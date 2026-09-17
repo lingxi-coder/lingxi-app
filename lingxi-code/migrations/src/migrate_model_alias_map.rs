@@ -4,7 +4,7 @@
 //! exact no-op. Keep the helper shape so the runner order matches the oracle.
 
 use crate::context::MigrationEnv;
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsSource};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -16,7 +16,7 @@ pub async fn run(alias_map: Option<&HashMap<String, String>>, env: &MigrationEnv
     };
 
     let sp = settings_path(
-        SettingsSource::User,
+        SettingsScope::User,
         &env.lingxi_config_home,
         &env.project_dir,
     );

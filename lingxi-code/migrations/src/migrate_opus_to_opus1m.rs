@@ -23,7 +23,7 @@
 //!   (alias-level), sufficient for the `opus[1m]` vs default comparison.
 
 use crate::context::{env_var_truthy, MigrationEnv};
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsSource};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
 use llm_client::oauth::anthropic::limits::SubscriptionType;
 use serde_json::{json, Value};
 
@@ -60,7 +60,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
         return true;
     }
     let sp = settings_path(
-        SettingsSource::User,
+        SettingsScope::User,
         &env.lingxi_config_home,
         &env.project_dir,
     );
@@ -93,7 +93,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings_update::{read_settings_map, settings_path, SettingsSource};
+    use crate::settings_update::{read_settings_map, settings_path, SettingsScope};
     use crate::test_support::{env_lock, temp_config};
     use llm_client::oauth::anthropic::limits::SubscriptionType;
 
@@ -119,7 +119,7 @@ mod tests {
         let _g = env_lock();
         std::env::remove_var("CLAUDE_CODE_DISABLE_1M_CONTEXT");
         let t = temp_config();
-        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "opus"}"#).unwrap();
         run(&test_env(&t)).await;
@@ -136,7 +136,7 @@ mod tests {
         let _g = env_lock();
         std::env::remove_var("CLAUDE_CODE_DISABLE_1M_CONTEXT");
         let t = temp_config();
-        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "opus", "keep": 1}"#).unwrap();
         let mut env = test_env(&t);
@@ -154,7 +154,7 @@ mod tests {
         let _g = env_lock();
         std::env::remove_var("CLAUDE_CODE_DISABLE_1M_CONTEXT");
         let t = temp_config();
-        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "opus"}"#).unwrap();
         let mut env = test_env(&t);
@@ -175,7 +175,7 @@ mod tests {
         let _g = env_lock();
         std::env::remove_var("CLAUDE_CODE_DISABLE_1M_CONTEXT");
         let t = temp_config();
-        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "opus"}"#).unwrap();
         let mut env = test_env(&t);
@@ -194,7 +194,7 @@ mod tests {
     async fn env_disable_or_pro_or_other_model_noop() {
         let _g = env_lock();
         let t = temp_config();
-        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "opus"}"#).unwrap();
 

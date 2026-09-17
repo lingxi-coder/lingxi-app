@@ -43,7 +43,8 @@ use migrations::settings_update::read_settings_map;
 use serde_json::{Map, Value};
 use telemetry::AnalyticsBus;
 
-use crate::plugin_settings::Scope;
+use crate::plugin_settings::{parse_scope_str, scope_label, scope_path};
+use protocol::SettingsScope;
 
 /// `<plugins>/installed_plugins.json` path.
 #[cfg(test)]
@@ -59,18 +60,18 @@ fn load_installed(plugins_dir: &Path) -> Value {
 
 /// Parse the prune `--scope` (default `user`); invalid-scope wording matches the
 /// install family (`Invalid scope: <s>. Must be one of: user, project, local.`).
-fn parse_scope(scope: &str) -> Result<Scope, String> {
-    Scope::parse(scope)
+fn parse_scope(scope: &str) -> Result<SettingsScope, String> {
+    parse_scope_str(scope)
         .ok_or_else(|| format!("Invalid scope: {scope}. Must be one of: user, project, local."))
 }
 
 /// The scope's `projectPath` selector: `Some(cwd)` for project/local,
 /// `None` for user (mirrors the oracle's `Svt`, which returns the originalCwd
 /// for project/local and `undefined` for user).
-fn scope_project_path(scope: Scope, cwd: &Path) -> Option<String> {
+fn scope_project_path(scope: SettingsScope, cwd: &Path) -> Option<String> {
     match scope {
-        Scope::User => None,
-        Scope::Project | Scope::Local => Some(cwd.display().to_string()),
+        SettingsScope::User => None,
+        SettingsScope::Project | SettingsScope::Local => Some(cwd.display().to_string()),
     }
 }
 
@@ -113,12 +114,12 @@ fn resolve_dep(dep: &str, source_id: &str) -> String {
 /// projectPath (mirrors `find(u => u.scope===scope && u.projectPath===pp)`).
 fn scoped_record<'a>(
     records: &'a [Value],
-    scope: Scope,
+    scope: SettingsScope,
     project_path: &Option<String>,
 ) -> Option<&'a Value> {
     records.iter().find(|r| {
         let rec_scope = r.get("scope").and_then(Value::as_str);
-        if rec_scope != Some(scope.label()) {
+        if rec_scope != Some(scope_label(scope)) {
             return false;
         }
         let rec_pp = r.get("projectPath").and_then(Value::as_str);
@@ -171,7 +172,7 @@ fn load_dependencies(install_path: &str) -> Option<Vec<String>> {
 
 /// Compute the orphan set at `scope` (mirrors `Ria`): auto-installed plugins
 /// unreachable from any manual plugin via the `dependencies` graph.
-fn scan(db: &Value, scope: Scope, project_path: &Option<String>) -> Scan {
+fn scan(db: &Value, scope: SettingsScope, project_path: &Option<String>) -> Scan {
     let plugins = plugins_obj(db);
 
     // Partition the scope's records into manual (`o`) and auto (`s`), in DB order.
@@ -268,7 +269,7 @@ fn dfs(id: &str, loaded: &HashMap<String, Vec<String>>, reachable: &mut HashSet<
 /// dependency graph is unresolvable — mirrors the silent-skip the oracle's
 /// `plugin uninstall` post-removal orphan check takes rather than surfacing a
 /// scary "cannot determine orphans" error after a successful uninstall.
-pub fn scan_orphans(db: &Value, scope: Scope, project_path: &Option<String>) -> Vec<String> {
+pub fn scan_orphans(db: &Value, scope: SettingsScope, project_path: &Option<String>) -> Vec<String> {
     let result = scan(db, scope, project_path);
     if result.unloadable.is_empty() {
         result.orphans
@@ -324,7 +325,7 @@ fn read_enabled(path: &Path) -> Map<String, Value> {
 fn collect_scoped_orphan_records(
     db: &Value,
     orphans: &[String],
-    scope: Scope,
+    scope: SettingsScope,
     project_path: &Option<String>,
 ) -> Vec<(String, Value)> {
     let mut removed = Vec::new();
@@ -345,7 +346,7 @@ fn collect_scoped_orphan_records(
 fn drop_orphan_records(
     db: &mut Value,
     orphans: &[String],
-    scope: Scope,
+    scope: SettingsScope,
     project_path: &Option<String>,
 ) {
     for id in orphans {
@@ -469,9 +470,9 @@ async fn run_prune_inner_with_bus(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Result<String, String> {
     let scope = parse_scope(scope_str)?;
-    let label = scope.label();
+    let label = scope_label(scope);
     let project_path = scope_project_path(scope, cwd);
-    let settings_path = scope.path(home, cwd);
+    let settings_path = scope_path(scope, home, cwd);
     let previous_settings = std::fs::read(&settings_path).ok();
     let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
     {
@@ -542,7 +543,7 @@ async fn run_prune_inner_with_bus(
 
     if !yes {
         if !is_tty {
-            let scope_flag = if scope == Scope::User {
+            let scope_flag = if scope == SettingsScope::User {
                 String::new()
             } else {
                 format!(" --scope {label}")
@@ -608,7 +609,7 @@ async fn run_prune_inner_with_bus(
             }
         }
 
-        crate::plugin_telemetry::emit_plugin_prune_cli(analytics_bus, scope.label(), removed.len() as u64)
+        crate::plugin_telemetry::emit_plugin_prune_cli(analytics_bus, scope_label(scope), removed.len() as u64)
             .await;
 
         Ok(format!(
@@ -1129,7 +1130,7 @@ mod tests {
             ],
         );
         let db = load_installed(&e.plugins);
-        let orphans = scan_orphans(&db, Scope::User, &None);
+        let orphans = scan_orphans(&db, SettingsScope::User, &None);
         assert_eq!(orphans, vec!["dep@mkt".to_string()]);
     }
 
@@ -1148,6 +1149,6 @@ mod tests {
             ],
         );
         let db = load_installed(&e.plugins);
-        assert_eq!(scan_orphans(&db, Scope::User, &None), Vec::<String>::new());
+        assert_eq!(scan_orphans(&db, SettingsScope::User, &None), Vec::<String>::new());
     }
 }

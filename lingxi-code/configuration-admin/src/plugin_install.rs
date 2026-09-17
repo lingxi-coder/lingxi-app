@@ -36,7 +36,8 @@ use serde_json::{Map, Value};
 use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata};
 
 use crate::plugin_policy;
-use crate::plugin_settings::Scope;
+use crate::plugin_settings::{parse_scope_str, scope_label, scope_path};
+use protocol::SettingsScope;
 
 fn registry_error_kind(error: &str) -> &'static str {
     if error.contains("expected value")
@@ -1038,17 +1039,17 @@ fn sanitize(segment: &str, allow_dot: bool) -> String {
 
 /// Parse the install-family `--scope` (default `user`); its invalid-scope
 /// wording differs from enable/disable and marketplace.
-fn parse_scope(scope: Option<&str>) -> Result<Scope, String> {
+fn parse_scope(scope: Option<&str>) -> Result<SettingsScope, String> {
     match scope {
-        None => Ok(Scope::User),
-        Some(s) => Scope::parse(s)
+        None => Ok(SettingsScope::User),
+        Some(s) => parse_scope_str(s)
             .ok_or_else(|| format!("Invalid scope: {s}. Must be one of: user, project, local.")),
     }
 }
 
 /// Read a scope's `enabledPlugins` map.
-fn read_enabled(scope: Scope, home: &Path, cwd: &Path) -> Map<String, Value> {
-    read_settings_map(&scope.path(home, cwd))
+fn read_enabled(scope: SettingsScope, home: &Path, cwd: &Path) -> Map<String, Value> {
+    read_settings_map(&scope_path(scope, home, cwd))
         .ok()
         .and_then(|m| m.get("enabledPlugins").and_then(Value::as_object).cloned())
         .unwrap_or_default()
@@ -1056,7 +1057,7 @@ fn read_enabled(scope: Scope, home: &Path, cwd: &Path) -> Map<String, Value> {
 
 /// Set (`Some(true/false)`) or delete (`None`) an `enabledPlugins` entry at scope.
 fn edit_enabled(
-    scope: Scope,
+    scope: SettingsScope,
     home: &Path,
     cwd: &Path,
     id: &str,
@@ -1072,7 +1073,7 @@ fn edit_enabled(
         }
     }
     update_settings(
-        &scope.path(home, cwd),
+        &scope_path(scope, home, cwd),
         vec![("enabledPlugins".to_string(), Some(Value::Object(map)))],
     )
 }
@@ -1207,14 +1208,14 @@ fn parse_config_pairs(
 /// a documented follow-up, so a sensitive `--config` value is validated here but
 /// not persisted to plaintext settings.
 fn persist_plugin_options(
-    scope: Scope,
+    scope: SettingsScope,
     home: &Path,
     cwd: &Path,
     plugin_key: &str,
     schema: &Map<String, Value>,
     pairs: &[ConfigPair],
 ) -> Result<(), String> {
-    let path = scope.path(home, cwd);
+    let path = scope_path(scope, home, cwd);
     let settings = read_settings_map(&path).unwrap_or_default();
     let mut plugin_configs = settings
         .get("pluginConfigs")
@@ -1253,10 +1254,10 @@ fn persist_plugin_options(
 /// The `projectPath` an install record carries at this scope: the realpath of
 /// `cwd` for `project`/`local`, `None` for `user` (which is cwd-independent).
 /// Records are keyed per (scope, projectPath), so this identifies the slot.
-fn project_path(scope: Scope, cwd: &Path) -> Option<String> {
+fn project_path(scope: SettingsScope, cwd: &Path) -> Option<String> {
     match scope {
-        Scope::User => None,
-        Scope::Project | Scope::Local => Some(
+        SettingsScope::User => None,
+        SettingsScope::Project | SettingsScope::Local => Some(
             std::fs::canonicalize(cwd)
                 .unwrap_or_else(|_| cwd.to_path_buf())
                 .display()
@@ -1268,8 +1269,8 @@ fn project_path(scope: Scope, cwd: &Path) -> Option<String> {
 /// Does an installed record occupy the (scope, projectPath) slot? For `user` the
 /// scope match suffices; for project/local the record's `projectPath` must match
 /// the current one too (distinct projects install the same plugin independently).
-fn record_matches(rec: &Value, scope: Scope, proj: &Option<String>) -> bool {
-    if rec.get("scope").and_then(Value::as_str) != Some(scope.label()) {
+fn record_matches(rec: &Value, scope: SettingsScope, proj: &Option<String>) -> bool {
+    if rec.get("scope").and_then(Value::as_str) != Some(scope_label(scope)) {
         return false;
     }
     match proj {
@@ -1331,8 +1332,8 @@ async fn run_install_async(
     yes: bool,
 ) -> Result<String, String> {
     let parsed_scope = parse_scope(scope)?;
-    let telemetry_scope = crate::plugin_telemetry::telemetry_scope(Some(parsed_scope.label()));
-    let settings_path = parsed_scope.path(home, cwd);
+    let telemetry_scope = crate::plugin_telemetry::telemetry_scope(Some(scope_label(parsed_scope)));
+    let settings_path = scope_path(parsed_scope, home, cwd);
     let previous_settings = std::fs::read(&settings_path).ok();
     let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
     {
@@ -1495,13 +1496,13 @@ fn strict_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
 }
 
 pub fn edit_enabled_strict(
-    scope: Scope,
+    scope: SettingsScope,
     home: &Path,
     cwd: &Path,
     id: &str,
     value: Option<bool>,
 ) -> Result<(), String> {
-    let path = scope.path(home, cwd);
+    let path = scope_path(scope, home, cwd);
     let mut settings = strict_settings_map(&path)?;
     let mut enabled = settings
         .remove("enabledPlugins")
@@ -1523,12 +1524,12 @@ pub fn edit_enabled_strict(
 }
 
 fn clear_plugin_config_strict(
-    scope: Scope,
+    scope: SettingsScope,
     home: &Path,
     cwd: &Path,
     plugin_key: &str,
 ) -> Result<(), String> {
-    let path = scope.path(home, cwd);
+    let path = scope_path(scope, home, cwd);
     if !path.exists() {
         return Ok(());
     }
@@ -1778,11 +1779,11 @@ async fn run_install_inner(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     yes: bool,
 ) -> Result<String, String> {
-    // Scope is validated BEFORE the "Installing plugin …" progress prefix — the
+    // SettingsScope is validated BEFORE the "Installing plugin …" progress prefix — the
     // binary emits the bare `Invalid scope: …` line with no prefix.
     let scope = parse_scope(scope)?;
 
-    if !config.is_empty() && !matches!(scope, Scope::User) {
+    if !config.is_empty() && !matches!(scope, SettingsScope::User) {
         return Err(format!(
             "Installing plugin \"{}\"...{}",
             arg,
@@ -1846,7 +1847,7 @@ async fn run_install_inner(
         &full_id,
         &market_name,
         &plugin_src,
-        Some(scope.label()),
+        Some(scope_label(scope)),
         plugins_dir,
         home,
         cwd,
@@ -1908,7 +1909,7 @@ async fn run_install_inner(
         }
         return Ok(format!(
             "Installing plugin \"{arg}\"...✔ Plugin \"{full_id}\" is already installed (scope: {})",
-            scope.label()
+            scope_label(scope)
         ));
     }
 
@@ -1965,7 +1966,7 @@ async fn run_install_inner(
     let mut record = serde_json::Map::new();
     record.insert(
         "scope".to_string(),
-        Value::String(scope.label().to_string()),
+        Value::String(scope_label(scope).to_string()),
     );
     record.insert(
         "installPath".to_string(),
@@ -2018,7 +2019,7 @@ async fn run_install_inner(
 
     Ok(format!(
         "Installing plugin \"{arg}\"...✔ Successfully installed plugin: {full_id} (scope: {})",
-        scope.label()
+        scope_label(scope)
     ))
 }
 
@@ -2127,7 +2128,7 @@ async fn install_declared_dependencies(
 fn add_required_by_metadata(
     installed: &mut Value,
     plugin_id: &str,
-    scope: Scope,
+    scope: SettingsScope,
     project: &Option<String>,
     required_by: Option<&str>,
 ) {
@@ -2320,9 +2321,9 @@ pub async fn run_uninstall_with_bus(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Result<String, String> {
     let scope = parse_scope(scope)?;
-    let telemetry_scope = crate::plugin_telemetry::telemetry_scope(Some(scope.label()));
+    let telemetry_scope = crate::plugin_telemetry::telemetry_scope(Some(scope_label(scope)));
     let proj = project_path(scope, cwd);
-    let settings_path = scope.path(home, cwd);
+    let settings_path = scope_path(scope, home, cwd);
     let previous_settings = std::fs::read(&settings_path).ok();
     let (name, market) = split_id(arg);
     let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
@@ -2391,7 +2392,7 @@ pub async fn run_uninstall_with_bus(
                 &format!(
                     "Plugin \"{full_id}\" is installed in {installed_in} scope, not {}. \
                      Use --scope {first} to uninstall.",
-                    scope.label()
+                    scope_label(scope)
                 ),
             ));
         }
@@ -2441,7 +2442,7 @@ pub async fn run_uninstall_with_bus(
         Ok(format!(
             "✔ Successfully uninstalled plugin: {} (scope: {})",
             name_of(&full_id),
-            scope.label()
+            scope_label(scope)
         ))
     }
     .await;
@@ -2555,7 +2556,7 @@ where
         let prune_message = crate::plugin_prune::run_prune_with_bus(
             false,
             yes,
-            scope_value.label(),
+            scope_label(scope_value),
             plugins_dir,
             home,
             cwd,
@@ -2578,10 +2579,10 @@ where
 /// `QWn`): any auto-installed dependency the removal just left unreachable,
 /// or `""` when there is nothing to report. Reads the just-updated installed
 /// DB, so it reflects the POST-removal dependency graph.
-fn uninstall_orphan_suffix(plugins_dir: &Path, scope: Scope, project: &Option<String>) -> String {
+fn uninstall_orphan_suffix(plugins_dir: &Path, scope: SettingsScope, project: &Option<String>) -> String {
     let db = load_installed(plugins_dir);
     let orphans = crate::plugin_prune::scan_orphans(&db, scope, project);
-    crate::plugin_prune::orphan_notice(&orphans, scope.label())
+    crate::plugin_prune::orphan_notice(&orphans, scope_label(scope))
 }
 
 /// Validate a `plugin update` `--scope`. Unlike the install family, update's
@@ -4379,7 +4380,7 @@ mod tests {
         )
         .unwrap();
 
-        let suffix = uninstall_orphan_suffix(&e.plugins, Scope::User, &None);
+        let suffix = uninstall_orphan_suffix(&e.plugins, SettingsScope::User, &None);
         assert_eq!(
             suffix,
             "\n1 auto-installed dependency no longer needed: dep. Run `lingxi-cli plugin prune` \
@@ -4390,7 +4391,7 @@ mod tests {
     #[test]
     fn uninstall_orphan_suffix_is_empty_with_no_orphans() {
         let e = env();
-        assert_eq!(uninstall_orphan_suffix(&e.plugins, Scope::User, &None), "");
+        assert_eq!(uninstall_orphan_suffix(&e.plugins, SettingsScope::User, &None), "");
     }
 
     #[test]

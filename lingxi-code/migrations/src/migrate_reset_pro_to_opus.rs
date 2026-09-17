@@ -7,7 +7,7 @@
 
 use crate::context::{js_truthy, MigrationEnv};
 use crate::global_config;
-use crate::settings_update::{read_settings_map, settings_path, SettingsSource};
+use crate::settings_update::{read_settings_map, settings_path, SettingsScope};
 use llm_client::oauth::anthropic::limits::SubscriptionType;
 use serde_json::{json, Value};
 use telemetry::sink::AnalyticsValue;
@@ -48,7 +48,7 @@ pub async fn run(env: &MigrationEnv) {
     // (merged settings); the user-settings model is the in-port stand-in
     // (doc'd: the merged read has no substrate at this pre-boot point).
     let sp = settings_path(
-        SettingsSource::User,
+        SettingsScope::User,
         &env.lingxi_config_home,
         &env.project_dir,
     );
@@ -154,7 +154,7 @@ mod tests {
     async fn pro_with_custom_model_marks_complete_without_timestamp() {
         let t = temp_config();
         let sp = crate::settings_update::settings_path(
-            crate::settings_update::SettingsSource::User,
+            crate::settings_update::SettingsScope::User,
             &t.home,
             &t.project,
         );

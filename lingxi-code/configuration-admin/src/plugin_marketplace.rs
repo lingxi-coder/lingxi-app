@@ -32,7 +32,8 @@ use serde_json::{Map, Value};
 
 use crate::plugin_policy;
 use crate::plugin_policy::MarketplaceSourceIdentity;
-use crate::plugin_settings::{Scope, SCOPES};
+use crate::plugin_settings::{parse_scope_str, scope_label, scope_path, SCOPES};
+use protocol::SettingsScope;
 
 /// The resolved-marketplaces registry file under the plugins root.
 fn registry_path(plugins_dir: &Path) -> PathBuf {
@@ -179,8 +180,8 @@ fn write_registry(plugins_dir: &Path, map: &Map<String, Value>) -> Result<(), St
 }
 
 /// The `extraKnownMarketplaces` declaration map from a scope's settings file.
-fn read_extra(scope: Scope, home: &Path, cwd: &Path) -> Map<String, Value> {
-    read_settings_map(&scope.path(home, cwd))
+fn read_extra(scope: SettingsScope, home: &Path, cwd: &Path) -> Map<String, Value> {
+    read_settings_map(&scope_path(scope, home, cwd))
         .ok()
         .and_then(|m| {
             let canonical = m.get("extraKnownMarketplaces").and_then(Value::as_object);
@@ -197,13 +198,13 @@ fn read_extra(scope: Scope, home: &Path, cwd: &Path) -> Map<String, Value> {
 
 /// Read-modify-write a scope's `extraKnownMarketplaces` map.
 fn write_extra(
-    scope: Scope,
+    scope: SettingsScope,
     home: &Path,
     cwd: &Path,
     map: Map<String, Value>,
 ) -> Result<(), String> {
     update_settings(
-        &scope.path(home, cwd),
+        &scope_path(scope, home, cwd),
         vec![(
             "extraKnownMarketplaces".to_string(),
             Some(Value::Object(map)),
@@ -218,7 +219,7 @@ fn market_invalid_scope(s: &str) -> String {
 }
 
 /// Does any editable scope declare `name` in `extraKnownMarketplaces`?
-fn declaring_scopes(name: &str, home: &Path, cwd: &Path) -> Vec<Scope> {
+fn declaring_scopes(name: &str, home: &Path, cwd: &Path) -> Vec<SettingsScope> {
     SCOPES
         .into_iter()
         .filter(|s| read_extra(*s, home, cwd).contains_key(name))
@@ -669,8 +670,8 @@ pub fn run_add(
     // and only then does the `--sparse` kind guard run. With both wrong, the
     // caller must see the scope error.
     let target = match scope {
-        Some(s) => Scope::parse(s).ok_or_else(|| market_invalid_scope(s))?,
-        None => Scope::User,
+        Some(s) => parse_scope_str(s).ok_or_else(|| market_invalid_scope(s))?,
+        None => SettingsScope::User,
     };
     if !sparse.is_empty() && !matches!(classified, Source::Github { .. } | Source::Git { .. }) {
         return Err(format!(
@@ -689,7 +690,7 @@ pub fn run_add(
 /// then write the scope declaration + registry entry.
 fn add_directory(
     abs: &Path,
-    target: Scope,
+    target: SettingsScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -758,7 +759,7 @@ fn add_directory(
 fn add_remote(
     remote: &Source,
     sparse: &[String],
-    target: Scope,
+    target: SettingsScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -1124,7 +1125,7 @@ fn publish_and_write_marketplace(
     name: &str,
     source_value: &Value,
     staged: &Path,
-    target: Scope,
+    target: SettingsScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -1180,7 +1181,7 @@ fn write_marketplace(
     name: &str,
     source_value: &Value,
     install_location: &str,
-    target: Scope,
+    target: SettingsScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -1202,12 +1203,12 @@ fn write_marketplace_unlocked(
     name: &str,
     source_value: &Value,
     install_location: &str,
-    target: Scope,
+    target: SettingsScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
 ) -> Result<String, String> {
-    let settings_path = target.path(home, cwd);
+    let settings_path = scope_path(target, home, cwd);
     let previous_settings = std::fs::read(&settings_path).ok();
     let previous_registry = platform_api::rooted_fs::read_to_string_limited(
         plugins_dir,
@@ -1234,7 +1235,7 @@ fn write_marketplace_unlocked(
     if registry.contains_key(name) {
         return Ok(format!(
             "Adding marketplace…✔ Marketplace '{name}' already on disk — declared in {} settings",
-            target.label()
+            scope_label(target)
         ));
     }
     registry.insert(
@@ -1254,7 +1255,7 @@ fn write_marketplace_unlocked(
     }
     Ok(format!(
         "Adding marketplace…✔ Successfully added marketplace: {name} (declared in {} settings)",
-        target.label()
+        scope_label(target)
     ))
 }
 
@@ -1314,12 +1315,12 @@ pub fn run_remove(
     cwd: &Path,
 ) -> Result<String, String> {
     let requested = match scope {
-        Some(s) => Some(Scope::parse(s).ok_or_else(|| market_invalid_scope(s))?),
+        Some(s) => Some(parse_scope_str(s).ok_or_else(|| market_invalid_scope(s))?),
         None => None,
     };
     let _lock = lock_marketplace_state(plugins_dir)?;
     let declaring = declaring_scopes(name, home, cwd);
-    let targets: Vec<Scope> = match requested {
+    let targets: Vec<SettingsScope> = match requested {
         Some(s) => {
             if declaring.contains(&s) {
                 vec![s]
@@ -1360,7 +1361,7 @@ pub fn run_remove(
     Ok(match requested {
         Some(s) => format!(
             "✔ Successfully removed marketplace: {name} (from {} settings)",
-            s.label()
+            scope_label(s)
         ),
         None => format!("✔ Successfully removed marketplace: {name}"),
     })
@@ -1740,7 +1741,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let extra = read_extra(Scope::User, &e.home, &e.cwd);
+        let extra = read_extra(SettingsScope::User, &e.home, &e.cwd);
         assert_eq!(
             extra.get("alias"),
             Some(&json!({ "source": { "source": "directory", "path": "/tmp/alias" } }))
@@ -1762,7 +1763,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let extra = read_extra(Scope::User, &e.home, &e.cwd);
+        let extra = read_extra(SettingsScope::User, &e.home, &e.cwd);
         assert!(extra.get("canonical").is_some());
         assert!(extra.get("alias").is_none());
     }

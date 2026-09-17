@@ -153,11 +153,19 @@ fn collect_ignored_plugin_config_warnings(
     [
         (
             "project",
-            crate::commands::plugin_settings::Scope::Project.path(home, cwd),
+            crate::commands::plugin_settings::scope_path(
+                crate::commands::plugin_settings::SettingsScope::Project,
+                home,
+                cwd,
+            ),
         ),
         (
             "local",
-            crate::commands::plugin_settings::Scope::Local.path(home, cwd),
+            crate::commands::plugin_settings::scope_path(
+                crate::commands::plugin_settings::SettingsScope::Local,
+                home,
+                cwd,
+            ),
         ),
     ]
     .into_iter()

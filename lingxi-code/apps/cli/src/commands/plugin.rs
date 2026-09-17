@@ -1166,7 +1166,7 @@ fn installed_record_settings_path(
     home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    use crate::commands::plugin_settings::Scope;
+    use crate::commands::plugin_settings::{scope_path, SettingsScope};
 
     let scope = record.get("scope")?.as_str()?;
     let project_root = record
@@ -1175,9 +1175,9 @@ fn installed_record_settings_path(
         .map(std::path::Path::new)
         .unwrap_or(cwd);
     match scope {
-        "user" => Some(Scope::User.path(home, cwd)),
-        "project" => Some(Scope::Project.path(home, project_root)),
-        "local" => Some(Scope::Local.path(home, project_root)),
+        "user" => Some(scope_path(SettingsScope::User, home, cwd)),
+        "project" => Some(scope_path(SettingsScope::Project, home, project_root)),
+        "local" => Some(scope_path(SettingsScope::Local, home, project_root)),
         _ => None,
     }
 }

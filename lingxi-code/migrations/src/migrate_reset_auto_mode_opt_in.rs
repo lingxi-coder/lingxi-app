@@ -4,7 +4,7 @@
 
 use crate::context::{js_truthy, MigrationEnv};
 use crate::global_config;
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsSource};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
 use serde_json::json;
 
 const EVENT: &str = "tengu_migrate_reset_auto_opt_in_for_default_offer";
@@ -27,7 +27,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
     }
 
     let sp = settings_path(
-        SettingsSource::User,
+        SettingsScope::User,
         &env.lingxi_config_home,
         &env.project_dir,
     );
@@ -90,7 +90,7 @@ mod tests {
     #[tokio::test]
     async fn clears_skip_bit_when_not_in_auto_mode() {
         let t = temp_config();
-        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(
             &sp,
@@ -107,7 +107,7 @@ mod tests {
     #[tokio::test]
     async fn keeps_skip_bit_for_explicit_auto_mode() {
         let t = temp_config();
-        let sp = settings_path(SettingsSource::User, &t.home, &t.project);
+        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(
             &sp,

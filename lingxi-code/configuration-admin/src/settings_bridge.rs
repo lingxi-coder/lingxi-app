@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use client_protocol::commands::SettingsDestinationDto;
 use lingxi_core::settings::merger::merge_raw_layer;
-use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
+use migrations::settings_update::{read_settings_map, settings_path, SettingsScope};
 use serde_json::Value;
 
 /// A layer a settings value can come from. Ordered lowest priority first,
@@ -143,10 +143,10 @@ pub struct SettingsPaths {
 /// first so a later entry overwrites an earlier one. Per the engine's merge
 /// precedence, among these three: local beats project beats user. (`cli`,
 /// `managed`, `env` and `defaults` are not file layers this module reads.)
-const FILE_LAYERS: [(SettingsSource, SettingsLayer); 3] = [
-    (SettingsSource::User, SettingsLayer::User),
-    (SettingsSource::Project, SettingsLayer::Project),
-    (SettingsSource::Local, SettingsLayer::Local),
+const FILE_LAYERS: [(SettingsScope, SettingsLayer); 3] = [
+    (SettingsScope::User, SettingsLayer::User),
+    (SettingsScope::Project, SettingsLayer::Project),
+    (SettingsScope::Local, SettingsLayer::Local),
 ];
 
 /// Build a settings snapshot by reading and merging the three writable file
@@ -292,9 +292,9 @@ pub fn active_settings_baseline(
 /// with an error naming both the rejected value and the writable set.
 pub fn writable_path(paths: &SettingsPaths, layer: SettingsLayer) -> Result<PathBuf, String> {
     let source = match layer {
-        SettingsLayer::User => SettingsSource::User,
-        SettingsLayer::Project => SettingsSource::Project,
-        SettingsLayer::Local => SettingsSource::Local,
+        SettingsLayer::User => SettingsScope::User,
+        SettingsLayer::Project => SettingsScope::Project,
+        SettingsLayer::Local => SettingsScope::Local,
         other => {
             return Err(format!(
                 "{other:?} is not a writable settings destination; writable destinations are User, Project, Local"

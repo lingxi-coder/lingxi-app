@@ -18,6 +18,7 @@ mcp = { path = "../mcp" }
 migrations = { path = "../migrations" }
 permission = { path = "../permission" }
 platform-api = { path = "../platform-api" }
+protocol = { path = "../protocol" }
 plugin = { path = "../plugin" }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

@@ -31,54 +31,54 @@ use serde_json::{Map, Value};
 
 use crate::plugin_policy;
 
-/// An editable settings scope for the `enabledPlugins` allowlist.
+/// The editable settings scopes, re-exported so this module reads as the seam
+/// that owns the `enabledPlugins` allowlist.
 ///
 /// `user` = `<lingxi-home>/settings.json`; `project` =
 /// `<cwd>/.lingxi/settings.json`; `local` = `<cwd>/.lingxi/settings.local.json`.
 /// (`managed` is a read-only enterprise scope and is not editable here — it is
-/// only a valid `--scope` for `plugin update`, handled separately.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    User,
-    Project,
-    Local,
-}
+/// only a valid `--scope` for `plugin update`, handled separately. That refusal
+/// is why this stays [`protocol::SettingsScope`] rather than a bare
+/// `protocol::Scope`.)
+pub use protocol::SettingsScope;
 
 /// The editable scopes, in auto-detect / `--all` search order.
-const EDITABLE: [Scope; 3] = [Scope::User, Scope::Project, Scope::Local];
+const EDITABLE: [SettingsScope; 3] = [SettingsScope::User, SettingsScope::Project, SettingsScope::Local];
 
 /// The editable scopes, in auto-detect / iteration order (shared with the
 /// marketplace command).
-pub const SCOPES: [Scope; 3] = EDITABLE;
+pub const SCOPES: [SettingsScope; 3] = EDITABLE;
 
-impl Scope {
-    /// The scope's wire label (matches the `(scope: …)` success suffix).
-    pub fn label(self) -> &'static str {
-        match self {
-            Scope::User => "user",
-            Scope::Project => "project",
-            Scope::Local => "local",
-        }
+/// The scope's wire label (matches the `(scope: …)` success suffix).
+///
+/// Local to this subsystem on purpose: the same rung is spelled differently by
+/// the hook payload, the MCP telemetry inventory, and the settings admin panel,
+/// so there is no shared `SettingsScope::as_str`.
+pub fn scope_label(scope: SettingsScope) -> &'static str {
+    match scope {
+        SettingsScope::User => "user",
+        SettingsScope::Project => "project",
+        SettingsScope::Local => "local",
     }
+}
 
-    /// Parse a `--scope` value; `None` when unrecognized (the caller emits the
-    /// `Invalid scope …` error). `managed` is intentionally NOT accepted here.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "user" => Some(Scope::User),
-            "project" => Some(Scope::Project),
-            "local" => Some(Scope::Local),
-            _ => None,
-        }
+/// Parse a `--scope` value; `None` when unrecognized (the caller emits the
+/// `Invalid scope …` error). `managed` is intentionally NOT accepted here.
+pub fn parse_scope_str(s: &str) -> Option<SettingsScope> {
+    match s {
+        "user" => Some(SettingsScope::User),
+        "project" => Some(SettingsScope::Project),
+        "local" => Some(SettingsScope::Local),
+        _ => None,
     }
+}
 
-    /// Resolve the settings.json path for this scope.
-    pub fn path(self, home: &Path, cwd: &Path) -> PathBuf {
-        match self {
-            Scope::User => home.join("settings.json"),
-            Scope::Project => cwd.join(branding::DOT_DIR).join("settings.json"),
-            Scope::Local => cwd.join(branding::DOT_DIR).join("settings.local.json"),
-        }
+/// Resolve the settings.json path for this scope.
+pub fn scope_path(scope: SettingsScope, home: &Path, cwd: &Path) -> PathBuf {
+    match scope {
+        SettingsScope::User => home.join("settings.json"),
+        SettingsScope::Project => cwd.join(branding::DOT_DIR).join("settings.json"),
+        SettingsScope::Local => cwd.join(branding::DOT_DIR).join("settings.local.json"),
     }
 }
 
@@ -141,7 +141,7 @@ fn installed_plugins(home: &Path) -> Value {
 fn installed_record<'a>(
     db: &'a Value,
     id: &str,
-    scope: Scope,
+    scope: SettingsScope,
     project_path: &Option<String>,
 ) -> Option<&'a Value> {
     db.get("plugins")
@@ -149,7 +149,7 @@ fn installed_record<'a>(
         .and_then(Value::as_array)?
         .iter()
         .find(|record| {
-            if record.get("scope").and_then(Value::as_str) != Some(scope.label()) {
+            if record.get("scope").and_then(Value::as_str) != Some(scope_label(scope)) {
                 return false;
             }
             match project_path {
@@ -161,10 +161,10 @@ fn installed_record<'a>(
         })
 }
 
-fn scope_project_path(scope: Scope, cwd: &Path) -> Option<String> {
+fn scope_project_path(scope: SettingsScope, cwd: &Path) -> Option<String> {
     match scope {
-        Scope::User => None,
-        Scope::Project | Scope::Local => Some(
+        SettingsScope::User => None,
+        SettingsScope::Project | SettingsScope::Local => Some(
             std::fs::canonicalize(cwd)
                 .unwrap_or_else(|_| cwd.to_path_buf())
                 .display()
@@ -196,7 +196,7 @@ fn record_dependencies(record: &Value, owner_id: &str) -> Vec<String> {
 fn collect_dependencies(
     db: &Value,
     id: &str,
-    scope: Scope,
+    scope: SettingsScope,
     project_path: &Option<String>,
     seen: &mut HashSet<String>,
 ) {
@@ -214,7 +214,7 @@ fn collect_dependencies(
 fn enabled_dependents(
     db: &Value,
     id: &str,
-    scope: Scope,
+    scope: SettingsScope,
     project_path: &Option<String>,
     settings_path: &Path,
 ) -> Vec<String> {
@@ -244,7 +244,7 @@ fn resolve_id(plugin: &str, home: &Path, cwd: &Path) -> Result<String, String> {
         return Ok(plugin.to_string());
     }
     for scope in EDITABLE {
-        let map = read_enabled(&scope.path(home, cwd));
+        let map = read_enabled(&scope_path(scope, home, cwd));
         if let Some(key) = map.keys().find(|k| name_of(k) == plugin) {
             return Ok(key.clone());
         }
@@ -257,10 +257,10 @@ fn resolve_id(plugin: &str, home: &Path, cwd: &Path) -> Result<String, String> {
 
 /// The first editable scope whose allowlist carries `id` as a key (any value),
 /// for auto-detect when no `--scope` is given.
-fn scope_holding(id: &str, home: &Path, cwd: &Path) -> Option<Scope> {
+fn scope_holding(id: &str, home: &Path, cwd: &Path) -> Option<SettingsScope> {
     EDITABLE
         .into_iter()
-        .find(|scope| read_enabled(&scope.path(home, cwd)).contains_key(id))
+        .find(|scope| read_enabled(&scope_path(*scope, home, cwd)).contains_key(id))
 }
 
 /// The formatted `✘ Failed to <verb> plugin "<id>": <reason>` line.
@@ -274,10 +274,10 @@ fn invalid_scope(s: &str) -> String {
 }
 
 /// Parse an optional `--scope`, surfacing the `Invalid scope …` error.
-fn parse_scope(scope: Option<&str>) -> Result<Option<Scope>, String> {
+fn parse_scope(scope: Option<&str>) -> Result<Option<SettingsScope>, String> {
     match scope {
         None => Ok(None),
-        Some(s) => Scope::parse(s).map(Some).ok_or_else(|| invalid_scope(s)),
+        Some(s) => parse_scope_str(s).map(Some).ok_or_else(|| invalid_scope(s)),
     }
 }
 
@@ -300,8 +300,8 @@ pub fn run_enable(
     }
     let scope = requested
         .or_else(|| scope_holding(&id, home, cwd))
-        .unwrap_or(Scope::User);
-    let path = scope.path(home, cwd);
+        .unwrap_or(SettingsScope::User);
+    let path = scope_path(scope, home, cwd);
     if current_value(&path, &id) == Some(true) {
         return Err(fail(
             "enable",
@@ -326,7 +326,7 @@ pub fn run_enable(
     Ok(format!(
         "✔ Successfully enabled plugin: {} (scope: {})",
         name_of(&id),
-        scope.label()
+        scope_label(scope)
     ))
 }
 
@@ -346,10 +346,10 @@ pub fn run_disable(
     let requested = parse_scope(scope)?;
 
     if all {
-        let scopes: Vec<Scope> = requested.map_or_else(|| EDITABLE.to_vec(), |s| vec![s]);
+        let scopes: Vec<SettingsScope> = requested.map_or_else(|| EDITABLE.to_vec(), |s| vec![s]);
         let mut count = 0usize;
         for scope in scopes {
-            let path = scope.path(home, cwd);
+            let path = scope_path(scope, home, cwd);
             let mut map = read_enabled(&path);
             let mut changed = false;
             for value in map.values_mut() {
@@ -382,7 +382,7 @@ pub fn run_disable(
         Some(s) => s,
         None => EDITABLE
             .into_iter()
-            .find(|s| current_value(&s.path(home, cwd), &id) == Some(true))
+            .find(|s| current_value(&scope_path(*s, home, cwd), &id) == Some(true))
             .ok_or_else(|| {
                 fail(
                     "disable",
@@ -391,7 +391,7 @@ pub fn run_disable(
                 )
             })?,
     };
-    let path = scope.path(home, cwd);
+    let path = scope_path(scope, home, cwd);
     if current_value(&path, &id) != Some(true) {
         return Err(fail(
             "disable",
@@ -415,7 +415,7 @@ pub fn run_disable(
     Ok(format!(
         "✔ Successfully disabled plugin: {} (scope: {})",
         name_of(&id),
-        scope.label()
+        scope_label(scope)
     ))
 }
 
@@ -647,7 +647,7 @@ mod tests {
     /// privilege change it is.
     #[test]
     fn managed_is_rejected_as_a_scope_like_any_unknown_value() {
-        assert_eq!(Scope::parse("managed"), None);
+        assert_eq!(parse_scope_str("managed"), None);
 
         let e = env();
         let err = run_enable("a@b", Some("managed"), &e.home, &e.cwd).unwrap_err();
@@ -662,8 +662,8 @@ mod tests {
     /// relabel cannot slip through on the paths that test does not walk.
     #[test]
     fn scope_labels_match_the_cli_suffix_spellings() {
-        assert_eq!(Scope::User.label(), "user");
-        assert_eq!(Scope::Project.label(), "project");
-        assert_eq!(Scope::Local.label(), "local");
+        assert_eq!(scope_label(SettingsScope::User), "user");
+        assert_eq!(scope_label(SettingsScope::Project), "project");
+        assert_eq!(scope_label(SettingsScope::Local), "local");
     }
 }

@@ -763,23 +763,7 @@ pub struct MemoryEntry {
     pub size_bytes: u64,
 }
 
-/// The tier a memdir entry belongs to.
-///
-/// Defined here rather than in `lingxi-memory` so the DTO stays free of
-/// platform deps. Resolved locations (`repo_root`, `team_dir`, …) are NOT part
-/// of the tier — they live beside a tier field in whichever crate resolved
-/// them.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
-pub enum MemoryEntryTier {
-    /// Session-scoped entry (highest tier weight).
-    Session,
-    /// Project-scoped entry (next tier).
-    Project,
-    /// Team-scoped entry (subject to team-boost gate).
-    Team,
-    /// User-scoped entry (lowest tier).
-    User,
-}
+pub use crate::scope::MemoryEntryTier;
 
 #[cfg(test)]
 mod tests {

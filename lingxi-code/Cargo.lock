@@ -7680,6 +7680,7 @@ dependencies = [
  "once_cell",
  "permission",
  "platform-api",
+ "protocol",
  "serde",
  "serde_json",
  "tokio",

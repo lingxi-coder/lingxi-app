@@ -400,6 +400,12 @@ where
 /// dir (`<cwd>/.lingxi/workflows`); `User` under the user config dir
 /// (`$LINGXI_CONFIG_DIR` / `~/.lingxi`, `+ /workflows`). Defaults to `Project`
 /// (oracle `useState("project")`).
+///
+/// These two rungs are [`protocol::Scope::Project`] and [`protocol::Scope::User`]
+/// — see the `From` impl below, which a test pins. It stays a separate type
+/// rather than joining the shared narrowings because [`Self::toggled`] is a
+/// two-element cycle: the dialog offers exactly these two choices (oracle
+/// `l3p`), and a third rung would leave the Tab toggle undefined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowScope {
     /// Project scope — `<cwd>/.lingxi/workflows` (oracle `.claude/workflows`).
@@ -431,6 +437,49 @@ impl WorkflowScope {
         match self {
             WorkflowScope::Project => WorkflowScope::User,
             WorkflowScope::User => WorkflowScope::Project,
+        }
+    }
+}
+
+impl From<WorkflowScope> for protocol::Scope {
+    fn from(value: WorkflowScope) -> Self {
+        match value {
+            WorkflowScope::Project => Self::Project,
+            WorkflowScope::User => Self::User,
+        }
+    }
+}
+
+#[cfg(test)]
+mod workflow_scope_tests {
+    use super::WorkflowScope;
+
+    /// The dialog's two choices are the shared vocabulary's Project and User
+    /// rungs, and its lowercase `wire()` spelling is the same one the rest of
+    /// the engine uses for them. Pinned so this type cannot quietly come to
+    /// mean something else.
+    #[test]
+    fn the_two_rungs_are_the_shared_projects_and_user_scopes() {
+        for (scope, expected) in [
+            (WorkflowScope::Project, protocol::Scope::Project),
+            (WorkflowScope::User, protocol::Scope::User),
+        ] {
+            assert_eq!(protocol::Scope::from(scope), expected);
+            assert_eq!(
+                scope.wire(),
+                protocol::scope::snake_case::name(expected),
+                "workflow's wire spelling must not diverge from the shared one"
+            );
+        }
+    }
+
+    /// The toggle is a two-cycle; a rung added here without revisiting it would
+    /// make Tab skip a choice.
+    #[test]
+    fn toggling_twice_returns_to_the_start() {
+        for scope in [WorkflowScope::Project, WorkflowScope::User] {
+            assert_eq!(scope.toggled().toggled(), scope);
+            assert_ne!(scope.toggled(), scope);
         }
     }
 }

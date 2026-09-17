@@ -21,26 +21,14 @@ use lingxi_core::settings::merger::merge_raw_layer;
 use migrations::settings_update::{read_settings_map, settings_path, WritableScope};
 use serde_json::Value;
 
-/// A layer a settings value can come from. Ordered lowest priority first,
-/// matching the engine's documented merge precedence (highest first):
-/// `env → managed → cli → local → project → user → defaults`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettingsLayer {
-    /// Built-in defaults, no file backs this layer.
-    Defaults,
-    /// `<lingxi_home>/settings.json`.
-    User,
-    /// `<project_dir>/<DOT_DIR>/settings.json`.
-    Project,
-    /// `<project_dir>/<DOT_DIR>/settings.local.json`.
-    Local,
-    /// Flags passed on the command line for this run.
-    Cli,
-    /// Administrator-managed settings; keys here can also be locked.
-    Managed,
-    /// Environment variables.
-    Env,
-}
+/// A layer a settings value can come from.
+///
+/// The merge precedence these layers fold in (`env → managed → cli → local →
+/// project → user → defaults`, highest first) is deliberately NOT a property of
+/// this type — it is one of several conflicting orders over the same rungs, and
+/// it lives in `core::settings`'s fold. The file-layer subset this module reads
+/// is ordered by [`FILE_LAYERS`] below.
+pub use protocol::Scope as SettingsLayer;
 
 /// One settings file's on-disk state, as surfaced to the UI.
 pub struct SettingsFile {
@@ -119,7 +107,7 @@ pub struct SettingsSnapshot {
     /// [`SettingsSnapshot::merged_keys`].
     pub locked: Vec<String>,
     /// Each FILE layer's OWN raw map, unmerged: `{"user": {...}, "project":
-    /// {...}, "local": {...}}`, keyed by [`SettingsLayer::wire_name`]. This
+    /// {...}, "local": {...}}`, keyed by [`layer_wire_name`]. This
     /// is what a layered editor must pre-merge an object-valued key's write
     /// against — `effective` is a cross-layer merge and can carry another
     /// layer's entries for a key like `providers`, so basing a write on it
@@ -143,10 +131,10 @@ pub struct SettingsPaths {
 /// first so a later entry overwrites an earlier one. Per the engine's merge
 /// precedence, among these three: local beats project beats user. (`cli`,
 /// `managed`, `env` and `defaults` are not file layers this module reads.)
-const FILE_LAYERS: [(WritableScope, SettingsLayer); 3] = [
-    (WritableScope::User, SettingsLayer::User),
-    (WritableScope::Project, SettingsLayer::Project),
-    (WritableScope::Local, SettingsLayer::Local),
+const FILE_LAYERS: [WritableScope; 3] = [
+    WritableScope::User,
+    WritableScope::Project,
+    WritableScope::Local,
 ];
 
 /// Build a settings snapshot by reading and merging the three writable file
@@ -175,7 +163,8 @@ pub fn build_snapshot(
     let mut files: Vec<SettingsFile> = Vec::new();
     let mut layers: BTreeMap<&'static str, serde_json::Map<String, Value>> = BTreeMap::new();
 
-    for (source, layer) in FILE_LAYERS {
+    for source in FILE_LAYERS {
+        let layer = SettingsLayer::from(source);
         let path = settings_path(source, &paths.lingxi_home, &paths.project_dir);
         let exists = path.exists();
         let (map, parse_error) = match read_settings_map(&path) {
@@ -211,7 +200,7 @@ pub fn build_snapshot(
         });
         // Moved, not cloned: `map` is only read by reference above, so this
         // is the map's one and only owner from here on.
-        layers.insert(layer.wire_name(), map);
+        layers.insert(layer_wire_name(layer), map);
     }
 
     // The managed overlay goes on LAST so it wins, and its keys are the locked
@@ -514,22 +503,30 @@ fn bridge_settings_error(error: String) -> String {
     error
 }
 
-impl SettingsLayer {
-    /// The layer's name as it appears in the wire payloads
-    /// (`provenance_json`'s values and `files_json`'s `layer` field).
-    /// Spelled out rather than derived from `Debug` so a rename of the Rust
-    /// variant cannot silently change the wire contract.
-    #[must_use]
-    pub fn wire_name(self) -> &'static str {
-        match self {
-            SettingsLayer::Defaults => "defaults",
-            SettingsLayer::User => "user",
-            SettingsLayer::Project => "project",
-            SettingsLayer::Local => "local",
-            SettingsLayer::Cli => "cli",
-            SettingsLayer::Managed => "managed",
-            SettingsLayer::Env => "env",
-        }
+/// The layer's name as it appears in the wire payloads
+/// (`provenance_json`'s values and `files_json`'s `layer` field).
+///
+/// Spelled out rather than derived from `Debug` so a rename of the Rust
+/// variant cannot silently change the wire contract — which is exactly what
+/// keeps `Builtin` reporting as `"defaults"` here, the name this panel has
+/// always used.
+///
+/// The last three rungs back no settings file and so never reach a snapshot;
+/// they are named rather than lumped into a catch-all so that adding one later
+/// is a deliberate edit here instead of a silent relabel.
+#[must_use]
+pub fn layer_wire_name(layer: SettingsLayer) -> &'static str {
+    match layer {
+        SettingsLayer::Builtin => "defaults",
+        SettingsLayer::User => "user",
+        SettingsLayer::Project => "project",
+        SettingsLayer::Local => "local",
+        SettingsLayer::Cli => "cli",
+        SettingsLayer::Managed => "managed",
+        SettingsLayer::Env => "env",
+        SettingsLayer::Flag => "flag",
+        SettingsLayer::Session => "session",
+        SettingsLayer::Team => "team",
     }
 }
 
@@ -636,14 +633,14 @@ pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
     let provenance: BTreeMap<&str, &str> = snapshot
         .provenance
         .iter()
-        .map(|(key, layer)| (key.as_str(), layer.wire_name()))
+        .map(|(key, layer)| (key.as_str(), layer_wire_name(*layer)))
         .collect();
     let files: Vec<Value> = snapshot
         .files
         .iter()
         .map(|file| {
             let mut entry = serde_json::Map::new();
-            entry.insert("layer".to_string(), Value::from(file.layer.wire_name()));
+            entry.insert("layer".to_string(), Value::from(layer_wire_name(file.layer)));
             entry.insert(
                 "path".to_string(),
                 Value::from(file.path.to_string_lossy().into_owned()),

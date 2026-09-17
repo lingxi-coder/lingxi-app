@@ -209,6 +209,118 @@ impl TryFrom<Scope> for SettingsScope {
     }
 }
 
+/// The four tiers a memdir entry can live in.
+///
+/// A narrowing of [`Scope`] like the two above, but it earns its own type for a
+/// different reason: `memdir` ranks these four three separate ways (relevance
+/// weight, tie-break order, and what survives a byte budget), and each ranking
+/// is a `match`. Widening to [`Scope`] would hand all three six arms that can
+/// never be reached.
+///
+/// `Team` appears here and nowhere else in the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MemoryEntryTier {
+    /// Session-scoped entry.
+    Session,
+    /// Project-scoped entry.
+    Project,
+    /// Team-scoped entry (subject to the team-boost gate).
+    Team,
+    /// User-scoped entry.
+    User,
+}
+
+impl From<MemoryEntryTier> for Scope {
+    fn from(value: MemoryEntryTier) -> Self {
+        match value {
+            MemoryEntryTier::Session => Self::Session,
+            MemoryEntryTier::Project => Self::Project,
+            MemoryEntryTier::Team => Self::Team,
+            MemoryEntryTier::User => Self::User,
+        }
+    }
+}
+
+impl TryFrom<Scope> for MemoryEntryTier {
+    type Error = Scope;
+
+    fn try_from(value: Scope) -> Result<Self, Self::Error> {
+        match value {
+            Scope::Session => Ok(Self::Session),
+            Scope::Project => Ok(Self::Project),
+            Scope::Team => Ok(Self::Team),
+            Scope::User => Ok(Self::User),
+            other => Err(other),
+        }
+    }
+}
+
+/// `snake_case` serde for [`Scope`], for wires that spell the rungs that way.
+///
+/// The type derives PascalCase, which is what `MemoryEntry` has always
+/// round-tripped and what the `InstructionsLoaded` hook payload sends. Other
+/// wires spell the same rungs `snake_case`. Neither is "the" spelling — that is
+/// why this is an opt-in adapter on a field rather than a `rename_all` on the
+/// type, which could only ever serve one of them.
+///
+/// Use it as `#[serde(with = "protocol::scope::snake_case")]`.
+pub mod snake_case {
+    use super::Scope;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// The `snake_case` spelling of each rung.
+    #[must_use]
+    pub const fn name(scope: Scope) -> &'static str {
+        match scope {
+            Scope::Builtin => "builtin",
+            Scope::Env => "env",
+            Scope::Cli => "cli",
+            Scope::Flag => "flag",
+            Scope::Session => "session",
+            Scope::Local => "local",
+            Scope::Project => "project",
+            Scope::User => "user",
+            Scope::Team => "team",
+            Scope::Managed => "managed",
+        }
+    }
+
+    /// Parse a `snake_case` rung; `None` when unrecognized.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Scope> {
+        Some(match value {
+            "builtin" => Scope::Builtin,
+            "env" => Scope::Env,
+            "cli" => Scope::Cli,
+            "flag" => Scope::Flag,
+            "session" => Scope::Session,
+            "local" => Scope::Local,
+            "project" => Scope::Project,
+            "user" => Scope::User,
+            "team" => Scope::Team,
+            "managed" => Scope::Managed,
+            _ => return None,
+        })
+    }
+
+    /// Serialize as the `snake_case` spelling.
+    ///
+    /// # Errors
+    /// Never fails itself; propagates the serializer's own error.
+    pub fn serialize<S: Serializer>(scope: &Scope, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(name(*scope))
+    }
+
+    /// Deserialize from the `snake_case` spelling.
+    ///
+    /// # Errors
+    /// Returns an error for any value outside the ten rungs.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Scope, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        parse(&raw).ok_or_else(|| serde::de::Error::custom(format!("unknown scope: {raw}")))
+    }
+}
+
 /// What delivered a piece of configuration to its [`Scope`].
 ///
 /// A variant earns a place here only when **more than one subsystem** produces
@@ -263,7 +375,7 @@ impl Provenance {
 
 #[cfg(test)]
 mod tests {
-    use super::{Origin, Provenance, Scope, SettingsScope, WritableScope};
+    use super::{MemoryEntryTier, Origin, Provenance, Scope, SettingsScope, WritableScope};
     use crate::ids::PluginId;
 
     /// Both sides of the narrowing, because only pinning the accepted side
@@ -334,6 +446,31 @@ mod tests {
         }
     }
 
+    /// Pins the `snake_case` spellings and their round trip. These are a
+    /// different wire's names for the same rungs as the derived PascalCase
+    /// form — both are live, which is the reason neither is a method on the
+    /// type.
+    #[test]
+    fn snake_case_names_round_trip_for_every_rung() {
+        for (scope, expected) in [
+            (Scope::Builtin, "builtin"),
+            (Scope::Env, "env"),
+            (Scope::Cli, "cli"),
+            (Scope::Flag, "flag"),
+            (Scope::Session, "session"),
+            (Scope::Local, "local"),
+            (Scope::Project, "project"),
+            (Scope::User, "user"),
+            (Scope::Team, "team"),
+            (Scope::Managed, "managed"),
+        ] {
+            assert_eq!(super::snake_case::name(scope), expected);
+            assert_eq!(super::snake_case::parse(expected), Some(scope));
+        }
+        assert_eq!(super::snake_case::parse("Project"), None, "not the PascalCase form");
+        assert_eq!(super::snake_case::parse("nope"), None);
+    }
+
     /// The reason this is a type and not a runtime check: these values reach
     /// `serde` on a production path (`--agents` JSON → `AgentDefinition`).
     /// A field typed `Scope` would newly accept every rung above.
@@ -362,17 +499,28 @@ mod tests {
         assert_ne!(p, Provenance::store(Scope::Project));
     }
 
-    /// `MemoryEntry.tier` serialized its four tiers as PascalCase before this
-    /// type existed. Widening the enum must not have changed those four bytes.
+    /// `MemoryEntry.tier` has always serialized PascalCase. Pinned on both the
+    /// narrow type that carries the field and the wide one it converts to, so
+    /// the two cannot drift apart.
     #[test]
     fn the_memory_tier_rungs_keep_their_historical_pascal_case_spelling() {
-        for (scope, expected) in [
-            (Scope::Session, "\"Session\""),
-            (Scope::Project, "\"Project\""),
-            (Scope::Team, "\"Team\""),
-            (Scope::User, "\"User\""),
+        for (tier, expected) in [
+            (MemoryEntryTier::Session, "\"Session\""),
+            (MemoryEntryTier::Project, "\"Project\""),
+            (MemoryEntryTier::Team, "\"Team\""),
+            (MemoryEntryTier::User, "\"User\""),
         ] {
-            assert_eq!(serde_json::to_string(&scope).unwrap(), expected);
+            assert_eq!(serde_json::to_string(&tier).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_string(&Scope::from(tier)).unwrap(),
+                expected,
+                "the wide spelling must match the narrow one"
+            );
+            assert_eq!(MemoryEntryTier::try_from(Scope::from(tier)), Ok(tier));
+        }
+
+        for outside in [Scope::Builtin, Scope::Env, Scope::Cli, Scope::Flag, Scope::Local, Scope::Managed] {
+            assert_eq!(MemoryEntryTier::try_from(outside), Err(outside), "{outside:?}");
         }
     }
 

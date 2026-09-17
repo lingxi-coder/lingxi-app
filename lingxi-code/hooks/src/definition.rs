@@ -375,3 +375,32 @@ impl HookSource {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::HookSource;
+
+    /// Pins the family label every source projects to. The four settings tiers
+    /// deliberately collapse to a single `"settings"` family: on this wire the
+    /// ORIGIN is observable and the settings rung is not — so a change that
+    /// starts spelling `User`/`Project`/`Local`/`Managed` apart here would emit
+    /// three labels claude-code never sends.
+    ///
+    /// A newly added variant is caught by [`HookSource::deferred_label`]'s own
+    /// exhaustive `match`, which stops compiling until it is handled.
+    #[test]
+    fn deferred_label_folds_the_settings_tiers_and_keeps_each_origin_distinct() {
+        for (source, expected) in [
+            (HookSource::User, "settings"),
+            (HookSource::Project, "settings"),
+            (HookSource::Local, "settings"),
+            (HookSource::Managed, "settings"),
+            (HookSource::Plugin, "plugin"),
+            (HookSource::FrontMatter, "agent"),
+            (HookSource::Session, "session"),
+            (HookSource::Skill, "skill"),
+        ] {
+            assert_eq!(source.deferred_label(), expected, "{source:?}");
+        }
+    }
+}

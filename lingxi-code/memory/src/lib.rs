@@ -20,7 +20,6 @@ pub mod session_memory;
 pub mod snapshot;
 pub mod surfacing;
 pub mod team_memory;
-pub mod tier;
 
 pub use file::{
     parse_markdown_with_frontmatter, MemoryError, MemoryFile, MemoryFrontmatter,
@@ -31,7 +30,6 @@ pub use index_cap::{
     human_bytes, measure, memory_index_cap_notice, memory_index_cap_notice_measured, IndexMeasure,
     MemoryIndexNotice, TENGU_MEMDIR_ENTRYPOINT_NEAR_CAP,
 };
-pub use tier::MemoryTier;
 
 // ------ M3-02 wire-identifier constants ------
 

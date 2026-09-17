@@ -763,10 +763,12 @@ pub struct MemoryEntry {
     pub size_bytes: u64,
 }
 
-/// Cross-crate stand-in for `memory::MemoryTier`.
+/// The tier a memdir entry belongs to.
 ///
-/// Defined here to keep `lingxi-protocol` free of platform deps; the richer
-/// variants (`Project { repo_root }`, etc.) live in `lingxi-memory::tier`.
+/// Defined here rather than in `lingxi-memory` so the DTO stays free of
+/// platform deps. Resolved locations (`repo_root`, `team_dir`, …) are NOT part
+/// of the tier — they live beside a tier field in whichever crate resolved
+/// them.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum MemoryEntryTier {
     /// Session-scoped entry (highest tier weight).

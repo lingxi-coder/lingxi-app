@@ -27,8 +27,9 @@ pub use loader::{LoadedFile, LoaderError};
 ///   Managed and User share the "private global instructions" wording; Project
 ///   and Local each have their own.
 ///
-/// DISTINCT from [`crate::tier::MemoryTier`], which models the separate memdir
-/// subsystem (Project/User/Session/Team). Do NOT overload one for the other.
+/// DISTINCT from [`protocol::MemoryEntryTier`], which models the separate
+/// memdir subsystem (Project/User/Session/Team). Do NOT overload one for the
+/// other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LingxiMdTier {
     /// Enterprise / managed policy memory (`<managed>/LINGXI.md` +

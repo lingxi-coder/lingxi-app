@@ -639,4 +639,31 @@ mod tests {
             "Invalid scope \"bogus\". Valid scopes: user, project, local"
         );
     }
+
+    /// `managed` is a real rung elsewhere in the engine but is deliberately NOT
+    /// a `--scope` value here: a plugin cannot be enabled into the
+    /// administrator-managed tier. Pinned separately from the `bogus` case
+    /// because a wider parse would read as a typo fix rather than the
+    /// privilege change it is.
+    #[test]
+    fn managed_is_rejected_as_a_scope_like_any_unknown_value() {
+        assert_eq!(Scope::parse("managed"), None);
+
+        let e = env();
+        let err = run_enable("a@b", Some("managed"), &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Invalid scope \"managed\". Valid scopes: user, project, local"
+        );
+    }
+
+    /// Pins the three `(scope: …)` suffix spellings. `enable_writes_true_to_user_and_reports_name`
+    /// covers `user` through the whole message; this pins the other two so a
+    /// relabel cannot slip through on the paths that test does not walk.
+    #[test]
+    fn scope_labels_match_the_cli_suffix_spellings() {
+        assert_eq!(Scope::User.label(), "user");
+        assert_eq!(Scope::Project.label(), "project");
+        assert_eq!(Scope::Local.label(), "local");
+    }
 }

@@ -83,7 +83,7 @@ pub struct AgentDefinition {
     /// pool, mirroring claude's `isAutoMemoryEnabled` → Write/Edit/Read
     /// injection (the scope selects only WHERE memory lives, not which tools).
     #[serde(default)]
-    pub memory: Option<AgentMemoryScope>,
+    pub memory: Option<protocol::SettingsScope>,
     /// Reasoning effort preference (claude `effort` = level OR integer).
     #[serde(default)]
     pub effort: Option<AgentEffort>,
@@ -228,19 +228,6 @@ pub enum AgentIsolation {
     Worktree,
     /// Run remotely in CCR (claude `'remote'`; ant-only).
     Remote,
-}
-
-/// Persistent memory scope for an agent (claude `memory`).
-///
-/// Order mirrors claude `VALID_MEMORY_SCOPES = ['user', 'project', 'local']`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentMemoryScope {
-    /// User-global memory (claude `'user'`).
-    User,
-    /// Project-scoped memory (claude `'project'`).
-    Project,
-    /// Local (uncommitted) memory (claude `'local'`).
-    Local,
 }
 
 /// Reasoning effort preference (claude `EffortValue = EffortLevel | number`).

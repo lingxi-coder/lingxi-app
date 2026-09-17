@@ -18,6 +18,7 @@ pub mod js_utf16;
 pub mod mcp_name;
 pub mod message_size;
 pub mod messages;
+pub mod scope;
 pub mod secret;
 pub mod transport;
 
@@ -39,6 +40,7 @@ pub use messages::{
     MediaObservation, MemoryEntry, MemoryEntryTier, MessageRole, PreservedMessages,
     PreservedSegment, RefusalFallbackMetadata,
 };
+pub use scope::{Origin, Provenance, Scope, SettingsScope};
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,
 };

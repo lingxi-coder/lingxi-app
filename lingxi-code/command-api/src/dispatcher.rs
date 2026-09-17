@@ -877,6 +877,30 @@ mod tests {
     use crate::registry::CommandRegistry;
     use std::path::PathBuf;
 
+    /// Pins the per-source provenance token that reaches the
+    /// `UserPromptExpansion` hook payload as `command_source`. Byte-locked to
+    /// claude-code's own `source` values; `Local` is spelled `"local"` HERE and
+    /// `"project, gitignored"` in [`crate::describe`], so the two surfaces must
+    /// never be collapsed into one shared label.
+    ///
+    /// A newly added variant is caught by `command_source_str`'s own exhaustive
+    /// `match`, which stops compiling until it is handled.
+    #[test]
+    fn command_source_str_pins_every_source_token() {
+        for (source, expected) in [
+            (CommandSource::Builtin, "builtin"),
+            (CommandSource::User, "user"),
+            (CommandSource::Project, "project"),
+            (CommandSource::Local, "local"),
+            (CommandSource::Plugin, "plugin"),
+            (CommandSource::Managed, "managed"),
+            (CommandSource::Mcp, "mcp"),
+            (CommandSource::Bundled, "bundled"),
+        ] {
+            assert_eq!(command_source_str(source), expected, "{source:?}");
+        }
+    }
+
     // M8-P9: seed directly from the api-side scaffolding (the real
     // `register_all_builtin_commands` lives in `command-core`, which depends on
     // this crate — using it here would cycle). Registering every name as an

@@ -52,6 +52,7 @@ pub mod mcp_servers;
 pub mod model_resolution;
 pub mod multi_dispatch;
 pub mod observer;
+pub mod observer_text;
 pub mod permission_mode;
 pub mod pool;
 pub mod runner;

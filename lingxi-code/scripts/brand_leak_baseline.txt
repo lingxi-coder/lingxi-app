@@ -914,7 +914,6 @@ G2	lingxi-code/agent/src/model_resolution.rs	CLAUDE_CODE_USE_BEDROCK
 G2	lingxi-code/agent/src/model_resolution.rs	CLAUDE_CODE_USE_FOUNDRY
 G2	lingxi-code/agent/src/model_resolution.rs	CLAUDE_CODE_USE_VERTEX
 G2	lingxi-code/agent/src/observer.rs	CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
-G2	lingxi-code/agent/src/observer.rs	CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS
 G2	lingxi-code/agent/src/tool_resolver.rs	CLAUDE_CODE_DISABLE_AUTO_MEMORY
 G2	lingxi-code/apps/cli/src/argv.rs	CLAUDE_CODE_FORWARD_SUBAGENT_TEXT
 G2	lingxi-code/apps/cli/src/argv.rs	CLAUDE_CODE_RESTRICTED

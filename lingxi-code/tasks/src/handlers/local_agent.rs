@@ -2292,9 +2292,28 @@ mod tests {
         registry.register_handler(TaskType::LocalAgent, Arc::new(handler));
         let registry = Arc::new(registry);
         sink.bind(registry.clone());
+        // The pairing table the composition root shares with the report tool.
+        let coordinator = AgentId::new();
+        let pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
+        registry.set_observer_pairings(pairings.clone());
+        let seed = platform_api::observer_pairing::ObserverPairingSeed {
+            spec: platform_api::subagent_spawn::ObserverSpec::new("reviewer"),
+            observed_name: "step two".into(),
+            observed_creator: Some(coordinator),
+            observed_creator_name: Some("coordinator".into()),
+        };
         let request = SubagentSpawnRequest {
             subagent_type: "reviewer".into(),
             prompt: "Observe material issues".into(),
+            name: Some("step two".into()),
+            observer: Some(platform_api::subagent_spawn::ObserverSpec::new("reviewer")),
+            // A coordinator's worker: the report must go UP to the coordinator.
+            // This also pins that arming happens BEFORE the request is stripped
+            // — `creator_agent_id` is cleared a few lines later, so an arming
+            // that ran after the strip would read `None` and take the plain
+            // branch with everything still green.
+            creator_agent_id: Some(coordinator),
+            creator_teammate_name: Some("coordinator".into()),
             ..Default::default()
         };
         let inherit = SubagentInheritance {
@@ -2308,6 +2327,7 @@ mod tests {
             inherit.clone(),
             observed,
             "first digest".into(),
+            Some(seed.clone()),
         )
         .await
         .unwrap();
@@ -2332,6 +2352,37 @@ mod tests {
             row.base().creator_agent_id.is_none(),
             "observer pairing must not create a cascade-stop ownership edge"
         );
+        // THE cross-crate link nothing else covers. `agent` drives a stubbed
+        // registry, `tasks::observer` tests `arm_pairing` directly, `tool-ui`
+        // tests the report tool against a hand-built table, and `orchestrator`
+        // proves the table reaches a tool. All four pass even if this spawn
+        // path never calls `arm_pairing` — and then `ObserverReport` answers
+        // "not armed" forever with nothing red. So: a REAL spawn must leave a
+        // pairing, resolvable the way the tool resolves it (by the OBSERVER's
+        // id, not the observed agent's key).
+        let pairing = pairings
+            .get(&observed.to_string())
+            .expect("a real observer spawn must arm a pairing");
+        assert!(pairing.state.is_armed());
+        assert_eq!(pairing.observed_task_id, Some(observed));
+        assert_eq!(pairing.observed_envelope_name, "step-two");
+        assert!(
+            pairings
+                .armed_for_observer(&pairing.observer_task_id)
+                .is_some(),
+            "the report tool looks pairings up by the OBSERVER id"
+        );
+        assert_eq!(
+            pairing.report_target_task_id,
+            Some(coordinator),
+            "a worker's observer reports UP to the coordinator"
+        );
+        assert_ne!(
+            pairing.report_target_task_id,
+            Some(observed),
+            "…and never into the worker it is watching"
+        );
+        assert_eq!(pairing.via_worker_name.as_deref(), Some("step-two"));
         let id = row.base().id.clone();
         let marker = row.base().output_file.with_extension("observer.json");
         assert!(fs
@@ -2349,6 +2400,7 @@ mod tests {
             inherit.clone(),
             observed,
             "second digest".into(),
+            Some(seed.clone()),
         )
         .await
         .unwrap();
@@ -2384,7 +2436,8 @@ mod tests {
             request.clone(),
             inherit.clone(),
             observed,
-            "after stop".into()
+            "after stop".into(),
+            Some(seed.clone()),
         )
         .await
         .is_err());
@@ -2401,7 +2454,8 @@ mod tests {
             request,
             inherit,
             AgentId::new(),
-            "corrupt marker".into()
+            "corrupt marker".into(),
+            Some(seed),
         )
         .await
         .is_err());

@@ -927,6 +927,7 @@ pub trait TaskRegistryHandle: Send + Sync {
         _inheritance: crate::SubagentInheritance,
         _observed_agent_id: protocol::AgentId,
         _digest: String,
+        _seed: Option<crate::observer_pairing::ObserverPairingSeed>,
     ) -> Result<(), TaskRegistryError> {
         Err(TaskRegistryError::InvalidInput(
             "observer tasks are unavailable".into(),

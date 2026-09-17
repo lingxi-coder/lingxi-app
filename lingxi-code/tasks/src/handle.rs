@@ -507,10 +507,18 @@ impl TaskRegistryHandle for TaskRegistry {
         inheritance: platform_api::SubagentInheritance,
         observed_agent_id: protocol::AgentId,
         digest: String,
+        seed: Option<platform_api::observer_pairing::ObserverPairingSeed>,
     ) -> Result<(), TaskRegistryError> {
-        TaskRegistry::observe_agent_activity(self, request, inheritance, observed_agent_id, digest)
-            .await
-            .map_err(|error| TaskRegistryError::Internal(error.to_string()))
+        TaskRegistry::observe_agent_activity(
+            self,
+            request,
+            inheritance,
+            observed_agent_id,
+            digest,
+            seed,
+        )
+        .await
+        .map_err(|error| TaskRegistryError::Internal(error.to_string()))
     }
     async fn task_output_directory(&self) -> Option<String> {
         Some(

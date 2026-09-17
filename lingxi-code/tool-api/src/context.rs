@@ -103,6 +103,14 @@ pub struct ToolUseContext {
     /// Effective observer inherited from a parent subagent. The Agent tool
     /// copies this to a child only when the child has no direct observer.
     pub observer: Option<platform_api::subagent_spawn::ObserverSpec>,
+    /// The session's observer PAIRINGS (oracle `toolUseContext.session
+    /// .observers`). Distinct from [`Self::observer`], which is the
+    /// declaration propagated to children; this is the live observed↔observer
+    /// table an `ObserverReport` resolves its destination from, and the table
+    /// `SendMessage` consults to refuse an observer. `None` for hosts that
+    /// have not wired observers — the tool then refuses with the oracle's
+    /// "not armed" wording rather than pretending a pairing exists.
+    pub observer_pairings: Option<Arc<platform_api::observer_pairing::ObserverPairings>>,
     /// (`/rewind`) Pre-edit file-history backup hook. The `Edit`/`Write`/
     /// `NotebookEdit` tools call `track_edit(path)` through this BEFORE writing,
     /// so `/rewind` can restore the pre-edit content. `None` (tests / no
@@ -151,6 +159,7 @@ impl ToolUseContext {
             // Inert seed; model-only context is never handed to a tool.
             depth: 0,
             observer: None,
+            observer_pairings: None,
             file_history: None,
         }
     }

@@ -1411,6 +1411,19 @@ impl PoolSubagentSpawner {
             request: observer_request,
             inheritance: inheritance.clone(),
             registry: Arc::downgrade(&registry),
+            // Captured from the ORIGINAL request, which still has the observed
+            // agent's name, its declaration and its creator. `observer_request`
+            // above has had all three rewritten or cleared.
+            seed: platform_api::observer_pairing::ObserverPairingSeed {
+                spec: spec.clone(),
+                observed_name: request
+                    .name
+                    .clone()
+                    .or_else(|| request.description.clone())
+                    .unwrap_or_else(|| request.subagent_type.clone()),
+                observed_creator: request.creator_agent_id,
+                observed_creator_name: request.creator_teammate_name.clone(),
+            },
         }))
     }
 
@@ -3074,18 +3087,19 @@ impl SubagentSpawner for PoolSubagentSpawner {
             .try_with(|permit| permit.borrow_mut().take())
             .ok()
             .flatten();
-        // ⚠️ Observer AGENTS are built but never launched. `observer_spec` /
-        // `observed_agent_type` / `observer_inherit` used to be captured here —
-        // cloned before `inherit` moves into `build_subagent_context` below,
-        // which is exactly the shape of a call site that was planned and never
-        // written. Removed because they were dead, not because the gap is
-        // closed: `crate::observer::build_observer_launch` and
-        // `ObserverLaunchPlan` have NO production caller (verified 2026-09-16 —
-        // the only call is `observer.rs:389`, inside that module's own
-        // `#[cfg(test)]`). What DOES work is the observer as an event sink:
-        // `activity_observer` below is wired and joins `observers`. So a spec
-        // on a request today gets its events forwarded, but no observer agent
-        // is ever spawned to receive them.
+        // Observer agents ARE launched, from here: `activity_observer` validates
+        // the declaration and returns a tap whose events drive
+        // `TaskRegistryHandle::observe_agent_activity`, which spawns (or
+        // unparks) the observer task and delivers the digest.
+        //
+        // ⚠️ An earlier comment here claimed the opposite, on the strength of
+        // `crate::observer::build_observer_launch` having no production caller.
+        // That symbol was a SECOND, invented design sitting beside the live
+        // path; it has since been deleted. The lesson is the reason this note
+        // survives it: "one symbol has no callers" does not establish "the
+        // feature is unwired" — enumerate every entry point to the behaviour
+        // (here, every caller of `observer_agents_enabled`) before concluding
+        // anything about reachability.
         let activity_observer = self.activity_observer(&request, &inherit).await;
         let request_name = request.name.clone().or_else(|| request.description.clone());
         let observers: Vec<Arc<dyn SubagentSpawnObserver>> = self
@@ -4170,7 +4184,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
         let _guard = crate::observer::observer_env_lock().lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
+        std::env::set_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let api = Arc::new(QueueApi {
@@ -4256,7 +4270,7 @@ mod tests {
             1,
             "unregistered observer must not run"
         );
-        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
     #[tokio::test]
@@ -9516,7 +9530,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_selection_surfaces_only_valid_observer_specs() {
         let _guard = crate::observer::observer_env_lock().lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
+        std::env::set_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
 
@@ -9551,7 +9565,7 @@ mod tests {
             invalid.observer.is_none(),
             "invalid observer graphs must fail closed before spawn metadata"
         );
-        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
     #[tokio::test]
@@ -9561,7 +9575,16 @@ mod tests {
             TaskRegistryHandle, TaskUpdatePatch,
         };
         #[derive(Default)]
-        struct Registry(Mutex<Vec<(AgentId, SubagentSpawnRequest, String)>>);
+        struct Registry(
+            Mutex<
+                Vec<(
+                    AgentId,
+                    SubagentSpawnRequest,
+                    String,
+                    Option<platform_api::observer_pairing::ObserverPairingSeed>,
+                )>,
+            >,
+        );
         #[async_trait]
         impl TaskRegistryHandle for Registry {
             async fn create(&self, _: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
@@ -9599,13 +9622,17 @@ mod tests {
                 _: SubagentInheritance,
                 observed: AgentId,
                 digest: String,
+                seed: Option<platform_api::observer_pairing::ObserverPairingSeed>,
             ) -> Result<(), TaskRegistryError> {
-                self.0.lock().unwrap().push((observed, request, digest));
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((observed, request, digest, seed));
                 Ok(())
             }
         }
         let _guard = crate::observer::observer_env_lock().lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
+        std::env::set_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
         let pool = Arc::new(StateMachinePool::new(
             Arc::new(MockRuntimeSpawner::default()),
             4,
@@ -9671,7 +9698,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|(id, _, _)| *id)
+                    .map(|(id, _, _, _)| *id)
                     .collect::<std::collections::HashSet<_>>();
                 if seen.contains(&one_shot) && seen.contains(&persistent) {
                     break;
@@ -9681,21 +9708,63 @@ mod tests {
         })
         .await
         .expect("both real spawn paths must deliver observer activity");
-        for (_, request, digest) in registry.0.lock().unwrap().iter() {
+        for (_, request, digest, seed) in registry.0.lock().unwrap().iter() {
             assert_eq!(request.subagent_type, "reviewer");
             assert!(request.run_in_background);
             assert!(request.observer.is_none());
-            assert!(digest.contains("observer-activity"));
+            // 2.1.270 shape: a `<name-activity>` envelope around rendered
+            // activity, closed by the `ebn` postamble. The old invented
+            // `<observer-activity …>{json}` envelope is gone; asserting the
+            // envelope AND the postamble is what keeps a half-rendered digest
+            // (activity with no brief, or a brief with no activity) from
+            // passing.
+            assert!(
+                digest.contains("-activity>"),
+                "digest must carry the observed agent's envelope: {digest}"
+            );
+            assert!(
+                digest.ends_with(crate::observer_text::DIGEST_POSTAMBLE),
+                "digest must close with the 2.1.270 postamble: {digest}"
+            );
+            assert!(
+                !digest.contains("observer-activity"),
+                "the invented envelope must not come back: {digest}"
+            );
+            // The envelope must name the OBSERVED agent. `ActivityObserver`
+            // holds the OBSERVER's request (its `name` is cleared and its
+            // `description` is "reviewer@worker"), so deriving the name from
+            // that request names the wrong agent.
+            // The observed agent has no display name in this fixture, so the
+            // envelope falls back to its TYPE. What matters is that it is not
+            // named after the OBSERVER, which is what reading the name off the
+            // observer's request produced ("reviewer@general-purpose").
+            assert!(
+                digest.contains("<general-purpose-activity>"),
+                "the envelope must name the observed agent: {digest}"
+            );
+            assert!(
+                !digest.contains("reviewer"),
+                "the envelope must not be named after the observer: {digest}"
+            );
+            // The seed must describe the OBSERVED agent. Without it the
+            // registry arms nothing, because the request above is the
+            // observer's and its declaration has been cleared.
+            let seed = seed.as_ref().expect("a seed must reach the registry");
+            assert_eq!(seed.spec.agent, "reviewer");
+            // No display name on the observed request in this fixture, so the
+            // seed falls back to its TYPE — which is still the OBSERVED agent's,
+            // never the observer's.
+            assert_eq!(seed.observed_name, "general-purpose");
         }
         spawner.stop(&persistent).await.unwrap();
-        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
     #[tokio::test]
     async fn resolve_selection_strips_observer_when_experimental_gate_is_off() {
         let _guard = crate::observer::observer_env_lock().lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
-        std::env::remove_var("LINGXI_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
 

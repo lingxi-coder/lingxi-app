@@ -20,6 +20,7 @@ pub mod artifact;
 pub mod ask_user_question;
 pub mod brief;
 pub mod list_agents;
+pub mod observer_report;
 pub mod push_notification;
 pub mod report_findings;
 pub mod send_message;
@@ -131,6 +132,15 @@ fn register_with_options(
     if include_send_message {
         reg.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
     }
+    // 2.1.270 `ObserverReport`. Registered unconditionally, like the oracle's
+    // `isEnabled(){return!0}`: reachability belongs to the PAIRING, not to
+    // registration. An agent that is not an observer calling this gets a
+    // reason ("only available to an observer agent") rather than an unknown
+    // tool, which is what tells the model it asked the wrong question instead
+    // of that the tool does not exist.
+    reg.register_builtin(Arc::new(observer_report::ObserverReportTool::new(
+        None, None,
+    )));
     // 2.1.232 `ListAgents` (`zy`, alias `ListPeers`). `is_enabled` follows
     // harbor-kite / a live-session process dir so headless fixtures stay empty.
     reg.register_builtin(Arc::new(ListAgentsTool::new(ctx.clone())));

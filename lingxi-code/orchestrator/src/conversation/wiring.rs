@@ -373,6 +373,21 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Attach the session's observer pairing table.
+    ///
+    /// Must be the SAME `Arc` handed to `TaskRegistry::set_observer_pairings`:
+    /// the registry files a pairing when it spawns an observer, and
+    /// `ObserverReport` resolves against this one. Two tables would look wired
+    /// and report "not armed" forever.
+    #[must_use]
+    pub fn with_observer_pairings(
+        mut self,
+        table: Arc<platform_api::observer_pairing::ObserverPairings>,
+    ) -> Self {
+        self.model_runtime.observer_pairings = Some(table);
+        self
+    }
+
     /// Attach the host's shared output book. Inert unless explicitly wired.
     #[must_use]
     pub fn with_workflow_output_scopes(

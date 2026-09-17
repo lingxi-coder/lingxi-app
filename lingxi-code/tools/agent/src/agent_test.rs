@@ -218,6 +218,7 @@ mod tests {
             cwd: None,
             depth: 0,
             observer: None,
+            observer_pairings: None,
             file_history: None,
         }
     }

@@ -1135,6 +1135,10 @@ pub(crate) struct ModelRuntime {
     pub(crate) cost_tracker: Option<Arc<cost::CostTracker>>,
     /// Optional `/usage` Loops source (cron scheduler). `None` hides the section.
     pub(crate) loop_usage: Option<Arc<dyn platform_api::LoopUsageProvider>>,
+    /// The session's observer pairing table, shared with the task registry so
+    /// a pairing filed when an observer spawns is the same one `ObserverReport`
+    /// resolves. `None` on hosts without observer agents.
+    pub(crate) observer_pairings: Option<Arc<platform_api::observer_pairing::ObserverPairings>>,
     pub(crate) output_scopes: Option<Arc<dyn platform_api::WorkflowOutputScopes>>,
     pub(crate) output_turn: std::sync::Mutex<Option<super::output_accounting_impl::OutputTurn>>,
     /// Session-pinned response finalizer scope captured before provider work.
@@ -1222,6 +1226,7 @@ impl ModelRuntime {
             ),
             cost_tracker: None,
             loop_usage: None,
+            observer_pairings: None,
             output_scopes: None,
             output_turn: std::sync::Mutex::new(None),
             cost_scope: std::sync::Mutex::new(None),

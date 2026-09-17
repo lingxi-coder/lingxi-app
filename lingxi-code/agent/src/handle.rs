@@ -4167,7 +4167,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
         let _guard = crate::observer::observer_env_lock().lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
+        std::env::set_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let api = Arc::new(QueueApi {
@@ -4253,7 +4253,7 @@ mod tests {
             1,
             "unregistered observer must not run"
         );
-        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
     #[tokio::test]
@@ -9513,7 +9513,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_selection_surfaces_only_valid_observer_specs() {
         let _guard = crate::observer::observer_env_lock().lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
+        std::env::set_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
 
@@ -9548,7 +9548,7 @@ mod tests {
             invalid.observer.is_none(),
             "invalid observer graphs must fail closed before spawn metadata"
         );
-        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
     #[tokio::test]
@@ -9602,7 +9602,7 @@ mod tests {
             }
         }
         let _guard = crate::observer::observer_env_lock().lock().unwrap();
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
+        std::env::set_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS", "1");
         let pool = Arc::new(StateMachinePool::new(
             Arc::new(MockRuntimeSpawner::default()),
             4,
@@ -9702,14 +9702,14 @@ mod tests {
             );
         }
         spawner.stop(&persistent).await.unwrap();
-        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
     #[tokio::test]
     async fn resolve_selection_strips_observer_when_experimental_gate_is_off() {
         let _guard = crate::observer::observer_env_lock().lock().unwrap();
-        std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
-        std::env::remove_var("LINGXI_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
+        std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
 

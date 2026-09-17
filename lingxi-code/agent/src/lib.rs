@@ -87,8 +87,8 @@ pub use platform_api::subagent_spawn::{format_agent_line, should_inject_agent_li
 pub use mcp_servers::agent_mcp_specs_to_scoped_configs;
 pub use model_resolution::resolve_agent_model;
 pub use observer::{
-    build_observer_launch, propagation_for_spawn, validate_observer_graph, ObserverLaunchPlan,
-    ObserverPropagation, ObserverValidationError, DEFAULT_OBSERVER_FANOUT_DEPTH,
+    propagation_for_spawn, validate_observer_graph, ObserverPropagation, ObserverValidationError,
+    DEFAULT_OBSERVER_FANOUT_DEPTH,
 };
 pub use platform_api::fork_subagent::{
     build_child_message, build_forked_messages, build_worktree_notice, is_fork_subagent_enabled,

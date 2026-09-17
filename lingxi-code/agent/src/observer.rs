@@ -1,7 +1,6 @@
 //! Observer declaration validation and descendant propagation.
 
 use crate::definition::{AgentDefinition, ObserverSpec};
-use protocol::AgentId;
 use std::collections::{HashMap, HashSet};
 
 /// Observer fanout is bounded independently from ordinary subagent recursion.
@@ -53,21 +52,6 @@ pub struct ObserverPropagation {
     pub chain: Vec<String>,
     /// Current observer-only fanout depth.
     pub fanout_depth: u32,
-}
-
-/// A companion observer launch associated with the observed agent, not a user
-/// prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObserverLaunchPlan {
-    /// Runtime id of the agent whose output is being observed.
-    pub observed_agent_id: AgentId,
-    /// Agent type to launch.
-    pub observer_agent: String,
-    /// Model-facing observer prompt. This is seeded directly into the observer
-    /// context and must not be appended to the main conversation.
-    pub prompt: String,
-    /// Propagation state for descendants, when chaining remains enabled.
-    pub descendant: Option<ObserverPropagation>,
 }
 
 /// Invalid observer graph.
@@ -220,40 +204,6 @@ pub fn propagation_for_spawn(
     Some(next)
 }
 
-/// Build a companion launch after output is available.
-///
-/// The returned plan keeps the observed agent id explicit so UIs/transcripts
-/// can attach observer output to that agent rather than injecting it as a
-/// normal user turn.
-#[must_use]
-pub fn build_observer_launch(
-    observed_agent_id: AgentId,
-    observed_agent_type: &str,
-    observed_output: &serde_json::Value,
-    propagation: &ObserverPropagation,
-) -> ObserverLaunchPlan {
-    let instruction = propagation
-        .spec
-        .message
-        .as_deref()
-        .unwrap_or("Review the observed agent's work and report material issues only.");
-    let prompt = format!(
-        "<agent-observation observed-agent-id=\"{observed_agent_id}\" observed-agent-type=\"{observed_agent_type}\">\n\
-{instruction}\n\nObserved output:\n{observed_output}\n\
-</agent-observation>"
-    );
-    let descendant = propagation
-        .spec
-        .observe_subagents
-        .then(|| propagation.clone());
-    ObserverLaunchPlan {
-        observed_agent_id,
-        observer_agent: propagation.spec.agent.clone(),
-        prompt,
-        descendant,
-    }
-}
-
 /// A passive lifecycle tap that never alters the observed agent's result.
 pub(crate) struct ActivityObserver {
     pub request: platform_api::SubagentSpawnRequest,
@@ -264,29 +214,74 @@ pub(crate) struct ActivityObserver {
 #[async_trait::async_trait]
 impl platform_api::subagent_spawn::SubagentSpawnObserver for ActivityObserver {
     async fn on_event(&self, event: platform_api::subagent_spawn::SubagentObservation) {
+        use crate::observer_delivery::activity_from_message;
+        use crate::observer_text::{build_digest, envelope_name, ObservedActivity};
         use platform_api::subagent_spawn::SubagentObservation;
-        let (agent_id, digest) = match event {
+
+        // claude-code 2.1.270 digests what the observed agent DID, rendered one
+        // entry per activity (`UIo`) inside a `<name-activity>` envelope with
+        // the `ebn` postamble — NOT a JSON dump of the runner event, which is
+        // what this used to send. A terminal event is a `<turn-ended>` whose
+        // reason names how it ended.
+        let (agent_id, activity) = match event {
             SubagentObservation::Message { agent_id, message } => {
-                (agent_id, serde_json::json!({"message": message}))
+                (agent_id, activity_from_message(&message))
             }
-            SubagentObservation::Completed {
-                agent_id, content, ..
-            } => (agent_id, serde_json::json!({"completed": content})),
-            SubagentObservation::Failed { agent_id, error } => {
-                (agent_id, serde_json::json!({"failed": error}))
-            }
-            SubagentObservation::Killed { agent_id } => {
-                (agent_id, serde_json::json!({"killed": true}))
-            }
+            SubagentObservation::Completed { agent_id, .. } => (
+                agent_id,
+                vec![ObservedActivity::TurnEnded {
+                    reason: "completed".into(),
+                }],
+            ),
+            SubagentObservation::Failed { agent_id, error } => (
+                agent_id,
+                vec![
+                    ObservedActivity::TurnEnded {
+                        reason: "failed".into(),
+                    },
+                    ObservedActivity::AssistantText { text: error },
+                ],
+            ),
+            SubagentObservation::Killed { agent_id } => (
+                agent_id,
+                vec![ObservedActivity::TurnEnded {
+                    reason: "killed".into(),
+                }],
+            ),
             _ => return,
         };
+        // Oracle `cBn`: a turn with no activity and no trigger wakes nobody.
+        if activity.is_empty() {
+            return;
+        }
         let Some(registry) = self.registry.upgrade() else {
             return;
         };
-        if let Err(error) = registry.observe_agent_activity(
-            self.request.clone(), self.inheritance.clone(), agent_id,
-            format!("<observer-activity observed-agent-id=\"{agent_id}\">\n{digest}\n</observer-activity>"),
-        ).await {
+        let observed_name = self
+            .request
+            .name
+            .clone()
+            .or_else(|| self.request.description.clone())
+            .unwrap_or_else(|| self.request.subagent_type.clone());
+        let digest = build_digest(
+            &envelope_name(&observed_name),
+            None,
+            &activity,
+            self.request
+                .observer
+                .as_ref()
+                .and_then(|o| o.message.as_deref()),
+            true,
+        );
+        if let Err(error) = registry
+            .observe_agent_activity(
+                self.request.clone(),
+                self.inheritance.clone(),
+                agent_id,
+                digest,
+            )
+            .await
+        {
             tracing::warn!(%agent_id, %error, "observer activity could not be delivered");
         }
     }
@@ -375,27 +370,6 @@ mod tests {
         let root = definition("root", Some(no_fanout));
         let state = propagation_for_spawn(&root, None).unwrap();
         assert!(propagation_for_spawn(&definition("child", None), Some(&state)).is_none());
-    }
-
-    #[test]
-    fn observer_prompt_is_explicitly_associated_with_observed_agent() {
-        let id = AgentId::new();
-        let propagation = ObserverPropagation {
-            spec: ObserverSpec::new("reviewer"),
-            origin_agent: "worker".into(),
-            chain: vec!["worker".into()],
-            fanout_depth: 0,
-        };
-        let plan = build_observer_launch(
-            id,
-            "worker",
-            &serde_json::json!({"text":"done"}),
-            &propagation,
-        );
-        assert_eq!(plan.observed_agent_id, id);
-        assert_eq!(plan.observer_agent, "reviewer");
-        assert!(plan.prompt.contains(&id.to_string()));
-        assert!(plan.prompt.contains("Observed output"));
     }
 
     #[test]

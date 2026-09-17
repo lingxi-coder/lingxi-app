@@ -432,3 +432,141 @@ mod tests {
         assert_eq!(FRESH_START_NOTE, f["fresh_start_note"].as_str().unwrap());
     }
 }
+
+/// Project a runner message onto the oracle's activity kinds (`UIo`'s arms).
+///
+/// The oracle digests what the observed agent DID, so a message becomes zero
+/// or more entries: an assistant turn contributes its text and each tool call,
+/// a user turn contributes its text and each tool result. A `System` message
+/// contributes nothing — the observer is briefed separately and has no business
+/// seeing the observed agent's system prompt.
+#[must_use]
+pub fn activity_from_message(message: &protocol::ConversationMessage) -> Vec<ObservedActivity> {
+    use protocol::{ContentBlock, ConversationMessage};
+    let mut out = Vec::new();
+    match message {
+        ConversationMessage::Assistant { content, .. } => {
+            for block in content {
+                match block {
+                    ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+                        if !text.trim().is_empty() {
+                            out.push(ObservedActivity::AssistantText { text: text.clone() });
+                        }
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        out.push(ObservedActivity::ToolCall {
+                            name: name.clone(),
+                            input: input.to_string(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ConversationMessage::User { content, .. } => {
+            for block in content {
+                match block {
+                    ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+                        if !text.trim().is_empty() {
+                            out.push(ObservedActivity::UserMessage { text: text.clone() });
+                        }
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        out.push(ObservedActivity::ToolResult {
+                            content: content.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ConversationMessage::System { .. } => {}
+    }
+    out
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+
+    #[test]
+    fn an_assistant_turn_contributes_its_text_and_each_tool_call() {
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "thinking".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: ToolUseId::new(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({"command": "ls"}),
+                    provider_id: None,
+                },
+            ],
+            stop_reason: None,
+        };
+        let got = activity_from_message(&msg);
+        assert_eq!(got.len(), 2);
+        assert!(matches!(got[0], ObservedActivity::AssistantText { .. }));
+        assert!(matches!(got[1], ObservedActivity::ToolCall { .. }));
+    }
+
+    /// A user turn's tool results are what the observed agent SAW, so they are
+    /// digested as results, not as user text.
+    #[test]
+    fn a_user_turn_contributes_text_and_tool_results_separately() {
+        let msg = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: ToolUseId::new(),
+                    content: "file listing".into(),
+                    is_error: false,
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                },
+                ContentBlock::Text {
+                    text: "now do X".into(),
+                },
+            ],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let got = activity_from_message(&msg);
+        assert_eq!(got.len(), 2);
+        assert!(matches!(got[0], ObservedActivity::ToolResult { .. }));
+        assert!(matches!(got[1], ObservedActivity::UserMessage { .. }));
+    }
+
+    /// Whitespace-only text is not activity. Without this an assistant turn
+    /// that only called a tool would digest an empty `AssistantText` alongside
+    /// the call.
+    #[test]
+    fn empty_text_is_not_activity() {
+        let msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "  \n".into(),
+            }],
+            stop_reason: None,
+        };
+        assert!(activity_from_message(&msg).is_empty());
+    }
+
+    /// The observer is briefed separately; it has no business seeing the
+    /// observed agent's system prompt.
+    #[test]
+    fn a_system_message_contributes_nothing() {
+        let msg = ConversationMessage::System {
+            id: MessageId::new(),
+            content: "you are…".into(),
+            subtype: None,
+            compact_metadata: None,
+            refusal_fallback: None,
+        };
+        assert!(activity_from_message(&msg).is_empty());
+    }
+}

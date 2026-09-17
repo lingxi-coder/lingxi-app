@@ -3074,18 +3074,19 @@ impl SubagentSpawner for PoolSubagentSpawner {
             .try_with(|permit| permit.borrow_mut().take())
             .ok()
             .flatten();
-        // ⚠️ Observer AGENTS are built but never launched. `observer_spec` /
-        // `observed_agent_type` / `observer_inherit` used to be captured here —
-        // cloned before `inherit` moves into `build_subagent_context` below,
-        // which is exactly the shape of a call site that was planned and never
-        // written. Removed because they were dead, not because the gap is
-        // closed: `crate::observer::build_observer_launch` and
-        // `ObserverLaunchPlan` have NO production caller (verified 2026-09-16 —
-        // the only call is `observer.rs:389`, inside that module's own
-        // `#[cfg(test)]`). What DOES work is the observer as an event sink:
-        // `activity_observer` below is wired and joins `observers`. So a spec
-        // on a request today gets its events forwarded, but no observer agent
-        // is ever spawned to receive them.
+        // Observer agents ARE launched, from here: `activity_observer` validates
+        // the declaration and returns a tap whose events drive
+        // `TaskRegistryHandle::observe_agent_activity`, which spawns (or
+        // unparks) the observer task and delivers the digest.
+        //
+        // ⚠️ An earlier comment here claimed the opposite, on the strength of
+        // `crate::observer::build_observer_launch` having no production caller.
+        // That symbol was a SECOND, invented design sitting beside the live
+        // path; it has since been deleted. The lesson is the reason this note
+        // survives it: "one symbol has no callers" does not establish "the
+        // feature is unwired" — enumerate every entry point to the behaviour
+        // (here, every caller of `observer_agents_enabled`) before concluding
+        // anything about reachability.
         let activity_observer = self.activity_observer(&request, &inherit).await;
         let request_name = request.name.clone().or_else(|| request.description.clone());
         let observers: Vec<Arc<dyn SubagentSpawnObserver>> = self
@@ -9681,7 +9682,24 @@ mod tests {
             assert_eq!(request.subagent_type, "reviewer");
             assert!(request.run_in_background);
             assert!(request.observer.is_none());
-            assert!(digest.contains("observer-activity"));
+            // 2.1.270 shape: a `<name-activity>` envelope around rendered
+            // activity, closed by the `ebn` postamble. The old invented
+            // `<observer-activity …>{json}` envelope is gone; asserting the
+            // envelope AND the postamble is what keeps a half-rendered digest
+            // (activity with no brief, or a brief with no activity) from
+            // passing.
+            assert!(
+                digest.contains("-activity>"),
+                "digest must carry the observed agent's envelope: {digest}"
+            );
+            assert!(
+                digest.ends_with(crate::observer_text::DIGEST_POSTAMBLE),
+                "digest must close with the 2.1.270 postamble: {digest}"
+            );
+            assert!(
+                !digest.contains("observer-activity"),
+                "the invented envelope must not come back: {digest}"
+            );
         }
         spawner.stop(&persistent).await.unwrap();
         std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");

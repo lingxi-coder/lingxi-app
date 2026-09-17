@@ -282,21 +282,23 @@ pub enum FrontmatterShell {
 }
 
 /// Where the command came from.
+///
+/// The settings rungs are the shared [`protocol::SettingsScope`]; `Builtin`,
+/// `Bundled`, `Plugin` and `Mcp` are this subsystem's own producers.
+///
+/// `Builtin` and `Bundled` are both "in the binary" and are NOT
+/// interchangeable: the reference reports them as `"builtin"` and `"bundled"`,
+/// and [`crate::dispatcher`] sends whichever applies on the
+/// `UserPromptExpansion` hook payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CommandSource {
     /// Compiled-in handler.
     #[default]
     Builtin,
-    /// User-level configuration directory.
-    User,
-    /// Project-local configuration directory.
-    Project,
-    /// `.local`-style override (per-user, per-project).
-    Local,
+    /// Read from a settings tier's `commands/` directory.
+    Settings(protocol::SettingsScope),
     /// Loaded by an installed plugin.
     Plugin,
-    /// Loaded from a managed (admin-controlled) source.
-    Managed,
     /// Derived from an MCP server prompt.
     Mcp,
     /// Programmatically-registered bundled skill (TS `loadedFrom: 'bundled'` /

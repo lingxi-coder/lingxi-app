@@ -229,18 +229,20 @@ where
 }
 
 /// Where the skill originally came from (provenance classification).
+///
+/// The settings rungs are the shared [`protocol::SettingsScope`]; the other
+/// three are this subsystem's own producers. Distinct from [`LoadedFrom`]
+/// below, which says which *loader* ran — the two differ only for the
+/// file-backed case, where `LoadedFrom` separates the `skills/` layout from the
+/// legacy `commands/` one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillSource {
     /// Compiled into the binary.
     Bundled,
-    /// User-level configuration directory.
-    User,
-    /// Project-local configuration directory.
-    Project,
+    /// Read from a settings tier's `skills/` directory.
+    Settings(protocol::SettingsScope),
     /// Loaded by an installed plugin.
     Plugin,
-    /// Loaded from a managed (admin-controlled) source.
-    Managed,
     /// Derived from an MCP server tool definition.
     Mcp {},
 }

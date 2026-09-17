@@ -898,7 +898,7 @@ mod tests {
             events: vec![HookEventType::Stop],
             if_condition: None,
             executor,
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,

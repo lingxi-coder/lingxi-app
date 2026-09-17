@@ -658,9 +658,9 @@ fn validate_skill_markdown(markdown: &str, scope: &str) -> Result<(), String> {
         return Err("SKILL.md exceeds the 512 KiB limit".to_string());
     }
     let source = if scope == "user" {
-        skill_api::SkillSource::User
+        skill_api::SkillSource::Settings(protocol::SettingsScope::User)
     } else {
-        skill_api::SkillSource::Project
+        skill_api::SkillSource::Settings(protocol::SettingsScope::Project)
     };
     skill_api::parse_skill_markdown(
         markdown,
@@ -824,7 +824,7 @@ fn inspect_markdown(markdown: &str) -> Inspection {
     match skill_api::parse_skill_markdown(
         markdown,
         PathBuf::from(SKILL_FILE),
-        skill_api::SkillSource::User,
+        skill_api::SkillSource::Settings(protocol::SettingsScope::User),
         skill_api::LoadedFrom::Skills,
     ) {
         Ok(skill) => Inspection {

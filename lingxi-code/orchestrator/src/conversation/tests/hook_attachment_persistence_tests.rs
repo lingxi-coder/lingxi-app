@@ -492,7 +492,7 @@ async fn executor_run_reaches_the_transcript_through_the_real_sink() {
         executor: hooks::HookExecutor::Builtin {
             handler_id: "lint".into(),
         },
-        source: hooks::HookSource::User,
+        source: hooks::HookSource::Settings(protocol::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,

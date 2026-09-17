@@ -87,11 +87,11 @@ struct ExpansionHooks {
 fn command_source_str(source: CommandSource) -> &'static str {
     match source {
         CommandSource::Builtin => "builtin",
-        CommandSource::User => "user",
-        CommandSource::Project => "project",
-        CommandSource::Local => "local",
+        CommandSource::Settings(protocol::SettingsScope::User) => "user",
+        CommandSource::Settings(protocol::SettingsScope::Project) => "project",
+        CommandSource::Settings(protocol::SettingsScope::Local) => "local",
         CommandSource::Plugin => "plugin",
-        CommandSource::Managed => "managed",
+        CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
         CommandSource::Mcp => "mcp",
         // Programmatic bundled skills (TS `source: 'bundled'`).
         CommandSource::Bundled => "bundled",
@@ -889,11 +889,11 @@ mod tests {
     fn command_source_str_pins_every_source_token() {
         for (source, expected) in [
             (CommandSource::Builtin, "builtin"),
-            (CommandSource::User, "user"),
-            (CommandSource::Project, "project"),
-            (CommandSource::Local, "local"),
+            (CommandSource::Settings(protocol::SettingsScope::User), "user"),
+            (CommandSource::Settings(protocol::SettingsScope::Project), "project"),
+            (CommandSource::Settings(protocol::SettingsScope::Local), "local"),
             (CommandSource::Plugin, "plugin"),
-            (CommandSource::Managed, "managed"),
+            (CommandSource::Settings(protocol::SettingsScope::Managed), "managed"),
             (CommandSource::Mcp, "mcp"),
             (CommandSource::Bundled, "bundled"),
         ] {
@@ -963,7 +963,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "demo".to_string(),
             description: "Demo".to_string(),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/demo.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -1114,7 +1114,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "commit".to_string(),
             description: "Custom commit".to_string(),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/commit.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -1246,7 +1246,7 @@ mod tests {
         shared.write().await.register_command(SlashCommand {
             name: "deploy".to_string(),
             description: "Deploy".to_string(),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: std::path::PathBuf::from("/x/deploy.md"),
                 frontmatter: crate::model::CommandFrontmatter::default(),
@@ -1471,7 +1471,7 @@ mod tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "record-user-prompt-expansion".into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -1527,7 +1527,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let dispatcher =
-            RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::User))
+            RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(protocol::SettingsScope::User)))
                 .with_skill_usage_home(root.clone());
 
         assert!(matches!(
@@ -1557,7 +1557,7 @@ mod tests {
                 }
             })
         });
-        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Project))
+        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(protocol::SettingsScope::Project)))
             .with_expansion_hooks(exec, provider);
 
         // Expansion still produces the body, AND the hook fires.
@@ -1696,7 +1696,7 @@ mod tests {
         let (exec, log) = recording_expansion_executor().await;
         let provider: ExpansionHookContextProvider =
             Arc::new(|| Box::pin(async { HookContext::default() }));
-        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::User))
+        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(protocol::SettingsScope::User)))
             .with_expansion_hooks(exec, provider);
 
         let _ = d.dispatch("/demo").await;
@@ -1716,7 +1716,7 @@ mod tests {
         let (exec, log) = recording_expansion_executor().await;
         // Note: executor exists but is NOT wired into the dispatcher.
         let _ = exec;
-        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Project));
+        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(protocol::SettingsScope::Project)));
 
         match d.dispatch("/demo x").await {
             SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Use x"),
@@ -1871,7 +1871,7 @@ mod tests {
     #[tokio::test]
     async fn wired_provider_expands_markdown_embedded_shell() {
         let reg = markdown_with(
-            CommandSource::Project,
+            CommandSource::Settings(protocol::SettingsScope::Project),
             "before !`echo hi` after",
             Some(vec!["Bash(echo:*)".to_string()]),
         );
@@ -1898,7 +1898,7 @@ mod tests {
     /// byte-exact expansion-failure display (patterns never left in place).
     #[tokio::test]
     async fn wired_deny_provider_aborts_markdown_expansion() {
-        let reg = markdown_with(CommandSource::Project, "before !`echo hi` after", None);
+        let reg = markdown_with(CommandSource::Settings(protocol::SettingsScope::Project), "before !`echo hi` after", None);
         let provider = Arc::new(FakeProvider {
             deny: true,
             seen_allowed: std::sync::Mutex::new(Vec::new()),
@@ -2063,7 +2063,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "tight".to_string(),
             description: "A skill that narrows its own tools".to_string(),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/tight.md"),
                 frontmatter: CommandFrontmatter {
@@ -2077,7 +2077,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "open".to_string(),
             description: "A skill that narrows nothing".to_string(),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/open.md"),
                 frontmatter: CommandFrontmatter::default(),
@@ -2136,7 +2136,7 @@ mod tests {
         reg.register_command(SlashCommand {
             name: "tight".to_string(),
             description: "d".to_string(),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from("/tmp/tight.md"),
                 frontmatter: CommandFrontmatter {

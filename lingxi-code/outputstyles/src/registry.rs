@@ -184,7 +184,7 @@ impl OutputStyleRegistry {
             OutputStyle {
                 name: "markdown".into(),
                 description: "Default markdown output".into(),
-                source: OutputStyleSource::Store(protocol::Scope::Builtin),
+                source: OutputStyleSource::Builtin,
                 frontmatter: OutputStyleFrontmatter {
                     name: "markdown".into(),
                     description: String::new(),

@@ -277,7 +277,7 @@ mod tests {
                 prompt: "vet this".into(),
                 model: None,
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,

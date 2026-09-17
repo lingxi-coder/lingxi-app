@@ -30,7 +30,7 @@ fn hk(
         executor: HookExecutor::Builtin {
             handler_id: "noop".into(),
         },
-        source: HookSource::User,
+        source: HookSource::Settings(protocol::SettingsScope::User),
         blocking: true,
         timeout,
         priority: 0,
@@ -110,7 +110,7 @@ async fn list_hooks_maps_executor_type_content_and_source() {
             cwd: None,
             shell: None,
         },
-        source: HookSource::Project,
+        source: HookSource::Settings(protocol::SettingsScope::Project),
         blocking: true,
         timeout: None,
         priority: 0,

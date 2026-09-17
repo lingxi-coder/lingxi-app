@@ -246,7 +246,7 @@ mod tests {
         SlashCommand {
             name: name.to_string(),
             description: format!("{name} cmd"),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Builtin {
                 handler_id: name.to_string(),
             },

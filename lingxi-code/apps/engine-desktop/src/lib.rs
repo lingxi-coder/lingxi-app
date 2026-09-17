@@ -13043,17 +13043,17 @@ pub async fn build_with_credential_stack(
     for (path, source, included) in [
         (
             user_settings_path,
-            hooks::definition::HookSource::User,
+            hooks::definition::HookSource::Settings(protocol::SettingsScope::User),
             incl_user_settings,
         ),
         (
             project_settings_path,
-            hooks::definition::HookSource::Project,
+            hooks::definition::HookSource::Settings(protocol::SettingsScope::Project),
             incl_project_settings,
         ),
         (
             local_settings_path,
-            hooks::definition::HookSource::Local,
+            hooks::definition::HookSource::Settings(protocol::SettingsScope::Local),
             incl_project_settings,
         ),
     ] {
@@ -13098,7 +13098,7 @@ pub async fn build_with_credential_stack(
     // mode. Bare mode disables hooks entirely.
     if !cfg.customization_gates.bare {
         for raw in &managed_settings_for_strict {
-            match hooks::parse_hooks_from_settings_json(raw, hooks::definition::HookSource::Managed)
+            match hooks::parse_hooks_from_settings_json(raw, hooks::definition::HookSource::Settings(protocol::SettingsScope::Managed))
             {
                 Ok(hooks_vec) => {
                     for hook in hooks_vec {

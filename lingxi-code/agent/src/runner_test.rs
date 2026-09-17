@@ -3961,7 +3961,7 @@ async fn exec_with_start_context(context: &str) -> Arc<hooks::HookExecutorImpl> 
         executor: HookExecutor::Builtin {
             handler_id: "additional-context-start".into(),
         },
-        source: HookSource::User,
+        source: HookSource::Settings(protocol::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -3999,7 +3999,7 @@ async fn exec_with_two_start_contexts(c0: &str, c1: &str) -> Arc<hooks::HookExec
             executor: HookExecutor::Builtin {
                 handler_id: (*handler_id).into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             // Distinct DESCENDING priorities pin the firing order so the
@@ -4139,7 +4139,7 @@ fn frontmatter_stop_hook(handler_id: &str) -> hooks::definition::HookDefinition 
         executor: HookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::User,
+        source: HookSource::Settings(protocol::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -4290,7 +4290,7 @@ async fn runner_fires_subagent_start_and_frontmatter_stop_exactly_once_each() {
         executor: HookExecutor::Builtin {
             handler_id: "r7-start-stop-counter".into(),
         },
-        source: HookSource::User,
+        source: HookSource::Settings(protocol::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,
@@ -4467,7 +4467,7 @@ async fn exec_with_counting_start_context(
         executor: HookExecutor::Builtin {
             handler_id: "g008-counting-start-hook".into(),
         },
-        source: HookSource::User,
+        source: HookSource::Settings(protocol::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,

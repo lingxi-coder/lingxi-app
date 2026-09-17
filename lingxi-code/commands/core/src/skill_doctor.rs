@@ -177,18 +177,18 @@ pub fn record_skill_usage(lingxi_home: &Path, name: &str) -> Result<(), String> 
 fn is_countable_source(source: CommandSource) -> bool {
     matches!(
         source,
-        CommandSource::User | CommandSource::Project | CommandSource::Local
+        CommandSource::Settings(protocol::SettingsScope::User) | CommandSource::Settings(protocol::SettingsScope::Project) | CommandSource::Settings(protocol::SettingsScope::Local)
     )
 }
 
 fn source_label(source: CommandSource) -> &'static str {
     match source {
         CommandSource::Builtin => "builtin",
-        CommandSource::User => "user",
-        CommandSource::Project => "project",
-        CommandSource::Local => "local",
+        CommandSource::Settings(protocol::SettingsScope::User) => "user",
+        CommandSource::Settings(protocol::SettingsScope::Project) => "project",
+        CommandSource::Settings(protocol::SettingsScope::Local) => "local",
         CommandSource::Plugin => "plugin",
-        CommandSource::Managed => "managed",
+        CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
         CommandSource::Mcp => "mcp",
         CommandSource::Bundled => "bundled",
     }
@@ -345,7 +345,7 @@ async fn load_registry_entries(
             SlashCommandKind::Markdown { .. }
                 if matches!(
                     command.source,
-                    CommandSource::User | CommandSource::Project | CommandSource::Local
+                    CommandSource::Settings(protocol::SettingsScope::User) | CommandSource::Settings(protocol::SettingsScope::Project) | CommandSource::Settings(protocol::SettingsScope::Local)
                 ) =>
             {
                 (
@@ -813,7 +813,7 @@ mod tests {
         SlashCommand {
             name: name.to_string(),
             description: format!("Run {name}"),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Mcp {
                 connection_id: McpConnectionId::new(),
                 prompt_name: name.split_once(':').unwrap().1.to_string(),

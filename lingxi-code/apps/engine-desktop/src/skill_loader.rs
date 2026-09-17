@@ -207,7 +207,7 @@ mod tests {
         SlashCommand {
             name: name.to_string(),
             description: format!("{name} description"),
-            source: CommandSource::Project,
+            source: CommandSource::Settings(protocol::SettingsScope::Project),
             kind: SlashCommandKind::Markdown {
                 file_path: PathBuf::from(format!("/x/{name}.md")),
                 frontmatter: CommandFrontmatter {

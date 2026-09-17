@@ -95,7 +95,7 @@ async fn pretooluse_block_short_circuits() {
         executor: HookExecutor::Builtin {
             handler_id: "blocking-test".into(),
         },
-        source: HookSource::User,
+        source: HookSource::Settings(protocol::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 100,

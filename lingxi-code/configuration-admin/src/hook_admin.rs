@@ -155,9 +155,9 @@ fn settings_destination(scope: &str) -> Result<SettingsDestinationDto, String> {
 
 fn hook_source(scope: &str) -> Result<HookSource, String> {
     match scope {
-        "user" => Ok(HookSource::User),
-        "project" => Ok(HookSource::Project),
-        "local" => Ok(HookSource::Local),
+        "user" => Ok(HookSource::Settings(protocol::SettingsScope::User)),
+        "project" => Ok(HookSource::Settings(protocol::SettingsScope::Project)),
+        "local" => Ok(HookSource::Settings(protocol::SettingsScope::Local)),
         _ => Err(format!("unknown hook scope `{scope}`")),
     }
 }
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn null_document_builds_an_empty_runtime_candidate() {
         let candidate = runtime_candidate(r#"{"scope":"local","hooks":null}"#).expect("candidate");
-        assert_eq!(candidate.source, HookSource::Local);
+        assert_eq!(candidate.source, HookSource::Settings(protocol::SettingsScope::Local));
         assert!(candidate.hooks.is_empty());
     }
 }

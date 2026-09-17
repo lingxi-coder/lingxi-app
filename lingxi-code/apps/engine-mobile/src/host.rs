@@ -4075,11 +4075,11 @@ async fn build_mobile_inner_with_ask(
     // read last so it wins precedence on differing paths, matching desktop).
     let mut settings_sources: Vec<(std::path::PathBuf, hooks::definition::HookSource)> = Vec::new();
     if user_settings_path != project_settings_path {
-        settings_sources.push((user_settings_path, hooks::definition::HookSource::User));
+        settings_sources.push((user_settings_path, hooks::definition::HookSource::Settings(protocol::SettingsScope::User)));
     }
     settings_sources.push((
         project_settings_path,
-        hooks::definition::HookSource::Project,
+        hooks::definition::HookSource::Settings(protocol::SettingsScope::Project),
     ));
     // (H-BIN-12) Accumulate the CC 2.1.207 HTTP-hook security allowlists across
     // the SAME settings tiers, concat-deduped (CC merges these arrays across
@@ -11965,11 +11965,11 @@ impl MobileEngineHandle {
 fn command_source_string(source: command_api::model::CommandSource) -> &'static str {
     match source {
         command_api::model::CommandSource::Builtin => "builtin",
-        command_api::model::CommandSource::User => "user",
-        command_api::model::CommandSource::Project => "project",
-        command_api::model::CommandSource::Local => "local",
+        command_api::model::CommandSource::Settings(protocol::SettingsScope::User) => "user",
+        command_api::model::CommandSource::Settings(protocol::SettingsScope::Project) => "project",
+        command_api::model::CommandSource::Settings(protocol::SettingsScope::Local) => "local",
         command_api::model::CommandSource::Plugin => "plugin",
-        command_api::model::CommandSource::Managed => "managed",
+        command_api::model::CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
         command_api::model::CommandSource::Mcp => "mcp",
         command_api::model::CommandSource::Bundled => "bundled",
     }

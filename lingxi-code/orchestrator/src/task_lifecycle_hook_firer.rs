@@ -272,7 +272,7 @@ mod tests {
                 model: None,
                 continue_on_block: false,
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,

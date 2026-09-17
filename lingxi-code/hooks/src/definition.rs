@@ -340,14 +340,9 @@ pub struct HookCondition {
 /// the user and by policy code to decide whether a hook can run at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HookSource {
-    /// `~/.lingxi/hooks.json` (global, user-owned).
-    User,
-    /// `<project>/.lingxi/hooks.json` (committed project config).
-    Project,
-    /// `<project>/.lingxi/hooks.local.json` (developer-local override).
-    Local,
-    /// Managed policy hook (org-level, supplied via managed settings).
-    Managed,
+    /// A settings tier's `hooks.json` — `~/.lingxi/`, the committed project
+    /// file, the developer-local override, or managed policy.
+    Settings(protocol::SettingsScope),
     /// Hook supplied by an installed plugin.
     Plugin,
     /// Hook embedded in an agent file's front-matter.
@@ -367,7 +362,7 @@ impl HookSource {
     #[must_use]
     pub const fn deferred_label(self) -> &'static str {
         match self {
-            Self::User | Self::Project | Self::Local | Self::Managed => "settings",
+            Self::Settings(_) => "settings",
             Self::Plugin => "plugin",
             Self::FrontMatter => "agent",
             Self::Session => "session",
@@ -381,20 +376,23 @@ mod tests {
     use super::HookSource;
 
     /// Pins the family label every source projects to. The four settings tiers
-    /// deliberately collapse to a single `"settings"` family: on this wire the
-    /// ORIGIN is observable and the settings rung is not — so a change that
-    /// starts spelling `User`/`Project`/`Local`/`Managed` apart here would emit
-    /// three labels claude-code never sends.
+    /// collapse to a single `"settings"` family: on this wire the producer is
+    /// observable and the settings rung is not.
     ///
-    /// A newly added variant is caught by [`HookSource::deferred_label`]'s own
-    /// exhaustive `match`, which stops compiling until it is handled.
+    /// That collapse is now structural — the rung lives inside
+    /// `Settings(_)`, so there is no longer a way to spell the four tiers apart
+    /// here by accident. The four rows below therefore guard less than they did
+    /// when each tier was its own variant; what they still pin is that a
+    /// settings-backed hook reports `"settings"` and not one of the producer
+    /// labels. A newly added producer is caught by
+    /// [`HookSource::deferred_label`]'s exhaustive `match`.
     #[test]
     fn deferred_label_folds_the_settings_tiers_and_keeps_each_origin_distinct() {
         for (source, expected) in [
-            (HookSource::User, "settings"),
-            (HookSource::Project, "settings"),
-            (HookSource::Local, "settings"),
-            (HookSource::Managed, "settings"),
+            (HookSource::Settings(protocol::SettingsScope::User), "settings"),
+            (HookSource::Settings(protocol::SettingsScope::Project), "settings"),
+            (HookSource::Settings(protocol::SettingsScope::Local), "settings"),
+            (HookSource::Settings(protocol::SettingsScope::Managed), "settings"),
             (HookSource::Plugin, "plugin"),
             (HookSource::FrontMatter, "agent"),
             (HookSource::Session, "session"),

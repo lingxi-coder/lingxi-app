@@ -1532,7 +1532,7 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
     reg.register_command(SlashCommand {
         name: "deploy".to_string(),
         description: "ship it".to_string(),
-        source: CommandSource::Project,
+        source: CommandSource::Settings(protocol::SettingsScope::Project),
         kind: SlashCommandKind::Markdown {
             file_path: std::path::PathBuf::from("/tmp/deploy.md"),
             frontmatter: CommandFrontmatter {
@@ -1659,7 +1659,7 @@ impl SlashCommandDispatcher for MutatingDispatcher {
             self.registry.write().await.register_command(SlashCommand {
                 name: "newcmd".to_string(),
                 description: "added during dispatch".to_string(),
-                source: CommandSource::User,
+                source: CommandSource::Settings(protocol::SettingsScope::User),
                 kind: SlashCommandKind::Markdown {
                     file_path: std::path::PathBuf::from("/tmp/newcmd.md"),
                     frontmatter: CommandFrontmatter {

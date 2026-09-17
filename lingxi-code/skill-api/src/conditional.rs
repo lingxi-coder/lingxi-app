@@ -205,7 +205,7 @@ mod tests {
                 ..SkillFrontmatter::default()
             },
             content: String::new(),
-            source: SkillSource::User,
+            source: SkillSource::Settings(protocol::SettingsScope::User),
             loaded_from: LoadedFrom::Skills,
             plugin_id: None,
             file_path: PathBuf::from("/work/repo/.lingxi/skills/x/SKILL.md"),

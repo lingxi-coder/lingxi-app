@@ -4208,11 +4208,11 @@ fn provider_id_is_valid(value: &str) -> bool {
 fn command_source_string(source: CommandSource) -> &'static str {
     match source {
         CommandSource::Builtin => "builtin",
-        CommandSource::User => "user",
-        CommandSource::Project => "project",
-        CommandSource::Local => "local",
+        CommandSource::Settings(protocol::SettingsScope::User) => "user",
+        CommandSource::Settings(protocol::SettingsScope::Project) => "project",
+        CommandSource::Settings(protocol::SettingsScope::Local) => "local",
         CommandSource::Plugin => "plugin",
-        CommandSource::Managed => "managed",
+        CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
         CommandSource::Mcp => "mcp",
         CommandSource::Bundled => "bundled",
     }

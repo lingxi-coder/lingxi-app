@@ -2224,11 +2224,12 @@ fn apply_mcp_disabled(
 /// fallback (`source as string`, the bare enum name).
 fn hook_source_description(source: hooks::HookSource) -> String {
     use hooks::HookSource as S;
+    use protocol::SettingsScope as T;
     match source {
-        S::User => "User settings (~/.lingxi/settings.json)",
-        S::Project => "Project settings (.lingxi/settings.json)",
-        S::Local => "Local settings (.lingxi/settings.local.json)",
-        S::Managed => "Managed settings (enterprise policy)",
+        S::Settings(T::User) => "User settings (~/.lingxi/settings.json)",
+        S::Settings(T::Project) => "Project settings (.lingxi/settings.json)",
+        S::Settings(T::Local) => "Local settings (.lingxi/settings.local.json)",
+        S::Settings(T::Managed) => "Managed settings (enterprise policy)",
         S::Plugin => "Plugin hooks (~/.lingxi/plugins/*/hooks/hooks.json)",
         S::FrontMatter => "Agent front matter",
         S::Session => "Session hooks (in-memory, temporary)",
@@ -3088,7 +3089,7 @@ mod tests {
                     cwd: None,
                     shell: None,
                 },
-                source: hooks::HookSource::User,
+                source: hooks::HookSource::Settings(protocol::SettingsScope::User),
                 blocking: true,
                 timeout: None,
                 priority: 0,

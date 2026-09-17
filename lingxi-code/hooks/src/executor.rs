@@ -4342,7 +4342,7 @@ mod attachment_wiring_tests {
                 cwd: None,
                 shell: None,
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: Some(Duration::from_secs(90)),
             priority: 0,

@@ -48,7 +48,7 @@ mod session_end_timeout_tests {
             executor: HookExecutor::Builtin {
                 handler_id: "noop".into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout,
             priority: 0,
@@ -222,7 +222,7 @@ mod session_end_batch_deadline_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: handler_id.into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -524,7 +524,7 @@ mod command_arm_tests {
                 cwd: None,
                 shell: None,
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -2750,7 +2750,7 @@ mod async_path_tests {
                 cwd: None,
                 shell: None,
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking,
             timeout: None,
             priority,
@@ -3911,7 +3911,7 @@ mod once_and_status_message_tests {
         let mut sess = builtin_hook("session-stop", false, None);
         sess.events = vec![HookEventType::SubagentStop];
         sess.name = "session-stop".into();
-        sess.source = HookSource::User;
+        sess.source = HookSource::Settings(protocol::SettingsScope::User);
         registry.register(sess);
 
         let reg = Arc::new(RwLock::new(registry));
@@ -3981,7 +3981,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "rewrite".into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4043,7 +4043,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "ctx".into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4120,7 +4120,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "rewrite_all".into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4178,7 +4178,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "term".into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4216,7 +4216,7 @@ mod once_and_status_message_tests {
             executor: DefHookExecutor::Builtin {
                 handler_id: "observe".into(),
             },
-            source: HookSource::User,
+            source: HookSource::Settings(protocol::SettingsScope::User),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4411,7 +4411,7 @@ mod http_agent_dispatch_tests {
                 allowed_env_vars: Vec::new(),
                 timeout: Duration::from_secs(5),
             },
-            source: HookSource::Project,
+            source: HookSource::Settings(protocol::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4543,7 +4543,7 @@ mod http_agent_dispatch_tests {
                 prompt: "vet this".into(),
                 model: None,
             },
-            source: HookSource::Project,
+            source: HookSource::Settings(protocol::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4726,7 +4726,7 @@ mod prompt_dispatch_tests {
                 model: Some("claude-sonnet-4-6".into()),
                 continue_on_block: false,
             },
-            source: HookSource::Project,
+            source: HookSource::Settings(protocol::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -4875,7 +4875,7 @@ mod prompt_dispatch_tests {
                 source: source.into(),
                 budget_ms: Some(500),
             },
-            source: HookSource::Project,
+            source: HookSource::Settings(protocol::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -5048,7 +5048,7 @@ mod prompt_dispatch_tests {
                 tool: "format_file".into(),
                 input: std::collections::HashMap::new(),
             },
-            source: HookSource::Project,
+            source: HookSource::Settings(protocol::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,
@@ -5098,7 +5098,7 @@ mod prompt_dispatch_tests {
                     ("event".into(), json!("hook:${hook_event_name}")),
                 ]),
             },
-            source: HookSource::Project,
+            source: HookSource::Settings(protocol::SettingsScope::Project),
             blocking: true,
             timeout: Some(Duration::from_secs(12)),
             priority: 0,
@@ -5155,7 +5155,7 @@ mod prompt_dispatch_tests {
                 tool: "lint".into(),
                 input: std::collections::HashMap::new(),
             },
-            source: HookSource::Project,
+            source: HookSource::Settings(protocol::SettingsScope::Project),
             blocking: true,
             timeout: None,
             priority: 0,

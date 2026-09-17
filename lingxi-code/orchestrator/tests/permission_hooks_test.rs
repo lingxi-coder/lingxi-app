@@ -391,7 +391,7 @@ fn builtin_hook(name: &str, handler_id: &str, event_type: HookEventType) -> Hook
         executor: DefHookExecutor::Builtin {
             handler_id: handler_id.into(),
         },
-        source: HookSource::User,
+        source: HookSource::Settings(protocol::SettingsScope::User),
         blocking: true,
         timeout: None,
         priority: 0,

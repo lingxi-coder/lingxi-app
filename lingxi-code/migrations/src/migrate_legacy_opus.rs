@@ -5,7 +5,7 @@
 
 use crate::context::{env_var_truthy, MigrationEnv};
 use crate::global_config;
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, WritableScope};
 use serde_json::{json, Value};
 use telemetry::sink::AnalyticsValue;
 
@@ -28,7 +28,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
     }
 
     let sp = settings_path(
-        SettingsScope::User,
+        WritableScope::User,
         &env.lingxi_config_home,
         &env.project_dir,
     );
@@ -72,7 +72,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
 mod tests {
     use super::*;
     use crate::settings_update::{
-        force_rename_failure_for_test, read_settings_map, settings_path, SettingsScope,
+        force_rename_failure_for_test, read_settings_map, settings_path, WritableScope,
     };
     use crate::test_support::{env_lock, temp_config};
     use serde_json::json;
@@ -105,7 +105,7 @@ mod tests {
             "claude-opus-4-1",
         ] {
             let t = temp_config();
-            let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+            let sp = settings_path(WritableScope::User, &t.home, &t.project);
             std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
             std::fs::write(&sp, format!(r#"{{"model": "{legacy}"}}"#)).unwrap();
             run(&test_env(&t)).await;
@@ -125,7 +125,7 @@ mod tests {
         let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "claude-opus-4-1"}"#).unwrap();
         let _failure = force_rename_failure_for_test(&sp);
@@ -150,7 +150,7 @@ mod tests {
         let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "claude-opus-4-1-20250805"}"#).unwrap();
         let (bus, events) = crate::test_support::capture_bus().await;
@@ -170,7 +170,7 @@ mod tests {
         let _g = env_lock();
         std::env::remove_var("LINGXI_DISABLE_LEGACY_MODEL_REMAP");
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "claude-opus-4-0"}"#).unwrap();
 

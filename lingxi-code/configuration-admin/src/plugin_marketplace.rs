@@ -33,7 +33,7 @@ use serde_json::{Map, Value};
 use crate::plugin_policy;
 use crate::plugin_policy::MarketplaceSourceIdentity;
 use crate::plugin_settings::{parse_scope_str, scope_label, scope_path, SCOPES};
-use protocol::SettingsScope;
+use protocol::WritableScope;
 
 /// The resolved-marketplaces registry file under the plugins root.
 fn registry_path(plugins_dir: &Path) -> PathBuf {
@@ -180,7 +180,7 @@ fn write_registry(plugins_dir: &Path, map: &Map<String, Value>) -> Result<(), St
 }
 
 /// The `extraKnownMarketplaces` declaration map from a scope's settings file.
-fn read_extra(scope: SettingsScope, home: &Path, cwd: &Path) -> Map<String, Value> {
+fn read_extra(scope: WritableScope, home: &Path, cwd: &Path) -> Map<String, Value> {
     read_settings_map(&scope_path(scope, home, cwd))
         .ok()
         .and_then(|m| {
@@ -198,7 +198,7 @@ fn read_extra(scope: SettingsScope, home: &Path, cwd: &Path) -> Map<String, Valu
 
 /// Read-modify-write a scope's `extraKnownMarketplaces` map.
 fn write_extra(
-    scope: SettingsScope,
+    scope: WritableScope,
     home: &Path,
     cwd: &Path,
     map: Map<String, Value>,
@@ -219,7 +219,7 @@ fn market_invalid_scope(s: &str) -> String {
 }
 
 /// Does any editable scope declare `name` in `extraKnownMarketplaces`?
-fn declaring_scopes(name: &str, home: &Path, cwd: &Path) -> Vec<SettingsScope> {
+fn declaring_scopes(name: &str, home: &Path, cwd: &Path) -> Vec<WritableScope> {
     SCOPES
         .into_iter()
         .filter(|s| read_extra(*s, home, cwd).contains_key(name))
@@ -671,7 +671,7 @@ pub fn run_add(
     // caller must see the scope error.
     let target = match scope {
         Some(s) => parse_scope_str(s).ok_or_else(|| market_invalid_scope(s))?,
-        None => SettingsScope::User,
+        None => WritableScope::User,
     };
     if !sparse.is_empty() && !matches!(classified, Source::Github { .. } | Source::Git { .. }) {
         return Err(format!(
@@ -690,7 +690,7 @@ pub fn run_add(
 /// then write the scope declaration + registry entry.
 fn add_directory(
     abs: &Path,
-    target: SettingsScope,
+    target: WritableScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -759,7 +759,7 @@ fn add_directory(
 fn add_remote(
     remote: &Source,
     sparse: &[String],
-    target: SettingsScope,
+    target: WritableScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -1125,7 +1125,7 @@ fn publish_and_write_marketplace(
     name: &str,
     source_value: &Value,
     staged: &Path,
-    target: SettingsScope,
+    target: WritableScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -1181,7 +1181,7 @@ fn write_marketplace(
     name: &str,
     source_value: &Value,
     install_location: &str,
-    target: SettingsScope,
+    target: WritableScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -1203,7 +1203,7 @@ fn write_marketplace_unlocked(
     name: &str,
     source_value: &Value,
     install_location: &str,
-    target: SettingsScope,
+    target: WritableScope,
     plugins_dir: &Path,
     home: &Path,
     cwd: &Path,
@@ -1320,7 +1320,7 @@ pub fn run_remove(
     };
     let _lock = lock_marketplace_state(plugins_dir)?;
     let declaring = declaring_scopes(name, home, cwd);
-    let targets: Vec<SettingsScope> = match requested {
+    let targets: Vec<WritableScope> = match requested {
         Some(s) => {
             if declaring.contains(&s) {
                 vec![s]
@@ -1741,7 +1741,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let extra = read_extra(SettingsScope::User, &e.home, &e.cwd);
+        let extra = read_extra(WritableScope::User, &e.home, &e.cwd);
         assert_eq!(
             extra.get("alias"),
             Some(&json!({ "source": { "source": "directory", "path": "/tmp/alias" } }))
@@ -1763,7 +1763,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let extra = read_extra(SettingsScope::User, &e.home, &e.cwd);
+        let extra = read_extra(WritableScope::User, &e.home, &e.cwd);
         assert!(extra.get("canonical").is_some());
         assert!(extra.get("alias").is_none());
     }

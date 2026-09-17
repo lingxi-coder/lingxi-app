@@ -19,28 +19,12 @@ pub use loader::{LoadedFile, LoaderError};
 ///
 /// 1:1 with claude-code `MemoryType` (`utils/memory/types.ts`) restricted to
 /// the four instruction tiers this port loads — the separate memdir tiers
-/// (`AutoMem` / `TeamMem`) are out of scope. The tier drives two things:
+/// (`AutoMem` / `TeamMem`) are out of scope, and are spelled
+/// [`protocol::MemoryEntryTier`].
 ///
-/// - **splice / discovery order** (`getMemoryFiles`, claudemd.ts:803-934):
-///   Managed first, then User, then Project, then Local.
-/// - **the injection description** (`getLingxiMds`, claudemd.ts:1168-1186):
-///   Managed and User share the "private global instructions" wording; Project
-///   and Local each have their own.
-///
-/// DISTINCT from [`protocol::MemoryEntryTier`], which models the separate
-/// memdir subsystem (Project/User/Session/Team). Do NOT overload one for the
-/// other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LingxiMdTier {
-    /// Enterprise / managed policy memory (`<managed>/LINGXI.md` +
-    /// `<managed>/.lingxi/rules/**`). Always loaded, never settings-gated,
-    /// never excludable; lowest priority (spliced first).
-    Managed,
-    /// User-global memory (`~/.lingxi/LINGXI.md` + `~/.lingxi/rules/**`).
-    User,
-    /// Project memory checked into the codebase (`LINGXI.md`,
-    /// `.lingxi/LINGXI.md`, `.lingxi/rules/**`).
-    Project,
-    /// Private project-local override (`LINGXI.local.md`), not checked in.
-    Local,
-}
+/// The splice / discovery order the tiers drive is NOT a property of this type
+/// — see [`hierarchy::walk`], which encodes it. The injection description
+/// (`getLingxiMds`, claudemd.ts:1168-1186) is likewise a function, in
+/// [`loader`]: Managed and User share the "private global instructions"
+/// wording; Project and Local each have their own.
+pub use protocol::SettingsScope as LingxiMdTier;

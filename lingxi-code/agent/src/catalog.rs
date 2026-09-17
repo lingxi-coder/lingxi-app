@@ -727,7 +727,7 @@ fn parse_background(value: Option<&serde_yaml::Value>, path: &Path) -> bool {
 }
 
 /// claude memory coercion: validate against VALID_MEMORY_SCOPES; invalid -> log.
-fn parse_memory(value: Option<&serde_yaml::Value>, path: &Path) -> Option<protocol::SettingsScope> {
+fn parse_memory(value: Option<&serde_yaml::Value>, path: &Path) -> Option<protocol::WritableScope> {
     let Some(raw) = value.and_then(yaml_as_string) else {
         // A non-string (or absent) value: claude reads `as string | undefined`,
         // so a non-string is treated as defined-but-invalid only when it is a
@@ -736,9 +736,9 @@ fn parse_memory(value: Option<&serde_yaml::Value>, path: &Path) -> Option<protoc
         return None;
     };
     match raw.as_str() {
-        "user" => Some(protocol::SettingsScope::User),
-        "project" => Some(protocol::SettingsScope::Project),
-        "local" => Some(protocol::SettingsScope::Local),
+        "user" => Some(protocol::WritableScope::User),
+        "project" => Some(protocol::WritableScope::Project),
+        "local" => Some(protocol::WritableScope::Local),
         _ => {
             tracing::debug!(
                 path = %path.display(),
@@ -1109,9 +1109,9 @@ pub fn parse_agent_from_json(
     let memory = match obj.get("memory") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(s)) => match s.as_str() {
-            "user" => Some(protocol::SettingsScope::User),
-            "project" => Some(protocol::SettingsScope::Project),
-            "local" => Some(protocol::SettingsScope::Local),
+            "user" => Some(protocol::WritableScope::User),
+            "project" => Some(protocol::WritableScope::Project),
+            "local" => Some(protocol::WritableScope::Local),
             _ => {
                 tracing::debug!("Error parsing agent '{name}' from JSON: invalid memory");
                 return None;
@@ -2772,7 +2772,7 @@ mod tests {
     fn memory_valid_and_invalid() {
         assert_eq!(
             md("---\nname: a\ndescription: d\nmemory: project\n---\n").memory,
-            Some(protocol::SettingsScope::Project)
+            Some(protocol::WritableScope::Project)
         );
         assert_eq!(
             md("---\nname: a\ndescription: d\nmemory: bogus\n---\n").memory,
@@ -2970,7 +2970,7 @@ mod tests {
         assert_eq!(def.max_turns, 5);
         assert_eq!(def.skills, vec!["alpha"]);
         assert_eq!(def.initial_prompt.as_deref(), Some("  start"));
-        assert_eq!(def.memory, Some(protocol::SettingsScope::Project));
+        assert_eq!(def.memory, Some(protocol::WritableScope::Project));
         assert!(def.background);
         assert_eq!(def.isolation, Some(AgentIsolation::Worktree));
         assert_eq!(def.source, AgentSource::Flag);
@@ -3164,7 +3164,7 @@ mod tests {
         assert_eq!(def.effort, Some(AgentEffort::Numeric(7)));
         assert_eq!(def.max_turns, 3);
         assert!(!def.background);
-        assert_eq!(def.memory, Some(protocol::SettingsScope::User));
+        assert_eq!(def.memory, Some(protocol::WritableScope::User));
         assert_eq!(def.mcp_servers.len(), 2);
         assert!(matches!(&def.mcp_servers[0], AgentMcpServerSpec::ByName(n) if n == "slack"));
         assert!(matches!(&def.mcp_servers[1], AgentMcpServerSpec::ByName(n) if n == "github"));

@@ -44,7 +44,7 @@ use serde_json::{Map, Value};
 use telemetry::AnalyticsBus;
 
 use crate::plugin_settings::{parse_scope_str, scope_label, scope_path};
-use protocol::SettingsScope;
+use protocol::WritableScope;
 
 /// `<plugins>/installed_plugins.json` path.
 #[cfg(test)]
@@ -60,7 +60,7 @@ fn load_installed(plugins_dir: &Path) -> Value {
 
 /// Parse the prune `--scope` (default `user`); invalid-scope wording matches the
 /// install family (`Invalid scope: <s>. Must be one of: user, project, local.`).
-fn parse_scope(scope: &str) -> Result<SettingsScope, String> {
+fn parse_scope(scope: &str) -> Result<WritableScope, String> {
     parse_scope_str(scope)
         .ok_or_else(|| format!("Invalid scope: {scope}. Must be one of: user, project, local."))
 }
@@ -68,10 +68,10 @@ fn parse_scope(scope: &str) -> Result<SettingsScope, String> {
 /// The scope's `projectPath` selector: `Some(cwd)` for project/local,
 /// `None` for user (mirrors the oracle's `Svt`, which returns the originalCwd
 /// for project/local and `undefined` for user).
-fn scope_project_path(scope: SettingsScope, cwd: &Path) -> Option<String> {
+fn scope_project_path(scope: WritableScope, cwd: &Path) -> Option<String> {
     match scope {
-        SettingsScope::User => None,
-        SettingsScope::Project | SettingsScope::Local => Some(cwd.display().to_string()),
+        WritableScope::User => None,
+        WritableScope::Project | WritableScope::Local => Some(cwd.display().to_string()),
     }
 }
 
@@ -114,7 +114,7 @@ fn resolve_dep(dep: &str, source_id: &str) -> String {
 /// projectPath (mirrors `find(u => u.scope===scope && u.projectPath===pp)`).
 fn scoped_record<'a>(
     records: &'a [Value],
-    scope: SettingsScope,
+    scope: WritableScope,
     project_path: &Option<String>,
 ) -> Option<&'a Value> {
     records.iter().find(|r| {
@@ -172,7 +172,7 @@ fn load_dependencies(install_path: &str) -> Option<Vec<String>> {
 
 /// Compute the orphan set at `scope` (mirrors `Ria`): auto-installed plugins
 /// unreachable from any manual plugin via the `dependencies` graph.
-fn scan(db: &Value, scope: SettingsScope, project_path: &Option<String>) -> Scan {
+fn scan(db: &Value, scope: WritableScope, project_path: &Option<String>) -> Scan {
     let plugins = plugins_obj(db);
 
     // Partition the scope's records into manual (`o`) and auto (`s`), in DB order.
@@ -269,7 +269,7 @@ fn dfs(id: &str, loaded: &HashMap<String, Vec<String>>, reachable: &mut HashSet<
 /// dependency graph is unresolvable — mirrors the silent-skip the oracle's
 /// `plugin uninstall` post-removal orphan check takes rather than surfacing a
 /// scary "cannot determine orphans" error after a successful uninstall.
-pub fn scan_orphans(db: &Value, scope: SettingsScope, project_path: &Option<String>) -> Vec<String> {
+pub fn scan_orphans(db: &Value, scope: WritableScope, project_path: &Option<String>) -> Vec<String> {
     let result = scan(db, scope, project_path);
     if result.unloadable.is_empty() {
         result.orphans
@@ -325,7 +325,7 @@ fn read_enabled(path: &Path) -> Map<String, Value> {
 fn collect_scoped_orphan_records(
     db: &Value,
     orphans: &[String],
-    scope: SettingsScope,
+    scope: WritableScope,
     project_path: &Option<String>,
 ) -> Vec<(String, Value)> {
     let mut removed = Vec::new();
@@ -346,7 +346,7 @@ fn collect_scoped_orphan_records(
 fn drop_orphan_records(
     db: &mut Value,
     orphans: &[String],
-    scope: SettingsScope,
+    scope: WritableScope,
     project_path: &Option<String>,
 ) {
     for id in orphans {
@@ -543,7 +543,7 @@ async fn run_prune_inner_with_bus(
 
     if !yes {
         if !is_tty {
-            let scope_flag = if scope == SettingsScope::User {
+            let scope_flag = if scope == WritableScope::User {
                 String::new()
             } else {
                 format!(" --scope {label}")
@@ -1130,7 +1130,7 @@ mod tests {
             ],
         );
         let db = load_installed(&e.plugins);
-        let orphans = scan_orphans(&db, SettingsScope::User, &None);
+        let orphans = scan_orphans(&db, WritableScope::User, &None);
         assert_eq!(orphans, vec!["dep@mkt".to_string()]);
     }
 
@@ -1149,6 +1149,6 @@ mod tests {
             ],
         );
         let db = load_installed(&e.plugins);
-        assert_eq!(scan_orphans(&db, SettingsScope::User, &None), Vec::<String>::new());
+        assert_eq!(scan_orphans(&db, WritableScope::User, &None), Vec::<String>::new());
     }
 }

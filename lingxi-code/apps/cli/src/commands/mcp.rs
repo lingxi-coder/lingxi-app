@@ -44,14 +44,14 @@ pub struct Cli {
     pub command: Option<Sub>,
 }
 
-pub use protocol::SettingsScope;
+pub use protocol::WritableScope;
 
-/// The `--scope` flag's own type, kept distinct from [`SettingsScope`] purely
+/// The `--scope` flag's own type, kept distinct from [`WritableScope`] purely
 /// so clap keeps generating its `[possible values: local, user, project]` help
 /// and its own invalid-value error.
 ///
 /// argv is a wire like any other, and this is its adapter — it carries no
-/// semantics of its own and converts to [`SettingsScope`] the moment it is
+/// semantics of its own and converts to [`WritableScope`] the moment it is
 /// read. (Where claude's *exact* message matters instead of clap's, the arg is
 /// a raw `String` parsed by [`parse_add_scope`]; see `AddArgs::scope`.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -64,7 +64,7 @@ pub enum ScopeArg {
     Project,
 }
 
-impl From<ScopeArg> for SettingsScope {
+impl From<ScopeArg> for WritableScope {
     fn from(value: ScopeArg) -> Self {
         match value {
             ScopeArg::Local => Self::Local,
@@ -77,31 +77,31 @@ impl From<ScopeArg> for SettingsScope {
 /// Lowercase scope label used in claude's success strings
 /// (`… to local config`). Project scope is `project` here (the `add`
 /// success line is `… to project config`).
-fn scope_label(scope: SettingsScope) -> &'static str {
+fn scope_label(scope: WritableScope) -> &'static str {
     match scope {
-        SettingsScope::Local => "local",
-        SettingsScope::User => "user",
-        SettingsScope::Project => "project",
+        WritableScope::Local => "local",
+        WritableScope::User => "user",
+        WritableScope::Project => "project",
     }
 }
 
 /// Suffix for claude's `MCP server X already exists in <suffix>` error
 /// (config.ts): local/user → `<scope> config`, project → `.mcp.json`.
-fn scope_exists_suffix(scope: SettingsScope) -> &'static str {
+fn scope_exists_suffix(scope: WritableScope) -> &'static str {
     match scope {
-        SettingsScope::Local => "local config",
-        SettingsScope::User => "user config",
-        SettingsScope::Project => ".mcp.json",
+        WritableScope::Local => "local config",
+        WritableScope::User => "user config",
+        WritableScope::Project => ".mcp.json",
     }
 }
 
 /// Suffix for claude's `No MCP server named "X" <suffix>` not-found-in-scope
 /// error: local/user → `in <scope> scope`, project → `in .mcp.json`.
-fn scope_not_found_suffix(scope: SettingsScope) -> &'static str {
+fn scope_not_found_suffix(scope: WritableScope) -> &'static str {
     match scope {
-        SettingsScope::Local => "in local scope",
-        SettingsScope::User => "in user scope",
-        SettingsScope::Project => "in .mcp.json",
+        WritableScope::Local => "in local scope",
+        WritableScope::User => "in user scope",
+        WritableScope::Project => "in .mcp.json",
     }
 }
 
@@ -425,7 +425,7 @@ fn mcp_add_command_metadata(a: &AddArgs, transport: Transport) -> LogEventMetada
     metadata
 }
 
-fn mcp_add_json_metadata(scope: SettingsScope, server_type: &str) -> LogEventMetadata {
+fn mcp_add_json_metadata(scope: WritableScope, server_type: &str) -> LogEventMetadata {
     let mut metadata = LogEventMetadata::new();
     metadata.insert("scope".into(), metadata_string(scope_label(scope)));
     metadata.insert("source".into(), metadata_string("json"));
@@ -433,7 +433,7 @@ fn mcp_add_json_metadata(scope: SettingsScope, server_type: &str) -> LogEventMet
     metadata
 }
 
-fn mcp_add_desktop_metadata(scope: SettingsScope) -> LogEventMetadata {
+fn mcp_add_desktop_metadata(scope: WritableScope) -> LogEventMetadata {
     let mut metadata = LogEventMetadata::new();
     metadata.insert("scope".into(), metadata_string(scope_label(scope)));
     metadata.insert("platform".into(), metadata_string(oracle_platform()));
@@ -441,7 +441,7 @@ fn mcp_add_desktop_metadata(scope: SettingsScope) -> LogEventMetadata {
     metadata
 }
 
-fn mcp_delete_metadata(name: &str, scope: SettingsScope) -> LogEventMetadata {
+fn mcp_delete_metadata(name: &str, scope: WritableScope) -> LogEventMetadata {
     let mut metadata = LogEventMetadata::new();
     metadata.insert("name".into(), metadata_string(name));
     metadata.insert("scope".into(), metadata_string(scope_label(scope)));
@@ -1157,7 +1157,7 @@ async fn run_add_from_claude_desktop(
     emit_mcp_cli_event(
         analytics_bus,
         telemetry::tengu::mcp::ADD,
-        mcp_add_desktop_metadata(SettingsScope::from(a.scope)),
+        mcp_add_desktop_metadata(WritableScope::from(a.scope)),
     )
     .await;
     let Some(path) = claude_desktop_config_path() else {
@@ -1199,14 +1199,14 @@ async fn run_add_from_claude_desktop(
             failures += 1;
             continue;
         };
-        match write_server(&cfg.name, &entry, SettingsScope::from(a.scope)) {
+        match write_server(&cfg.name, &entry, WritableScope::from(a.scope)) {
             Ok(WriteOutcome::Added(path)) => {
                 println!(
                     "Added MCP server {} to {} config.",
                     cfg.name,
-                    scope_label(SettingsScope::from(a.scope))
+                    scope_label(WritableScope::from(a.scope))
                 );
-                print_file_modified(SettingsScope::from(a.scope), &path);
+                print_file_modified(WritableScope::from(a.scope), &path);
                 existing.insert(cfg.name.clone());
                 added += 1;
             }
@@ -1214,7 +1214,7 @@ async fn run_add_from_claude_desktop(
                 eprintln!(
                     "MCP server {} already exists in {}.",
                     cfg.name,
-                    scope_exists_suffix(SettingsScope::from(a.scope))
+                    scope_exists_suffix(WritableScope::from(a.scope))
                 );
                 failures += 1;
             }
@@ -1510,10 +1510,10 @@ fn build_add_entry(a: &AddArgs, transport: Transport) -> Result<serde_json::Valu
 
 /// Validate `mcp add`'s `--scope` string the way claude does (in the action
 /// handler, not the parser): the writable scopes (local/user/project) map to a
-/// [`SettingsScope`]; the other recognized config scopes (dynamic/enterprise/claudeai/
+/// [`WritableScope`]; the other recognized config scopes (dynamic/enterprise/claudeai/
 /// managed/agent) are rejected with `Cannot add MCP server to scope: …`; an
 /// unrecognized value with `Invalid scope: …. Must be one of: …`.
-fn parse_add_scope(s: &str) -> Result<SettingsScope, String> {
+fn parse_add_scope(s: &str) -> Result<WritableScope, String> {
     const RECOGNIZED: [&str; 8] = [
         "local",
         "user",
@@ -1525,9 +1525,9 @@ fn parse_add_scope(s: &str) -> Result<SettingsScope, String> {
         "agent",
     ];
     match s {
-        "local" => Ok(SettingsScope::Local),
-        "user" => Ok(SettingsScope::User),
-        "project" => Ok(SettingsScope::Project),
+        "local" => Ok(WritableScope::Local),
+        "user" => Ok(WritableScope::User),
+        "project" => Ok(WritableScope::Project),
         other if RECOGNIZED.contains(&other) => {
             Err(format!("Cannot add MCP server to scope: {other}"))
         }
@@ -1784,7 +1784,7 @@ async fn run_add_json(
         ty = "http".to_string();
     }
 
-    match write_server(&a.name, &entry, SettingsScope::from(a.scope)) {
+    match write_server(&a.name, &entry, WritableScope::from(a.scope)) {
         Ok(WriteOutcome::Added(_path)) => {
             // JSON import emits only after validation and persistence succeed;
             // malformed/duplicate input follows the CLI failure path without
@@ -1792,14 +1792,14 @@ async fn run_add_json(
             emit_mcp_cli_event(
                 analytics_bus,
                 telemetry::tengu::mcp::ADD,
-                mcp_add_json_metadata(SettingsScope::from(a.scope), &ty),
+                mcp_add_json_metadata(WritableScope::from(a.scope), &ty),
             )
             .await;
             println!(
                 "Added {} MCP server {} to {} config",
                 ty,
                 a.name,
-                scope_label(SettingsScope::from(a.scope))
+                scope_label(WritableScope::from(a.scope))
             );
             SUCCESS
         }
@@ -1807,7 +1807,7 @@ async fn run_add_json(
             eprintln!(
                 "MCP server {} already exists in {}",
                 a.name,
-                scope_exists_suffix(SettingsScope::from(a.scope))
+                scope_exists_suffix(WritableScope::from(a.scope))
             );
             RUNTIME_ERROR
         }
@@ -1854,7 +1854,7 @@ fn validate_mcp_server_name(name: &str) -> Result<(), String> {
 fn write_server(
     name: &str,
     entry: &serde_json::Value,
-    scope: SettingsScope,
+    scope: WritableScope,
 ) -> Result<WriteOutcome, String> {
     // TS `addMcpServer` (`TPe`) runs these gates BEFORE any scope write, in this
     // order; both `mcp add` and `mcp add-json` route through here.
@@ -1882,9 +1882,9 @@ fn write_server(
         return Err(mcp::enterprise_policy::not_allowed_message(name));
     }
     match scope {
-        SettingsScope::User => write_user_server(name, entry),
-        SettingsScope::Local => write_local_server(name, entry),
-        SettingsScope::Project => write_project_server(name, entry),
+        WritableScope::User => write_user_server(name, entry),
+        WritableScope::Local => write_local_server(name, entry),
+        WritableScope::Project => write_project_server(name, entry),
     }
 }
 
@@ -1974,7 +1974,7 @@ fn write_project_server(name: &str, entry: &serde_json::Value) -> Result<WriteOu
 /// removes from whichever scope holds the server (local → project → user).
 async fn run_remove(a: &RemoveArgs, analytics_bus: Option<&Arc<telemetry::AnalyticsBus>>) -> i32 {
     // With an explicit `--scope`, operate on exactly that scope.
-    if let Some(scope) = a.scope.map(SettingsScope::from) {
+    if let Some(scope) = a.scope.map(WritableScope::from) {
         emit_mcp_cli_event(
             analytics_bus,
             telemetry::tengu::mcp::DELETE,
@@ -2071,17 +2071,17 @@ async fn run_remove(a: &RemoveArgs, analytics_bus: Option<&Arc<telemetry::Analyt
 
 /// Human scope label for the multi-scope disambiguation list (matches claude's
 /// `getScopeLabel`).
-fn scope_remove_label(scope: SettingsScope) -> &'static str {
+fn scope_remove_label(scope: WritableScope) -> &'static str {
     match scope {
-        SettingsScope::Local => "Local config (private to you in this project)",
-        SettingsScope::User => "User config (available in all your projects)",
-        SettingsScope::Project => "Project config (shared via .mcp.json)",
+        WritableScope::Local => "Local config (private to you in this project)",
+        WritableScope::User => "User config (available in all your projects)",
+        WritableScope::Project => "Project config (shared via .mcp.json)",
     }
 }
 
 /// Config-file path description for the multi-scope disambiguation list
 /// (matches claude's `describeMcpConfigFilePath`).
-fn scope_config_path_desc(scope: SettingsScope) -> String {
+fn scope_config_path_desc(scope: WritableScope) -> String {
     let cwd = std::env::current_dir()
         .map(|c| c.display().to_string())
         .unwrap_or_default();
@@ -2089,17 +2089,17 @@ fn scope_config_path_desc(scope: SettingsScope) -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     match scope {
-        SettingsScope::User => global,
-        SettingsScope::Project => format!("{cwd}/.mcp.json"),
-        SettingsScope::Local => format!("{global} [project: {cwd}]"),
+        WritableScope::User => global,
+        WritableScope::Project => format!("{cwd}/.mcp.json"),
+        WritableScope::Local => format!("{global} [project: {cwd}]"),
     }
 }
 
 /// Remove a server from one scope; `Ok(Some(path))` when it existed and was
 /// removed, `Ok(None)` when absent in that scope.
-fn remove_server(name: &str, scope: SettingsScope) -> Result<Option<PathBuf>, String> {
+fn remove_server(name: &str, scope: WritableScope) -> Result<Option<PathBuf>, String> {
     match scope {
-        SettingsScope::User => {
+        WritableScope::User => {
             let path = global_config_path()
                 .ok_or_else(|| "Could not resolve home directory".to_string())?;
             let map = migrations::global_config::read_map(&path).map_err(|e| e.to_string())?;
@@ -2120,7 +2120,7 @@ fn remove_server(name: &str, scope: SettingsScope) -> Result<Option<PathBuf>, St
             .map_err(|e| e.to_string())?;
             Ok(Some(path))
         }
-        SettingsScope::Local => {
+        WritableScope::Local => {
             let path = global_config_path()
                 .ok_or_else(|| "Could not resolve home directory".to_string())?;
             let key =
@@ -2144,7 +2144,7 @@ fn remove_server(name: &str, scope: SettingsScope) -> Result<Option<PathBuf>, St
             .map_err(|e| e.to_string())?;
             Ok(Some(path))
         }
-        SettingsScope::Project => {
+        WritableScope::Project => {
             let path = project_mcp_json_path()
                 .ok_or_else(|| "Could not resolve project directory".to_string())?;
             if !path.exists() {
@@ -2927,8 +2927,8 @@ fn not_found_message_get(name: &str) -> String {
 /// Which writable scopes (local/project/user) currently hold a server named
 /// `name`. Used by `mcp remove` without `--scope` to detect the multi-scope
 /// case that claude refuses to auto-resolve.
-fn scopes_containing(name: &str) -> Vec<SettingsScope> {
-    [SettingsScope::Local, SettingsScope::Project, SettingsScope::User]
+fn scopes_containing(name: &str) -> Vec<WritableScope> {
+    [WritableScope::Local, WritableScope::Project, WritableScope::User]
         .into_iter()
         .filter(|&scope| scope_contains_server(name, scope))
         .collect()
@@ -2937,9 +2937,9 @@ fn scopes_containing(name: &str) -> Vec<SettingsScope> {
 /// Presence-only check for a server in one scope (no mutation). Mirrors the
 /// per-scope read in [`remove_server`]; a read error is treated as "absent" so
 /// the disambiguation logic never blocks on a transient read failure.
-fn scope_contains_server(name: &str, scope: SettingsScope) -> bool {
+fn scope_contains_server(name: &str, scope: WritableScope) -> bool {
     match scope {
-        SettingsScope::User => {
+        WritableScope::User => {
             let Some(path) = global_config_path() else {
                 return false;
             };
@@ -2952,7 +2952,7 @@ fn scope_contains_server(name: &str, scope: SettingsScope) -> bool {
                 })
                 .is_some_and(|m| m.contains_key(name))
         }
-        SettingsScope::Local => {
+        WritableScope::Local => {
             let Some(path) = global_config_path() else {
                 return false;
             };
@@ -2968,7 +2968,7 @@ fn scope_contains_server(name: &str, scope: SettingsScope) -> bool {
                 })
                 .is_some_and(|m| m.contains_key(name))
         }
-        SettingsScope::Project => {
+        WritableScope::Project => {
             let Some(path) = project_mcp_json_path() else {
                 return false;
             };
@@ -3005,7 +3005,7 @@ fn transport_summary(spec: &platform_api::McpTransportSpec) -> String {
     }
 }
 
-/// Human label for `get`'s `SettingsScope:` line (matches claude's wording).
+/// Human label for `get`'s `WritableScope:` line (matches claude's wording).
 fn scope_detail(scope: ConfigScope) -> &'static str {
     match scope {
         ConfigScope::Local => "Local config (private to you in this project)",
@@ -3169,7 +3169,7 @@ where
     ClearLocal: FnOnce(&Path) -> Result<(), String>,
 {
     let local_settings_path = migrations::settings_update::settings_path(
-        migrations::settings_update::SettingsScope::Local,
+        migrations::settings_update::WritableScope::Local,
         config_home,
         project_dir,
     );
@@ -3235,7 +3235,7 @@ fn collect_reset_project_choices_summary(
     config_home: &Path,
     project_dir: &Path,
 ) -> ResetProjectChoicesSummary {
-    use migrations::settings_update::{settings_path, SettingsScope};
+    use migrations::settings_update::{settings_path, WritableScope};
 
     // `nh()` short-circuits the oracle's entire post-reset disclosure scan
     // while a parseable managed-mcp.json has exclusive control. The choices
@@ -3246,17 +3246,17 @@ fn collect_reset_project_choices_summary(
     }
 
     let (user_settings, user_error) = read_reset_settings(&settings_path(
-        SettingsScope::User,
+        WritableScope::User,
         config_home,
         project_dir,
     ));
     let (project_settings, project_error) = read_reset_settings(&settings_path(
-        SettingsScope::Project,
+        WritableScope::Project,
         config_home,
         project_dir,
     ));
     let (_, local_error) = read_reset_settings(&settings_path(
-        SettingsScope::Local,
+        WritableScope::Local,
         config_home,
         project_dir,
     ));
@@ -3502,15 +3502,15 @@ fn write_json_object(
 ///   * local   → `File modified: ~/.lingxi.json [project: <cwd>]`
 ///   * user    → `File modified: ~/.lingxi.json`
 ///   * project → `File modified: <cwd>/.mcp.json`
-fn print_file_modified(scope: SettingsScope, path: &std::path::Path) {
+fn print_file_modified(scope: WritableScope, path: &std::path::Path) {
     match scope {
-        SettingsScope::Local => {
+        WritableScope::Local => {
             let cwd = std::env::current_dir()
                 .map(|c| c.display().to_string())
                 .unwrap_or_else(|_| ".".to_string());
             println!("File modified: {} [project: {}]", path.display(), cwd);
         }
-        SettingsScope::User | SettingsScope::Project => {
+        WritableScope::User | WritableScope::Project => {
             println!("File modified: {}", path.display());
         }
     }

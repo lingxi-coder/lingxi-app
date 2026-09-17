@@ -4597,9 +4597,9 @@ async fn read_status_line_configs(
 /// (claude-code `settings.ts:882-889`; the flag/policy tiers have no Rust
 /// substrate). On any read failure the tier degrades to `false`.
 pub(crate) fn read_skip_dangerous_prompt() -> bool {
-    use migrations::settings_update::{read_settings_map, settings_path, SettingsScope};
+    use migrations::settings_update::{read_settings_map, settings_path, WritableScope};
     let (lingxi_home, project_dir) = settings_dirs();
-    [SettingsScope::User, SettingsScope::Local]
+    [WritableScope::User, WritableScope::Local]
         .iter()
         .any(|s| {
             let p = settings_path(*s, &lingxi_home, &project_dir);
@@ -4618,9 +4618,9 @@ pub(crate) fn read_skip_dangerous_prompt() -> bool {
 /// failure warns and is otherwise ignored (TS `updateSettingsForSource` never
 /// throws; the migration port follows the same warn-and-continue contract).
 pub(crate) fn persist_skip_dangerous_prompt() {
-    use migrations::settings_update::{settings_path, update_settings, SettingsScope};
+    use migrations::settings_update::{settings_path, update_settings, WritableScope};
     let (lingxi_home, project_dir) = settings_dirs();
-    let path = settings_path(SettingsScope::User, &lingxi_home, &project_dir);
+    let path = settings_path(WritableScope::User, &lingxi_home, &project_dir);
     if let Err(e) = update_settings(
         &path,
         vec![(

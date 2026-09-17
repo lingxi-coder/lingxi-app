@@ -11,7 +11,7 @@
 
 use crate::context::{js_truthy, MigrationEnv};
 use crate::global_config;
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, WritableScope};
 use serde_json::json;
 
 /// Run the migration.
@@ -30,7 +30,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
         return true;
     }
 
-    let has_skip = [SettingsScope::User, SettingsScope::Local]
+    let has_skip = [WritableScope::User, WritableScope::Local]
         .iter()
         .any(|s| {
             let p = settings_path(*s, &env.lingxi_config_home, &env.project_dir);
@@ -41,7 +41,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
         });
     if !has_skip {
         let sp = settings_path(
-            SettingsScope::User,
+            WritableScope::User,
             &env.lingxi_config_home,
             &env.project_dir,
         );
@@ -77,7 +77,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
 mod tests {
     use super::*;
     use crate::settings_update::{
-        force_rename_failure_for_test, read_settings_map, settings_path, SettingsScope,
+        force_rename_failure_for_test, read_settings_map, settings_path, WritableScope,
     };
     use crate::test_support::temp_config;
     use serde_json::json;
@@ -100,7 +100,7 @@ mod tests {
         let t = temp_config();
         std::fs::write(&t.global, r#"{"bypassPermissionsModeAccepted": true}"#).unwrap();
         run(&test_env(&t)).await;
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         let s = read_settings_map(&sp).unwrap();
         assert_eq!(s["skipDangerousModePermissionPrompt"], json!(true));
         let m = crate::global_config::read_map(&t.global).unwrap();
@@ -111,12 +111,12 @@ mod tests {
     async fn existing_skip_flag_in_local_settings_is_not_overwritten() {
         let t = temp_config();
         std::fs::write(&t.global, r#"{"bypassPermissionsModeAccepted": true}"#).unwrap();
-        let lp = settings_path(SettingsScope::Local, &t.home, &t.project);
+        let lp = settings_path(WritableScope::Local, &t.home, &t.project);
         std::fs::create_dir_all(lp.parent().unwrap()).unwrap();
         std::fs::write(&lp, r#"{"skipDangerousModePermissionPrompt": true}"#).unwrap();
         run(&test_env(&t)).await;
         // userSettings must NOT gain the key (TS: hasSkip… short-circuits)
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         let s = read_settings_map(&sp).unwrap();
         assert!(s.get("skipDangerousModePermissionPrompt").is_none());
         // config key still removed
@@ -131,7 +131,7 @@ mod tests {
     async fn settings_write_failure_preserves_config_key() {
         let t = temp_config();
         std::fs::write(&t.global, r#"{"bypassPermissionsModeAccepted": true}"#).unwrap();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, "{}").unwrap();
         let _failure = force_rename_failure_for_test(&sp);

@@ -37,7 +37,7 @@ use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata};
 
 use crate::plugin_policy;
 use crate::plugin_settings::{parse_scope_str, scope_label, scope_path};
-use protocol::SettingsScope;
+use protocol::WritableScope;
 
 fn registry_error_kind(error: &str) -> &'static str {
     if error.contains("expected value")
@@ -1039,16 +1039,16 @@ fn sanitize(segment: &str, allow_dot: bool) -> String {
 
 /// Parse the install-family `--scope` (default `user`); its invalid-scope
 /// wording differs from enable/disable and marketplace.
-fn parse_scope(scope: Option<&str>) -> Result<SettingsScope, String> {
+fn parse_scope(scope: Option<&str>) -> Result<WritableScope, String> {
     match scope {
-        None => Ok(SettingsScope::User),
+        None => Ok(WritableScope::User),
         Some(s) => parse_scope_str(s)
             .ok_or_else(|| format!("Invalid scope: {s}. Must be one of: user, project, local.")),
     }
 }
 
 /// Read a scope's `enabledPlugins` map.
-fn read_enabled(scope: SettingsScope, home: &Path, cwd: &Path) -> Map<String, Value> {
+fn read_enabled(scope: WritableScope, home: &Path, cwd: &Path) -> Map<String, Value> {
     read_settings_map(&scope_path(scope, home, cwd))
         .ok()
         .and_then(|m| m.get("enabledPlugins").and_then(Value::as_object).cloned())
@@ -1057,7 +1057,7 @@ fn read_enabled(scope: SettingsScope, home: &Path, cwd: &Path) -> Map<String, Va
 
 /// Set (`Some(true/false)`) or delete (`None`) an `enabledPlugins` entry at scope.
 fn edit_enabled(
-    scope: SettingsScope,
+    scope: WritableScope,
     home: &Path,
     cwd: &Path,
     id: &str,
@@ -1208,7 +1208,7 @@ fn parse_config_pairs(
 /// a documented follow-up, so a sensitive `--config` value is validated here but
 /// not persisted to plaintext settings.
 fn persist_plugin_options(
-    scope: SettingsScope,
+    scope: WritableScope,
     home: &Path,
     cwd: &Path,
     plugin_key: &str,
@@ -1254,10 +1254,10 @@ fn persist_plugin_options(
 /// The `projectPath` an install record carries at this scope: the realpath of
 /// `cwd` for `project`/`local`, `None` for `user` (which is cwd-independent).
 /// Records are keyed per (scope, projectPath), so this identifies the slot.
-fn project_path(scope: SettingsScope, cwd: &Path) -> Option<String> {
+fn project_path(scope: WritableScope, cwd: &Path) -> Option<String> {
     match scope {
-        SettingsScope::User => None,
-        SettingsScope::Project | SettingsScope::Local => Some(
+        WritableScope::User => None,
+        WritableScope::Project | WritableScope::Local => Some(
             std::fs::canonicalize(cwd)
                 .unwrap_or_else(|_| cwd.to_path_buf())
                 .display()
@@ -1269,7 +1269,7 @@ fn project_path(scope: SettingsScope, cwd: &Path) -> Option<String> {
 /// Does an installed record occupy the (scope, projectPath) slot? For `user` the
 /// scope match suffices; for project/local the record's `projectPath` must match
 /// the current one too (distinct projects install the same plugin independently).
-fn record_matches(rec: &Value, scope: SettingsScope, proj: &Option<String>) -> bool {
+fn record_matches(rec: &Value, scope: WritableScope, proj: &Option<String>) -> bool {
     if rec.get("scope").and_then(Value::as_str) != Some(scope_label(scope)) {
         return false;
     }
@@ -1496,7 +1496,7 @@ fn strict_settings_map(path: &Path) -> Result<Map<String, Value>, String> {
 }
 
 pub fn edit_enabled_strict(
-    scope: SettingsScope,
+    scope: WritableScope,
     home: &Path,
     cwd: &Path,
     id: &str,
@@ -1524,7 +1524,7 @@ pub fn edit_enabled_strict(
 }
 
 fn clear_plugin_config_strict(
-    scope: SettingsScope,
+    scope: WritableScope,
     home: &Path,
     cwd: &Path,
     plugin_key: &str,
@@ -1779,11 +1779,11 @@ async fn run_install_inner(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     yes: bool,
 ) -> Result<String, String> {
-    // SettingsScope is validated BEFORE the "Installing plugin …" progress prefix — the
+    // WritableScope is validated BEFORE the "Installing plugin …" progress prefix — the
     // binary emits the bare `Invalid scope: …` line with no prefix.
     let scope = parse_scope(scope)?;
 
-    if !config.is_empty() && !matches!(scope, SettingsScope::User) {
+    if !config.is_empty() && !matches!(scope, WritableScope::User) {
         return Err(format!(
             "Installing plugin \"{}\"...{}",
             arg,
@@ -2128,7 +2128,7 @@ async fn install_declared_dependencies(
 fn add_required_by_metadata(
     installed: &mut Value,
     plugin_id: &str,
-    scope: SettingsScope,
+    scope: WritableScope,
     project: &Option<String>,
     required_by: Option<&str>,
 ) {
@@ -2579,7 +2579,7 @@ where
 /// `QWn`): any auto-installed dependency the removal just left unreachable,
 /// or `""` when there is nothing to report. Reads the just-updated installed
 /// DB, so it reflects the POST-removal dependency graph.
-fn uninstall_orphan_suffix(plugins_dir: &Path, scope: SettingsScope, project: &Option<String>) -> String {
+fn uninstall_orphan_suffix(plugins_dir: &Path, scope: WritableScope, project: &Option<String>) -> String {
     let db = load_installed(plugins_dir);
     let orphans = crate::plugin_prune::scan_orphans(&db, scope, project);
     crate::plugin_prune::orphan_notice(&orphans, scope_label(scope))
@@ -4380,7 +4380,7 @@ mod tests {
         )
         .unwrap();
 
-        let suffix = uninstall_orphan_suffix(&e.plugins, SettingsScope::User, &None);
+        let suffix = uninstall_orphan_suffix(&e.plugins, WritableScope::User, &None);
         assert_eq!(
             suffix,
             "\n1 auto-installed dependency no longer needed: dep. Run `lingxi-cli plugin prune` \
@@ -4391,7 +4391,7 @@ mod tests {
     #[test]
     fn uninstall_orphan_suffix_is_empty_with_no_orphans() {
         let e = env();
-        assert_eq!(uninstall_orphan_suffix(&e.plugins, SettingsScope::User, &None), "");
+        assert_eq!(uninstall_orphan_suffix(&e.plugins, WritableScope::User, &None), "");
     }
 
     #[test]

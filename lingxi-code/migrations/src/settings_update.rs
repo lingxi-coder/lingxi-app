@@ -22,15 +22,15 @@ use serde_json::{Map, Value};
 /// `User` → `<claude-config-home>/settings.json`, `Project` →
 /// `<project>/.lingxi/settings.json`, `Local` →
 /// `<project>/.lingxi/settings.local.json`; [`settings_path`] resolves them.
-pub use protocol::SettingsScope;
+pub use protocol::WritableScope;
 
 /// Resolve the file path for a source (TS `getSettingsFilePathForSource`).
 #[must_use]
-pub fn settings_path(source: SettingsScope, lingxi_home: &Path, project_dir: &Path) -> PathBuf {
+pub fn settings_path(source: WritableScope, lingxi_home: &Path, project_dir: &Path) -> PathBuf {
     match source {
-        SettingsScope::User => lingxi_home.join("settings.json"),
-        SettingsScope::Project => project_dir.join(branding::DOT_DIR).join("settings.json"),
-        SettingsScope::Local => project_dir
+        WritableScope::User => lingxi_home.join("settings.json"),
+        WritableScope::Project => project_dir.join(branding::DOT_DIR).join("settings.json"),
+        WritableScope::Local => project_dir
             .join(branding::DOT_DIR)
             .join("settings.local.json"),
     }
@@ -514,11 +514,11 @@ mod tests {
     fn paths_for_sources() {
         let t = temp_config();
         assert_eq!(
-            settings_path(SettingsScope::User, &t.home, &t.project),
+            settings_path(WritableScope::User, &t.home, &t.project),
             t.home.join("settings.json")
         );
         assert_eq!(
-            settings_path(SettingsScope::Local, &t.home, &t.project),
+            settings_path(WritableScope::Local, &t.home, &t.project),
             t.project.join(".lingxi").join("settings.local.json")
         );
     }
@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn update_creates_file_and_merges_and_deletes() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         update_settings(
             &path,
             vec![("model".into(), Some(serde_json::json!("opus")))],
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn update_bails_on_broken_json_without_overwriting() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{ broken").unwrap();
         let res = update_settings(&path, vec![("x".into(), Some(serde_json::json!(1)))]);
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn read_settings_map_missing_and_empty_are_empty() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         assert!(read_settings_map(&path).unwrap().is_empty());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "   \n").unwrap();
@@ -568,7 +568,7 @@ mod tests {
     fn project_source_resolves_to_project_settings_json() {
         let home = std::path::Path::new("/home/u/.lingxi");
         let project = std::path::Path::new("/work/repo");
-        let path = settings_path(SettingsScope::Project, home, project);
+        let path = settings_path(WritableScope::Project, home, project);
         assert_eq!(
             path,
             std::path::Path::new("/work/repo")
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn concurrent_updates_to_one_path_preserve_both_keys() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         update_settings(
             &path,
             vec![("original".into(), Some(serde_json::json!(true)))],
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn staging_write_failure_preserves_source_and_cleans_temp() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"old bytes\n").unwrap();
         let error = write_settings_atomic_with(
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn non_fallback_rename_failure_preserves_source_and_cleans_temp() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"old bytes\n").unwrap();
         let error = write_settings_atomic_with(
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn eligible_rename_failure_uses_bounded_in_place_fallback() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"old bytes\n").unwrap();
         write_settings_atomic_with(
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn failed_in_place_fallback_restores_source() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"old bytes\n").unwrap();
         let error = write_settings_in_place_with(&path, b"new bytes\n", None, |file, _| {
@@ -721,7 +721,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{}\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn serialized_settings_have_one_trailing_newline() {
         let t = temp_config();
-        let path = settings_path(SettingsScope::User, &t.home, &t.project);
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
         update_settings(&path, vec![("x".into(), Some(serde_json::json!(1)))]).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(bytes.ends_with(b"\n"));

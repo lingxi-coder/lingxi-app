@@ -38,47 +38,47 @@ use crate::plugin_policy;
 /// `<cwd>/.lingxi/settings.json`; `local` = `<cwd>/.lingxi/settings.local.json`.
 /// (`managed` is a read-only enterprise scope and is not editable here — it is
 /// only a valid `--scope` for `plugin update`, handled separately. That refusal
-/// is why this stays [`protocol::SettingsScope`] rather than a bare
+/// is why this stays [`protocol::WritableScope`] rather than a bare
 /// `protocol::Scope`.)
-pub use protocol::SettingsScope;
+pub use protocol::WritableScope;
 
 /// The editable scopes, in auto-detect / `--all` search order.
-const EDITABLE: [SettingsScope; 3] = [SettingsScope::User, SettingsScope::Project, SettingsScope::Local];
+const EDITABLE: [WritableScope; 3] = [WritableScope::User, WritableScope::Project, WritableScope::Local];
 
 /// The editable scopes, in auto-detect / iteration order (shared with the
 /// marketplace command).
-pub const SCOPES: [SettingsScope; 3] = EDITABLE;
+pub const SCOPES: [WritableScope; 3] = EDITABLE;
 
 /// The scope's wire label (matches the `(scope: …)` success suffix).
 ///
 /// Local to this subsystem on purpose: the same rung is spelled differently by
 /// the hook payload, the MCP telemetry inventory, and the settings admin panel,
-/// so there is no shared `SettingsScope::as_str`.
-pub fn scope_label(scope: SettingsScope) -> &'static str {
+/// so there is no shared `WritableScope::as_str`.
+pub fn scope_label(scope: WritableScope) -> &'static str {
     match scope {
-        SettingsScope::User => "user",
-        SettingsScope::Project => "project",
-        SettingsScope::Local => "local",
+        WritableScope::User => "user",
+        WritableScope::Project => "project",
+        WritableScope::Local => "local",
     }
 }
 
 /// Parse a `--scope` value; `None` when unrecognized (the caller emits the
 /// `Invalid scope …` error). `managed` is intentionally NOT accepted here.
-pub fn parse_scope_str(s: &str) -> Option<SettingsScope> {
+pub fn parse_scope_str(s: &str) -> Option<WritableScope> {
     match s {
-        "user" => Some(SettingsScope::User),
-        "project" => Some(SettingsScope::Project),
-        "local" => Some(SettingsScope::Local),
+        "user" => Some(WritableScope::User),
+        "project" => Some(WritableScope::Project),
+        "local" => Some(WritableScope::Local),
         _ => None,
     }
 }
 
 /// Resolve the settings.json path for this scope.
-pub fn scope_path(scope: SettingsScope, home: &Path, cwd: &Path) -> PathBuf {
+pub fn scope_path(scope: WritableScope, home: &Path, cwd: &Path) -> PathBuf {
     match scope {
-        SettingsScope::User => home.join("settings.json"),
-        SettingsScope::Project => cwd.join(branding::DOT_DIR).join("settings.json"),
-        SettingsScope::Local => cwd.join(branding::DOT_DIR).join("settings.local.json"),
+        WritableScope::User => home.join("settings.json"),
+        WritableScope::Project => cwd.join(branding::DOT_DIR).join("settings.json"),
+        WritableScope::Local => cwd.join(branding::DOT_DIR).join("settings.local.json"),
     }
 }
 
@@ -141,7 +141,7 @@ fn installed_plugins(home: &Path) -> Value {
 fn installed_record<'a>(
     db: &'a Value,
     id: &str,
-    scope: SettingsScope,
+    scope: WritableScope,
     project_path: &Option<String>,
 ) -> Option<&'a Value> {
     db.get("plugins")
@@ -161,10 +161,10 @@ fn installed_record<'a>(
         })
 }
 
-fn scope_project_path(scope: SettingsScope, cwd: &Path) -> Option<String> {
+fn scope_project_path(scope: WritableScope, cwd: &Path) -> Option<String> {
     match scope {
-        SettingsScope::User => None,
-        SettingsScope::Project | SettingsScope::Local => Some(
+        WritableScope::User => None,
+        WritableScope::Project | WritableScope::Local => Some(
             std::fs::canonicalize(cwd)
                 .unwrap_or_else(|_| cwd.to_path_buf())
                 .display()
@@ -196,7 +196,7 @@ fn record_dependencies(record: &Value, owner_id: &str) -> Vec<String> {
 fn collect_dependencies(
     db: &Value,
     id: &str,
-    scope: SettingsScope,
+    scope: WritableScope,
     project_path: &Option<String>,
     seen: &mut HashSet<String>,
 ) {
@@ -214,7 +214,7 @@ fn collect_dependencies(
 fn enabled_dependents(
     db: &Value,
     id: &str,
-    scope: SettingsScope,
+    scope: WritableScope,
     project_path: &Option<String>,
     settings_path: &Path,
 ) -> Vec<String> {
@@ -257,7 +257,7 @@ fn resolve_id(plugin: &str, home: &Path, cwd: &Path) -> Result<String, String> {
 
 /// The first editable scope whose allowlist carries `id` as a key (any value),
 /// for auto-detect when no `--scope` is given.
-fn scope_holding(id: &str, home: &Path, cwd: &Path) -> Option<SettingsScope> {
+fn scope_holding(id: &str, home: &Path, cwd: &Path) -> Option<WritableScope> {
     EDITABLE
         .into_iter()
         .find(|scope| read_enabled(&scope_path(*scope, home, cwd)).contains_key(id))
@@ -274,7 +274,7 @@ fn invalid_scope(s: &str) -> String {
 }
 
 /// Parse an optional `--scope`, surfacing the `Invalid scope …` error.
-fn parse_scope(scope: Option<&str>) -> Result<Option<SettingsScope>, String> {
+fn parse_scope(scope: Option<&str>) -> Result<Option<WritableScope>, String> {
     match scope {
         None => Ok(None),
         Some(s) => parse_scope_str(s).map(Some).ok_or_else(|| invalid_scope(s)),
@@ -300,7 +300,7 @@ pub fn run_enable(
     }
     let scope = requested
         .or_else(|| scope_holding(&id, home, cwd))
-        .unwrap_or(SettingsScope::User);
+        .unwrap_or(WritableScope::User);
     let path = scope_path(scope, home, cwd);
     if current_value(&path, &id) == Some(true) {
         return Err(fail(
@@ -346,7 +346,7 @@ pub fn run_disable(
     let requested = parse_scope(scope)?;
 
     if all {
-        let scopes: Vec<SettingsScope> = requested.map_or_else(|| EDITABLE.to_vec(), |s| vec![s]);
+        let scopes: Vec<WritableScope> = requested.map_or_else(|| EDITABLE.to_vec(), |s| vec![s]);
         let mut count = 0usize;
         for scope in scopes {
             let path = scope_path(scope, home, cwd);
@@ -662,8 +662,8 @@ mod tests {
     /// relabel cannot slip through on the paths that test does not walk.
     #[test]
     fn scope_labels_match_the_cli_suffix_spellings() {
-        assert_eq!(scope_label(SettingsScope::User), "user");
-        assert_eq!(scope_label(SettingsScope::Project), "project");
-        assert_eq!(scope_label(SettingsScope::Local), "local");
+        assert_eq!(scope_label(WritableScope::User), "user");
+        assert_eq!(scope_label(WritableScope::Project), "project");
+        assert_eq!(scope_label(WritableScope::Local), "local");
     }
 }

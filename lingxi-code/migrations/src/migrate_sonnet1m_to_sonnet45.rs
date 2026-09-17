@@ -11,7 +11,7 @@
 
 use crate::context::{js_truthy, MigrationEnv};
 use crate::global_config;
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, WritableScope};
 use serde_json::{json, Value};
 
 /// Run the migration (errors swallowed with a warn, never abort startup).
@@ -34,7 +34,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
     }
 
     let sp = settings_path(
-        SettingsScope::User,
+        WritableScope::User,
         &env.lingxi_config_home,
         &env.project_dir,
     );
@@ -65,7 +65,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
 mod tests {
     use super::*;
     use crate::settings_update::{
-        force_rename_failure_for_test, read_settings_map, settings_path, SettingsScope,
+        force_rename_failure_for_test, read_settings_map, settings_path, WritableScope,
     };
     use crate::test_support::temp_config;
     use serde_json::json;
@@ -86,7 +86,7 @@ mod tests {
     #[tokio::test]
     async fn rewrites_sonnet1m_and_sets_flag() {
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "sonnet[1m]", "keep": true}"#).unwrap();
         run(&test_env(&t)).await;
@@ -100,7 +100,7 @@ mod tests {
     #[tokio::test]
     async fn other_model_untouched_but_flag_still_set() {
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "opus"}"#).unwrap();
         run(&test_env(&t)).await;
@@ -112,7 +112,7 @@ mod tests {
     #[tokio::test]
     async fn broken_settings_file_still_sets_flag() {
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, "{ broken").unwrap();
         run(&test_env(&t)).await;
@@ -128,7 +128,7 @@ mod tests {
     #[tokio::test]
     async fn settings_write_failure_skips_flag() {
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "sonnet[1m]"}"#).unwrap();
         let _failure = force_rename_failure_for_test(&sp);
@@ -147,7 +147,7 @@ mod tests {
     async fn completion_flag_short_circuits() {
         let t = temp_config();
         std::fs::write(&t.global, r#"{"sonnet1m45MigrationComplete": true}"#).unwrap();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "sonnet[1m]"}"#).unwrap();
         run(&test_env(&t)).await;

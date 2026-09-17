@@ -40,7 +40,7 @@ pub use messages::{
     MediaObservation, MemoryEntry, MemoryEntryTier, MessageRole, PreservedMessages,
     PreservedSegment, RefusalFallbackMetadata,
 };
-pub use scope::{Origin, Provenance, Scope, SettingsScope};
+pub use scope::{Origin, Provenance, Scope, SettingsScope, WritableScope};
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,
 };

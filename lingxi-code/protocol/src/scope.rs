@@ -82,7 +82,7 @@ pub enum Scope {
     Managed,
 }
 
-/// The three rungs backed by a settings file a user can edit.
+/// The three rungs a user can WRITE configuration to.
 ///
 /// Six of the enums this module replaced were *exactly* this subset —
 /// `configuration-admin`'s `Scope`, the CLI's `Scope`, `SettingsSource`,
@@ -99,7 +99,7 @@ pub enum Scope {
 ///
 /// Converting *up* to [`Scope`] is total; converting *down* is fallible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SettingsScope {
+pub enum WritableScope {
     /// `~/.lingxi/settings.json`.
     User,
     /// `<project>/.lingxi/settings.json` — checked in.
@@ -108,17 +108,17 @@ pub enum SettingsScope {
     Local,
 }
 
-impl From<SettingsScope> for Scope {
-    fn from(value: SettingsScope) -> Self {
+impl From<WritableScope> for Scope {
+    fn from(value: WritableScope) -> Self {
         match value {
-            SettingsScope::User => Self::User,
-            SettingsScope::Project => Self::Project,
-            SettingsScope::Local => Self::Local,
+            WritableScope::User => Self::User,
+            WritableScope::Project => Self::Project,
+            WritableScope::Local => Self::Local,
         }
     }
 }
 
-impl TryFrom<Scope> for SettingsScope {
+impl TryFrom<Scope> for WritableScope {
     type Error = Scope;
 
     /// Returns the offending [`Scope`] as the error so a caller can name it in
@@ -128,6 +128,82 @@ impl TryFrom<Scope> for SettingsScope {
             Scope::User => Ok(Self::User),
             Scope::Project => Ok(Self::Project),
             Scope::Local => Ok(Self::Local),
+            other => Err(other),
+        }
+    }
+}
+
+/// Every rung backed by a settings file, including the read-only
+/// administrator-managed one.
+///
+/// Distinct from [`WritableScope`] by exactly one variant, and the difference
+/// is load-bearing: `Managed` is a tier the engine READS (it is spliced into
+/// `LINGXI.md` and reported on the `InstructionsLoaded` hook payload) but never
+/// writes, which is why `plugin enable --scope managed` is refused.
+///
+/// Narrower than [`Scope`] for two different reasons depending on the caller.
+/// For the hook payload it is wire safety — 1:1 with claude-code's
+/// `INSTRUCTIONS_MEMORY_TYPES`, so a bare [`Scope`] would let the engine emit
+/// `Team` or `Session` tiers the reference never sends. For the `LINGXI.md`
+/// splice it is just honesty: that code can never see the other six rungs, and
+/// a wide type would hand every `match` six unreachable arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SettingsScope {
+    /// `~/.lingxi/settings.json`.
+    User,
+    /// `<project>/.lingxi/settings.json` — checked in.
+    Project,
+    /// `<project>/.lingxi/settings.local.json` — gitignored.
+    Local,
+    /// Administrator-managed policy. Read-only.
+    Managed,
+}
+
+impl From<WritableScope> for SettingsScope {
+    fn from(value: WritableScope) -> Self {
+        match value {
+            WritableScope::User => Self::User,
+            WritableScope::Project => Self::Project,
+            WritableScope::Local => Self::Local,
+        }
+    }
+}
+
+impl TryFrom<SettingsScope> for WritableScope {
+    type Error = SettingsScope;
+
+    /// Fails only on [`SettingsScope::Managed`] — the one tier that is read but
+    /// never written.
+    fn try_from(value: SettingsScope) -> Result<Self, Self::Error> {
+        match value {
+            SettingsScope::User => Ok(Self::User),
+            SettingsScope::Project => Ok(Self::Project),
+            SettingsScope::Local => Ok(Self::Local),
+            SettingsScope::Managed => Err(value),
+        }
+    }
+}
+
+impl From<SettingsScope> for Scope {
+    fn from(value: SettingsScope) -> Self {
+        match value {
+            SettingsScope::User => Self::User,
+            SettingsScope::Project => Self::Project,
+            SettingsScope::Local => Self::Local,
+            SettingsScope::Managed => Self::Managed,
+        }
+    }
+}
+
+impl TryFrom<Scope> for SettingsScope {
+    type Error = Scope;
+
+    fn try_from(value: Scope) -> Result<Self, Self::Error> {
+        match value {
+            Scope::User => Ok(Self::User),
+            Scope::Project => Ok(Self::Project),
+            Scope::Local => Ok(Self::Local),
+            Scope::Managed => Ok(Self::Managed),
             other => Err(other),
         }
     }
@@ -187,7 +263,7 @@ impl Provenance {
 
 #[cfg(test)]
 mod tests {
-    use super::{Origin, Provenance, Scope, SettingsScope};
+    use super::{Origin, Provenance, Scope, SettingsScope, WritableScope};
     use crate::ids::PluginId;
 
     /// Both sides of the narrowing, because only pinning the accepted side
@@ -196,11 +272,11 @@ mod tests {
     #[test]
     fn settings_scope_accepts_exactly_the_three_editable_rungs() {
         for (scope, expected) in [
-            (Scope::User, SettingsScope::User),
-            (Scope::Project, SettingsScope::Project),
-            (Scope::Local, SettingsScope::Local),
+            (Scope::User, WritableScope::User),
+            (Scope::Project, WritableScope::Project),
+            (Scope::Local, WritableScope::Local),
         ] {
-            assert_eq!(SettingsScope::try_from(scope), Ok(expected));
+            assert_eq!(WritableScope::try_from(scope), Ok(expected));
             assert_eq!(Scope::from(expected), scope, "round trip");
         }
 
@@ -214,10 +290,47 @@ mod tests {
             Scope::Managed,
         ] {
             assert_eq!(
-                SettingsScope::try_from(rejected),
+                WritableScope::try_from(rejected),
                 Err(rejected),
                 "{rejected:?} is not user-editable and must not narrow"
             );
+        }
+    }
+
+    /// `Managed` is the single variant separating the two narrowings, and the
+    /// whole point of keeping them apart — it is a tier the engine reads but
+    /// must never write. Pinned on both sides so the boundary cannot drift in
+    /// either direction.
+    #[test]
+    fn managed_reads_as_a_settings_tier_but_never_narrows_to_a_writable_one() {
+        assert_eq!(SettingsScope::try_from(Scope::Managed), Ok(SettingsScope::Managed));
+        assert_eq!(
+            WritableScope::try_from(SettingsScope::Managed),
+            Err(SettingsScope::Managed),
+            "Managed is read-only; narrowing it to a writable rung would make \
+             `plugin enable --scope managed` succeed"
+        );
+
+        for writable in [WritableScope::User, WritableScope::Project, WritableScope::Local] {
+            let tier = SettingsScope::from(writable);
+            assert_eq!(WritableScope::try_from(tier), Ok(writable), "round trip");
+        }
+    }
+
+    /// The six rungs that are not settings files at all must not narrow to a
+    /// tier either — otherwise `InstructionsLoaded` could report a memory type
+    /// claude-code never sends.
+    #[test]
+    fn settings_scope_admits_exactly_the_four_file_tiers() {
+        for rejected in [
+            Scope::Builtin,
+            Scope::Env,
+            Scope::Cli,
+            Scope::Flag,
+            Scope::Session,
+            Scope::Team,
+        ] {
+            assert_eq!(SettingsScope::try_from(rejected), Err(rejected), "{rejected:?}");
         }
     }
 
@@ -226,9 +339,9 @@ mod tests {
     /// A field typed `Scope` would newly accept every rung above.
     #[test]
     fn settings_scope_refuses_a_wider_rung_through_serde() {
-        assert!(serde_json::from_str::<SettingsScope>("\"Project\"").is_ok());
-        assert!(serde_json::from_str::<SettingsScope>("\"Managed\"").is_err());
-        assert!(serde_json::from_str::<SettingsScope>("\"Session\"").is_err());
+        assert!(serde_json::from_str::<WritableScope>("\"Project\"").is_ok());
+        assert!(serde_json::from_str::<WritableScope>("\"Managed\"").is_err());
+        assert!(serde_json::from_str::<WritableScope>("\"Session\"").is_err());
 
         // The wide type does accept them — which is exactly what the narrow
         // type is protecting those fields from.

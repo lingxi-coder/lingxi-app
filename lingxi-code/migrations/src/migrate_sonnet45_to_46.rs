@@ -8,7 +8,7 @@
 
 use crate::context::MigrationEnv;
 use crate::global_config;
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, WritableScope};
 use llm_client::oauth::anthropic::limits::SubscriptionType;
 use serde_json::{json, Value};
 use telemetry::sink::AnalyticsValue;
@@ -37,7 +37,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
     }
 
     let sp = settings_path(
-        SettingsScope::User,
+        WritableScope::User,
         &env.lingxi_config_home,
         &env.project_dir,
     );
@@ -92,7 +92,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
 mod tests {
     use super::*;
     use crate::settings_update::{
-        force_rename_failure_for_test, read_settings_map, settings_path, SettingsScope,
+        force_rename_failure_for_test, read_settings_map, settings_path, WritableScope,
     };
     use crate::test_support::temp_config;
     use llm_client::oauth::anthropic::limits::SubscriptionType;
@@ -113,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn tier_none_is_noop() {
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "claude-sonnet-4-5-20250929"}"#).unwrap();
         run(&test_env(&t)).await;
@@ -127,7 +127,7 @@ mod tests {
     async fn max_tier_rewrites_preserving_1m_and_gates_timestamp_on_startups() {
         let t = temp_config();
         std::fs::write(&t.global, r#"{"numStartups": 5}"#).unwrap();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "sonnet-4-5-20250929[1m]"}"#).unwrap();
         let mut env = test_env(&t);
@@ -142,7 +142,7 @@ mod tests {
 
         // fresh user (numStartups missing → 0) gets no timestamp
         let t2 = temp_config();
-        let sp2 = settings_path(SettingsScope::User, &t2.home, &t2.project);
+        let sp2 = settings_path(WritableScope::User, &t2.home, &t2.project);
         std::fs::create_dir_all(sp2.parent().unwrap()).unwrap();
         std::fs::write(&sp2, r#"{"model": "claude-sonnet-4-5-20250929"}"#).unwrap();
         let mut env2 = test_env(&t2);
@@ -163,7 +163,7 @@ mod tests {
     async fn max_tier_happy_path_emits_from_model_and_has_1m() {
         let t = temp_config();
         std::fs::write(&t.global, r#"{"numStartups": 5}"#).unwrap();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "sonnet-4-5-20250929[1m]"}"#).unwrap();
         let (bus, events) = crate::test_support::capture_bus().await;
@@ -190,7 +190,7 @@ mod tests {
     async fn pro_and_team_tiers_are_accepted() {
         for tier in [SubscriptionType::Pro, SubscriptionType::Team] {
             let t = temp_config();
-            let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+            let sp = settings_path(WritableScope::User, &t.home, &t.project);
             std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
             std::fs::write(&sp, r#"{"model": "claude-sonnet-4-5-20250929"}"#).unwrap();
             let mut env = test_env(&t);
@@ -207,7 +207,7 @@ mod tests {
     #[tokio::test]
     async fn not_first_party_is_noop() {
         let t = temp_config();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "claude-sonnet-4-5-20250929"}"#).unwrap();
         let mut env = test_env(&t);
@@ -226,7 +226,7 @@ mod tests {
     async fn settings_write_failure_skips_timestamp() {
         let t = temp_config();
         std::fs::write(&t.global, r#"{"numStartups": 5}"#).unwrap();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"model": "claude-sonnet-4-5-20250929"}"#).unwrap();
         let _failure = force_rename_failure_for_test(&sp);

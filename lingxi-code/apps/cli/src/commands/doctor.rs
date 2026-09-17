@@ -154,7 +154,7 @@ fn collect_ignored_plugin_config_warnings(
         (
             "project",
             crate::commands::plugin_settings::scope_path(
-                crate::commands::plugin_settings::SettingsScope::Project,
+                crate::commands::plugin_settings::WritableScope::Project,
                 home,
                 cwd,
             ),
@@ -162,7 +162,7 @@ fn collect_ignored_plugin_config_warnings(
         (
             "local",
             crate::commands::plugin_settings::scope_path(
-                crate::commands::plugin_settings::SettingsScope::Local,
+                crate::commands::plugin_settings::WritableScope::Local,
                 home,
                 cwd,
             ),

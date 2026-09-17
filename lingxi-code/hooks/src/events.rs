@@ -149,19 +149,15 @@ pub enum ConfigChangeSource {
 
 /// Which memory tier an [`HookEvent::InstructionsLoaded`] file belongs to.
 /// 1:1 with claude-code's `INSTRUCTIONS_MEMORY_TYPES`
-/// (`coreSchemas.ts:688-693`). Note: these serialize as `PascalCase` wire
-/// literals (`"User"` / `"Project"` / `"Local"` / `"Managed"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InstructionsMemoryType {
-    /// User-global instructions (`~/.lingxi/LINGXI.md`).
-    User,
-    /// Project-shared instructions (`./LINGXI.md`).
-    Project,
-    /// Project-local instructions (`./LINGXI.local.md`).
-    Local,
-    /// Enterprise-managed (policy) instructions.
-    Managed,
-}
+/// (`coreSchemas.ts:688-693`). These serialize as `PascalCase` wire literals
+/// (`"User"` / `"Project"` / `"Local"` / `"Managed"`), which is why the shared
+/// type's derived spelling is used verbatim rather than a `rename_all` — the
+/// sibling `InstructionsLoadReason` below is `snake_case`, and that difference
+/// is the reference's, not an oversight.
+///
+/// Narrow on purpose: a bare `protocol::Scope` would let this payload carry
+/// `Team` or `Session`, which claude-code never sends.
+pub use protocol::SettingsScope as InstructionsMemoryType;
 
 /// Why an [`HookEvent::InstructionsLoaded`] file was (re)loaded. 1:1 with
 /// claude-code's `INSTRUCTIONS_LOAD_REASONS` (`coreSchemas.ts:680-686`); the

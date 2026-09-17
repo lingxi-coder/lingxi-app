@@ -1094,7 +1094,7 @@ mod tests {
 
 
     /// Set an agent's memory scope on top of the spawn-path defaults.
-    fn agent_def_with_memory(tools: AgentToolPolicy, memory: protocol::SettingsScope) -> AgentDefinition {
+    fn agent_def_with_memory(tools: AgentToolPolicy, memory: protocol::WritableScope) -> AgentDefinition {
         AgentDefinition {
             memory: Some(memory),
             ..agent_def(tools)
@@ -1108,7 +1108,7 @@ mod tests {
         let parent = pool(&["Read", "Write", "Edit", "Bash", "Grep"]);
         let def = agent_def_with_memory(
             AgentToolPolicy::Explicit(vec!["Bash".to_string()]),
-            protocol::SettingsScope::Project,
+            protocol::WritableScope::Project,
         );
         let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         let got = names(&resolved);
@@ -1139,7 +1139,7 @@ mod tests {
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         let def = agent_def_with_memory(
             AgentToolPolicy::Except(vec!["Write".to_string()]),
-            protocol::SettingsScope::Project,
+            protocol::WritableScope::Project,
         );
         let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         let got = names(&resolved);
@@ -1172,7 +1172,7 @@ mod tests {
                 "Write".to_string(),
                 "Edit".to_string(),
             ]),
-            protocol::SettingsScope::User,
+            protocol::WritableScope::User,
         );
         let resolved = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
         assert_eq!(
@@ -1187,9 +1187,9 @@ mod tests {
         // scopes inject the identical Read/Write/Edit set.
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         for scope in [
-            protocol::SettingsScope::User,
-            protocol::SettingsScope::Project,
-            protocol::SettingsScope::Local,
+            protocol::WritableScope::User,
+            protocol::WritableScope::Project,
+            protocol::WritableScope::Local,
         ] {
             let def =
                 agent_def_with_memory(AgentToolPolicy::Explicit(vec!["Bash".to_string()]), scope);
@@ -1210,7 +1210,7 @@ mod tests {
         let parent = pool(&["Read", "Bash"]); // no Write/Edit in parent
         let def = agent_def_with_memory(
             AgentToolPolicy::Explicit(vec!["Bash".to_string()]),
-            protocol::SettingsScope::Local,
+            protocol::WritableScope::Local,
         );
         let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));
         assert!(got.contains(&"Read".to_string()));
@@ -1226,7 +1226,7 @@ mod tests {
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         let mut def = agent_def_with_memory(
             AgentToolPolicy::Explicit(vec!["Bash".to_string()]),
-            protocol::SettingsScope::Project,
+            protocol::WritableScope::Project,
         );
         def.disallowed_tools = vec!["Write".to_string()];
         let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));
@@ -1245,7 +1245,7 @@ mod tests {
         let parent = pool(&["Read", "Write", "Edit", "Bash"]);
         let def = AgentDefinition {
             permission_mode: AgentPermissionMode::Plan,
-            memory: Some(protocol::SettingsScope::Project),
+            memory: Some(protocol::WritableScope::Project),
             ..agent_def(AgentToolPolicy::Explicit(vec!["Bash".to_string()]))
         };
         let got = names(&AgentToolResolver::resolve(&def, &parent, &[], 0, false));

@@ -6,7 +6,7 @@
 
 use crate::context::MigrationEnv;
 use crate::global_config;
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, WritableScope};
 use serde_json::{Map, Value};
 use telemetry::sink::AnalyticsValue;
 
@@ -59,7 +59,7 @@ pub async fn run(env: &MigrationEnv) {
     // project-config save failure reaches
     // `tengu_migrate_mcp_approval_fields_error`.
     let lp = settings_path(
-        SettingsScope::Local,
+        WritableScope::Local,
         &env.lingxi_config_home,
         &env.project_dir,
     );
@@ -142,7 +142,7 @@ pub async fn run(env: &MigrationEnv) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings_update::{read_settings_map, settings_path, SettingsScope};
+    use crate::settings_update::{read_settings_map, settings_path, WritableScope};
     use crate::test_support::temp_config;
     use serde_json::json;
 
@@ -180,7 +180,7 @@ mod tests {
         .unwrap();
         run(&test_env(&t)).await;
 
-        let lp = settings_path(SettingsScope::Local, &t.home, &t.project);
+        let lp = settings_path(WritableScope::Local, &t.home, &t.project);
         let s = read_settings_map(&lp).unwrap();
         assert_eq!(s["enableAllProjectMcpServers"], json!(true));
         assert_eq!(s["enabledMcpjsonServers"], json!(["a", "b"]));
@@ -205,7 +205,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let lp = settings_path(SettingsScope::Local, &t.home, &t.project);
+        let lp = settings_path(WritableScope::Local, &t.home, &t.project);
         std::fs::create_dir_all(lp.parent().unwrap()).unwrap();
         std::fs::write(&lp, r#"{"enabledMcpjsonServers": ["a", "b"]}"#).unwrap();
         run(&test_env(&t)).await;
@@ -226,7 +226,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let lp = settings_path(SettingsScope::Local, &t.home, &t.project);
+        let lp = settings_path(WritableScope::Local, &t.home, &t.project);
         std::fs::create_dir_all(lp.parent().unwrap()).unwrap();
         std::fs::write(&lp, r#"{"enableAllProjectMcpServers": false}"#).unwrap();
         run(&test_env(&t)).await;
@@ -265,7 +265,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let lp = settings_path(SettingsScope::Local, &t.home, &t.project);
+        let lp = settings_path(WritableScope::Local, &t.home, &t.project);
         std::fs::create_dir_all(lp.parent().unwrap()).unwrap();
         std::fs::write(&lp, "{ broken").unwrap();
         run(&test_env(&t)).await;

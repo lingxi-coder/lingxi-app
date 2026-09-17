@@ -1991,21 +1991,10 @@ impl ConversationOrchestrator {
             }
             // `memory_type` is taken straight from the file's tier (claude-code
             // fires `file.type`, claudemd.ts:1058-1062), so the Managed tier is
-            // reported faithfully rather than misclassified as Project.
-            let memory_type = match file.tier {
-                memory::lingxi_md::LingxiMdTier::Managed => {
-                    hooks::events::InstructionsMemoryType::Managed
-                }
-                memory::lingxi_md::LingxiMdTier::User => {
-                    hooks::events::InstructionsMemoryType::User
-                }
-                memory::lingxi_md::LingxiMdTier::Project => {
-                    hooks::events::InstructionsMemoryType::Project
-                }
-                memory::lingxi_md::LingxiMdTier::Local => {
-                    hooks::events::InstructionsMemoryType::Local
-                }
-            };
+            // reported faithfully rather than misclassified as Project. The
+            // two used to be separate enums with a four-arm translation here;
+            // they are now the same type, so there is nothing left to mistype.
+            let memory_type = file.tier;
             // A fresh per-file `HookContext` (the executor reads `session_id` /
             // `cwd` from it); `lifecycle_hook_ctx` re-locks the session each call,
             // matching the other lifecycle fires.

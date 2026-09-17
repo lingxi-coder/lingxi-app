@@ -83,7 +83,7 @@ pub struct AgentDefinition {
     /// pool, mirroring claude's `isAutoMemoryEnabled` → Write/Edit/Read
     /// injection (the scope selects only WHERE memory lives, not which tools).
     #[serde(default)]
-    pub memory: Option<protocol::SettingsScope>,
+    pub memory: Option<protocol::WritableScope>,
     /// Reasoning effort preference (claude `effort` = level OR integer).
     #[serde(default)]
     pub effort: Option<AgentEffort>,

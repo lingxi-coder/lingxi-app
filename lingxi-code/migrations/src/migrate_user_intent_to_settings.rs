@@ -4,7 +4,7 @@
 
 use crate::context::MigrationEnv;
 use crate::global_config;
-use crate::settings_update::{read_settings_map, settings_path, update_settings, SettingsScope};
+use crate::settings_update::{read_settings_map, settings_path, update_settings, WritableScope};
 use serde_json::{json, Value};
 use telemetry::sink::AnalyticsValue;
 
@@ -35,7 +35,7 @@ pub async fn run(env: &MigrationEnv) -> bool {
     };
 
     let sp = settings_path(
-        SettingsScope::User,
+        WritableScope::User,
         &env.lingxi_config_home,
         &env.project_dir,
     );
@@ -104,7 +104,7 @@ mod tests {
             r#"{"theme":"light","verbose":false,"inputNeededNotifEnabled":true}"#,
         )
         .unwrap();
-        let sp = settings_path(SettingsScope::User, &t.home, &t.project);
+        let sp = settings_path(WritableScope::User, &t.home, &t.project);
         std::fs::create_dir_all(sp.parent().unwrap()).unwrap();
         std::fs::write(&sp, r#"{"theme":"solarized"}"#).unwrap();
         assert!(run(&test_env(&t)).await);

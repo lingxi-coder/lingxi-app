@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::settings_bridge::{apply_patch, build_snapshot, SettingsContext};
-use client_protocol::commands::SettingsDestinationDto;
+use client_protocol::commands::WritableScopeDto;
 
 pub struct HookRuntimeCandidate {
     pub source: HookSource,
@@ -144,11 +144,11 @@ fn required_string<'a>(payload: &'a Map<String, Value>, key: &str) -> Result<&'a
         .ok_or_else(|| format!("payload is missing `{key}`"))
 }
 
-fn settings_destination(scope: &str) -> Result<SettingsDestinationDto, String> {
+fn settings_destination(scope: &str) -> Result<WritableScopeDto, String> {
     match scope {
-        "user" => Ok(SettingsDestinationDto::User),
-        "project" => Ok(SettingsDestinationDto::Project),
-        "local" => Ok(SettingsDestinationDto::Local),
+        "user" => Ok(WritableScopeDto::User),
+        "project" => Ok(WritableScopeDto::Project),
+        "local" => Ok(WritableScopeDto::Local),
         _ => Err(format!("unknown hook scope `{scope}`")),
     }
 }

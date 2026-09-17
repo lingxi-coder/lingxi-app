@@ -11,7 +11,7 @@
 //! | `Project` | `<project>/.mcp.json`                               |
 //!
 //! (plus read-only `Dynamic` (plugins) and `Enterprise` (managed policy) —
-//! [`McpScopeDto`] omits both since nothing user-initiated ever writes them.)
+//! [`WritableScopeDto`] omits both since nothing user-initiated ever writes them.)
 //!
 //! The read side (`RefreshListings{Mcp}` → `ClientEvent::McpServers`) is
 //! already wired through the live `McpRegistry` snapshot
@@ -51,7 +51,7 @@
 
 use std::path::{Path, PathBuf};
 
-use client_protocol::commands::McpScopeDto;
+use client_protocol::commands::WritableScopeDto;
 use mcp::{ConfigScope, McpRegistry};
 use migrations::global_config::{
     get_project_config, project_path_for_config, read_map as read_global_map, save_map,
@@ -244,12 +244,12 @@ fn remove_from(map: &mut Map<String, Value>, name: &str) {
 /// [`verify_server_present`]).
 pub fn upsert_server(
     paths: &McpPaths,
-    scope: McpScopeDto,
+    scope: WritableScopeDto,
     name: &str,
     config: Value,
 ) -> Result<(), String> {
     match scope {
-        McpScopeDto::Project => {
+        WritableScopeDto::Project => {
             let path = project_mcp_path(&paths.project_dir);
             let root = read_json_object(&path)?;
             ensure_project_file_is_wrapped_or_empty(&root)?;
@@ -265,7 +265,7 @@ pub fn upsert_server(
             }
             write_json_object(&path, next)
         }
-        McpScopeDto::User => {
+        WritableScopeDto::User => {
             // The domain-specific `mcpServers`-is-an-object check does NOT run
             // as a pre-check here (a pre-check race that `save_map`'s own
             // locked re-read can invalidate is exactly the Minor-2 bug this
@@ -282,7 +282,7 @@ pub fn upsert_server(
             let after = read_global_map(&paths.global_config_path).map_err(|e| e.to_string())?;
             verify_server_present(&after, name, &expected)
         }
-        McpScopeDto::Local => {
+        WritableScopeDto::Local => {
             let key = project_path_for_config(&paths.project_dir);
             let expected = config.clone();
             save_project_config(&paths.global_config_path, &key, move |mut proj| {
@@ -306,9 +306,9 @@ pub fn upsert_server(
 /// legacy bare-map `Project` file), plus the underlying write failing, or —
 /// `User`/`Local` only — a post-write read-back shows `name` is still
 /// present (see [`verify_server_absent`]).
-pub fn remove_server(paths: &McpPaths, scope: McpScopeDto, name: &str) -> Result<(), String> {
+pub fn remove_server(paths: &McpPaths, scope: WritableScopeDto, name: &str) -> Result<(), String> {
     match scope {
-        McpScopeDto::Project => {
+        WritableScopeDto::Project => {
             let path = project_mcp_path(&paths.project_dir);
             let root = read_json_object(&path)?;
             ensure_project_file_is_wrapped_or_empty(&root)?;
@@ -324,7 +324,7 @@ pub fn remove_server(paths: &McpPaths, scope: McpScopeDto, name: &str) -> Result
             }
             write_json_object(&path, next)
         }
-        McpScopeDto::User => {
+        WritableScopeDto::User => {
             save_map(&paths.global_config_path, move |mut map| {
                 remove_from(&mut map, name);
                 map
@@ -333,7 +333,7 @@ pub fn remove_server(paths: &McpPaths, scope: McpScopeDto, name: &str) -> Result
             let after = read_global_map(&paths.global_config_path).map_err(|e| e.to_string())?;
             verify_server_absent(&after, name)
         }
-        McpScopeDto::Local => {
+        WritableScopeDto::Local => {
             let key = project_path_for_config(&paths.project_dir);
             save_project_config(&paths.global_config_path, &key, move |mut proj| {
                 remove_from(&mut proj, name);
@@ -436,7 +436,7 @@ mod tests {
         let p = paths(dir.path());
         upsert_server(
             &p,
-            McpScopeDto::Project,
+            WritableScopeDto::Project,
             "linear",
             json!({ "command": "npx", "args": ["-y", "linear-mcp"] }),
         )
@@ -464,7 +464,7 @@ mod tests {
             other => panic!("expected Stdio, got {other:?}"),
         }
 
-        remove_server(&p, McpScopeDto::Project, "linear").unwrap();
+        remove_server(&p, WritableScopeDto::Project, "linear").unwrap();
         let after: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap())
                 .unwrap();
@@ -491,7 +491,7 @@ mod tests {
 
         upsert_server(
             &p,
-            McpScopeDto::User,
+            WritableScopeDto::User,
             "mem",
             json!({ "command": "mcp-memory" }),
         )
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "mem");
 
-        remove_server(&p, McpScopeDto::User, "mem").unwrap();
+        remove_server(&p, WritableScopeDto::User, "mem").unwrap();
         let after: Value =
             serde_json::from_str(&std::fs::read_to_string(&p.global_config_path).unwrap()).unwrap();
         assert!(after["mcpServers"].get("mem").is_none());
@@ -536,7 +536,7 @@ mod tests {
 
         upsert_server(
             &p,
-            McpScopeDto::Local,
+            WritableScopeDto::Local,
             "loc",
             json!({ "command": "loc-cmd" }),
         )
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "loc");
 
-        remove_server(&p, McpScopeDto::Local, "loc").unwrap();
+        remove_server(&p, WritableScopeDto::Local, "loc").unwrap();
         let after: Value =
             serde_json::from_str(&std::fs::read_to_string(&p.global_config_path).unwrap()).unwrap();
         assert!(after["projects"][&key]["mcpServers"].get("loc").is_none());
@@ -579,9 +579,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let p = paths(dir.path());
         for (scope, marker) in [
-            (McpScopeDto::User, "user-cmd"),
-            (McpScopeDto::Local, "local-cmd"),
-            (McpScopeDto::Project, "project-cmd"),
+            (WritableScopeDto::User, "user-cmd"),
+            (WritableScopeDto::Local, "local-cmd"),
+            (WritableScopeDto::Project, "project-cmd"),
         ] {
             upsert_server(&p, scope, "shared-name", json!({ "command": marker })).unwrap();
         }
@@ -616,7 +616,11 @@ mod tests {
         std::fs::write(project_mcp_path(dir.path()), "{ not json").unwrap();
         std::fs::write(&p.global_config_path, "{ not json").unwrap();
 
-        for scope in [McpScopeDto::Project, McpScopeDto::User, McpScopeDto::Local] {
+        for scope in [
+            WritableScopeDto::Project,
+            WritableScopeDto::User,
+            WritableScopeDto::Local,
+        ] {
             let err = upsert_server(&p, scope, "x", json!({ "command": "x" })).unwrap_err();
             assert!(
                 err.contains("not valid JSON") || err.to_lowercase().contains("invalid"),
@@ -647,9 +651,9 @@ mod tests {
     fn removing_an_absent_server_is_not_an_error_and_creates_no_file() {
         let dir = tempdir().unwrap();
         let p = paths(dir.path());
-        remove_server(&p, McpScopeDto::Project, "never-existed").unwrap();
-        remove_server(&p, McpScopeDto::User, "never-existed").unwrap();
-        remove_server(&p, McpScopeDto::Local, "never-existed").unwrap();
+        remove_server(&p, WritableScopeDto::Project, "never-existed").unwrap();
+        remove_server(&p, WritableScopeDto::User, "never-existed").unwrap();
+        remove_server(&p, WritableScopeDto::Local, "never-existed").unwrap();
 
         assert!(
             !project_mcp_path(dir.path()).exists(),
@@ -670,12 +674,12 @@ mod tests {
         let p = paths(dir.path());
         upsert_server(
             &p,
-            McpScopeDto::Project,
+            WritableScopeDto::Project,
             "linear",
             json!({ "command": "npx" }),
         )
         .unwrap();
-        remove_server(&p, McpScopeDto::Project, "linear").unwrap();
+        remove_server(&p, WritableScopeDto::Project, "linear").unwrap();
         let raw = std::fs::read_to_string(project_mcp_path(dir.path())).unwrap();
         let parsed: Value = serde_json::from_str(&raw).unwrap();
         assert!(parsed["mcpServers"].get("linear").is_none());
@@ -694,8 +698,8 @@ mod tests {
         let p = paths(dir.path());
         std::fs::write(&p.global_config_path, r#"{"mcpServers":"oops"}"#).unwrap();
 
-        let err =
-            upsert_server(&p, McpScopeDto::User, "new", json!({ "command": "n" })).unwrap_err();
+        let err = upsert_server(&p, WritableScopeDto::User, "new", json!({ "command": "n" }))
+            .unwrap_err();
         assert!(
             err.contains("mcpServers") && err.contains("new"),
             "expected a refusal naming the key and server, got: {err}"
@@ -719,8 +723,13 @@ mod tests {
         let p = paths(dir.path());
         std::fs::write(&p.global_config_path, r#"{"projects":"oops"}"#).unwrap();
 
-        let err =
-            upsert_server(&p, McpScopeDto::Local, "new", json!({ "command": "n" })).unwrap_err();
+        let err = upsert_server(
+            &p,
+            WritableScopeDto::Local,
+            "new",
+            json!({ "command": "n" }),
+        )
+        .unwrap_err();
         assert!(
             err.contains("new") || err.contains("mcpServers"),
             "expected a refusal naming what could not be confirmed, got: {err}"
@@ -744,8 +753,13 @@ mod tests {
         )
         .unwrap();
 
-        let err =
-            upsert_server(&p, McpScopeDto::Local, "new", json!({ "command": "n" })).unwrap_err();
+        let err = upsert_server(
+            &p,
+            WritableScopeDto::Local,
+            "new",
+            json!({ "command": "n" }),
+        )
+        .unwrap_err();
         assert!(
             err.contains("mcpServers") && err.contains("new"),
             "expected a refusal naming the key and server, got: {err}"
@@ -766,8 +780,13 @@ mod tests {
         )
         .unwrap();
 
-        let err =
-            upsert_server(&p, McpScopeDto::Project, "new", json!({ "command": "n" })).unwrap_err();
+        let err = upsert_server(
+            &p,
+            WritableScopeDto::Project,
+            "new",
+            json!({ "command": "n" }),
+        )
+        .unwrap_err();
         assert!(
             err.contains("bare-map"),
             "expected a bare-map refusal, got: {err}"
@@ -787,8 +806,13 @@ mod tests {
         let p = paths(dir.path());
         std::fs::write(project_mcp_path(dir.path()), r#"{"mcpServers":"oops"}"#).unwrap();
 
-        let err =
-            upsert_server(&p, McpScopeDto::Project, "new", json!({ "command": "n" })).unwrap_err();
+        let err = upsert_server(
+            &p,
+            WritableScopeDto::Project,
+            "new",
+            json!({ "command": "n" }),
+        )
+        .unwrap_err();
         assert!(
             err.contains("not a JSON object"),
             "expected a non-object refusal, got: {err}"

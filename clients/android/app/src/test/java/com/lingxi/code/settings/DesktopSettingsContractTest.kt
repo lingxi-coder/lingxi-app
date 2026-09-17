@@ -41,7 +41,7 @@ class DesktopSettingsContractTest {
         val rules = commands.filterIsInstance<ClientCommand.UpdatePermissionRules>().single()
         assertEquals(listOf("Bash(ls)"),rules.add)
         assertEquals(listOf("Write"),rules.remove)
-        assertEquals(com.lingxi.code.bindings.SettingsDestinationDto.PROJECT,rules.destination)
+        assertEquals(com.lingxi.code.bindings.WritableScopeDto.PROJECT,rules.destination)
         assertEquals("plan",commands.filterIsInstance<ClientCommand.SetDefaultPermissionMode>().single().mode)
         assertEquals(listOf("/tmp/work"),commands.filterIsInstance<ClientCommand.UpdateWorkspaceDirectories>().single().add)
     }

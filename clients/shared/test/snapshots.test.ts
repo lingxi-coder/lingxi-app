@@ -185,7 +185,7 @@ function validatePermissionResponse(v: unknown): void {
 }
 
 function validateSettingsDestination(v: unknown): void {
-  assert.ok(['user', 'project', 'local'].includes(v as string), `unknown SettingsDestinationDto "${String(v)}"`);
+  assert.ok(['user', 'project', 'local'].includes(v as string), `unknown WritableScopeDto "${String(v)}"`);
 }
 
 function validateConfigurationAdminCommand(v: unknown): void {
@@ -202,7 +202,7 @@ function validatePermissionBehavior(v: unknown): void {
 }
 
 function validateMcpScope(v: unknown): void {
-  assert.ok(['user', 'local', 'project'].includes(v as string), `unknown McpScopeDto "${String(v)}"`);
+  assert.ok(['user', 'local', 'project'].includes(v as string), `unknown WritableScopeDto "${String(v)}"`);
 }
 
 function validateStringArray(v: unknown): void {

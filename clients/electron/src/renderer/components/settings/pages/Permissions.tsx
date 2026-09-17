@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ClientCommand, PermissionBehaviorDto, SettingsDestinationDto } from '@lingxi/bridge-client';
+import type { ClientCommand, PermissionBehaviorDto, WritableScopeDto } from '@lingxi/bridge-client';
 import { Card, FieldProvenanceNotice, ProvenanceBadge, Row, type Provenance } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
@@ -45,7 +45,7 @@ export function permissionsFromLayer(snapshot: SettingsSnapshot | null, layer: s
 }
 
 export interface PermissionRuleEdit {
-  destination?: SettingsDestinationDto;
+  destination?: WritableScopeDto;
   behavior: PermissionBehaviorDto;
   add?: string[];
   remove?: string[];

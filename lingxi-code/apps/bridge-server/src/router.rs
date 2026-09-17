@@ -79,8 +79,8 @@ use client_adapter::lowering::{
 };
 use client_adapter::ClientEventSink;
 use client_protocol::commands::{
-    ClientCommand, HookAdminCommandDto, ListingKindDto, McpAdminCommandDto, McpScopeDto,
-    PermissionBehaviorDto, PluginAdminCommandDto, SettingsDestinationDto, SkillAdminCommandDto,
+    ClientCommand, HookAdminCommandDto, ListingKindDto, McpAdminCommandDto, PermissionBehaviorDto,
+    PluginAdminCommandDto, SkillAdminCommandDto, WritableScopeDto,
 };
 use client_protocol::controls::{
     ConversationControlsDto, ReasoningControlStateDto, ReasoningSelectionDto,
@@ -835,7 +835,7 @@ impl EngineCommandRouter {
     /// this router uses, rather than a dedicated failure event.
     async fn apply_settings_patch(
         &self,
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         patch_json: &str,
         sink: &dyn ClientEventSink,
     ) {
@@ -909,7 +909,7 @@ impl EngineCommandRouter {
     /// matching claude-code's own parser.
     async fn apply_permission_rule_update(
         &self,
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         behavior: PermissionBehaviorDto,
         add: Vec<String>,
         remove: Vec<String>,
@@ -984,7 +984,7 @@ impl EngineCommandRouter {
     /// swallowed.
     async fn apply_default_permission_mode(
         &self,
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         mode: String,
         sink: &dyn ClientEventSink,
     ) {
@@ -1029,7 +1029,7 @@ impl EngineCommandRouter {
     /// [`Self::apply_permission_rule_update`].
     async fn apply_workspace_directories_update(
         &self,
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         add: Vec<String>,
         remove: Vec<String>,
         sink: &dyn ClientEventSink,
@@ -1095,7 +1095,7 @@ impl EngineCommandRouter {
     /// would not even show the new value).
     async fn apply_mcp_upsert(
         &self,
-        scope: McpScopeDto,
+        scope: WritableScopeDto,
         name: &str,
         config_json: &str,
         sink: &dyn ClientEventSink,
@@ -1151,7 +1151,12 @@ impl EngineCommandRouter {
     /// Route [`ClientCommand::RemoveMcpServer`] to `mcp_bridge::remove_server`.
     /// Same context/error-kind shape as [`Self::apply_mcp_upsert`], minus the
     /// `config_json` decode (there is nothing to parse for a removal).
-    async fn apply_mcp_remove(&self, scope: McpScopeDto, name: &str, sink: &dyn ClientEventSink) {
+    async fn apply_mcp_remove(
+        &self,
+        scope: WritableScopeDto,
+        name: &str,
+        sink: &dyn ClientEventSink,
+    ) {
         let Some(mcp) = self.mcp.as_ref() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,

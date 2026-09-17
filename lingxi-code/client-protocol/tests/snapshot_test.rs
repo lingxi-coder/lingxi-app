@@ -41,8 +41,8 @@ use std::path::{Path, PathBuf};
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
     AppCreateModeDto, AudioResultDto, ClientCommand, HookAdminCommandDto, ImageRefDto,
-    ListingKindDto, McpAdminCommandDto, McpScopeDto, PermissionBehaviorDto, PluginAdminCommandDto,
-    PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto, SkillAdminCommandDto,
+    ListingKindDto, McpAdminCommandDto, PermissionBehaviorDto, PluginAdminCommandDto,
+    PromptModeDto, ProviderCredentialSecretDto, SkillAdminCommandDto, WritableScopeDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -1845,14 +1845,14 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/update_settings.json",
             ClientCommand::UpdateSettings {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 patch_json: r#"{"outputStyle":"terse"}"#.to_string(),
             },
         ),
         (
             "command/update_permission_rules.json",
             ClientCommand::UpdatePermissionRules {
-                destination: SettingsDestinationDto::Project,
+                destination: WritableScopeDto::Project,
                 behavior: PermissionBehaviorDto::Allow,
                 add: vec!["Bash(ls:*)".to_string()],
                 remove: vec![],
@@ -1861,14 +1861,14 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/set_default_permission_mode.json",
             ClientCommand::SetDefaultPermissionMode {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 mode: "acceptEdits".to_string(),
             },
         ),
         (
             "command/update_workspace_directories.json",
             ClientCommand::UpdateWorkspaceDirectories {
-                destination: SettingsDestinationDto::Local,
+                destination: WritableScopeDto::Local,
                 add: vec!["/tmp/extra".to_string()],
                 remove: vec![],
             },
@@ -1876,7 +1876,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/upsert_mcp_server.json",
             ClientCommand::UpsertMcpServer {
-                scope: McpScopeDto::Project,
+                scope: WritableScopeDto::Project,
                 name: "linear".to_string(),
                 config_json: r#"{"command":"npx","args":["-y","linear-mcp"]}"#.to_string(),
             },
@@ -1884,7 +1884,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/remove_mcp_server.json",
             ClientCommand::RemoveMcpServer {
-                scope: McpScopeDto::User,
+                scope: WritableScopeDto::User,
                 name: "linear".to_string(),
             },
         ),

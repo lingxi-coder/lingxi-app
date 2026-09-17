@@ -33,19 +33,28 @@ fn version_is_semver() {
     }
 }
 
-/// Multi-connection providers establish major 14: `ProviderModelCatalogEntryDto`
-/// gains `group` + `connection_id` so several catalog entries can say they are
-/// one vendor reached different ways. The JSON is additive and both fields are
-/// last in the record, but the UniFFI-generated mobile record grows two members
-/// and those layouts are positional, so — as for 9.0.0 and 12.0.0 — it is a real
-/// major bump.
+/// Merging the two writable-scope DTOs establishes major 16.
+/// `SettingsDestinationDto` and `McpScopeDto` were the same three variants with
+/// the same bare `snake_case` wire strings and the same written-out rationale;
+/// they are now one `WritableScopeDto`. The wire VALUES are unchanged —
+/// `"user"` / `"project"` / `"local"` either way — but six indexed leaves are
+/// removed and six command fields are retyped, which the structural guard
+/// reports as twelve breaking entries. Verified by reverting to 15.0.0, where
+/// the guard refuses and names all twelve.
+///
+/// `MemoryTierDto` was deliberately left out of the merge: different variant
+/// set, and internally tagged rather than a bare string.
+///
+/// (Major 14 was multi-connection providers: `ProviderModelCatalogEntryDto`
+/// gained `group` + `connection_id`, additive in JSON but positional in the
+/// UniFFI-generated mobile record.)
 ///
 /// This test is the deliberate second lock on the version: the structural guard
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_fifteen_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "15.0.0");
+fn version_is_sixteen_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "16.0.0");
 }
 
 fn repository_root() -> PathBuf {

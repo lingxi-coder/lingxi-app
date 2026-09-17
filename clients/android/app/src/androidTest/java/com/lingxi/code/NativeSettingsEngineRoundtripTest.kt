@@ -30,9 +30,9 @@ class NativeSettingsEngineRoundtripTest {
             parentFile!!.mkdirs(); writeText("""{"viewMode":"focus"}""")
         }
         val layers = listOf(
-            Triple(SettingsDestinationDto.USER, userFile, "terse"),
-            Triple(SettingsDestinationDto.PROJECT, File(workspace, ".lingxi/settings.json"), "verbose"),
-            Triple(SettingsDestinationDto.LOCAL, File(workspace, ".lingxi/settings.local.json"), "default"),
+            Triple(WritableScopeDto.USER, userFile, "terse"),
+            Triple(WritableScopeDto.PROJECT, File(workspace, ".lingxi/settings.json"), "verbose"),
+            Triple(WritableScopeDto.LOCAL, File(workspace, ".lingxi/settings.local.json"), "default"),
         )
         try {
             suspend fun exercise(write: Boolean) {

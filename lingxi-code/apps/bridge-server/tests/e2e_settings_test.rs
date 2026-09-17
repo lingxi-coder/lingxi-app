@@ -30,7 +30,7 @@ use bridge::wire::Frame;
 use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::boot;
 use client_protocol::commands::{
-    ClientCommand, ListingKindDto, PermissionBehaviorDto, SettingsDestinationDto,
+    ClientCommand, ListingKindDto, PermissionBehaviorDto, WritableScopeDto,
 };
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use engine_desktop::DesktopConfig;
@@ -408,7 +408,7 @@ async fn update_settings_write_lands_in_the_real_file_and_preserves_siblings() {
     send_frame(
         &mut ws,
         &submit(&ClientCommand::UpdateSettings {
-            destination: SettingsDestinationDto::User,
+            destination: WritableScopeDto::User,
             patch_json: r#"{"outputStyle":"verbose"}"#.to_string(),
         }),
     )
@@ -459,7 +459,7 @@ async fn update_permission_rules_lands_in_the_real_project_file() {
     send_frame(
         &mut ws,
         &submit(&ClientCommand::UpdatePermissionRules {
-            destination: SettingsDestinationDto::Project,
+            destination: WritableScopeDto::Project,
             behavior: PermissionBehaviorDto::Allow,
             add: vec!["Bash(ls)".to_string()],
             remove: Vec::new(),
@@ -514,7 +514,7 @@ async fn update_settings_refuses_to_clobber_a_broken_layer_file() {
     send_frame(
         &mut ws,
         &submit(&ClientCommand::UpdateSettings {
-            destination: SettingsDestinationDto::Local,
+            destination: WritableScopeDto::Local,
             patch_json: r#"{"outputStyle":"x"}"#.to_string(),
         }),
     )

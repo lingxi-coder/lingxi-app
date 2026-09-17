@@ -553,9 +553,16 @@ pub struct MemoryEntryDto {
     pub size_bytes: u64,
 }
 
-/// Memory tier — the lowered `protocol::MemoryEntryTier`
-/// (`protocol/src/messages.rs:218`). Internally tagged on `type`, `snake_case`.
-/// `#[non_exhaustive]` so a future tier is additive.
+/// Memory tier — the lowered `protocol::MemoryEntryTier`.
+/// Internally tagged on `type`, `snake_case`. `#[non_exhaustive]` so a future
+/// tier is additive.
+///
+/// NOT merged into [`crate::commands::WritableScopeDto`], which absorbed the
+/// two DTOs that really were one concept. This one is a different set
+/// (`session`/`team` exist here and nowhere else; `managed` does not exist
+/// here) AND a different wire shape — those two are bare strings, this is
+/// internally tagged. Merging would have widened a write destination to accept
+/// `session`, and widened a memory tier to accept `local`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]

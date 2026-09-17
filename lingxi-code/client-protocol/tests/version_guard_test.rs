@@ -983,7 +983,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::UpdateSettings", "update_settings");
     put(
         "ClientCommand::UpdateSettings.destination",
-        "SettingsDestinationDto",
+        "WritableScopeDto",
     );
     put("ClientCommand::UpdateSettings.patch_json", "String");
 
@@ -993,7 +993,7 @@ fn current_contract_index() -> ContractIndex {
     );
     put(
         "ClientCommand::UpdatePermissionRules.destination",
-        "SettingsDestinationDto",
+        "WritableScopeDto",
     );
     put(
         "ClientCommand::UpdatePermissionRules.behavior",
@@ -1008,7 +1008,7 @@ fn current_contract_index() -> ContractIndex {
     );
     put(
         "ClientCommand::SetDefaultPermissionMode.destination",
-        "SettingsDestinationDto",
+        "WritableScopeDto",
     );
     put("ClientCommand::SetDefaultPermissionMode.mode", "String");
 
@@ -1018,7 +1018,7 @@ fn current_contract_index() -> ContractIndex {
     );
     put(
         "ClientCommand::UpdateWorkspaceDirectories.destination",
-        "SettingsDestinationDto",
+        "WritableScopeDto",
     );
     put(
         "ClientCommand::UpdateWorkspaceDirectories.add",
@@ -1030,12 +1030,12 @@ fn current_contract_index() -> ContractIndex {
     );
 
     put("ClientCommand::UpsertMcpServer", "upsert_mcp_server");
-    put("ClientCommand::UpsertMcpServer.scope", "McpScopeDto");
+    put("ClientCommand::UpsertMcpServer.scope", "WritableScopeDto");
     put("ClientCommand::UpsertMcpServer.name", "String");
     put("ClientCommand::UpsertMcpServer.config_json", "String");
 
     put("ClientCommand::RemoveMcpServer", "remove_mcp_server");
-    put("ClientCommand::RemoveMcpServer.scope", "McpScopeDto");
+    put("ClientCommand::RemoveMcpServer.scope", "WritableScopeDto");
     put("ClientCommand::RemoveMcpServer.name", "String");
 
     put("ClientCommand::AudioResponse", "audio_response");
@@ -1070,10 +1070,10 @@ fn current_contract_index() -> ContractIndex {
     put("AudioResultDto::Failed.kind", "AudioErrorKindDto");
     put("AudioResultDto::Failed.message", "String");
 
-    // ── McpScopeDto (commands.rs) ─────────────────────────────────────────
-    put("McpScopeDto::User", "user");
-    put("McpScopeDto::Local", "local");
-    put("McpScopeDto::Project", "project");
+    // ── WritableScopeDto (commands.rs) ─────────────────────────────────────────
+    put("WritableScopeDto::User", "user");
+    put("WritableScopeDto::Local", "local");
+    put("WritableScopeDto::Project", "project");
 
     // ── PromptModeDto (commands.rs) ───────────────────────────────────────
     put("PromptModeDto::Normal", "normal");
@@ -1105,10 +1105,10 @@ fn current_contract_index() -> ContractIndex {
     put("ListingKindDto::Tasks", "tasks");
     put("ListingKindDto::Coordinator", "coordinator");
 
-    // ── SettingsDestinationDto (commands.rs) ──────────────────────────────
-    put("SettingsDestinationDto::User", "user");
-    put("SettingsDestinationDto::Project", "project");
-    put("SettingsDestinationDto::Local", "local");
+    // ── WritableScopeDto (commands.rs) ──────────────────────────────
+    put("WritableScopeDto::User", "user");
+    put("WritableScopeDto::Project", "project");
+    put("WritableScopeDto::Local", "local");
 
     // ── PermissionBehaviorDto (commands.rs) ───────────────────────────────
     put("PermissionBehaviorDto::Allow", "allow");
@@ -2731,8 +2731,8 @@ fn current_contract_matches_index_or_version_bumped() {
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
         AppCreateModeDto, AudioErrorKindDto, AudioResultDto, ClientCommand, CommandResultDto,
-        ImageRefDto, ListingKindDto, McpScopeDto, PermissionBehaviorDto, PromptModeDto,
-        ProviderCredentialSecretDto, SettingsDestinationDto,
+        ImageRefDto, ListingKindDto, PermissionBehaviorDto, PromptModeDto,
+        ProviderCredentialSecretDto, WritableScopeDto,
     };
     use client_protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -2980,31 +2980,31 @@ fn contract_index_covers_every_dto() {
             approved: false,
         },
         ClientCommand::UpdateSettings {
-            destination: SettingsDestinationDto::User,
+            destination: WritableScopeDto::User,
             patch_json: String::new(),
         },
         ClientCommand::UpdatePermissionRules {
-            destination: SettingsDestinationDto::User,
+            destination: WritableScopeDto::User,
             behavior: PermissionBehaviorDto::Allow,
             add: Vec::new(),
             remove: Vec::new(),
         },
         ClientCommand::SetDefaultPermissionMode {
-            destination: SettingsDestinationDto::User,
+            destination: WritableScopeDto::User,
             mode: String::new(),
         },
         ClientCommand::UpdateWorkspaceDirectories {
-            destination: SettingsDestinationDto::User,
+            destination: WritableScopeDto::User,
             add: Vec::new(),
             remove: Vec::new(),
         },
         ClientCommand::UpsertMcpServer {
-            scope: McpScopeDto::Project,
+            scope: WritableScopeDto::Project,
             name: String::new(),
             config_json: String::new(),
         },
         ClientCommand::RemoveMcpServer {
-            scope: McpScopeDto::Project,
+            scope: WritableScopeDto::Project,
             name: String::new(),
         },
         ClientCommand::AudioResponse {
@@ -3045,8 +3045,8 @@ fn contract_index_covers_every_dto() {
         AudioErrorKindDto::SynthesisFailed,
         AudioErrorKindDto::Other,
     ];
-    let _mcp_scope = McpScopeDto::User;
-    let _settings_destination = SettingsDestinationDto::User;
+    let _mcp_scope = WritableScopeDto::User;
+    let _settings_destination = WritableScopeDto::User;
     let _permission_behavior = PermissionBehaviorDto::Allow;
     let _recovery_state = TurnRecoveryStateDto::PausedRecoverable;
     let _mode = PromptModeDto::Normal;

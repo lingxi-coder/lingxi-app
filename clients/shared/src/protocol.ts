@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '15.0.0';
+export const CLIENT_PROTOCOL_VERSION = '16.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -118,12 +118,16 @@ export type ListingKindDto =
   | { type: 'tasks' };
 
 /**
- * A writable settings layer, as named on the wire (commands.rs
- * `SettingsDestinationDto`). Deliberately narrower than the engine's full
- * `SettingsLayer` (which also has `defaults`/`cli`/`managed`/`env`): those
- * layers cannot be user-written. A bare wire string.
+ * A settings tier the user can WRITE to, as named on the wire (commands.rs
+ * `WritableScopeDto`). Deliberately narrower than the engine's full `Scope`
+ * (which also has `defaults`/`cli`/`managed`/`env`, and for MCP
+ * `dynamic`/`enterprise`): those tiers cannot be user-written, so they are
+ * omitted rather than accepted and rejected at runtime.
+ *
+ * This was two identical types — one for settings destinations, one for MCP
+ * scopes — merged in protocol 16.0.0. A bare wire string.
  */
-export type SettingsDestinationDto = 'user' | 'project' | 'local';
+export type WritableScopeDto = 'user' | 'project' | 'local';
 
 /**
  * The behavior bucket a permission rule belongs to
@@ -131,13 +135,6 @@ export type SettingsDestinationDto = 'user' | 'project' | 'local';
  * `PermissionBehaviorDto`). A bare wire string.
  */
 export type PermissionBehaviorDto = 'allow' | 'deny' | 'ask';
-
-/**
- * A writable MCP server-definition scope, as named on the wire (commands.rs
- * `McpScopeDto`). Deliberately narrower than the full `ConfigScope` (which
- * also has read-only `dynamic`/`enterprise`). A bare wire string.
- */
-export type McpScopeDto = 'user' | 'local' | 'project';
 
 /**
  * Coarse, branchable failure class for {@link AudioResultDto}'s `failed`
@@ -398,25 +395,25 @@ export type ClientCommand =
   // ── Lifecycle ───────────────────────────────────────────────────────────────
   | { type: 'request_exit' }
   // ── Settings (persisted) ─────────────────────────────────────────────────────
-  | { type: 'update_settings'; destination: SettingsDestinationDto; patch_json: string }
+  | { type: 'update_settings'; destination: WritableScopeDto; patch_json: string }
   // ── Permissions (persisted) ──────────────────────────────────────────────────
   | {
       type: 'update_permission_rules';
-      destination: SettingsDestinationDto;
+      destination: WritableScopeDto;
       behavior: PermissionBehaviorDto;
       add: string[];
       remove: string[];
     }
-  | { type: 'set_default_permission_mode'; destination: SettingsDestinationDto; mode: string }
+  | { type: 'set_default_permission_mode'; destination: WritableScopeDto; mode: string }
   | {
       type: 'update_workspace_directories';
-      destination: SettingsDestinationDto;
+      destination: WritableScopeDto;
       add: string[];
       remove: string[];
     }
   // ── MCP servers (persisted) ──────────────────────────────────────────────────
-  | { type: 'upsert_mcp_server'; scope: McpScopeDto; name: string; config_json: string }
-  | { type: 'remove_mcp_server'; scope: McpScopeDto; name: string }
+  | { type: 'upsert_mcp_server'; scope: WritableScopeDto; name: string; config_json: string }
+  | { type: 'remove_mcp_server'; scope: WritableScopeDto; name: string }
   | { type: 'skill_admin'; command: SkillAdminCommandDto }
   | { type: 'mcp_admin'; command: McpAdminCommandDto }
   | { type: 'plugin_admin'; command: PluginAdminCommandDto }

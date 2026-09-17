@@ -13,7 +13,7 @@ enum DesktopSettingsLayer: String, CaseIterable, Identifiable {
     /// 落盘位置是否取决于当前项目。`user` 是本机全局的，给它标一个项目名就是在
     /// 暗示一个并不存在的作用域。
     var isProjectScoped: Bool { self == .project || self == .local }
-    var destination: SettingsDestinationDto? {
+    var destination: WritableScopeDto? {
         switch self { case .user: .user; case .project: .project; case .local: .local; case .managed: nil }
     }
 }

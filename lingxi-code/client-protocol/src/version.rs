@@ -120,4 +120,4 @@
 /// 15.0.0 adds versioned cron configuration and history records to native DTOs.
 /// (Renumbered from 14.0.0: multi-connection providers landed on 14.0.0 first.
 /// The owning session should replace this line with its own wording.)
-pub const CLIENT_PROTOCOL_VERSION: &str = "15.0.0";
+pub const CLIENT_PROTOCOL_VERSION: &str = "16.0.0";

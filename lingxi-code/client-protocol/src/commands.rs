@@ -757,11 +757,11 @@ pub enum ClientCommand {
     // writer — the three commands below. Only `User` / `Project` / `Local`
     // are valid destinations — the engine's full settings-layer enum also
     // has non-writable layers (`defaults` / `cli` / `managed` / `env`);
-    // [`SettingsDestinationDto`] omits them so a write to one is
+    // [`WritableScopeDto`] omits them so a write to one is
     // unrepresentable on the wire, rather than a runtime rejection.
     UpdateSettings {
         // Which writable layer's file to edit.
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         // A JSON object of top-level key → new value (or `null` to delete).
         patch_json: String,
     },
@@ -778,7 +778,7 @@ pub enum ClientCommand {
     // locked atomic transaction.
     UpdatePermissionRules {
         // Which writable layer's file to edit.
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         // The behavior bucket every rule in `add`/`remove` belongs to.
         behavior: PermissionBehaviorDto,
         // Rule strings (`"Tool"` or `"Tool(content)"`) to add. Parsing is
@@ -799,7 +799,7 @@ pub enum ClientCommand {
     // happened.
     SetDefaultPermissionMode {
         // Which writable layer's file to edit.
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         // Permission-mode wire id (`default`, `acceptEdits`, `plan`, `auto`,
         // `dontAsk`, or `bypassPermissions` — the last is always refused).
         mode: String,
@@ -809,7 +809,7 @@ pub enum ClientCommand {
     // single writable layer, in one locked atomic transaction.
     UpdateWorkspaceDirectories {
         // Which writable layer's file to edit.
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         // Directory strings to add, stored verbatim (no canonicalization).
         add: Vec<String>,
         // Directory strings to remove, compared verbatim against the file.
@@ -846,7 +846,7 @@ pub enum ClientCommand {
     // wants) is how a client observes the change.
     UpsertMcpServer {
         // Which writable MCP scope to edit.
-        scope: McpScopeDto,
+        scope: WritableScopeDto,
         // Server name (the `mcpServers` map key). Must be non-empty.
         name: String,
         // A JSON object holding the server's transport config.
@@ -859,7 +859,7 @@ pub enum ClientCommand {
     // doc comment for why.
     RemoveMcpServer {
         // Which writable MCP scope to edit.
-        scope: McpScopeDto,
+        scope: WritableScopeDto,
         // Server name (the `mcpServers` map key) to remove.
         name: String,
     },
@@ -981,44 +981,32 @@ pub enum ClientCommand {
     },
 }
 
-/// A writable MCP server-definition scope, as named on the wire. Deliberately
-/// narrower than `mcp::ConfigScope`'s full set (which also has `Dynamic`
-/// (plugins) and `Enterprise` (managed policy)): those are READ-ONLY —
-/// nothing user-initiated ever writes them — so this enum omits them rather
-/// than accepting them and rejecting at runtime.
+/// A settings tier the user can WRITE to, as named on the wire.
 ///
-/// - `User` → `~/.lingxi.json`, top-level `mcpServers`.
-/// - `Local` → `~/.lingxi.json`, under `projects[<cwd>].mcpServers`.
-/// - `Project` → `<project>/.mcp.json`.
+/// This was two enums — `WritableScopeDto` and `WritableScopeDto` — with the
+/// same three variants, the same bare `snake_case` wire strings, and the same
+/// rationale written out twice: the read-only tiers (`Managed`, `Env`, `Cli`,
+/// `Defaults`; `Dynamic`, `Enterprise`) are omitted rather than accepted and
+/// rejected at runtime. One concept, so one type.
 ///
-/// A bare wire STRING (`"user"` / `"local"` / `"project"`).
+/// The lowered [`protocol::WritableScope`]. A bare wire STRING
+/// (`"user"` / `"project"` / `"local"`).
+///
+/// - `User` → `<lingxi_home>/settings.json`; for MCP, `~/.lingxi.json`
+///   top-level `mcpServers`.
+/// - `Project` → `<project>/<DOT_DIR>/settings.json`; for MCP,
+///   `<project>/.mcp.json`.
+/// - `Local` → `<project>/<DOT_DIR>/settings.local.json`; for MCP,
+///   `~/.lingxi.json` under `projects[<cwd>].mcpServers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
-pub enum McpScopeDto {
-    /// `~/.lingxi.json`, top-level `mcpServers`.
+pub enum WritableScopeDto {
+    /// The user's own settings.
     User,
-    /// `~/.lingxi.json`, `projects[<cwd>].mcpServers`.
-    Local,
-    /// `<project>/.mcp.json`.
+    /// Checked into the project.
     Project,
-}
-
-/// A writable settings layer, as named on the wire. Deliberately narrower
-/// than the engine's full `SettingsLayer` (which also has `Defaults`, `Cli`,
-/// `Managed`, `Env`): those layers cannot be user-written, so this enum omits
-/// them rather than accepting them and rejecting at runtime.
-///
-/// A bare wire STRING (`"user"` / `"project"` / `"local"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(rename_all = "snake_case")]
-pub enum SettingsDestinationDto {
-    /// `<lingxi_home>/settings.json`.
-    User,
-    /// `<project_dir>/<DOT_DIR>/settings.json`.
-    Project,
-    /// `<project_dir>/<DOT_DIR>/settings.local.json`.
+    /// Gitignored, per-clone.
     Local,
 }
 

@@ -39,8 +39,8 @@ use bridge_server::server::BridgeConnection;
 use bridge_server::settings_bridge::{SettingsContext, SettingsPaths};
 use client_adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
 use client_protocol::commands::{
-    ClientCommand, ListingKindDto, McpScopeDto, PermissionBehaviorDto, ProviderCredentialSecretDto,
-    SettingsDestinationDto,
+    ClientCommand, ListingKindDto, PermissionBehaviorDto, ProviderCredentialSecretDto,
+    WritableScopeDto,
 };
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::listings::SessionModeDto;
@@ -3064,7 +3064,7 @@ async fn update_settings_with_a_null_value_deletes_the_key_on_disk() {
     router
         .route(
             ClientCommand::UpdateSettings {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 patch_json: r#"{"outputStyle": null}"#.to_string(),
             },
             sink.clone(),
@@ -3115,7 +3115,7 @@ async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
     router
         .route(
             ClientCommand::UpdateSettings {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 patch_json: r#"["outputStyle"]"#.to_string(),
             },
             sink.clone(),
@@ -3164,7 +3164,7 @@ async fn update_settings_rejects_invalid_json_with_protocol_error() {
     router
         .route(
             ClientCommand::UpdateSettings {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 patch_json: "{ not json".to_string(),
             },
             sink.clone(),
@@ -3248,7 +3248,7 @@ async fn update_permission_rules_writes_the_named_layer_and_preserves_other_keys
     router
         .route(
             ClientCommand::UpdatePermissionRules {
-                destination: SettingsDestinationDto::Project,
+                destination: WritableScopeDto::Project,
                 behavior: PermissionBehaviorDto::Allow,
                 add: vec!["Bash(ls:*)".to_string()],
                 remove: vec![],
@@ -3300,7 +3300,7 @@ async fn update_permission_rules_reports_when_nothing_was_requested() {
     router
         .route(
             ClientCommand::UpdatePermissionRules {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 behavior: PermissionBehaviorDto::Allow,
                 add: vec![],
                 remove: vec![],
@@ -3354,7 +3354,7 @@ async fn update_permission_rules_reports_only_the_error_when_nothing_changed_bef
     router
         .route(
             ClientCommand::UpdatePermissionRules {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 behavior: PermissionBehaviorDto::Allow,
                 add: vec![],
                 remove: vec!["Bash".to_string()],
@@ -3406,7 +3406,7 @@ async fn set_default_permission_mode_writes_the_named_layer_and_preserves_other_
     router
         .route(
             ClientCommand::SetDefaultPermissionMode {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 mode: "acceptEdits".to_string(),
             },
             sink.clone(),
@@ -3457,7 +3457,7 @@ async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
     router
         .route(
             ClientCommand::SetDefaultPermissionMode {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 mode: "bypassPermissions".to_string(),
             },
             sink.clone(),
@@ -3521,7 +3521,7 @@ async fn update_workspace_directories_writes_the_named_layer_and_preserves_other
     router
         .route(
             ClientCommand::UpdateWorkspaceDirectories {
-                destination: SettingsDestinationDto::Local,
+                destination: WritableScopeDto::Local,
                 add: vec!["/tmp/extra".to_string()],
                 remove: vec![],
             },
@@ -3563,7 +3563,7 @@ async fn update_permission_rules_reports_a_missing_context_instead_of_staying_si
     router
         .route(
             ClientCommand::UpdatePermissionRules {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 behavior: PermissionBehaviorDto::Allow,
                 add: vec!["Bash".to_string()],
                 remove: vec![],
@@ -3601,7 +3601,7 @@ async fn set_default_permission_mode_reports_a_missing_context_instead_of_stayin
     router
         .route(
             ClientCommand::SetDefaultPermissionMode {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 mode: "acceptEdits".to_string(),
             },
             sink.clone(),
@@ -3634,7 +3634,7 @@ async fn update_workspace_directories_reports_a_missing_context_instead_of_stayi
     router
         .route(
             ClientCommand::UpdateWorkspaceDirectories {
-                destination: SettingsDestinationDto::User,
+                destination: WritableScopeDto::User,
                 add: vec!["/tmp/extra".to_string()],
                 remove: vec![],
             },
@@ -3695,7 +3695,7 @@ async fn upsert_then_remove_mcp_server_round_trips_through_the_router() {
     router
         .route(
             ClientCommand::UpsertMcpServer {
-                scope: McpScopeDto::Project,
+                scope: WritableScopeDto::Project,
                 name: "linear".to_string(),
                 config_json: r#"{"command":"npx","args":["-y","linear-mcp"]}"#.to_string(),
             },
@@ -3717,7 +3717,7 @@ async fn upsert_then_remove_mcp_server_round_trips_through_the_router() {
     router
         .route(
             ClientCommand::RemoveMcpServer {
-                scope: McpScopeDto::Project,
+                scope: WritableScopeDto::Project,
                 name: "linear".to_string(),
             },
             sink.clone(),
@@ -3748,7 +3748,7 @@ async fn upsert_mcp_server_rejects_a_non_object_config_with_protocol_error() {
     router
         .route(
             ClientCommand::UpsertMcpServer {
-                scope: McpScopeDto::Project,
+                scope: WritableScopeDto::Project,
                 name: "linear".to_string(),
                 config_json: r#"["npx"]"#.to_string(),
             },
@@ -3791,12 +3791,12 @@ async fn mcp_commands_report_a_missing_context_instead_of_staying_silent() {
 
     for command in [
         ClientCommand::UpsertMcpServer {
-            scope: McpScopeDto::Project,
+            scope: WritableScopeDto::Project,
             name: "x".to_string(),
             config_json: r#"{"command":"x"}"#.to_string(),
         },
         ClientCommand::RemoveMcpServer {
-            scope: McpScopeDto::Project,
+            scope: WritableScopeDto::Project,
             name: "x".to_string(),
         },
     ] {
@@ -3835,7 +3835,7 @@ async fn upsert_mcp_server_rejects_an_empty_name_with_protocol_error() {
         router
             .route(
                 ClientCommand::UpsertMcpServer {
-                    scope: McpScopeDto::Project,
+                    scope: WritableScopeDto::Project,
                     name: empty_name.to_string(),
                     config_json: r#"{"command":"npx"}"#.to_string(),
                 },

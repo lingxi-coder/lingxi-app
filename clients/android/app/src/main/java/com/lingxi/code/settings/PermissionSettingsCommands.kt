@@ -2,12 +2,12 @@ package com.lingxi.code.settings
 
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.PermissionBehaviorDto
-import com.lingxi.code.bindings.SettingsDestinationDto
+import com.lingxi.code.bindings.WritableScopeDto
 import org.json.JSONObject
 
 /** Permissions is reserved by update_settings; edits must use the dedicated protocol. */
 internal fun permissionSettingsCommands(layer: String, before: JSONObject, after: JSONObject): List<ClientCommand> {
-    val destination = SettingsDestinationDto.valueOf(layer.uppercase())
+    val destination = WritableScopeDto.valueOf(layer.uppercase())
     fun strings(value: JSONObject, key: String): List<String> {
         val array = value.optJSONArray(key) ?: return emptyList()
         return (0 until array.length()).map { array.getString(it) }.distinct()

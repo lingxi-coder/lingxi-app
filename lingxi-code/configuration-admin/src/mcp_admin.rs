@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 
 use crate::mcp_bridge::{remove_server, upsert_server, McpPaths};
 use crate::settings_bridge::{apply_patch, build_snapshot, SettingsContext};
-use client_protocol::commands::SettingsDestinationDto;
+use client_protocol::commands::WritableScopeDto;
 
 #[derive(Debug, Serialize)]
 struct ScopeSnapshot {
@@ -173,7 +173,7 @@ pub fn set_project_approval(
     }
     apply_patch(
         &context.paths,
-        SettingsDestinationDto::Local,
+        WritableScopeDto::Local,
         vec![
             (
                 "enabledMcpjsonServers".to_string(),
@@ -219,11 +219,11 @@ fn required_string<'a>(payload: &'a Map<String, Value>, key: &str) -> Result<&'a
         .ok_or_else(|| format!("payload is missing `{key}`"))
 }
 
-fn scope_from_str(scope: &str) -> Result<client_protocol::commands::McpScopeDto, String> {
+fn scope_from_str(scope: &str) -> Result<client_protocol::commands::WritableScopeDto, String> {
     match scope {
-        "user" => Ok(client_protocol::commands::McpScopeDto::User),
-        "local" => Ok(client_protocol::commands::McpScopeDto::Local),
-        "project" => Ok(client_protocol::commands::McpScopeDto::Project),
+        "user" => Ok(client_protocol::commands::WritableScopeDto::User),
+        "local" => Ok(client_protocol::commands::WritableScopeDto::Local),
+        "project" => Ok(client_protocol::commands::WritableScopeDto::Project),
         _ => Err(format!("unknown mcp scope `{scope}`")),
     }
 }

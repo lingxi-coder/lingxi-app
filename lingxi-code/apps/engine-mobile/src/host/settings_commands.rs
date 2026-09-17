@@ -5,7 +5,7 @@ use ::configuration_admin::settings_bridge::{
     permission_rule_from_wire,
 };
 use client_adapter::ClientEventSink;
-use client_protocol::commands::{McpScopeDto, PermissionBehaviorDto, SettingsDestinationDto};
+use client_protocol::commands::{PermissionBehaviorDto, WritableScopeDto};
 
 impl MobileEngineHandle {
     pub(super) async fn emit_settings_snapshot(&self, sink: &dyn ClientEventSink) {
@@ -49,7 +49,7 @@ impl MobileEngineHandle {
     /// this router uses, rather than a dedicated failure event.
     pub(super) async fn apply_settings_patch(
         &self,
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         patch_json: &str,
         sink: &dyn ClientEventSink,
     ) {
@@ -123,7 +123,7 @@ impl MobileEngineHandle {
     /// matching claude-code's own parser.
     pub(super) async fn apply_permission_rule_update(
         &self,
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         behavior: PermissionBehaviorDto,
         add: Vec<String>,
         remove: Vec<String>,
@@ -198,7 +198,7 @@ impl MobileEngineHandle {
     /// swallowed.
     pub(super) async fn apply_default_permission_mode(
         &self,
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         mode: String,
         sink: &dyn ClientEventSink,
     ) {
@@ -243,7 +243,7 @@ impl MobileEngineHandle {
     /// [`Self::apply_permission_rule_update`].
     pub(super) async fn apply_workspace_directories_update(
         &self,
-        destination: SettingsDestinationDto,
+        destination: WritableScopeDto,
         add: Vec<String>,
         remove: Vec<String>,
         sink: &dyn ClientEventSink,
@@ -303,7 +303,7 @@ impl MobileEngineHandle {
 
     pub(super) async fn apply_mobile_mcp_write(
         &self,
-        scope: McpScopeDto,
+        scope: WritableScopeDto,
         name: &str,
         config: Option<&str>,
     ) {

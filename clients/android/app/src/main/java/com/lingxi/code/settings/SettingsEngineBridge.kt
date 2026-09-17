@@ -115,7 +115,7 @@ class SettingsEngineBridge {
         pendingPatch = layer to patch
         confirmationArmed = false
         mutable.value = mutable.value.copy(notice = "Waiting for engine confirmation…", savingSettings = true)
-        dispatch(ClientCommand.UpdateSettings(SettingsDestinationDto.valueOf(layer.uppercase()), patch.toString()), requestSource, requestGeneration)
+        dispatch(ClientCommand.UpdateSettings(WritableScopeDto.valueOf(layer.uppercase()), patch.toString()), requestSource, requestGeneration)
         check(requestGeneration == generation && requestSource === source) { "Engine source changed; reload settings" }
         confirmationArmed = true
         dispatch(ClientCommand.RefreshListings(listOf(ListingKindDto.SETTINGS)), requestSource, requestGeneration)

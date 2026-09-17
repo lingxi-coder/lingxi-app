@@ -35,7 +35,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
         try FileManager.default.createDirectory(at: userFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(#"{"viewMode":"focus"}"#.utf8).write(to: userFile)
         defer { try? FileManager.default.removeItem(at: root) }
-        let layers: [(SettingsDestinationDto, String, URL, String)] = [
+        let layers: [(WritableScopeDto, String, URL, String)] = [
             (.user, "user", userFile, "terse"),
             (.project, "project", workspace.appendingPathComponent(".lingxi/settings.json"), "verbose"),
             (.local, "local", workspace.appendingPathComponent(".lingxi/settings.local.json"), "default")
@@ -46,7 +46,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
     }
 
     private func exercise(root: URL, workspace: URL,
-                          layers: [(SettingsDestinationDto, String, URL, String)], write: Bool) async throws {
+                          layers: [(WritableScopeDto, String, URL, String)], write: Bool) async throws {
         let listener = SettingsRoundtripListener()
         let handle = try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
             apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,

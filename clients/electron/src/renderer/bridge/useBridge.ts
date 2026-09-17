@@ -18,13 +18,12 @@ import type {
   HookDto,
   ImageRefDto,
   McpAdminCommandDto,
-  McpScopeDto,
+  WritableScopeDto,
   PermissionBehaviorDto,
   PermissionModeId,
   PermissionRequest,
   PermissionResponseDto,
   ReasoningSelectionDto,
-  SettingsDestinationDto,
   PluginAdminCommandDto,
   SkillAdminCommandDto,
 } from '@lingxi/bridge-client';
@@ -290,7 +289,7 @@ export interface UseBridge {
    * never an optimistic echo of the raw input.
    */
   updatePermissionRules(
-    destination: SettingsDestinationDto, behavior: PermissionBehaviorDto, add: string[], remove: string[],
+    destination: WritableScopeDto, behavior: PermissionBehaviorDto, add: string[], remove: string[],
   ): Promise<void>;
   /**
    * `set_default_permission_mode` — persists `permissions.defaultMode`.
@@ -301,17 +300,17 @@ export interface UseBridge {
    * afterward so a caller can tell a refusal apart from a success by
    * comparing the requested mode against what the snapshot actually shows.
    */
-  setDefaultPermissionMode(destination: SettingsDestinationDto, mode: string): Promise<void>;
+  setDefaultPermissionMode(destination: WritableScopeDto, mode: string): Promise<void>;
   /** `update_workspace_directories` — the dedicated writer for `permissions.additionalDirectories`, same add/remove-delta shape as {@link updatePermissionRules}. */
-  updateWorkspaceDirectories(destination: SettingsDestinationDto, add: string[], remove: string[]): Promise<void>;
+  updateWorkspaceDirectories(destination: WritableScopeDto, add: string[], remove: string[]): Promise<void>;
   /** Re-pulls the MCP server listing (`refresh_listings{mcp}` → `ClientEvent::McpServers`). This is a RUNNING/merged view (name, status, transport) with no per-scope provenance — see `McpServers.tsx`'s own doc comment for why the page cannot decompose it by scope. */
   refreshMcpServers(): Promise<void>;
   /** Re-pulls the discovered-skills listing (`refresh_listings{skills}` → `ClientEvent::Skills`). Directory-discovered, NOT layered — `Skills.tsx` reads this the same way regardless of `editingLayer`. */
   refreshSkills(): Promise<void>;
   /** `upsert_mcp_server` — writes one server definition into exactly the named scope's own storage location (`~/.lingxi.json` for User/Local, `<project>/.mcp.json` for Project). Refetches the MCP listing afterward. `config` is a plain JS object; this wrapper owns the `JSON.stringify` the wire's `config_json: String` field requires. */
-  upsertMcpServer(scope: McpScopeDto, name: string, config: Record<string, unknown>): Promise<void>;
+  upsertMcpServer(scope: WritableScopeDto, name: string, config: Record<string, unknown>): Promise<void>;
   /** `remove_mcp_server` — idempotent removal from exactly the named scope. Refetches the MCP listing afterward. */
-  removeMcpServer(scope: McpScopeDto, name: string): Promise<void>;
+  removeMcpServer(scope: WritableScopeDto, name: string): Promise<void>;
   /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
   scheduledScopes: ScheduledScope[];
   scheduledContext(scopeId: string): Promise<ScheduledContext>;
@@ -2383,21 +2382,21 @@ export function useBridge(): UseBridge {
     [command, refreshSettingsSnapshot],
   );
   const updatePermissionRules = useCallback(
-    async (destination: SettingsDestinationDto, behavior: PermissionBehaviorDto, add: string[], remove: string[]) => {
+    async (destination: WritableScopeDto, behavior: PermissionBehaviorDto, add: string[], remove: string[]) => {
       await command({ type: 'update_permission_rules', destination, behavior, add, remove });
       await refreshSettingsSnapshot();
     },
     [command, refreshSettingsSnapshot],
   );
   const setDefaultPermissionMode = useCallback(
-    async (destination: SettingsDestinationDto, mode: string) => {
+    async (destination: WritableScopeDto, mode: string) => {
       await command({ type: 'set_default_permission_mode', destination, mode });
       await refreshSettingsSnapshot();
     },
     [command, refreshSettingsSnapshot],
   );
   const updateWorkspaceDirectories = useCallback(
-    async (destination: SettingsDestinationDto, add: string[], remove: string[]) => {
+    async (destination: WritableScopeDto, add: string[], remove: string[]) => {
       await command({ type: 'update_workspace_directories', destination, add, remove });
       await refreshSettingsSnapshot();
     },
@@ -2412,14 +2411,14 @@ export function useBridge(): UseBridge {
     [command],
   );
   const upsertMcpServer = useCallback(
-    async (scope: McpScopeDto, name: string, config: Record<string, unknown>) => {
+    async (scope: WritableScopeDto, name: string, config: Record<string, unknown>) => {
       await command({ type: 'upsert_mcp_server', scope, name, config_json: JSON.stringify(config) });
       await refreshMcpServers();
     },
     [command, refreshMcpServers],
   );
   const removeMcpServer = useCallback(
-    async (scope: McpScopeDto, name: string) => {
+    async (scope: WritableScopeDto, name: string) => {
       await command({ type: 'remove_mcp_server', scope, name });
       await refreshMcpServers();
     },

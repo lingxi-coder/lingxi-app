@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import type { McpScopeDto } from '@lingxi/bridge-client';
+import type { WritableScopeDto } from '@lingxi/bridge-client';
 import { Card, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
@@ -31,14 +31,14 @@ export { parseJsonObjectInput };
 /**
  * MCP 的三个作用域各自落在哪。**它和设置层不是一回事**，尽管用了同样三个词 ——
  * 见下面 `MCP_SCOPE_VS_LAYERS_NOTE`。这三条对应 `client-protocol` 里
- * `McpScopeDto` 各变体的文档：user → `~/.lingxi.json` 顶层 `mcpServers`；
+ * `WritableScopeDto` 各变体的文档：user → `~/.lingxi.json` 顶层 `mcpServers`；
  * local → 同一个 `~/.lingxi.json` 里 `projects["<项目>"]` 下；
  * project → `<项目>/.mcp.json`。
  *
  * 与设置层的说明一样不写死路径：每台机器的实际文件位置由引擎在选中条目的
  * `path` 上回传，页面已经在标题下方显示它。
  */
-const MCP_SCOPE_DESCRIPTIONS: Record<McpScopeDto, string> = {
+const MCP_SCOPE_DESCRIPTIONS: Record<WritableScopeDto, string> = {
   user: '存在主目录的配置文件里，本机所有项目共用。',
   local: '也存在主目录的配置文件里，但只对这个项目生效——文件不在项目内，不会提交。',
   project: '存在项目内的配置文件里，随仓库提交、团队共享。',
@@ -55,7 +55,7 @@ const MCP_SCOPE_VS_LAYERS_NOTE =
   + '设置的「本地」在项目内。在这里选的作用域不受设置页顶部层切换器影响。';
 
 interface ScopeSnapshot {
-  scope: McpScopeDto;
+  scope: WritableScopeDto;
   path: string;
   revision_sha256: string;
   raw_json: string;
@@ -84,14 +84,14 @@ interface McpSnapshotEnvelope {
 
 interface McpEntry {
   id: string;
-  scope: McpScopeDto;
+  scope: WritableScopeDto;
   name: string;
   config: Record<string, unknown>;
   path: string;
   revision_sha256: string;
 }
 
-type Selection = { kind: 'list' } | { kind: 'server'; id: string } | { kind: 'create'; scope: McpScopeDto };
+type Selection = { kind: 'list' } | { kind: 'server'; id: string } | { kind: 'create'; scope: WritableScopeDto };
 
 function callMcpAdmin(bridge: PageContentProps['bridge'], command: unknown) {
   const admin = (bridge as { mcpAdmin?: (payload: unknown) => Promise<unknown> }).mcpAdmin;
@@ -186,7 +186,7 @@ export function McpServers({ bridge }: PageContentProps) {
   const approval = snapshot.approval ?? {};
   const [selection, setSelection] = useState<Selection>({ kind: 'list' });
   const [search, setSearch] = useState('');
-  const [draftScope, setDraftScope] = useState<McpScopeDto>('user');
+  const [draftScope, setDraftScope] = useState<WritableScopeDto>('user');
   const [draftName, setDraftName] = useState('');
   const [draftConfigText, setDraftConfigText] = useState('{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
   const [pageError, setPageError] = useState<string | null>(null);
@@ -344,7 +344,7 @@ export function McpServers({ bridge }: PageContentProps) {
               </div>
             </div>
             <div style={sidebarListStyle()}>
-              {(['user', 'local', 'project'] as McpScopeDto[]).map((scope) => (
+              {(['user', 'local', 'project'] as WritableScopeDto[]).map((scope) => (
                 <div key={scope} style={{ display: 'grid', gap: 8 }}>
                   <div style={sidebarSectionTitleStyle(t)}>{scope}</div>
                   {filtered.filter((entry) => entry.scope === scope).map((entry) => (
@@ -383,7 +383,7 @@ export function McpServers({ bridge }: PageContentProps) {
             </div>
             <div className="mcp-editor-grid mcp-identity">
               <Field t={t} label="作用域">
-                <select value={draftScope} onChange={(event) => { const next = event.target.value as McpScopeDto; setDraftScope(next); setSelection({ kind: 'create', scope: next }); }} style={inputStyle(t)} aria-label="mcp-scope">
+                <select value={draftScope} onChange={(event) => { const next = event.target.value as WritableScopeDto; setDraftScope(next); setSelection({ kind: 'create', scope: next }); }} style={inputStyle(t)} aria-label="mcp-scope">
                   <option value="user">用户</option>
                   <option value="local">本地</option>
                   <option value="project">项目</option>

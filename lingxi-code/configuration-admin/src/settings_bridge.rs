@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use client_protocol::commands::SettingsDestinationDto;
+use client_protocol::commands::WritableScopeDto;
 use lingxi_core::settings::merger::merge_raw_layer;
 use migrations::settings_update::{read_settings_map, settings_path, WritableScope};
 use serde_json::Value;
@@ -322,13 +322,13 @@ const RESERVED_KEYS: [(&str, &str); 1] = [(
 )];
 
 /// Map a wire-writable destination to its file layer. Narrower than
-/// [`SettingsLayer`]'s full set by construction (`SettingsDestinationDto` has
+/// [`SettingsLayer`]'s full set by construction (`WritableScopeDto` has
 /// no `Defaults` / `Cli` / `Managed` / `Env` variant), so this is infallible.
-fn destination_layer(destination: SettingsDestinationDto) -> SettingsLayer {
+fn destination_layer(destination: WritableScopeDto) -> SettingsLayer {
     match destination {
-        SettingsDestinationDto::User => SettingsLayer::User,
-        SettingsDestinationDto::Project => SettingsLayer::Project,
-        SettingsDestinationDto::Local => SettingsLayer::Local,
+        WritableScopeDto::User => SettingsLayer::User,
+        WritableScopeDto::Project => SettingsLayer::Project,
+        WritableScopeDto::Local => SettingsLayer::Local,
     }
 }
 
@@ -347,32 +347,32 @@ fn destination_layer(destination: SettingsDestinationDto) -> SettingsLayer {
 
 /// Map a wire-writable destination to the `permission` crate's persistence
 /// target. Narrower than [`permission::PermissionUpdateDestination`]'s full
-/// set by construction (`SettingsDestinationDto` has no `Session` / `CliArg`
+/// set by construction (`WritableScopeDto` has no `Session` / `CliArg`
 /// variant), so this is infallible — mirrors [`destination_layer`] above at
 /// the `permission` crate's granularity.
 #[must_use]
 pub fn permission_destination(
-    destination: SettingsDestinationDto,
+    destination: WritableScopeDto,
 ) -> permission::PermissionUpdateDestination {
     match destination {
-        SettingsDestinationDto::User => permission::PermissionUpdateDestination::UserSettings,
-        SettingsDestinationDto::Project => permission::PermissionUpdateDestination::ProjectSettings,
-        SettingsDestinationDto::Local => permission::PermissionUpdateDestination::LocalSettings,
+        WritableScopeDto::User => permission::PermissionUpdateDestination::UserSettings,
+        WritableScopeDto::Project => permission::PermissionUpdateDestination::ProjectSettings,
+        WritableScopeDto::Local => permission::PermissionUpdateDestination::LocalSettings,
     }
 }
 
 /// Map a writable destination to the [`permission::PermissionRuleSource`] a
 /// rule created at that layer should carry, so a persisted rule's `source`
 /// matches the file it actually landed in.
-fn permission_rule_source(destination: SettingsDestinationDto) -> permission::PermissionRuleSource {
+fn permission_rule_source(destination: WritableScopeDto) -> permission::PermissionRuleSource {
     match destination {
-        SettingsDestinationDto::User => {
+        WritableScopeDto::User => {
             permission::PermissionRuleSource::Settings(protocol::SettingsScope::User)
         }
-        SettingsDestinationDto::Project => {
+        WritableScopeDto::Project => {
             permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)
         }
-        SettingsDestinationDto::Local => {
+        WritableScopeDto::Local => {
             permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local)
         }
     }
@@ -406,7 +406,7 @@ pub fn permission_behavior(
 pub fn permission_rule_from_wire(
     raw: &str,
     behavior: client_protocol::commands::PermissionBehaviorDto,
-    destination: SettingsDestinationDto,
+    destination: WritableScopeDto,
 ) -> permission::PermissionRule {
     permission::PermissionRule {
         value: permission::PermissionRuleValue::from_rule_string(raw),
@@ -439,7 +439,7 @@ pub fn permission_paths(paths: &SettingsPaths) -> permission::PermissionPaths {
 ///
 /// # Errors
 /// The destination resolves to a non-writable layer (unreachable given
-/// [`SettingsDestinationDto`]'s three variants, but `writable_path` is the
+/// [`WritableScopeDto`]'s three variants, but `writable_path` is the
 /// single source of truth so its `Result` is still propagated rather than
 /// unwrapped), the patch touches a [`RESERVED_KEYS`] key, the destination file
 /// exists but is not valid JSON, or the write to disk fails. A broken
@@ -447,7 +447,7 @@ pub fn permission_paths(paths: &SettingsPaths) -> permission::PermissionPaths {
 /// before this function reaches the write.
 pub fn apply_patch(
     paths: &SettingsPaths,
-    destination: SettingsDestinationDto,
+    destination: WritableScopeDto,
     patch: Vec<(String, Option<Value>)>,
 ) -> Result<(), String> {
     apply_patch_before_publish(paths, destination, patch, || {})
@@ -460,7 +460,7 @@ pub fn apply_patch(
 /// read-modify-write transaction without widening the bridge API.
 fn apply_patch_before_publish<F>(
     paths: &SettingsPaths,
-    destination: SettingsDestinationDto,
+    destination: WritableScopeDto,
     patch: Vec<(String, Option<Value>)>,
     before_publish: F,
 ) -> Result<(), String>
@@ -1460,7 +1460,7 @@ mod tests {
         };
         let err = apply_patch(
             &paths,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
             vec![("permissions".to_string(), Some(serde_json::json!({})))],
         )
         .unwrap_err();
@@ -1493,7 +1493,7 @@ mod tests {
         };
         apply_patch(
             &paths,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
             vec![("outputStyle".to_string(), Some(serde_json::json!("terse")))],
         )
         .unwrap();
@@ -1538,7 +1538,7 @@ mod tests {
 
         apply_patch(
             &paths,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
             vec![("outputStyle".to_string(), Some(serde_json::json!("terse")))],
         )
         .unwrap();
@@ -1577,7 +1577,7 @@ mod tests {
         };
         apply_patch(
             &paths,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
             vec![("original".into(), Some(serde_json::json!(true)))],
         )
         .unwrap();
@@ -1592,7 +1592,7 @@ mod tests {
         let first = std::thread::spawn(move || {
             apply_patch_before_publish(
                 &first_paths,
-                SettingsDestinationDto::User,
+                WritableScopeDto::User,
                 vec![("first".into(), Some(serde_json::json!(1)))],
                 move || {
                     first_read_tx.send(()).unwrap();
@@ -1614,7 +1614,7 @@ mod tests {
             second_started_tx.send(()).unwrap();
             apply_patch_before_publish(
                 &second_paths,
-                SettingsDestinationDto::User,
+                WritableScopeDto::User,
                 vec![("second".into(), Some(serde_json::json!(2)))],
                 move || second_read_tx.send(()).unwrap(),
             )
@@ -1659,7 +1659,7 @@ mod tests {
         let first = std::thread::spawn(move || {
             apply_patch_before_publish(
                 &first_paths,
-                SettingsDestinationDto::User,
+                WritableScopeDto::User,
                 vec![("user".into(), Some(serde_json::json!(true)))],
                 move || {
                     first_read_tx.send(()).unwrap();
@@ -1679,7 +1679,7 @@ mod tests {
         let second = std::thread::spawn(move || {
             apply_patch_before_publish(
                 &second_paths,
-                SettingsDestinationDto::Project,
+                WritableScopeDto::Project,
                 vec![("project".into(), Some(serde_json::json!(true)))],
                 move || second_read_tx.send(()).unwrap(),
             )
@@ -1711,7 +1711,7 @@ mod tests {
 
         let error = apply_patch(
             &paths,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
             vec![("new".into(), Some(serde_json::json!(true)))],
         )
         .unwrap_err();
@@ -1737,7 +1737,7 @@ mod tests {
 
         apply_patch(
             &paths,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
             vec![("new".into(), Some(serde_json::json!(true)))],
         )
         .unwrap();
@@ -1777,7 +1777,7 @@ mod tests {
         };
         apply_patch(
             &paths,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
             vec![("patched".into(), Some(serde_json::json!(true)))],
         )
         .unwrap();
@@ -1812,7 +1812,7 @@ mod tests {
         };
         apply_patch(
             &paths,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
             vec![("value".into(), Some(serde_json::json!(1)))],
         )
         .unwrap();
@@ -1850,15 +1850,15 @@ mod tests {
     #[test]
     fn permission_destination_maps_every_writable_layer() {
         assert_eq!(
-            permission_destination(SettingsDestinationDto::User),
+            permission_destination(WritableScopeDto::User),
             permission::PermissionUpdateDestination::UserSettings
         );
         assert_eq!(
-            permission_destination(SettingsDestinationDto::Project),
+            permission_destination(WritableScopeDto::Project),
             permission::PermissionUpdateDestination::ProjectSettings
         );
         assert_eq!(
-            permission_destination(SettingsDestinationDto::Local),
+            permission_destination(WritableScopeDto::Local),
             permission::PermissionUpdateDestination::LocalSettings
         );
     }
@@ -1890,7 +1890,7 @@ mod tests {
         let rule = permission_rule_from_wire(
             "Bash(ls:*)",
             PermissionBehaviorDto::Allow,
-            SettingsDestinationDto::Project,
+            WritableScopeDto::Project,
         );
         assert_eq!(rule.value.tool_name, "Bash");
         assert_eq!(rule.value.rule_content.as_deref(), Some("ls:*"));
@@ -1911,7 +1911,7 @@ mod tests {
         let rule = permission_rule_from_wire(
             "Bash(ls:*",
             PermissionBehaviorDto::Deny,
-            SettingsDestinationDto::User,
+            WritableScopeDto::User,
         );
         assert_eq!(
             rule.value.tool_name, "Bash(ls:*",

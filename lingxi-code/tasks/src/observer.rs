@@ -20,14 +20,14 @@ impl TaskRegistry {
     /// what makes the brief tell the observer to name the worker in its report.
     fn arm_observer_pairing(
         &self,
-        request: &SubagentSpawnRequest,
+        seed: Option<&platform_api::observer_pairing::ObserverPairingSeed>,
         observed_agent_id: AgentId,
         observer_task_id: AgentId,
     ) {
-        let Some(table) = self.observer_pairings() else {
+        let (Some(table), Some(seed)) = (self.observer_pairings(), seed) else {
             return;
         };
-        arm_pairing(table, request, observed_agent_id, observer_task_id);
+        arm_pairing(table, seed, observed_agent_id, observer_task_id);
     }
 }
 
@@ -35,20 +35,13 @@ impl TaskRegistry {
 /// is testable without standing up a whole registry.
 pub(crate) fn arm_pairing(
     table: &platform_api::observer_pairing::ObserverPairings,
-    request: &SubagentSpawnRequest,
+    seed: &platform_api::observer_pairing::ObserverPairingSeed,
     observed_agent_id: AgentId,
     observer_task_id: AgentId,
 ) {
     {
-        let Some(spec) = request.observer.as_ref() else {
-            return;
-        };
-        let observed_name = request
-            .name
-            .clone()
-            .or_else(|| request.description.clone())
-            .unwrap_or_else(|| request.subagent_type.clone());
-        let envelope = agent_observer_text::envelope_name(&observed_name);
+        let spec = &seed.spec;
+        let envelope = agent_observer_text::envelope_name(&seed.observed_name);
         let mut pairing = platform_api::observer_pairing::ObserverPairing::armed(
             observer_task_id,
             spec,
@@ -56,13 +49,13 @@ pub(crate) fn arm_pairing(
             envelope.clone(),
         );
         pairing.observed_task_id = Some(observed_agent_id);
-        match request.creator_agent_id {
+        match seed.observed_creator {
             // A worker spawned BY a coordinator: the report goes up to the
             // coordinator, and the brief must name the worker.
             Some(coordinator) => {
                 pairing.report_target_task_id = Some(coordinator);
-                pairing.report_target_name = request
-                    .creator_teammate_name
+                pairing.report_target_name = seed
+                    .observed_creator_name
                     .clone()
                     .unwrap_or_else(|| coordinator.to_string());
                 pairing.via_worker_name = Some(envelope);
@@ -104,6 +97,7 @@ impl TaskRegistry {
         inheritance: SubagentInheritance,
         observed_agent_id: AgentId,
         digest: String,
+        seed: Option<platform_api::observer_pairing::ObserverPairingSeed>,
     ) -> Result<(), TaskError> {
         // Pair lookup and first publication form one transaction, including
         // concurrent lifecycle taps restored for the same observed agent.
@@ -142,15 +136,13 @@ impl TaskRegistry {
         if let Some((id, digest)) = resume {
             return self.deliver_observer_digest(&id, digest).await;
         }
-        // Arm BEFORE the request is stripped for the spawn. The next few lines
-        // clear `observer` and `creator_agent_id`, and arming reads BOTH — the
-        // declaration to arm at all, and the creator to decide whether this is a
-        // coordinator's worker (report goes UP) or a plain pairing. Arming after
-        // the strip silently armed nothing, and made the coordinator branch
-        // unreachable; the per-crate unit test could not see it because it calls
-        // `arm_pairing` with an intact request.
+        // The pairing comes from `seed`, never from `request`. By the time this
+        // runs `request` is the OBSERVER's — the caller cleared the declaration
+        // and the observed agent's name out of it and rewrote `description` to
+        // "<observer>@<observed>". Deriving the pairing from it armed nothing
+        // and named the envelope after the wrong agent.
         let observer_task_id = AgentId::new();
-        self.arm_observer_pairing(&request, observed_agent_id, observer_task_id);
+        self.arm_observer_pairing(seed.as_ref(), observed_agent_id, observer_task_id);
         request.observer = None;
         request.run_in_background = true;
         request.query_source_label =
@@ -181,19 +173,16 @@ impl TaskRegistry {
 #[cfg(test)]
 mod pairing_tests {
     use super::arm_pairing;
-    use platform_api::observer_pairing::ObserverPairings;
+    use platform_api::observer_pairing::{ObserverPairingSeed, ObserverPairings};
     use platform_api::subagent_spawn::ObserverSpec;
-    use platform_api::SubagentSpawnRequest;
     use protocol::AgentId;
 
-    fn request(observer: Option<ObserverSpec>, creator: Option<AgentId>) -> SubagentSpawnRequest {
-        SubagentSpawnRequest {
-            subagent_type: "worker".into(),
-            name: Some("step two".into()),
-            observer,
-            creator_agent_id: creator,
-            creator_teammate_name: creator.map(|_| "coordinator".to_string()),
-            ..Default::default()
+    fn seed(creator: Option<AgentId>) -> ObserverPairingSeed {
+        ObserverPairingSeed {
+            spec: ObserverSpec::new("reviewer"),
+            observed_name: "step two".into(),
+            observed_creator: creator,
+            observed_creator_name: creator.map(|_| "coordinator".to_string()),
         }
     }
 
@@ -204,12 +193,7 @@ mod pairing_tests {
         let table = ObserverPairings::new();
         let observed = AgentId::new();
         let observer = AgentId::new();
-        arm_pairing(
-            &table,
-            &request(Some(ObserverSpec::new("reviewer")), None),
-            observed,
-            observer,
-        );
+        arm_pairing(&table, &seed(None), observed, observer);
         let found = table
             .armed_for_observer(&observer)
             .expect("ObserverReport must resolve the pairing just armed");
@@ -229,24 +213,11 @@ mod pairing_tests {
         let observed = AgentId::new();
         let observer = AgentId::new();
         let coordinator = AgentId::new();
-        arm_pairing(
-            &table,
-            &request(Some(ObserverSpec::new("reviewer")), Some(coordinator)),
-            observed,
-            observer,
-        );
+        arm_pairing(&table, &seed(Some(coordinator)), observed, observer);
         let found = table.armed_for_observer(&observer).expect("armed");
         assert_eq!(found.report_target_task_id, Some(coordinator));
         assert_ne!(found.report_target_task_id, Some(observed));
         assert_eq!(found.report_target_name, "coordinator");
         assert_eq!(found.via_worker_name.as_deref(), Some("step-two"));
-    }
-
-    #[test]
-    fn a_request_without_a_declaration_arms_nothing() {
-        let table = ObserverPairings::new();
-        let observer = AgentId::new();
-        arm_pairing(&table, &request(None, None), AgentId::new(), observer);
-        assert!(table.armed_for_observer(&observer).is_none());
     }
 }

@@ -1411,6 +1411,19 @@ impl PoolSubagentSpawner {
             request: observer_request,
             inheritance: inheritance.clone(),
             registry: Arc::downgrade(&registry),
+            // Captured from the ORIGINAL request, which still has the observed
+            // agent's name, its declaration and its creator. `observer_request`
+            // above has had all three rewritten or cleared.
+            seed: platform_api::observer_pairing::ObserverPairingSeed {
+                spec: spec.clone(),
+                observed_name: request
+                    .name
+                    .clone()
+                    .or_else(|| request.description.clone())
+                    .unwrap_or_else(|| request.subagent_type.clone()),
+                observed_creator: request.creator_agent_id,
+                observed_creator_name: request.creator_teammate_name.clone(),
+            },
         }))
     }
 
@@ -9558,7 +9571,16 @@ mod tests {
             TaskRegistryHandle, TaskUpdatePatch,
         };
         #[derive(Default)]
-        struct Registry(Mutex<Vec<(AgentId, SubagentSpawnRequest, String)>>);
+        struct Registry(
+            Mutex<
+                Vec<(
+                    AgentId,
+                    SubagentSpawnRequest,
+                    String,
+                    Option<platform_api::observer_pairing::ObserverPairingSeed>,
+                )>,
+            >,
+        );
         #[async_trait]
         impl TaskRegistryHandle for Registry {
             async fn create(&self, _: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
@@ -9596,8 +9618,12 @@ mod tests {
                 _: SubagentInheritance,
                 observed: AgentId,
                 digest: String,
+                seed: Option<platform_api::observer_pairing::ObserverPairingSeed>,
             ) -> Result<(), TaskRegistryError> {
-                self.0.lock().unwrap().push((observed, request, digest));
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((observed, request, digest, seed));
                 Ok(())
             }
         }
@@ -9668,7 +9694,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|(id, _, _)| *id)
+                    .map(|(id, _, _, _)| *id)
                     .collect::<std::collections::HashSet<_>>();
                 if seen.contains(&one_shot) && seen.contains(&persistent) {
                     break;
@@ -9678,7 +9704,7 @@ mod tests {
         })
         .await
         .expect("both real spawn paths must deliver observer activity");
-        for (_, request, digest) in registry.0.lock().unwrap().iter() {
+        for (_, request, digest, seed) in registry.0.lock().unwrap().iter() {
             assert_eq!(request.subagent_type, "reviewer");
             assert!(request.run_in_background);
             assert!(request.observer.is_none());
@@ -9700,6 +9726,31 @@ mod tests {
                 !digest.contains("observer-activity"),
                 "the invented envelope must not come back: {digest}"
             );
+            // The envelope must name the OBSERVED agent. `ActivityObserver`
+            // holds the OBSERVER's request (its `name` is cleared and its
+            // `description` is "reviewer@worker"), so deriving the name from
+            // that request names the wrong agent.
+            // The observed agent has no display name in this fixture, so the
+            // envelope falls back to its TYPE. What matters is that it is not
+            // named after the OBSERVER, which is what reading the name off the
+            // observer's request produced ("reviewer@general-purpose").
+            assert!(
+                digest.contains("<general-purpose-activity>"),
+                "the envelope must name the observed agent: {digest}"
+            );
+            assert!(
+                !digest.contains("reviewer"),
+                "the envelope must not be named after the observer: {digest}"
+            );
+            // The seed must describe the OBSERVED agent. Without it the
+            // registry arms nothing, because the request above is the
+            // observer's and its declaration has been cleared.
+            let seed = seed.as_ref().expect("a seed must reach the registry");
+            assert_eq!(seed.spec.agent, "reviewer");
+            // No display name on the observed request in this fixture, so the
+            // seed falls back to its TYPE — which is still the OBSERVED agent's,
+            // never the observer's.
+            assert_eq!(seed.observed_name, "general-purpose");
         }
         spawner.stop(&persistent).await.unwrap();
         std::env::remove_var("LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS");

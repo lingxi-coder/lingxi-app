@@ -2296,6 +2296,12 @@ mod tests {
         let coordinator = AgentId::new();
         let pairings = Arc::new(platform_api::observer_pairing::ObserverPairings::new());
         registry.set_observer_pairings(pairings.clone());
+        let seed = platform_api::observer_pairing::ObserverPairingSeed {
+            spec: platform_api::subagent_spawn::ObserverSpec::new("reviewer"),
+            observed_name: "step two".into(),
+            observed_creator: Some(coordinator),
+            observed_creator_name: Some("coordinator".into()),
+        };
         let request = SubagentSpawnRequest {
             subagent_type: "reviewer".into(),
             prompt: "Observe material issues".into(),
@@ -2321,6 +2327,7 @@ mod tests {
             inherit.clone(),
             observed,
             "first digest".into(),
+            Some(seed.clone()),
         )
         .await
         .unwrap();
@@ -2393,6 +2400,7 @@ mod tests {
             inherit.clone(),
             observed,
             "second digest".into(),
+            Some(seed.clone()),
         )
         .await
         .unwrap();
@@ -2428,7 +2436,8 @@ mod tests {
             request.clone(),
             inherit.clone(),
             observed,
-            "after stop".into()
+            "after stop".into(),
+            Some(seed.clone()),
         )
         .await
         .is_err());
@@ -2445,7 +2454,8 @@ mod tests {
             request,
             inherit,
             AgentId::new(),
-            "corrupt marker".into()
+            "corrupt marker".into(),
+            Some(seed),
         )
         .await
         .is_err());

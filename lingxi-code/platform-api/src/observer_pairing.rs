@@ -116,6 +116,29 @@ impl ObserverPairing {
     }
 }
 
+/// What a pairing needs about the OBSERVED agent, captured while its spawn
+/// request is still intact.
+///
+/// The observer is spawned from a REWRITTEN copy of that request — its
+/// `observer` declaration and `name` are cleared and its `description` is
+/// rewritten to `"<observer>@<observed>"` — so nothing about the observed
+/// agent can be recovered from it afterwards. Reading the observed identity
+/// off that copy names the wrong agent and arms nothing; this type exists so
+/// that is not possible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserverPairingSeed {
+    /// The declaration, which the observer's own request no longer carries.
+    pub spec: ObserverSpec,
+    /// The OBSERVED agent's display name, before slugging.
+    pub observed_name: String,
+    /// The coordinator that spawned the observed agent, when it is a worker.
+    pub observed_creator: Option<AgentId>,
+    /// That coordinator's DISPLAY name. The brief says "it delivers to X" and
+    /// the refusal names X, so an agent id here would put a uuid in front of a
+    /// model. `None` falls back to the id.
+    pub observed_creator_name: Option<String>,
+}
+
 /// The session's pairing table (oracle `session.observers`).
 #[derive(Debug, Default)]
 pub struct ObserverPairings {

@@ -212,9 +212,16 @@ pub fn propagation_for_spawn(
 
 /// A passive lifecycle tap that never alters the observed agent's result.
 pub(crate) struct ActivityObserver {
+    /// The OBSERVER's spawn request — its declaration and `name` are cleared
+    /// and its `description` is rewritten to `"<observer>@<observed>"`, so
+    /// nothing about the OBSERVED agent survives on it. That is what
+    /// [`Self::seed`] is for.
     pub request: platform_api::SubagentSpawnRequest,
     pub inheritance: platform_api::SubagentInheritance,
     pub registry: std::sync::Weak<dyn platform_api::task_registry::TaskRegistryHandle>,
+    /// The observed agent's identity and declaration, captured while its own
+    /// request was still intact.
+    pub seed: platform_api::observer_pairing::ObserverPairingSeed,
 }
 
 #[async_trait::async_trait]
@@ -263,20 +270,17 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for ActivityObserver {
         let Some(registry) = self.registry.upgrade() else {
             return;
         };
-        let observed_name = self
-            .request
-            .name
-            .clone()
-            .or_else(|| self.request.description.clone())
-            .unwrap_or_else(|| self.request.subagent_type.clone());
+        // Both of these come from the SEED, not from `self.request`. The
+        // request is the OBSERVER's: its `name` is cleared and its
+        // `description` is "<observer>@<observed>", so naming the envelope from
+        // it named the envelope after the observer; and its `observer` field is
+        // cleared, so the declaration's own instruction never reached the
+        // digest at all.
         let digest = build_digest(
-            &envelope_name(&observed_name),
+            &envelope_name(&self.seed.observed_name),
             None,
             &activity,
-            self.request
-                .observer
-                .as_ref()
-                .and_then(|o| o.message.as_deref()),
+            self.seed.spec.message.as_deref(),
             true,
         );
         if let Err(error) = registry
@@ -285,6 +289,7 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for ActivityObserver {
                 self.inheritance.clone(),
                 agent_id,
                 digest,
+                Some(self.seed.clone()),
             )
             .await
         {

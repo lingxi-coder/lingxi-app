@@ -10,6 +10,65 @@ use llm_client::{
 
 // ── Fix 3.3: ChatGptOAuth dispatch integration ───────────────────────────────
 
+#[tokio::test]
+async fn codex_builtin_uses_oauth_endpoint_and_rejects_api_keys() {
+    #[derive(Debug)]
+    struct Store(Credential);
+    impl CredentialProvider for Store {
+        fn load<'a>(
+            &'a self,
+            scope: &'a CredentialScope,
+        ) -> BoxFuture<'a, Result<Credential, LlmError>> {
+            assert_eq!(scope.credential_id.as_deref(), Some("openai-chatgpt"));
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+    }
+    for credential in [
+        Credential::ChatGptOAuth {
+            access_token: "oauth-access".into(),
+            account_id: Some("account".into()),
+            fedramp: false,
+        },
+        Credential::ApiKey("api-key-must-not-be-used".into()),
+    ] {
+        let oauth = matches!(&credential, Credential::ChatGptOAuth { .. });
+        let client = DefaultLlmClient::from_config(ClientConfig {
+            providers: llm_client::builtin_presets().providers,
+        })
+        .unwrap()
+        .with_credential_provider(Arc::new(Store(credential)));
+        let mut request = LlmRequest::new("gpt-6-astra");
+        request.profile = Some("openai-chatgpt".into());
+        let result = client.prepare(&request).await;
+        if oauth {
+            let prepared = result.unwrap();
+            assert_eq!(
+                prepared.provider_request.url,
+                "https://chatgpt.com/backend-api/codex/responses"
+            );
+            assert_eq!(prepared.provider_request.body_json["model"], "gpt-6-astra");
+            assert_eq!(
+                prepared
+                    .provider_request
+                    .headers
+                    .get("Authorization")
+                    .map(String::as_str),
+                Some("Bearer oauth-access")
+            );
+            assert_eq!(
+                prepared
+                    .provider_request
+                    .headers
+                    .get("ChatGPT-Account-ID")
+                    .map(String::as_str),
+                Some("account")
+            );
+        } else {
+            assert!(matches!(result, Err(LlmError::Authentication { .. })));
+        }
+    }
+}
+
 /// ChatGptOAuth sets Authorization: Bearer and ChatGPT-Account-ID headers.
 #[tokio::test]
 async fn chatgpt_oauth_injects_bearer_and_account_id_headers() {

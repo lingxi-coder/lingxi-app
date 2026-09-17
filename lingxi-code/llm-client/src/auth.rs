@@ -105,7 +105,19 @@ impl ChatGptAuthenticator {
 impl Authenticator for ChatGptAuthenticator {
     fn apply(&self, mut request: ProviderRequest) -> Result<ProviderRequest, LlmError> {
         let headers = &mut request.headers;
-        headers.remove("x-api-key");
+        // ProviderRequest uses string keys, while HTTP header names are
+        // case-insensitive. Remove stale credentials before installing OAuth.
+        headers.retain(|name, _| {
+            ![
+                "authorization",
+                "x-api-key",
+                "api-key",
+                "chatgpt-account-id",
+                "x-openai-fedramp",
+            ]
+            .iter()
+            .any(|header| name.eq_ignore_ascii_case(header))
+        });
         headers.insert(
             "Authorization".to_string(),
             format!("Bearer {}", self.token),
@@ -141,6 +153,34 @@ mod tests {
         );
         assert!(!req.headers.contains_key("X-OpenAI-Fedramp"));
         assert!(!req.headers.contains_key("x-api-key"));
+    }
+
+    #[test]
+    fn chatgpt_authenticator_replaces_case_insensitive_credentials() {
+        let mut req = ProviderRequest::post_json("https://x/responses", serde_json::json!({}));
+        for name in [
+            "authorization",
+            "AUTHORIZATION",
+            "X-API-Key",
+            "api-key",
+            "chatgpt-account-id",
+            "x-openai-fedramp",
+        ] {
+            req.headers.insert(name.into(), "stale".into());
+        }
+        req.headers.insert("originator".into(), "lingxi".into());
+        let req = ChatGptAuthenticator::new("oauth-token", None, false)
+            .apply(req)
+            .unwrap();
+        assert_eq!(
+            req.headers.get("Authorization").map(String::as_str),
+            Some("Bearer oauth-token")
+        );
+        assert_eq!(
+            req.headers.get("originator").map(String::as_str),
+            Some("lingxi")
+        );
+        assert!(!req.headers.values().any(|value| value == "stale"));
     }
 
     #[test]

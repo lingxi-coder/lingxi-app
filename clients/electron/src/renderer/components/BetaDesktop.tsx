@@ -204,12 +204,28 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.title || 'Untitled session'}</span>
           {opening
             ? <SidebarSessionProgress label="Opening session" />
-            : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" /> : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+            // A session ERROR shows as a ringed mark at this row's trailing edge
+            // instead (below), so it is not repeated inline here.
+            : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" />
+            : attention && attention.label !== 'Session error' ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
         </span>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
           {formatSessionMetadata(session.modified_rfc3339, session.message_count)}
         </span>
       </button>
+      {attention?.label === 'Session error' && (
+        // Sits where the pin/archive actions sit, and yields to them: the row
+        // reveals those on hover/focus, and two marks in one slot would collide.
+        <span
+          className="sidebar-session-error"
+          role="img"
+          aria-label={attention.label}
+          title={attention.label}
+          style={{ position: 'absolute', right: 8, top: 4, width: 26, height: 26, display: 'grid', placeItems: 'center', color: attention.color, pointerEvents: 'none' }}
+        >
+          <Icon name="circleAlert" size={15} />
+        </span>
+      )}
       <button
         type="button"
         className="sidebar-row-action"
@@ -476,6 +492,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
                       {opening
                         ? <SidebarSessionProgress label="Opening session" />
+                        // The PINNED list keeps the inline dot: its unpin action is
+                        // `data-visible="true"`, permanently occupying the trailing
+                        // slot, so a mark there would be hidden at all times.
                         : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" /> : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
                     </span>
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>

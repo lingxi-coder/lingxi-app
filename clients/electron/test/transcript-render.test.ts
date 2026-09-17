@@ -896,3 +896,25 @@ test('no blanket focus ring, but deliberate and high-contrast ones survive', () 
   assert.match(css, /\.desktop-topbar-action:focus-visible\s*\{[^}]*outline:\s*2px/);
   assert.match(css, /prefers-contrast: more[\s\S]*?:focus-visible\s*\{\s*outline:\s*3px/);
 });
+
+test('a session error shows a ringed mark that yields to the row actions', () => {
+  const css = readFileSync(new URL('../src/renderer/global.css', import.meta.url), 'utf8');
+  // Visible by default…
+  assert.match(css, /\.sidebar-session-error\s*\{[^}]*opacity:\s*1/);
+  // …and hidden under exactly the conditions that reveal pin/archive, since
+  // they share the trailing slot.
+  assert.match(css, /\.sidebar-tree-row:hover\s*>\s*\.sidebar-session-error/);
+  assert.match(css, /\.sidebar-tree-row:focus-within\s*>\s*\.sidebar-session-error/);
+  assert.match(css, /data-visible='true'\]\)\s*>\s*\.sidebar-session-error/);
+  const hidden = css.slice(css.indexOf('.sidebar-tree-row:hover > .sidebar-session-error'));
+  assert.match(hidden.slice(0, 400), /opacity:\s*0/, 'the reveal conditions must hide it');
+});
+
+test('the error mark is a ringed icon, not the old bare dot', () => {
+  const icons = readFileSync(new URL('../src/renderer/components/Icon.tsx', import.meta.url), 'utf8');
+  assert.match(icons, /case 'circleAlert'/, 'the icon exists');
+  const sidebar = readFileSync(new URL('../src/renderer/components/BetaDesktop.tsx', import.meta.url), 'utf8');
+  assert.match(sidebar, /className="sidebar-session-error"[\s\S]{0,400}circleAlert/, 'and the error row renders it');
+  // The inline dot must no longer double up for the error state on that row.
+  assert.match(sidebar, /attention\.label !== 'Session error' \? <span/, 'the inline dot skips the error state');
+});

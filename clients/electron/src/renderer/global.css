@@ -1627,6 +1627,14 @@ body {
 .sidebar-tree-row:hover > .sidebar-row-action,
 .sidebar-tree-row:focus-within > .sidebar-row-action,
 .sidebar-row-action[data-visible='true'] { opacity: 1; }
+/* The session-error mark shares the trailing slot with those actions, so it
+   yields whenever they are revealed — the same hover/focus conditions, inverted.
+   A pinned row keeps its action visible permanently, which is why the pinned
+   LIST marks its errors inline instead of here. */
+.sidebar-session-error { opacity: 1; transition: opacity 110ms ease; }
+.sidebar-tree-row:hover > .sidebar-session-error,
+.sidebar-tree-row:focus-within > .sidebar-session-error,
+.sidebar-tree-row:has(> .sidebar-row-action[data-visible='true']) > .sidebar-session-error { opacity: 0; }
 .sidebar-row-action:hover:not(:disabled) {
   background: color-mix(in oklab, currentColor 10%, transparent) !important;
 }

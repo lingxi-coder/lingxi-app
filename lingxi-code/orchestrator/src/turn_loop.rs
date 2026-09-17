@@ -4522,17 +4522,18 @@ pub(crate) async fn dispatch_tool_uses_tracked_deferred(
                         // The current call was explicitly approved, but never
                         // claim Auto mode when the atomic live-mode write fails.
                         tracing::warn!(%error, "permission prompt approved Auto mode but mode switch failed");
+                    } else {
+                        // Upstream 2.1.270 flattens a decision source with
+                        // `case "user": return e.permanent ? "user_permanent"
+                        // : "user_temporary"`, so a user's allow-once is
+                        // `user_temporary`, not `hook`. Set the CLASSIFICATION
+                        // rather than the label: the assignment after this
+                        // `match` is unconditional, so writing the label here
+                        // could never be observed (it was, and was not).
+                        hook_decision_classification = Some(
+                            platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                        );
                     }
-                    // ⚠️ This arm used to set `decision_otel_source =
-                    // "user_temporary"` here, which could never be observed: the
-                    // assignment below this `match` is unconditional and
-                    // overwrites it on every path. `AllowAuto` sets no
-                    // `hook_decision_classification`, so an Auto-mode approval
-                    // reports its OTEL source as "hook" — a user's temporary
-                    // approval labelled as a hook decision. Removed rather than
-                    // repaired because repairing it changes a telemetry label on
-                    // a permission path, which wants adjudicating against the
-                    // oracle's `ZX_`, not deciding in a lint sweep.
                     PermissionDecision::Allow
                 }
                 platform_api::permission_gate::PermissionOutcome::Deny { reason } => {
@@ -6737,6 +6738,26 @@ mod decision_otel_source_tests {
         // classifier / safety-check decision carries no rule and stays "config".
         assert_eq!(rule_decision_otel_source(None, true), "config");
         assert_eq!(rule_decision_otel_source(None, false), "config");
+    }
+
+    /// An Auto-mode approval is a USER allow-once, so 2.1.270's source
+    /// flattener (`case "user": return e.permanent ? "user_permanent" :
+    /// "user_temporary"`) renders it `user_temporary` — NOT `hook`.
+    ///
+    /// The `AllowAuto` arm cannot write that label directly: the assignment
+    /// after its `match` is unconditional and overwrites every path, so a label
+    /// written there can never be observed (it was written, and never was). It
+    /// sets the CLASSIFICATION instead; this pins that the classification still
+    /// renders the oracle's string, so the repair did not quietly relabel the
+    /// telemetry it was restoring.
+    #[test]
+    fn an_auto_mode_approval_renders_as_a_temporary_user_allow() {
+        use platform_api::permission_gate::ToolDecisionClassification;
+        assert_eq!(
+            ToolDecisionClassification::UserTemporary.as_str(),
+            "user_temporary"
+        );
+        assert_ne!(ToolDecisionClassification::UserTemporary.as_str(), "hook");
     }
 }
 

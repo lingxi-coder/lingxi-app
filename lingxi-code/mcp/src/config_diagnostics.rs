@@ -746,8 +746,15 @@ pub fn collect_all_mcp_config_warnings_at(
     // too, matching the oracle; every OTHER rejection (shape/size, other I/O
     // error, invalid JSON) is surfaced as a typed warning.
     let project = project_mcp_path;
-    match read_mcp_config_file(project, ConfigScope::Settings(protocol::SettingsScope::Project)) {
-        Ok(raw) => match parse_mcp_config_json(&raw, project, ConfigScope::Settings(protocol::SettingsScope::Project)) {
+    match read_mcp_config_file(
+        project,
+        ConfigScope::Settings(protocol::SettingsScope::Project),
+    ) {
+        Ok(raw) => match parse_mcp_config_json(
+            &raw,
+            project,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        ) {
             Ok(v) => {
                 // oracle: `return y("mcp_config_parse"), xqe({...})` — the
                 // success half of the gate, fired right where `Iqe` hands the
@@ -804,7 +811,11 @@ mod tests {
     use serde_json::json;
 
     fn only(config: &Value) -> Vec<McpConfigWarning> {
-        collect_mcp_config_warnings(config, ConfigScope::Settings(protocol::SettingsScope::Project), Some("/p/.mcp.json"))
+        collect_mcp_config_warnings(
+            config,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+            Some("/p/.mcp.json"),
+        )
     }
 
     #[test]
@@ -1116,7 +1127,11 @@ mod tests {
     #[test]
     fn servers_typo_shape_error_is_byte_exact() {
         let c = json!({"servers":{"a":{"type":"stdio","command":"c"}}});
-        let w = collect_mcp_config_warnings(&c, ConfigScope::Settings(protocol::SettingsScope::User), Some("/u/config.json"));
+        let w = collect_mcp_config_warnings(
+            &c,
+            ConfigScope::Settings(protocol::SettingsScope::User),
+            Some("/u/config.json"),
+        );
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].severity, McpConfigSeverity::Fatal);
         assert_eq!(
@@ -1186,10 +1201,17 @@ mod tests {
         let big = vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize];
         std::fs::write(&path, &big).unwrap();
 
-        let err = read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap_err();
+        let err = read_mcp_config_file(
+            &path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap_err();
         assert!(!err.is_not_found());
         assert_eq!(err.severity, McpConfigSeverity::Fatal);
-        assert_eq!(err.scope, ConfigScope::Settings(protocol::SettingsScope::Project));
+        assert_eq!(
+            err.scope,
+            ConfigScope::Settings(protocol::SettingsScope::Project)
+        );
         assert_eq!(
             err.message,
             format!(
@@ -1213,7 +1235,11 @@ mod tests {
         let mut body = vec![b' '; MCP_CONFIG_MAX_BYTES as usize - 2];
         body.extend_from_slice(b"{}");
         std::fs::write(&path, &body).unwrap();
-        let raw = read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap();
+        let raw = read_mcp_config_file(
+            &path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(raw.len() as u64, MCP_CONFIG_MAX_BYTES);
     }
 
@@ -1223,7 +1249,11 @@ mod tests {
         // A directory is not a regular file — same "shape" branch the oracle's
         // suggestion text describes for devices/FIFOs/symlinks-to-those.
         let dir = TempDir::new().unwrap();
-        let err = read_mcp_config_file(dir.path(), ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap_err();
+        let err = read_mcp_config_file(
+            dir.path(),
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap_err();
         assert!(err
             .message
             .starts_with("MCP config is not a regular file or exceeds"));
@@ -1241,7 +1271,11 @@ mod tests {
             .status()
             .expect("mkfifo");
         assert!(status.success());
-        let err = read_mcp_config_file(&fifo, ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap_err();
+        let err = read_mcp_config_file(
+            &fifo,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap_err();
         assert!(err
             .message
             .starts_with("MCP config is not a regular file or exceeds"));
@@ -1258,7 +1292,11 @@ mod tests {
         let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("absent.mcp.json");
-        let err = read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap_err();
+        let err = read_mcp_config_file(
+            &path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap_err();
         assert!(err.is_not_found());
         assert_eq!(
             err.message,
@@ -1279,7 +1317,11 @@ mod tests {
         // "Failed to read file: …" message.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("a".repeat(300));
-        let err = read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap_err();
+        let err = read_mcp_config_file(
+            &path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap_err();
         assert!(!err.is_not_found());
         assert!(
             err.message.starts_with("Failed to read file: "),
@@ -1311,7 +1353,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(".mcp.json");
         std::fs::write(&path, r#"{"mcpServers":{}}"#).unwrap();
-        let raw = read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap();
+        let raw = read_mcp_config_file(
+            &path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(raw, r#"{"mcpServers":{}}"#);
     }
 
@@ -1321,7 +1367,12 @@ mod tests {
         // Oracle returns a SHORT literal here — NOT the detailed
         // path/scope/length/first100 string, which is log-only.
         let path = Path::new("/p/.mcp.json");
-        let err = parse_mcp_config_json("{ not json", path, ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap_err();
+        let err = parse_mcp_config_json(
+            "{ not json",
+            path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap_err();
         assert_eq!(err.message, "MCP config is not a valid JSON");
         assert_eq!(
             err.suggestion.as_deref(),
@@ -1335,7 +1386,12 @@ mod tests {
     fn valid_json_parses_through() {
         let (_cap, _guard) = install_gate_capture();
         let path = Path::new("/p/.mcp.json");
-        let v = parse_mcp_config_json(r#"{"mcpServers":{}}"#, path, ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap();
+        let v = parse_mcp_config_json(
+            r#"{"mcpServers":{}}"#,
+            path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(v, json!({"mcpServers":{}}));
     }
 
@@ -1362,7 +1418,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("huge.mcp.json");
         std::fs::write(&path, vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize]).unwrap();
-        let _ = read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project));
+        let _ = read_mcp_config_file(
+            &path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
 
         assert_eq!(
             cap.rows(),
@@ -1379,7 +1438,10 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("a".repeat(300));
-        let _ = read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project));
+        let _ = read_mcp_config_file(
+            &path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
 
         assert_eq!(
             cap.rows(),
@@ -1398,7 +1460,10 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("absent.mcp.json");
-        let _ = read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project));
+        let _ = read_mcp_config_file(
+            &path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
 
         assert_eq!(cap.rows(), Vec::<(String, Option<String>)>::new());
     }
@@ -1408,7 +1473,11 @@ mod tests {
         let (cap, _guard) = install_gate_capture();
 
         let path = Path::new("/p/.mcp.json");
-        let _ = parse_mcp_config_json("{ not json", path, ConfigScope::Settings(protocol::SettingsScope::Project));
+        let _ = parse_mcp_config_json(
+            "{ not json",
+            path,
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
 
         assert_eq!(
             cap.rows(),
@@ -1461,7 +1530,10 @@ mod tests {
             "got: {}",
             warnings[0].message
         );
-        assert_eq!(warnings[0].scope, ConfigScope::Settings(protocol::SettingsScope::Project));
+        assert_eq!(
+            warnings[0].scope,
+            ConfigScope::Settings(protocol::SettingsScope::Project)
+        );
     }
 
     #[test]

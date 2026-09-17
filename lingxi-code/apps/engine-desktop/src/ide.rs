@@ -437,7 +437,10 @@ mod tests {
             .get(IDE_SERVER_NAME)
             .expect("static ide slot must remain")
             .config();
-        assert_eq!(config.scope, ConfigScope::Settings(protocol::SettingsScope::User));
+        assert_eq!(
+            config.scope,
+            ConfigScope::Settings(protocol::SettingsScope::User)
+        );
         assert!(matches!(
             &config.spec,
             McpTransportSpec::InProcess { registry_key }

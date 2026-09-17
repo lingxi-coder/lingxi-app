@@ -269,7 +269,11 @@ fn dfs(id: &str, loaded: &HashMap<String, Vec<String>>, reachable: &mut HashSet<
 /// dependency graph is unresolvable — mirrors the silent-skip the oracle's
 /// `plugin uninstall` post-removal orphan check takes rather than surfacing a
 /// scary "cannot determine orphans" error after a successful uninstall.
-pub fn scan_orphans(db: &Value, scope: WritableScope, project_path: &Option<String>) -> Vec<String> {
+pub fn scan_orphans(
+    db: &Value,
+    scope: WritableScope,
+    project_path: &Option<String>,
+) -> Vec<String> {
     let result = scan(db, scope, project_path);
     if result.unloadable.is_empty() {
         result.orphans
@@ -1149,6 +1153,9 @@ mod tests {
             ],
         );
         let db = load_installed(&e.plugins);
-        assert_eq!(scan_orphans(&db, WritableScope::User, &None), Vec::<String>::new());
+        assert_eq!(
+            scan_orphans(&db, WritableScope::User, &None),
+            Vec::<String>::new()
+        );
     }
 }

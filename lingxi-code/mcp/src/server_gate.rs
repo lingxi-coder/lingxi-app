@@ -458,7 +458,12 @@ mod tests {
 
         // No reference at all.
         assert_eq!(
-            policy.decide(&stdio("d", ConfigScope::Settings(protocol::SettingsScope::Project), "/bin/srv", &[])),
+            policy.decide(&stdio(
+                "d",
+                ConfigScope::Settings(protocol::SettingsScope::Project),
+                "/bin/srv",
+                &[]
+            )),
             McpServerDecision::Allow
         );
     }
@@ -704,11 +709,20 @@ mod tests {
         std::fs::write(&global, serde_json::to_vec(&contents).unwrap()).unwrap();
 
         let mut servers = vec![
-            stdio("context7", ConfigScope::Settings(protocol::SettingsScope::Project)),
+            stdio(
+                "context7",
+                ConfigScope::Settings(protocol::SettingsScope::Project),
+            ),
             // Same name but NON-project scope ⇒ the jsonServers reject list
             // (a `.mcp.json` trust model) must NOT touch it.
-            stdio("context7", ConfigScope::Settings(protocol::SettingsScope::User)),
-            stdio("linear", ConfigScope::Settings(protocol::SettingsScope::Project)),
+            stdio(
+                "context7",
+                ConfigScope::Settings(protocol::SettingsScope::User),
+            ),
+            stdio(
+                "linear",
+                ConfigScope::Settings(protocol::SettingsScope::Project),
+            ),
         ];
         apply_project_server_gate(&mut servers, &global, &cwd);
 
@@ -860,7 +874,9 @@ mod tests {
             metadata: Default::default(),
         };
         assert_eq!(
-            policy.decide(&make(ConfigScope::Settings(protocol::SettingsScope::Project))),
+            policy.decide(&make(ConfigScope::Settings(
+                protocol::SettingsScope::Project
+            ))),
             McpServerDecision::Block(McpServerBlockReason::ProjectPendingApproval)
         );
         assert_eq!(

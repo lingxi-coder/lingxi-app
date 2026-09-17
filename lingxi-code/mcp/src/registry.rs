@@ -12739,7 +12739,11 @@ mod tests {
         env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         for (name, scope, source) in [
-            ("shared-grant", ConfigScope::Settings(protocol::SettingsScope::User), None),
+            (
+                "shared-grant",
+                ConfigScope::Settings(protocol::SettingsScope::User),
+                None,
+            ),
             (
                 "agent-grant",
                 ConfigScope::Agent,

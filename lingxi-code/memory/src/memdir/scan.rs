@@ -343,6 +343,17 @@ fn select_entries(
     scan.pending = deferred;
 }
 
+/// Which tier gets the REMAINDER of a divided byte/entry budget first
+/// (lowest number = first slot).
+///
+/// This is an anti-starvation order, NOT a relevance order, and it deliberately
+/// disagrees with [`super::find::tier_weight_bps`]: `Project` ranks LAST here
+/// and SECOND there. A project memdir is typically the largest, so giving it
+/// the leftovers last is what keeps a handful of session and team files from
+/// being crowded out — see `scan_preserves_room_for_session_and_team_tiers`.
+///
+/// The two orderings answer different questions. Do not "reconcile" them;
+/// `the_two_tier_orderings_disagree_on_purpose` pins the divergence.
 const fn tier_priority(tier: MemoryEntryTier) -> u8 {
     match tier {
         MemoryEntryTier::Session => 0,
@@ -369,6 +380,30 @@ mod tests {
     use crate::memdir::paths::{memdir_path, MemdirRoots};
     use crate::{secret_scan::redact, MEMORY_AGE_HARD_DROP_DAYS};
     use protocol::MemoryEntryTier;
+
+    /// The budget order and the relevance order rank `Project` at opposite
+    /// ends, and that is deliberate — see `tier_priority`'s docs. Pinned so a
+    /// future reader who spots the "inconsistency" and reconciles the two
+    /// breaks a test instead of quietly changing which memories survive a
+    /// byte budget.
+    #[test]
+    fn the_two_tier_orderings_disagree_on_purpose() {
+        use crate::memdir::find::tier_weight_bps;
+
+        // Relevance: Project outranks Team and User.
+        assert!(tier_weight_bps(MemoryEntryTier::Project) > tier_weight_bps(MemoryEntryTier::Team));
+        assert!(tier_weight_bps(MemoryEntryTier::Team) > tier_weight_bps(MemoryEntryTier::User));
+
+        // Leftover budget: Project comes LAST, behind both of them.
+        assert!(tier_priority(MemoryEntryTier::Project) > tier_priority(MemoryEntryTier::Team));
+        assert!(tier_priority(MemoryEntryTier::Project) > tier_priority(MemoryEntryTier::User));
+
+        // Session leads both orderings — the one rung they agree on.
+        assert_eq!(tier_priority(MemoryEntryTier::Session), 0);
+        assert!(
+            tier_weight_bps(MemoryEntryTier::Session) > tier_weight_bps(MemoryEntryTier::Project)
+        );
+    }
     use std::fs;
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;

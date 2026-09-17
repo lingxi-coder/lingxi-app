@@ -43,10 +43,17 @@ use crate::plugin_policy;
 pub use protocol::WritableScope;
 
 /// The editable scopes, in auto-detect / `--all` search order.
-const EDITABLE: [WritableScope; 3] = [WritableScope::User, WritableScope::Project, WritableScope::Local];
+const EDITABLE: [WritableScope; 3] = [
+    WritableScope::User,
+    WritableScope::Project,
+    WritableScope::Local,
+];
 
 /// The editable scopes, in auto-detect / iteration order (shared with the
 /// marketplace command).
+/// Answers: which scope `plugin enable` auto-detects first.
+///
+/// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
 pub const SCOPES: [WritableScope; 3] = EDITABLE;
 
 /// The scope's wire label (matches the `(scope: …)` success suffix).

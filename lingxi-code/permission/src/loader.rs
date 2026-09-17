@@ -729,18 +729,20 @@ mod tests {
 
     #[test]
     fn no_permissions_block_is_empty() {
-        assert!(
-            permission_rules_from_settings_json("{}", PermissionRuleSource::Settings(protocol::SettingsScope::User))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(permission_rules_from_settings_json(
+            "{}",
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+        )
+        .unwrap()
+        .is_empty());
         // Other settings keys present, but no permissions → still empty.
         let raw = r#"{ "model": "claude-opus-4-7" }"#;
-        assert!(
-            permission_rules_from_settings_json(raw, PermissionRuleSource::Settings(protocol::SettingsScope::Project))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(permission_rules_from_settings_json(
+            raw,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
@@ -761,8 +763,11 @@ mod tests {
                 "ask": ["WebFetch"]
             }
         }"#;
-        let rules = permission_rules_from_settings_json(raw, PermissionRuleSource::Settings(protocol::SettingsScope::Project))
-            .unwrap();
+        let rules = permission_rules_from_settings_json(
+            raw,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(rules.len(), 4);
         // Every rule carries the caller's source.
         assert!(rules
@@ -799,11 +804,12 @@ mod tests {
     #[test]
     fn empty_arrays_yield_no_rules() {
         let raw = r#"{ "permissions": { "allow": [], "deny": [], "ask": [] } }"#;
-        assert!(
-            permission_rules_from_settings_json(raw, PermissionRuleSource::Settings(protocol::SettingsScope::User))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(permission_rules_from_settings_json(
+            raw,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
@@ -977,7 +983,9 @@ mod tests {
         .unwrap();
         let mut rules: Vec<PermissionRule> = user.into_iter().chain(managed).collect();
         assert_eq!(rules.len(), 2);
-        rules.retain(|r| r.source == PermissionRuleSource::Settings(protocol::SettingsScope::Managed));
+        rules.retain(|r| {
+            r.source == PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+        });
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].value.tool_name, "Bash");
         assert!(matches!(rules[0].behavior, PermissionBehavior::Deny));
@@ -1080,9 +1088,18 @@ mod tests {
     #[test]
     fn startup_warning_bash_wildcard_checks_all_settings_tier_prefixes() {
         let displays = [
-            (PermissionRuleSource::Settings(protocol::SettingsScope::User), "user settings"),
-            (PermissionRuleSource::Settings(protocol::SettingsScope::Project), "project settings"),
-            (PermissionRuleSource::Settings(protocol::SettingsScope::Local), "local settings"),
+            (
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                "user settings",
+            ),
+            (
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                "project settings",
+            ),
+            (
+                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                "local settings",
+            ),
             (PermissionRuleSource::CliArg, "CLI argument"),
             (
                 PermissionRuleSource::Settings(protocol::SettingsScope::Managed),

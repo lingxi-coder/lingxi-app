@@ -78,9 +78,13 @@ pub fn hooks_trust_dir(base_dir: &Path) -> PathBuf {
 pub fn source_is_self_trusting(source: AgentSource) -> bool {
     match source {
         // `J0e` = {plugin, policySettings, built-in, builtin, bundled}
-        AgentSource::BuiltIn | AgentSource::Plugin | AgentSource::Settings(protocol::SettingsScope::Managed) => true,
+        AgentSource::BuiltIn
+        | AgentSource::Plugin
+        | AgentSource::Settings(protocol::SettingsScope::Managed) => true,
         // `e.source==="userSettings" || e.source==="flagSettings"`
-        AgentSource::Settings(protocol::SettingsScope::User) | AgentSource::Flag | AgentSource::AdditionalDirectory => true,
+        AgentSource::Settings(protocol::SettingsScope::User)
+        | AgentSource::Flag
+        | AgentSource::AdditionalDirectory => true,
         // `localSettings` is in neither claude set — not in `J0e`
         // {plugin, policySettings, built-in, builtin, bundled}, and not in
         // `mvo`'s userSettings/flagSettings arm — so like `projectSettings` it
@@ -281,7 +285,9 @@ mod tests {
             assert!(source_is_self_trusting(s), "{s:?} must be self-trusting");
         }
         // The workspace/`--add-dir` case is the one that must prove trust.
-        assert!(!source_is_self_trusting(AgentSource::Settings(protocol::SettingsScope::Project)));
+        assert!(!source_is_self_trusting(AgentSource::Settings(
+            protocol::SettingsScope::Project
+        )));
     }
 
     /// Build a definition rooted at `<proj>/<dot>/agents` with the given source.
@@ -305,7 +311,10 @@ mod tests {
         let cfg = tmp.path().join(".lingxi.json");
         std::fs::write(&cfg, "{}").unwrap();
 
-        let def = def_at(&proj, AgentSource::Settings(protocol::SettingsScope::Project));
+        let def = def_at(
+            &proj,
+            AgentSource::Settings(protocol::SettingsScope::Project),
+        );
 
         // Before any trust grant: hooks are refused.
         assert!(
@@ -364,7 +373,10 @@ mod tests {
         // Trust ONLY the parent.
         migrations::global_config::mark_trust_dialog_accepted(&cfg, &parent).unwrap();
 
-        let def = def_at(&nested, AgentSource::Settings(protocol::SettingsScope::Project));
+        let def = def_at(
+            &nested,
+            AgentSource::Settings(protocol::SettingsScope::Project),
+        );
         assert!(
             !agent_hooks_origin_trusted_with_config(&def, &nested, &cfg),
             "trusting a PARENT dir must not trust a nested repo's agent hooks"
@@ -386,7 +398,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let proj = tmp.path().join("repo");
         std::fs::create_dir_all(proj.join(branding::DOT_DIR).join("agents")).unwrap();
-        let def = def_at(&proj, AgentSource::Settings(protocol::SettingsScope::Project));
+        let def = def_at(
+            &proj,
+            AgentSource::Settings(protocol::SettingsScope::Project),
+        );
         let dir = trust_dir_for(&def, &proj);
         // What the gate reads:
         let gate_key = migrations::global_config::project_path_for_config(&dir);
@@ -408,7 +423,10 @@ mod tests {
         let missing = tmp.path().join("does-not-exist.json");
         assert!(
             !agent_hooks_origin_trusted_with_config(
-                &def_at(&proj, AgentSource::Settings(protocol::SettingsScope::Project)),
+                &def_at(
+                    &proj,
+                    AgentSource::Settings(protocol::SettingsScope::Project)
+                ),
                 &proj,
                 &missing
             ),

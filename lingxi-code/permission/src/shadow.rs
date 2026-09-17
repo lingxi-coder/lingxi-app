@@ -94,10 +94,14 @@ pub fn is_shared_setting_source(source: PermissionRuleSource) -> bool {
 pub(crate) fn format_source(source: PermissionRuleSource) -> &'static str {
     match source {
         PermissionRuleSource::Settings(protocol::SettingsScope::User) => "user settings",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => "shared project settings",
+        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => {
+            "shared project settings"
+        }
         PermissionRuleSource::Settings(protocol::SettingsScope::Local) => "project local settings",
         PermissionRuleSource::FlagSettings => "command line arguments",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Managed) => "enterprise managed settings",
+        PermissionRuleSource::Settings(protocol::SettingsScope::Managed) => {
+            "enterprise managed settings"
+        }
         PermissionRuleSource::CliArg => "CLI argument",
         PermissionRuleSource::Command => "command configuration",
         PermissionRuleSource::Session => "current session",
@@ -303,12 +307,12 @@ mod tests {
 
     #[test]
     fn shared_sources_are_project_policy_command() {
-        assert!(is_shared_setting_source(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
-        ));
-        assert!(is_shared_setting_source(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
-        ));
+        assert!(is_shared_setting_source(PermissionRuleSource::Settings(
+            protocol::SettingsScope::Project
+        )));
+        assert!(is_shared_setting_source(PermissionRuleSource::Settings(
+            protocol::SettingsScope::Managed
+        )));
         assert!(is_shared_setting_source(PermissionRuleSource::Command));
     }
 
@@ -334,7 +338,11 @@ mod tests {
             Some("ls:*"),
             PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )];
-        let deny_rules = [deny("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
+        let deny_rules = [deny(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].shadow_type, ShadowType::Deny);
@@ -349,9 +357,21 @@ mod tests {
     #[test]
     fn tool_wide_allow_is_never_reported() {
         // A bare "Bash" allow rule (rule_content == None) cannot be shadowed.
-        let allow_rules = [allow("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::User))];
-        let deny_rules = [deny("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
-        let ask_rules = [ask("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
+        let allow_rules = [allow(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        )];
+        let deny_rules = [deny(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
+        let ask_rules = [ask(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &deny_rules, false);
         assert!(out.is_empty());
     }
@@ -364,8 +384,16 @@ mod tests {
             Some("ls:*"),
             PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )];
-        let ask_rules = [ask("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
-        let deny_rules = [deny("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
+        let ask_rules = [ask(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
+        let deny_rules = [deny(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &deny_rules, false);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].shadow_type, ShadowType::Deny);
@@ -378,7 +406,11 @@ mod tests {
             Some("ls:*"),
             PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )];
-        let deny_rules = [deny("Edit", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
+        let deny_rules = [deny(
+            "Edit",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert!(out.is_empty());
     }
@@ -409,7 +441,11 @@ mod tests {
             Some("ls:*"),
             PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )];
-        let ask_rules = [ask("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
+        let ask_rules = [ask(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].shadow_type, ShadowType::Ask);
@@ -428,7 +464,11 @@ mod tests {
             Some("src/**"),
             PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )];
-        let ask_rules = [ask("Edit", None, PermissionRuleSource::Settings(protocol::SettingsScope::User))];
+        let ask_rules = [ask(
+            "Edit",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], true);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].shadow_type, ShadowType::Ask);
@@ -468,7 +508,11 @@ mod tests {
             Some("ls:*"),
             PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )];
-        let ask_rules = [ask("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::User))];
+        let ask_rules = [ask(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].shadow_type, ShadowType::Ask);
@@ -483,7 +527,11 @@ mod tests {
             Some("ls:*"),
             PermissionRuleSource::Settings(protocol::SettingsScope::User),
         )];
-        let ask_rules = [ask("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
+        let ask_rules = [ask(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], true);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].shadow_type, ShadowType::Ask);
@@ -498,7 +546,11 @@ mod tests {
             Some("ls:*"),
             PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         )];
-        let deny_rules = [deny("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
+        let deny_rules = [deny(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert_eq!(
             out[0].fix,
@@ -514,7 +566,11 @@ mod tests {
             Some("ls:*"),
             PermissionRuleSource::Settings(protocol::SettingsScope::Local),
         )];
-        let ask_rules = [ask("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Project))];
+        let ask_rules = [ask(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &ask_rules, &[], false);
         assert_eq!(
             out[0].fix,
@@ -528,11 +584,27 @@ mod tests {
     #[test]
     fn each_shadowed_allow_rule_is_reported() {
         let allow_rules = [
-            allow("Bash", Some("ls:*"), PermissionRuleSource::Settings(protocol::SettingsScope::User)),
-            allow("Bash", Some("cat:*"), PermissionRuleSource::Settings(protocol::SettingsScope::User)),
-            allow("Edit", Some("src/**"), PermissionRuleSource::Settings(protocol::SettingsScope::User)), // not shadowed
+            allow(
+                "Bash",
+                Some("ls:*"),
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ),
+            allow(
+                "Bash",
+                Some("cat:*"),
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ),
+            allow(
+                "Edit",
+                Some("src/**"),
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ), // not shadowed
         ];
-        let deny_rules = [deny("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::Managed))];
+        let deny_rules = [deny(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+        )];
         let out = detect_unreachable_rules(&allow_rules, &[], &deny_rules, false);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|u| u.shadow_type == ShadowType::Deny));
@@ -549,15 +621,21 @@ mod tests {
     #[test]
     fn format_source_matches_ts_display_strings() {
         assert_eq!(
-            format_source(PermissionRuleSource::Settings(protocol::SettingsScope::User)),
+            format_source(PermissionRuleSource::Settings(
+                protocol::SettingsScope::User
+            )),
             "user settings"
         );
         assert_eq!(
-            format_source(PermissionRuleSource::Settings(protocol::SettingsScope::Project)),
+            format_source(PermissionRuleSource::Settings(
+                protocol::SettingsScope::Project
+            )),
             "shared project settings"
         );
         assert_eq!(
-            format_source(PermissionRuleSource::Settings(protocol::SettingsScope::Local)),
+            format_source(PermissionRuleSource::Settings(
+                protocol::SettingsScope::Local
+            )),
             "project local settings"
         );
         assert_eq!(
@@ -565,7 +643,9 @@ mod tests {
             "command line arguments"
         );
         assert_eq!(
-            format_source(PermissionRuleSource::Settings(protocol::SettingsScope::Managed)),
+            format_source(PermissionRuleSource::Settings(
+                protocol::SettingsScope::Managed
+            )),
             "enterprise managed settings"
         );
         assert_eq!(format_source(PermissionRuleSource::CliArg), "CLI argument");

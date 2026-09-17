@@ -99,7 +99,9 @@ mod tests {
     fn deny_rule_wins_over_allow() {
         let mut p = PermissionPolicy::new(PermissionMode::Default);
         p.allow_rules
-            .entry(PermissionRuleSource::Settings(protocol::SettingsScope::User))
+            .entry(PermissionRuleSource::Settings(
+                protocol::SettingsScope::User,
+            ))
             .or_default()
             .push(PermissionRule {
                 value: PermissionRuleValue {
@@ -110,7 +112,9 @@ mod tests {
                 source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
             });
         p.deny_rules
-            .entry(PermissionRuleSource::Settings(protocol::SettingsScope::Project))
+            .entry(PermissionRuleSource::Settings(
+                protocol::SettingsScope::Project,
+            ))
             .or_default()
             .push(PermissionRule {
                 value: PermissionRuleValue {
@@ -2247,7 +2251,9 @@ mod tests {
         // `policy_with_roots` loads from the PROJECT settings bucket.
         assert_eq!(
             p.agent_type_deny_source("Explore"),
-            Some(PermissionRuleSource::Settings(protocol::SettingsScope::Project))
+            Some(PermissionRuleSource::Settings(
+                protocol::SettingsScope::Project
+            ))
         );
         assert_eq!(
             p.agent_type_deny_source("general-purpose"),
@@ -2256,7 +2262,8 @@ mod tests {
         );
         // Raw SettingSource identifier is byte-locked to claude-code.
         assert_eq!(
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project).lingxi_settings_source(),
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+                .lingxi_settings_source(),
             "projectSettings"
         );
         assert_eq!(
@@ -2273,7 +2280,9 @@ mod tests {
         );
         assert_eq!(
             p2.agent_type_deny_source("Explore"),
-            Some(PermissionRuleSource::Settings(protocol::SettingsScope::Project))
+            Some(PermissionRuleSource::Settings(
+                protocol::SettingsScope::Project
+            ))
         );
         assert_eq!(p2.agent_deny_content_types(), vec!["Explore".to_string()]);
     }
@@ -4358,15 +4367,19 @@ mod tests {
         // Same directory contributed by projectSettings → does NOT widen it.
         assert!(
             matches!(
-                policy_with(PermissionRuleSource::Settings(protocol::SettingsScope::Project))
-                    .authorize("Read", &read("/extra/a.txt")),
+                policy_with(PermissionRuleSource::Settings(
+                    protocol::SettingsScope::Project
+                ))
+                .authorize("Read", &read("/extra/a.txt")),
                 PermissionResult::Deny { .. }
             ),
             "a projectSettings-sourced dir must not widen the read block"
         );
         // …but it still widens everything that uses the ordinary `rb` union:
         // only the read block applies the narrower `mEt` set.
-        let project = policy_with(PermissionRuleSource::Settings(protocol::SettingsScope::Project));
+        let project = policy_with(PermissionRuleSource::Settings(
+            protocol::SettingsScope::Project,
+        ));
         assert_eq!(
             project.all_working_dirs(&roots()),
             vec![PathBuf::from("/proj"), PathBuf::from("/extra")]
@@ -4549,7 +4562,10 @@ mod tests {
             );
         }
         // projectSettings-sourced: excluded from `mEt` ⇒ the read block asks.
-        let out = with(PermissionRuleSource::Settings(protocol::SettingsScope::Project)).authorize("Bash", &cmd);
+        let out = with(PermissionRuleSource::Settings(
+            protocol::SettingsScope::Project,
+        ))
+        .authorize("Bash", &cmd);
         let PermissionResult::Ask { reason, .. } = &out else {
             panic!("expected an ask, got {out:?}");
         };
@@ -4818,8 +4834,10 @@ mod tests {
             assert!(!crate::read_block::is_outside_reads_blocked(&reason));
         }
         // projectSettings-sourced does not.
-        let out =
-            with(PermissionRuleSource::Settings(protocol::SettingsScope::Project)).authorize("Bash", &bash("cat /extra/x"));
+        let out = with(PermissionRuleSource::Settings(
+            protocol::SettingsScope::Project,
+        ))
+        .authorize("Bash", &bash("cat /extra/x"));
         let PermissionResult::Ask { reason, .. } = &out else {
             panic!("expected an ask, got {out:?}");
         };

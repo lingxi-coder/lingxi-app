@@ -1531,8 +1531,10 @@ pub fn entry_reads_environment(entry: &Value) -> bool {
 /// loaded at `Enterprise`/`Managed` scope, so the conjunct is vacuous here.
 #[must_use]
 fn org_delivered_needs_no_allowlist_entry(config: &McpServerConfig) -> bool {
-    matches!(config.scope, ConfigScope::Enterprise | ConfigScope::Settings(protocol::SettingsScope::Managed))
-        && !config.metadata.expanded_from_env
+    matches!(
+        config.scope,
+        ConfigScope::Enterprise | ConfigScope::Settings(protocol::SettingsScope::Managed)
+    ) && !config.metadata.expanded_from_env
 }
 
 /// claude `Ree`'s per-server predicate — a loaded server is kept iff it is an
@@ -1718,8 +1720,11 @@ pub fn load_managed_settings_servers_in(dir: &Path) -> Vec<McpServerConfig> {
             .into_iter()
             .collect(),
     );
-    crate::json_config::parse_mcp_json_string(&document.to_string(), ConfigScope::Settings(protocol::SettingsScope::Managed))
-        .unwrap_or_default()
+    crate::json_config::parse_mcp_json_string(
+        &document.to_string(),
+        ConfigScope::Settings(protocol::SettingsScope::Managed),
+    )
+    .unwrap_or_default()
 }
 
 /// Apply the enterprise MCP policy to the assembled to-connect list, in place —
@@ -2599,7 +2604,10 @@ mod tests {
         let servers = super::load_managed_settings_servers_in(dir.path());
         assert_eq!(servers.len(), 2, "both remote entries load");
         for s in &servers {
-            assert_eq!(s.scope, ConfigScope::Settings(protocol::SettingsScope::Managed));
+            assert_eq!(
+                s.scope,
+                ConfigScope::Settings(protocol::SettingsScope::Managed)
+            );
             assert!(
                 !s.metadata.expanded_from_env,
                 "a managed-settings entry never reads the environment"

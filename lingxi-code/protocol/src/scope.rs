@@ -45,6 +45,38 @@
 //! ordering function next to the code that asks it, and each such function owns
 //! a test pinning the pairs it depends on. The `scope_is_not_ordered` test
 //! below keeps a comparison trait from being derived here.
+//!
+//! ## The orderings, and the question each answers
+//!
+//! There is no canonical order. These all rank overlapping rungs, and several
+//! disagree with each other on purpose. Before adding a twelfth, check whether
+//! one of these already answers your question — and before "fixing" an apparent
+//! inconsistency between two of them, read both questions.
+//!
+//! | Question | Where |
+//! |---|---|
+//! | Which settings VALUE wins a conflict? | `core::settings::Settings::load_with_layers` |
+//! | Which rule does a denial CITE? | `permission::PermissionRuleSource::priority` |
+//! | What order is `LINGXI.md` spliced into the prompt? | `memory::lingxi_md::hierarchy::walk` |
+//! | Which tier's command/skill definition wins a name clash? | `command_api::markdown_loader` |
+//! | May a later load replace a registered command? | `command_api::registry::CommandRegistry::register_command` |
+//! | Which status-line config is used? | `cli::mode::read_status_line_configs_from` |
+//! | Which agent directory wins? | `agent::catalog::agent_dir_precedence` |
+//! | Which memory is most RELEVANT? | `memory::memdir::find::tier_weight_bps` |
+//! | Which memory tier gets scarce BUDGET first? | `memory::memdir::scan::tier_priority` |
+//! | Which settings files does the admin panel read, in order? | `configuration_admin::settings_bridge::FILE_LAYERS` |
+//! | Which scope does `plugin enable` auto-detect first? | `configuration_admin::plugin_settings::SCOPES` |
+//!
+//! Two pairs are known to disagree, each for a good reason, and each is pinned
+//! by a test that says so: citation precedence runs `user > project > local`
+//! while value precedence runs the other way
+//! (`citation_precedence_is_the_reverse_of_value_precedence_for_the_file_tiers`),
+//! and memdir ranks `Project` second for relevance but last for budget
+//! (`the_two_tier_orderings_disagree_on_purpose`).
+//!
+//! A twelfth entry is a partition rather than an order, and is security-bearing:
+//! `agent::hooks_trust::source_is_self_trusting` decides which agent sources
+//! must prove folder trust.
 
 use serde::{Deserialize, Serialize};
 
@@ -323,8 +355,6 @@ pub mod snake_case {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::{MemoryEntryTier, Scope, SettingsScope, WritableScope};
@@ -366,7 +396,10 @@ mod tests {
     /// either direction.
     #[test]
     fn managed_reads_as_a_settings_tier_but_never_narrows_to_a_writable_one() {
-        assert_eq!(SettingsScope::try_from(Scope::Managed), Ok(SettingsScope::Managed));
+        assert_eq!(
+            SettingsScope::try_from(Scope::Managed),
+            Ok(SettingsScope::Managed)
+        );
         assert_eq!(
             WritableScope::try_from(SettingsScope::Managed),
             Err(SettingsScope::Managed),
@@ -374,7 +407,11 @@ mod tests {
              `plugin enable --scope managed` succeed"
         );
 
-        for writable in [WritableScope::User, WritableScope::Project, WritableScope::Local] {
+        for writable in [
+            WritableScope::User,
+            WritableScope::Project,
+            WritableScope::Local,
+        ] {
             let tier = SettingsScope::from(writable);
             assert_eq!(WritableScope::try_from(tier), Ok(writable), "round trip");
         }
@@ -393,7 +430,11 @@ mod tests {
             Scope::Session,
             Scope::Team,
         ] {
-            assert_eq!(SettingsScope::try_from(rejected), Err(rejected), "{rejected:?}");
+            assert_eq!(
+                SettingsScope::try_from(rejected),
+                Err(rejected),
+                "{rejected:?}"
+            );
         }
     }
 
@@ -418,7 +459,11 @@ mod tests {
             assert_eq!(super::snake_case::name(scope), expected);
             assert_eq!(super::snake_case::parse(expected), Some(scope));
         }
-        assert_eq!(super::snake_case::parse("Project"), None, "not the PascalCase form");
+        assert_eq!(
+            super::snake_case::parse("Project"),
+            None,
+            "not the PascalCase form"
+        );
         assert_eq!(super::snake_case::parse("nope"), None);
     }
 
@@ -461,8 +506,19 @@ mod tests {
             assert_eq!(MemoryEntryTier::try_from(Scope::from(tier)), Ok(tier));
         }
 
-        for outside in [Scope::Builtin, Scope::Env, Scope::Cli, Scope::Flag, Scope::Local, Scope::Managed] {
-            assert_eq!(MemoryEntryTier::try_from(outside), Err(outside), "{outside:?}");
+        for outside in [
+            Scope::Builtin,
+            Scope::Env,
+            Scope::Cli,
+            Scope::Flag,
+            Scope::Local,
+            Scope::Managed,
+        ] {
+            assert_eq!(
+                MemoryEntryTier::try_from(outside),
+                Err(outside),
+                "{outside:?}"
+            );
         }
     }
 

@@ -177,7 +177,9 @@ pub fn record_skill_usage(lingxi_home: &Path, name: &str) -> Result<(), String> 
 fn is_countable_source(source: CommandSource) -> bool {
     matches!(
         source,
-        CommandSource::Settings(protocol::SettingsScope::User) | CommandSource::Settings(protocol::SettingsScope::Project) | CommandSource::Settings(protocol::SettingsScope::Local)
+        CommandSource::Settings(protocol::SettingsScope::User)
+            | CommandSource::Settings(protocol::SettingsScope::Project)
+            | CommandSource::Settings(protocol::SettingsScope::Local)
     )
 }
 
@@ -345,7 +347,9 @@ async fn load_registry_entries(
             SlashCommandKind::Markdown { .. }
                 if matches!(
                     command.source,
-                    CommandSource::Settings(protocol::SettingsScope::User) | CommandSource::Settings(protocol::SettingsScope::Project) | CommandSource::Settings(protocol::SettingsScope::Local)
+                    CommandSource::Settings(protocol::SettingsScope::User)
+                        | CommandSource::Settings(protocol::SettingsScope::Project)
+                        | CommandSource::Settings(protocol::SettingsScope::Local)
                 ) =>
             {
                 (

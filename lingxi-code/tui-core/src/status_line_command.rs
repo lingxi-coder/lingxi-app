@@ -173,7 +173,8 @@ impl StatusLineExecutionPolicy {
     pub fn allows(self, source: StatusLineSource) -> bool {
         self.workspace_trusted
             && !self.disable_all_hooks
-            && (!self.managed_hooks_only || source == StatusLineSource::Known(protocol::Scope::Managed))
+            && (!self.managed_hooks_only
+                || source == StatusLineSource::Known(protocol::Scope::Managed))
     }
 }
 

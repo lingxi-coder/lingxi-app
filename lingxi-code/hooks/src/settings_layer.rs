@@ -469,7 +469,11 @@ mod tests {
             }]
         });
 
-        let parsed = parse_hook_layer_value_strict(&raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let parsed = parse_hook_layer_value_strict(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(serialize_hook_layer(&parsed.document).unwrap(), raw);
         assert_eq!(parsed.hooks.len(), 2);
         assert!(parsed.hooks.iter().any(|hook| hook.priority == 25));
@@ -489,7 +493,11 @@ mod tests {
             }]
         });
 
-        let error = parse_hook_layer_value_strict(&raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap_err();
+        let error = parse_hook_layer_value_strict(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap_err();
         let issues = error.issues();
         assert!(issues.iter().any(|issue| issue.path == "hooks.Nope"));
         assert!(issues
@@ -516,7 +524,11 @@ mod tests {
             }]
         });
 
-        let error = parse_hook_layer_value_strict(&raw, HookSource::Settings(protocol::SettingsScope::Local)).unwrap_err();
+        let error = parse_hook_layer_value_strict(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::Local),
+        )
+        .unwrap_err();
         let issues = error.issues();
         assert!(issues
             .iter()

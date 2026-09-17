@@ -3251,9 +3251,15 @@ async fn run_permission_action(
     // (persist keys off `behavior` + `destination`, not `source`; this is for
     // the live `session_allow_rules` citation on an allow add).
     let dest_source = |d: PermissionUpdateDestination| match d {
-        PermissionUpdateDestination::UserSettings => PermissionRuleSource::Settings(protocol::SettingsScope::User),
-        PermissionUpdateDestination::ProjectSettings => PermissionRuleSource::Settings(protocol::SettingsScope::Project),
-        PermissionUpdateDestination::LocalSettings => PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+        PermissionUpdateDestination::UserSettings => {
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+        }
+        PermissionUpdateDestination::ProjectSettings => {
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+        }
+        PermissionUpdateDestination::LocalSettings => {
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+        }
         PermissionUpdateDestination::Session => PermissionRuleSource::Session,
         PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
     };
@@ -4449,6 +4455,9 @@ struct ResolvedStatusLineConfigs {
 /// Read effective `statusLine` and `subagentStatusLine` configurations with
 /// source provenance, then freeze the trust/hook-policy decision that must be
 /// checked before any process creation.
+/// Answers: which status-line config is used when several tiers define one.
+///
+/// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
 fn read_status_line_configs_from(
     lingxi_home: &std::path::Path,
     project_dir: &std::path::Path,
@@ -4510,10 +4519,16 @@ fn read_status_line_configs_from(
     }
     if let Some(flag) = flag_settings {
         if let Some(value) = flag.status_line.as_ref() {
-            status_line = Some((value.clone(), StatusLineSource::Known(protocol::Scope::Flag)));
+            status_line = Some((
+                value.clone(),
+                StatusLineSource::Known(protocol::Scope::Flag),
+            ));
         }
         if let Some(value) = flag.subagent_status_line.as_ref() {
-            subagent_status_line = Some((value.clone(), StatusLineSource::Known(protocol::Scope::Flag)));
+            subagent_status_line = Some((
+                value.clone(),
+                StatusLineSource::Known(protocol::Scope::Flag),
+            ));
         }
         if let Some(value) = flag.disable_all_hooks {
             disable_all_hooks = value;
@@ -4528,10 +4543,16 @@ fn read_status_line_configs_from(
             continue;
         };
         if let Some(value) = map.get("statusLine") {
-            status_line = Some((value.clone(), StatusLineSource::Known(protocol::Scope::Managed)));
+            status_line = Some((
+                value.clone(),
+                StatusLineSource::Known(protocol::Scope::Managed),
+            ));
         }
         if let Some(value) = map.get("subagentStatusLine") {
-            subagent_status_line = Some((value.clone(), StatusLineSource::Known(protocol::Scope::Managed)));
+            subagent_status_line = Some((
+                value.clone(),
+                StatusLineSource::Known(protocol::Scope::Managed),
+            ));
         }
         if let Some(value) = map
             .get("disableAllHooks")
@@ -4599,18 +4620,16 @@ async fn read_status_line_configs(
 pub(crate) fn read_skip_dangerous_prompt() -> bool {
     use migrations::settings_update::{read_settings_map, settings_path, WritableScope};
     let (lingxi_home, project_dir) = settings_dirs();
-    [WritableScope::User, WritableScope::Local]
-        .iter()
-        .any(|s| {
-            let p = settings_path(*s, &lingxi_home, &project_dir);
-            read_settings_map(&p)
-                .ok()
-                .and_then(|m| {
-                    m.get("skipDangerousModePermissionPrompt")
-                        .map(migrations::context::js_truthy)
-                })
-                .unwrap_or(false)
-        })
+    [WritableScope::User, WritableScope::Local].iter().any(|s| {
+        let p = settings_path(*s, &lingxi_home, &project_dir);
+        read_settings_map(&p)
+            .ok()
+            .and_then(|m| {
+                m.get("skipDangerousModePermissionPrompt")
+                    .map(migrations::context::js_truthy)
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Persist `skipDangerousModePermissionPrompt = true` to the USER
@@ -6366,9 +6385,15 @@ detached catalog refresh"
 
         let configs =
             read_status_line_configs_from(&home, &project, &[], true, None, (true, true, true));
-        assert_eq!(configs.main.unwrap().source, StatusLineSource::Known(protocol::Scope::User));
+        assert_eq!(
+            configs.main.unwrap().source,
+            StatusLineSource::Known(protocol::Scope::User)
+        );
         let subagent = configs.subagent.unwrap();
-        assert_eq!(subagent.source, StatusLineSource::Known(protocol::Scope::Local));
+        assert_eq!(
+            subagent.source,
+            StatusLineSource::Known(protocol::Scope::Local)
+        );
         assert_eq!(subagent.command, "local-agent");
         assert!(subagent.should_run(true));
 
@@ -6384,7 +6409,10 @@ detached catalog refresh"
             (true, true, true),
         );
         let subagent = configs.subagent.unwrap();
-        assert_eq!(subagent.source, StatusLineSource::Known(protocol::Scope::Managed));
+        assert_eq!(
+            subagent.source,
+            StatusLineSource::Known(protocol::Scope::Managed)
+        );
         assert!(subagent.should_run(true));
         assert!(
             !configs.main.unwrap().should_run(true),

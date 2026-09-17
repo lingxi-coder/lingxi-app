@@ -238,8 +238,14 @@ impl NotificationWatcher {
             .join(branding::DOT_DIR)
             .join("settings.json");
         for (path, source) in [
-            (user_settings, hooks::definition::HookSource::Settings(protocol::SettingsScope::User)),
-            (project_settings, hooks::definition::HookSource::Settings(protocol::SettingsScope::Project)),
+            (
+                user_settings,
+                hooks::definition::HookSource::Settings(protocol::SettingsScope::User),
+            ),
+            (
+                project_settings,
+                hooks::definition::HookSource::Settings(protocol::SettingsScope::Project),
+            ),
         ] {
             if let Ok(raw) = std::fs::read_to_string(&path) {
                 if let Ok(defs) = hooks::parse_hooks_from_settings_json(&raw, source) {

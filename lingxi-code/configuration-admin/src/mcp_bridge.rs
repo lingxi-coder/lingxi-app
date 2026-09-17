@@ -368,7 +368,9 @@ pub async fn reconcile_writable_servers(
         if let Some(current) = registry.get_config(&config.name).await {
             if !matches!(
                 current.scope,
-                ConfigScope::Settings(protocol::SettingsScope::User) | ConfigScope::Settings(protocol::SettingsScope::Local) | ConfigScope::Settings(protocol::SettingsScope::Project)
+                ConfigScope::Settings(protocol::SettingsScope::User)
+                    | ConfigScope::Settings(protocol::SettingsScope::Local)
+                    | ConfigScope::Settings(protocol::SettingsScope::Project)
             ) {
                 // Plugin/managed/agent/dynamic servers own their registry slot.
                 // A writable definition with the same name stays on disk but
@@ -393,7 +395,9 @@ pub async fn reconcile_writable_servers(
         };
         if matches!(
             current.scope,
-            ConfigScope::Settings(protocol::SettingsScope::User) | ConfigScope::Settings(protocol::SettingsScope::Local) | ConfigScope::Settings(protocol::SettingsScope::Project)
+            ConfigScope::Settings(protocol::SettingsScope::User)
+                | ConfigScope::Settings(protocol::SettingsScope::Local)
+                | ConfigScope::Settings(protocol::SettingsScope::Project)
         ) && !desired_names.contains(&name)
         {
             registry
@@ -445,7 +449,11 @@ mod tests {
             "a project-scope server must land in <project>/.mcp.json under mcpServers"
         );
 
-        let cfgs = mcp::parse_mcp_json_string(&raw, mcp::ConfigScope::Settings(protocol::SettingsScope::Project)).unwrap();
+        let cfgs = mcp::parse_mcp_json_string(
+            &raw,
+            mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "linear");
         match &cfgs[0].spec {
@@ -498,7 +506,11 @@ mod tests {
         );
         assert_eq!(parsed["oauthAccount"]["emailAddress"], "x@y.z");
 
-        let cfgs = mcp::parse_global_config_mcp_servers(&raw, mcp::ConfigScope::Settings(protocol::SettingsScope::User)).unwrap();
+        let cfgs = mcp::parse_global_config_mcp_servers(
+            &raw,
+            mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "mem");
 
@@ -542,8 +554,12 @@ mod tests {
             "Local scope must NOT write the top-level mcpServers (that's User's location)"
         );
 
-        let cfgs =
-            mcp::parse_local_config_mcp_servers(&raw, &key, mcp::ConfigScope::Settings(protocol::SettingsScope::Local)).unwrap();
+        let cfgs = mcp::parse_local_config_mcp_servers(
+            &raw,
+            &key,
+            mcp::ConfigScope::Settings(protocol::SettingsScope::Local),
+        )
+        .unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "loc");
 

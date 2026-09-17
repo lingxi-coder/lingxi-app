@@ -170,6 +170,9 @@ impl Settings {
     /// Load settings with explicit file-source gating plus optional CLI and
     /// managed layers.
     ///
+    /// Answers: which settings VALUE wins a conflict.
+    /// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+    ///
     /// Priority (highest first): env → managed → cli → local → project
     /// → user → defaults. `managed_layers` must already be sorted in ASCENDING
     /// priority so later tiers override earlier ones.

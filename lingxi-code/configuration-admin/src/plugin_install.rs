@@ -2579,7 +2579,11 @@ where
 /// `QWn`): any auto-installed dependency the removal just left unreachable,
 /// or `""` when there is nothing to report. Reads the just-updated installed
 /// DB, so it reflects the POST-removal dependency graph.
-fn uninstall_orphan_suffix(plugins_dir: &Path, scope: WritableScope, project: &Option<String>) -> String {
+fn uninstall_orphan_suffix(
+    plugins_dir: &Path,
+    scope: WritableScope,
+    project: &Option<String>,
+) -> String {
     let db = load_installed(plugins_dir);
     let orphans = crate::plugin_prune::scan_orphans(&db, scope, project);
     crate::plugin_prune::orphan_notice(&orphans, scope_label(scope))
@@ -4391,7 +4395,10 @@ mod tests {
     #[test]
     fn uninstall_orphan_suffix_is_empty_with_no_orphans() {
         let e = env();
-        assert_eq!(uninstall_orphan_suffix(&e.plugins, WritableScope::User, &None), "");
+        assert_eq!(
+            uninstall_orphan_suffix(&e.plugins, WritableScope::User, &None),
+            ""
+        );
     }
 
     #[test]

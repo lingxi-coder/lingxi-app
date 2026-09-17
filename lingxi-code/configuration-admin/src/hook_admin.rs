@@ -256,7 +256,10 @@ mod tests {
     #[test]
     fn null_document_builds_an_empty_runtime_candidate() {
         let candidate = runtime_candidate(r#"{"scope":"local","hooks":null}"#).expect("candidate");
-        assert_eq!(candidate.source, HookSource::Settings(protocol::SettingsScope::Local));
+        assert_eq!(
+            candidate.source,
+            HookSource::Settings(protocol::SettingsScope::Local)
+        );
         assert!(candidate.hooks.is_empty());
     }
 }

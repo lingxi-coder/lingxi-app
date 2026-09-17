@@ -79,7 +79,11 @@ fn headers_helper_parts(spec: &McpTransportSpec) -> Option<(&str, &str)> {
 }
 
 fn ensure_helper_source_trusted(scope: ConfigScope, cwd: &Path) -> Result<(), McpError> {
-    if !matches!(scope, ConfigScope::Settings(protocol::SettingsScope::Project) | ConfigScope::Settings(protocol::SettingsScope::Local)) {
+    if !matches!(
+        scope,
+        ConfigScope::Settings(protocol::SettingsScope::Project)
+            | ConfigScope::Settings(protocol::SettingsScope::Local)
+    ) {
         return Ok(());
     }
     let trusted = migrations::global_config::global_config_path()
@@ -310,7 +314,10 @@ mod tests {
     #[test]
     fn only_project_and_local_scopes_are_trust_gated() {
         let cwd = std::path::Path::new("/definitely/not/a/trusted/workspace");
-        for scope in [ConfigScope::Settings(protocol::SettingsScope::Project), ConfigScope::Settings(protocol::SettingsScope::Local)] {
+        for scope in [
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(protocol::SettingsScope::Local),
+        ] {
             let err = ensure_helper_source_trusted(scope, cwd)
                 .expect_err("repo-resident scopes must require a trust record");
             assert_eq!(

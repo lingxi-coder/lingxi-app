@@ -169,11 +169,19 @@ pub fn agent_mcp_specs_to_scoped_configs(
             let mut cfg = cfg;
             cfg.metadata.agent_source = Some(match def.source {
                 AgentSource::BuiltIn => mcp::McpAgentSource::BuiltIn,
-                AgentSource::Settings(protocol::SettingsScope::User) => mcp::McpAgentSource::UserSettings,
-                AgentSource::Settings(protocol::SettingsScope::Project) => mcp::McpAgentSource::ProjectSettings,
-                AgentSource::Settings(protocol::SettingsScope::Local) => mcp::McpAgentSource::LocalSettings,
+                AgentSource::Settings(protocol::SettingsScope::User) => {
+                    mcp::McpAgentSource::UserSettings
+                }
+                AgentSource::Settings(protocol::SettingsScope::Project) => {
+                    mcp::McpAgentSource::ProjectSettings
+                }
+                AgentSource::Settings(protocol::SettingsScope::Local) => {
+                    mcp::McpAgentSource::LocalSettings
+                }
                 AgentSource::Plugin => mcp::McpAgentSource::Plugin,
-                AgentSource::Settings(protocol::SettingsScope::Managed) => mcp::McpAgentSource::PolicySettings,
+                AgentSource::Settings(protocol::SettingsScope::Managed) => {
+                    mcp::McpAgentSource::PolicySettings
+                }
                 AgentSource::Flag => mcp::McpAgentSource::FlagSettings,
                 AgentSource::AdditionalDirectory => mcp::McpAgentSource::AdditionalDirectory,
             });
@@ -188,7 +196,9 @@ pub fn agent_mcp_specs_to_scoped_configs(
 pub(crate) fn plugin_trusted_source(source: AgentSource) -> bool {
     matches!(
         source,
-        AgentSource::Plugin | AgentSource::Settings(protocol::SettingsScope::Managed) | AgentSource::BuiltIn
+        AgentSource::Plugin
+            | AgentSource::Settings(protocol::SettingsScope::Managed)
+            | AgentSource::BuiltIn
     )
 }
 
@@ -241,7 +251,10 @@ mod tests {
 
     #[test]
     fn empty_specs_yield_no_configs() {
-        let def = def_with_specs(vec![], AgentSource::Settings(protocol::SettingsScope::Project));
+        let def = def_with_specs(
+            vec![],
+            AgentSource::Settings(protocol::SettingsScope::Project),
+        );
         assert!(convert(&def, false).is_empty());
     }
 
@@ -364,7 +377,10 @@ mod tests {
         let mut map = serde_json::Map::new();
         map.insert("a".into(), serde_json::json!({"command": "x"}));
         map.insert("b".into(), serde_json::json!({"command": "y"}));
-        let def = def_with_specs(vec![AgentMcpServerSpec::Record(map)], AgentSource::Settings(protocol::SettingsScope::Project));
+        let def = def_with_specs(
+            vec![AgentMcpServerSpec::Record(map)],
+            AgentSource::Settings(protocol::SettingsScope::Project),
+        );
         assert!(convert(&def, false).is_empty());
     }
 

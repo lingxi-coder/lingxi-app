@@ -55,7 +55,13 @@ pub fn jaccard_bps(prompt: &str, entry_body: &str) -> u64 {
     intersection * 10_000 / union
 }
 
-/// Tier weight in basis points (session > project > team > user).
+/// How strongly a tier counts toward a RELEVANCE score, in basis points
+/// (session > project > team > user).
+///
+/// Answers "which tier's content should surface first", which is a different
+/// question from "which tier gets scarce budget first" — see
+/// [`super::scan`]'s `tier_priority`, which ranks `Project` last where this
+/// ranks it second. Both are correct.
 #[must_use]
 pub const fn tier_weight_bps(tier: MemoryEntryTier) -> u64 {
     match tier {
@@ -66,7 +72,10 @@ pub const fn tier_weight_bps(tier: MemoryEntryTier) -> u64 {
     }
 }
 
-/// Tier ordering (ascending = strongest tie-break preference).
+/// Tie-break order when two entries score equally (ascending = preferred).
+///
+/// Mirrors [`tier_weight_bps`]'s ranking; `tier_weights_and_tie_breaks_agree`
+/// keeps the two from drifting apart.
 const fn tier_order(tier: MemoryEntryTier) -> u8 {
     match tier {
         MemoryEntryTier::Session => 0,
@@ -144,6 +153,30 @@ fn apply_team_boost(s: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The relevance weight and the tie-break order are two statements of one
+    /// ranking. They are separate functions, so nothing but this test stops
+    /// them drifting apart.
+    #[test]
+    fn tier_weights_and_tie_breaks_agree() {
+        let ranked = [
+            MemoryEntryTier::Session,
+            MemoryEntryTier::Project,
+            MemoryEntryTier::Team,
+            MemoryEntryTier::User,
+        ];
+        for pair in ranked.windows(2) {
+            let (hi, lo) = (pair[0], pair[1]);
+            assert!(
+                tier_weight_bps(hi) > tier_weight_bps(lo),
+                "{hi:?} must outweigh {lo:?}"
+            );
+            assert!(
+                tier_order(hi) < tier_order(lo),
+                "{hi:?} must tie-break ahead of {lo:?}"
+            );
+        }
+    }
 
     #[test]
     fn tokenize_lowercases_and_splits_on_punctuation() {

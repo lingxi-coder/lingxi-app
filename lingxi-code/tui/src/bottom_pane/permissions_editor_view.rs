@@ -301,9 +301,10 @@ impl PermissionsSnapshot {
     fn append_managed_rules(rules: &mut Vec<PermissionRule>, managed_dir: &Path) {
         fn read_into(path: &Path, rules: &mut Vec<PermissionRule>) {
             if let Ok(raw) = std::fs::read_to_string(path) {
-                if let Ok(mut projected) =
-                    permission_rules_from_settings_json(&raw, PermissionRuleSource::Settings(protocol::SettingsScope::Managed))
-                {
+                if let Ok(mut projected) = permission_rules_from_settings_json(
+                    &raw,
+                    PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+                ) {
                     rules.append(&mut projected);
                 }
             }
@@ -333,7 +334,10 @@ impl PermissionsSnapshot {
     fn append_managed_auto_mode(snapshot: &mut AutoModeSnapshot, managed_dir: &Path) {
         fn read_into(path: &Path, snapshot: &mut AutoModeSnapshot) {
             if let Ok(raw) = std::fs::read_to_string(path) {
-                snapshot.append_settings_json(&raw, PermissionRuleSource::Settings(protocol::SettingsScope::Managed));
+                snapshot.append_settings_json(
+                    &raw,
+                    PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+                );
             }
         }
         read_into(&managed_dir.join("managed-settings.json"), snapshot);
@@ -416,9 +420,15 @@ impl PermTab {
 #[must_use]
 fn source_to_destination(source: PermissionRuleSource) -> Option<PermissionUpdateDestination> {
     match source {
-        PermissionRuleSource::Settings(protocol::SettingsScope::User) => Some(PermissionUpdateDestination::UserSettings),
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => Some(PermissionUpdateDestination::ProjectSettings),
-        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => Some(PermissionUpdateDestination::LocalSettings),
+        PermissionRuleSource::Settings(protocol::SettingsScope::User) => {
+            Some(PermissionUpdateDestination::UserSettings)
+        }
+        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => {
+            Some(PermissionUpdateDestination::ProjectSettings)
+        }
+        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => {
+            Some(PermissionUpdateDestination::LocalSettings)
+        }
         _ => None,
     }
 }
@@ -1535,7 +1545,10 @@ mod tests {
 
         // A PolicySettings rule has no writable destination, so the editor's
         // read-only handling (no remove) stays active for it.
-        assert!(source_to_destination(PermissionRuleSource::Settings(protocol::SettingsScope::Managed)).is_none());
+        assert!(source_to_destination(PermissionRuleSource::Settings(
+            protocol::SettingsScope::Managed
+        ))
+        .is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1778,13 +1791,19 @@ mod tests {
             .entries_for_category(AutoModeCategory::SoftAllow);
         assert_eq!(user.len(), 1);
         assert_eq!(user[0].value, "user classifier");
-        assert_eq!(user[0].source, PermissionRuleSource::Settings(protocol::SettingsScope::User));
+        assert_eq!(
+            user[0].source,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+        );
         let local = snapshot
             .auto_mode
             .entries_for_category(AutoModeCategory::SoftDeny);
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].value, "local classifier");
-        assert_eq!(local[0].source, PermissionRuleSource::Settings(protocol::SettingsScope::Local));
+        assert_eq!(
+            local[0].source,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+        );
         assert!(snapshot
             .auto_mode
             .builtin_enabled(AutoModeCategory::SoftAllow));

@@ -389,10 +389,22 @@ mod tests {
     #[test]
     fn deferred_label_folds_the_settings_tiers_and_keeps_each_origin_distinct() {
         for (source, expected) in [
-            (HookSource::Settings(protocol::SettingsScope::User), "settings"),
-            (HookSource::Settings(protocol::SettingsScope::Project), "settings"),
-            (HookSource::Settings(protocol::SettingsScope::Local), "settings"),
-            (HookSource::Settings(protocol::SettingsScope::Managed), "settings"),
+            (
+                HookSource::Settings(protocol::SettingsScope::User),
+                "settings",
+            ),
+            (
+                HookSource::Settings(protocol::SettingsScope::Project),
+                "settings",
+            ),
+            (
+                HookSource::Settings(protocol::SettingsScope::Local),
+                "settings",
+            ),
+            (
+                HookSource::Settings(protocol::SettingsScope::Managed),
+                "settings",
+            ),
             (HookSource::Plugin, "plugin"),
             (HookSource::FrontMatter, "agent"),
             (HookSource::Session, "session"),

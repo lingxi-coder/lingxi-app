@@ -751,7 +751,8 @@ fn mcp_servers_inventory_payload(
             // LingXi's `Managed` scope is a port-side split of the same
             // enterprise-managed settings tier. The 2.1.252 oracle has no
             // separate `managed` inventory bucket.
-            mcp::ConfigScope::Enterprise | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed) => "enterprise",
+            mcp::ConfigScope::Enterprise
+            | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed) => "enterprise",
             mcp::ConfigScope::Settings(protocol::SettingsScope::User) => "global",
             mcp::ConfigScope::Settings(protocol::SettingsScope::Project) => "project",
             mcp::ConfigScope::Settings(protocol::SettingsScope::Local) => "user",
@@ -839,10 +840,22 @@ mod mcp_telemetry_helper_tests {
     fn mcp_server_inventory_matches_oracle_scope_buckets_and_folds_managed_into_enterprise() {
         let payload = mcp_servers_inventory_payload(&[
             stdio_config("enterprise", mcp::ConfigScope::Enterprise),
-            stdio_config("managed", mcp::ConfigScope::Settings(protocol::SettingsScope::Managed)),
-            stdio_config("global", mcp::ConfigScope::Settings(protocol::SettingsScope::User)),
-            stdio_config("project", mcp::ConfigScope::Settings(protocol::SettingsScope::Project)),
-            stdio_config("user", mcp::ConfigScope::Settings(protocol::SettingsScope::Local)),
+            stdio_config(
+                "managed",
+                mcp::ConfigScope::Settings(protocol::SettingsScope::Managed),
+            ),
+            stdio_config(
+                "global",
+                mcp::ConfigScope::Settings(protocol::SettingsScope::User),
+            ),
+            stdio_config(
+                "project",
+                mcp::ConfigScope::Settings(protocol::SettingsScope::Project),
+            ),
+            stdio_config(
+                "user",
+                mcp::ConfigScope::Settings(protocol::SettingsScope::Local),
+            ),
             stdio_config("dynamic", mcp::ConfigScope::Dynamic),
             stdio_config("agent", mcp::ConfigScope::Agent),
             stdio_config("claudeai", mcp::ConfigScope::ClaudeAi),
@@ -1481,7 +1494,9 @@ async fn load_boot_permission_tiers_with_flag(
         .iter()
         .any(|raw| permission::allow_managed_permission_rules_only_from_settings_json(raw));
     if allow_managed_permission_rules_only {
-        rules.retain(|r| r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed));
+        rules.retain(|r| {
+            r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)
+        });
     }
     let mode_preference_allowed = !managed_tiers
         .iter()
@@ -12826,7 +12841,8 @@ pub async fn build_with_credential_stack(
         mcp_configs.retain(|cfg| {
             matches!(
                 cfg.scope,
-                mcp::ConfigScope::Enterprise | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed)
+                mcp::ConfigScope::Enterprise
+                    | mcp::ConfigScope::Settings(protocol::SettingsScope::Managed)
             )
         });
     }
@@ -13098,8 +13114,10 @@ pub async fn build_with_credential_stack(
     // mode. Bare mode disables hooks entirely.
     if !cfg.customization_gates.bare {
         for raw in &managed_settings_for_strict {
-            match hooks::parse_hooks_from_settings_json(raw, hooks::definition::HookSource::Settings(protocol::SettingsScope::Managed))
-            {
+            match hooks::parse_hooks_from_settings_json(
+                raw,
+                hooks::definition::HookSource::Settings(protocol::SettingsScope::Managed),
+            ) {
                 Ok(hooks_vec) => {
                     for hook in hooks_vec {
                         hook_registry.register(hook);
@@ -19845,7 +19863,10 @@ still flip to available"
 
         // Open gates: the frontmatter server joins the to-connect list with
         // scope Agent, exactly like a `--mcp-config` server.
-        let def = agent_with_server("docs", agent::AgentSource::Settings(protocol::SettingsScope::Project));
+        let def = agent_with_server(
+            "docs",
+            agent::AgentSource::Settings(protocol::SettingsScope::Project),
+        );
         let mut configs = vec![existing("keep")];
         let blocked = super::merge_agent_frontmatter_mcp_servers(
             &mut configs,
@@ -19911,7 +19932,10 @@ still flip to available"
             matches!(&configs[0].spec, platform_api::McpTransportSpec::Stdio { command, .. } if command == "prior"),
             "a --mcp-config server must win on name collision"
         );
-        assert_eq!(configs[0].scope, mcp::ConfigScope::Settings(protocol::SettingsScope::Project));
+        assert_eq!(
+            configs[0].scope,
+            mcp::ConfigScope::Settings(protocol::SettingsScope::Project)
+        );
 
         // Gl(): safe mode → no merge.
         let mut configs = vec![];
@@ -19984,7 +20008,10 @@ still flip to available"
 
         // Yee: a deny-listed server is BLOCKED (returned for the stderr
         // warning), an allowed sibling still merges.
-        let mut two = agent_with_server("docs", agent::AgentSource::Settings(protocol::SettingsScope::Project));
+        let mut two = agent_with_server(
+            "docs",
+            agent::AgentSource::Settings(protocol::SettingsScope::Project),
+        );
         let mut denied = serde_json::Map::new();
         denied.insert("denied".to_string(), serde_json::json!({"command": "evil"}));
         two.mcp_servers
@@ -23837,7 +23864,9 @@ must be filtered out: got {after:?}"
         assert!(!super::agent_source_is_trusted(
             agent::AgentSource::Settings(protocol::SettingsScope::User)
         ));
-        assert!(!super::agent_source_is_trusted(agent::AgentSource::Settings(protocol::SettingsScope::Project)));
+        assert!(!super::agent_source_is_trusted(
+            agent::AgentSource::Settings(protocol::SettingsScope::Project)
+        ));
         assert!(!super::agent_source_is_trusted(agent::AgentSource::Flag));
         assert!(!super::agent_source_is_trusted(
             agent::AgentSource::AdditionalDirectory
@@ -25675,10 +25704,8 @@ must be filtered out: got {after:?}"
         let (home, cwd) = perm_tier_dirs();
         let tiers = super::load_boot_permission_tiers(home.path(), cwd.path(), (true, true)).await;
         assert_eq!(tiers.rules.len(), 2, "base + drop-in rules both accumulate");
-        assert!(tiers
-            .rules
-            .iter()
-            .all(|r| r.source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)));
+        assert!(tiers.rules.iter().all(|r| r.source
+            == permission::PermissionRuleSource::Settings(protocol::SettingsScope::Managed)));
         assert_eq!(
             tiers.mode,
             permission::PermissionMode::Plan,

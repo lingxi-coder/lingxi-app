@@ -715,7 +715,11 @@ mod tests {
 
     #[test]
     fn empty_settings_yields_no_hooks() {
-        let hooks = parse_hooks_from_settings_json("{}", HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            "{}",
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert!(hooks.is_empty());
     }
 
@@ -730,12 +734,19 @@ mod tests {
             ]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].name, "./fmt.sh");
         assert_eq!(hooks[0].events, vec![HookEventType::PreToolUse]);
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(30)));
-        assert_eq!(hooks[0].source, HookSource::Settings(protocol::SettingsScope::Project));
+        assert_eq!(
+            hooks[0].source,
+            HookSource::Settings(protocol::SettingsScope::Project)
+        );
         let cond = hooks[0].if_condition.as_ref().expect("matcher present");
         assert_eq!(cond.pattern, "Write|Edit");
         // No `if` → if_pattern stays None, match_input false.
@@ -754,7 +765,11 @@ mod tests {
             ]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         // Tool-name matcher AND the `if`-condition are both carried on one condition.
         assert_eq!(hooks[0].matcher(), Some("Bash"));
@@ -775,7 +790,11 @@ mod tests {
             ]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         // No group matcher → no tool-name matcher, but the `if` is carried.
         assert_eq!(hooks[0].matcher(), None);
@@ -786,14 +805,22 @@ mod tests {
     fn unknown_event_is_skipped() {
         let raw =
             r#"{ "hooks": { "Bogus": [{ "hooks": [{ "type": "command", "command": "x" }]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert!(hooks.is_empty());
     }
 
     #[test]
     fn missing_command_field_is_skipped() {
         let raw = r#"{ "hooks": { "Stop": [{ "hooks": [{ "type": "command" }]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert!(hooks.is_empty());
     }
 
@@ -853,7 +880,11 @@ mod tests {
         );
         for (name, expected) in cases {
             let raw = one_command(name);
-            let hooks = parse_hooks_from_settings_json(&raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+            let hooks = parse_hooks_from_settings_json(
+                &raw,
+                HookSource::Settings(protocol::SettingsScope::User),
+            )
+            .unwrap();
             assert_eq!(hooks.len(), 1, "event {name} should produce one hook");
             assert_eq!(
                 hooks[0].events,
@@ -868,7 +899,11 @@ mod tests {
         // FileChanged was NOT recognized before this change; assert it now is
         // and carries no if-condition when no matcher is supplied.
         let raw = one_command("FileChanged");
-        let hooks = parse_hooks_from_settings_json(&raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].events, vec![HookEventType::FileChanged]);
         assert!(hooks[0].if_condition.is_none());
@@ -883,7 +918,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert!(
             hooks[0].once,
@@ -895,7 +934,11 @@ mod tests {
     #[test]
     fn once_defaults_to_false_when_absent() {
         let raw = one_command("Stop");
-        let hooks = parse_hooks_from_settings_json(&raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert!(!hooks[0].once, "absent once must default to false");
     }
@@ -909,7 +952,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].status_message.as_deref(), Some("Formatting…"));
         assert!(!hooks[0].once, "absent once must default to false");
@@ -925,7 +972,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert!(hooks[0].once);
         assert_eq!(hooks[0].status_message.as_deref(), Some("Guarding"));
@@ -946,7 +997,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert!(!hooks[0].blocking);
         assert!(hooks[0].async_rewake);
@@ -971,10 +1026,17 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].events, vec![HookEventType::PreToolUse]);
-        assert_eq!(hooks[0].source, HookSource::Settings(protocol::SettingsScope::Project));
+        assert_eq!(
+            hooks[0].source,
+            HookSource::Settings(protocol::SettingsScope::Project)
+        );
         // The per-hook timeout is carried onto the definition (seconds).
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(12)));
         let HookExecutor::Http {
@@ -1018,7 +1080,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         let HookExecutor::Http {
             allowed_env_vars, ..
         } = &hooks[0].executor
@@ -1040,7 +1106,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         let HookExecutor::Agent { model, .. } = &hooks[0].executor else {
             panic!("expected Agent executor");
         };
@@ -1059,7 +1129,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].timeout, None);
         let HookExecutor::Http {
@@ -1081,7 +1155,11 @@ mod tests {
         let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
             { "type": "http", "timeout": 5 }
         ]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert!(hooks.is_empty(), "an http entry without a url is skipped");
     }
 
@@ -1098,10 +1176,17 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Local)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Local),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].events, vec![HookEventType::Stop]);
-        assert_eq!(hooks[0].source, HookSource::Settings(protocol::SettingsScope::Local));
+        assert_eq!(
+            hooks[0].source,
+            HookSource::Settings(protocol::SettingsScope::Local)
+        );
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(90)));
         let HookExecutor::Agent {
             agent_type,
@@ -1121,7 +1206,11 @@ mod tests {
         let raw = r#"{ "hooks": { "Stop": [{ "hooks": [
             { "type": "agent", "timeout": 30 }
         ]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             hooks.is_empty(),
             "an agent entry without a prompt is skipped"
@@ -1143,10 +1232,17 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].events, vec![HookEventType::PreToolUse]);
-        assert_eq!(hooks[0].source, HookSource::Settings(protocol::SettingsScope::Project));
+        assert_eq!(
+            hooks[0].source,
+            HookSource::Settings(protocol::SettingsScope::Project)
+        );
         assert_eq!(hooks[0].timeout, Some(Duration::from_secs(15)));
         let HookExecutor::Prompt { prompt, model, .. } = &hooks[0].executor else {
             panic!("expected Prompt executor, got {:?}", hooks[0].executor);
@@ -1165,7 +1261,11 @@ mod tests {
         let raw = r#"{ "hooks": { "PostToolUse": [{ "hooks": [
             { "type": "prompt", "prompt": "evaluate this" }
         ]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         let HookExecutor::Prompt { prompt, model, .. } = &hooks[0].executor else {
             panic!("expected Prompt executor");
@@ -1179,7 +1279,11 @@ mod tests {
         let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
             { "type": "prompt", "model": "claude-sonnet-4-6" }
         ]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert!(
             hooks.is_empty(),
             "a prompt entry without a prompt is skipped"
@@ -1207,7 +1311,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(
             hooks.len(),
             1,
@@ -1252,7 +1360,11 @@ mod tests {
         let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
             { "type": "mcp_tool", "server": "audit", "tool": "check" }
         ]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1);
         let HookExecutor::McpTool { input, .. } = &hooks[0].executor else {
             panic!("expected McpTool executor");
@@ -1268,15 +1380,21 @@ mod tests {
         let no_tool = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
             { "type": "mcp_tool", "server": "audit" }
         ]}]}}"#;
-        assert!(parse_hooks_from_settings_json(no_tool, HookSource::Settings(protocol::SettingsScope::User))
-            .unwrap()
-            .is_empty());
+        assert!(parse_hooks_from_settings_json(
+            no_tool,
+            HookSource::Settings(protocol::SettingsScope::User)
+        )
+        .unwrap()
+        .is_empty());
         let no_server = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
             { "type": "mcp_tool", "tool": "check" }
         ]}]}}"#;
-        assert!(parse_hooks_from_settings_json(no_server, HookSource::Settings(protocol::SettingsScope::User))
-            .unwrap()
-            .is_empty());
+        assert!(parse_hooks_from_settings_json(
+            no_server,
+            HookSource::Settings(protocol::SettingsScope::User)
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
@@ -1293,7 +1411,11 @@ mod tests {
             ]}]
           }
         }"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::Project)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 4, "command + http + agent + prompt all parse");
         // Every parsed hook keeps the group's matcher.
         for h in &hooks {
@@ -1320,7 +1442,11 @@ mod tests {
             { "type": "command", "command": "b.ps1", "shell": "powershell" },
             { "type": "command", "command": "c.sh" }
         ]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 3);
         let shells: Vec<Option<crate::definition::HookShell>> = hooks
             .iter()
@@ -1349,7 +1475,11 @@ mod tests {
             { "type": "command", "command": "a.sh", "shell": "pwsh" },
             { "type": "command", "command": "b.sh" }
         ]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let hooks = parse_hooks_from_settings_json(
+            raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(hooks.len(), 1, "only the valid entry survives");
         assert_eq!(hooks[0].name, "b.sh");
     }
@@ -1387,7 +1517,11 @@ mod tests {
         let policy = r#"{ "disableAllHooks": true }"#;
         let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
         assert!(gate.policy_disable_all_hooks);
-        for src in [HookSource::Settings(protocol::SettingsScope::User), HookSource::Settings(protocol::SettingsScope::Project), HookSource::Settings(protocol::SettingsScope::Managed)] {
+        for src in [
+            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Settings(protocol::SettingsScope::Managed),
+        ] {
             assert!(
                 !gate.allows_source(src),
                 "disableAllHooks must block {src:?}"
@@ -1403,7 +1537,11 @@ mod tests {
         let gate = HookPolicyGate::from_policy_settings_json(Some(policy), false, false);
         assert!(gate.managed_only());
         assert!(gate.allows_source(HookSource::Settings(protocol::SettingsScope::Managed)));
-        for src in [HookSource::Settings(protocol::SettingsScope::User), HookSource::Settings(protocol::SettingsScope::Project), HookSource::Plugin] {
+        for src in [
+            HookSource::Settings(protocol::SettingsScope::User),
+            HookSource::Settings(protocol::SettingsScope::Project),
+            HookSource::Plugin,
+        ] {
             assert!(!gate.allows_source(src), "managed-only must block {src:?}");
         }
     }
@@ -1485,7 +1623,12 @@ mod tests {
             false,
         );
         let raw = one_stop_command();
-        let hooks = parse_hooks_from_settings_json_gated(&raw, HookSource::Settings(protocol::SettingsScope::User), gate).unwrap();
+        let hooks = parse_hooks_from_settings_json_gated(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+            gate,
+        )
+        .unwrap();
         assert!(
             hooks.is_empty(),
             "disableAllHooks must suppress the user tier"
@@ -1501,12 +1644,24 @@ mod tests {
         );
         let raw = one_stop_command();
         // Managed tier loads.
-        let managed =
-            parse_hooks_from_settings_json_gated(&raw, HookSource::Settings(protocol::SettingsScope::Managed), gate).unwrap();
+        let managed = parse_hooks_from_settings_json_gated(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::Managed),
+            gate,
+        )
+        .unwrap();
         assert_eq!(managed.len(), 1);
-        assert_eq!(managed[0].source, HookSource::Settings(protocol::SettingsScope::Managed));
+        assert_eq!(
+            managed[0].source,
+            HookSource::Settings(protocol::SettingsScope::Managed)
+        );
         // User tier is suppressed.
-        let user = parse_hooks_from_settings_json_gated(&raw, HookSource::Settings(protocol::SettingsScope::User), gate).unwrap();
+        let user = parse_hooks_from_settings_json_gated(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+            gate,
+        )
+        .unwrap();
         assert!(user.is_empty());
     }
 
@@ -1515,10 +1670,17 @@ mod tests {
         // With the default (no-policy) gate, the gated entry point is
         // byte-identical to the ungated one.
         let raw = one_stop_command();
-        let gated =
-            parse_hooks_from_settings_json_gated(&raw, HookSource::Settings(protocol::SettingsScope::User), HookPolicyGate::default())
-                .unwrap();
-        let ungated = parse_hooks_from_settings_json(&raw, HookSource::Settings(protocol::SettingsScope::User)).unwrap();
+        let gated = parse_hooks_from_settings_json_gated(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+            HookPolicyGate::default(),
+        )
+        .unwrap();
+        let ungated = parse_hooks_from_settings_json(
+            &raw,
+            HookSource::Settings(protocol::SettingsScope::User),
+        )
+        .unwrap();
         assert_eq!(gated.len(), ungated.len());
         assert_eq!(gated.len(), 1);
         assert_eq!(gated[0].name, ungated[0].name);

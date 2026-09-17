@@ -22,8 +22,8 @@
 
 use crate::definition::{
     parse_effort_value, AgentCacheTtl, AgentDefinition, AgentEffort, AgentIsolation,
-    AgentMcpServerSpec, AgentModel, AgentPermissionMode, AgentSource,
-    AgentToolPolicy, ObserverSpec, EFFORT_LEVELS,
+    AgentMcpServerSpec, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
+    ObserverSpec, EFFORT_LEVELS,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -1917,6 +1917,10 @@ pub fn project_agent_dirs(cwd: &Path, home: &Path, project_root: Option<&Path>) 
 /// ⛔ One of claude's sources is still missing: the managed policy directory
 /// (`SN(Jb(),".claude",e)`, the LOWEST tier). The port has no managed-settings
 /// DIRECTORY helper, only `managed-settings.json` content handling.
+///
+/// Answers: which agent directory wins a name clash. One of several orderings
+/// over these rungs; `protocol::scope`'s module docs index them all and say
+/// which question each answers.
 #[must_use]
 pub fn agent_dir_precedence(
     user_agents_dir: PathBuf,
@@ -1928,7 +1932,10 @@ pub fn agent_dir_precedence(
     let mut project = project_agent_dirs(cwd, home, project_root);
     project.reverse();
 
-    let mut dirs = vec![(user_agents_dir, AgentSource::Settings(protocol::SettingsScope::User))];
+    let mut dirs = vec![(
+        user_agents_dir,
+        AgentSource::Settings(protocol::SettingsScope::User),
+    )];
     let mut seen_additional: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for extra in additional_dirs {
         let dir = extra.join(branding::DOT_DIR).join("agents");
@@ -1937,7 +1944,11 @@ pub fn agent_dir_precedence(
         }
         dirs.push((dir, AgentSource::AdditionalDirectory));
     }
-    dirs.extend(project.into_iter().map(|d| (d, AgentSource::Settings(protocol::SettingsScope::Project))));
+    dirs.extend(
+        project
+            .into_iter()
+            .map(|d| (d, AgentSource::Settings(protocol::SettingsScope::Project))),
+    );
     dirs
 }
 
@@ -2276,8 +2287,11 @@ mod tests {
             "---\nname: good\ndescription: d\n---\nBody",
         )
         .unwrap();
-        let defs =
-            load_agents_from_dirs(&[(dir.path().to_path_buf(), AgentSource::Settings(protocol::SettingsScope::User))]).await;
+        let defs = load_agents_from_dirs(&[(
+            dir.path().to_path_buf(),
+            AgentSource::Settings(protocol::SettingsScope::User),
+        )])
+        .await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].agent_type, "good");
     }
@@ -2361,7 +2375,11 @@ mod tests {
         .await
         .unwrap();
 
-        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Settings(protocol::SettingsScope::Project))]).await;
+        let loaded = load_agents_from_dirs(&[(
+            agents,
+            AgentSource::Settings(protocol::SettingsScope::Project),
+        )])
+        .await;
         let names: Vec<&str> = loaded.iter().map(|a| a.agent_type.as_str()).collect();
         assert_eq!(
             names,
@@ -2388,7 +2406,11 @@ mod tests {
         // sub/loop -> agents, i.e. agents/sub/loop/sub/loop/...
         std::os::unix::fs::symlink(&agents, sub.join("loop")).unwrap();
 
-        let loaded = load_agents_from_dirs(&[(agents, AgentSource::Settings(protocol::SettingsScope::Project))]).await;
+        let loaded = load_agents_from_dirs(&[(
+            agents,
+            AgentSource::Settings(protocol::SettingsScope::Project),
+        )])
+        .await;
         assert_eq!(loaded.len(), 1, "the cycle must not duplicate or hang");
         assert_eq!(loaded[0].agent_type, "a");
     }
@@ -2413,7 +2435,10 @@ mod tests {
 
         let loaded = load_agents_from_dirs(&[
             (user, AgentSource::Settings(protocol::SettingsScope::User)),
-            (project, AgentSource::Settings(protocol::SettingsScope::Project)),
+            (
+                project,
+                AgentSource::Settings(protocol::SettingsScope::Project),
+            ),
         ])
         .await;
         assert_eq!(loaded.len(), 1, "one inode, one definition: {loaded:?}");
@@ -2448,7 +2473,10 @@ mod tests {
 
         let loaded = load_agents_from_dirs(&[
             (user, AgentSource::Settings(protocol::SettingsScope::User)),
-            (project, AgentSource::Settings(protocol::SettingsScope::Project)),
+            (
+                project,
+                AgentSource::Settings(protocol::SettingsScope::Project),
+            ),
         ])
         .await;
         assert_eq!(loaded.len(), 1);
@@ -2471,19 +2499,34 @@ mod tests {
         };
         let mut agents = vec![
             named("keeper", "FLAG", AgentSource::Flag),
-            named("other", "PROJECT", AgentSource::Settings(protocol::SettingsScope::Project)),
+            named(
+                "other",
+                "PROJECT",
+                AgentSource::Settings(protocol::SettingsScope::Project),
+            ),
         ];
         merge_agents_later_wins(
             &mut agents,
             vec![
-                named("keeper", "POLICY", AgentSource::Settings(protocol::SettingsScope::Managed)),
-                named("fresh", "POLICY", AgentSource::Settings(protocol::SettingsScope::Managed)),
+                named(
+                    "keeper",
+                    "POLICY",
+                    AgentSource::Settings(protocol::SettingsScope::Managed),
+                ),
+                named(
+                    "fresh",
+                    "POLICY",
+                    AgentSource::Settings(protocol::SettingsScope::Managed),
+                ),
             ],
         );
         assert_eq!(agents.len(), 3, "replace in place, then append: {agents:?}");
         let keeper = agents.iter().find(|a| a.agent_type == "keeper").unwrap();
         assert_eq!(keeper.when_to_use, "POLICY");
-        assert_eq!(keeper.source, AgentSource::Settings(protocol::SettingsScope::Managed));
+        assert_eq!(
+            keeper.source,
+            AgentSource::Settings(protocol::SettingsScope::Managed)
+        );
         assert_eq!(
             agents[1].agent_type, "other",
             "untouched entries keep order"
@@ -2570,8 +2613,13 @@ mod tests {
             ],
             "user first (lowest), then project shallow -> deep",
         );
-        assert_eq!(got[0].1, AgentSource::Settings(protocol::SettingsScope::User));
-        assert!(got[1..].iter().all(|(_, s)| *s == AgentSource::Settings(protocol::SettingsScope::Project)));
+        assert_eq!(
+            got[0].1,
+            AgentSource::Settings(protocol::SettingsScope::User)
+        );
+        assert!(got[1..]
+            .iter()
+            .all(|(_, s)| *s == AgentSource::Settings(protocol::SettingsScope::Project)));
     }
 
     /// `--add-dir` agents rank between the user tier and the ordinary project
@@ -2592,9 +2640,15 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (d("/home/u/.lingxi/agents"), AgentSource::Settings(protocol::SettingsScope::User)),
+                (
+                    d("/home/u/.lingxi/agents"),
+                    AgentSource::Settings(protocol::SettingsScope::User)
+                ),
                 (agents("/other"), AgentSource::AdditionalDirectory),
-                (agents("/home/u/repo"), AgentSource::Settings(protocol::SettingsScope::Project)),
+                (
+                    agents("/home/u/repo"),
+                    AgentSource::Settings(protocol::SettingsScope::Project)
+                ),
             ],
             "user < additionalDirectory < projectSettings, deduped",
         );
@@ -2664,8 +2718,14 @@ mod tests {
         .unwrap();
 
         let defs = load_agents_from_dirs(&[
-            (user.clone(), AgentSource::Settings(protocol::SettingsScope::User)),
-            (project.clone(), AgentSource::Settings(protocol::SettingsScope::Project)),
+            (
+                user.clone(),
+                AgentSource::Settings(protocol::SettingsScope::User),
+            ),
+            (
+                project.clone(),
+                AgentSource::Settings(protocol::SettingsScope::Project),
+            ),
         ])
         .await;
 
@@ -2678,9 +2738,11 @@ mod tests {
 
     #[tokio::test]
     async fn load_agents_from_missing_dir_yields_empty() {
-        let defs =
-            load_agents_from_dirs(&[(PathBuf::from("/does/not/exist"), AgentSource::Settings(protocol::SettingsScope::User))])
-                .await;
+        let defs = load_agents_from_dirs(&[(
+            PathBuf::from("/does/not/exist"),
+            AgentSource::Settings(protocol::SettingsScope::User),
+        )])
+        .await;
         assert!(defs.is_empty());
     }
 

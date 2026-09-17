@@ -3874,12 +3874,21 @@ async fn build_mobile_inner_with_ask(
         let local = cwd.join(branding::DOT_DIR).join("settings.local.json");
         let mut sources: Vec<(std::path::PathBuf, permission::PermissionRuleSource)> = Vec::new();
         if user != proj {
-            sources.push((user, permission::PermissionRuleSource::Settings(protocol::SettingsScope::User)));
+            sources.push((
+                user,
+                permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ));
         }
-        sources.push((proj, permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)));
+        sources.push((
+            proj,
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        ));
         // `settings.local.json` is a distinct filename from both `settings.json`
         // paths, so it never collides with the dedup above — always read it last.
-        sources.push((local, permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local)));
+        sources.push((
+            local,
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+        ));
         for (path, source) in sources {
             if let Ok(raw) = tokio::fs::read_to_string(&path).await {
                 match permission::permission_rules_from_settings_json(&raw, source) {
@@ -3896,7 +3905,10 @@ async fn build_mobile_inner_with_ask(
                     // classifier-driven auto mode.  User settings are the
                     // trusted mobile tier for that promotion.
                     if m != PermissionMode::Auto
-                        || source == permission::PermissionRuleSource::Settings(protocol::SettingsScope::User)
+                        || source
+                            == permission::PermissionRuleSource::Settings(
+                                protocol::SettingsScope::User,
+                            )
                     {
                         mode = m; // local settings read last → scalar modes win
                     } else {
@@ -4075,7 +4087,10 @@ async fn build_mobile_inner_with_ask(
     // read last so it wins precedence on differing paths, matching desktop).
     let mut settings_sources: Vec<(std::path::PathBuf, hooks::definition::HookSource)> = Vec::new();
     if user_settings_path != project_settings_path {
-        settings_sources.push((user_settings_path, hooks::definition::HookSource::Settings(protocol::SettingsScope::User)));
+        settings_sources.push((
+            user_settings_path,
+            hooks::definition::HookSource::Settings(protocol::SettingsScope::User),
+        ));
     }
     settings_sources.push((
         project_settings_path,

@@ -746,9 +746,21 @@ mod tests {
     #[test]
     fn find_collects_only_dangerous_allow_rules() {
         let rules = vec![
-            allow("Bash", Some("python:*"), PermissionRuleSource::Settings(protocol::SettingsScope::User)),
-            allow("Bash", Some("ls:*"), PermissionRuleSource::Settings(protocol::SettingsScope::User)),
-            allow("Read", None, PermissionRuleSource::Settings(protocol::SettingsScope::User)),
+            allow(
+                "Bash",
+                Some("python:*"),
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ),
+            allow(
+                "Bash",
+                Some("ls:*"),
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ),
+            allow(
+                "Read",
+                None,
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ),
             allow("Agent", None, PermissionRuleSource::CliArg),
             // a dangerous DENY rule must NOT be collected (only allow rules).
             PermissionRule {
@@ -771,7 +783,11 @@ mod tests {
 
     #[test]
     fn find_displays_tool_wide_as_star() {
-        let rules = vec![allow("Bash", None, PermissionRuleSource::Settings(protocol::SettingsScope::User))];
+        let rules = vec![allow(
+            "Bash",
+            None,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        )];
         let found = find_dangerous_classifier_permissions(&rules);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rule_display, "Bash(*)");
@@ -780,13 +796,21 @@ mod tests {
     #[test]
     fn find_with_flag_escalates_safe_shell_allows() {
         let rules = vec![
-            allow("Bash", Some("ls:*"), PermissionRuleSource::Settings(protocol::SettingsScope::User)),
+            allow(
+                "Bash",
+                Some("ls:*"),
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ),
             allow(
                 "PowerShell",
                 Some("gci:*"),
                 PermissionRuleSource::Settings(protocol::SettingsScope::User),
             ),
-            allow("Read", None, PermissionRuleSource::Settings(protocol::SettingsScope::User)),
+            allow(
+                "Read",
+                None,
+                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            ),
         ];
         // flag OFF: none of these safe shell allows is dangerous.
         assert!(find_dangerous_classifier_permissions_with_flag(&rules, false).is_empty());

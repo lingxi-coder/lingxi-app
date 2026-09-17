@@ -196,7 +196,10 @@ mod tests {
         let settings = json!({
             "autoMode": { "allow": ["x"], "environment": ["y"], "soft_deny": [] }
         });
-        let r = scan_settings_tier(&settings, PermissionRuleSource::Settings(protocol::SettingsScope::Local));
+        let r = scan_settings_tier(
+            &settings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+        );
         assert_eq!(r.auto_mode_entry_count, 3);
         assert!(r.dangerous_allow.is_empty());
     }
@@ -221,7 +224,10 @@ mod tests {
         let settings = json!({
             "permissions": { "allow": ["Bash(*)", "Read", "Bash(rm:*)", "Edit(src/**)"] }
         });
-        let r = scan_settings_tier(&settings, PermissionRuleSource::Settings(protocol::SettingsScope::User));
+        let r = scan_settings_tier(
+            &settings,
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        );
         let displays: Vec<&str> = r
             .dangerous_allow
             .iter()
@@ -252,7 +258,10 @@ mod tests {
 
     #[test]
     fn empty_and_missing_sections_are_safe() {
-        let r = scan_settings_tier(&json!({}), PermissionRuleSource::Settings(protocol::SettingsScope::User));
+        let r = scan_settings_tier(
+            &json!({}),
+            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+        );
         assert_eq!(r.auto_mode_entry_count, 0);
         assert!(r.dangerous_allow.is_empty());
         assert!(removal_offer(&[r]).is_empty());

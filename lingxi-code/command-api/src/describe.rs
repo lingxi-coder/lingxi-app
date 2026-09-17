@@ -43,10 +43,18 @@ pub fn format_description_with_source(cmd: &SlashCommand) -> String {
         // TS: plugin → `(name) desc` when the manifest name is known, else `desc (plugin)`.
         CommandSource::Plugin => format!("{} (plugin)", cmd.description),
         // TS: `getSettingSourceName` mapping for the SettingSource cases.
-        CommandSource::Settings(protocol::SettingsScope::User) => format!("{} (user)", cmd.description),
-        CommandSource::Settings(protocol::SettingsScope::Project) => format!("{} (project)", cmd.description),
-        CommandSource::Settings(protocol::SettingsScope::Local) => format!("{} (project, gitignored)", cmd.description),
-        CommandSource::Settings(protocol::SettingsScope::Managed) => format!("{} (managed)", cmd.description),
+        CommandSource::Settings(protocol::SettingsScope::User) => {
+            format!("{} (user)", cmd.description)
+        }
+        CommandSource::Settings(protocol::SettingsScope::Project) => {
+            format!("{} (project)", cmd.description)
+        }
+        CommandSource::Settings(protocol::SettingsScope::Local) => {
+            format!("{} (project, gitignored)", cmd.description)
+        }
+        CommandSource::Settings(protocol::SettingsScope::Managed) => {
+            format!("{} (managed)", cmd.description)
+        }
     }
 }
 
@@ -69,13 +77,21 @@ mod tests {
 
     #[test]
     fn project_source_gets_project_suffix() {
-        let c = cmd("deploy", "Ship it", CommandSource::Settings(protocol::SettingsScope::Project));
+        let c = cmd(
+            "deploy",
+            "Ship it",
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert_eq!(format_description_with_source(&c), "Ship it (project)");
     }
 
     #[test]
     fn user_source_gets_user_suffix() {
-        let c = cmd("note", "Jot a note", CommandSource::Settings(protocol::SettingsScope::User));
+        let c = cmd(
+            "note",
+            "Jot a note",
+            CommandSource::Settings(protocol::SettingsScope::User),
+        );
         assert_eq!(format_description_with_source(&c), "Jot a note (user)");
     }
 
@@ -100,7 +116,11 @@ mod tests {
 
     #[test]
     fn local_source_matches_ts_setting_name() {
-        let c = cmd("x", "Local cmd", CommandSource::Settings(protocol::SettingsScope::Local));
+        let c = cmd(
+            "x",
+            "Local cmd",
+            CommandSource::Settings(protocol::SettingsScope::Local),
+        );
         assert_eq!(
             format_description_with_source(&c),
             "Local cmd (project, gitignored)"
@@ -109,13 +129,21 @@ mod tests {
 
     #[test]
     fn managed_source_matches_ts_setting_name() {
-        let c = cmd("x", "Managed cmd", CommandSource::Settings(protocol::SettingsScope::Managed));
+        let c = cmd(
+            "x",
+            "Managed cmd",
+            CommandSource::Settings(protocol::SettingsScope::Managed),
+        );
         assert_eq!(format_description_with_source(&c), "Managed cmd (managed)");
     }
 
     #[test]
     fn bundled_loaded_from_overrides_source_suffix() {
-        let mut c = cmd("skill", "A bundled skill", CommandSource::Settings(protocol::SettingsScope::User));
+        let mut c = cmd(
+            "skill",
+            "A bundled skill",
+            CommandSource::Settings(protocol::SettingsScope::User),
+        );
         c.loaded_from = Some("bundled".to_string());
         assert_eq!(
             format_description_with_source(&c),

@@ -30,15 +30,13 @@ pub async fn run(env: &MigrationEnv) -> bool {
         return true;
     }
 
-    let has_skip = [WritableScope::User, WritableScope::Local]
-        .iter()
-        .any(|s| {
-            let p = settings_path(*s, &env.lingxi_config_home, &env.project_dir);
-            read_settings_map(&p)
-                .ok()
-                .and_then(|m| m.get("skipDangerousModePermissionPrompt").map(js_truthy))
-                .unwrap_or(false)
-        });
+    let has_skip = [WritableScope::User, WritableScope::Local].iter().any(|s| {
+        let p = settings_path(*s, &env.lingxi_config_home, &env.project_dir);
+        read_settings_map(&p)
+            .ok()
+            .and_then(|m| m.get("skipDangerousModePermissionPrompt").map(js_truthy))
+            .unwrap_or(false)
+    });
     if !has_skip {
         let sp = settings_path(
             WritableScope::User,

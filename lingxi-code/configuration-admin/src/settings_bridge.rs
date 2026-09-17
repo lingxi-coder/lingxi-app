@@ -131,6 +131,9 @@ pub struct SettingsPaths {
 /// first so a later entry overwrites an earlier one. Per the engine's merge
 /// precedence, among these three: local beats project beats user. (`cli`,
 /// `managed`, `env` and `defaults` are not file layers this module reads.)
+/// Answers: which settings files the admin panel reads, and in what order.
+///
+/// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
 const FILE_LAYERS: [WritableScope; 3] = [
     WritableScope::User,
     WritableScope::Project,
@@ -363,9 +366,15 @@ pub fn permission_destination(
 /// matches the file it actually landed in.
 fn permission_rule_source(destination: SettingsDestinationDto) -> permission::PermissionRuleSource {
     match destination {
-        SettingsDestinationDto::User => permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
-        SettingsDestinationDto::Project => permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
-        SettingsDestinationDto::Local => permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+        SettingsDestinationDto::User => {
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::User)
+        }
+        SettingsDestinationDto::Project => {
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+        }
+        SettingsDestinationDto::Local => {
+            permission::PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+        }
     }
 }
 
@@ -640,7 +649,10 @@ pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
         .iter()
         .map(|file| {
             let mut entry = serde_json::Map::new();
-            entry.insert("layer".to_string(), Value::from(layer_wire_name(file.layer)));
+            entry.insert(
+                "layer".to_string(),
+                Value::from(layer_wire_name(file.layer)),
+            );
             entry.insert(
                 "path".to_string(),
                 Value::from(file.path.to_string_lossy().into_owned()),

@@ -236,7 +236,10 @@ mod tests {
             content: "Hello $0".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::Project),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert_eq!(cmd.name, "foo");
         let parsed = parse_slash_command("/foo world").unwrap();
         let runner = Arc::new(EchoRunner {

@@ -889,11 +889,23 @@ mod tests {
     fn command_source_str_pins_every_source_token() {
         for (source, expected) in [
             (CommandSource::Builtin, "builtin"),
-            (CommandSource::Settings(protocol::SettingsScope::User), "user"),
-            (CommandSource::Settings(protocol::SettingsScope::Project), "project"),
-            (CommandSource::Settings(protocol::SettingsScope::Local), "local"),
+            (
+                CommandSource::Settings(protocol::SettingsScope::User),
+                "user",
+            ),
+            (
+                CommandSource::Settings(protocol::SettingsScope::Project),
+                "project",
+            ),
+            (
+                CommandSource::Settings(protocol::SettingsScope::Local),
+                "local",
+            ),
             (CommandSource::Plugin, "plugin"),
-            (CommandSource::Settings(protocol::SettingsScope::Managed), "managed"),
+            (
+                CommandSource::Settings(protocol::SettingsScope::Managed),
+                "managed",
+            ),
             (CommandSource::Mcp, "mcp"),
             (CommandSource::Bundled, "bundled"),
         ] {
@@ -1526,9 +1538,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let dispatcher =
-            RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(protocol::SettingsScope::User)))
-                .with_skill_usage_home(root.clone());
+        let dispatcher = RegistrySlashDispatcher::new(registry_with_demo_markdown(
+            CommandSource::Settings(protocol::SettingsScope::User),
+        ))
+        .with_skill_usage_home(root.clone());
 
         assert!(matches!(
             dispatcher.dispatch("/demo one").await,
@@ -1557,8 +1570,10 @@ mod tests {
                 }
             })
         });
-        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(protocol::SettingsScope::Project)))
-            .with_expansion_hooks(exec, provider);
+        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(
+            protocol::SettingsScope::Project,
+        )))
+        .with_expansion_hooks(exec, provider);
 
         // Expansion still produces the body, AND the hook fires.
         match d.dispatch("/demo this and that").await {
@@ -1696,8 +1711,10 @@ mod tests {
         let (exec, log) = recording_expansion_executor().await;
         let provider: ExpansionHookContextProvider =
             Arc::new(|| Box::pin(async { HookContext::default() }));
-        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(protocol::SettingsScope::User)))
-            .with_expansion_hooks(exec, provider);
+        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(
+            protocol::SettingsScope::User,
+        )))
+        .with_expansion_hooks(exec, provider);
 
         let _ = d.dispatch("/demo").await;
 
@@ -1716,7 +1733,9 @@ mod tests {
         let (exec, log) = recording_expansion_executor().await;
         // Note: executor exists but is NOT wired into the dispatcher.
         let _ = exec;
-        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(protocol::SettingsScope::Project)));
+        let d = RegistrySlashDispatcher::new(registry_with_demo_markdown(CommandSource::Settings(
+            protocol::SettingsScope::Project,
+        )));
 
         match d.dispatch("/demo x").await {
             SlashDispatchResult::RunAsTurn { prompt } => assert_eq!(prompt, "Use x"),
@@ -1898,7 +1917,11 @@ mod tests {
     /// byte-exact expansion-failure display (patterns never left in place).
     #[tokio::test]
     async fn wired_deny_provider_aborts_markdown_expansion() {
-        let reg = markdown_with(CommandSource::Settings(protocol::SettingsScope::Project), "before !`echo hi` after", None);
+        let reg = markdown_with(
+            CommandSource::Settings(protocol::SettingsScope::Project),
+            "before !`echo hi` after",
+            None,
+        );
         let provider = Arc::new(FakeProvider {
             deny: true,
             seen_allowed: std::sync::Mutex::new(Vec::new()),

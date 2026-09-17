@@ -1092,9 +1092,11 @@ mod tests {
 
     // ── Auto-memory tool injection (claude isAutoMemoryEnabled → Write/Edit/Read) ──
 
-
     /// Set an agent's memory scope on top of the spawn-path defaults.
-    fn agent_def_with_memory(tools: AgentToolPolicy, memory: protocol::WritableScope) -> AgentDefinition {
+    fn agent_def_with_memory(
+        tools: AgentToolPolicy,
+        memory: protocol::WritableScope,
+    ) -> AgentDefinition {
         AgentDefinition {
             memory: Some(memory),
             ..agent_def(tools)

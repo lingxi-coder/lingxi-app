@@ -186,9 +186,15 @@ impl PolicyPermissionGate {
 
     fn parse_update_destination(value: &Value) -> Option<PermissionRuleSource> {
         match value.as_str()? {
-            "userSettings" => Some(PermissionRuleSource::Settings(protocol::SettingsScope::User)),
-            "projectSettings" => Some(PermissionRuleSource::Settings(protocol::SettingsScope::Project)),
-            "localSettings" => Some(PermissionRuleSource::Settings(protocol::SettingsScope::Local)),
+            "userSettings" => Some(PermissionRuleSource::Settings(
+                protocol::SettingsScope::User,
+            )),
+            "projectSettings" => Some(PermissionRuleSource::Settings(
+                protocol::SettingsScope::Project,
+            )),
+            "localSettings" => Some(PermissionRuleSource::Settings(
+                protocol::SettingsScope::Local,
+            )),
             "cliArg" => Some(PermissionRuleSource::CliArg),
             "session" => Some(PermissionRuleSource::Session),
             _ => None,

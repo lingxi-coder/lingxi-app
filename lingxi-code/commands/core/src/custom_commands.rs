@@ -371,7 +371,10 @@ mod tests {
         assert_eq!(n, 1);
 
         let cmd = reg.resolve("dup").expect("/dup should resolve");
-        assert_eq!(cmd.source, command_api::CommandSource::Settings(protocol::SettingsScope::Managed));
+        assert_eq!(
+            cmd.source,
+            command_api::CommandSource::Settings(protocol::SettingsScope::Managed)
+        );
         assert_eq!(cmd.description, "Managed skill");
         assert_eq!(cmd.skill_root.as_deref(), Some(managed_skill_dir.as_path()));
         match &cmd.kind {

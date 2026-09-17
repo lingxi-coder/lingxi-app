@@ -193,6 +193,9 @@ pub enum PermissionRuleSource {
 }
 
 impl PermissionRuleSource {
+    /// Answers: which rule a denial CITES — NOT which rule wins.
+    /// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+    ///
     /// Citation precedence matching claude-code's `Szn` walk
     /// (`userSettings` → `projectSettings` → `localSettings` → `flagSettings`
     /// → `policySettings` → `cliArg` → `command` → `session`), where the FIRST
@@ -312,6 +315,77 @@ mod tests {
             PermissionRuleSource::Settings(protocol::SettingsScope::User).priority()
                 > PermissionRuleSource::Session.priority()
         );
+    }
+
+    /// Walks the whole `Szn` chain, not just one pair.
+    ///
+    /// #35 was a whole-chain inversion, and until now exactly one of its nine
+    /// adjacent pairs was pinned (`user_settings_outrank_session` above) — the
+    /// same regression could have landed again on any of the other eight with
+    /// every test green.
+    ///
+    /// Written as a walk so a reordering fails at the FIRST pair that breaks
+    /// and names it, rather than reporting a single opaque inequality.
+    #[test]
+    fn citation_precedence_walks_the_whole_szn_chain_descending() {
+        use protocol::SettingsScope as T;
+        // claude-code `Szn`: userSettings → projectSettings → localSettings →
+        // flagSettings → policySettings → cliArg → command → session, then the
+        // two latent producers. FIRST in the walk wins citation, and `priority`
+        // encodes that as the HIGHEST number.
+        let chain = [
+            PermissionRuleSource::Settings(T::User),
+            PermissionRuleSource::Settings(T::Project),
+            PermissionRuleSource::Settings(T::Local),
+            PermissionRuleSource::FlagSettings,
+            PermissionRuleSource::Settings(T::Managed),
+            PermissionRuleSource::CliArg,
+            PermissionRuleSource::Command,
+            PermissionRuleSource::Session,
+            PermissionRuleSource::ToolsNarrowing,
+            PermissionRuleSource::McpServerPolicy,
+        ];
+
+        for pair in chain.windows(2) {
+            let (before, after) = (pair[0], pair[1]);
+            assert!(
+                before.priority() > after.priority(),
+                "{before:?} must cite before {after:?} ({} vs {})",
+                before.priority(),
+                after.priority()
+            );
+        }
+
+        // Every rung distinct: a duplicate number would make two sources tie and
+        // let the winner fall out of iteration order.
+        let mut seen: Vec<u8> = chain.iter().map(|s| s.priority()).collect();
+        seen.sort_unstable();
+        let before_dedup = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), before_dedup, "two sources share a priority");
+    }
+
+    /// Citation precedence and settings-value precedence are the two orderings
+    /// that disagree, and both are right. Pinned together so that "fixing" one
+    /// to match the other fails loudly instead of silently changing which rule
+    /// a denial names.
+    #[test]
+    fn citation_precedence_is_the_reverse_of_value_precedence_for_the_file_tiers() {
+        use protocol::SettingsScope as T;
+        // Citation: user cites before project cites before local.
+        assert!(
+            PermissionRuleSource::Settings(T::User).priority()
+                > PermissionRuleSource::Settings(T::Project).priority()
+        );
+        assert!(
+            PermissionRuleSource::Settings(T::Project).priority()
+                > PermissionRuleSource::Settings(T::Local).priority()
+        );
+        // Value precedence runs the other way — `core::settings` folds
+        // user, then project, then local, so local WINS a value conflict. That
+        // is asserted by `env_beats_local_beats_project_beats_user_beats_defaults`
+        // in `core/src/settings/mod.rs`; this comment is the link between the
+        // two, since no single crate can see both.
     }
 
     // M6-05 Task 7: PermissionRule::allow_tool_session + matches_tool.

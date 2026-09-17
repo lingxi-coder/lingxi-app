@@ -422,7 +422,9 @@ fn name_collision_warning(name: &str, home: &Path, cwd: &Path) -> Option<String>
     // separate disabled-setting check below reads a value.
     let mut merged: BTreeMap<String, Option<bool>> = BTreeMap::new();
     for scope in plugin_settings::SCOPES {
-        for (key, value) in plugin_settings::read_enabled(&plugin_settings::scope_path(scope, home, cwd)) {
+        for (key, value) in
+            plugin_settings::read_enabled(&plugin_settings::scope_path(scope, home, cwd))
+        {
             merged.insert(key, value.as_bool());
         }
     }

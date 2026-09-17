@@ -931,7 +931,11 @@ mod all_hooks_tests {
     }
 
     fn hk_http(name: &str, event: HookEventType) -> HookDefinition {
-        let mut h = hk(name, event, HookSource::Settings(protocol::SettingsScope::User));
+        let mut h = hk(
+            name,
+            event,
+            HookSource::Settings(protocol::SettingsScope::User),
+        );
         h.executor = HookExecutor::Http {
             url: "https://example.com/hook".into(),
             method: "POST".into(),
@@ -1006,8 +1010,16 @@ mod all_hooks_tests {
     #[test]
     fn remove_once_hook_drops_from_source_bucket_and_reports() {
         let mut r = HookRegistry::new();
-        let keep = hk("keep", HookEventType::PostToolUse, HookSource::Settings(protocol::SettingsScope::User));
-        let drop = hk("drop", HookEventType::PostToolUse, HookSource::Settings(protocol::SettingsScope::User));
+        let keep = hk(
+            "keep",
+            HookEventType::PostToolUse,
+            HookSource::Settings(protocol::SettingsScope::User),
+        );
+        let drop = hk(
+            "drop",
+            HookEventType::PostToolUse,
+            HookSource::Settings(protocol::SettingsScope::User),
+        );
         let drop_id = drop.id;
         let absent = HookId::new();
         r.register(keep);
@@ -1112,9 +1124,21 @@ mod all_hooks_tests {
     #[test]
     fn replace_source_hooks_only_swaps_target_bucket() {
         let mut r = HookRegistry::new();
-        r.register(hk("user-stop", HookEventType::Stop, HookSource::Settings(protocol::SettingsScope::User)));
-        r.register(hk("project-stop", HookEventType::Stop, HookSource::Settings(protocol::SettingsScope::Project)));
-        r.register(hk("local-stop", HookEventType::Stop, HookSource::Settings(protocol::SettingsScope::Local)));
+        r.register(hk(
+            "user-stop",
+            HookEventType::Stop,
+            HookSource::Settings(protocol::SettingsScope::User),
+        ));
+        r.register(hk(
+            "project-stop",
+            HookEventType::Stop,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        ));
+        r.register(hk(
+            "local-stop",
+            HookEventType::Stop,
+            HookSource::Settings(protocol::SettingsScope::Local),
+        ));
         r.register_plugin_hooks(
             PluginId::new(),
             vec![hk("plugin-stop", HookEventType::Stop, HookSource::Plugin)],
@@ -1122,7 +1146,11 @@ mod all_hooks_tests {
 
         let result = r.replace_source_hooks(
             HookSource::Settings(protocol::SettingsScope::Project),
-            vec![hk("project-new", HookEventType::Stop, HookSource::Settings(protocol::SettingsScope::Project))],
+            vec![hk(
+                "project-new",
+                HookEventType::Stop,
+                HookSource::Settings(protocol::SettingsScope::Project),
+            )],
         );
 
         assert_eq!(result.replaced_count, 1);
@@ -1141,7 +1169,11 @@ mod all_hooks_tests {
     #[test]
     fn replace_source_hooks_reports_file_changed_matcher_delta() {
         let mut r = HookRegistry::new();
-        let mut user = hk("watch-user", HookEventType::FileChanged, HookSource::Settings(protocol::SettingsScope::User));
+        let mut user = hk(
+            "watch-user",
+            HookEventType::FileChanged,
+            HookSource::Settings(protocol::SettingsScope::User),
+        );
         user.if_condition = Some(HookCondition {
             pattern: ".env".into(),
             match_tool_name: true,
@@ -1173,7 +1205,10 @@ mod all_hooks_tests {
             match_input: false,
             if_pattern: None,
         });
-        let result = r.replace_source_hooks(HookSource::Settings(protocol::SettingsScope::Project), vec![replacement]);
+        let result = r.replace_source_hooks(
+            HookSource::Settings(protocol::SettingsScope::Project),
+            vec![replacement],
+        );
         let mut before = result.file_changed_matchers_before;
         before.sort();
         let mut after = result.file_changed_matchers_after;
@@ -1188,9 +1223,21 @@ mod all_hooks_tests {
         let mut r = HookRegistry::new();
         let a = SessionId::new();
         let b = SessionId::new();
-        let first = hk("old-name", HookEventType::Stop, HookSource::Settings(protocol::SettingsScope::User));
-        let replaced = hk("other-name", HookEventType::Stop, HookSource::Settings(protocol::SettingsScope::Project));
-        let keep = hk("keep", HookEventType::Stop, HookSource::Settings(protocol::SettingsScope::User));
+        let first = hk(
+            "old-name",
+            HookEventType::Stop,
+            HookSource::Settings(protocol::SettingsScope::User),
+        );
+        let replaced = hk(
+            "other-name",
+            HookEventType::Stop,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        );
+        let keep = hk(
+            "keep",
+            HookEventType::Stop,
+            HookSource::Settings(protocol::SettingsScope::User),
+        );
 
         assert!(r
             .upsert_session_named_hook(a, "goal-stop".into(), first)
@@ -1451,8 +1498,16 @@ mod all_hooks_tests {
     #[test]
     fn all_hooks_unions_source_and_plugin_buckets() {
         let mut r = HookRegistry::new();
-        r.register(hk("user-fmt", HookEventType::PostToolUse, HookSource::Settings(protocol::SettingsScope::User)));
-        r.register(hk("project-lint", HookEventType::Stop, HookSource::Settings(protocol::SettingsScope::Project)));
+        r.register(hk(
+            "user-fmt",
+            HookEventType::PostToolUse,
+            HookSource::Settings(protocol::SettingsScope::User),
+        ));
+        r.register(hk(
+            "project-lint",
+            HookEventType::Stop,
+            HookSource::Settings(protocol::SettingsScope::Project),
+        ));
         r.register_plugin_hooks(
             protocol::PluginId::new(),
             vec![hk(

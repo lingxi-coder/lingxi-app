@@ -267,7 +267,9 @@ impl AdditionalWorkingDirs {
     pub fn read_block_paths(&self) -> Vec<PathBuf> {
         self.entries
             .iter()
-            .filter(|entry| entry.source != PermissionRuleSource::Settings(protocol::SettingsScope::Project))
+            .filter(|entry| {
+                entry.source != PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            })
             .map(|entry| entry.path.clone())
             .collect()
     }
@@ -290,7 +292,10 @@ mod tests {
     #[test]
     fn map_semantics_key_by_path_last_source_wins() {
         let mut dirs = AdditionalWorkingDirs::new();
-        dirs.insert("/a", PermissionRuleSource::Settings(protocol::SettingsScope::Project));
+        dirs.insert(
+            "/a",
+            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+        );
         dirs.insert("/b", PermissionRuleSource::CliArg);
         // Re-setting an existing key keeps its POSITION and takes the new source.
         dirs.insert("/a", PermissionRuleSource::Session);
@@ -308,9 +313,15 @@ mod tests {
     #[test]
     fn read_block_paths_drop_project_settings_only() {
         let dirs = AdditionalWorkingDirs::from_sources([
-            (vec!["/from-project"], PermissionRuleSource::Settings(protocol::SettingsScope::Project)),
+            (
+                vec!["/from-project"],
+                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            ),
             (vec!["/from-cli"], PermissionRuleSource::CliArg),
-            (vec!["/from-local"], PermissionRuleSource::Settings(protocol::SettingsScope::Local)),
+            (
+                vec!["/from-local"],
+                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            ),
         ]);
         assert_eq!(dirs.paths().len(), 3);
         assert_eq!(

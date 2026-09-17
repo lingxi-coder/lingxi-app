@@ -1172,7 +1172,10 @@ async fn run_add_from_claude_desktop(
         return RUNTIME_ERROR;
     };
 
-    let Ok(imported) = mcp::json_config::parse_mcp_json_string(&raw, ConfigScope::Settings(protocol::SettingsScope::Project)) else {
+    let Ok(imported) = mcp::json_config::parse_mcp_json_string(
+        &raw,
+        ConfigScope::Settings(protocol::SettingsScope::Project),
+    ) else {
         eprintln!("Could not parse Claude Desktop config.");
         return RUNTIME_ERROR;
     };
@@ -2062,7 +2065,11 @@ async fn run_remove(a: &RemoveArgs, analytics_bus: Option<&Arc<telemetry::Analyt
                 // claude prints the command hint with the name UNQUOTED (the
                 // surrounding message text quotes it, but the copy-paste command
                 // does not — verified against the live 2.1.191 binary).
-                eprintln!("  lingxi-cli mcp remove {} -s {}", a.name, scope_label(scope));
+                eprintln!(
+                    "  lingxi-cli mcp remove {} -s {}",
+                    a.name,
+                    scope_label(scope)
+                );
             }
             RUNTIME_ERROR
         }
@@ -2590,7 +2597,9 @@ fn diagnostic_row_survives(
     match w.scope {
         // A user-scope server is overridden by an APPROVED project server
         // (`gKy`) or a local one.
-        ConfigScope::Settings(protocol::SettingsScope::User) => !approved_project.contains(name) && !local_names.contains(name),
+        ConfigScope::Settings(protocol::SettingsScope::User) => {
+            !approved_project.contains(name) && !local_names.contains(name)
+        }
         ConfigScope::Settings(protocol::SettingsScope::Project) => !local_names.contains(name),
         _ => true,
     }
@@ -2650,7 +2659,11 @@ fn print_config_diagnostics(suppress_warnings: bool) {
     let approved_project = project_server_approval().approved;
 
     let mut printed_header = false;
-    for scope in [ConfigScope::Settings(protocol::SettingsScope::User), ConfigScope::Settings(protocol::SettingsScope::Project), ConfigScope::Settings(protocol::SettingsScope::Local)] {
+    for scope in [
+        ConfigScope::Settings(protocol::SettingsScope::User),
+        ConfigScope::Settings(protocol::SettingsScope::Project),
+        ConfigScope::Settings(protocol::SettingsScope::Local),
+    ] {
         let rows: Vec<&McpConfigWarning> = warnings
             .iter()
             .filter(|w| w.scope == scope)
@@ -2699,7 +2712,8 @@ fn print_config_diagnostics(suppress_warnings: bool) {
 /// [`mcp::json_config::load_mcp_servers`] and never require approval) must NOT be
 /// mislabelled pending nor have its details hidden.
 fn is_pending_project_server(cfg: &mcp::connection::McpServerConfig, pending: &[String]) -> bool {
-    cfg.scope == ConfigScope::Settings(protocol::SettingsScope::Project) && pending.iter().any(|n| n == &cfg.name)
+    cfg.scope == ConfigScope::Settings(protocol::SettingsScope::Project)
+        && pending.iter().any(|n| n == &cfg.name)
 }
 
 /// Whether a LOADED server is an explicitly-rejected project `.mcp.json`
@@ -2708,7 +2722,8 @@ fn is_pending_project_server(cfg: &mcp::connection::McpServerConfig, pending: &[
 /// takes precedence in the loaded view and never requires approval) must NOT
 /// be suppressed or labelled rejected.
 fn is_rejected_project_server(cfg: &mcp::connection::McpServerConfig, rejected: &[String]) -> bool {
-    cfg.scope == ConfigScope::Settings(protocol::SettingsScope::Project) && rejected.iter().any(|n| n == &cfg.name)
+    cfg.scope == ConfigScope::Settings(protocol::SettingsScope::Project)
+        && rejected.iter().any(|n| n == &cfg.name)
 }
 
 /// Per-project approval state of the `.mcp.json` servers, mirroring claude's
@@ -2802,7 +2817,10 @@ fn project_mcp_server_names_at(project_dir: &Path) -> Vec<String> {
 
 fn project_mcp_server_entries_at(project_dir: &Path) -> Vec<(String, serde_json::Value)> {
     let path = nearest_project_mcp_json(project_dir);
-    let Ok(raw) = mcp::config_diagnostics::read_mcp_config_file(&path, ConfigScope::Settings(protocol::SettingsScope::Project)) else {
+    let Ok(raw) = mcp::config_diagnostics::read_mcp_config_file(
+        &path,
+        ConfigScope::Settings(protocol::SettingsScope::Project),
+    ) else {
         return Vec::new();
     };
     let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -2817,8 +2835,10 @@ fn project_mcp_server_entries_at(project_dir: &Path) -> Vec<(String, serde_json:
     else {
         return Vec::new();
     };
-    let Ok(valid_servers) = mcp::json_config::parse_mcp_json_string(&raw, ConfigScope::Settings(protocol::SettingsScope::Project))
-    else {
+    let Ok(valid_servers) = mcp::json_config::parse_mcp_json_string(
+        &raw,
+        ConfigScope::Settings(protocol::SettingsScope::Project),
+    ) else {
         return Vec::new();
     };
     let valid_names: std::collections::HashSet<String> = valid_servers
@@ -2928,10 +2948,14 @@ fn not_found_message_get(name: &str) -> String {
 /// `name`. Used by `mcp remove` without `--scope` to detect the multi-scope
 /// case that claude refuses to auto-resolve.
 fn scopes_containing(name: &str) -> Vec<WritableScope> {
-    [WritableScope::Local, WritableScope::Project, WritableScope::User]
-        .into_iter()
-        .filter(|&scope| scope_contains_server(name, scope))
-        .collect()
+    [
+        WritableScope::Local,
+        WritableScope::Project,
+        WritableScope::User,
+    ]
+    .into_iter()
+    .filter(|&scope| scope_contains_server(name, scope))
+    .collect()
 }
 
 /// Presence-only check for a server in one scope (no mutation). Mirrors the
@@ -3008,9 +3032,15 @@ fn transport_summary(spec: &platform_api::McpTransportSpec) -> String {
 /// Human label for `get`'s `WritableScope:` line (matches claude's wording).
 fn scope_detail(scope: ConfigScope) -> &'static str {
     match scope {
-        ConfigScope::Settings(protocol::SettingsScope::Local) => "Local config (private to you in this project)",
-        ConfigScope::Settings(protocol::SettingsScope::User) => "User config (available in all your projects)",
-        ConfigScope::Settings(protocol::SettingsScope::Project) => "Project config (shared via .mcp.json)",
+        ConfigScope::Settings(protocol::SettingsScope::Local) => {
+            "Local config (private to you in this project)"
+        }
+        ConfigScope::Settings(protocol::SettingsScope::User) => {
+            "User config (available in all your projects)"
+        }
+        ConfigScope::Settings(protocol::SettingsScope::Project) => {
+            "Project config (shared via .mcp.json)"
+        }
         ConfigScope::Dynamic => "Dynamic",
         // claude `Llr`: `case"agent":return"Agent config (from agent frontmatter)"`.
         ConfigScope::Agent => "Agent config (from agent frontmatter)",
@@ -3961,7 +3991,10 @@ mod pending_approval_tests {
     /// pending — shown as Pending approval and never spawned.
     #[test]
     fn unapproved_project_server_is_pending() {
-        let cfg = stdio("repo-srv", ConfigScope::Settings(protocol::SettingsScope::Project));
+        let cfg = stdio(
+            "repo-srv",
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
         let pending = vec!["repo-srv".to_string()];
         assert!(is_pending_project_server(&cfg, &pending));
     }
@@ -3970,7 +4003,10 @@ mod pending_approval_tests {
     /// is listed/health-checked normally (lingxi shows its transport summary).
     #[test]
     fn approved_project_server_is_not_pending() {
-        let cfg = stdio("repo-srv", ConfigScope::Settings(protocol::SettingsScope::Project));
+        let cfg = stdio(
+            "repo-srv",
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
         let pending: Vec<String> = vec![]; // approved ⇒ absent from pending
         assert!(!is_pending_project_server(&cfg, &pending));
     }
@@ -4015,7 +4051,10 @@ mod pending_approval_tests {
         // After reset: all choices cleared ⇒ not approved (pending).
         assert!(!project_server_is_approved("repo-srv", false, &[], &[]));
         // And the loaded project server would now be flagged pending.
-        let cfg = stdio("repo-srv", ConfigScope::Settings(protocol::SettingsScope::Project));
+        let cfg = stdio(
+            "repo-srv",
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
         assert!(is_pending_project_server(&cfg, &["repo-srv".to_string()]));
     }
 
@@ -4454,7 +4493,10 @@ mod pending_approval_tests {
     #[test]
     fn same_named_user_or_local_server_is_never_pending() {
         let pending = vec!["srv".to_string()];
-        for scope in [ConfigScope::Settings(protocol::SettingsScope::User), ConfigScope::Settings(protocol::SettingsScope::Local)] {
+        for scope in [
+            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(protocol::SettingsScope::Local),
+        ] {
             let cfg = stdio("srv", scope);
             assert!(
                 !is_pending_project_server(&cfg, &pending),
@@ -4493,7 +4535,10 @@ mod pending_approval_tests {
         };
 
         // `zar`: blank url, no configError.
-        let mut blank = stdio("blank", ConfigScope::Settings(protocol::SettingsScope::Project));
+        let mut blank = stdio(
+            "blank",
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
         blank.spec = http("   ");
         assert_eq!(
             unconnectable_status(&blank),
@@ -4501,7 +4546,10 @@ mod pending_approval_tests {
         );
 
         // configError: the failed branch WITH the issue text.
-        let mut broken = stdio("broken", ConfigScope::Settings(protocol::SettingsScope::Project));
+        let mut broken = stdio(
+            "broken",
+            ConfigScope::Settings(protocol::SettingsScope::Project),
+        );
         broken.spec = http("${VAR:-}");
         broken.config_error = Some(CONFIG_ERROR.to_string());
         assert_eq!(
@@ -4511,7 +4559,13 @@ mod pending_approval_tests {
         );
 
         // A healthy server has to be dialed to know.
-        assert_eq!(unconnectable_status(&stdio("ok", ConfigScope::Settings(protocol::SettingsScope::User))), None);
+        assert_eq!(
+            unconnectable_status(&stdio(
+                "ok",
+                ConfigScope::Settings(protocol::SettingsScope::User)
+            )),
+            None
+        );
     }
 
     /// `mcp list` decides its empty state on the map `afe` actually built:
@@ -4522,19 +4576,39 @@ mod pending_approval_tests {
     fn rejected_only_workspace_is_empty_for_list() {
         let rejected = vec!["repo-srv".to_string()];
         assert!(
-            listed_servers(vec![stdio("repo-srv", ConfigScope::Settings(protocol::SettingsScope::Project))], &rejected).is_empty(),
+            listed_servers(
+                vec![stdio(
+                    "repo-srv",
+                    ConfigScope::Settings(protocol::SettingsScope::Project)
+                )],
+                &rejected
+            )
+            .is_empty(),
             "a rejected project server never enters the list-path server map"
         );
         // A same-named USER server never requires approval and is kept.
         assert_eq!(
-            listed_servers(vec![stdio("repo-srv", ConfigScope::Settings(protocol::SettingsScope::User))], &rejected).len(),
+            listed_servers(
+                vec![stdio(
+                    "repo-srv",
+                    ConfigScope::Settings(protocol::SettingsScope::User)
+                )],
+                &rejected
+            )
+            .len(),
             1
         );
         // Non-rejected servers survive alongside a rejected one.
         let kept = listed_servers(
             vec![
-                stdio("repo-srv", ConfigScope::Settings(protocol::SettingsScope::Project)),
-                stdio("other", ConfigScope::Settings(protocol::SettingsScope::Project)),
+                stdio(
+                    "repo-srv",
+                    ConfigScope::Settings(protocol::SettingsScope::Project),
+                ),
+                stdio(
+                    "other",
+                    ConfigScope::Settings(protocol::SettingsScope::Project),
+                ),
             ],
             &rejected,
         );
@@ -4638,10 +4712,16 @@ mod pending_approval_tests {
     fn rejected_project_server_scope_guard() {
         let rejected = vec!["srv".to_string()];
         assert!(is_rejected_project_server(
-            &stdio("srv", ConfigScope::Settings(protocol::SettingsScope::Project)),
+            &stdio(
+                "srv",
+                ConfigScope::Settings(protocol::SettingsScope::Project)
+            ),
             &rejected
         ));
-        for scope in [ConfigScope::Settings(protocol::SettingsScope::User), ConfigScope::Settings(protocol::SettingsScope::Local)] {
+        for scope in [
+            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(protocol::SettingsScope::Local),
+        ] {
             assert!(
                 !is_rejected_project_server(&stdio("srv", scope), &rejected),
                 "{scope:?} server must not be treated as rejected"
@@ -4655,7 +4735,10 @@ mod pending_approval_tests {
     /// configError text.
     #[tokio::test]
     async fn config_error_server_is_not_dialed() {
-        let mut cfg = stdio("broken", ConfigScope::Settings(protocol::SettingsScope::User));
+        let mut cfg = stdio(
+            "broken",
+            ConfigScope::Settings(protocol::SettingsScope::User),
+        );
         cfg.config_error = Some(
             "'url' \"${X}\" expanded to an empty string. Set the referenced \
              environment variable, or update the server's config and reconnect."

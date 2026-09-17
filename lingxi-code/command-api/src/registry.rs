@@ -29,6 +29,9 @@ impl CommandRegistry {
     /// entries), indexing every entry in `cmd.aliases` so the command resolves by
     /// any of its alternate names. Mirrors the TS `findCommand` search over
     /// `name` + `aliases` (`claude-code/src/commands.ts:690`).
+    /// Answers: may a later load replace an already-registered command.
+    ///
+    /// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
     pub fn register_command(&mut self, cmd: SlashCommand) {
         // Plugin names are qualified namespaces. A later project/user reload
         // must not replace the live owner behind `plugin:skill`; otherwise a

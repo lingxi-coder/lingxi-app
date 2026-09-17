@@ -450,6 +450,9 @@ pub async fn load_command_markdown_files(
         }
     }
 
+    // Answers: which tier's markdown command wins a name clash.
+    // One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+    //
     // Load each layer. Order: managed, user, then project dirs (most- to
     // least-specific). Combined priority: managed > user > project.
     let mut all_files: Vec<MarkdownCommandFile> = Vec::new();
@@ -457,9 +460,15 @@ pub async fn load_command_markdown_files(
         &managed_commands_dir,
         CommandSource::Settings(protocol::SettingsScope::Managed),
     ));
-    all_files.extend(load_markdown_dir(&user_dir, CommandSource::Settings(protocol::SettingsScope::User)));
+    all_files.extend(load_markdown_dir(
+        &user_dir,
+        CommandSource::Settings(protocol::SettingsScope::User),
+    ));
     for project_dir in &project_dirs {
-        all_files.extend(load_markdown_dir(project_dir, CommandSource::Settings(protocol::SettingsScope::Project)));
+        all_files.extend(load_markdown_dir(
+            project_dir,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        ));
     }
 
     deduplicate_by_inode(all_files)
@@ -511,10 +520,16 @@ pub async fn load_skill_markdown_files_with_roots(
         CommandSource::Settings(protocol::SettingsScope::User),
     ));
     for project_dir in project_dirs_up_to_home("skills", cwd, home) {
-        all_files.extend(load_skill_dir(&project_dir, CommandSource::Settings(protocol::SettingsScope::Project)));
+        all_files.extend(load_skill_dir(
+            &project_dir,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        ));
     }
     for dir in additional_skill_dirs {
-        all_files.extend(load_skill_dir(dir, CommandSource::Settings(protocol::SettingsScope::Project)));
+        all_files.extend(load_skill_dir(
+            dir,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        ));
     }
     deduplicate_skill_files_by_inode(all_files)
 }
@@ -1287,7 +1302,10 @@ mod tests {
             content: "# Foo Title\n\nHello $1".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::Project),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert_eq!(cmd.name, "foo");
         assert_eq!(cmd.description, "Foo Title");
         match cmd.kind {
@@ -1311,7 +1329,10 @@ mod tests {
             content: "# Ignored Title".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::User),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::User));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::User),
+        );
         assert_eq!(cmd.description, "explicit");
     }
 
@@ -1330,7 +1351,10 @@ mod tests {
             content: "# Body".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::Project),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert_eq!(cmd.argument_hint.as_deref(), Some("<file> [flags]"));
         assert_eq!(cmd.loaded_from.as_deref(), Some("commands_DEPRECATED"));
     }
@@ -1350,7 +1374,10 @@ mod tests {
             content: "# Body".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::Project),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert_eq!(
             cmd.argument_names,
             vec!["first".to_string(), "second".to_string()]
@@ -1367,7 +1394,10 @@ mod tests {
             content: "# Body".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::Project),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert!(cmd.argument_names.is_empty());
     }
 
@@ -1460,7 +1490,10 @@ mod tests {
             content: "# Body".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::Project),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert_eq!(cmd.when_to_use.as_deref(), Some("use for X"));
     }
 
@@ -1476,7 +1509,10 @@ mod tests {
             content: "# Body".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::Project),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert!(cmd.disable_model_invocation);
     }
 
@@ -1491,7 +1527,10 @@ mod tests {
             content: "# Body".to_string(),
             source: CommandSource::Settings(protocol::SettingsScope::Project),
         };
-        let cmd = build_markdown_command(&file, CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_markdown_command(
+            &file,
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert_eq!(cmd.argument_hint, None);
         assert_eq!(cmd.loaded_from.as_deref(), Some("commands_DEPRECATED"));
     }
@@ -1705,7 +1744,10 @@ mod tests {
         assert_eq!(files.len(), 2, "both skills load");
 
         for file in &files {
-            let cmd = build_skill_command(file, CommandSource::Settings(protocol::SettingsScope::Project));
+            let cmd = build_skill_command(
+                file,
+                CommandSource::Settings(protocol::SettingsScope::Project),
+            );
             let want = match cmd.name.as_str() {
                 "hidden" => Some(false),
                 "shown" => Some(true),
@@ -1740,7 +1782,10 @@ mod tests {
         let skill_files = load_skill_markdown_files(&repo, &lingxi_home, &home).await;
         assert_eq!(skill_files.len(), 1);
 
-        let cmd = build_skill_command(&skill_files[0], CommandSource::Settings(protocol::SettingsScope::Project));
+        let cmd = build_skill_command(
+            &skill_files[0],
+            CommandSource::Settings(protocol::SettingsScope::Project),
+        );
         assert_eq!(cmd.name, "demo");
         assert_eq!(cmd.description, "Demo skill");
         assert_eq!(cmd.loaded_from.as_deref(), Some("skills"));
@@ -1802,7 +1847,10 @@ mod tests {
             .iter()
             .find(|f| f.skill_root.file_name().is_some_and(|n| n == "dup"))
             .expect("dup skill should load");
-        assert_eq!(first_dup.source, CommandSource::Settings(protocol::SettingsScope::User));
+        assert_eq!(
+            first_dup.source,
+            CommandSource::Settings(protocol::SettingsScope::User)
+        );
         assert_eq!(first_dup.frontmatter.description, "User skill");
 
         fs::remove_dir_all(&root).ok();
@@ -1863,10 +1911,22 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["dup", "dup", "dup", "extra"]);
-        assert_eq!(skill_files[0].source, CommandSource::Settings(protocol::SettingsScope::Managed));
-        assert_eq!(skill_files[1].source, CommandSource::Settings(protocol::SettingsScope::User));
-        assert_eq!(skill_files[2].source, CommandSource::Settings(protocol::SettingsScope::Project));
-        assert_eq!(skill_files[3].source, CommandSource::Settings(protocol::SettingsScope::Project));
+        assert_eq!(
+            skill_files[0].source,
+            CommandSource::Settings(protocol::SettingsScope::Managed)
+        );
+        assert_eq!(
+            skill_files[1].source,
+            CommandSource::Settings(protocol::SettingsScope::User)
+        );
+        assert_eq!(
+            skill_files[2].source,
+            CommandSource::Settings(protocol::SettingsScope::Project)
+        );
+        assert_eq!(
+            skill_files[3].source,
+            CommandSource::Settings(protocol::SettingsScope::Project)
+        );
 
         fs::remove_dir_all(&root).ok();
     }

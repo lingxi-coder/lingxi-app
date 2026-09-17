@@ -597,6 +597,21 @@ fn accept_loop(listener: std::os::unix::net::UnixListener, state: Arc<InboxState
 
 #[cfg(unix)]
 fn handle_client(mut stream: std::os::unix::net::UnixStream, state: &InboxState) {
+    // `accept_loop` puts the LISTENER into non-blocking mode, and on macOS/BSD an
+    // accepted socket INHERITS O_NONBLOCK (Linux does not — POSIX leaves it
+    // unspecified and the two disagree). A non-blocking socket ignores
+    // `set_read_timeout`: `read` returns `WouldBlock` the instant no bytes are
+    // buffered, and the loop below treats that as end-of-message and BREAKS.
+    //
+    // So on macOS every message whose bytes had not already landed when the
+    // server got here was silently dropped — which is most of them, since the
+    // sender connects and writes in that order. Verified against a real
+    // `UnixListener`: accept, `set_read_timeout(2s)`, read before the peer
+    // writes ⇒ `Os { code: 35 }`.
+    //
+    // `bg_attach.rs` already does this on its accepted stream for the same
+    // reason. Restore blocking mode so `SEND_TIMEOUT` is what bounds the read.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(SEND_TIMEOUT));
     let Some((peer_pid, peer_uid)) = peer_identity(&stream) else {
         return;
@@ -1443,6 +1458,71 @@ mod tests {
         assert!(got[0].contains("<cross-session-message"), "{got:?}");
         assert!(got[0].contains("hello"), "{got:?}");
         assert!(got[0].contains("from=\"alpha\""), "{got:?}");
+    }
+
+    /// A sender that connects and then pauses before writing must still be
+    /// heard.
+    ///
+    /// `loopback_user_message` above cannot catch this: `send_uds` connects and
+    /// writes back-to-back, so the bytes are usually already buffered by the
+    /// time `handle_client` reads and the bug hides. Here the server is made to
+    /// read FIRST.
+    ///
+    /// The bug: `accept_loop` sets the LISTENER non-blocking, and on macOS/BSD
+    /// the accepted socket inherits O_NONBLOCK. `set_read_timeout` does nothing
+    /// on a non-blocking socket, so the first `read` returned `WouldBlock`, which
+    /// the read loop treats as end-of-message — dropping the message.
+    #[test]
+    fn a_sender_that_pauses_before_writing_is_still_heard() {
+        use std::io::Write;
+        let _g = test_guard();
+        stop_process_inbox();
+        clean_env();
+        crate::live_sessions::set_process_name("alpha");
+        crate::live_sessions::set_process_session_id("s1");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sock");
+        start_process_inbox(&path).unwrap();
+
+        let mut stream = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        // Let the server accept and reach its first `read` with nothing buffered.
+        std::thread::sleep(Duration::from_millis(250));
+        // Built from the real payload type so the test cannot drift from the wire
+        // shape the reader expects.
+        let payload = UdsUserPayload {
+            msg_v: 1,
+            msg_id: "11111111-1111-4111-8111-111111111111".into(),
+            kind: "user".into(),
+            message: UdsUserMessage {
+                role: "user".into(),
+                content: "delayed hello".into(),
+            },
+            priority: "next".into(),
+            from: uds_address(Path::new("/beta")),
+            to_session_id: Some("s1".into()),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        stream.write_all(line.as_bytes()).unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut got = Vec::new();
+        while Instant::now() < deadline {
+            got = take_accepted_peer_reminders(false);
+            if !got.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop_process_inbox();
+        clean_env();
+        assert_eq!(
+            got.len(),
+            1,
+            "a paused sender must still be delivered: {got:?}"
+        );
+        assert!(got[0].contains("delayed hello"), "{got:?}");
     }
 
     #[test]

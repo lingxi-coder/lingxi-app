@@ -2261,14 +2261,23 @@ mod streaming_tests {
     #[tokio::test]
     async fn streaming_delivers_a_line_before_process_exit() {
         let sink = Arc::new(RecordingSink::default());
-        // The child sleeps long enough that the `!task.is_finished()` assertion
-        // below cannot lose a race with the scheduler. At 0.4s it did: this test
-        // passes in isolation but failed alongside its siblings, because a
-        // descheduled test thread let the whole process finish before the
-        // assertion ran. The window is what makes the assertion meaningful, so
-        // it has to dwarf jitter rather than merely exceed it.
+        // The child BLOCKS until this test releases it, so `!task.is_finished()`
+        // is not a race at all: the process physically cannot have exited while
+        // the gate file is absent.
+        //
+        // This used to be `sleep 0.4`, then `sleep 3`, on the theory that a wide
+        // enough window beats scheduler jitter. It does not — the assertion is
+        // still "did the child outlive my thread being descheduled", and under
+        // full-suite load the answer is occasionally no. Widening a timing window
+        // makes a race rarer and slower, never absent. A gate the test owns
+        // removes the timing question instead of enlarging it.
+        let gate_dir = tempfile::tempdir().expect("gate dir");
+        let gate = gate_dir.path().join("release");
         let command = stream_sh(
-            "printf 'ready\\n'; sleep 3; printf 'done\\n'",
+            &format!(
+                "printf 'ready\\n'; while [ ! -f '{}' ]; do sleep 0.01; done; printf 'done\\n'",
+                gate.display()
+            ),
             Duration::from_secs(60),
         );
         let task_sink: Arc<dyn ProcessStreamSink> = sink.clone();
@@ -2280,10 +2289,21 @@ mod streaming_tests {
         tokio::time::timeout(Duration::from_secs(30), sink.line_ready.notified())
             .await
             .expect("first line is delivered live");
+        // NOTE which assertion is doing the work. Reaching this line at all is
+        // the proof: the child cannot exit before the gate below, so a runner
+        // that buffered until exit would never notify, and the timeout above
+        // would fire. Verified by planting exactly that — a child that prints
+        // nothing until released fails with `first line is delivered live`.
+        //
+        // The check below is then nearly structural. It is kept as a tripwire on
+        // the GATE rather than on streaming: if the gate ever stopped holding the
+        // child, this is what would notice.
         assert!(
             !task.is_finished(),
             "streaming must not wait for process exit"
         );
+        // Only now can the child finish.
+        std::fs::write(&gate, b"go").expect("release the child");
         let output = task
             .await
             .expect("runner task joins")
@@ -2398,12 +2418,24 @@ mod streaming_tests {
 
         task.abort();
         let _ = task.await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let alive = std::process::Command::new("/bin/kill")
-            .args(["-0", &pid])
-            .status()
-            .expect("kill -0 runs")
-            .success();
+        // Poll until the shell is reaped rather than sleeping a fixed 100ms and
+        // asserting once. Reaping is the kernel's schedule, not ours: a single
+        // fixed wait turns "slower than usual" into "leaked a process", which is
+        // a false failure under load. The deadline still fails a real leak — a
+        // surviving `sleep 30` is alive for every one of these polls.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut alive = true;
+        while std::time::Instant::now() < deadline {
+            alive = std::process::Command::new("/bin/kill")
+                .args(["-0", &pid])
+                .status()
+                .expect("kill -0 runs")
+                .success();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         assert!(!alive, "cancelled streaming shell {pid} must not survive");
     }
 }

@@ -19455,6 +19455,15 @@ mod tests {
                     Err(error) => panic!("local provider was never called: {error}"),
                 }
             };
+            // The listener above is non-blocking, and on macOS/BSD an accepted
+            // socket INHERITS O_NONBLOCK. `set_read_timeout` is meaningless on a
+            // non-blocking socket — `read` returns `WouldBlock` the instant no
+            // bytes are buffered rather than waiting — so the unwrap below
+            // panicked with `Os { code: 35 }` whenever the request had not landed
+            // yet. In isolation it always had; under full-suite load it had not.
+            // Put the socket back into blocking mode so the 5s timeout is the
+            // thing that actually bounds the read.
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();

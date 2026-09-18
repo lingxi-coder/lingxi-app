@@ -13,12 +13,34 @@ test('agent busy blocks working tree mutations but permits safe staging', async 
 test('path traversal and symlink parent escapes are rejected', async (t) => { const f = await fixture(t); await mkdir(path.join(f.root, 'nested')); await symlink(tmpdir(), path.join(f.root, 'escape')); for (const p of ['../outside', '.git/config', 'escape/outside'])
     await assert.rejects(f.service.request(f.scope, { kind: 'stage', paths: [p], token: await f.token() }), /Invalid|escapes/); });
 test('hook rejection preserves index and reports error', async (t) => { const f = await fixture(t); await writeFile(path.join(f.root, 'a'), 'one'); await f.service.request(f.scope, { kind: 'stage', token: await f.token() }); await writeFile(path.join(f.root, '.git/hooks/pre-commit'), '#!/bin/sh\necho deliberate-rejection >&2\nexit 1\n', { mode: 0o755 }); await assert.rejects(f.service.request(f.scope, { kind: 'commit', message: 'test', token: await f.token() }), /deliberate-rejection/); assert.equal(f.run('diff', '--cached', '--name-only'), 'a'); });
-test('watch emits invalidations and close releases watchers', async (t) => { const f = await fixture(t); const stop = await f.service.watch(f.scope); const event = new Promise<void>(resolve => { const off = f.service.onChanged(e => { assert.ok(e.root.endsWith(path.basename(f.root))); off(); resolve(); }); }); await writeFile(path.join(f.root, 'watch.txt'), 'test'); await Promise.race([event, new Promise((_, reject) => setTimeout(() => reject(new Error('watch timeout')), 15_000))]); stop(); });
-// The budget above is deliberately far above the 180ms watcher debounce it is
-// waiting on: the whole file shares one process with suites that spawn hundreds
-// of real `git` children, so fs.watch callbacks queue behind them. A tight bound
-// makes this test report "the watcher is broken" when the machine was merely
-// busy, and a flaky red here hides the real ones.
+test('watch emits invalidations and close releases watchers', async (t) => {
+  const f = await fixture(t);
+  const stop = await f.service.watch(f.scope);
+  const event = new Promise<void>(resolve => { const off = f.service.onChanged(e => { assert.ok(e.root.endsWith(path.basename(f.root))); off(); resolve(); }); });
+  let settled = false;
+  event.then(() => { settled = true; });
+  // Write REPEATEDLY, not once. `fs.watch(dir, { recursive: true })` is FSEvents
+  // on macOS and returns before its stream delivers, so a single write placed
+  // immediately after it can be dropped outright — and a dropped event never
+  // arrives however long you wait. That is what the old single-write version was
+  // hitting: both observed failures burned the FULL budget (15107ms, 15148ms)
+  // rather than landing early, which is not the shape of a merely busy machine.
+  // The interval must stay ABOVE the service's 180ms debounce; poking faster
+  // than that keeps clearing the timer and guarantees no event at all.
+  const poke = (async () => {
+    for (let n = 0; !settled && n < 30; n++) {
+      await writeFile(path.join(f.root, 'watch.txt'), `test ${n}`);
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
+  })();
+  try {
+    await Promise.race([event, new Promise((_, reject) => setTimeout(() => reject(new Error('watch timeout')), 15_000))]);
+  } finally {
+    settled = true;
+    await poke;
+    stop();
+  }
+});
 test('same-commit branch switch invalidates snapshot', async t => {
  const f=await fixture(t);await writeFile(path.join(f.root,'a'),'one');f.run('add','.');f.run('commit','-m','initial');f.run('branch','next');const old=await f.token();f.run('switch','next');await assert.rejects(f.service.request(f.scope,{kind:'commit',message:'wrong branch',token:old}),/changed/);
 });

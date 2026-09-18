@@ -32,3 +32,45 @@ test('Git IPC requires known session and trusted main frame, works without model
   host.dispose();await new Promise(resolve=>setImmediate(resolve));assert.equal(closed,watched);
  }finally{host.dispose();rmSync(dir,{recursive:true,force:true});}
 });
+
+/**
+ * A watch is a live filesystem subscription held per renderer, per project.
+ * `detachGit` releases them when a WINDOW goes away, and nothing released them
+ * when a PROJECT did — so removing a project left its watcher running against a
+ * directory the user had just told us to forget, feeding change events for a
+ * scope no surface can display, for the rest of the session.
+ */
+test('removing a project releases the Git watch it left running', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-git-remove-'));
+  const project = realpathSync(dir);
+  const settings = new SettingsStore(join(dir, 'settings'));
+  settings.addProject(project);
+  const scope = { projectPath: project, sessionId: '11111111-2222-4333-8444-555555555555' };
+  settings.setActiveSessionDraft(scope);
+  const handlers = new Map<string, Function>();
+  const ipc = { handle: (key: string, fn: Function) => handlers.set(key, fn), removeHandler: (key: string) => handlers.delete(key) };
+  const bridge = {
+    registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
+    get: () => ({ projectPath: project, connectionState: { status: 'idle' } }),
+    closeProject: async () => undefined,
+  };
+  let watched = 0, closed = 0;
+  const service = { onChanged: () => () => {}, watch: async () => { watched++; return () => { closed++; }; }, request: async () => ({ status: { repository: true } }) };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  host.attachGit(service as any);
+  (host as any).bootstrap = () => ({ settings: settings.getPublic() });
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  try {
+    await handlers.get(CH_GIT_REQUEST)!({ sender, senderFrame: frame }, scope, { kind: 'status' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(watched, 1);
+    assert.equal(closed, 0, 'precondition: the watch is live before the project is removed');
+
+    await (host as any).removeProjectInternal(project);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed, 1, 'removing the project must stop its watcher');
+  } finally { host.dispose(); rmSync(dir, { recursive: true, force: true }); }
+});

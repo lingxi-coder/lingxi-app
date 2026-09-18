@@ -2704,3 +2704,136 @@ test('activating Codex authentication refuses to restart an active turn', async 
   );
   assert.equal(resolved, false);
 });
+
+/**
+ * `runScheduledTurn` parks a promise in `pendingScheduledTurns` and hand-sets
+ * `activeTurn`. Nothing else ever settles either one: only the
+ * `scheduled_run_finished` branch resolves the promise and drops the latch, and
+ * only the connection-loss paths reject it. Those three sites had no coverage,
+ * and a scheduled run that never settles leaves `activeTurn` true forever —
+ * which blocks credential writes, Codex login, engine restart and every
+ * rewriting git operation on that session.
+ */
+function scheduledRuntime() {
+  const runtime = new SessionRuntime({ sessionId: '11111111-2222-4333-8444-555555555555', projectPath: '/fixture' } as any);
+  const sent: unknown[] = [];
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void; cancel(): void };
+  client.sendCommand = (command) => { sent.push(command); };
+  client.cancel = () => undefined;
+  (runtime as any).requireClient = () => client;
+  (runtime as any).client = client;
+  (runtime as any).credentialRoutingSettings = {};
+  (runtime as any).ensureModelProviderCredential = async () => undefined;
+  (runtime as any).scheduledModelCatalog = async () => ({
+    details: [{ reference: 'provider/model', reasoning: { options: [], provider_default: { type: 'automatic' } } }],
+  });
+  (runtime as any).wireClient(client, 0);
+  const work = runtime.runScheduledTurn('run-1', {
+    prompt: 'automatic task',
+    automation: { model: 'provider/model', reasoning: { type: 'automatic' } },
+  } as any);
+  return { runtime, client, sent, work };
+}
+
+/** Park until the dispatch has actually gone out, so the latch is really set. */
+async function dispatched(state: ReturnType<typeof scheduledRuntime>) {
+  for (let attempt = 0; attempt < 50 && state.sent.length === 0; attempt++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal((state.sent[0] as { type: string } | undefined)?.type, 'scheduled_run_turn');
+  assert.equal(state.runtime.turnActive, true);
+}
+
+test('scheduled_run_finished resolves the parked run and releases the turn latch', async () => {
+  const state = await scheduledRuntime();
+  await dispatched(state);
+  state.client.emit('event', { type: 'scheduled_run_finished', run_id: 'run-1', summary: 'done' });
+  assert.equal(await state.work, 'done');
+  assert.equal(state.runtime.turnActive, false);
+});
+
+test('a failed scheduled run rejects, and only a busy: failure keeps the latch', async () => {
+  const failed = await scheduledRuntime();
+  await dispatched(failed);
+  failed.client.emit('event', { type: 'scheduled_run_finished', run_id: 'run-1', error: 'the model refused' });
+  await assert.rejects(failed.work, /the model refused/);
+  assert.equal(failed.runtime.turnActive, false);
+
+  // `busy:` means the engine never took the turn over — the turn that IS
+  // running belongs to someone else, so clearing the latch would be a lie.
+  const busy = await scheduledRuntime();
+  await dispatched(busy);
+  busy.client.emit('event', { type: 'scheduled_run_finished', run_id: 'run-1', error: 'busy: a turn is already running' });
+  await assert.rejects(busy.work, /busy:/);
+  assert.equal(busy.runtime.turnActive, true);
+});
+
+test('losing the connection rejects the parked run instead of latching it forever', async () => {
+  const state = await scheduledRuntime();
+  await dispatched(state);
+  (state.runtime as any).setState({ status: 'disconnected' });
+  await assert.rejects(state.work, /Scheduled connection closed/);
+  assert.equal(state.runtime.turnActive, false);
+  assert.equal((state.runtime as any).pendingScheduledTurns.size, 0);
+});
+
+test('cron_run_bound settles the binding wait the scheduler blocks on', async () => {
+  const runtime = new SessionRuntime({ sessionId: '11111111-2222-4333-8444-555555555555', projectPath: '/fixture' } as any);
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+  client.sendCommand = () => undefined;
+  (runtime as any).requireClient = () => client;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+
+  const bound = runtime.markCronRunStarted('bind-1', 'session-1');
+  assert.equal((runtime as any).pendingRunBindings.size, 1);
+  client.emit('event', { type: 'cron_run_bound', run_id: 'bind-1' });
+  await bound;
+  assert.equal((runtime as any).pendingRunBindings.size, 0);
+
+  const refused = runtime.markCronRunStarted('bind-2', 'session-1');
+  client.emit('event', { type: 'cron_run_bound', run_id: 'bind-2', error: 'that session is gone' });
+  await assert.rejects(refused, /that session is gone/);
+  assert.equal((runtime as any).pendingRunBindings.size, 0);
+});
+
+/**
+ * `GitActivityTracker`'s own comment says an agent counted as running "pinned
+ * the worktree guard AND the session's engine runtime" — but `hasActiveAgents`
+ * had no reader outside the git handler, so the runtime half was never true.
+ * A coordinator worker outlives the turn that started it; evicting its runtime
+ * kills the engine process it is still running inside.
+ */
+test('a session with a coordinator worker still running survives cache pressure', async () => {
+  const refs = [1, 2].map((n) => ({ projectPath: '/workspace', sessionId: `eeeeeeee-ffff-4aaa-8bbb-00000000000${n}` }));
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () { (this as any).state = { status: 'connected' }; };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const open = async () => {
+    const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1, launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
+    const first = await manager.openSession(refs[0]!);
+    const client = new EventEmitter();
+    (first as any).wireClient(client, (first as any).generation);
+    return { manager, first, client };
+  };
+  try {
+    const idle = await open();
+    await idle.manager.openSession(refs[1]!);
+    (idle.manager as any).trimCache();
+    assert.equal(idle.first.hasActiveAgents, false);
+    assert.equal(idle.manager.get(refs[0]!.sessionId), undefined, 'the control must actually be evictable');
+    await idle.manager.dispose();
+
+    const busy = await open();
+    busy.client.emit('event', { type: 'coordinator_status', active_workers: 1 });
+    assert.equal(busy.first.hasActiveAgents, true, 'the event must reach the tracker');
+    await busy.manager.openSession(refs[1]!);
+    (busy.manager as any).trimCache();
+    assert.strictEqual(busy.manager.get(refs[0]!.sessionId), busy.first, 'a running worker pins its runtime');
+    await busy.manager.dispose();
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+  }
+});

@@ -132,7 +132,14 @@ async function main() {
     const setBackgroundStatus = (status) => webContents.executeJavaScript(
       `window.__composerDraftTest.setBackgroundStatus(${JSON.stringify(backgroundSession)}, ${JSON.stringify(status)})`,
     );
-    for (const status of ['running', 'working', 'in_progress']) {
+    // The statuses `state.agents` can actually hold and that mean running.
+    // `working` and `in_progress` were here until bf9ea9d0c narrowed
+    // `runningSubagentIds` to this pair: `in_progress` has no producer at all,
+    // and `working` only ever arrives on `coordinator_worker`, which normalises
+    // it to `running` before storing — so this fixture, which writes the stored
+    // map directly, cannot express it without asserting a shape the reducer
+    // never produces. That commit rewrote the unit test and missed this one.
+    for (const status of ['running', 'pending']) {
       await setBackgroundStatus(status);
       await waitFor(webContents, `document.querySelector('[aria-label="Stop background agents"]')?.disabled === false && getComputedStyle(document.querySelector('.composer-stop-presence')).transform === 'matrix(1, 0, 0, 1, 0, 0)'`);
       const stopState = await webContents.executeJavaScript(`(() => {
@@ -177,7 +184,7 @@ async function main() {
     await waitFor(webContents, `getComputedStyle(document.querySelector('.composer-stop-presence')).visibility === 'hidden' && getComputedStyle(document.querySelector('.composer-submit-actions')).display === 'none'`);
     await switchSession(webContents, backgroundSession);
     await waitFor(webContents, `document.querySelector('[aria-label="Stop background agents"]')?.disabled === false && getComputedStyle(document.querySelector('.composer-stop-presence')).visibility === 'visible'`);
-    for (const status of ['idle', 'completed', 'failed', 'cancelled']) {
+    for (const status of ['idle', 'completed', 'failed', 'killed', 'cancelled', 'unknown']) {
       await setBackgroundStatus('running');
       await waitFor(webContents, `document.querySelector('[aria-label="Stop background agents"]')?.disabled === false`);
       await setBackgroundStatus(status);

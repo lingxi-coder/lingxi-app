@@ -983,7 +983,7 @@ pub enum ClientCommand {
 
 /// A settings tier the user can WRITE to, as named on the wire.
 ///
-/// This was two enums — `WritableScopeDto` and `WritableScopeDto` — with the
+/// This was two enums — `SettingsDestinationDto` and `McpScopeDto` — with the
 /// same three variants, the same bare `snake_case` wire strings, and the same
 /// rationale written out twice: the read-only tiers (`Managed`, `Env`, `Cli`,
 /// `Defaults`; `Dynamic`, `Enterprise`) are omitted rather than accepted and

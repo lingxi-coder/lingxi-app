@@ -6,18 +6,46 @@ import type { LingxiApi } from '../src/renderer/bridge/lingxi';
 
 test('stop targets only active children observed in the current session', () => {
   let state = emptyRuntimeCenterState();
+  // Exactly the statuses `client-protocol`'s agent listing can carry.
   for (const [agent_id, status, session_id] of [
-    ['main', 'running', 'a'], ['live', 'running', 'a'], ['working', 'working', 'a'],
-    ['busy', 'in_progress', 'a'], ['idle', 'idle', 'a'], ['done', 'completed', 'a'],
-    ['failed', 'failed', 'a'], ['foreign', 'running', 'b'],
+    ['main', 'running', 'a'], ['live', 'running', 'a'], ['spawning', 'pending', 'a'],
+    ['idle', 'idle', 'a'], ['done', 'completed', 'a'],
+    ['failed', 'failed', 'a'], ['killed', 'killed', 'a'],
+    ['cancelled', 'cancelled', 'a'], ['unknown', 'unknown', 'a'],
+    ['foreign', 'running', 'b'],
   ]) {
     state = reduceRuntimeCenterEvent(state, {
       type: 'session_agent_updated', session_id,
       agent: { agent_id, name: agent_id, agent_type: 'reviewer', status },
     }, 'a');
   }
-  assert.deepEqual(runningSubagentIds(state), ['live', 'working', 'busy']);
+  assert.deepEqual(runningSubagentIds(state), ['live', 'spawning']);
   assert.deepEqual(runningSubagentIds(undefined), []);
+});
+
+/**
+ * A coordinator worker is the ONE producer of `working`, and it arrives on
+ * `coordinator_worker`, never on the roster. Driving it through the real reducer
+ * is the only honest way to pin it: a fixture that writes `working` straight
+ * onto a `session_agent_updated` agent asserts against a shape the engine does
+ * not send, and would keep passing if the normalisation were deleted.
+ */
+test('a coordinator worker reporting working is stoppable through the normalisation', () => {
+  let state = emptyRuntimeCenterState();
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'coordinator_worker',
+    worker: { agent_id: 'worker', name: 'worker', agent_type: 'general-purpose', status: 'working' },
+  } as never, 'a');
+  assert.equal(state.agents['worker']?.status, 'running', 'working is normalised on the way in');
+  assert.deepEqual(runningSubagentIds(state), ['worker']);
+
+  // …and a lagging roster snapshot cannot demote a live worker out of the set.
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'session_agent_list', session_id: 'a',
+    agents: [{ agent_id: 'worker', name: 'worker', agent_type: 'general-purpose', status: 'completed' }],
+  } as never, 'a');
+  assert.deepEqual(runningSubagentIds(state), ['worker'],
+    'live coordinator state outranks a lagging transcript snapshot');
 });
 
 test('background stop pins its session and refreshes only after all stop dispatches finish', async () => {

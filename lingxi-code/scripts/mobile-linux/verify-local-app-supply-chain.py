@@ -840,7 +840,13 @@ OPTIMIZED_BUILD_WORKFLOW_REQUIRED = {
     "input.operation === 'verify' || repairRounds >= repairBudget || qa.disposition !== 'candidate' || qa.source_findings.length === 0",
     "QA pass reused the previous Host qa_handle",
     "Infrastructure failures, evidence-resample requests, and non-source findings never enter this path",
-    "LocalAppBuild with exactly app_id=${input.app_id} and no contract_handle",
+    # The invariant is that the repair round does NOT reuse the staged handle.
+    # This token used to be spelled "LocalAppBuild with exactly app_id=... and no
+    # contract_handle", which matched ZERO characters of the workflow from the
+    # commit that introduced both (f81c57261) -- so this check has never once
+    # passed. It is now the workflow's actual sentence.
+    "call LocalAppBuild with app_id=${input.app_id} and workflow_run_id=${context.workflow_run_id}; omit contract_handle",
+    "The successful prior build consumed its staged contract_handle; do not reuse it",
     "'LocalAppContract', 'LocalAppManifest', 'LocalAppInstallDeps'",
 }
 OPTIMIZED_BUILD_WORKFLOW_FORBIDDEN = {
@@ -1060,30 +1066,21 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         fail(f"missing local-apps host: {exc}")
     if "already bound to local app `{id}`" not in local_apps_host:
         fail("app-scoped LINGXI.md does not make its current app id authoritative")
-    # The SKILL.md pins above only cover the SECOND hop: the skill text is
-    # delivered after the model invokes `lingxi-local-app:create-local-app`.
-    # An unscaffolded shell's only channel to the model is the guided
-    # `workspace/LINGXI.md` rendered by `guided_workspace_contract`, so the
-    # create-time MCP interview must be pinned THERE too -- deleting it from
-    # the guided contract un-ships the interview on a real device while every
-    # SKILL.md pin above stays green.
-    for fragment, missing in (
-        (
-            "`mcpSuggestions` for the template family matching their confirmed shape",
-            "no longer grounds its MCP recommendations in LocalAppTemplateCatalog's mcpSuggestions",
-        ),
-        (
-            "the exact service names they picked, or",
-            "no longer writes the MCP answer back in plain text for the skill to carry forward",
-        ),
-    ):
-        if fragment not in local_apps_host:
-            fail(
-                "guided workspace contract "
-                f"{missing} (missing {fragment!r}) -- that contract is the ONLY "
-                "channel an unscaffolded shell has to the model, so the "
-                "create-time MCP interview cannot live in SKILL.md alone"
-            )
+    # There was a pin here requiring the create-time MCP interview text in the
+    # guided `workspace/LINGXI.md` as well, on the premise that an unscaffolded
+    # shell's only channel to the model is that contract, so the interview could
+    # not live in SKILL.md alone. `f81c57261` moved the interview deliberately:
+    # the guided contract is now a thin identity/no-write guard that immediately
+    # enters `lingxi-local-app:create-local-app`, which is the channel. Its Rust
+    # test `guided_shell_delegates_without_technical_or_mcp_prerequisites` pins
+    # that delegation AND asserts `mcpSuggestions`/`LocalAppTemplateCatalog` are
+    # absent from the guided contract -- the exact strings this pin demanded, so
+    # the repository could not satisfy both and this script has failed since.
+    #
+    # The behaviour is not unpinned, it moved with the text: the same commit
+    # added `validate_optimized_create_skill_contract`, called above on BOTH the
+    # skill and its plugin mirror, which requires the `mcpSuggestions` grounding
+    # and the `mcp_intent` carry-forward in their new home.
     workflow_dir = repo / "lingxi-code" / "plugins" / "lingxi-local-app" / "workflows"
     try:
         workflow = (workflow_dir / "local-app-build.js").read_text(encoding="utf-8")
@@ -1223,8 +1220,21 @@ def validate_agent_prompt_contracts(repo: pathlib.Path) -> None:
         fail("verifier.md no longer binds its candidate to the tester Host result")
 
     operator = (agents_dir / "operator.md").read_text(encoding="utf-8")
-    if "Return the Host qa_handle and every evidence ID without truncation" not in operator:
-        fail("operator.md no longer requires complete Host evidence identities")
+    # Two halves of one invariant: the handle is checked against the pass, and
+    # the evidence list is returned WHOLE. The single token this used to look
+    # for ("Return the Host qa_handle and every evidence ID without
+    # truncation") matched nothing in operator.md at the commit that added
+    # both (f81c57261), so this check had never passed; these are the file's
+    # own sentences.
+    for fragment in (
+        "verify that its handle matches the pass",
+        "deduplicate without truncating, and\nreturn that complete list as the structured result's `evidence_ids`",
+    ):
+        if fragment not in operator:
+            fail(
+                "operator.md no longer requires complete Host evidence "
+                f"identities (missing {fragment!r})"
+            )
     if "do not judge scenario\npass/fail" not in operator:
         fail("operator.md no longer separates operation from QA judgement")
 

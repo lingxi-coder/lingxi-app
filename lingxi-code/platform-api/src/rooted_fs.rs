@@ -2173,10 +2173,17 @@ mod imp {
         }
     }
 
+    /// `rustix`'s `Mode` is built from the platform's raw `mode_t`, which is
+    /// `u16` on Apple and `u32` on Linux/Android — and `rustix` 0.38 does not
+    /// re-export the `RawMode` alias, so the target type cannot be named here.
+    /// Inferring it from `from_bits_retain` is what keeps this compiling for
+    /// both; hard-coding `u16` built only on Apple and broke the whole Android
+    /// target, which no macOS gate can see.
     fn mode(bits: u32, path: &Path) -> Result<Mode, FsError> {
-        let bits = u16::try_from(bits)
+        let raw = bits
+            .try_into()
             .map_err(|_| FsError::Io(format!("{}: invalid unix mode {bits:o}", path.display())))?;
-        Ok(Mode::from_bits_retain(bits))
+        Ok(Mode::from_bits_retain(raw))
     }
 
     fn identity_from_fd(fd: &OwnedFd, path: &Path) -> Result<RootIdentity, FsError> {

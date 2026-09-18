@@ -3933,23 +3933,35 @@ pub fn build_android_engine_with_mobile_linux(
         api_base,
         api_key,
         model,
-        session_mode: _,
-        vision_delegation_enabled: _,
+        session_mode,
+        vision_delegation_enabled,
         app_files_root,
         project_cwd,
         provider_config,
         mobile_linux,
-        local_apps_full_runtime: _,
-        local_apps_runtime_root: _,
-        physical_memory_bytes: _,
+        local_apps_full_runtime,
+        local_apps_runtime_root,
+        physical_memory_bytes,
         host_environment,
     } = config;
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
     #[cfg(target_os = "android")]
     let device_control = device_control.map(|inner| Arc::new(AndroidDeviceControlBridge { inner }));
+    // Everything after this point that only the `cfg(android)` arm consumes has
+    // to be discarded HERE, not bound as `_` in the destructuring above: an `_`
+    // there silences the macOS warning by deleting the NAME, and the Android arm
+    // — which no gate on this machine compiles — then fails to find it.
     #[cfg(not(target_os = "android"))]
-    let _ = (project_cwd, device_control);
+    let _ = (
+        project_cwd,
+        device_control,
+        session_mode,
+        vision_delegation_enabled,
+        local_apps_full_runtime,
+        local_apps_runtime_root,
+        physical_memory_bytes,
+    );
     #[cfg(target_os = "android")]
     {
         use platform_android::{AndroidPlatform, AndroidPlatformInputs};

@@ -443,6 +443,13 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
         result.automation = {
           version: 2,
           ...(config['name'] === undefined ? {} : { name: string(config['name'], 'task name', 256) }),
+          // Carried, not dropped. `exactKeys` above admits `statusReason`, and the
+          // renderer sends it back untouched — `scheduledTaskInput` strips `runs`
+          // and `ownedSessionId` and deliberately leaves this one. It is the
+          // sentence that tells the user WHY a task stopped ("Target chat was
+          // archived…", set by host.ts), and the setup screen displays it, so
+          // rebuilding the record without it erased the explanation on every save.
+          ...(config['statusReason'] === undefined ? {} : { statusReason: string(config['statusReason'], 'status reason', 512) }),
           status: status as 'active' | 'paused' | 'completed', model: string(config['model'], 'task model', 256), reasoning: reasoning.selection,
           runMode: runMode as 'new_session' | 'selected_session' | 'task_session',
           ...(targetSessionId ? { targetSessionId } : {}),

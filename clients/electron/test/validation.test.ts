@@ -495,3 +495,48 @@ test('an audio response is never blocked by an active turn', () => {
     () => assertCommandAllowedDuringTurn({ type: 'audio_response', request_id: 1, result: { type: 'ok' } }, true),
   );
 });
+
+/**
+ * `CronRequestDto` has carried nine actions and a v2 `automation` payload since
+ * the task-center protocol landed, and `ScheduledTasks.tsx` sends them — but
+ * this validator still allowed only the four v1 actions and rejected
+ * `automation` outright through `exactKeys`. Every pause, resume, complete and
+ * history request from the renderer, and every v2 task create or edit, died
+ * here with "invalid cron action" / "unexpected key".
+ */
+test('cron_manage accepts the v2 lifecycle actions and validates the automation payload', () => {
+  const automation = {
+    version: 2, name: 'nightly', status: 'active', statusReason: 'resumed by hand',
+    model: 'anthropic/claude-sonnet-5', reasoning: { type: 'automatic' },
+    runMode: 'selected_session', targetSessionId: '11111111-2222-4333-8444-555555555555',
+    notificationPolicy: 'failed',
+  };
+  const manage = (request: object) => validateClientCommand({ type: 'cron_manage', request_id: 'r1', request });
+
+  for (const action of ['pause', 'resume', 'complete', 'history'] as const) {
+    const result = manage({ action, id: 'task-1' });
+    assert.equal(result.type, 'cron_manage');
+    assert.equal(result.type === 'cron_manage' ? result.request.action : undefined, action);
+  }
+  // …and they still require the task they act on.
+  assert.throws(() => manage({ action: 'pause' }), /cron task id/);
+
+  const created = manage({ action: 'create', cron: '0 3 * * *', prompt: 'nightly sweep', automation });
+  const carried = created.type === 'cron_manage' ? created.request.automation : undefined;
+  assert.equal(carried?.runMode, 'selected_session');
+  assert.equal(carried?.targetSessionId, automation.targetSessionId);
+  assert.equal(carried?.notificationPolicy, 'failed');
+  assert.equal(carried?.name, 'nightly');
+  // The reason is what tells the user WHY a task stopped; `exactKeys` admitted
+  // it, so dropping it silently would be worse than rejecting it.
+  assert.equal(carried?.statusReason, 'resumed by hand');
+
+  assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, version: 1 } }), /unsupported scheduled task version/);
+  assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, status: 'archived' } }), /invalid task status/);
+  assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, runMode: 'whatever' } }), /invalid run mode/);
+  assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, notificationPolicy: 'sometimes' } }), /invalid notification policy/);
+  // `selected_session` without a target would run against nothing.
+  assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, targetSessionId: undefined } }), /select a target session/);
+  assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, surprise: true } }), /unsupported fields/);
+  assert.throws(() => manage({ action: 'prune_history', id: 'task-1' }), /invalid cron action/);
+});

@@ -11,7 +11,12 @@ async function main() {
   const evaluate = (code) => win.webContents.executeJavaScript(code);
   const wait = () => new Promise((resolve) => setTimeout(resolve, 100));
   const state = () => evaluate(`({
-    disclosure: Boolean(document.querySelector('.desktop-stage [aria-expanded]')),
+    // Scoped to the thinking row on purpose. The disclosure this asserts is gone
+    // lived INSIDE div[data-run-type="thinking"], so this still catches it coming
+    // back; a bare '.desktop-stage [aria-expanded]' also matched the subagent row
+    // (8441256a9) and the 'Show more' narration trigger, neither of which is the
+    // subject here.
+    disclosure: Boolean(document.querySelector('[data-run-type="thinking"] [aria-expanded]')),
     legacyToggle: Boolean(document.querySelector('[role="switch"]')),
     thinking: Boolean(document.querySelector('[data-run-type="thinking"]')),
     animated: Boolean(document.querySelector('[data-run-type="thinking"] .running-sweep')),

@@ -536,6 +536,10 @@ final class ConversationModel: ObservableObject {
     @Published var reasoningDisabledReason: String?
     @Published var controlsPending: Bool = false
     @Published var controlsError: String?
+    /// Confirmed engine speed preference; command delivery does not imply a change.
+    @Published var fastMode: Bool = false
+    @Published var fastModePending: Bool = false
+    @Published var fastModeError: String?
     @Published var bypassPermissionsWarningSuppressed: Bool = false
     // ── Out-of-band session state (real history) ───────────────────────────────
     // `ListSessions` / `SessionList` are NOT part of a text turn, so — exactly
@@ -1011,6 +1015,8 @@ protocol ConversationSource: AnyObject {
     /// Change provider-aware reasoning selection. `automatic` deliberately
     /// means no user override; other values are validated by the engine.
     func setReasoningSelection(_ selection: String)
+    /// Change speed through the engine and wait for its authoritative event.
+    func setFastMode(_ enabled: Bool)
     /// Switch the active conversation to `session` (the iOS analog of Android's
     /// `ChatViewModel.openSession`). MUST cancel any in-flight turn and reset the
     /// streaming bookkeeping FIRST so a turn that completes after the switch can't
@@ -1468,6 +1474,29 @@ final class MockConversationSource: ConversationSource {
             }
             source.model.availableModels = uiTestModelCatalog
             source.model.activeModelId = uiTestModelCatalog[0]
+            let fastModelReference = "anthropic/claude-opus-4-8"
+            source.model.availableModelDetails[fastModelReference] = ModelRuntimeDetails(
+                reference: fastModelReference,
+                providerId: "anthropic",
+                providerLabel: "Anthropic",
+                displayName: "Claude Opus 4.8",
+                modelId: "claude-opus-4-8",
+                description: nil, family: nil, status: nil,
+                releaseDate: nil, lastUpdated: nil, knowledgeCutoff: nil,
+                inputModalities: ["text"], outputModalities: ["text"],
+                contextWindowTokens: nil, maxInputTokens: nil, maxOutputTokens: nil,
+                openWeights: nil, attachments: nil, temperatureControl: nil,
+                pricing: nil,
+                capabilities: ModelCapabilitiesDto(
+                    streaming: true, tools: true, vision: false, documents: false,
+                    reasoning: true, structuredOutput: false
+                ),
+                reasoning: ReasoningControlSpecDto(
+                    options: [], budgetRange: nil, providerDefault: .automatic,
+                    forcedReasoning: false, editable: false, disabledReason: nil
+                ),
+                supportsFastMode: true
+            )
             #if canImport(engine_mobileFFI)
                 var uiCatalog: [(providerID: String, modelIDs: [String])] = []
                 for reference in uiTestModelCatalog {
@@ -1694,6 +1723,12 @@ final class MockConversationSource: ConversationSource {
 
     func setReasoningSelection(_ selection: String) {
         model.reasoningSelection = selection
+    }
+
+    func setFastMode(_ enabled: Bool) {
+        model.fastMode = enabled
+        model.fastModePending = false
+        model.fastModeError = nil
     }
 
     /// Switch sessions: drop the in-flight canned reply (bump the token so its
@@ -5405,6 +5440,11 @@ final class MockConversationSource: ConversationSource {
                 // Reflect the authoritative model, including slash-command changes.
                 applyActiveModel(newModel)
 
+            case let .fastModeChanged(enabled):
+                model.fastMode = enabled
+                model.fastModePending = false
+                model.fastModeError = nil
+
             case let .conversationControlsChanged(controls):
                 applyControlsSnapshot(controls)
 
@@ -6610,6 +6650,21 @@ final class MockConversationSource: ConversationSource {
                     self.model.requestedPermissionMode = previous
                     self.model.controlsPending = false
                     self.model.controlsError = error.localizedDescription
+                }
+            }
+        }
+
+        func setFastMode(_ enabled: Bool) {
+            guard !model.fastModePending, enabled != model.fastMode else { return }
+            model.fastModePending = true
+            model.fastModeError = nil
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.submitCommand(.setFastMode(enabled: enabled))
+                } catch {
+                    self.model.fastModePending = false
+                    self.model.fastModeError = error.localizedDescription
                 }
             }
         }

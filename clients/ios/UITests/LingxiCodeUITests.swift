@@ -175,9 +175,47 @@ final class LingxiCodeUITests: XCTestCase {
         app.launchEnvironment["LINGXI_UI_TEST_PROVIDER_UNCONFIGURED"] = "1"
         app.launch()
 
-        let chip = app.buttons["composer.model"]
-        XCTAssertTrue(chip.waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertEqual(chip.label, "未配置", app.debugDescription)
+        let options = app.buttons["composer.model"]
+        XCTAssertTrue(options.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertTrue(String(describing: options.value).contains("未配置"), app.debugDescription)
+    }
+
+    func testComposerConfigurationIsVisibleAndFastModeCanChange() {
+        openModelPicker()
+        let opus = providerRow("anthropic/claude-opus-4-8")
+        XCTAssertTrue(opus.waitForExistence(timeout: 5), app.debugDescription)
+        opus.tap()
+        for identifier in ["composer.model", "composer.controls", "composer.fast-mode"] {
+            let control = app.buttons[identifier]
+            XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(control.isHittable, app.debugDescription)
+        }
+        let fastMode = app.buttons["composer.fast-mode"]
+        XCTAssertEqual(fastMode.value as? String, "Off")
+        fastMode.tap()
+        let toggle = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@", "Fast Mode", "composer.fast-mode")).firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3), app.debugDescription)
+        toggle.tap()
+        // Native menus dismiss after committing the toggle.
+        XCTAssertTrue(NSPredicate(format: "value == %@", "On").evaluate(with: fastMode)
+            || XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", "On"), object: fastMode
+            )], timeout: 5) == .completed, app.debugDescription)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Composer visible configuration"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.textFields["composer.input"].tap()
+        for identifier in ["composer.model", "composer.controls", "composer.fast-mode"] {
+            XCTAssertTrue(app.buttons[identifier].isHittable, app.debugDescription)
+        }
+        app.buttons["composer.keyboard.dismiss"].tap()
+        fastMode.tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3), app.debugDescription)
+        toggle.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Off"), object: fastMode
+        )], timeout: 5), .completed, app.debugDescription)
     }
 
     func testComposerSendTransitionsToMatchingStopControl() {
@@ -963,10 +1001,7 @@ final class LingxiCodeUITests: XCTestCase {
     /// provider is reachable, the search box narrows the list, and a pick
     /// resurfaces at the top next time.
     func testModelPickerSearchesGroupsAndPinsRecentPicks() {
-        let chip = app.buttons["composer.model"]
-        XCTAssertTrue(chip.waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertTrue(waitUntilHittable(chip, timeout: 5), app.debugDescription)
-        chip.tap()
+        openModelPicker()
 
         let sheet = app.descendants(matching: .any)["composer.model.menu"]
         XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
@@ -1020,11 +1055,13 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(waitUntilHittable(flash, timeout: 3), app.debugDescription)
         flash.tap()
         XCTAssertTrue(waitUntilGone(sheet, timeout: 5), app.debugDescription)
-        XCTAssertEqual(chip.label, "V4 Flash", app.debugDescription)
+        let options = app.buttons["composer.model"]
+        XCTAssertTrue(options.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(String(describing: options.value).contains("V4 Flash"), app.debugDescription)
 
         // Reopening pins that pick to the top under 最近使用 — a SECOND row for
         // the same model, distinct from the one under its provider.
-        chip.tap()
+        openModelPicker()
         XCTAssertTrue(sheet.waitForExistence(timeout: 5), app.debugDescription)
         let recent = app.buttons["composer.model.recent.row.deepseek/deepseek-flash"]
         XCTAssertTrue(recent.waitForExistence(timeout: 3), app.debugDescription)
@@ -1066,6 +1103,13 @@ final class LingxiCodeUITests: XCTestCase {
 
     /// A model can appear twice — once under 最近使用 and once under its own
     /// provider — so rows are addressed by their section.
+    private func openModelPicker() {
+        let model = app.buttons["composer.model"]
+        XCTAssertTrue(model.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(model, timeout: 3), app.debugDescription)
+        model.tap()
+    }
+
     private func providerRow(_ reference: String) -> XCUIElement {
         app.buttons["composer.model.provider.row.\(reference)"]
     }

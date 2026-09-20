@@ -30,6 +30,10 @@ struct Composer: View {
     var permissionMode: String = "auto"
     var effectivePermissionMode: String = "auto"
     var permissionOptions: [ConversationPermissionOption] = []
+    var fastModeEnabled: Bool = false
+    var fastModePending: Bool = false
+    var fastModeError: String? = nil
+    var onSetFastMode: (Bool) -> Void = { _ in }
     var controlsPending: Bool = false
     var controlsError: String? = nil
     var bypassWarningSuppressed: Bool = false
@@ -108,6 +112,10 @@ struct Composer: View {
         permissionMode: String = "auto",
         effectivePermissionMode: String = "auto",
         permissionOptions: [ConversationPermissionOption] = [],
+        fastModeEnabled: Bool = false,
+        fastModePending: Bool = false,
+        fastModeError: String? = nil,
+        onSetFastMode: @escaping (Bool) -> Void = { _ in },
         controlsPending: Bool = false,
         controlsError: String? = nil,
         bypassWarningSuppressed: Bool = false,
@@ -151,6 +159,10 @@ struct Composer: View {
         self.permissionMode = permissionMode
         self.effectivePermissionMode = effectivePermissionMode
         self.permissionOptions = permissionOptions
+        self.fastModeEnabled = fastModeEnabled
+        self.fastModePending = fastModePending
+        self.fastModeError = fastModeError
+        self.onSetFastMode = onSetFastMode
         self.controlsPending = controlsPending
         self.controlsError = controlsError
         self.bypassWarningSuppressed = bypassWarningSuppressed
@@ -228,12 +240,12 @@ struct Composer: View {
                         }
                     }
 
-                if dynamicTypeSize.isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: 0) {
-                        modelChip
-                        controlsChip
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                configurationSummary
+                if let fastModeError {
+                    Text(fastModeError)
+                        .font(.caption)
+                        .foregroundStyle(t.danger)
+                        .accessibilityIdentifier("composer.fast-mode.error")
                 }
                 HStack(spacing: 4) {
                     // Attach / camera: drives a real on-device capture through the
@@ -245,10 +257,6 @@ struct Composer: View {
                     }
                     .buttonStyle(ComposerActionButtonStyle())
                     .accessibilityLabel("composer_add_attachment")
-                    if !dynamicTypeSize.isAccessibilitySize {
-                        modelChip
-                        controlsChip
-                    }
                     Spacer()
                     if isCancelling || slashCommandPending {
                         ProgressView()
@@ -528,9 +536,7 @@ struct Composer: View {
     private var controlsChip: some View {
         Button { controlsOpen = true } label: {
             HStack(spacing: 4) {
-                Text(reasoningSelection == "automatic" ? "Auto" : reasoningSelection.capitalized)
-                Text("·")
-                Text(effectivePermissionMode != permissionMode ? "\(permissionMode) → \(effectivePermissionMode)" : permissionMode)
+                Text(controlsSummary)
             }
             .font(.scaledSystem(11.5, weight: .medium, relativeTo: .caption))
             .lineLimit(1)
@@ -542,9 +548,81 @@ struct Composer: View {
         }
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(controlsPending)
-        .accessibilityLabel("Model, reasoning and permissions")
+        .accessibilityLabel("Effort and permission mode")
         .accessibilityValue("\(reasoningSelection), \(effectivePermissionMode)")
         .accessibilityIdentifier("composer.controls")
+    }
+
+    // Keep the actual selections visible, including on narrow phones. Native
+    // fitting moves controls to a second row before any labels are truncated.
+    private var configurationSummary: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if dynamicTypeSize.isAccessibilitySize {
+                modelChip
+                controlsChip
+                fastModeChip
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 0) {
+                        modelChip
+                        controlsChip
+                        fastModeChip
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        modelChip
+                        HStack(spacing: 0) {
+                            controlsChip
+                            Spacer(minLength: 0)
+                            fastModeChip
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var supportsFastMode: Bool {
+        availableModelDetails[activeModelId]?.supportsFastMode == true
+    }
+
+    private var fastModeChip: some View {
+        Menu {
+            if !supportsFastMode {
+                Text("Fast Mode is unavailable for this model")
+            }
+            Toggle("Fast Mode", isOn: Binding(
+                get: { fastModeEnabled },
+                set: onSetFastMode
+            ))
+            .disabled(!supportsFastMode && !fastModeEnabled)
+        } label: {
+            HStack(spacing: 4) {
+                if fastModePending {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: fastModeEnabled ? "bolt.fill" : "bolt")
+                }
+                Text(fastModeEnabled ? "Fast On" : (supportsFastMode ? "Fast Off" : "Fast N/A"))
+            }
+            .font(.scaledSystem(11.5, weight: .medium, relativeTo: .caption))
+            .foregroundStyle(fastModeEnabled ? t.accent : t.text2)
+            .padding(.horizontal, 8)
+            .frame(minHeight: 40)
+        }
+        .buttonStyle(ComposerActionButtonStyle())
+        .disabled(fastModePending)
+        .accessibilityLabel("Fast Mode")
+        .accessibilityValue(fastModeEnabled ? "On" : "Off")
+        .accessibilityIdentifier("composer.fast-mode")
+    }
+
+    private var controlsSummary: String {
+        let reasoning = reasoningSelection == "automatic" ? "Auto" : reasoningSelection.capitalized
+        let permission = effectivePermissionMode != permissionMode
+            ? "\(permissionMode) → \(effectivePermissionMode)"
+            : permissionMode
+        return "Effort: \(reasoning) · \(permission)"
     }
 
     private var slashSuggestions: [SlashCommandSuggestion] {

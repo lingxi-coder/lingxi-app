@@ -80,6 +80,7 @@ struct ModelRuntimeDetails: Identifiable, Equatable {
     let pricing: ModelPricingDto?
     let capabilities: ModelCapabilitiesDto
     let reasoning: ReasoningControlSpecDto
+    var supportsFastMode: Bool = false
 
     var id: String { reference }
 
@@ -106,7 +107,8 @@ struct ModelRuntimeDetails: Identifiable, Equatable {
             temperatureControl: dto.temperatureControl,
             pricing: dto.pricing,
             capabilities: dto.capabilities,
-            reasoning: dto.reasoning
+            reasoning: dto.reasoning,
+            supportsFastMode: dto.supportsFastMode
         )
     }
 

@@ -1209,6 +1209,7 @@ private final class ControllerConversationSource: ConversationSource {
     func setPermissionMode(_: String) {}
     func confirmAndSetBypassPermissions(suppressWarning _: Bool) {}
     func setReasoningSelection(_: String) {}
+    func setFastMode(_: Bool) {}
     func openSession(_: SessionRef) { startNewConversation() }
     func handleBackground() { cancel() }
 }

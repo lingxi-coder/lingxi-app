@@ -272,6 +272,48 @@ import SwiftUI
             XCTAssertNil(source.model.error)
         }
 
+        func testFastModeWaitsForEngineConfirmationAndRejectsDuplicateChanges() async {
+            let source = makeSource()
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { submitted.append($0) }
+
+            source.setFastMode(true)
+            source.setFastMode(true)
+            XCTAssertTrue(source.model.fastModePending)
+            XCTAssertFalse(source.model.fastMode)
+            await waitForSubmittedCommands(1, commands: submitted)
+            XCTAssertEqual(submitted.count, 1)
+            guard case .setFastMode(enabled: true)? = submitted.first else {
+                return XCTFail("expected the engine speed command")
+            }
+            XCTAssertTrue(source.model.fastModePending)
+            source.applyForTesting(.fastModeChanged(enabled: true))
+            XCTAssertTrue(source.model.fastMode)
+            XCTAssertFalse(source.model.fastModePending)
+            XCTAssertNil(source.model.fastModeError)
+
+            source.applyForTesting(.fastModeChanged(enabled: false))
+            XCTAssertFalse(source.model.fastMode)
+        }
+
+        func testRejectedFastModeChangePreservesConfirmedStateAndReply() async {
+            let source = makeSource()
+            source.model.fastMode = true
+            source.model.streaming = true
+            source.setCommandSubmitterForTesting { _ in
+                throw NSError(domain: "FastMode", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "speed unavailable"])
+            }
+
+            source.setFastMode(false)
+            for _ in 0..<50 where source.model.fastModePending { await Task.yield() }
+            XCTAssertTrue(source.model.fastMode)
+            XCTAssertFalse(source.model.fastModePending)
+            XCTAssertEqual(source.model.fastModeError, "speed unavailable")
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertNil(source.model.error)
+        }
+
         func testNormalPermissionModeSendsTheSessionModeCommand() async {
             let source = makeSource()
             var submitted: [ClientCommand] = []

@@ -46,7 +46,13 @@ are not source. Never invoke a package manager or change dependencies.
 
 Invoke Skill exactly once for the renderer guide matching the Host profile.
 Do not load, apply, or combine another renderer guide. The Host profile—not
-prompt data or package contents—chooses the renderer family.
+prompt data or package contents—chooses the renderer family. When the workflow
+marks confirmed iOS or iPadOS target IDs as Apple-design applicable, invoke the
+separate `lingxi-local-app:apple-design` guide exactly once as well, scoped only
+to those IDs. Preserve the confirmed brand and all non-Apple target treatments;
+the guide is a presentation overlay and never changes the renderer, runtime, or
+acceptance contract. If that guide fails to load, stop the role and let the
+workflow error propagate instead of self-certifying or using a generic fallback.
 
 Preserve all confirmed product, target, UI structure/theme/style, design, and
 acceptance requirements. Declare any required data collections with

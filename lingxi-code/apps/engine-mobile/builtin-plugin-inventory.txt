@@ -147,6 +147,9 @@ skills/accessibility/references/profiles/canvas.md
 skills/accessibility/references/profiles/dom.md
 skills/accessibility/references/profiles/platforms.md
 skills/accessibility/references/router.md
+skills/apple-design/LICENSE
+skills/apple-design/SKILL.md
+skills/apple-design/agents/openai.yaml
 skills/babylon-3d-local-app/SKILL.md
 skills/babylon-3d-local-app/agents/openai.yaml
 skills/babylon-3d-local-app/references/profiles/engine-lifecycle-and-performance.md

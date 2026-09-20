@@ -677,6 +677,50 @@ mod tests {
         ));
     }
 
+    /// A namespaced Plugin skill must win over a user command with the same
+    /// short name. This exercises the real checked-in Apple Design body and
+    /// the mobile preload path, rather than a static skill-name list.
+    #[tokio::test]
+    async fn namespaced_apple_design_loads_product_body_over_short_name_collision() {
+        let loader = loaded_local_app_skill_registry().await;
+        let registry = loader.registry.clone();
+        registry.write().await.register_command(SlashCommand {
+            name: "apple-design".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Markdown {
+                file_path: std::path::PathBuf::from("user/apple-design/SKILL.md"),
+                frontmatter: CommandFrontmatter::default(),
+                prompt_template: "USER SHORT-NAME SKILL — must never be selected".into(),
+            },
+            ..SlashCommand::default()
+        });
+
+        let loaded = AgentSkillLoader::resolve_and_load(
+            &loader,
+            "lingxi-local-app:apple-design",
+            "lingxi-local-app:designer",
+            None,
+        )
+        .await
+        .expect("checked skill preload")
+        .expect("installed namespaced Apple Design skill must resolve");
+        let body = loaded
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .expect("Apple Design preload must be text");
+
+        assert!(body.contains("LingXi Local App contract"));
+        assert!(body.contains("85e8e2363b713506e1d5b6e07a0eb2da66be1bc3"));
+        assert!(body.contains("Ionic React and React"));
+        assert!(!body.contains("USER SHORT-NAME SKILL"));
+        assert!(!body.contains("## Initial Response"));
+        println!("APPLE_DESIGN_LOADED_BYTES={}", body.len());
+    }
+
     #[tokio::test]
     async fn chat_mode_hides_commands_without_explicit_session_modes() {
         let tmp = tempfile::tempdir().unwrap();

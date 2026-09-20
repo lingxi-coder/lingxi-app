@@ -8,7 +8,7 @@ device; do not attempt them through guessed device metadata or call them pass.
 
 - Browser preview: first paint, fatal console errors, primary interaction,
   navigation, back, loading and error handling.
-- iPhone: safe area, 44pt controls, iOS navigation/back, text scaling, reduced
+- iPhone: safe area, 44 CSS-pixel controls, iOS navigation/back, text scaling, reduced
   motion.
 - Android phone: 48dp controls, Android back, Material feedback, permission and
   recovery flows.
@@ -21,6 +21,12 @@ device; do not attempt them through guessed device metadata or call them pass.
 If a target was not requested, say so instead of silently skipping it.
 Record bridge-dependent checks, reduced-motion behavior, and at least one
 double-frame motion observation for animated canvas or Three.js scenes.
+For iPhone/iPad checks, use the active contract's Apple requirements and the
+actual Host `verification_scope`; include system-font/Ionic navigation and the
+reserved bottom-leading 80-by-80 CSS-pixel host control corner where in scope.
+Do not infer an out-of-scope device from the launching device or report a
+partial current-device run as a full matrix. Screenshots and synthetic pointer
+events do not prove physical smoothness.
 
 ## Sources
 

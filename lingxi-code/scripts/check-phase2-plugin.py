@@ -29,6 +29,7 @@ TASKS_PHASE2 = REPO / "docs" / "local-apps" / "harness" / "tasks-phase-2.json"
 
 EXPECTED_SKILLS = {
     "accessibility",
+    "apple-design",
     "babylon-3d-local-app",
     "canvas-2d-local-app",
     "create-local-app",
@@ -185,17 +186,17 @@ def check_manifest_and_skills() -> tuple[dict, list[dict]]:
 
     skill_root = PLUGIN / "skills"
     if not skill_root.is_dir():
-        fail("Plugin must contain exactly 27 skills; skill root is missing")
+        fail(f"Plugin must contain exactly {len(EXPECTED_SKILLS)} skills; skill root is missing")
     skill_dirs = {path.name for path in skill_root.iterdir() if path.is_dir()}
     if skill_dirs != EXPECTED_SKILLS:
         fail(
-            "Plugin must contain exactly 27 skills; "
+            f"Plugin must contain exactly {len(EXPECTED_SKILLS)} skills; "
             f"missing={sorted(EXPECTED_SKILLS - skill_dirs)}, extra={sorted(skill_dirs - EXPECTED_SKILLS)}"
         )
 
     root_skills = REPO / "skills"
     for name in sorted({
-        "accessibility", "babylon-3d-local-app", "canvas-2d-local-app", "create-local-app",
+        "accessibility", "apple-design", "babylon-3d-local-app", "canvas-2d-local-app", "create-local-app",
         "frontend-design", "frontend-qa", "ionic-react-local-app", "phaser-2d-local-app",
         "react-best-practices", "threejs-local-app",
     }):
@@ -445,8 +446,12 @@ def check_build_inventory_and_permissions() -> None:
             "build inventory must equal the actual Plugin directory: "
             f"missing={sorted(actual - set(inventory_lines))[:4]}, extra={sorted(set(inventory_lines) - actual)[:4]}"
         )
-    if len(inventory_lines) != 213:
-        fail(f"build inventory expected 213 exact files for the current package, got {len(inventory_lines)}")
+    expected_inventory_count = 213 + (len(EXPECTED_SKILLS) - 27) * 3
+    if len(inventory_lines) != expected_inventory_count:
+        fail(
+            f"build inventory expected {expected_inventory_count} exact files for the current package, "
+            f"got {len(inventory_lines)}"
+        )
     source = require_file(PERMISSIONS_ASSET, "permission settings asset")
     if "default-workspace-settings.local.json" not in PERMISSIONS_RS.read_text(encoding="utf-8"):
         fail("permissions.rs must include the migrated production settings asset")
@@ -496,7 +501,7 @@ def main() -> int:
     check_migration(migration)
     check_build_inventory_and_permissions()
     check_phase2_task_evidence()
-    print("PHASE2-PLUGIN OK: 27 skills, 9 agents, 3 workflows, 6 schemas, 112 base profile assets, 5 shared MCP widget assets, 12 excluded orphans, and exact build inventory")
+    print("PHASE2-PLUGIN OK: 28 skills, 9 agents, 3 workflows, 6 schemas, 112 base profile assets, 5 shared MCP widget assets, 12 excluded orphans, and exact build inventory")
     return 0
 
 

@@ -16,6 +16,10 @@ Read this file first, then load only the profiles the confirmed brief needs.
 - Keep `targets[]` explicit even when one source serves multiple platforms.
 - Put platform deltas in navigation, chrome, density, spacing, and input, not
   only width breakpoints.
+- For an iOS/iPadOS target, route Apple Design defaults after this role has
+  loaded `lingxi-local-app:apple-design`; explicit brand/reference
+  choices remain authoritative. Adapt the result to the Host/Ionic shell and
+  keep the output compact; do not repeat the Apple skill tutorial here.
 - Use platform system fonts and checked-in assets by default. Treat any other
   font or asset as an unresolved proposal; never imply a download or package
   that the locked Local App scaffold does not contain.

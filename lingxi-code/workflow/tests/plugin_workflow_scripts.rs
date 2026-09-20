@@ -605,6 +605,206 @@ fn first_pass_agent_call_counts_are_exercised_for_each_quality_level() {
 }
 
 #[test]
+fn apple_design_uses_only_confirmed_ios_and_ipados_targets() {
+    let cases = [
+        (
+            "normalized iOS",
+            serde_json::json!([{"id":"iphone-main","os":"  IoS ","form_factor":"phone"}]),
+            "balanced",
+            vec!["iphone-main"],
+        ),
+        (
+            "iPadOS",
+            serde_json::json!([{"id":"ipad-main","os":" iPaDoS ","form_factor":"tablet"}]),
+            "balanced",
+            vec!["ipad-main"],
+        ),
+        (
+            "Android",
+            serde_json::json!([{"id":"android-main","os":" Android ","form_factor":"phone"}]),
+            "balanced",
+            Vec::<&str>::new(),
+        ),
+        (
+            "mixed targets",
+            serde_json::json!([
+                {"id":"iphone-main","os":"IOS","form_factor":"phone"},
+                {"id":"android-main","os":"android","form_factor":"phone"},
+                {"id":"ipad-main","os":"IPADOS","form_factor":"tablet"}
+            ]),
+            "fast",
+            vec!["iphone-main", "ipad-main"],
+        ),
+    ];
+
+    for (name, targets, quality, target_ids) in cases {
+        let expects_apple_design = !target_ids.is_empty();
+        let prompts = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let prompts_for_run = Arc::clone(&prompts);
+        let args = build_create_args_with_targets(targets, quality);
+        let design = serde_json::json!({"design": args["authoring_spec"]["design"]});
+        let outcome = workflow::run_with_progress(
+            &build_workflow_script(),
+            move |prompt_batch, options| {
+                prompt_batch
+                    .iter()
+                    .zip(options.iter())
+                    .map(|(prompt, options)| {
+                        let label = stage_label(options);
+                        prompts_for_run
+                            .lock()
+                            .expect("prompt log")
+                            .push((label.clone(), prompt.clone()));
+                        if label == "designer" {
+                            design.to_string()
+                        } else {
+                            canned_stage_reply(&label).unwrap_or_else(|| {
+                                passing_qa_reply(&label, "wf_regression", quality)
+                            })
+                        }
+                    })
+                    .collect()
+            },
+            |_progress| {},
+            None,
+            true,
+            Some(args.to_string()),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("{name} Apple routing should execute: {error}"));
+        assert!(outcome.result.is_some(), "{name} should return a result");
+
+        let prompts = prompts.lock().expect("prompt log");
+        let designer = prompts.iter().find(|(label, _)| label == "designer");
+        assert_eq!(designer.is_some(), quality != "fast", "{name}: {prompts:?}");
+        let builder = prompts
+            .iter()
+            .find(|(label, _)| label == "builder-build")
+            .expect("create builder prompt");
+        let expected_ids = serde_json::to_string(&target_ids).expect("target IDs JSON");
+        if !expects_apple_design {
+            assert!(
+                !builder.1.contains("Skill('lingxi-local-app:apple-design')"),
+                "{name}: {builder:?}"
+            );
+        } else {
+            assert!(
+                builder.1.contains("Skill('lingxi-local-app:apple-design')"),
+                "{name}: {builder:?}"
+            );
+            assert!(
+                builder.1.contains(&expected_ids),
+                "{name} lost scoped target IDs: {builder:?}"
+            );
+            assert!(
+                builder.1.contains("confirmed brand"),
+                "{name} lost brand preservation: {builder:?}"
+            );
+        }
+        if quality != "fast" {
+            let designer = designer.expect("designer prompt");
+            if expects_apple_design {
+                assert!(
+                    designer
+                        .1
+                        .contains("Skill('lingxi-local-app:apple-design')"),
+                    "{name}: {designer:?}"
+                );
+                assert!(
+                    designer.1.contains(&expected_ids),
+                    "{name} lost designer target IDs: {designer:?}"
+                );
+            } else {
+                assert!(
+                    !designer
+                        .1
+                        .contains("Skill('lingxi-local-app:apple-design')"),
+                    "{name}: {designer:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn fast_ui_update_loads_apple_design_without_running_designer() {
+    let mut args = build_create_args(serde_json::json!({"quality_level": "fast"}));
+    args["operation"] = serde_json::Value::String("update".into());
+    args["revision_prompt"] = serde_json::Value::String("Refresh the list presentation".into());
+    args["workflow_run_id"] = serde_json::Value::String("wf_update_fast".into());
+    args["host_context"]["operation"] = serde_json::Value::String("update".into());
+    args["host_context"]["workflow_run_id"] = serde_json::Value::String("wf_update_fast".into());
+    args["host_context"]["update_ui_impact"] = serde_json::Value::Bool(true);
+    args["host_context"]["authoring_contract_sha256"] = serde_json::Value::String("f".repeat(64));
+    args["host_context"]["runtime_profile"] = serde_json::json!({
+        "family": "react_dom",
+        "revision": 1,
+        "contract_sha256": "a".repeat(64),
+        "surface": "dom"
+    });
+    args["host_context"]["dependency_snapshot"] = serde_json::json!({"verified": true});
+    args["host_context"]["authoring_contract"] = serde_json::json!({
+        "contract_handle": "contract_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "spec": authoring_spec()
+    });
+
+    let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &build_workflow_script(),
+        move |prompts, options| {
+            prompts
+                .iter()
+                .zip(options.iter())
+                .map(|(prompt, options)| {
+                    let label = stage_label(options);
+                    calls_for_run
+                        .lock()
+                        .expect("call log")
+                        .push((label.clone(), prompt.clone()));
+                    if label == "builder" {
+                        serde_json::json!({
+                            "ok": true,
+                            "preview_url": "http://127.0.0.1:20000",
+                            "contract_handle": "contract_cccccccccccccccccccccccccccccccc",
+                            "summary": "updated"
+                        })
+                        .to_string()
+                    } else {
+                        passing_qa_reply(&label, "wf_update_fast", "fast")
+                    }
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(args.to_string()),
+        None,
+    )
+    .expect("fast UI update should execute");
+    assert!(outcome
+        .result
+        .expect("workflow result")
+        .contains("\"ok\":true"));
+    let calls = calls.lock().expect("call log");
+    assert!(
+        !calls.iter().any(|(label, _)| label == "designer"),
+        "{calls:?}"
+    );
+    let builder_prompt = calls
+        .iter()
+        .find(|(label, _)| label == "builder")
+        .map(|(_, prompt)| prompt)
+        .expect("fast UI update builder prompt");
+    assert!(
+        builder_prompt.contains("Skill('lingxi-local-app:apple-design')"),
+        "{builder_prompt}"
+    );
+    assert!(builder_prompt.contains("[\"primary\"]"), "{builder_prompt}");
+}
+
+#[test]
 fn refused_or_incomplete_design_stops_before_create_preparation() {
     for design in [
         serde_json::json!({"status": "refused", "refusal": "validated_selection_missing: journal row not found", "design_produced": false}),
@@ -831,6 +1031,14 @@ fn unified_build_verify_is_read_only_and_persisted_canvas_rejects_fast() {
             .all(|prompt| !prompt.contains("Handle=persisted-profile")),
         "persisted workflows must not manufacture a template-selection handle"
     );
+    assert!(
+        seen_prompts
+            .lock()
+            .expect("prompt capture")
+            .iter()
+            .all(|prompt| !prompt.contains("lingxi-local-app:apple-design")),
+        "verify must never load Apple Design"
+    );
 
     let fast_canvas_args = serde_json::json!({
         "operation": "update",
@@ -986,6 +1194,10 @@ fn unified_build_update_keeps_mcp_authoring_explicit() {
         .find(|(label, _)| label == "builder")
         .map(|(_, prompt)| prompt)
         .expect("update builder prompt");
+    assert!(
+        !builder_prompt.contains("Skill('lingxi-local-app:apple-design')"),
+        "a code-only update must preserve existing Apple styles: {builder_prompt}"
+    );
     for required in [
         "operation=stage, app_id=aaaa1111, workflow_run_id=wf_update2",
         "base_contract_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -1040,8 +1252,10 @@ fn host_ui_impact_flag_is_the_only_update_design_trigger() {
                         assert_eq!(options_value["schema"], design_schema());
                         assert_eq!(options_value["structuredOutputParseRetries"], 2);
                         assert!(prompt.contains("Resolve impact"), "UI-impact update lost design instruction: {prompt}");
+                        assert!(prompt.contains("Skill('lingxi-local-app:apple-design')"), "UI-impact update lost Apple design instruction: {prompt}");
                         design_subtree().to_string()
                     } else if label == "builder" {
+                        assert!(prompt.contains("Skill('lingxi-local-app:apple-design')"), "UI-impact update builder lost Apple design instruction: {prompt}");
                         serde_json::json!({"ok": true, "preview_url": "http://127.0.0.1:20000", "contract_handle": "contract_cccccccccccccccccccccccccccccccc", "summary": "updated"}).to_string()
                     } else {
                         passing_qa_reply(&label, "wf_update_ui1", "balanced")
@@ -1380,6 +1594,34 @@ fn build_create_args(extra: serde_json::Value) -> serde_json::Value {
             .insert(key.clone(), value.clone());
     }
     base
+}
+
+fn build_create_args_with_targets(targets: serde_json::Value, quality: &str) -> serde_json::Value {
+    let mut spec = authoring_spec();
+    let ids: Vec<_> = targets
+        .as_array()
+        .expect("target fixtures")
+        .iter()
+        .map(|target| target["id"].clone())
+        .collect();
+    let presentation = spec["design"]["presentations"][0].clone();
+    spec["design"]["presentations"] = serde_json::Value::Array(
+        ids.iter()
+            .map(|id| {
+                let mut presentation = presentation.clone();
+                presentation["target_id"] = id.clone();
+                presentation
+            })
+            .collect(),
+    );
+    spec["acceptance_checks"][0]["target_ids"] = serde_json::json!(ids);
+    spec["targets"] = targets;
+    let mut args = build_create_args(serde_json::json!({
+        "quality_level": quality,
+        "authoring_spec": spec.clone(),
+    }));
+    args["host_context"]["authoring_spec"] = spec;
+    args
 }
 
 fn build_verify_args(quality: &str) -> serde_json::Value {
@@ -2537,6 +2779,11 @@ fn repair_uses_no_expired_contract_and_denies_contract_manifest_dependency_tools
     assert!(
         prompt.contains(r#""family":"canvas_2d""#),
         "repair must carry the authoritative non-DOM Host QA profile: {prompt}"
+    );
+    assert!(
+        prompt.contains("Skill('lingxi-local-app:apple-design')")
+            && prompt.contains("[\"primary\"]"),
+        "create repair must preserve the originally applicable Apple design scope: {prompt}"
     );
     let options: serde_json::Value =
         serde_json::from_str(&repair_options.lock().expect("repair options"))

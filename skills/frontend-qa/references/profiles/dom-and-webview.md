@@ -10,6 +10,14 @@
   and orientation changes.
 - If the app is routed, verify screen transitions and that each main route keeps
   its shell usable after forward and back navigation.
+- For an active iOS/iPadOS contract, check the prepared Apple requirements on
+the actual Host target: 44 CSS-pixel controls, Dynamic Type tolerance, system-font
+  and Ionic navigation behavior, reduced motion, and the reserved bottom-leading
+  80-by-80 CSS-pixel host control corner. Preserve explicit brand/reference
+  choices; a subjective style preference is not a blocker.
+- Do not add `motion_required` to DOM checks. Screenshots or synthetic pointer
+  events may support layout/interaction evidence, but cannot prove physical
+  smoothness; use only actual Host evidence for such a required behavior.
 
 ## Sources
 

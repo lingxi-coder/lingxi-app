@@ -33,3 +33,9 @@ untested targets as passed or summarize a partial run as full-matrix success.
 Carry Host upstream finding IDs/messages unchanged. A post-repair pass may
 resolve one only with exact fresh Host evidence IDs; it must not erase or
 rewrite an immutable prior candidate.
+
+Read the active confirmed contract only. For iOS/iPadOS targets, apply the
+contract's prepared Apple checks within the Host in-scope target set; do not
+migrate an existing design or introduce subjective style blockers. Screenshots
+and synthetic pointer events can document layout or interaction state but
+cannot establish physical smoothness.

@@ -8,6 +8,21 @@ description: Produce a platform-specific local-app design_spec for LingXi apps, 
 Turn the confirmed product brief into one compact `design_spec` that another
 agent can implement without guessing.
 
+Act as a lightweight platform/output router. The coordinator owns the
+conversation, target inference, conditional skill loading, acceptance checks,
+and final AuthoringSpec; this skill translates that confirmed contract into
+target-specific output and does not open another questionnaire or confirmation.
+For a design run, normalize each `targets[].os` with
+`String(target.os ?? "").trim().toLowerCase()` before routing. An iOS/iPadOS
+output has an explicit `lingxi-local-app:apple-design` skill dependency. Each
+designing role must load that namespaced skill once in its own execution before
+producing iOS/iPadOS output; a coordinator's earlier load is not inherited by a
+child role. Reuse it only if already loaded in this same role execution.
+Do not load it for verify-only or
+code-only work. Adapt the guidance to the Host/Ionic shell, keep an explicit
+brand or reference authoritative, and apply Apple guidance only to affected UI
+targets. Do not add APIs, dependencies, or nested token/state fields.
+
 Always:
 
 - start from the confirmed product goal, target matrix, and surface choice, then

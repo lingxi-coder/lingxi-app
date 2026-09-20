@@ -44,6 +44,17 @@ only the remaining material gaps before the final AuthoringSpec confirmation.
    move on. Ask only material unresolved questions; there is no question-count
    quota and no re-asking of an answered decision. Continue until the confirmed
    AuthoringSpec is complete, then use the answers in step 3.
+2a. After targets have been inferred, normalize each target OS for routing with
+   `String(target.os ?? "").trim().toLowerCase()` (so `ios` and `ipados` are
+   matched case-insensitively). For create or UI-impacting design/generate/update
+   work, if any confirmed target is iOS or iPadOS, load the
+   `lingxi-local-app:apple-design` skill exactly once before proposing the UI or
+   presenting the final AuthoringSpec, including for `fast`. Route from the
+   confirmed `targets[]`; never substitute the launching device or ask another
+   platform questionnaire. Apple Design is the default for those targets only,
+   and an explicit brand or reference remains authoritative. This conditional
+   load is workflow work, not an extra confirmation. Do not load it for
+   verify-only or code-only work.
 3. Call `LocalAppRuntimeProfiles` to make a technical recommendation, then
    propose a display **name**, one-line **brief**, targets, and the complete
    AuthoringSpec. Include a user-facing one-line UI summary naming the
@@ -166,6 +177,10 @@ or Host handoff and ask for one only when it is absent. Inside an app that
 already has a shape, read `LINGXI.md` and its persisted
 AuthoringSpec, then sharpen only the requested change. In a global chat, gather the product, screens, data,
 capabilities, and visual intent before creating the app. When a material decision is unresolved, call `AskUserQuestion` for that decision; do not impose a question quota and never re-ask an answered decision. Never ask unresolved questions in ordinary assistant text.
+An existing shaped app retains its persisted design and explicit brand or
+reference choices. Apply the conditional Apple guidance only to a confirmed
+UI-impacting change and only within its affected iOS/iPadOS targets; do not
+migrate an existing design during verify-only or code-only work.
 The one exception is the opening turn of a shell conversation (step 1 above),
 where you have no options to offer and need the user's own description; that
 exception covers that turn only, and does not extend to any later question in
@@ -201,6 +216,14 @@ specification containing:
   request `capture` evidence and use a Canvas profile. Omit it or keep it false
   for static UI and reduced-motion checks; identical captured frames remain
   valid when motion is not required.
+
+Before this final confirmation, the coordinator must prepare any required
+iOS/iPadOS checks in `acceptance_checks` from the confirmed targets and scope.
+For DOM targets these include the existing safe-area reservation, 44 CSS-pixel
+control targets, system-font/Ionic navigation, Dynamic Type tolerance, and reduced
+motion behavior as applicable; keep them as the existing flat check schema and
+do not invent `motion_required` for DOM. The frontend designer reads this
+active contract and cannot add acceptance checks after confirmation.
 
 Before the final confirmation, classify the confirmed specification without
 starting another agent. Score screens/routes, data complexity, host or external
@@ -478,15 +501,18 @@ serves only `build/store/dist/`. Never configure another `build.outDir`,
 inspect host staging paths, or copy generated output back into editable
 source.
 
-1. **Design** — for `dom`, the designer uses the frontend-design and
-   accessibility guidance for `balanced` and `thorough`, while `fast` folds
-   compact decisions into Generate & Build. For `canvas`, use the designer for
-   both accepted strategies; its
+1. **Design** — for `dom`, the designer uses the frontend-design platform/output
+   router and accessibility guidance for `balanced` and `thorough`, while `fast`
+   folds compact decisions into Generate & Build. When the coordinator loaded
+   Apple Design, apply it to iOS/iPadOS output only, adapting to the Host/Ionic
+   shell; do not copy it into Android or desktop targets. For `canvas`, Apple
+   guidance applies to the HUD/menu overlay and its safe-area treatment, never
+   to the drawn scene. Use the designer for both accepted strategies; its
    confirmation never includes `fast`. Produce/confirm platform and form
    factor, page structure, tokens, adapters, interactions, and asset decision.
-   On Create, this is a structured design return before scaffold; do not write
-   files. Do not propose npm operations, fallback scaffold modes, or root-file
-   edits.
+   Keep the existing string token/state schema and do not add APIs. On Create,
+   this is a structured design return before scaffold; do not write files. Do
+   not propose npm operations, fallback scaffold modes, or root-file edits.
 2. **Generate** — after the preparer receipt and scaffold, the builder consumes
    its generic device/React guidance and invokes exactly one Host-profile
    renderer guide. Consume the host-provided LingXi bridge, `deviceContext`,
@@ -524,12 +550,18 @@ source.
    so repair LSP errors first.
 4. **Verify** — invoke `$frontend-qa`. For `dom`, `fast` checks the confirmed
    primary target, root render, fatal console errors, primary interaction, and
-   native WebView path; `balanced` covers all confirmed targets and app states;
-   `thorough` covers the full phone/tablet/desktop matrix. For `canvas`,
+   native WebView path; `balanced` expands to the confirmed targets and app
+   states that the Host authorizes; `thorough` expands the same active contract
+   with the broader checks the Host verification scope authorizes. For `canvas`,
    `balanced` covers the confirmed simulation, captured render, motion, and
-   input paths; `thorough` adds the full target matrix and all declared states.
-   Use Browser when available for the selected breadth, then use native WebView
-   inspect/act/log tools for bridge, data, system back, and device context. For
+   input paths; `thorough` adds declared states and any additional targets the
+   Host scope authorizes. A quality level never expands the Host's current-device
+   `verification_scope`: preserve declared targets and report unverified ones,
+   and never call a partial run a full-matrix pass. Use Browser when available
+   for the selected breadth, then use native WebView inspect/act/log tools for
+   bridge, data, system back, and device context. Use only actual Host in-scope
+   evidence for Apple checks; screenshots or synthetic pointers cannot establish
+   physical smoothness. For
    every declared collection listed in `expected_writable_collections`, perform
    the real UI write and then call `LocalAppQueryData`; the returned
    `records[].document` must contain the value. On mobile, the host derives the

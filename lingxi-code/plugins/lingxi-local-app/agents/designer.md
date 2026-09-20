@@ -7,6 +7,7 @@ tools:
   - LocalAppCaptureUi
   - LocalAppQueryData
   - LocalAppResolveTemplateSelection
+  - Skill
 skills:
   - device
   - frontend-design

@@ -18,6 +18,13 @@ post-repair candidate; a finding can be marked resolved only with the exact
 new evidence IDs that demonstrate resolution. Never manufacture a union from
 agent prose, and never rewrite a previous immutable candidate.
 
+For iOS/iPadOS Apple checks, use only the active confirmed contract and actual
+Host in-scope evidence. A screenshot or synthetic pointer event can support a
+layout or state claim, but cannot establish physical smoothness; report that
+limitation instead of inventing a DOM `motion_required` field. Treat a failed
+required check as a blocker only when the confirmed contract requires it, not
+because of a subjective style preference.
+
 For motion-heavy flows, capture two frames or observations across time so the
 report can distinguish a static render from a broken transition.
 

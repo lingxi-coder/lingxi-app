@@ -585,6 +585,51 @@ fn first_pass_agent_call_counts_are_exercised_for_each_quality_level() {
 }
 
 #[test]
+fn refused_or_incomplete_design_stops_before_create_preparation() {
+    for design in [
+        serde_json::json!({"status": "refused", "refusal": "validated_selection_missing: journal row not found", "design_produced": false}),
+        serde_json::json!({}),
+        serde_json::json!([]),
+        serde_json::json!({"presentations": [], "tokens": {}, "states": {}, "inputs": {}}),
+    ] {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&calls);
+        let outcome = workflow::run_with_progress(
+            &build_workflow_script(),
+            move |_, options| {
+                options
+                    .iter()
+                    .map(|options| {
+                        let label = stage_label(options);
+                        seen.lock().expect("calls").push(label.clone());
+                        if label == "designer" {
+                            serde_json::json!({"design": design}).to_string()
+                        } else {
+                            canned_stage_reply(&label).unwrap_or_else(|| {
+                                passing_qa_reply(&label, "wf_regression", "balanced")
+                            })
+                        }
+                    })
+                    .collect()
+            },
+            |_| {},
+            None,
+            true,
+            Some(build_create_args(serde_json::json!({})).to_string()),
+            None,
+        );
+        assert!(
+            outcome.is_err(),
+            "a refusal or incomplete design must stop the workflow"
+        );
+        assert_eq!(
+            calls.lock().expect("calls").as_slice(),
+            ["template-selector", "designer"]
+        );
+    }
+}
+
+#[test]
 fn actual_role_schemas_drive_a_host_shaped_successful_create_chain() {
     let source = build_workflow_script();
     let calls = Arc::new(Mutex::new(Vec::<String>::new()));

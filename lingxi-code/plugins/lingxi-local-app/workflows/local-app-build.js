@@ -95,6 +95,17 @@ const requireObject = (value, stage) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${WORKFLOW_ID}: ${stage} returned malformed structured output`);
   return value;
 };
+const requireDesign = (result) => {
+  const design = result.design;
+  if (Object.keys(result).length !== 1 || !design || typeof design !== 'object' || Array.isArray(design)) throw new Error(`${WORKFLOW_ID}: designer may return only the design subtree`);
+  const allowed = ['presentations', 'tokens', 'states', 'inputs', 'canvas'];
+  if (Object.keys(design).some((key) => !allowed.includes(key))
+      || !Array.isArray(design.presentations) || design.presentations.length === 0
+      || ['tokens', 'states', 'inputs'].some((key) => !design[key] || typeof design[key] !== 'object' || Array.isArray(design[key]))) {
+    throw new Error(`${WORKFLOW_ID}: designer returned a refusal or incomplete design: ${JSON.stringify(design)}`);
+  }
+  return design;
+};
 let calls = 0;
 const run = async (prompt, options) => {
   calls += 1;
@@ -213,8 +224,7 @@ if (input.operation === 'create') {
   if (typeof selection.validated_selection_handle !== 'string' || !/^vsel_[A-Za-z0-9]{32}$/.test(selection.validated_selection_handle)) throw new Error(`${WORKFLOW_ID}: selector did not return a Host-issued selection handle`);
   if (quality !== 'fast') {
     designResult = await run(`Return only {design} for app ${input.app_id}; do not change confirmed product, targets, or ui structure/theme/style. Preserve every confirmed requirement and add platform presentations, tokens, states, inputs, and canvas detail only in the design subtree. Resolve the Host selection by calling LocalAppResolveTemplateSelection with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${selection.validated_selection_handle}. ${RESOLVE_REFUSAL_CONTRACT} ${HOST_CHROME_CONTRACT} Full confirmed AuthoringSpec: ${JSON.stringify(confirmedSpec)}`, { agentType: 'designer', label: 'designer', phase: 'Select and Design', schema: designSchema });
-    if (Object.keys(designResult).length !== 1 || !designResult.design || typeof designResult.design !== 'object') throw new Error(`${WORKFLOW_ID}: designer may return only the design subtree`);
-    confirmedSpec = { ...confirmedSpec, design: designResult.design };
+    confirmedSpec = { ...confirmedSpec, design: requireDesign(designResult) };
   }
 }
 if (updateNeedsDesign) phase('Select and Design');
@@ -230,8 +240,7 @@ if (input.operation === 'create') {
 } else if (input.operation === 'update') {
   if (updateNeedsDesign) {
     designResult = await run(`Return only {design} for the confirmed update. Do not change product, targets, or ui structure/theme/style. Resolve impact in the design subtree and preserve the Host authoring contract. Full Host AuthoringSpec: ${JSON.stringify(confirmedSpec)}. Requested update: ${input.revision_prompt || ''}`, { agentType: 'designer', label: 'designer', phase: 'Select and Design', schema: designSchema });
-    if (Object.keys(designResult).length !== 1 || !designResult.design) throw new Error(`${WORKFLOW_ID}: designer may return only the design subtree`);
-    confirmedSpec = { ...confirmedSpec, design: designResult.design };
+    confirmedSpec = { ...confirmedSpec, design: requireDesign(designResult) };
   }
   build = await run(`Use only the Host-persisted profile and AuthoringSpec for app ${input.app_id}. First call LocalAppContract with operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, base_contract_sha256=${persistedContractSha256}, and the full confirmed update; retain its new contract_handle. Then edit App-managed source only. Preserve product, targets, ui structure/theme/style, design, acceptance requirements, profile, dependencies and manifest; repair source defects only. Invoke Skill exactly once for the one Host-profile renderer selected by Host; never preload all renderer guides. Call LocalAppBuild with exactly app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, and the actual new contract_handle, then call LocalAppRuntime with app_id=${input.app_id} and action=restart; return the contract handle with the build result. If source/build fails, the Host must retain the previous committed contract. ${HOST_CHROME_CONTRACT} Full AuthoringSpec: ${JSON.stringify(confirmedSpec)}. Requested update: ${input.revision_prompt || ''}`, { agentType: 'builder', label: 'builder', phase: 'Generate and Build', disallowedTools: ['LocalAppGet', 'LocalAppScaffold', 'LocalAppStageCreate', 'LocalAppApproveMcpProposal'], schema: buildSchema });
 }

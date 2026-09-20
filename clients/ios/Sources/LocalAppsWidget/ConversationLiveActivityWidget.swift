@@ -63,30 +63,49 @@ import SwiftUI
 
     @available(iOS 18.0, *)
     private struct ConversationLiveActivityView: View {
+        @Environment(\.colorSchemeContrast) private var contrast
+        @Environment(\.isLuminanceReduced) private var isLuminanceReduced
+        @ScaledMetric(relativeTo: .title2) private var symbolWidth = 28
+
         let state: ConversationLiveActivityAttributes.ContentState
         let sessionID: String
 
         var body: some View {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles")
-                        .font(.headline)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.title2.weight(.medium))
+                    .frame(width: symbolWidth)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 6) {
                     Text(state.title)
                         .font(.headline)
-                        .lineLimit(1)
+                        .lineLimit(2)
+
+                    if !state.subtitle.isEmpty {
+                        Text(state.subtitle)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+
+                    Label {
+                        Text(statusLabel)
+                    } icon: {
+                        Image(systemName: statusSymbol)
+                            .foregroundStyle(statusColor)
+                    }
+                    .font(.caption.weight(.medium))
+                    .padding(.top, 4)
                 }
-                Text(state.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                Label(statusLabel, systemImage: statusSymbol)
-                    .font(.caption2)
-                    .foregroundStyle(statusColor)
             }
+            .foregroundStyle(.primary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .activityBackgroundTint(Color(.systemBackground))
-            .activitySystemActionForegroundColor(.accentColor)
+            .padding(16)
+            .accessibilityElement(children: .combine)
+            // Preserve the system material so the activity blends with the Lock Screen.
+            .activityBackgroundTint(nil)
+            .activitySystemActionForegroundColor(nil)
             .widgetURL(ConversationDeepLink.makeURL(
                 sessionID: sessionID,
                 turnID: state.turnID,
@@ -133,8 +152,12 @@ import SwiftUI
         }
 
         private var statusColor: Color {
+            // Keep state readable when the system dims or increases contrast.
+            if isLuminanceReduced || contrast == .increased {
+                return .primary
+            }
             switch state.status {
-            case .running: return .green
+            case .running: return .primary
             case .waiting, .paused: return .orange
             case .completed: return .green
             case .failed: return .red

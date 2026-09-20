@@ -467,6 +467,13 @@ fn unified_build_workflow_executes_create_identity_chain_with_hermetic_agents() 
             .map(|(_, prompt)| prompt.as_str())
             .unwrap_or_else(|| panic!("no agent call was dispatched under label {label:?}"))
     };
+    for label in ["designer", "create-preparer"] {
+        let prompt = prompt_for(label);
+        assert!(
+            prompt.contains("LocalAppResolveTemplateSelection with app_id=aaaa1111, workflow_run_id=wf_hermetic1, validated_selection_handle=vsel_0123456789abcdef0123456789abcdef"),
+            "{label} must receive the complete Host selection identity instead of guessing the run ID: {prompt}"
+        );
+    }
     let stage_prompt = prompt_for("create-preparer");
     assert!(
         stage_prompt

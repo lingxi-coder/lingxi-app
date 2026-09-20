@@ -4833,6 +4833,45 @@ fn partial_text_then_err(
 /// CC 2.1.207/2.1.208 `wTy` (`cutoffNote:`+"${e.message}\n\n"+"Everything below…").
 const EXPECTED_SERVER_ERROR_CUTOFF: &str = "Agent terminated early due to an API error: API Error: Server error mid-response. The response above may be incomplete.\n\nEverything below is PARTIAL output recovered from the agent before it was cut off. The agent did NOT finish its task \u{2014} treat these results as incomplete.";
 
+/// A workflow role with a schema must report the stream failure, rather than
+/// returning a successful prose envelope that bypasses its output contract.
+#[tokio::test]
+async fn structured_agent_midstream_error_does_not_complete_with_partial_prose() {
+    let api = ResultStreamMockApiClient::new(vec![partial_text_then_err(
+        "I will prepare the design now.",
+        llm_client::LlmError::StreamInterrupted {
+            message: "stream ended before message_stop".into(),
+        },
+    )]);
+    let mut ctx = loop_ctx(api, None, 10);
+    ctx.schema = Some(
+        r#"{"type":"object","required":["design"],"properties":{"design":{"type":"object"}}}"#
+            .to_string(),
+    );
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })),
+        "partial prose must not satisfy the required design schema: {events:?}"
+    );
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            SubagentEvent::Failed { error, .. } => Some(error),
+            _ => None,
+        })
+        .expect("the structured agent must emit Failed");
+    assert!(
+        error.contains("stream ended before message_stop"),
+        "original stream error must survive: {error}"
+    );
+}
+
 /// A second round-trip cut off by `RateLimited` mid-stream — after a completed
 /// first turn AND with a block salvaged from the failing turn — recovers as a
 /// `Completed` result whose FIRST content block is the exact `cutoffNote`, with

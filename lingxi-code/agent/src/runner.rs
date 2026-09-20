@@ -1874,12 +1874,17 @@ async fn run_subagent_loop(
                     // partial work as a `completed` result with the incomplete-
                     // output `cutoffNote` prepended — instead of failing the
                     // whole tool call and discarding everything the child did.
+                    // Schema-bound roles cannot use this prose fallback: it
+                    // bypasses structured-output validation and makes a failed
+                    // workflow stage appear completed. Preserve the API error
+                    // as Failed so workflow throwOnError can surface its cause.
                     // Every other kind (auth/invalid/quota/…) or an empty
-                    // transcript rethrows as `Failed`, exactly as CC does.
+                    // transcript also rethrows as `Failed`.
                     let salvaged = translate_response_blocks(&partial_blocks);
                     match classify_api_termination(&e) {
                         Some((_error_kind, api_error_text))
-                            if !final_text_blocks(history, &salvaged).is_empty() =>
+                            if ctx.schema.is_none()
+                                && !final_text_blocks(history, &salvaged).is_empty() =>
                         {
                             let cutoff_note = build_cutoff_note(api_error_text);
                             let result = build_recovered_result(history, &salvaged, &cutoff_note);

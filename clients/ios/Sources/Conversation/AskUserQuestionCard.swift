@@ -10,6 +10,7 @@ import SwiftUI
 /// injected; anything else force-unwraps and traps).
 struct AskUserQuestionCard: View {
     @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let question: ConversationPendingQuestion
     /// Returns whether the answer command was submitted; `false` re-enables
@@ -23,6 +24,8 @@ struct AskUserQuestionCard: View {
     /// The 「其他」free-text answer per question index.
     @State private var custom: [Int: String] = [:]
     @State private var submitting = false
+    @FocusState private var customFocused: Bool
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     // MARK: pure answer logic (unit-tested)
 
@@ -69,6 +72,7 @@ struct AskUserQuestionCard: View {
     private var currentQuestion: ConversationAskQuestion? {
         questions.indices.contains(step) ? questions[step] : nil
     }
+
     private var canSubmit: Bool {
         Self.isComplete(questions: questions, selected: selected, custom: custom)
     }
@@ -84,24 +88,24 @@ struct AskUserQuestionCard: View {
         // push 取消/下一题/提交 below the sheet's visible height.
         VStack(alignment: .leading, spacing: 0) {
             header
-                .padding(.horizontal, 18)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
+                .padding(.horizontal, 24)
+                .padding(.top, 28)
+                .padding(.bottom, 20)
 
             ScrollView {
                 if let current = currentQuestion {
                     questionBody(current)
-                        .padding(.horizontal, 18)
+                        .padding(.horizontal, 24)
                         .padding(.bottom, 16)
                 }
             }
             .scrollBounceBehavior(.basedOnSize)
-
-            Divider().overlay(t.border)
+            .scrollDismissesKeyboard(.interactively)
 
             actions
-                .padding(.horizontal, 18)
-                .padding(.vertical, 12)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 16)
+                .background(.regularMaterial)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(t.surface)
@@ -115,30 +119,49 @@ struct AskUserQuestionCard: View {
     }
 
     private var header: some View {
-        HStack {
-            Label("chat_ask_user_question_title", systemImage: "questionmark.bubble")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(t.accent)
-            Spacer()
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: "questionmark.bubble.fill")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(t.accent)
+                    .frame(width: 44, height: 44)
+                    .background(t.accent.opacity(0.1), in: .rect(cornerRadius: 14))
+                    .accessibilityHidden(true)
+                Text("chat_ask_user_question_title")
+                    .font(.headline)
+                    .foregroundStyle(t.text)
+                Spacer(minLength: 0)
+                if questions.count > 1 {
+                    Text("chat_ask_progress \(step + 1) \(questions.count)")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(t.text3)
+                        .fixedSize()
+                }
+            }
             if questions.count > 1 {
-                Text("chat_ask_progress \(step + 1) \(questions.count)")
-                    .font(.caption)
-                    .foregroundColor(t.text4)
+                HStack(spacing: 6) {
+                    ForEach(questions.indices, id: \.self) { index in
+                        Capsule()
+                            .fill(index <= step ? t.accent : t.border)
+                            .frame(height: 3)
+                    }
+                }
+                .accessibilityHidden(true)
             }
         }
     }
 
     private func questionBody(_ current: ConversationAskQuestion) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 20) {
             if !current.header.isEmpty {
                 Text(current.header)
                     .font(.caption.weight(.semibold))
-                    .foregroundColor(t.text3)
+                    .foregroundStyle(t.text3)
                     .textCase(.uppercase)
             }
             Text(current.question)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(t.text)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(t.text)
                 .fixedSize(horizontal: false, vertical: true)
 
             optionChips(for: current)
@@ -146,10 +169,10 @@ struct AskUserQuestionCard: View {
             // The automatic 「其他」 free-text row — every question
             // offers it, mirroring the oracle client's synthesized
             // Other row.
-            HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("chat_ask_other_option")
-                    .font(.system(size: 12.5))
-                    .foregroundColor(t.text3)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(t.text3)
                 TextField(
                     String(localized: "chat_ask_other_placeholder"),
                     text: Binding(
@@ -158,9 +181,16 @@ struct AskUserQuestionCard: View {
                     ),
                     axis: .vertical
                 )
-                .font(.system(size: 13))
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1 ... 3)
+                .font(.body)
+                .textFieldStyle(.plain)
+                .lineLimit(2 ... 5)
+                .padding(16)
+                .background(t.surfaceActive.opacity(0.6), in: .rect(cornerRadius: 16))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(customFocused ? t.accent : t.border, lineWidth: 1)
+                }
+                .focused($customFocused)
                 .disabled(submitting)
                 .accessibilityIdentifier("chat.ask.other.\(step)")
             }
@@ -169,20 +199,23 @@ struct AskUserQuestionCard: View {
     }
 
     private var actions: some View {
-        HStack(spacing: 8) {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            : AnyLayout(HStackLayout(spacing: 12))
+        return layout {
             Button("common_cancel") {
                 resolve { await onCancel() }
             }
             .buttonStyle(.bordered)
             .accessibilityIdentifier("chat.ask.cancel")
-            Spacer()
+            if !dynamicTypeSize.isAccessibilitySize { Spacer() }
             if step > 0 {
-                Button("chat_ask_prev") { step -= 1 }
+                Button("chat_ask_prev") { changeStep(by: -1) }
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("chat.ask.prev")
             }
             if step < questions.count - 1 {
-                Button("chat_ask_next") { step += 1 }
+                Button("chat_ask_next") { changeStep(by: 1) }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("chat.ask.next")
             } else {
@@ -201,20 +234,67 @@ struct AskUserQuestionCard: View {
                 .accessibilityIdentifier("chat.ask.submit")
             }
         }
+        .controlSize(.large)
         .disabled(submitting)
     }
 
     @ViewBuilder
     private func optionChips(for current: ConversationAskQuestion) -> some View {
         let currentSelection = selected[step] ?? []
-        FlowChips(options: current.options, isSelected: { currentSelection.contains($0.label) }) { option in
-            guard !submitting else { return }
-            selected[step] = Self.toggled(
-                option.label,
-                in: currentSelection,
-                multiSelect: current.multiSelect
-            )
+        VStack(spacing: 10) {
+            ForEach(current.options.indices, id: \.self) { index in
+                let option = current.options[index]
+                let active = currentSelection.contains(option.label)
+                Button {
+                    guard !submitting else { return }
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1)) {
+                        selected[step] = Self.toggled(
+                            option.label, in: currentSelection, multiSelect: current.multiSelect
+                        )
+                    }
+                } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: current.multiSelect
+                            ? (active ? "checkmark.square.fill" : "square")
+                            : (active ? "checkmark.circle.fill" : "circle"))
+                            .font(.title3)
+                            .foregroundStyle(active ? t.accent : t.text3)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(option.label)
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(t.text)
+                            if !option.description.isEmpty {
+                                Text(option.description)
+                                    .font(.subheadline)
+                                    .foregroundStyle(t.text3)
+                            }
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .multilineTextAlignment(.leading)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                    .background(active ? t.accent.opacity(0.1) : t.surfaceActive.opacity(0.5),
+                                in: .rect(cornerRadius: 18))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18)
+                            .stroke(active ? t.accent : t.border, lineWidth: active ? 1.5 : 1)
+                    }
+                    .contentShape(.rect(cornerRadius: 18))
+                }
+                .buttonStyle(.plain)
+                .disabled(submitting)
+                .accessibilityAddTraits(active ? [.isSelected] : [])
+                .accessibilityIdentifier("chat.ask.option.\(step).\(index)")
+            }
         }
+    }
+
+    private func changeStep(by offset: Int) {
+        customFocused = false
+        step += offset
     }
 
     private func resolve(_ action: @escaping () async -> Bool) {
@@ -226,57 +306,6 @@ struct AskUserQuestionCard: View {
             // `askUserQuestionResolved`; on a failed submit re-enable for a
             // retry instead of leaving a dead card.
             if !accepted { submitting = false }
-        }
-    }
-}
-
-/// A simple wrapping chip row for the answer options.
-private struct FlowChips: View {
-    @Environment(\.theme) private var t
-    let options: [ConversationAskOption]
-    let isSelected: (ConversationAskOption) -> Bool
-    let onTap: (ConversationAskOption) -> Void
-
-    var body: some View {
-        // A vertical list of chips: option descriptions matter more than
-        // density here, and questions carry at most a handful of options.
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(options.indices, id: \.self) { index in
-                let option = options[index]
-                let active = isSelected(option)
-                Button {
-                    onTap(option)
-                } label: {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: active ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 14))
-                            .foregroundColor(active ? t.accent : t.text4)
-                            .padding(.top, 1)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(option.label)
-                                .font(.system(size: 13.5, weight: active ? .semibold : .regular))
-                                .foregroundColor(t.text)
-                                .multilineTextAlignment(.leading)
-                            if !option.description.isEmpty {
-                                Text(option.description)
-                                    .font(.caption)
-                                    .foregroundColor(t.text4)
-                                    .multilineTextAlignment(.leading)
-                            }
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(active ? t.accent.opacity(0.12) : t.surfaceActive.opacity(0.6))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(active ? t.accent.opacity(0.5) : t.border, lineWidth: 0.6)
-                    )
-                }
-                .buttonStyle(.plain)
-            }
         }
     }
 }

@@ -332,8 +332,10 @@ final class LingxiCodeUITests: XCTestCase {
         app.launchEnvironment["LINGXI_UI_TEST_ASK_QUESTION"] = "1"
         app.launch()
 
+        let panel = app.descendants(matching: .any)["conversation.ask-user-question.sheet"]
+        XCTAssertTrue(panel.waitForExistence(timeout: 10), app.debugDescription)
         let cancel = app.buttons["chat.ask.cancel"]
-        XCTAssertTrue(cancel.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5), app.debugDescription)
         let next = app.buttons["chat.ask.next"]
         XCTAssertTrue(next.waitForExistence(timeout: 5), app.debugDescription)
         // `isHittable` is what fails when a control is laid out below the
@@ -343,7 +345,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(next.isHittable, app.debugDescription)
         // The free-text row is part of every question and must be reachable
         // without first scrolling past four described options.
-        XCTAssertTrue(app.textFields["chat.ask.other.0"].exists, app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["chat.ask.other.0"].exists, app.debugDescription)
 
         // Walk the whole stepper: every step must keep its actions on screen,
         // and the last one must offer an enabled 提交 once each question is

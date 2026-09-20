@@ -16,8 +16,18 @@
 // UniFFI types, and the mock source never parks a turn on a permission gate.
 
 import SwiftUI
+import UIKit
 
 #if canImport(engine_mobileFFI)
+
+    extension Notification.Name {
+        /// Posted by SwiftUI-owned sheets whose presentation state is local to
+        /// ChatView/Composer. The root fallback observes it because those
+        /// sheets are above the in-chat prompt but do not change RootView state.
+        static let lingxiPermissionPresentationContextChanged = Notification.Name(
+            "LingxiPermissionPresentationContextChanged"
+        )
+    }
 
     enum PermissionPromptPresentationPolicy {
         static func canPresent(
@@ -28,29 +38,83 @@ import SwiftUI
         }
     }
 
-    /// Observes the engine-scoped queue and presents its head above the currently
-    /// visible UIKit controller. A separate over-full-screen presentation is used
-    /// because a SwiftUI overlay attached to the chat remains behind sheets and
-    /// full-screen covers.
+    enum PermissionPromptHostPlacement {
+        /// The normal path: a non-modal panel attached to the chat surface.
+        case inChat
+        /// A reachability fallback used while a root-owned sheet or cover is up.
+        /// The fallback keeps the existing UIKit bridge so a queued engine request
+        /// cannot disappear behind an unrelated presentation.
+        case fallback
+        /// A root-mounted fallback that stays dormant until UIKit reports an
+        /// external presentation above the chat surface.
+        case presentedFallback
+    }
+
+    /// Observes the engine-scoped queue and renders its head. Chat surfaces use a
+    /// native SwiftUI overlay; RootView mounts a dormant UIKit fallback that
+    /// activates only while another controller is above the chat surface.
     struct EnginePermissionPromptHost: View {
         @ObservedObject var model: ConversationModel
         @Environment(\.theme) private var theme
         @Environment(\.locale) private var locale
 
+        let placement: PermissionPromptHostPlacement
         let onApprove: (UInt64, PermissionResponseDto) -> Void
         let onDeny: (UInt64) -> Void
 
+        init(
+            model: ConversationModel,
+            placement: PermissionPromptHostPlacement = .fallback,
+            onApprove: @escaping (UInt64, PermissionResponseDto) -> Void,
+            onDeny: @escaping (UInt64) -> Void
+        ) {
+            self.model = model
+            self.placement = placement
+            self.onApprove = onApprove
+            self.onDeny = onDeny
+        }
+
+        @ViewBuilder
         var body: some View {
-            PermissionPromptPresentationBridge(
-                pending: model.pendingPermissions.first,
-                theme: theme,
-                locale: locale,
-                onApprove: onApprove,
-                onDeny: onDeny
-            )
-            .frame(width: 0, height: 0)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
+            switch placement {
+            case .inChat:
+                if let pending = model.pendingPermissions.first {
+                    PermissionPrompt(
+                        pending: pending,
+                        onApprove: onApprove,
+                        onDeny: onDeny
+                    )
+                    .environment(\.theme, theme)
+                    .environment(\.locale, locale)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .zIndex(100)
+                    .transition(.opacity)
+                }
+            case .fallback:
+                PermissionPromptPresentationBridge(
+                    pending: model.pendingPermissions.first,
+                    theme: theme,
+                    locale: locale,
+                    onlyWhenExternalPresentation: false,
+                    onApprove: onApprove,
+                    onDeny: onDeny
+                )
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            case .presentedFallback:
+                PermissionPromptPresentationBridge(
+                    pending: model.pendingPermissions.first,
+                    theme: theme,
+                    locale: locale,
+                    onlyWhenExternalPresentation: true,
+                    onApprove: onApprove,
+                    onDeny: onDeny
+                )
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
         }
     }
 
@@ -61,6 +125,7 @@ import SwiftUI
         let pending: PendingPermission?
         let theme: Palette
         let locale: Locale
+        let onlyWhenExternalPresentation: Bool
         let onApprove: (UInt64, PermissionResponseDto) -> Void
         let onDeny: (UInt64) -> Void
 
@@ -79,6 +144,7 @@ import SwiftUI
                 pending: pending,
                 theme: theme,
                 locale: locale,
+                onlyWhenExternalPresentation: onlyWhenExternalPresentation,
                 fallbackPresenter: controller,
                 onApprove: onApprove,
                 onDeny: onDeny
@@ -101,6 +167,7 @@ import SwiftUI
             private var presentationGeneration = 0
             private var retryScheduled = false
             private var consumedRunLoopRetryGeneration: Int?
+            private var onlyWhenExternalPresentation = false
 
             override init() {
                 super.init()
@@ -122,6 +189,12 @@ import SwiftUI
                     name: UIWindow.didBecomeKeyNotification,
                     object: nil
                 )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(presentationContextChanged),
+                    name: .lingxiPermissionPresentationContextChanged,
+                    object: nil
+                )
             }
 
             deinit {
@@ -132,6 +205,7 @@ import SwiftUI
                 pending: PendingPermission?,
                 theme: Palette,
                 locale: Locale,
+                onlyWhenExternalPresentation: Bool,
                 fallbackPresenter: UIViewController,
                 onApprove: @escaping (UInt64, PermissionResponseDto) -> Void,
                 onDeny: @escaping (UInt64) -> Void
@@ -153,6 +227,7 @@ import SwiftUI
 
                 deferredContent = content
                 self.fallbackPresenter = fallbackPresenter
+                self.onlyWhenExternalPresentation = onlyWhenExternalPresentation
 
                 if let hostingController {
                     hostingController.rootView = content
@@ -163,6 +238,17 @@ import SwiftUI
                 }
 
                 attemptPresentation()
+                if onlyWhenExternalPresentation {
+                    // Root-owned covers update their binding before UIKit has
+                    // attached the controller. Give that transition two bounded
+                    // main-queue opportunities without starting a poll loop.
+                    DispatchQueue.main.async { [weak self] in
+                        self?.attemptPresentation()
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                        self?.attemptPresentation()
+                    }
+                }
             }
 
             func dismiss(animated: Bool) {
@@ -184,6 +270,18 @@ import SwiftUI
                 attemptPresentation()
             }
 
+            @objc private func presentationContextChanged() {
+                // SwiftUI posts the composer/summary state change before UIKit
+                // attaches the resulting sheet. Defer one main-queue turn so
+                // `Presenter.topViewController()` observes the settled cover.
+                DispatchQueue.main.async { [weak self] in
+                    self?.attemptPresentation()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.attemptPresentation()
+                }
+            }
+
             private func attemptPresentation() {
                 guard hostingController == nil,
                       !presentationInFlight,
@@ -191,6 +289,9 @@ import SwiftUI
                 else { return }
                 guard let presenter = activeAttachedPresenter() else {
                     scheduleRetry()
+                    return
+                }
+                guard !onlyWhenExternalPresentation || hasExternalPresentationContext() else {
                     return
                 }
 
@@ -204,6 +305,29 @@ import SwiftUI
                 hostingController = host
                 presentationInFlight = true
                 present(host, from: presenter, generation: generation)
+            }
+
+            private func hasExternalPresentationContext() -> Bool {
+                let fallbackScene = fallbackPresenter?.viewIfLoaded?.window?.windowScene
+                let sceneTop = fallbackScene.flatMap { topViewController(in: $0) }
+                guard let top = sceneTop ?? Presenter.topViewController(),
+                      let scene = top.viewIfLoaded?.window?.windowScene,
+                      scene.activationState == .foregroundActive
+                else { return false }
+                // The root host is the window's root controller. A non-nil
+                // presenter means UIKit has placed a sheet/cover above it.
+                // The permission host itself is excluded because this check
+                // runs only before creating a new hostingController.
+                return top.presentingViewController != nil
+            }
+
+            private func topViewController(in scene: UIWindowScene) -> UIViewController? {
+                let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first
+                var top = window?.rootViewController
+                while let presented = top?.presentedViewController {
+                    top = presented
+                }
+                return top
             }
 
             private func scheduleRetry() {
@@ -223,7 +347,13 @@ import SwiftUI
                 let fallbackScene = fallback?.viewIfLoaded?.window?.windowScene
                 let presenter: UIViewController?
                 let scene: UIWindowScene?
-                if let fallback,
+                if onlyWhenExternalPresentation,
+                   let top = fallbackScene.flatMap({ topViewController(in: $0) }) ?? Presenter.topViewController(),
+                   let topScene = top.viewIfLoaded?.window?.windowScene
+                {
+                    presenter = top
+                    scene = topScene
+                } else if let fallback,
                    let fallbackScene,
                    fallbackScene.activationState == .foregroundActive {
                     var top = fallback
@@ -312,8 +442,8 @@ import SwiftUI
         }
     }
 
-    /// A modal prompt for one engine-parked permission request (the head of the
-    /// queue). Renders nothing when there is no pending request.
+    /// The Desktop-style panel for one engine-parked permission request (the
+    /// head of the queue). Renders nothing when there is no pending request.
     struct PermissionPrompt: View {
         @Environment(\.theme) private var t
 
@@ -327,62 +457,70 @@ import SwiftUI
         var body: some View {
             if let pending {
                 let copy = Self.describe(pending.kind)
-                ZStack(alignment: .bottom) {
-                    // Scrim: dims the chat behind the modal. Tapping it does NOT
-                    // dismiss — a permission request must be answered explicitly
-                    // (an accidental tap-away can't silently deny a tool).
-                    Color.black.opacity(0.38)
-                        .ignoresSafeArea()
-                        .accessibilityHidden(true)
-
-                    VStack(spacing: 0) {
-                        VStack(alignment: .leading, spacing: 16) {
-                            Label {
-                                Text(copy.title)
-                                    .font(.headline)
-                                    .foregroundStyle(t.text)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            } icon: {
-                                Image(systemName: "hand.raised.fill")
-                                    .foregroundStyle(t.accent)
-                            }
-                            if let worker = pending.worker {
-                                workerChip(worker)
-                            }
-                            if !copy.detail.isEmpty {
-                                if case .exitPlanMode = pending.kind {
-                                    PlanDocumentCard(document: PlanDocument(markdown: copy.detail, isWriting: false))
-                                } else {
-                                    detailBlock(copy.detail)
-                                }
+                VStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label {
+                            Text(copy.title)
+                                .font(.headline)
+                                .foregroundStyle(t.text)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } icon: {
+                            Image(systemName: Self.isElevatedRisk(pending) ? "shield.lefthalf.filled" : "hand.raised.fill")
+                                .foregroundStyle(Self.isElevatedRisk(pending) ? t.danger : t.accent)
+                        }
+                        Text(copy.summary)
+                            .font(.subheadline)
+                            .foregroundStyle(t.text2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(copy.detailLabel)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(t.text)
+                            Text(copy.detailCaption)
+                                .font(.caption)
+                                .foregroundStyle(t.text3)
+                        }
+                        if let worker = pending.worker {
+                            workerChip(worker)
+                        }
+                        if !copy.detail.isEmpty {
+                            if case .exitPlanMode = pending.kind {
+                                PlanDocumentCard(document: PlanDocument(markdown: copy.detail, isWriting: false))
+                            } else {
+                                detailBlock(copy.detail)
                             }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 20)
-                        .padding(.bottom, 20)
-
-                        Divider().overlay(t.border)
-
-                        actionStack(
-                            requestId: pending.requestId,
-                            suppressAlwaysAllowRule: pending.suppressAlwaysAllowRule,
-                            autoModePrompt: pending.autoModePrompt
-                        )
-                        .padding(20)
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "info.circle")
+                            Text(Self.riskCopy(for: pending))
+                        }
+                        .font(.caption)
+                        .foregroundStyle(t.text3)
                     }
-                    .frame(maxWidth: 520)
-                    .background(.regularMaterial, in: .rect(cornerRadius: 24))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 24)
-                            .stroke(t.border.opacity(0.7), lineWidth: 0.5)
-                    }
-                    .shadow(color: .black.opacity(0.28), radius: 28, y: 16)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 20)
+                    .padding(.bottom, 20)
+
+                    Divider().overlay(t.border)
+
+                    actionStack(
+                        requestId: pending.requestId,
+                        suppressAlwaysAllowRule: pending.suppressAlwaysAllowRule,
+                        autoModePrompt: pending.autoModePrompt
+                    )
+                    .padding(20)
                 }
-                .transition(.opacity)
-                .accessibilityAddTraits(.isModal)
+                .frame(maxWidth: 560)
+                .background(.regularMaterial, in: .rect(cornerRadius: 24))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 24)
+                        .stroke(t.border.opacity(0.7), lineWidth: 0.5)
+                }
+                .shadow(color: .black.opacity(0.28), radius: 28, y: 16)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+                .accessibilityElement(children: .contain)
             }
         }
 
@@ -401,7 +539,9 @@ import SwiftUI
             }
         }
 
-        /// The monospaced, scrollable detail block (the tool-input preview / plan).
+        /// The monospaced, scrollable detail block. Permission decisions show
+        /// every field in the request, after the same best-effort credential
+        /// redaction used by the Desktop client.
         private func detailBlock(_ detail: String) -> some View {
             ScrollView {
                 detailText(detail)
@@ -492,35 +632,127 @@ import SwiftUI
 
         // MARK: copy
 
-        /// Human title + detail for each request kind, matching the Electron
-        /// `describe` switch. `@unknown default` keeps a future kind renderable.
-        static func describe(_ kind: PermissionKindDto) -> (title: String, detail: String) {
+        /// Human copy for each request kind, matching the Electron `describe`
+        /// switch. `@unknown default` keeps a future kind renderable.
+        static func describe(_ kind: PermissionKindDto) -> (
+            title: String,
+            summary: String,
+            detailLabel: String,
+            detailCaption: String,
+            detail: String
+        ) {
             switch kind {
             case let .toolUseConfirm(toolName, toolInputJson, _):
-                return (String(localized: "permission_allow_tool \(toolName)"), previewToolInput(toolInputJson))
+                return (
+                    String(localized: "permission_allow_tool \(toolName)"),
+                    "LingXi wants to use \(toolName). Review the requested input before continuing.",
+                    "Requested action",
+                    toolName,
+                    permissionDetail(toolInputJson)
+                )
             case let .exitPlanMode(plan):
-                return (String(localized: "permission_exit_plan_mode"), plan)
+                return (
+                    String(localized: "permission_exit_plan_mode"),
+                    "LingXi wants to leave plan mode and begin working from this plan.",
+                    "Plan to execute",
+                    "May run commands or modify files",
+                    plan
+                )
             case .bypassPermissionsMode:
-                return (String(localized: "permission_bypass_confirmation_title"), String(localized: "permission_bypass_confirmation_detail"))
+                return (
+                    String(localized: "permission_bypass_confirmation_title"),
+                    "LingXi will be able to act without asking for further confirmation.",
+                    "Permission scope",
+                    "Commands, files, and connected services",
+                    String(localized: "permission_bypass_confirmation_detail")
+                )
             @unknown default:
-                return (String(localized: "permission_request_title"), "")
+                return (
+                    String(localized: "permission_request_title"),
+                    "LingXi needs your approval before it can continue.",
+                    "Requested action",
+                    "Current session",
+                    ""
+                )
             }
         }
 
-        /// Best-effort, never-throwing one-line preview of a tool's JSON input —
-        /// surfaces the most telling field (command / path / pattern / query),
-        /// falling back to the raw JSON. Mirrors the Electron `previewToolInput`.
-        static func previewToolInput(_ inputJson: String) -> String {
+        private static func permissionDetail(_ inputJson: String) -> String {
             guard !inputJson.isEmpty,
-                let data = inputJson.data(using: .utf8),
-                let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            else { return inputJson }
-            for key in ["command", "file_path", "path", "pattern", "query"] {
-                if let value = obj[key] as? String, !value.isEmpty {
-                    return value
-                }
+                  let data = inputJson.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let input = object as? [String: Any],
+                  !input.isEmpty
+            else {
+                return redactSensitiveText(inputJson)
             }
-            return inputJson
+
+            let keys = input.keys.sorted { lhs, rhs in
+                let dangerous = ["command", "code", "script"]
+                let lhsIndex = dangerous.firstIndex(of: lhs) ?? dangerous.endIndex
+                let rhsIndex = dangerous.firstIndex(of: rhs) ?? dangerous.endIndex
+                return lhsIndex == rhsIndex ? lhs < rhs : lhsIndex < rhsIndex
+            }
+            if keys.count == 1, let value = input[keys[0]] {
+                return redactSensitiveText(renderValue(value))
+            }
+            return redactSensitiveText(
+                keys.compactMap { key in
+                    guard let value = input[key] else { return nil }
+                    return "\(key): \(renderValue(value))"
+                }
+                .joined(separator: "\n")
+            )
+        }
+
+        private static func renderValue(_ value: Any) -> String {
+            if let string = value as? String { return string }
+            guard let data = try? JSONSerialization.data(
+                      withJSONObject: value,
+                      options: [.fragmentsAllowed, .sortedKeys, .prettyPrinted]
+                  ),
+                  let string = String(data: data, encoding: .utf8)
+            else {
+                return String(describing: value)
+            }
+            return string
+        }
+
+        private static func redactSensitiveText(_ value: String) -> String {
+            var redacted = value
+            redacted = redacted.replacingOccurrences(
+                of: #"\b(sk-(?:ant-|proj-)?[A-Za-z0-9_-]{12,})\b"#,
+                with: "[REDACTED]",
+                options: .regularExpression
+            )
+            redacted = redacted.replacingOccurrences(
+                of: #"\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*"#,
+                with: "$1[REDACTED]",
+                options: [.regularExpression, .caseInsensitive]
+            )
+            return redacted.replacingOccurrences(
+                of: #"((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s,;]+"#,
+                with: "$1[REDACTED]",
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+
+        private static func riskCopy(for pending: PendingPermission) -> String {
+            if isElevatedRisk(pending) {
+                return "This can expose or modify sensitive data. Continue only if you trust the current session."
+            }
+            if pending.autoModePrompt != nil, !pending.suppressAlwaysAllowRule {
+                return "Auto mode can approve future actions without asking. Review the requested scope carefully."
+            }
+            if !pending.suppressAlwaysAllowRule, pending.autoModePrompt == nil {
+                return "Allow matching actions saves a rule for this workspace. Use it only when you trust future matching requests."
+            }
+            return "This decision applies only to the current request."
+        }
+
+        private static func isElevatedRisk(_ pending: PendingPermission) -> Bool {
+            if case .bypassPermissionsMode = pending.kind { return true }
+            return false
         }
     }
 

@@ -95,6 +95,9 @@ final class DesktopSettingsUITests: XCTestCase {
         }
         attach("Phone-LargeText-Composer")
         app.buttons["composer.model"].tap()
+        let chooseModel = app.buttons["composer.model.choose"]
+        XCTAssertTrue(chooseModel.waitForExistence(timeout: 3), app.debugDescription)
+        chooseModel.tap()
         XCTAssertTrue(app.descendants(matching: .any)["composer.model.menu"].waitForExistence(timeout: 5), app.debugDescription)
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.isHittable, app.debugDescription)

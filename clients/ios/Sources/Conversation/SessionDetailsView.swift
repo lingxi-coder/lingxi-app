@@ -149,7 +149,7 @@ struct SessionDetailsView: View {
             t.windowBg.ignoresSafeArea()
         }
         .navigationTitle("session_details_title")
-        .fullScreenCover(item: $selectedTask) { task in
+        .sheet(item: $selectedTask) { task in
             NavigationStack {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -171,6 +171,10 @@ struct SessionDetailsView: View {
                     }
                 }
             }
+            .environment(\.theme, t)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+            .accessibilityIdentifier("conversation.task-detail-sheet")
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

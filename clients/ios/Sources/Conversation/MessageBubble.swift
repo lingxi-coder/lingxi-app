@@ -130,11 +130,11 @@ struct MessageBubble: View, Equatable {
                     Spacer(minLength: 0)
                     if !message.text.isEmpty {
                         userContent
-                        // Dynamic Type: scale the body relative to .body so the
-                        // transcript honors the user's text-size setting while
-                        // keeping the design's 15.5pt baseline.
-                        .font(.scaledSystem(15.5, relativeTo: .body))
-                        .lineSpacing(15.5 * 0.5)
+                        // Desktop narration uses a 14pt body at 1.65 line
+                        // height. Keep it relative to .body so Dynamic Type
+                        // still scales the transcript as one readable unit.
+                        .font(.scaledSystem(14, relativeTo: .body))
+                        .lineSpacing(14 * 0.65)
                         // `lineLimit`, not the assistant branch's
                         // `frame(maxHeight:)`: this bubble is one `Text` inside
                         // a `BubbleShape`, so a height clip would square off the
@@ -143,13 +143,22 @@ struct MessageBubble: View, Equatable {
                         .frame(maxHeight: userIsCollapsed ? 260 : nil, alignment: .top)
                         .clipped()
                         .foregroundColor(t.text)
-                        .padding(.horizontal, 16).padding(.vertical, 12)
-                        .background(t.surface)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(t.surfaceHover)
                         .clipShape(.rect(cornerRadius: 18))
-                        .frame(maxWidth: 700, alignment: .trailing)
-                            .fixedSize(horizontal: false, vertical: true)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                // Constrain the readable column, not the bubble itself. The
+                // bubble keeps its intrinsic width for short prompts while the
+                // outer trailing column caps long prompts at Desktop's 700pt.
+                .containerRelativeFrame(
+                    .horizontal,
+                    alignment: .trailing
+                ) { viewport, _ in
+                    min(700, min(max(0, viewport - 32), 860) * 0.9)
+                }
+                .frame(maxWidth: 700, alignment: .trailing)
                 // A subagent's prompt arrives as the first USER bubble of its
                 // child transcript, and those run to thousands of characters —
                 // the whole transcript became a wall of text. Same affordance,
@@ -177,7 +186,6 @@ struct MessageBubble: View, Equatable {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
-            .padding(.bottom, 22)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.message.user")
         } else {
@@ -232,7 +240,6 @@ struct MessageBubble: View, Equatable {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .opacity(dimmed ? 0.4 : 1)
-            .padding(.bottom, 26)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.message.assistant")
         }
@@ -383,6 +390,8 @@ private struct StructuredAIBlocks: View {
 }
 
 private struct StructuredToolBlock: View {
+    @FocusState private var isFocused: Bool
+    @State private var isHovering = false
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let id: String
@@ -435,6 +444,8 @@ private struct StructuredToolBlock: View {
                     summaryRow(showsDisclosure: true)
                 }
                 .buttonStyle(.plain)
+                .focused($isFocused)
+                .onHover { isHovering = $0 }
                 .accessibilityIdentifier("conversation.structured-tool.\(id).toggle")
                 .accessibilityLabel(accessibilityTitle)
                 .accessibilityValue(isExpanded
@@ -499,6 +510,11 @@ private struct StructuredToolBlock: View {
                 LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 1.8)
                     .rotationEffect(.degrees(isExpanded ? 180 : 0))
                     .padding(.top, 3)
+                    .timelineChevron(
+                        isHighlighted: isFocused || isHovering,
+                        isExpanded: isExpanded,
+                        reduceMotion: reduceMotion
+                    )
             }
         }
         .contentShape(Rectangle())
@@ -571,7 +587,7 @@ private struct MDBlockView: View, Equatable {
     @Environment(\.theme) private var t
     let block: MDBlock
 
-    private static let bodySize: CGFloat = 15.5
+    private static let bodySize: CGFloat = 14
 
     static func == (lhs: MDBlockView, rhs: MDBlockView) -> Bool {
         lhs.block == rhs.block
@@ -792,7 +808,7 @@ private struct MDLineView: View, Equatable {
     @Environment(\.theme) private var t
     let line: MDLine
 
-    private static let bodySize: CGFloat = 15.5
+    private static let bodySize: CGFloat = 14
 
     static func == (lhs: MDLineView, rhs: MDLineView) -> Bool {
         lhs.line == rhs.line
@@ -848,7 +864,7 @@ private struct MDLineView: View, Equatable {
         // AttributedString; the outer .font sets the scalable default size.
         Text(AIText.parseInline(s, size: Self.bodySize))
             .font(.scaledSystem(Self.bodySize, relativeTo: .body))
-            .lineSpacing(Self.bodySize * 0.6)
+            .lineSpacing(Self.bodySize * 0.65)
             .foregroundColor(t.text)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -860,7 +876,7 @@ struct AIText: View, Equatable {
     @Environment(\.theme) private var t
     let markdown: String
 
-    private static let bodySize: CGFloat = 15.5
+    private static let bodySize: CGFloat = 14
 
     static func == (lhs: AIText, rhs: AIText) -> Bool {
         lhs.markdown == rhs.markdown

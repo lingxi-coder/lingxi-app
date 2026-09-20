@@ -84,6 +84,79 @@ struct Palette {
     let diffRemoveWordBg: Color
     let diffAddGutter: Color
     let diffRemoveGutter: Color
+
+    /// Conversation-only neutral palette matching the Desktop renderer. The
+    /// rest of iOS keeps its existing richer surfaces; ChatView can inject this
+    /// palette at its boundary without changing settings, drawer, or composer
+    /// styling elsewhere in the app.
+    static func desktopConversation(isDark: Bool) -> Palette {
+        if isDark {
+            return Palette(
+                appBg: Color(srgb: 0.1098, 0.1098, 0.1176),
+                windowBg: Color(srgb: 0.1176, 0.1176, 0.1255),
+                sidebarBg: Color(srgb: 0.1529, 0.1529, 0.1608),
+                surface: Color(srgb: 0.1725, 0.1725, 0.1804),
+                surfaceHover: Color(srgb: 0.2118, 0.2118, 0.2196),
+                surfaceActive: Color(srgb: 0.2549, 0.2549, 0.2667),
+                border: Color.white.opacity(0.09),
+                borderStrong: Color.white.opacity(0.18),
+                text: Color(srgb: 0.9608, 0.9608, 0.9686),
+                text2: Color(srgb: 0.7608, 0.7608, 0.7804),
+                text3: Color(srgb: 0.6314, 0.6314, 0.6510),
+                text4: Color(srgb: 0.5686, 0.5686, 0.5882),
+                accent: Color(srgb: 0.0392, 0.5176, 1.0),
+                accent2: Color(srgb: 0.3922, 0.6667, 1.0),
+                accent3: Color(srgb: 0.3922, 0.8235, 1.0),
+                ok: Color(srgb: 0.1961, 0.8431, 0.2941),
+                composerBg: Color(srgb: 0.1725, 0.1725, 0.1804),
+                ambient: LinearGradientStops(top: .clear, bottom: .clear),
+                statusConnected: Color(srgb: 0.1961, 0.8431, 0.2941),
+                statusIdle: Color(srgb: 0.5686, 0.5686, 0.5882),
+                statusTesting: Color(srgb: 1.0, 0.8392, 0.0392),
+                statusError: Color(srgb: 1.0, 0.4118, 0.3804),
+                danger: Color(srgb: 1.0, 0.4118, 0.3804),
+                isDark: true,
+                diffAddBg: Color(srgb: 0.1961, 0.8431, 0.2941, 0.13),
+                diffRemoveBg: Color(srgb: 1.0, 0.4118, 0.3804, 0.12),
+                diffAddWordBg: Color(srgb: 0.1961, 0.8431, 0.2941, 0.32),
+                diffRemoveWordBg: Color(srgb: 1.0, 0.4118, 0.3804, 0.30),
+                diffAddGutter: Color(srgb: 0.3600, 0.8000, 0.5400),
+                diffRemoveGutter: Color(srgb: 0.9600, 0.4600, 0.4500)
+            )
+        }
+        return Palette(
+            appBg: Color(srgb: 0.8980, 0.8980, 0.9059),
+            windowBg: Color.white,
+            sidebarBg: Color(srgb: 0.9490, 0.9490, 0.9569),
+            surface: Color.white,
+            surfaceHover: Color(srgb: 0.9490, 0.9490, 0.9569),
+            surfaceActive: Color(srgb: 0.8980, 0.8980, 0.9176),
+            border: Color(srgb: 0.2353, 0.2353, 0.2627, 0.10),
+            borderStrong: Color(srgb: 0.2353, 0.2353, 0.2627, 0.22),
+            text: Color(srgb: 0.1137, 0.1137, 0.1216),
+            text2: Color(srgb: 0.3176, 0.3176, 0.3294),
+            text3: Color(srgb: 0.3882, 0.3882, 0.4000),
+            text4: Color(srgb: 0.4314, 0.4314, 0.4510),
+            accent: Color(srgb: 0.0, 0.4, 0.8392),
+            accent2: Color(srgb: 0.0000, 0.4000, 0.8392),
+            accent3: Color(srgb: 0.0000, 0.4784, 0.6235),
+            ok: Color(srgb: 0.1412, 0.5412, 0.2392),
+            composerBg: Color.white,
+            ambient: LinearGradientStops(top: .clear, bottom: .clear),
+            statusConnected: Color(srgb: 0.1412, 0.5412, 0.2392),
+            statusIdle: Color(srgb: 0.4314, 0.4314, 0.4510),
+            statusTesting: Color(srgb: 0.6000, 0.3961, 0.0000),
+            statusError: Color(srgb: 0.7882, 0.2039, 0.1725),
+            danger: Color(srgb: 0.7882, 0.2039, 0.1725),
+            isDark: false,
+            diffAddBg: Color(srgb: 0.1412, 0.5412, 0.2392, 0.11),
+            diffRemoveBg: Color(srgb: 0.7800, 0.1400, 0.1400, 0.09),
+            diffAddWordBg: Color(srgb: 0.1412, 0.5412, 0.2392, 0.26),
+            diffRemoveWordBg: Color(srgb: 0.7800, 0.1400, 0.1400, 0.22),
+            diffAddGutter: Color(srgb: 0.0000, 0.4400, 0.2200),
+            diffRemoveGutter: Color(srgb: 0.7000, 0.1200, 0.1200)
+        )
+    }
 }
 
 /// Helper carrying the ambient gradient color + the window bg fade target.
@@ -167,6 +240,12 @@ enum DesignTokens {
     )
 
     static func palette(dark isDark: Bool) -> Palette { isDark ? dark : light }
+
+    /// Desktop-neutral colors scoped to the conversation surface. Callers may
+    /// override `accent` after construction to retain the user's chosen hue.
+    static func chatPalette(dark isDark: Bool) -> Palette {
+        Palette.desktopConversation(isDark: isDark)
+    }
 }
 
 // MARK: - Accent options (Appearance screen) -------------------------------

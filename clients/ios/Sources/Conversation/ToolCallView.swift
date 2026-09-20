@@ -21,6 +21,9 @@ import SwiftUI
 
 struct ToolCallView: View {
     @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @FocusState private var isFocused: Bool
+    @State private var isHovering = false
     let trace: ConversationToolTrace
     var isExpanded: Bool = false
     /// Timeline mode uses Codex's borderless, dense row treatment. The legacy
@@ -42,6 +45,8 @@ struct ToolCallView: View {
                 if isCollapsible {
                     Button(action: onToggle) { compactHeader }
                         .buttonStyle(.plain)
+                        .focused($isFocused)
+                        .onHover { isHovering = $0 }
                         .accessibilityLabel(ConversationDesktopTimeline.summary([trace]))
                         .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
                 } else {
@@ -58,8 +63,11 @@ struct ToolCallView: View {
                 legacyFallback
             }
         }
-        .padding(.horizontal, compact ? 10 : 10)
-        .padding(.vertical, compact ? 5 : 8)
+        // Desktop tool rows are borderless and use a 40pt disclosure target;
+        // keep the compact transcript on that rhythm while the legacy card
+        // retains its padded surface treatment.
+        .padding(.horizontal, compact ? 0 : 10)
+        .padding(.vertical, compact ? 2 : 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(compact ? Color.clear : t.surface)
         .clipShape(RoundedRectangle(cornerRadius: compact ? 0 : 10))
@@ -83,7 +91,7 @@ struct ToolCallView: View {
 
     private var compactHeader: some View {
         HStack(spacing: 8) {
-            LXIcon(name: ToolDisplayText.icon(header: trace.header, tool: trace.tool), size: 18,
+            LXIcon(name: ToolDisplayText.icon(header: trace.header, tool: trace.tool), size: 20,
                    color: trace.status == .failed ? t.danger : t.text3, stroke: 1.8)
                 .accessibilityIdentifier("conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)")
             Text(compactSummary)
@@ -97,9 +105,14 @@ struct ToolCallView: View {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(t.text3)
+                    .timelineChevron(
+                        isHighlighted: isFocused || isHovering,
+                        isExpanded: isExpanded,
+                        reduceMotion: reduceMotion
+                    )
             }
         }
-        .frame(minHeight: 32)
+        .frame(minHeight: 40)
         .contentShape(.rect)
     }
 

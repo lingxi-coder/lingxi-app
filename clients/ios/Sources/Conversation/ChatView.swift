@@ -11,10 +11,14 @@ struct ChatView: View {
     #endif
 
     @Environment(AppState.self) private var app
-    @Environment(\.theme) private var t
+    /// Chat keeps the desktop-neutral palette scoped to this surface. Child
+    /// views receive the same resolved value through the environment below.
+    private var t: Palette { DesignTokens.chatPalette(dark: app.isDark) }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let session: SessionRef
+    let projectName: String?
+    let projectPath: String?
 
     /// The conversation source (mock or engine-over-UniFFI). ChatView renders its
     /// published `model` and forwards user input to it — it no longer owns the
@@ -25,6 +29,8 @@ struct ChatView: View {
     @ObservedObject private var convo: ConversationModel
 
     @State private var followsLatestMessage = true
+    @State private var followsLatestAgentMessage = true
+    @State private var pendingAgentDetailID: String?
 
     // Composer draft, HOISTED up to RootView (the iOS analog of Android
     // RootScreen's `draft`) so a hold-to-talk transcription can route its
@@ -43,6 +49,11 @@ struct ChatView: View {
     private let modelRecents = ModelRecents()
     @State private var providerRepository = ProviderRepository.shared
     @State private var recentModels: [String] = []
+    /// The selected Runtime Center category. The enum drives the one native
+    /// sheet used by the summary menu and keeps the presentation dismissible
+    /// when the active session changes.
+    @State private var summaryCategory: ConversationSummaryCategory?
+    @State private var summaryDetent: PresentationDetent = .medium
 
     /// Root-owned state machine shared by ordinary dictation and Flow Mode.
     let voiceInteraction: VoiceInteractionController
@@ -60,10 +71,14 @@ struct ChatView: View {
          draft: Binding<String>,
          voiceInteraction: VoiceInteractionController,
          source: any ConversationSource,
+         projectName: String? = nil,
+         projectPath: String? = nil,
          onOpenVoiceSettings: @escaping () -> Void = {},
          onOpenSessionDetails: @escaping () -> Void = {},
          onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil) {
         self.session = session
+        self.projectName = projectName
+        self.projectPath = projectPath
         self._draft = draft
         self.voiceInteraction = voiceInteraction
         self.source = source
@@ -87,33 +102,15 @@ struct ChatView: View {
                         .padding(.horizontal, 14).padding(.top, 6).padding(.bottom, 8)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
-                messageList
-                if !visibleExecutionGroups.isEmpty {
-                    ExecutionStatusPanel(
-                        agents: convo.agentSummaries,
-                        selectedAgentID: selectedAgentBinding,
-                        latestActivity: selectedAgentActivity,
-                        isReadOnly: convo.isSelectedAgentReadOnly,
-                        tasks: convo.backgroundTasks,
-                        planTasks: convo.planTasks,
-                        workflowResumeState: convo.workflowResumeState,
-                        onSelectAgent: { id in
-                            source.selectAgent(id ?? ConversationModel.mainAgentID)
-                        },
-                        onResumeWorkflow: source.resumeWorkflow
-                    )
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 4)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                messageList(showsSelectedAgent: false)
                 runtimeFooter
-                if !convo.isSelectedAgentReadOnly, voiceInteraction.isPresented {
+                if voiceInteraction.isPresented {
                     InlineVoicePanel(
                         controller: voiceInteraction,
                         onConfigure: onOpenVoiceSettings
                     )
                 }
-                if !convo.isSelectedAgentReadOnly {
+                Group {
                     Composer(model: $convo.model,
                          // SHIP-BLOCKER #2: drive the picker off the engine's real
                          // model catalog + active id (out-of-band model state). On
@@ -173,27 +170,25 @@ struct ChatView: View {
                          onFlowModeTap: enterFlowMode,
                          voiceCapturePhase: voiceInteraction.capturePhase,
                          voiceInteractionMode: voiceInteraction.mode)
-                } else {
-                    HStack(spacing: 8) {
-                        Image(systemName: "eye")
-                            .font(.system(size: 13, weight: .medium))
-                        Text(String(localized: "chat_agent_read_only_hint"))
-                            .font(.system(size: 12.5))
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                    }
-                    .foregroundStyle(t.text3)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(t.surface.opacity(0.65))
-                    .clipShape(Capsule())
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 8)
-                    .accessibilityIdentifier("conversation.agent-read-only")
                 }
             }
 
+            #if canImport(engine_mobileFFI)
+                if !convo.pendingPermissions.isEmpty {
+                    EnginePermissionPromptHost(
+                        model: convo,
+                        placement: .inChat,
+                        onApprove: { source.approvePermission($0, $1) },
+                        onDeny: { source.denyPermission($0) }
+                    )
+                    .environment(\.theme, t)
+                    .transition(.opacity)
+                }
+            #endif
+
         }
+        .environment(\.theme, t)
+        .tint(t.accent)
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
         .animation(.spring(response: 0.3, dampingFraction: 0.86), value: voiceInteraction.isPresented)
@@ -209,6 +204,18 @@ struct ChatView: View {
             // navigation presentation may cause this view to appear again;
             // that must not discard the user's current scroll position.
             followsLatestMessage = true
+            pendingAgentDetailID = nil
+            source.selectAgent(ConversationModel.mainAgentID)
+            summaryCategory = nil
+            summaryDetent = .medium
+        }
+        .onChange(of: summaryCategory) { _, _ in
+            #if canImport(engine_mobileFFI)
+                NotificationCenter.default.post(
+                    name: .lingxiPermissionPresentationContextChanged,
+                    object: nil
+                )
+            #endif
         }
         .onChange(of: visibleAvailableModels) { _, models in
             // Re-resolve against the new catalog so a remembered model whose
@@ -225,7 +232,7 @@ struct ChatView: View {
             guard let completion else { return }
             voiceInteraction.handleTurnCompletion(completion)
         }
-        .sheet(item: pendingQuestionBinding) { question in
+        .sheet(item: pendingQuestion) { question in
             AskUserQuestionCard(
                 question: question,
                 onSubmit: { answers in await answerQuestion(question.requestId, answers: answers) },
@@ -241,64 +248,171 @@ struct ChatView: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation.ask-user-question.sheet")
         }
+        .sheet(item: $summaryCategory, onDismiss: {
+            if let id = pendingAgentDetailID {
+                pendingAgentDetailID = nil
+                source.selectAgent(id)
+            }
+        }) { category in
+            ConversationSummarySheet(
+                category: category,
+                session: session,
+                source: source,
+                selectedAgentID: convo.selectedAgentID,
+                onSelectAgent: { id in pendingAgentDetailID = id },
+                onResumeWorkflow: source.resumeWorkflow
+            )
+            .environment(\.theme, t)
+            .presentationDetents([.medium, .large], selection: $summaryDetent)
+            .presentationDragIndicator(.visible)
+        }
+        .sheet(item: agentDetailSelection) { agent in
+            NavigationStack {
+                VStack(spacing: 0) {
+                    Text(AgentStatusPresentation(rawValue: convo.selectedAgentSummary?.status ?? agent.status).label)
+                        .font(.subheadline)
+                        .foregroundStyle(t.text3)
+                        .padding(.top, 8)
+                    messageList(showsSelectedAgent: true)
+                    Text("chat_agent_read_only_hint")
+                        .accessibilityIdentifier("conversation.agent-read-only")
+                        .font(.footnote)
+                        .foregroundStyle(t.text3)
+                        .padding()
+                }
+                .background(t.windowBg.ignoresSafeArea())
+                .navigationTitle(agent.name.isEmpty ? agent.agentType : agent.name)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("common_close") { agentDetailSelection.wrappedValue = nil }
+                            .accessibilityIdentifier("conversation.agent-detail.close")
+                    }
+                }
+            }
+            .environment(\.theme, t)
+            .tint(t.accent)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+            .accessibilityIdentifier("conversation.agent-detail-sheet")
+            .onAppear { followsLatestAgentMessage = true }
+        }
         // The chat is the detail column of RootView's split view. Its chrome is
         // the system navigation bar so that the leading item stays the system's
         // sidebar affordance — the only thing that both opens the sidebar and
         // advertises the back-swipe. Nothing here may hide that bar.
-        .navigationTitle(convo.isNew ? String(localized: "chat_new_conversation") : session.title)
+        .navigationTitle(projectName ?? (convo.isNew ? String(localized: "chat_new_conversation") : session.title))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 0) {
-                    toolbarIconButton(
-                        systemName: "info.circle",
-                        label: String(localized: "session_details_button"),
-                        accessibilityIdentifier: "conversation.session-details",
-                        action: onOpenSessionDetails
-                    )
-                    toolbarIconButton(
-                        systemName: app.isDark ? "sun.max" : "moon",
-                        label: app.isDark
-                            ? String(localized: "chat_theme_light")
-                            : String(localized: "chat_theme_dark"),
-                        accessibilityIdentifier: "conversation.theme-toggle",
-                        action: app.toggleTheme
-                    )
-                    toolbarIconButton(
-                        systemName: "square.and.pencil",
-                        label: String(localized: "chat_new_chat"),
-                        accessibilityIdentifier: "conversation.new-chat",
-                        action: newChat
-                    )
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text(projectName ?? (convo.isNew ? String(localized: "chat_new_conversation") : session.title))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(t.text)
+                        .lineLimit(1)
+                    if let path = projectPath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+                        Text(path)
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(t.text4)
+                            .lineLimit(1)
+                    }
                 }
+                .frame(maxWidth: 220)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("conversation.project-context")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                summaryMenu
             }
         }
     }
 
-    private func toolbarIconButton(
-        systemName: String,
-        label: String,
-        accessibilityIdentifier: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
+    private var summaryMenu: some View {
+        Menu {
+            ForEach(summaryCategories) { category in
+                Button {
+                    summaryDetent = .medium
+                    summaryCategory = category
+                } label: {
+                    Label(category.title, systemImage: category.systemImage)
+                }
+                .accessibilityIdentifier("conversation.summary.category.\(category.rawValue)")
+            }
+            if !summaryCategories.isEmpty { Divider() }
+            Button {
+                onOpenSessionDetails()
+            } label: {
+                Label(String(localized: "session_details_button"), systemImage: "info.circle")
+            }
+            .accessibilityIdentifier("conversation.session-details")
+            Button {
+                app.toggleTheme()
+            } label: {
+                Label(
+                    app.isDark ? String(localized: "chat_theme_light") : String(localized: "chat_theme_dark"),
+                    systemImage: app.isDark ? "sun.max" : "moon"
+                )
+            }
+            .accessibilityIdentifier("conversation.theme-toggle")
+            Button {
+                newChat()
+            } label: {
+                Label(String(localized: "chat_new_chat"), systemImage: "square.and.pencil")
+            }
+            .accessibilityIdentifier("conversation.new-chat")
+        } label: {
+            Image(systemName: "list.bullet.rectangle")
                 .symbolRenderingMode(.monochrome)
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(t.accent)
-                .frame(width: 32, height: 36)
+                .frame(width: 38, height: 36)
                 .contentShape(.rect)
         }
-        .accessibilityLabel(label)
-        .accessibilityIdentifier(accessibilityIdentifier)
+        .accessibilityLabel("Open conversation summary")
+        .accessibilityIdentifier("conversation.summary-menu")
+    }
+
+    private var summaryCategories: [ConversationSummaryCategory] {
+        [.changes, .agents, .resources, .plan]
+    }
+
+    /// Only engine resolution removes a request; an incidental presentation
+    /// dismissal must never silently cancel a pending answer.
+    private var pendingQuestion: Binding<ConversationPendingQuestion?> {
+        Binding(
+            get: {
+                summaryCategory == nil
+                    ? ConversationRenderLayout.sheetQuestion(convo.pendingQuestions)
+                    : nil
+            },
+            set: { _ in }
+        )
     }
 
     // MARK: message list
-    private var messageList: some View {
+    private var agentDetailSelection: Binding<ConversationAgentSummary?> {
+        Binding(
+            get: { convo.selectedAgentID == ConversationModel.mainAgentID ? nil : convo.selectedAgentSummary },
+            set: { if $0 == nil { source.selectAgent(ConversationModel.mainAgentID) } }
+        )
+    }
+
+    private func messageList(showsSelectedAgent: Bool) -> some View {
         // The scroll container is shared with local-app generation
         // (`TranscriptScroll`); what stays here is this screen's content and
         // its own definition of "something new arrived".
-        let groups = visibleTimelineGroups
+        let groups = showsSelectedAgent ? visibleTimelineGroups : ConversationRenderLayout.timelineGroups(renderItems)
+        let visibleRenderItems = showsSelectedAgent ? self.visibleRenderItems : renderItems
+        let visibleMessageDetails = showsSelectedAgent ? self.visibleMessageDetails : convo.messageDetails
+        let streaming = showsSelectedAgent
+            ? convo.selectedAgentSummary.map { AgentStatusPresentation(rawValue: $0.status) == .running } ?? false
+            : convo.streaming
+        let hasLiveOwner = showsSelectedAgent ? streaming : convo.streaming || convo.hasUnresolvedTurnRecovery
+        let liveToolIDs = Set(visibleRenderItems.flatMap { item -> [String] in
+            guard case let .run(run) = item,
+                  (run.status == .running && hasLiveOwner) || run.activeWorkers > 0 else { return [] }
+            return run.tools.filter { $0.status == .running }.map(\.id)
+        })
         return TranscriptScroll(
             follow: FollowSignal(
                 itemCount: groups.reduce(0) { $0 + $1.rows.count },
@@ -313,40 +427,61 @@ struct ChatView: View {
                     guard case let .message(message) = item else { return nil }
                     return message.text
                 },
-                streaming: convo.streaming,
+                streaming: streaming,
                 error: convo.error,
-                notice: convo.notice
+                notice: convo.notice,
+                agentSummarySignal: convo.orderedAgentSummaries
+                    .filter { $0.id != ConversationModel.mainAgentID }
+                    .map { summary in
+                        "\(summary.id):\(summary.status):\(summary.latestActivity ?? "")"
+                    }
+                    .joined(separator: "|")
             ),
-            followsLatest: $followsLatestMessage,
-            focused: composerFocused,
-            accessibilityIdentifier: "conversation.message-list"
+            followsLatest: showsSelectedAgent ? $followsLatestAgentMessage : $followsLatestMessage,
+            focused: showsSelectedAgent ? false : composerFocused,
+            accessibilityIdentifier: showsSelectedAgent ? "conversation.agent-message-list" : "conversation.message-list",
+            maxContentWidth: 860,
+            alignShortContentToTop: true
         ) {
-            if convo.selectedAgentID == ConversationModel.mainAgentID {
-                if visibleRenderItems.isEmpty, !convo.streaming, convo.isNew { emptyState }
+            if !showsSelectedAgent {
+                if visibleRenderItems.isEmpty,
+                   !streaming,
+                   convo.isNew,
+                    !convo.orderedAgentSummaries.contains(where: { $0.id != ConversationModel.mainAgentID }) {
+                    emptyState
+                }
                 ConversationTimelineView(
                     groups: groups,
-                    liveToolIDs: convo.liveTranscriptToolIDs,
-                    hasLiveOwner: convo.hasLiveTranscriptOwner,
+                    liveToolIDs: liveToolIDs,
+                    hasLiveOwner: hasLiveOwner,
                     messageDetails: visibleMessageDetails,
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
-                    onShareMessage: shareMessage
+                    onShareMessage: shareMessage,
+                    transcriptAgents: convo.orderedAgentSummaries,
+                    transcriptAgentAnchors: convo.transcriptAgentAnchors,
+                    activeAgentID: ConversationModel.mainAgentID,
+                    onSelectAgent: { source.selectAgent($0) },
+                    streaming: streaming,
+                    showThinking: canShowTranscriptThinking
                 )
             } else if convo.isAgentTranscriptLoading {
                 childAgentLoadingState
             } else if let error = convo.agentTranscriptError {
                 childAgentErrorState(error)
-            } else if selectedAgentTranscriptLoaded, visibleRenderItems.isEmpty, !convo.streaming {
+            } else if selectedAgentTranscriptLoaded, visibleRenderItems.isEmpty, !streaming {
                 childAgentEmptyState
             } else if !visibleRenderItems.isEmpty {
                 ConversationTimelineView(
                     groups: groups,
-                    liveToolIDs: convo.liveTranscriptToolIDs,
-                    hasLiveOwner: convo.hasLiveTranscriptOwner,
+                    liveToolIDs: liveToolIDs,
+                    hasLiveOwner: hasLiveOwner,
                     messageDetails: visibleMessageDetails,
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
-                    onShareMessage: shareMessage
+                    onShareMessage: shareMessage,
+                    streaming: streaming,
+                    showThinking: canShowTranscriptThinking
                 )
             }
         }
@@ -365,6 +500,7 @@ struct ChatView: View {
         let streaming: Bool
         let error: ConversationError?
         let notice: TurnNotice?
+        let agentSummarySignal: String
     }
 
     /// Rows for the selected agent. The main agent keeps the rich execution
@@ -379,16 +515,6 @@ struct ChatView: View {
         convo.visibleTimelineGroups
     }
 
-    private var visibleExecutionGroups: [ExecutionStatusPanel.Group] {
-        ExecutionStatusPanel.visibleGroups(
-            agents: convo.agentSummaries,
-            tasks: convo.backgroundTasks,
-            todos: convo.planTasks,
-            workflowResumeState: convo.workflowResumeState,
-            selectedAgentID: convo.selectedAgentID
-        )
-    }
-
     private var visibleMessageDetails: [UUID: ConversationMessageDetail] {
         convo.selectedAgentID == ConversationModel.mainAgentID
             ? convo.messageDetails
@@ -400,33 +526,21 @@ struct ChatView: View {
         return convo.agentTranscripts[convo.selectedAgentID]?.loaded == true
     }
 
-    private var selectedAgentBinding: Binding<String?> {
-        Binding(
-            get: {
-                convo.selectedAgentID == ConversationModel.mainAgentID ? nil : convo.selectedAgentID
-            },
-            set: { id in
-                source.selectAgent(id ?? ConversationModel.mainAgentID)
-            }
-        )
+    private var canShowTranscriptThinking: Bool {
+        guard convo.pendingQuestions.isEmpty,
+              !convo.isCancelling,
+              !convo.hasUnresolvedTurnRecovery,
+              convo.compactionStatus?.isActive != true else { return false }
+        #if canImport(engine_mobileFFI)
+            guard convo.pendingPermissions.isEmpty else { return false }
+        #endif
+        return true
     }
 
-    private var selectedAgentActivity: String? {
-        guard convo.selectedAgentID == ConversationModel.mainAgentID else { return nil }
-        return convo.statusLine
-    }
-
-    /// Durable transcript rows only. Agent execution is pinned above the
-    /// composer, while pending questions are presented by the native sheet.
+    /// Durable transcript rows only. Execution summaries live in the Runtime
+    /// Center menu, while pending questions remain attached to the chat.
     private var renderItems: [ConversationRenderItem] {
         ConversationRenderLayout.transcriptItems(convo.items)
-    }
-
-    private var pendingQuestionBinding: Binding<ConversationPendingQuestion?> {
-        Binding(
-            get: { ConversationRenderLayout.sheetQuestion(convo.pendingQuestions) },
-            set: { _ in }
-        )
     }
 
     /// 提交 for a pending questionnaire. The card stays disabled until the
@@ -467,22 +581,22 @@ struct ChatView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 0) {
-            RoundedRectangle(cornerRadius: 15)
-                .fill(LinearGradient(colors: [t.accent, t.accent2], startPoint: .topLeading, endPoint: .bottomTrailing))
-                .frame(width: 52, height: 52)
-                .overlay(LXIcon(name: .sparkle, size: 26, color: .white, stroke: 1.8))
-                .padding(.bottom, 18)
-            Text("chat_start_new_conversation")
-                .font(.scaledSystem(21, weight: .semibold, relativeTo: .title2))
-                .foregroundColor(t.text)
-                .padding(.bottom, 7)
-            Text("chat_empty_state_hint")
-                .font(.scaledSystem(14, relativeTo: .subheadline)).foregroundColor(t.text4)
-                .multilineTextAlignment(.center).lineSpacing(14 * 0.5)
-                .frame(maxWidth: 260)
+        VStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(t.accent)
+            Text(projectName ?? String(localized: "chat_start_new_conversation"))
+                .font(.scaledSystem(20, weight: .semibold, relativeTo: .title2))
+                .foregroundStyle(t.text)
+                .lineLimit(2)
+            Text("Describe what you want LingXi to accomplish")
+                .font(.scaledSystem(14, relativeTo: .subheadline))
+                .foregroundStyle(t.text3)
+                .multilineTextAlignment(.center)
+                .lineSpacing(7)
+                .frame(maxWidth: 300)
         }
-        .frame(maxWidth: .infinity, minHeight: 420)
+        .frame(maxWidth: .infinity, minHeight: 360)
         .padding(.horizontal, 24)
     }
 
@@ -537,57 +651,19 @@ struct ChatView: View {
     /// visible below the transcript.
     @ViewBuilder
     private var runtimeFooter: some View {
-        if convo.selectedAgentID == ConversationModel.mainAgentID {
-            switch runtimeFooterState {
-            case .hidden:
-                EmptyView()
-            case let .activeTool(tool):
-                runtimeFooterRow(
-                    label: tool.header.map { ToolDisplayText.title($0) } ?? tool.tool,
-                    detail: tool.elapsedMs.flatMap(ConversationExecutionParsing.formatDuration),
-                    color: ToolDisplayText.iconColor(header: tool.header, tool: tool.tool, palette: t),
-                    isAnimated: true,
-                    icon: ToolDisplayText.icon(header: tool.header, tool: tool.tool)
-                )
-            case let .thinking(status):
-                runtimeFooterRow(
-                    label: String(localized: "chat_thinking"),
-                    detail: status,
-                    color: t.accent,
-                    isAnimated: true
-                )
-            case let .activeLabel(activity):
-                runtimeFooterRow(
-                    label: activity,
-                    detail: nil,
-                    color: t.accent,
-                    isAnimated: true
-                )
-            case let .compaction(status):
-                CompactionRuntimeFooter(status: status)
-            case .stopping:
-                runtimeFooterRow(
-                    label: String(localized: "chat_stopping"),
-                    detail: nil,
-                    color: t.text3,
-                    isAnimated: false
-                )
-            case .waiting:
-                runtimeFooterRow(
-                    label: String(localized: "chat_runtime_waiting"),
-                    detail: nil,
-                    color: t.text3,
-                    isAnimated: false
-                )
-            case let .error(message):
-                runtimeFooterRow(
-                    label: String(localized: "chat_error_generic_headline"),
-                    detail: message,
-                    color: t.danger,
-                    isAnimated: false,
-                    onDismiss: dismissRuntimeError
-                )
-            }
+        switch runtimeFooterState {
+        case .hidden:
+            EmptyView()
+        case let .compaction(status):
+            CompactionRuntimeFooter(status: status)
+        case let .error(message):
+            runtimeFooterRow(
+                label: String(localized: "chat_error_generic_headline"),
+                detail: message,
+                color: t.danger,
+                isAnimated: false,
+                onDismiss: dismissRuntimeError
+            )
         }
     }
 
@@ -601,45 +677,7 @@ struct ChatView: View {
         if let error = convo.error {
             return .error(error.message)
         }
-        #if canImport(engine_mobileFFI)
-            if !convo.pendingPermissions.isEmpty {
-                return .waiting
-            }
-        #endif
-        if !convo.pendingQuestions.isEmpty {
-            return .waiting
-        }
-        if convo.isCancelling {
-            return .stopping
-        }
-        if let tool = currentRunningTool {
-            return .activeTool(tool)
-        }
-        if convo.streaming {
-            return .thinking(convo.statusLine)
-        }
-        if let summary = convo.selectedAgentSummary,
-           AgentStatusPresentation(rawValue: summary.status) == .running,
-           let activity = summary.latestActivity?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !activity.isEmpty {
-            return .activeLabel(activity)
-        }
         return .hidden
-    }
-
-    private var currentRunningTool: ConversationToolTrace? {
-        for item in convo.selectedAgentItems.reversed() {
-            let tools: [ConversationToolTrace]
-            switch item {
-            case let .run(run): tools = run.tools
-            case let .toolCall(trace): tools = [trace]
-            default: continue
-            }
-            if let trace = tools.reversed().first(where: { $0.status == .running }) {
-                return trace
-            }
-        }
-        return nil
     }
 
     private func runtimeFooterRow(
@@ -841,12 +879,7 @@ struct ChatView: View {
 
 private enum RuntimeFooterState: Equatable {
     case hidden
-    case activeTool(ConversationToolTrace)
-    case thinking(String?)
-    case activeLabel(String)
     case compaction(ConversationCompactionStatus)
-    case stopping
-    case waiting
     case error(String)
 }
 

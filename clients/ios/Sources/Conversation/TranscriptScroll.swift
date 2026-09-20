@@ -33,6 +33,14 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// Identifier for UI tests, applied to the scroll view.
     var accessibilityIdentifier: String?
 
+    /// Maximum readable content width. Local-app surfaces retain the compact
+    /// default; the desktop-style conversation opts into its wider column.
+    var maxContentWidth: CGFloat = 720
+
+    /// Desktop's short conversations begin at the top of the stage. Keep this
+    /// opt-in so other transcript clients retain their existing anchor.
+    var alignShortContentToTop = false
+
     @ViewBuilder var content: () -> Content
 
     var body: some View {
@@ -50,7 +58,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                         .frame(height: 1)
                         .id(Self.bottomAnchor)
                 }
-                .frame(maxWidth: 720)
+                .frame(maxWidth: maxContentWidth)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
             }
@@ -59,6 +67,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             // a sheet changes the available presentation size) instead of
             // falling back to the first row.
             .defaultScrollAnchor(.bottom)
+            .modifier(ShortTranscriptAlignmentModifier(enabled: alignShortContentToTop))
             .scrollIndicators(.hidden)
             .scrollDismissesKeyboard(.interactively)
             // The reader's position is measured, not inferred. The previous
@@ -126,6 +135,19 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// a marker rather than to the last item keeps the behaviour correct when
     /// the last item is itself growing (a streaming block).
     static var bottomAnchor: String { "bottom" }
+}
+
+private struct ShortTranscriptAlignmentModifier: ViewModifier {
+    let enabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.defaultScrollAnchor(.top, for: .alignment)
+        } else {
+            content
+        }
+    }
 }
 
 enum TranscriptScrollFollowState {

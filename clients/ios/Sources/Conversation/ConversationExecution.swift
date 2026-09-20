@@ -876,6 +876,10 @@ struct ConversationToolTrace: Identifiable, Equatable {
     /// The engine-derived `⎿` result block. Present once the tool returns on a
     /// current engine.
     var display: ConversationToolResultDisplay? = nil
+    /// Structured identity returned by Agent/Task/Skill spawn results. This is
+    /// presentation metadata only; it anchors the transcript agent row to the
+    /// originating tool instead of letting it drift to the tail.
+    var spawnedAgentID: String? = nil
 }
 
 enum ConversationShellStatus: Equatable {
@@ -1067,6 +1071,17 @@ struct ConversationExecutionNotice: Identifiable, Equatable {
 }
 
 enum ConversationExecutionParsing {
+    static func spawnedAgentID(tool: String, resultJson: String) -> String? {
+        let normalized = tool.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard ["agent", "task", "skill", "spawn_agent", "fork_agent"].contains(normalized),
+              let object = jsonObject(from: resultJson) else { return nil }
+        return stringValue(object["agentId"] ?? object["agent_id"])
+            .flatMap { value in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+    }
+
     static func isShellTool(_ name: String) -> Bool {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalized == "shell" || normalized == "bash" || normalized == "terminal"

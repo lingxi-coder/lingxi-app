@@ -339,6 +339,7 @@ final class ConversationModel: ObservableObject {
             if !suppressIndexRebuild {
                 rebuildItemIndex()
             }
+            refreshTranscriptAgentAnchors()
         }
     }
 
@@ -346,6 +347,14 @@ final class ConversationModel: ObservableObject {
     /// child rows arrive from `SessionAgentList`/`SessionAgentUpdated` or the
     /// coordinator worker fallback on older engines.
     @Published private(set) var agentSummaries: [ConversationAgentSummary]
+    /// Stable transcript placement keyed by child agent id. Empty anchors mean
+    /// the agent belongs at the top; other values are tool/item ids.
+    @Published private(set) var transcriptAgentAnchors: [String: String] = [:]
+    /// First-seen child order is independent of the engine's roster sort order.
+    private var agentFirstSeenOrder: [String] = []
+    /// Last visible position of each concrete anchor, used to recover from a
+    /// rewind or compaction that removes the anchored row.
+    private var transcriptAgentAnchorPositions: [String: Int] = [:]
     /// The currently visible agent.  Selecting a child makes its transcript
     /// read-only; selecting `main` restores the ordinary composer transcript.
     @Published var selectedAgentID: String {
@@ -387,6 +396,8 @@ final class ConversationModel: ObservableObject {
     var selectedAgentSummary: ConversationAgentSummary? {
         agentSummaries.first { $0.id == selectedAgentID }
     }
+    /// Every transcript surface consumes the same model-owned roster order.
+    var orderedAgentSummaries: [ConversationAgentSummary] { agentSummaries }
     /// Ordered activity projection for the currently selected session/agent.
     /// Run cards never enter this projection; reasoning, tools, notices and
     /// narrative rows retain their wire order and stable identities.
@@ -696,20 +707,26 @@ final class ConversationModel: ObservableObject {
     /// agent, which is also what session transitions use.
     func replaceAgentSummaries(_ summaries: [ConversationAgentSummary]) {
         let currentByID = Dictionary(uniqueKeysWithValues: agentSummaries.map { ($0.id, $0) })
-        var merged: [ConversationAgentSummary] = [
-            agentSummaries.first(where: { $0.id == Self.mainAgentID }) ?? .main
-        ]
-        for summary in summaries.map(Self.normalizedAgentSummaryForSource) {
-            let summary = currentByID[summary.id].map {
-                Self.mergeAgentSummary(current: $0, incoming: summary)
-            } ?? summary
-            if let index = merged.firstIndex(where: { $0.id == summary.id }) {
-                merged[index] = summary
-            } else {
-                merged.append(summary)
+        let incoming = summaries.map(Self.normalizedAgentSummaryForSource)
+        for summary in incoming where summary.id != Self.mainAgentID {
+            if !agentFirstSeenOrder.contains(summary.id) {
+                agentFirstSeenOrder.append(summary.id)
             }
         }
+        let incomingByID = Dictionary(uniqueKeysWithValues: incoming.map { ($0.id, $0) })
+        let currentMain = agentSummaries.first(where: { $0.id == Self.mainAgentID }) ?? .main
+        var merged: [ConversationAgentSummary] = [currentMain]
+        merged.append(contentsOf: agentFirstSeenOrder.compactMap { id in
+            guard let incomingSummary = incomingByID[id] else { return nil }
+            return currentByID[id].map {
+                Self.mergeAgentSummary(current: $0, incoming: incomingSummary)
+            } ?? incomingSummary
+        })
+        if let incomingMain = incomingByID[Self.mainAgentID] {
+            merged[0] = Self.mergeAgentSummary(current: currentMain, incoming: incomingMain)
+        }
         agentSummaries = merged
+        refreshTranscriptAgentAnchors()
         if !merged.contains(where: { $0.id == selectedAgentID }) {
             selectedAgentID = Self.mainAgentID
             isAgentTranscriptLoading = false
@@ -811,6 +828,9 @@ final class ConversationModel: ObservableObject {
 
     func clearAgentState() {
         agentSummaries = [.main]
+        agentFirstSeenOrder = []
+        transcriptAgentAnchors = [:]
+        transcriptAgentAnchorPositions = [:]
         selectedAgentID = Self.mainAgentID
         agentTranscripts = [:]
         isAgentTranscriptLoading = false
@@ -819,6 +839,87 @@ final class ConversationModel: ObservableObject {
         #if canImport(engine_mobileFFI)
             pendingAgentMessages = [:]
         #endif
+    }
+
+    private func refreshTranscriptAgentAnchors() {
+        let childIDs = agentSummaries.map(\.id).filter { $0 != Self.mainAgentID }
+        let childIDSet = Set(childIDs)
+        var next = transcriptAgentAnchors.filter { childIDSet.contains($0.key) }
+        transcriptAgentAnchorPositions = transcriptAgentAnchorPositions.filter { childIDSet.contains($0.key) }
+
+        // Use the same durable-to-display projection as the timeline. This
+        // gives standalone tool calls the same concrete trace id as run tools
+        // and excludes terminal reasoning rows hidden by the display policy.
+        let visibleGroups = ConversationDesktopTimeline.groups(
+            ConversationRenderLayout.timelineGroups(items)
+        )
+        let visibleRowIDs = visibleGroups.flatMap { group in
+            group.rows.map { Self.transcriptAnchorID(for: $0) }
+        }
+        let visibleBoundary = visibleRowIDs.last
+
+        for id in childIDs {
+            if let trace = items.lazy.flatMap({ Self.spawnTraces(in: $0) }).first(where: {
+                Self.transcriptAgentKey($0.agentID) == Self.transcriptAgentKey(id)
+            }) {
+                // Structured spawn metadata is authoritative and may upgrade a
+                // previously assigned fallback row.
+                next[id] = trace.traceID
+                transcriptAgentAnchorPositions[id] = visibleRowIDs.firstIndex(of: trace.traceID)
+                continue
+            }
+
+            if let existing = next[id], !existing.isEmpty {
+                if let position = visibleRowIDs.firstIndex(of: existing) {
+                    transcriptAgentAnchorPositions[id] = position
+                } else if let previousPosition = transcriptAgentAnchorPositions[id], !visibleRowIDs.isEmpty {
+                    // Rewind/compaction removed the anchor. Pick the closest
+                    // surviving boundary before its former position.
+                    let position = min(max(previousPosition - 1, 0), visibleRowIDs.count - 1)
+                    next[id] = visibleRowIDs[position]
+                    transcriptAgentAnchorPositions[id] = position
+                } else {
+                    // An anchor with no remembered position cannot be safely
+                    // ordered relative to surviving rows, so place it at the
+                    // top exactly once rather than guessing a later boundary.
+                    next[id] = ""
+                    transcriptAgentAnchorPositions.removeValue(forKey: id)
+                }
+            } else if let visibleBoundary {
+                // Keep a concrete fallback stable while it survives. The empty
+                // sentinel is reserved for a transcript with no visible row.
+                next[id] = visibleBoundary
+                transcriptAgentAnchorPositions[id] = visibleRowIDs.count - 1
+            } else {
+                next[id] = ""
+                transcriptAgentAnchorPositions.removeValue(forKey: id)
+            }
+        }
+        if next != transcriptAgentAnchors { transcriptAgentAnchors = next }
+    }
+
+    private static func transcriptAnchorID(for row: ConversationTimelineRow) -> String {
+        if case let .tool(_, trace) = row { return trace.id }
+        return row.id
+    }
+
+    private static func spawnTraces(in item: ConversationRenderItem) -> [(agentID: String, traceID: String)] {
+        switch item {
+        case let .run(run):
+            return run.tools.compactMap { trace in
+                guard let agentID = trace.spawnedAgentID else { return nil }
+                return (agentID: agentID, traceID: trace.id)
+            }
+        case let .toolCall(trace):
+            guard let agentID = trace.spawnedAgentID else { return [] }
+            return [(agentID: agentID, traceID: trace.id)]
+        default:
+            return []
+        }
+    }
+
+    private static func transcriptAgentKey(_ id: String) -> String {
+        id.hasPrefix("agent:") ? String(id.dropFirst("agent:".count)) : id
     }
 
     private func agentRequestKey(sessionID: String, agentID: String) -> String {
@@ -4916,6 +5017,7 @@ final class MockConversationSource: ConversationSource {
                         trace.tool = "Shell"
                         trace.status = resolvedShellStatus.asToolStatus
                         trace.display = derivedDisplay
+                        trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                         trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(resultJson, isError: isError, tool: tool)
                         trace.elapsedMs = finished?.durationMs ?? trace.elapsedMs
                     }
@@ -4926,6 +5028,7 @@ final class MockConversationSource: ConversationSource {
                         trace.tool = tool
                         trace.status = wasCancelled ? .cancelled : (isError ? .failed : .completed)
                         trace.display = derivedDisplay
+                        trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                         trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(
                             resultJson,
                             isError: isError,
@@ -6437,6 +6540,7 @@ final class MockConversationSource: ConversationSource {
                             var merged = existing
                             merged.status = status
                             merged.display = lowered
+                            merged.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                             merged.outputSummary = fallback
                             pendingRun?.tools[index] = merged
                         } else {
@@ -6448,7 +6552,8 @@ final class MockConversationSource: ConversationSource {
                                 outputSummary: fallback,
                                 elapsedMs: nil,
                                 header: nil,
-                                display: lowered
+                                display: lowered,
+                                spawnedAgentID: ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                             )
                             pendingRun?.tools.append(trace)
                         }

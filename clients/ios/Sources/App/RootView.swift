@@ -138,6 +138,8 @@ struct RootView: View {
     @State private var sourceGeneration = UUID()
     @State private var workspaceWidth: CGFloat = 0
     @State private var sessionInspectorOpen = false
+    @State private var sessionDetailsSheetOpen = false
+    @State private var openTerminalAfterSessionDetails = false
     @State private var selectedPlanDocument: PlanDocument?
     @State private var providerCatalogBootstrapped = false
     /// The workspace the conversation currently runs in: global, a managed
@@ -440,11 +442,13 @@ struct RootView: View {
             }
 
             #if canImport(engine_mobileFFI)
-                // Engine permissions are app-scoped, not chat-scoped. The host
-                // presents above the current UIKit surface, including sheets and
-                // full-screen covers opened after a workflow starts.
+                // The ChatView shell owns the normal non-modal prompt. Keep a
+                // root-mounted UIKit fallback dormant until UIKit reports an
+                // external sheet/cover above the chat; this also catches sheets
+                // owned by ChatView or Composer, whose state is local to them.
                 EnginePermissionPromptHost(
                     model: source.model,
+                    placement: .presentedFallback,
                     onApprove: { source.approvePermission($0, $1) },
                     onDeny: { source.denyPermission($0) }
                 )
@@ -1008,10 +1012,11 @@ struct RootView: View {
                 draft: $draft,
                 voiceInteraction: voiceInteraction,
                 source: source,
+                projectName: projectStore.activeProject?.record.name,
+                projectPath: currentWorkspaceGuestPath,
                 onOpenVoiceSettings: { navigation.showSettings(.voice) },
                 onOpenSessionDetails: {
-                    if workspaceWidth >= 840 { sessionInspectorOpen = true }
-                    else { navigation.openSessionDetails(sessionID: session.id) }
+                    sessionDetailsSheetOpen = true
                 },
                 onOpenShellTask: { request in
                     navigation.openTerminal(
@@ -1043,6 +1048,39 @@ struct RootView: View {
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                     .zIndex(90)
             }
+        }
+        .sheet(isPresented: $sessionDetailsSheetOpen, onDismiss: {
+            if openTerminalAfterSessionDetails {
+                openTerminalAfterSessionDetails = false
+                openCurrentWorkspaceTerminal()
+            }
+        }) {
+            NavigationStack {
+                SessionDetailsView(
+                    session: session,
+                    source: source,
+                    workspacePath: currentWorkspaceGuestPath,
+                    onOpenTerminal: {
+                        openTerminalAfterSessionDetails = true
+                        sessionDetailsSheetOpen = false
+                    }
+                )
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("common_close") { sessionDetailsSheetOpen = false }
+                            .accessibilityIdentifier("conversation.session-details.close")
+                    }
+                }
+            }
+            .environment(\.theme, theme)
+            .environment(\.openPlanDocument, nil)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+            .accessibilityIdentifier("conversation.session-details-sheet")
+        }
+        .onChange(of: session.id) { _, _ in
+            openTerminalAfterSessionDetails = false
+            sessionDetailsSheetOpen = false
         }
     }
 

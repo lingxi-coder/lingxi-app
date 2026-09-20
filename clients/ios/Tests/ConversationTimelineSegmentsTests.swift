@@ -140,8 +140,72 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         XCTAssertTrue(model.liveTranscriptToolIDs.isEmpty)
     }
 
-    func testTimelineChevronKeepsATouchVisibleRestingAffordance() {
-        XCTAssertGreaterThan(ConversationTimelineChevronPresentation.opacity(isHighlighted: false), 0)
+    @MainActor
+    func testProjectedSegmentsPlacePrefixedSpawnAgentBetweenLaterTools() {
+        var spawn = ConversationToolTrace(id: "spawn-tool", tool: "Agent", status: .completed)
+        spawn.spawnedAgentID = "agent:child"
+        let later = ConversationToolTrace(id: "later-tool", tool: "Read", status: .completed)
+        let child = ConversationAgentSummary(
+            id: "child", name: "Child", agentType: "worker", status: "working",
+            latestActivity: "Checking workspace"
+        )
+        let model = ConversationModel()
+        model.replaceAgentSummaries([.main, child])
+        model.items = [.toolCall(spawn), .toolCall(later)]
+
+        XCTAssertEqual(
+            ConversationTimelineView.projectedSegmentIDs(
+                groups: model.visibleTimelineGroups,
+                transcriptAgents: model.orderedAgentSummaries,
+                transcriptAgentAnchors: model.transcriptAgentAnchors
+            ),
+            ["timeline-tools:spawn-tool", "agents:after:spawn-tool", "timeline-tools:later-tool"]
+        )
+        XCTAssertEqual(model.transcriptAgentAnchors["child"], "spawn-tool")
+    }
+
+    @MainActor
+    func testProjectedSegmentsKeepFallbackAgentPlacementAcrossNewTurnAndRosterUpdates() {
+        let first = ConversationToolTrace(id: "first-tool", tool: "Read", status: .completed)
+        let next = ConversationToolTrace(id: "new-tool", tool: "Write", status: .completed)
+        let child = ConversationAgentSummary(
+            id: "child", name: "Child", agentType: "worker", status: "working",
+            latestActivity: "Working"
+        )
+        let other = ConversationAgentSummary(
+            id: "other", name: "Other", agentType: "worker", status: "idle"
+        )
+        let model = ConversationModel()
+        model.items = [.toolCall(first)]
+        model.replaceAgentSummaries([.main, child])
+        let initialAnchor = model.transcriptAgentAnchors["child"]
+        model.items = [.toolCall(first), .toolCall(next)]
+        model.replaceAgentSummaries([.main, other, ConversationAgentSummary(
+            id: "child", name: "Child", agentType: "worker", status: "completed",
+            latestActivity: "Finished"
+        )])
+
+        let rendered = ConversationTimelineView.projectedSegmentIDs(
+            groups: model.visibleTimelineGroups,
+            transcriptAgents: model.orderedAgentSummaries,
+            transcriptAgentAnchors: model.transcriptAgentAnchors
+        )
+        XCTAssertEqual(initialAnchor, "first-tool")
+        XCTAssertEqual(model.transcriptAgentAnchors["child"], initialAnchor)
+        XCTAssertEqual(model.orderedAgentSummaries.map(\.id), ["main", "child", "other"])
+        XCTAssertEqual(rendered, [
+            "timeline-tools:first-tool",
+            "agents:after:first-tool",
+            "timeline-tools:new-tool",
+            "agents:after:new-tool",
+        ])
+    }
+
+    func testTimelineChevronIsHiddenUntilHighlightedOrExpanded() {
+        XCTAssertEqual(ConversationTimelineChevronPresentation.opacity(isHighlighted: false), 0)
+        XCTAssertEqual(ConversationTimelineChevronPresentation.opacity(isHighlighted: false, isExpanded: true), 1)
+        XCTAssertEqual(ConversationTimelineChevronPresentation.opacity(isHighlighted: true, isExpanded: false), 1)
+        XCTAssertEqual(ConversationTimelineChevronPresentation.opacity(isHighlighted: true, isExpanded: true), 1)
         XCTAssertGreaterThan(ConversationTimelineChevronPresentation.scale(isHighlighted: false), 0)
     }
 

@@ -10,7 +10,6 @@ enum VoiceHoldGesturePolicy {
 
 // MARK: - Composer (pill text field + model chip + attach + send/mic)
 struct Composer: View {
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.theme) private var t
     @FocusState.Binding var inputFocused: Bool
     @Binding var model: ModelOption
@@ -240,134 +239,37 @@ struct Composer: View {
                         }
                     }
 
-                configurationSummary
                 if let fastModeError {
                     Text(fastModeError)
                         .font(.caption)
                         .foregroundStyle(t.danger)
                         .accessibilityIdentifier("composer.fast-mode.error")
                 }
-                HStack(spacing: 4) {
-                    // Attach / camera: drives a real on-device capture through the
-                    // same CameraImpl the engine bridges onto `traits::CameraControl`;
-                    // the result surfaces as the attachment chip above.
-                    Button(action: onCameraClick) {
-                        LXIcon(name: .plus, size: 18, color: t.text3, stroke: 1.8)
-                            .frame(width: 40, height: 40)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 0) {
+                        attachmentButton
+                        permissionChip
+                        Spacer(minLength: 8)
+                        modelChip
+                        keyboardDismissButton
+                        turnActions
                     }
-                    .buttonStyle(ComposerActionButtonStyle())
-                    .accessibilityLabel("composer_add_attachment")
-                    Spacer()
-                    if isCancelling || slashCommandPending {
-                        ProgressView()
-                            .tint(t.text3)
-                            .frame(width: 40, height: 40)
-                            .accessibilityLabel(isCancelling ? "composer_stopping" : "slash_command_running")
-                    } else if showDiscardRecovery {
-                        Button(action: onStop) {
-                            ComposerTurnActionIcon(
-                                systemName: "stop.fill",
-                                symbolSize: 11,
-                                background: t.danger
-                            )
+                    VStack(spacing: 0) {
+                        configurationSummary
+                        HStack(spacing: 0) {
+                            attachmentButton
+                            keyboardDismissButton
+                            Spacer(minLength: 0)
+                            turnActions
                         }
-                        .buttonStyle(ComposerActionButtonStyle())
-                        .accessibilityLabel(showDiscardRecovery ? "composer_discard_recovery" : "composer_stop")
-                        .accessibilityIdentifier(showDiscardRecovery ? "composer.discard-recovery" : "composer.stop")
-                    } else {
-                        HStack(spacing: 6) {
-                            if streaming {
-                                Button(action: onStop) {
-                                    ComposerTurnActionIcon(
-                                        systemName: "stop.fill",
-                                        symbolSize: 11,
-                                        background: t.danger
-                                    )
-                                }
-                                .buttonStyle(ComposerActionButtonStyle())
-                                .accessibilityLabel("composer_stop")
-                                .accessibilityIdentifier("composer.stop")
-                            }
-
-                            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                // Match Android: ordinary recording and Flow Mode
-                                // remain available while the agent is working.
-                            Button(action: handleMicTap) {
-                                if voiceCapturePhase == .finishing {
-                                    ProgressView()
-                                        .tint(t.text2)
-                                        .frame(width: 40, height: 40)
-                                } else {
-                                    LXIcon(
-                                        name: cancellingHold || isDictationListening ? .stop : .mic,
-                                        size: 18,
-                                        color: cancellingHold ? t.danger
-                                            : (holding || isDictationListening ? t.accent : t.text2),
-                                        stroke: 1.8
-                                    )
-                                    .frame(width: 40, height: 40)
-                                    .background(
-                                        isDictationListening || holding
-                                            ? t.accent.tint(0.15)
-                                            : t.surfaceHover.opacity(0.72),
-                                        in: Circle()
-                                    )
-                                }
-                            }
-                            .buttonStyle(ComposerActionButtonStyle())
-                            .simultaneousGesture(micHoldGesture)
-                            .accessibilityLabel(
-                                isDictationListening ? String(localized: "composer_stop_recording") : String(localized: "composer_record")
-                            )
-                            .accessibilityHint("composer_voice_hint")
-                            .accessibilityIdentifier("composer.voice")
-                            .disabled(
-                                !sendEnabled
-                                    || voiceCapturePhase == .finishing
-                                    || voiceInteractionMode == .flow
-                            )
-
-                            Button(action: onFlowModeTap) {
-                                LXIcon(name: .audioWave, size: 18, color: .white, stroke: 1.8)
-                                    .frame(width: 40, height: 40)
-                                    .background(
-                                        LinearGradient(
-                                            colors: [t.accent, t.accent2],
-                                            startPoint: .topLeading,
-                                            endPoint: .bottomTrailing
-                                        )
-                                    )
-                                    .clipShape(Circle())
-                                    .shadow(color: t.accent.tint(0.28), radius: 7, y: 4)
-                            }
-                            .buttonStyle(ComposerActionButtonStyle())
-                            .accessibilityLabel("composer_flow_mode")
-                            .accessibilityIdentifier("composer.flow")
-                            .disabled(!sendEnabled || voiceInteractionMode != nil)
-                            } else {
-                                Button(action: send) {
-                                    ComposerTurnActionIcon(
-                                        systemName: "arrow.up",
-                                        symbolSize: 15,
-                                        background: t.accent
-                                    )
-                                }
-                                .buttonStyle(ComposerActionButtonStyle())
-                                .accessibilityLabel(streaming ? "composer_queue" : "composer_send")
-                                .accessibilityIdentifier("composer.send")
-                                .disabled(!canSubmitDraft)
-                                .opacity(canSubmitDraft ? 1 : 0.45)
-                            }
-                        }
-                        .opacity(sendEnabled ? 1 : 0.45)
                     }
                 }
             }
             .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 8)
             .background(t.composerBg)
-            .clipShape(.rect(cornerRadius: 22))
+            .clipShape(.rect(cornerRadius: 16))
             .overlay {
-                RoundedRectangle(cornerRadius: 22)
+                RoundedRectangle(cornerRadius: 16)
                     .stroke(inputFocused ? t.accent.tint(0.52) : t.borderStrong,
                             lineWidth: inputFocused ? 1 : 0.5)
             }
@@ -415,13 +317,20 @@ struct Composer: View {
                 onDismiss: { controlsOpen = false }
             )
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("composer_done") { inputFocused = false }
-                    .accessibilityIdentifier("composer.keyboard.dismiss")
+        #if canImport(engine_mobileFFI)
+            .onChange(of: modelOpen) { _, _ in
+                NotificationCenter.default.post(
+                    name: .lingxiPermissionPresentationContextChanged,
+                    object: nil
+                )
             }
-        }
+            .onChange(of: controlsOpen) { _, _ in
+                NotificationCenter.default.post(
+                    name: .lingxiPermissionPresentationContextChanged,
+                    object: nil
+                )
+            }
+        #endif
     }
 
     // Press-and-hold → release, mirroring Android `voiceHold`: a 0.6s
@@ -479,6 +388,67 @@ struct Composer: View {
         onMicTap()
     }
 
+    /// Desktop keeps ordinary recording available while drafting and while a
+    /// turn is running. Flow Mode is the only voice affordance gated to idle.
+    private var ordinaryMicButton: some View {
+        Button(action: handleMicTap) {
+            if voiceCapturePhase == .finishing {
+                ProgressView()
+                    .tint(t.text2)
+                    .frame(width: 40, height: 40)
+            } else {
+                LXIcon(
+                    name: cancellingHold || isDictationListening ? .stop : .mic,
+                    size: 18,
+                    color: cancellingHold ? t.danger
+                        : (holding || isDictationListening ? t.accent : t.text2),
+                    stroke: 1.8
+                )
+                .frame(width: 40, height: 40)
+                .background(
+                    isDictationListening || holding
+                        ? t.accent.tint(0.15)
+                        : .clear,
+                    in: Circle()
+                )
+            }
+        }
+        .buttonStyle(ComposerActionButtonStyle())
+        .simultaneousGesture(micHoldGesture)
+        .accessibilityLabel(
+            isDictationListening ? String(localized: "composer_stop_recording") : String(localized: "composer_record")
+        )
+        .accessibilityHint("composer_voice_hint")
+        .accessibilityIdentifier("composer.voice")
+        .disabled(
+            !sendEnabled
+                || voiceCapturePhase == .finishing
+                || voiceInteractionMode == .flow
+        )
+    }
+
+    private var flowModeButton: some View {
+        Button(action: onFlowModeTap) {
+            LXIcon(
+                name: .audioWave,
+                size: 18,
+                color: voiceInteractionMode == .flow ? t.accent : t.text2,
+                stroke: 1.8
+            )
+            .frame(width: 40, height: 40)
+            .background(
+                voiceInteractionMode == .flow
+                    ? t.accent.tint(0.15)
+                    : .clear,
+                in: Circle()
+            )
+        }
+        .buttonStyle(ComposerActionButtonStyle())
+        .accessibilityLabel("composer_flow_mode")
+        .accessibilityIdentifier("composer.flow")
+        .disabled(!sendEnabled || voiceInteractionMode != nil)
+    }
+
     private var isDictationListening: Bool {
         voiceInteractionMode == .dictation && voiceCapturePhase == .listening
     }
@@ -506,77 +476,142 @@ struct Composer: View {
             : ModelDisplay.shortName(for: activeModelId)
     }
 
-    /// The chip's dot color: derived from the active engine id when driving.
-    private var chipColor: Color {
-        if !providerConfigured { return t.danger }
-        return availableModels.isEmpty ? t.text4 : ModelDisplay.color(for: activeModelId)
+    private var attachmentButton: some View {
+        Button(action: onCameraClick) {
+            LXIcon(name: .plus, size: 18, color: t.text3, stroke: 1.8)
+                .frame(width: 40, height: 40)
+        }
+        .buttonStyle(ComposerActionButtonStyle())
+        .accessibilityLabel("composer_add_attachment")
+    }
+
+    @ViewBuilder
+    private var keyboardDismissButton: some View {
+        if inputFocused {
+            Button {
+                inputFocused = false
+            } label: {
+                Image(systemName: "keyboard.chevron.compact.down")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(t.text2)
+                    .frame(width: 40, height: 40)
+            }
+            .buttonStyle(ComposerActionButtonStyle())
+            .accessibilityLabel("composer_done")
+            .accessibilityIdentifier("composer.keyboard.dismiss")
+        }
+    }
+
+    @ViewBuilder
+    private var turnActions: some View {
+        let hasDraft = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        HStack(spacing: 0) {
+            ordinaryMicButton
+            if isCancelling || slashCommandPending {
+                ProgressView()
+                    .tint(t.text3)
+                    .frame(width: 40, height: 40)
+                    .accessibilityLabel(isCancelling ? "composer_stopping" : "slash_command_running")
+            } else if hasDraft {
+                // Desktop gives a drafted message precedence over Stop so
+                // users can queue text while a turn is running.
+                Button(action: send) {
+                    ComposerTurnActionIcon(
+                        systemName: "arrow.up",
+                        symbolSize: 15,
+                        background: t.accent
+                    )
+                }
+                .buttonStyle(ComposerActionButtonStyle())
+                .accessibilityLabel(streaming ? "composer_queue" : "composer_send")
+                .accessibilityIdentifier("composer.send")
+                .disabled(!canSubmitDraft)
+                .opacity(canSubmitDraft ? 1 : 0.45)
+            } else if streaming || showDiscardRecovery {
+                Button(action: onStop) {
+                    ComposerTurnActionIcon(
+                        systemName: "stop.fill",
+                        symbolSize: 11,
+                        background: t.danger
+                    )
+                }
+                .buttonStyle(ComposerActionButtonStyle())
+                .accessibilityLabel(showDiscardRecovery ? "composer_discard_recovery" : "composer_stop")
+                .accessibilityIdentifier(showDiscardRecovery ? "composer.discard-recovery" : "composer.stop")
+                .disabled(showDiscardRecovery && !sendEnabled)
+            } else {
+                flowModeButton
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .opacity(sendEnabled ? 1 : 0.45)
     }
 
     private var modelChip: some View {
-        Button { modelOpen = true } label: {
+        Menu {
+            Button("Choose model") { modelOpen = true }
+                .accessibilityIdentifier("composer.model.choose")
+            Button("Effort: \(reasoningLabel)") { controlsOpen = true }
+                .accessibilityIdentifier("composer.reasoning.choose")
+            Toggle("Fast Mode", isOn: Binding(
+                get: { fastModeEnabled },
+                set: onSetFastMode
+            ))
+            .disabled(fastModePending || (!supportsFastMode && !fastModeEnabled))
+            if !supportsFastMode {
+                Text("Fast Mode is unavailable for this model")
+            }
+        } label: {
             HStack(spacing: 5) {
-                Circle().fill(chipColor).frame(width: 6, height: 6)
-                Text(chipLabel).font(.scaledSystem(12, weight: .medium, relativeTo: .caption))
-                    .lineLimit(1)
+                if fastModePending {
+                    ProgressView().controlSize(.mini)
+                } else if fastModeEnabled {
+                    Image(systemName: "bolt.fill")
+                        .accessibilityLabel("Fast Mode On")
+                        .accessibilityIdentifier("composer.fast-mode")
+                }
+                Text(chipLabel)
+                    .foregroundStyle(t.text)
+                Text(reasoningLabel)
+                    .foregroundStyle(t.text3)
                 LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 2)
             }
-            .foregroundColor(t.text2)
-            .padding(.horizontal, 9)
-            .frame(minHeight: 40)
-            .background(modelOpen ? t.surfaceHover : .clear)
-            .clipShape(.rect(cornerRadius: 10))
+            .font(.scaledSystem(12, weight: .medium, relativeTo: .caption))
+            .padding(.horizontal, 6)
+            .frame(minHeight: 44)
         }
         .buttonStyle(ComposerActionButtonStyle())
-        .disabled(availableModels.isEmpty)
-        .accessibilityLabel("composer_select_model")
-        .accessibilityValue(chipLabel)
+        .accessibilityLabel("Model and effort")
+        .accessibilityValue("\(chipLabel), \(reasoningLabel)" + (fastModeEnabled ? ", Fast Mode On" : ""))
         .accessibilityIdentifier("composer.model")
     }
 
-    private var controlsChip: some View {
+    private var permissionChip: some View {
         Button { controlsOpen = true } label: {
-            HStack(spacing: 4) {
-                Text(controlsSummary)
-            }
-            .font(.scaledSystem(11.5, weight: .medium, relativeTo: .caption))
-            .lineLimit(1)
-            .foregroundStyle(t.text2)
-            .padding(.horizontal, 8)
-            .frame(minHeight: 40)
-            .background(controlsOpen ? t.surfaceHover : .clear)
-            .clipShape(.rect(cornerRadius: 10))
+            Label(permissionLabel, systemImage: effectivePermissionMode == "bypassPermissions"
+                  ? "exclamationmark.shield" : "checkmark.shield")
+                .font(.scaledSystem(12, weight: .medium, relativeTo: .caption))
+                .foregroundStyle(effectivePermissionMode == "bypassPermissions" ? .orange : t.text2)
+                .padding(.horizontal, 4)
+                .frame(minHeight: 44)
         }
         .buttonStyle(ComposerActionButtonStyle())
         .disabled(controlsPending)
-        .accessibilityLabel("Effort and permission mode")
-        .accessibilityValue("\(reasoningSelection), \(effectivePermissionMode)")
+        .accessibilityLabel("Permission mode")
+        .accessibilityValue(permissionLabel)
         .accessibilityIdentifier("composer.controls")
     }
 
-    // Keep the actual selections visible, including on narrow phones. Native
-    // fitting moves controls to a second row before any labels are truncated.
     private var configurationSummary: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if dynamicTypeSize.isAccessibilitySize {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 0) {
+                permissionChip
+                Spacer(minLength: 8)
                 modelChip
-                controlsChip
-                fastModeChip
-            } else {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 0) {
-                        modelChip
-                        controlsChip
-                        fastModeChip
-                    }
-                    VStack(alignment: .leading, spacing: 0) {
-                        modelChip
-                        HStack(spacing: 0) {
-                            controlsChip
-                            Spacer(minLength: 0)
-                            fastModeChip
-                        }
-                    }
-                }
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                permissionChip
+                modelChip
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -586,43 +621,20 @@ struct Composer: View {
         availableModelDetails[activeModelId]?.supportsFastMode == true
     }
 
-    private var fastModeChip: some View {
-        Menu {
-            if !supportsFastMode {
-                Text("Fast Mode is unavailable for this model")
-            }
-            Toggle("Fast Mode", isOn: Binding(
-                get: { fastModeEnabled },
-                set: onSetFastMode
-            ))
-            .disabled(!supportsFastMode && !fastModeEnabled)
-        } label: {
-            HStack(spacing: 4) {
-                if fastModePending {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: fastModeEnabled ? "bolt.fill" : "bolt")
-                }
-                Text(fastModeEnabled ? "Fast On" : (supportsFastMode ? "Fast Off" : "Fast N/A"))
-            }
-            .font(.scaledSystem(11.5, weight: .medium, relativeTo: .caption))
-            .foregroundStyle(fastModeEnabled ? t.accent : t.text2)
-            .padding(.horizontal, 8)
-            .frame(minHeight: 40)
-        }
-        .buttonStyle(ComposerActionButtonStyle())
-        .disabled(fastModePending)
-        .accessibilityLabel("Fast Mode")
-        .accessibilityValue(fastModeEnabled ? "On" : "Off")
-        .accessibilityIdentifier("composer.fast-mode")
+    private var reasoningLabel: String {
+        reasoningSelection == "automatic" ? "Auto" : reasoningSelection.capitalized
     }
 
-    private var controlsSummary: String {
-        let reasoning = reasoningSelection == "automatic" ? "Auto" : reasoningSelection.capitalized
-        let permission = effectivePermissionMode != permissionMode
-            ? "\(permissionMode) → \(effectivePermissionMode)"
-            : permissionMode
-        return "Effort: \(reasoning) · \(permission)"
+    private var permissionLabel: String {
+        switch effectivePermissionMode {
+        case "bypassPermissions": return "Full access"
+        case "auto": return "Auto"
+        case "default": return "Default"
+        case "acceptEdits": return "Accept edits"
+        case "plan": return "Plan"
+        case "dontAsk": return "Don't ask"
+        default: return effectivePermissionMode
+        }
     }
 
     private var slashSuggestions: [SlashCommandSuggestion] {
@@ -739,22 +751,35 @@ private struct AttachmentThumb: View {
     var body: some View {
         HStack(spacing: 8) {
             #if canImport(UIKit)
-                Image(uiImage: attachment.image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 48, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                ZStack(alignment: .topTrailing) {
+                    Image(uiImage: attachment.image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 74, height: 62)
+                        .clipShape(.rect(cornerRadius: 10))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(t.borderStrong.opacity(0.55), lineWidth: 0.5)
+                        }
+                    Button(action: onRemove) {
+                        LXIcon(name: .x, size: 11, color: .white, stroke: 2)
+                            .frame(width: 24, height: 24)
+                            .background(.black.opacity(0.62), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(3)
+                    .accessibilityLabel("composer_remove_attachment")
+                }
             #endif
-            Text("\(attachment.width)×\(attachment.height)")
-                .font(.system(size: 12))
-                .foregroundColor(t.text3)
-            Spacer()
-            Button(action: onRemove) {
-                LXIcon(name: .x, size: 14, color: t.text3, stroke: 2)
-                    .frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.mediaType == "image/jpeg" ? "Image" : attachment.mediaType)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(t.text2)
+                Text("\(attachment.width)×\(attachment.height)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(t.text3)
             }
-            .buttonStyle(ComposerActionButtonStyle())
-            .accessibilityLabel("composer_remove_attachment")
+            Spacer()
         }
         .padding(.horizontal, 4).padding(.vertical, 2)
     }

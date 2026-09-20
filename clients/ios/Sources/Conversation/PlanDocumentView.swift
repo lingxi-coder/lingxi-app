@@ -114,7 +114,7 @@ struct PlanDocumentCard: View {
         .accessibilityIdentifier("chat.plan-document.preview")
         .accessibilityHint("plan_document_open")
         .onChange(of: document) { old, new in _ = openPlanDocument?(new, old) }
-        .fullScreenCover(isPresented: $isPresented) {
+        .sheet(isPresented: $isPresented) {
             NavigationStack {
                 PlanDocumentDetail(document: document)
                     .toolbar {
@@ -123,6 +123,10 @@ struct PlanDocumentCard: View {
                         }
                     }
             }
+            .environment(\.theme, theme)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+            .accessibilityIdentifier("conversation.plan-detail-sheet")
         }
     }
 }

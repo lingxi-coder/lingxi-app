@@ -185,37 +185,39 @@ final class LingxiCodeUITests: XCTestCase {
         let opus = providerRow("anthropic/claude-opus-4-8")
         XCTAssertTrue(opus.waitForExistence(timeout: 5), app.debugDescription)
         opus.tap()
-        for identifier in ["composer.model", "composer.controls", "composer.fast-mode"] {
-            let control = app.buttons[identifier]
-            XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(control.isHittable, app.debugDescription)
-        }
-        let fastMode = app.buttons["composer.fast-mode"]
-        XCTAssertEqual(fastMode.value as? String, "Off")
-        fastMode.tap()
-        let toggle = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@", "Fast Mode", "composer.fast-mode")).firstMatch
-        XCTAssertTrue(toggle.waitForExistence(timeout: 3), app.debugDescription)
-        toggle.tap()
-        // Native menus dismiss after committing the toggle.
-        XCTAssertTrue(NSPredicate(format: "value == %@", "On").evaluate(with: fastMode)
-            || XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-                predicate: NSPredicate(format: "value == %@", "On"), object: fastMode
-            )], timeout: 5) == .completed, app.debugDescription)
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Composer visible configuration"
-        screenshot.lifetime = .keepAlways
-        add(screenshot)
-        app.textFields["composer.input"].tap()
-        for identifier in ["composer.model", "composer.controls", "composer.fast-mode"] {
+        let model = app.buttons["composer.model"]
+        for identifier in ["composer.model", "composer.controls"] {
             XCTAssertTrue(app.buttons[identifier].isHittable, app.debugDescription)
         }
-        app.buttons["composer.keyboard.dismiss"].tap()
-        fastMode.tap()
+        XCTAssertFalse(String(describing: model.value).contains("Fast Mode"))
+        XCTAssertFalse(app.staticTexts["Fast Off"].exists)
+        XCTAssertFalse(app.staticTexts["Fast N/A"].exists)
+        model.tap()
+        let toggle = app.buttons["Fast Mode"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 3), app.debugDescription)
         toggle.tap()
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value == %@", "Off"), object: fastMode
+            predicate: NSPredicate(format: "value CONTAINS %@", "Fast Mode On"), object: model
         )], timeout: 5), .completed, app.debugDescription)
+        let enabled = XCTAttachment(screenshot: app.screenshot())
+        enabled.name = "Composer Fast enabled"
+        enabled.lifetime = .keepAlways
+        add(enabled)
+        app.textFields["composer.input"].tap()
+        for identifier in ["composer.model", "composer.controls"] {
+            XCTAssertTrue(app.buttons[identifier].isHittable, app.debugDescription)
+        }
+        app.buttons["composer.keyboard.dismiss"].tap()
+        model.tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3), app.debugDescription)
+        toggle.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "NOT (value CONTAINS %@)", "Fast Mode"), object: model
+        )], timeout: 5), .completed, app.debugDescription)
+        let disabled = XCTAttachment(screenshot: app.screenshot())
+        disabled.name = "Composer Fast hidden"
+        disabled.lifetime = .keepAlways
+        add(disabled)
     }
 
     func testComposerSendTransitionsToMatchingStopControl() {
@@ -242,6 +244,9 @@ final class LingxiCodeUITests: XCTestCase {
         let stop = app.buttons["composer.stop"]
         XCTAssertTrue(stop.waitForExistence(timeout: 1), app.debugDescription)
         XCTAssertEqual(stop.frame.width, stop.frame.height, accuracy: 1)
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.llm-status"].exists, app.debugDescription)
+        let thinkingRows = app.descendants(matching: .any).matching(identifier: "conversation.timeline.thinking")
+        XCTAssertEqual(thinkingRows.count, 1, app.debugDescription)
 
         let stopScreenshot = XCTAttachment(screenshot: app.screenshot())
         stopScreenshot.name = "Composer-Stop-Action"
@@ -420,9 +425,17 @@ final class LingxiCodeUITests: XCTestCase {
         app.launchEnvironment["LINGXI_UI_TEST_MULTI_AGENT"] = "1"
         app.launch()
 
-        let childRow = app.buttons["conversation.agent-row.ui-child"]
+        let menu = app.buttons["conversation.summary-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 8), app.debugDescription)
+        menu.tap()
+        let agents = app.buttons["conversation.summary.category.agents"]
+        XCTAssertTrue(agents.waitForExistence(timeout: 5), app.debugDescription)
+        agents.tap()
+        let childRow = app.buttons["conversation.summary.agent.ui-child"]
         XCTAssertTrue(childRow.waitForExistence(timeout: 5), app.debugDescription)
         childRow.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.agent-detail-sheet"].waitForExistence(timeout: 8), app.debugDescription)
 
         let toggle = app.buttons["conversation.message.user.toggle"]
         XCTAssertTrue(
@@ -465,22 +478,35 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertEqual(bubble.frame.height, collapsedHeight, accuracy: 1.0)
     }
 
-    func testMultiAgentDockSwitchesTranscriptAndRestoresMain() {
+    func testMultiAgentDetailSheetDismissesBackToMain() {
         app.terminate()
         app.launchEnvironment["LINGXI_UI_TEST_MULTI_AGENT"] = "1"
         app.launch()
 
-        let childRow = app.buttons["conversation.agent-row.ui-child"]
-        XCTAssertTrue(childRow.waitForExistence(timeout: 5), app.debugDescription)
-        childRow.tap()
+        // Child execution is surfaced inline in the transcript while the main
+        // turn is active; it no longer relies on the removed bottom status dock.
+        let inlineChild = app.buttons["conversation.agent-row.ui-child"]
+        XCTAssertTrue(inlineChild.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertEqual(
+            inlineChild.label,
+            "UI Child · Running · Child agent checking workspace",
+            app.debugDescription
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.llm-status"].exists, app.debugDescription)
+        let inlineScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        inlineScreenshot.name = "Inline child runtime row"
+        inlineScreenshot.lifetime = .keepAlways
+        add(inlineScreenshot)
 
+        inlineChild.tap()
+        let sheet = app.descendants(matching: .any)["conversation.agent-detail-sheet"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(app.staticTexts["Child agent completed the requested check."].waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.agent-read-only"].exists, app.debugDescription)
-        XCTAssertFalse(app.textFields["composer.input"].exists, app.debugDescription)
+        XCTAssertFalse(sheet.textFields["composer.input"].exists, app.debugDescription)
+        app.buttons["conversation.agent-detail.close"].tap()
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 5), app.debugDescription)
 
-        let mainRow = app.buttons["conversation.agent-row.main"]
-        XCTAssertTrue(mainRow.waitForExistence(timeout: 5), app.debugDescription)
-        mainRow.tap()
         XCTAssertTrue(app.staticTexts["Hello! I'm ready to help with your software engineering tasks."].waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(app.textFields["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
@@ -825,43 +851,86 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["drawer.tab.cron"].exists, app.debugDescription)
     }
 
-    func testChatToolbarIconsShareSizeAndSpacing() {
-        let sessionDetails = app.buttons["conversation.session-details"]
-        let themeToggle = app.buttons["conversation.theme-toggle"]
-        let newChat = app.buttons["conversation.new-chat"]
+    func testChatSummaryMenuContainsFormerToolbarActions() {
+        let menu = app.buttons["conversation.summary-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertGreaterThanOrEqual(menu.frame.width, 28)
+        XCTAssertGreaterThanOrEqual(menu.frame.height, 32)
+        XCTAssertFalse(app.buttons["conversation.session-details"].exists, app.debugDescription)
+        XCTAssertFalse(app.buttons["conversation.theme-toggle"].exists, app.debugDescription)
+        XCTAssertFalse(app.buttons["conversation.new-chat"].exists, app.debugDescription)
 
-        XCTAssertTrue(sessionDetails.waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertTrue(themeToggle.waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertTrue(newChat.waitForExistence(timeout: 8), app.debugDescription)
-        XCTAssertGreaterThanOrEqual(themeToggle.frame.width, 28)
-        XCTAssertGreaterThanOrEqual(themeToggle.frame.height, 32)
-        XCTAssertEqual(sessionDetails.frame.width, themeToggle.frame.width, accuracy: 1)
-        XCTAssertEqual(themeToggle.frame.width, newChat.frame.width, accuracy: 1)
-        XCTAssertEqual(sessionDetails.frame.height, themeToggle.frame.height, accuracy: 1)
-        XCTAssertEqual(themeToggle.frame.height, newChat.frame.height, accuracy: 1)
-        XCTAssertEqual(
-            themeToggle.frame.midX - sessionDetails.frame.midX,
-            newChat.frame.midX - themeToggle.frame.midX,
-            accuracy: 1.5
-        )
+        menu.tap()
+        XCTAssertTrue(app.buttons["conversation.session-details"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["conversation.theme-toggle"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["conversation.new-chat"].exists, app.debugDescription)
+    }
+
+    func testSummaryMenuOpensBottomSheetDismissesAndPreservesDraft() {
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_MULTI_AGENT"] = "1"
+        app.launch()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
+
+        let input = app.textFields["composer.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), app.debugDescription)
+        input.tap()
+        input.typeText("summary draft")
+        app.buttons["composer.keyboard.dismiss"].tap()
+
+        let chatScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        chatScreenshot.name = "Summary menu chat with draft"
+        chatScreenshot.lifetime = .keepAlways
+        add(chatScreenshot)
+
+        let menu = app.buttons["conversation.summary-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5), app.debugDescription)
+        menu.tap()
+        let menuScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        menuScreenshot.name = "Summary menu"
+        menuScreenshot.lifetime = .keepAlways
+        add(menuScreenshot)
+
+        let agents = app.buttons["conversation.summary.category.agents"]
+        XCTAssertTrue(agents.waitForExistence(timeout: 5), app.debugDescription)
+        agents.tap()
+        let sheet = app.descendants(matching: .any)["conversation.summary-sheet.agents"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 8), app.debugDescription)
+        let sheetScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        sheetScreenshot.name = "Summary bottom sheet"
+        sheetScreenshot.lifetime = .keepAlways
+        add(sheetScreenshot)
+
+        let close = app.buttons["关闭"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5), app.debugDescription)
+        close.tap()
+        XCTAssertTrue(waitUntilGone(sheet, timeout: 8), app.debugDescription)
+        XCTAssertTrue(chatSurface.exists, app.debugDescription)
+        XCTAssertEqual(input.value as? String, "summary draft", app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["conversation.agent-status"].exists, app.debugDescription)
     }
 
     func testSessionDetailsOpensFromChatHeader() {
+        app.buttons["conversation.summary-menu"].tap()
         let details = app.buttons["conversation.session-details"]
         XCTAssertTrue(details.waitForExistence(timeout: 8), app.debugDescription)
         details.tap()
 
+        let sheet = app.descendants(matching: .any)["conversation.session-details-sheet"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["session-details.root"].waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertTrue(app.staticTexts["会话详情"].exists)
         XCTAssertTrue(app.staticTexts["Agents"].exists)
         XCTAssertTrue(app.staticTexts["Tasks"].exists)
         XCTAssertTrue(app.staticTexts["Plan & progress"].exists)
 
-        app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
+        app.buttons["conversation.session-details.close"].tap()
+        XCTAssertTrue(waitUntilGone(sheet, timeout: 8), app.debugDescription)
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 8), app.debugDescription)
     }
 
     func testThemeToggleUsesCompleteSystemGlyphAndUpdatesItsAction() {
+        app.buttons["conversation.summary-menu"].tap()
         let themeToggle = app.buttons["conversation.theme-toggle"]
         XCTAssertTrue(themeToggle.waitForExistence(timeout: 8), app.debugDescription)
         XCTAssertGreaterThanOrEqual(themeToggle.frame.width, 28)
@@ -875,9 +944,13 @@ final class LingxiCodeUITests: XCTestCase {
 
         themeToggle.tap()
         let expectedLabel = initialLabel == "切换到深色主题" ? "切换到浅色主题" : "切换到深色主题"
+        XCTAssertTrue(waitUntilGone(themeToggle, timeout: 3), app.debugDescription)
+        app.buttons["conversation.summary-menu"].tap()
+        let updatedToggle = app.buttons["conversation.theme-toggle"]
+        XCTAssertTrue(updatedToggle.waitForExistence(timeout: 5), app.debugDescription)
         let labelChanged = expectation(
             for: NSPredicate(format: "label == %@", expectedLabel),
-            evaluatedWith: themeToggle
+            evaluatedWith: updatedToggle
         )
         XCTAssertEqual(XCTWaiter.wait(for: [labelChanged], timeout: 5), .completed, app.debugDescription)
     }
@@ -1108,6 +1181,9 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(model.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(model, timeout: 3), app.debugDescription)
         model.tap()
+        let choose = app.buttons["composer.model.choose"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 3), app.debugDescription)
+        choose.tap()
     }
 
     private func providerRow(_ reference: String) -> XCUIElement {

@@ -149,6 +149,21 @@ pub enum LlmError {
         /// Stream interruption detail safe for caller-facing diagnostics.
         message: String,
     },
+    /// Model-generated tool arguments were not valid JSON. Never a transport failure.
+    #[error("malformed tool input for {tool_name} on block {block_index} ({input_bytes} bytes): {reason}")]
+    MalformedToolInput {
+        /// Name of the tool whose arguments failed parsing.
+        tool_name: String,
+        /// Stream content block index.
+        block_index: u32,
+        /// Parser diagnosis without the generated input.
+        reason: String,
+        /// Byte length of the malformed arguments.
+        input_bytes: usize,
+        /// Whether another tool invocation started in this response, or the
+        /// stream ended before its absence could be established.
+        has_other_tool_calls: bool,
+    },
     /// Pricing was required but unavailable.
     #[error("cost unavailable: {message}")]
     CostUnavailable {

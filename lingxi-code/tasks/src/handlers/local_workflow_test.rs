@@ -2489,6 +2489,64 @@ async fn parallel_agents_round_trip_through_spawner_in_order() {
 }
 
 #[test]
+fn make_request_maps_structured_output_parse_retries() {
+    assert_eq!(
+        make_request("designer", "p", "{}").structured_output_parse_retries,
+        0
+    );
+    for retries in 0..=2 {
+        let opts = serde_json::json!({"structuredOutputParseRetries": retries});
+        assert_eq!(structured_output_parse_retries(&opts), Ok(retries));
+        assert_eq!(
+            make_request("designer", "p", &opts.to_string()).structured_output_parse_retries,
+            retries
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_structured_output_parse_retries_reject_before_spawn() {
+    for invalid in [
+        serde_json::json!(-1),
+        serde_json::json!(3),
+        serde_json::json!(1.5),
+        serde_json::json!("2"),
+        serde_json::json!(null),
+        serde_json::json!(true),
+    ] {
+        let spawner = Arc::new(EchoSpawner::default());
+        let script = format!("await agent('p', {{ structuredOutputParseRetries: {invalid} }});");
+        let error = run_workflow_script(
+            &script,
+            DEFAULT_WORKFLOW_SUBAGENT,
+            "",
+            spawner.clone(),
+            Arc::new(MockInvoker),
+            Arc::new(MockBudget),
+            None,
+            None,
+            None,
+            None,
+            0,
+            NestedConfig::default(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AnalyticsBus::new()),
+            None,
+            None,
+        )
+        .await
+        .expect_err("invalid retry count must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("expected an integer from 0 to 2"),
+            "{error}"
+        );
+        assert!(spawner.seen_reqs.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn make_request_maps_effort_opt() {
     // `agent({effort})` — a level string or an integer — is carried raw.
     assert_eq!(

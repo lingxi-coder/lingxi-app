@@ -730,9 +730,9 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             // Generic `Error` fallthrough in `Flp` → "unknown".
             LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => (Some("invalid_request"), None),
-            LlmError::CostUnavailable { .. } | LlmError::UnsupportedCapability { .. } => {
-                (Some("unknown"), None)
-            }
+            LlmError::MalformedToolInput { .. }
+            | LlmError::CostUnavailable { .. }
+            | LlmError::UnsupportedCapability { .. } => (Some("unknown"), None),
         },
         // Generic-Error fallthrough (`Flp`: `if(e instanceof $o)→"unknown"`;
         // generic Error → "unknown"). These orchestrator-internal variants never

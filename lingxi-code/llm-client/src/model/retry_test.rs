@@ -936,6 +936,13 @@ mod next_step_tests {
             LlmError::StreamInterrupted {
                 message: "eof".into(),
             },
+            LlmError::MalformedToolInput {
+                tool_name: "StructuredOutput".into(),
+                block_index: 0,
+                reason: "EOF while parsing an object".into(),
+                input_bytes: 1,
+                has_other_tool_calls: false,
+            },
             LlmError::CostUnavailable {
                 message: "no price".into(),
             },

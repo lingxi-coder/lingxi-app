@@ -52,6 +52,19 @@ fn design_subtree() -> serde_json::Value {
     serde_json::json!({"design": authoring_spec()["design"].clone()})
 }
 
+fn design_schema() -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(
+            workflow_dir()
+                .parent()
+                .unwrap()
+                .join("schemas/design-spec.schema.json"),
+        )
+        .expect("read canonical design schema"),
+    )
+    .expect("parse canonical design schema")
+}
+
 fn workflow_schemas() -> serde_json::Value {
     let path = workflow_dir()
         .parent()
@@ -96,6 +109,7 @@ fn workflow_schemas() -> serde_json::Value {
         )
         .expect("parse checked-in MCP proposal schema"),
     );
+    schemas.insert("design_spec".into(), design_schema());
     serde_json::Value::Object(schemas)
 }
 
@@ -539,10 +553,16 @@ fn first_pass_agent_call_counts_are_exercised_for_each_quality_level() {
                             .get("$defs")
                             .and_then(serde_json::Value::as_object)
                             .expect("role schema must retain the complete workflow schema defs");
-                        assert!(
-                            defs.contains_key("qa_candidate") && defs.contains_key("mcp_promoter"),
-                            "agent call {label} must use the checked-in full role schema, not a permissive object witness"
-                        );
+                        if label == "designer" {
+                            assert_eq!(options_value["schema"], design_schema(), "designer must receive the closed design contract");
+                            assert_eq!(options_value["structuredOutputParseRetries"], 2);
+                        } else {
+                            assert!(options_value.get("structuredOutputParseRetries").is_none(), "only designers opt into parse recovery");
+                            assert!(
+                                defs.contains_key("qa_candidate") && defs.contains_key("mcp_promoter"),
+                                "agent call {label} must use the checked-in full role schema, not a permissive object witness"
+                            );
+                        }
                         calls_for_run
                             .lock()
                             .expect("call capture")
@@ -645,11 +665,19 @@ fn actual_role_schemas_drive_a_host_shaped_successful_create_chain() {
                     let options_value: serde_json::Value =
                         serde_json::from_str(options).expect("workflow agent options JSON");
                     let schema = options_value.get("schema").expect("agent schema");
-                    assert!(
-                        schema["$defs"]["qa_candidate"].is_object()
-                            && schema["$defs"]["mcp_promoter"].is_object(),
-                        "{label} must receive the checked-in complete role schema"
-                    );
+                    if label == "designer" {
+                        assert_eq!(
+                            schema,
+                            &design_schema(),
+                            "designer must receive the closed design contract"
+                        );
+                    } else {
+                        assert!(
+                            schema["$defs"]["qa_candidate"].is_object()
+                                && schema["$defs"]["mcp_promoter"].is_object(),
+                            "{label} must receive the checked-in complete role schema"
+                        );
+                    }
                     calls_for_run.lock().expect("call log").push(label.clone());
                     canned_stage_reply(&label).unwrap_or_else(|| {
                         host_shaped_passing_qa_reply(&label, "wf_regression", "balanced")
@@ -1008,6 +1036,9 @@ fn host_ui_impact_flag_is_the_only_update_design_trigger() {
                     let label = stage_label(options);
                     calls_for_run.lock().expect("call log").push(label.clone());
                     if label == "designer" {
+                        let options_value: serde_json::Value = serde_json::from_str(options).unwrap();
+                        assert_eq!(options_value["schema"], design_schema());
+                        assert_eq!(options_value["structuredOutputParseRetries"], 2);
                         assert!(prompt.contains("Resolve impact"), "UI-impact update lost design instruction: {prompt}");
                         design_subtree().to_string()
                     } else if label == "builder" {

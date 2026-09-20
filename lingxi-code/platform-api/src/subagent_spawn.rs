@@ -81,6 +81,10 @@ pub enum StructuredOutputMode {
     WhenDone,
 }
 
+fn is_zero_parse_retries(value: &u32) -> bool {
+    *value == 0
+}
+
 /// Locked subagent input passed to [`SubagentSpawner::spawn`].
 ///
 /// Mirrors `AgentToolInput` in `lingxi-tools::builtin::agent` byte-for-byte
@@ -227,6 +231,9 @@ pub struct SubagentSpawnRequest {
     /// `StructuredOutput` on turn 1.
     #[serde(default)]
     pub structured_output_mode: StructuredOutputMode,
+    /// Opt-in malformed StructuredOutput argument recovery; supported range is 0..=2.
+    #[serde(default, skip_serializing_if = "is_zero_parse_retries")]
+    pub structured_output_parse_retries: u32,
     /// Per-spawn thinking-effort override (claude-code workflow `agent({effort})`
     /// — `me={...ie,effort:ae}`): a level string (`"low"`..`"max"`) or an integer
     /// budget. When set, the spawner overrides the resolved agent definition's
@@ -1192,6 +1199,22 @@ pub trait SubagentSpawner: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn structured_output_parse_retries_defaults_and_round_trips() {
+        let request = super::SubagentSpawnRequest::default();
+        let value = serde_json::to_value(&request).unwrap();
+        assert!(value.get("structured_output_parse_retries").is_none());
+        let restored: super::SubagentSpawnRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.structured_output_parse_retries, 0);
+        let enabled = super::SubagentSpawnRequest {
+            structured_output_parse_retries: 2,
+            ..request
+        };
+        let restored: super::SubagentSpawnRequest =
+            serde_json::from_value(serde_json::to_value(enabled).unwrap()).unwrap();
+        assert_eq!(restored.structured_output_parse_retries, 2);
+    }
+
     #[test]
     fn model_attempt_authority_is_not_restored_from_serialized_spawn() {
         // A spawn request round-trips through task replay and the wire, so a

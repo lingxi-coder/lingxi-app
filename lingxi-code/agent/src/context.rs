@@ -209,6 +209,8 @@ pub struct SubagentContext {
     /// [`platform_api::subagent_spawn::SubagentSpawnRequest::structured_output_mode`].
     /// Ignored when [`Self::schema`] is `None`.
     pub structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode,
+    /// Maximum opt-in malformed StructuredOutput retries across this run (0..=2).
+    pub structured_output_parse_retries: u32,
     /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
     /// `Some`, the multi-turn loop consults it once per turn and stops with a
     /// budget-exhausted terminal when the cumulative cost is over the limit.

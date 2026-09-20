@@ -1503,6 +1503,7 @@ fn spawn_request(
         // Read/Grep/Glob/WebFetch tools instead of answering blind on turn 1
         // (F002).
         structured_output_mode: StructuredOutputMode::WhenDone,
+        structured_output_parse_retries: 0,
         max_turns_override: Some(max_turns),
         max_output_tokens_per_turn: Some(max_out),
         // Per-turn input cap derived from the reserved-token budget basis

@@ -91,3 +91,37 @@ fn local_app_union_schemas_preserve_success_and_failure_constraints() {
         }
     }
 }
+
+#[test]
+fn canonical_designer_schema_rejects_report_envelopes_and_nested_tokens() {
+    let document: Value = serde_json::from_str(include_str!(
+        "../../plugins/lingxi-local-app/schemas/design-spec.schema.json"
+    ))
+    .unwrap();
+    let authoring: Value = serde_json::from_str(include_str!(
+        "../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
+    ))
+    .unwrap();
+    let valid = json!({"design": authoring["design"]});
+    let mut schemas = boon::Schemas::new();
+    let mut compiler = boon::Compiler::new();
+    let url = "mem://designer-contract";
+    compiler.add_resource(url, document).unwrap();
+    let schema = compiler.compile(url, &mut schemas).unwrap();
+    assert!(schemas.validate(&valid, schema).is_ok());
+    for invalid in [
+        json!({"design": {"identity": {"app_id": "1234"}, "confirmed_passthrough": {}, "information_architecture": {}}}),
+        {
+            let mut value = valid.clone();
+            value["design"]["identity"] = json!({"app_id": "1234"});
+            value
+        },
+        {
+            let mut value = valid;
+            value["design"]["tokens"] = json!({"spacing": {"small": "8px"}});
+            value
+        },
+    ] {
+        assert!(schemas.validate(&invalid, schema).is_err(), "{invalid}");
+    }
+}

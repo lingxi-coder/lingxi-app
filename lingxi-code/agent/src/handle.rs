@@ -1846,6 +1846,7 @@ impl PoolSubagentSpawner {
             schema: None,
             // Overwritten by `build_subagent_context` from `request.structured_output_mode`.
             structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
+            structured_output_parse_retries: 0,
             budget: None,
             // Filled by `spawn` from the set-once `hook_executor` / `skill_loader`
             // cells (None when unfilled — tests / minimal builds). `hook_session_id`
@@ -2362,6 +2363,7 @@ impl PoolSubagentSpawner {
                 });
         ctx.schema = request.schema.clone();
         ctx.structured_output_mode = request.structured_output_mode;
+        ctx.structured_output_parse_retries = request.structured_output_parse_retries;
         // Preserve the spawn's human identity on every dispatched tool call.
         // Claude's per-agent async-local context exposes `getAgentName()` and
         // `getTeammateContext()?.teamName`; SendMessage and the V2 task tools
@@ -4218,6 +4220,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -7356,6 +7359,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -7422,6 +7426,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -8248,6 +8253,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -8377,6 +8383,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -8498,6 +8505,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -8577,6 +8585,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -8646,6 +8655,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -8697,6 +8707,34 @@ mod tests {
         assert!(!one_shot.is_async);
     }
 
+    #[tokio::test]
+    async fn build_subagent_context_copies_structured_output_parse_retries() {
+        let spawner = PoolSubagentSpawner::new(Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            4,
+        )));
+        let request = SubagentSpawnRequest {
+            subagent_type: "general-purpose".into(),
+            prompt: "design".into(),
+            schema: Some("{}".into()),
+            structured_output_parse_retries: 2,
+            ..Default::default()
+        };
+        let context = spawner
+            .build_subagent_context(
+                &request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+                false,
+            )
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(context.structured_output_parse_retries, 2);
+    }
+
     /// G011: `SubagentSpawnRequest::correlation_id` (Fusion's `{run_id}:p{index}`
     /// stamp, `fusion::panel::spawn_request`) must reach the child's
     /// `SubagentContext` — otherwise it is a field that is set at the one
@@ -8730,6 +8768,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -9033,6 +9072,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -9145,6 +9185,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -9243,6 +9284,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,
@@ -9854,6 +9896,7 @@ mod tests {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,

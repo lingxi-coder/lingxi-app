@@ -2225,6 +2225,7 @@ impl ApiService {
             LlmError::TlsCert { .. } => "ssl_cert_error",
             // "malformed_stream" — api-client `MalformedStream(_) => "malformed_stream"` (:1155)
             LlmError::StreamInterrupted { .. } => "malformed_stream",
+            LlmError::MalformedToolInput { .. } => "malformed_tool_input",
             // "overloaded" — api-client `Overloaded { .. } => "overloaded"` (:1149)
             LlmError::Overloaded { .. } => "overloaded",
             // "rate_limited" — api-client `RateLimited { .. } => "rate_limited"` (:1148)
@@ -2757,6 +2758,7 @@ impl ApiService {
             | LlmError::TransportTimeout { .. }
             | LlmError::TlsCert { .. }
             | LlmError::StreamInterrupted { .. }
+            | LlmError::MalformedToolInput { .. }
             | LlmError::CostUnavailable { .. }
             | LlmError::UnsupportedCapability { .. }
             | LlmError::MediaDelegationUnavailable { .. }

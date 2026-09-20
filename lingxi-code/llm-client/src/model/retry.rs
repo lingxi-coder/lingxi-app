@@ -711,6 +711,7 @@ pub fn next_step_with_backoff(
         | LlmError::QuotaExceeded
         | LlmError::ModelUnavailable
         | LlmError::StreamInterrupted { .. }
+        | LlmError::MalformedToolInput { .. }
         | LlmError::CostUnavailable { .. }
         | LlmError::UnsupportedCapability { .. }
         | LlmError::MediaDelegationUnavailable { .. }

@@ -2000,6 +2000,17 @@ fn telemetry_workflow_description(
     String::from_utf16_lossy(&units)
 }
 
+fn structured_output_parse_retries(opts: &Value) -> Result<u32, &'static str> {
+    match opts.get("structuredOutputParseRetries") {
+        None => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .filter(|value| *value <= 2)
+            .map(|value| value as u32)
+            .ok_or("agent({structuredOutputParseRetries}): expected an integer from 0 to 2"),
+    }
+}
+
 /// Build the `SubagentSpawnRequest` for one `agent(prompt, opts)` call. The
 /// spawn-affecting `agent()` opts are mapped from `opts_json`
 /// (`JSON.stringify(opts)`): `agentType` overrides the default subagent type,
@@ -2103,6 +2114,7 @@ fn make_request(
         // contract (byte-parity with pre-WP2a behavior); only Fusion panels
         // request `WhenDone`.
         structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
+        structured_output_parse_retries: structured_output_parse_retries(&opts).unwrap_or(0),
         // `agent(prompt, { effort })` → override the subagent's thinking effort
         // (claude-code `me={...ie,effort:ae}`). A level string or integer, carried
         // raw for the spawner to apply onto the resolved agent definition.
@@ -4448,6 +4460,9 @@ async fn run_workflow_script_with_live_updates_and_fusion_recorded(
                             ),
                         };
                         let mut opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+                        if let Err(error) = structured_output_parse_retries(&opts) {
+                            return wf_throw(error);
+                        }
                         if opts.get("isolation").and_then(Value::as_str) == Some("remote") {
                             return wf_throw("agent({isolation:'remote'}) is not available in this build");
                         }

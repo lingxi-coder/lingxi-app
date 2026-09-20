@@ -1290,6 +1290,9 @@ async fn run_subagent_loop(
     // retry cap (`MAX_STRUCTURED_OUTPUT_RETRIES ?? 5`).
     let mut structured_failed_count: u32 = 0;
     let mut structured_nudge_count: u32 = 0;
+    // Separate run-scoped cap: parsing failures never reach schema validation.
+    let mut structured_parse_retries: u32 = 0;
+    let structured_parse_retry_cap = ctx.structured_output_parse_retries.min(2);
     let structured_retry_cap = structured_output_retry_cap();
     // `StructuredOutputMode::WhenDone` (Fusion panels — WP2a item 1): counts
     // CONSECUTIVE turns that produced no tool_use block at all (not even a
@@ -1472,6 +1475,7 @@ async fn run_subagent_loop(
     let mut total_tool_use_count: u64 = 0;
     let mut last_usage = llm_client::Usage::default();
     let mut cumulative_usage = llm_client::Usage::default();
+    let mut usage_complete = true;
     // claude `agentMessages.length` — assistant turns produced across the run
     // (one per round-trip) — and the FINAL turn's provider request id (claude
     // `lastAssistantMessage.requestId`), both surfaced on the terminal
@@ -1848,6 +1852,71 @@ async fn run_subagent_loop(
             let response = match response {
                 Ok(r) => r,
                 Err((partial_blocks, e)) => {
+                    if let LlmError::MalformedToolInput {
+                        tool_name,
+                        has_other_tool_calls,
+                        ..
+                    } = &e
+                    {
+                        let can_recover = force_structured_tool == Some(tool_name.as_str())
+                            && !has_other_tool_calls
+                            && structured_parse_retry_cap > 0
+                            && model_attempt.is_none();
+                        if can_recover
+                            && structured_parse_retries < structured_parse_retry_cap
+                            && turn_idx + 1 < max_turns
+                        {
+                            structured_parse_retries += 1;
+                            // The parse-error result has no authoritative usage;
+                            // a later success must not imply all calls were counted.
+                            usage_complete = false;
+                            let reason = format!(
+                                "StructuredOutput JSON correction {structured_parse_retries}/{structured_parse_retry_cap}: {e}"
+                            );
+                            api_client
+                                .observe_workflow_query_retry(
+                                    agent_id,
+                                    structured_parse_retries + 1,
+                                    reason.clone(),
+                                )
+                                .await;
+                            // Keep completed turns and their tool results. Nothing
+                            // from this malformed response is dispatched or replayed.
+                            let correction = ConversationMessage::user_meta(
+                                MessageId::new(),
+                                format!(
+                                    "{reason}. The malformed response was discarded. Reuse the completed tool results above. Call StructuredOutput again with one complete, concise JSON object matching its schema; omit unrelated fields and do not repeat completed tools."
+                                ),
+                            );
+                            history.push(correction.clone());
+                            emit_message(&out_tx, agent_id, &correction).await;
+                            flush_transcript(transcript.as_ref(), history, &mut transcript_written)
+                                .await;
+                            // Re-enter the normal turn boundary: budgets, cancellation,
+                            // model call ownership and max_turns still apply.
+                            continue;
+                        }
+                        let error = if can_recover && structured_parse_retries > 0 {
+                            format!(
+                                "StructuredOutput JSON recovery stopped after {structured_parse_retries} retries (limit {structured_parse_retry_cap}, turn {}/{max_turns}): {e}",
+                                turn_idx + 1
+                            )
+                        } else {
+                            format!("subagent output error: {e}")
+                        };
+                        publish_prompt_hook_transcript(&ctx, history, &last_usage);
+                        emit_failed(
+                            &out_tx,
+                            transcript.as_ref(),
+                            history,
+                            &mut transcript_written,
+                            agent_id,
+                            error,
+                            cumulative_usage.clone(),
+                        )
+                        .await;
+                        return;
+                    }
                     if is_workflow_watchdog_timeout(&e) {
                         publish_prompt_hook_transcript(&ctx, history, &last_usage);
                         emit_failed(
@@ -2505,7 +2574,7 @@ async fn run_subagent_loop(
                         assistant_message_count,
                         last_request_id: last_request_id.clone(),
                         cumulative_usage: cumulative_usage.clone(),
-                        usage_complete: true,
+                        usage_complete,
                     })
                     .await;
                 // Terminal stop for this turn-set: leave the inner turn loop and
@@ -2602,7 +2671,7 @@ async fn run_subagent_loop(
                         assistant_message_count,
                         last_request_id: last_request_id.clone(),
                         cumulative_usage: cumulative_usage.clone(),
-                        usage_complete: true,
+                        usage_complete,
                     })
                     .await;
             }

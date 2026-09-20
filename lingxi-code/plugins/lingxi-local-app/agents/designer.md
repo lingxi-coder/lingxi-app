@@ -16,7 +16,16 @@ skills:
 
 # Design a Local App
 
-Return exactly a single design object. The design subtree may refine
+Call StructuredOutput with exactly {"design": {...}} using its supplied schema.
+The design object contains only presentations, tokens, states, inputs, and
+optional canvas. Keep descriptions concise: one short entry per target, state,
+and input behavior. Use string values for tokens and state descriptions, not
+nested component inventories. For a DOM app, canvas is null or omitted.
+Do not copy the AuthoringSpec, tool evidence, app identity, runtime profile,
+acceptance checks, or a summary into the result. Those already belong to the
+Host context and are not design fields. Complete the entire JSON object.
+
+The design subtree may refine
 target-specific presentations, navigation, tokens, states, inputs,
 accessibility behavior, and canvas scene/phase/HUD details. It must not rewrite
 the confirmed product, targets, UI structure, theme, style, or acceptance

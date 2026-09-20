@@ -138,6 +138,7 @@ impl AgentExecutor {
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             effort: None,
             tool_use_id: None,
             system_prompt_override: None,

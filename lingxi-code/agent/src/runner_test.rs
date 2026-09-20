@@ -563,6 +563,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         new_diagnostics_source: None,
         tool_schemas: vec![],
         schema: None,
+        structured_output_parse_retries: 0,
         structured_output_mode: platform_api::subagent_spawn::StructuredOutputMode::Forced,
         budget: None,
         hook_executor: None,
@@ -4761,12 +4762,16 @@ async fn preload_order_additional_context_then_skills() {
 struct ResultStreamMockApiClient {
     turns: Mutex<VecDeque<Vec<Result<llm_client::LlmEvent, llm_client::LlmError>>>>,
     calls: AtomicUsize,
+    histories: Mutex<Vec<Vec<ConversationMessage>>>,
+    retry_stop: Mutex<Option<Arc<ParseRetryStop>>>,
 }
 impl ResultStreamMockApiClient {
     fn new(turns: Vec<Vec<Result<llm_client::LlmEvent, llm_client::LlmError>>>) -> Arc<Self> {
         Arc::new(Self {
             turns: Mutex::new(turns.into_iter().collect()),
             calls: AtomicUsize::new(0),
+            histories: Mutex::new(Vec::new()),
+            retry_stop: Mutex::new(None),
         })
     }
     fn call_count(&self) -> usize {
@@ -4775,6 +4780,20 @@ impl ResultStreamMockApiClient {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
+    async fn observe_workflow_query_retry(&self, agent_id: AgentId, attempt: u32, reason: String) {
+        let stop = self.retry_stop.lock().unwrap().clone();
+        if let Some(stop) = stop {
+            platform_api::SubagentSpawnObserver::on_event(
+                stop.as_ref(),
+                platform_api::SubagentObservation::Retry {
+                    agent_id,
+                    attempt,
+                    reason,
+                },
+            )
+            .await;
+        }
+    }
     async fn messages_create(
         &self,
         _model: &str,
@@ -4788,7 +4807,7 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
         &self,
         _model: &str,
         _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
+        messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
         _effort: Option<serde_json::Value>,
     ) -> Result<
@@ -4796,6 +4815,7 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
         llm_client::LlmError,
     > {
         use futures::StreamExt;
+        self.histories.lock().unwrap().push(messages);
         self.calls.fetch_add(1, Ordering::SeqCst);
         let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
         Ok(futures::stream::iter(events).boxed())
@@ -4870,6 +4890,280 @@ async fn structured_agent_midstream_error_does_not_complete_with_partial_prose()
         error.contains("stream ended before message_stop"),
         "original stream error must survive: {error}"
     );
+}
+
+// Drive the real stream parser instead of injecting an already-classified error.
+fn malformed_structured_turn(
+    tool: &str,
+) -> Vec<Result<llm_client::LlmEvent, llm_client::LlmError>> {
+    let mut events = streamed_tool_use_turn(tool, "tool_use");
+    for event in &mut events {
+        if let llm_client::LlmEvent::ContentBlockDelta {
+            delta: llm_client::ContentDelta::InputJsonDelta { partial_json },
+            ..
+        } = event
+        {
+            *partial_json = r#"{"design":{}"#.into();
+        }
+    }
+    events.into_iter().map(Ok).collect()
+}
+
+fn valid_design_turn() -> Vec<Result<llm_client::LlmEvent, llm_client::LlmError>> {
+    llm_client::stream_accumulator::response_to_stream_events(structured_output_call_response(
+        serde_json::json!({"design": {}}),
+    ))
+    .into_iter()
+    .map(Ok)
+    .collect()
+}
+
+fn enable_design_parse_recovery(ctx: &mut SubagentContext) {
+    ctx.schema = Some(r#"{"type":"object","required":["design"],"properties":{"design":{"type":"object"}},"additionalProperties":false}"#.into());
+    ctx.structured_output_parse_retries = 2;
+}
+
+#[tokio::test]
+async fn design_parse_recovery_preserves_prior_tools_and_reports_retry() {
+    let api = ResultStreamMockApiClient::new(vec![
+        streamed_tool_use_turn("Read", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        malformed_structured_turn("StructuredOutput"),
+        valid_design_turn(),
+    ]);
+    let observer = Arc::new(RetryObserver::default());
+    let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+        api.clone(),
+        platform_api::WorkflowQueryWatchdog {
+            stall_timeout_ms: 60_000,
+            max_retries: 0,
+        },
+        vec![observer.clone()],
+    ));
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(wrapped, Some(invoker.clone()), 6);
+    enable_design_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(api.call_count(), 3);
+    assert_eq!(
+        invoker.call_count(),
+        1,
+        "completed tool must not be replayed"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while observer.attempts.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry observation delivery");
+    assert_eq!(*observer.attempts.lock().unwrap(), vec![2]);
+    assert!(events.iter().any(|event| matches!(event, SubagentEvent::Completed { result, usage_complete: false, .. } if result == &serde_json::json!({"design":{}}))));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    let history = api.histories.lock().unwrap();
+    assert!(
+        history[2].starts_with(&history[1]),
+        "completed conversation must survive"
+    );
+    assert!(history[2]
+        .iter()
+        .filter_map(user_text)
+        .any(|text| text.contains("JSON correction 1/2")));
+}
+
+#[tokio::test]
+async fn design_parse_recovery_still_requires_schema_valid_output() {
+    let invalid = llm_client::stream_accumulator::response_to_stream_events(
+        structured_output_call_response(serde_json::json!({"identity": "wrong"})),
+    )
+    .into_iter()
+    .map(Ok)
+    .collect();
+    let api = ResultStreamMockApiClient::new(vec![
+        malformed_structured_turn("StructuredOutput"),
+        invalid,
+        valid_design_turn(),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 5);
+    enable_design_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(api.call_count(), 3);
+    assert!(events.iter().any(|event| matches!(event, SubagentEvent::Completed { result, .. } if result == &serde_json::json!({"design": {}}))));
+    assert!(api.histories.lock().unwrap()[2].iter().any(|message| {
+        matches!(message, ConversationMessage::User { content, .. }
+            if content.iter().any(|block| matches!(block, ContentBlock::ToolResult { is_error: true, content, .. }
+                if content.contains("Output does not match required schema"))))
+    }));
+}
+
+#[tokio::test]
+async fn design_parse_recovery_cap_is_run_scoped_and_hard_bounded() {
+    for configured in [2, 99] {
+        let api = ResultStreamMockApiClient::new(vec![
+            malformed_structured_turn("StructuredOutput"),
+            streamed_tool_use_turn("Read", "tool_use")
+                .into_iter()
+                .map(Ok)
+                .collect(),
+            malformed_structured_turn("StructuredOutput"),
+            malformed_structured_turn("StructuredOutput"),
+            valid_design_turn(),
+        ]);
+        let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 10);
+        enable_design_parse_recovery(&mut ctx);
+        ctx.structured_output_parse_retries = configured;
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(
+            api.call_count(),
+            4,
+            "two corrections total, even across a successful tool turn"
+        );
+        assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. } if error.contains("after 2 retries"))));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    }
+}
+
+#[tokio::test]
+async fn design_parse_recovery_requires_opt_in_schema_and_structured_tool() {
+    for (tool, schema, retries, turns) in [
+        ("StructuredOutput", true, 0, 5),
+        ("StructuredOutput", false, 2, 5),
+        ("Write", true, 2, 5),
+        ("StructuredOutput", true, 2, 1),
+    ] {
+        let api = ResultStreamMockApiClient::new(vec![
+            malformed_structured_turn(tool),
+            valid_design_turn(),
+        ]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), turns);
+        enable_design_parse_recovery(&mut ctx);
+        if !schema {
+            ctx.schema = None;
+        }
+        ctx.structured_output_parse_retries = retries;
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), 1);
+        assert_eq!(invoker.call_count(), 0);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    }
+}
+
+#[tokio::test]
+async fn design_parse_recovery_does_not_dispatch_or_retry_mixed_tool_response() {
+    for other_first in [true, false] {
+        let mut mixed = malformed_structured_turn("StructuredOutput");
+        let other = vec![
+            Ok(llm_client::LlmEvent::ContentBlockStart {
+                index: 1,
+                content_block: llm_client::ContentBlock::ToolCall {
+                    id: "other".into(),
+                    name: "Write".into(),
+                    input: serde_json::json!({}),
+                },
+            }),
+            Ok(llm_client::LlmEvent::ContentBlockStop { index: 1 }),
+        ];
+        let index = if other_first { 1 } else { mixed.len() - 2 };
+        mixed.splice(index..index, other);
+        let api = ResultStreamMockApiClient::new(vec![mixed, valid_design_turn()]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 5);
+        enable_design_parse_recovery(&mut ctx);
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), 1);
+        assert_eq!(invoker.call_count(), 0);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    }
+}
+
+struct ParseRetryStop {
+    cancel: Option<mpsc::Sender<lingxi_core::Event>>,
+    exhausted: AtomicBool,
+}
+
+#[async_trait]
+impl platform_api::SubagentSpawnObserver for ParseRetryStop {
+    async fn on_event(&self, event: platform_api::SubagentObservation) {
+        if matches!(event, platform_api::SubagentObservation::Retry { .. }) {
+            if let Some(tx) = &self.cancel {
+                tx.send(lingxi_core::Event::UserInterrupt).await.unwrap();
+            } else {
+                self.exhausted.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl platform_api::budget::BudgetEnforcerHandle for ParseRetryStop {
+    async fn check_and_charge(&self, _: u64) -> Result<(), platform_api::budget::BudgetError> {
+        if self.exhausted.load(Ordering::SeqCst) {
+            Err(platform_api::budget::BudgetError::Exceeded {
+                current_nano_usd: 1,
+            })
+        } else {
+            Ok(())
+        }
+    }
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+}
+
+#[tokio::test]
+async fn design_parse_recovery_rechecks_cancellation_and_budget() {
+    for cancel in [true, false] {
+        let api = ResultStreamMockApiClient::new(vec![
+            malformed_structured_turn("StructuredOutput"),
+            valid_design_turn(),
+        ]);
+        let (tx, rx) = mpsc::channel(8);
+        let stop = Arc::new(ParseRetryStop {
+            cancel: cancel.then_some(tx),
+            exhausted: AtomicBool::new(false),
+        });
+        *api.retry_stop.lock().unwrap() = Some(stop.clone());
+        let mut ctx = loop_ctx(api.clone(), None, 5);
+        enable_design_parse_recovery(&mut ctx);
+        ctx.budget = Some(stop);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), 1);
+        if cancel {
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+        } else {
+            assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. } if error.contains("Budget"))));
+        }
+    }
 }
 
 /// A second round-trip cut off by `RateLimited` mid-stream — after a completed

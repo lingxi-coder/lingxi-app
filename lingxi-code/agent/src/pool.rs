@@ -499,6 +499,7 @@ mod tests {
             tool_schemas: vec![],
             schema: None,
             structured_output_mode: Default::default(),
+            structured_output_parse_retries: 0,
             budget: None,
             hook_executor: None,
             strict_plugin_only_hooks: false,

@@ -35,6 +35,7 @@ impl RetryPolicy {
             | LlmError::RequestTooLarge
             | LlmError::ModelUnavailable
             | LlmError::StreamInterrupted { .. }
+            | LlmError::MalformedToolInput { .. }
             | LlmError::CostUnavailable { .. }
             | LlmError::UnsupportedCapability { .. }
             | LlmError::MediaDelegationUnavailable { .. }

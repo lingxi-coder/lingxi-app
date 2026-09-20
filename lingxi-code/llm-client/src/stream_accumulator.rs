@@ -134,18 +134,27 @@ struct BlockState {
 #[derive(Debug, Default)]
 struct BlockAccumulator {
     blocks: HashMap<u32, BlockState>,
+    /// Counts started client and server tools, including completed blocks.
+    tool_calls_started: usize,
 }
 
 impl BlockAccumulator {
     fn new() -> Self {
         Self {
             blocks: HashMap::new(),
+            tool_calls_started: 0,
         }
     }
 
     /// Register a new block at `index`. An existing entry is overwritten,
     /// mirroring `claude.ts:1996-2070` (`contentBlocks[part.index] = { ... }`).
     fn start_block(&mut self, index: u32, kind: BlockKind) {
+        if matches!(
+            kind,
+            BlockKind::ToolCall { .. } | BlockKind::Preserved(ContentBlock::ServerToolUse { .. })
+        ) {
+            self.tool_calls_started += 1;
+        }
         self.blocks.insert(
             index,
             BlockState {
@@ -243,8 +252,15 @@ impl BlockAccumulator {
                 let input = if state.json_buf.is_empty() {
                     Value::Object(serde_json::Map::new())
                 } else {
-                    serde_json::from_str::<Value>(&state.json_buf)
-                        .map_err(|e| tool_use_json_parse(index, &e.to_string(), &state.json_buf))?
+                    serde_json::from_str::<Value>(&state.json_buf).map_err(|e| {
+                        LlmError::MalformedToolInput {
+                            tool_name: name.clone(),
+                            block_index: index,
+                            reason: e.to_string(),
+                            input_bytes: state.json_buf.len(),
+                            has_other_tool_calls: self.tool_calls_started > 1,
+                        }
+                    })?
                 };
                 CompletedBlock::ToolCall { id, name, input }
             }
@@ -286,14 +302,6 @@ fn type_mismatch(index: u32, expected: &str, got: &str) -> LlmError {
     LlmError::StreamInterrupted {
         message: format!(
             "streaming: type mismatch on block {index}: expected {expected}, got {got}"
-        ),
-    }
-}
-
-fn tool_use_json_parse(index: u32, reason: &str, buffer: &str) -> LlmError {
-    LlmError::StreamInterrupted {
-        message: format!(
-            "streaming: tool_use input failed to parse as JSON on block {index}: {reason}: buffer={buffer:?}"
         ),
     }
 }
@@ -395,9 +403,9 @@ pub(crate) fn merge_usage(seed: &Usage, delta: &Usage) -> Usage {
 ///
 /// # Errors
 /// - The transport [`LlmError`] verbatim if the stream yields `Err`.
+/// - [`LlmError::MalformedToolInput`] if a tool argument is not valid JSON.
 /// - [`LlmError::StreamInterrupted`] if the event sequence violates the
-///   per-block protocol (delta before start, double stop, type mismatch,
-///   unparseable `tool_use` input).
+///   per-block protocol (delta before start, double stop, type mismatch).
 /// - [`LlmError::StreamInterrupted`] if the stream ends before `message_stop`
 ///   or `completed`.
 // Test-only thin wrapper over the salvaging variant — drops the partial content
@@ -425,6 +433,7 @@ pub async fn accumulate_stream_salvaging(
     mut stream: BoxStream<'static, Result<LlmEvent, LlmError>>,
 ) -> Result<LlmResponse, (Vec<ContentBlock>, LlmError)> {
     let mut acc = BlockAccumulator::new();
+    let mut malformed_input: Option<LlmError> = None;
     let mut content: Vec<ContentBlock> = Vec::new();
     let mut id = String::new();
     let mut model = String::new();
@@ -446,7 +455,39 @@ pub async fn accumulate_stream_salvaging(
 
     while let Some(item) = stream.next().await {
         // Transport-level error: salvage the completed blocks + surface it.
-        let event = salvage!(item);
+        let event = match item {
+            Ok(event) => event,
+            Err(err) => return Err((content, malformed_input.unwrap_or(err))),
+        };
+        if let Some(error) = malformed_input.as_mut() {
+            match event {
+                LlmEvent::ContentBlockStart { content_block, .. }
+                    if matches!(
+                        content_block,
+                        ContentBlock::ToolCall { .. } | ContentBlock::ServerToolUse { .. }
+                    ) =>
+                {
+                    acc.tool_calls_started += 1;
+                }
+                LlmEvent::Completed { .. } => {
+                    // A terminal snapshot may include calls without corresponding
+                    // start events. Do not recover without complete event evidence.
+                    return Err((content, malformed_input.expect("pending malformed input")));
+                }
+                LlmEvent::MessageStop => {
+                    if let LlmError::MalformedToolInput {
+                        has_other_tool_calls,
+                        ..
+                    } = error
+                    {
+                        *has_other_tool_calls = acc.tool_calls_started > 1;
+                    }
+                    return Err((content, malformed_input.expect("pending malformed input")));
+                }
+                _ => {}
+            }
+            continue;
+        }
         match event {
             LlmEvent::MessageStart { response } => {
                 // Capture id/model + the usage seed from the start snapshot.
@@ -479,8 +520,25 @@ pub async fn accumulate_stream_salvaging(
                 ContentDelta::CitationsDelta { .. } | ContentDelta::ConnectorTextDelta { .. } => {}
             },
             LlmEvent::ContentBlockStop { index } => {
-                if let Some(block) = salvage!(acc.stop_block(index)).into_content_block() {
-                    content.push(block);
+                match acc.stop_block(index) {
+                    Ok(block) => {
+                        if let Some(block) = block.into_content_block() {
+                            content.push(block);
+                        }
+                    }
+                    Err(mut error @ LlmError::MalformedToolInput { .. }) => {
+                        // Until a terminal event proves the response complete, fail closed:
+                        // a later tool call may have performed server-side work.
+                        if let LlmError::MalformedToolInput {
+                            has_other_tool_calls,
+                            ..
+                        } = &mut error
+                        {
+                            *has_other_tool_calls = true;
+                        }
+                        malformed_input = Some(error);
+                    }
+                    Err(error) => return Err((content, error)),
                 }
             }
             LlmEvent::MessageDelta {
@@ -516,6 +574,9 @@ pub async fn accumulate_stream_salvaging(
         }
     }
     // Stream ended without a `message_stop` or `completed` event.
+    if let Some(error) = malformed_input {
+        return Err((content, error));
+    }
     Err((
         content,
         LlmError::StreamInterrupted {
@@ -970,10 +1031,139 @@ mod tests {
         ];
         let err = accumulate_stream(boxed(evs)).await.expect_err("bad json");
         match err {
-            LlmError::StreamInterrupted { message } => {
-                assert!(message.contains("failed to parse as JSON"), "{message}");
+            LlmError::MalformedToolInput {
+                tool_name,
+                block_index,
+                input_bytes,
+                has_other_tool_calls,
+                ..
+            } => {
+                assert_eq!(tool_name, "Read");
+                assert_eq!(block_index, 0);
+                assert_eq!(input_bytes, 9);
+                assert!(!has_other_tool_calls);
             }
-            other => panic!("expected StreamInterrupted, got {other:?}"),
+            other => panic!("expected MalformedToolInput, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_structured_output_is_redacted_and_tracks_all_started_tools() {
+        for other_tool in [None, Some(false), Some(true)] {
+            for completed in [false, true] {
+                let mut evs = vec![message_start("m1", "mock")];
+                if let Some(server) = other_tool {
+                    let content_block = if server {
+                        ContentBlock::ServerToolUse {
+                            id: "other".into(),
+                            name: "search".into(),
+                            input: Value::Null,
+                        }
+                    } else {
+                        ContentBlock::ToolCall {
+                            id: "other".into(),
+                            name: "Read".into(),
+                            input: Value::Null,
+                        }
+                    };
+                    evs.push(LlmEvent::ContentBlockStart {
+                        index: 0,
+                        content_block,
+                    });
+                    if completed {
+                        evs.push(LlmEvent::ContentBlockStop { index: 0 });
+                    }
+                }
+                let input = r#"{"secret":"never-print-this""#;
+                evs.extend([
+                    LlmEvent::ContentBlockStart {
+                        index: 1,
+                        content_block: ContentBlock::ToolCall {
+                            id: "output".into(),
+                            name: "StructuredOutput".into(),
+                            input: Value::Null,
+                        },
+                    },
+                    LlmEvent::ContentBlockDelta {
+                        index: 1,
+                        delta: ContentDelta::InputJsonDelta {
+                            partial_json: input.into(),
+                        },
+                    },
+                    LlmEvent::ContentBlockStop { index: 1 },
+                    LlmEvent::MessageStop,
+                ]);
+                let (_, err) = accumulate_stream_salvaging(boxed(evs))
+                    .await
+                    .expect_err("malformed JSON");
+                assert!(!err.to_string().contains("never-print-this"));
+                assert!(!format!("{err:?}").contains("never-print-this"));
+                assert_eq!(
+                    crate::retry::RetryPolicy.classify_error(&err),
+                    crate::retry::RetryDecision::DoNotRetry
+                );
+                match err {
+                    LlmError::MalformedToolInput {
+                        tool_name,
+                        block_index,
+                        reason,
+                        input_bytes,
+                        has_other_tool_calls,
+                    } => {
+                        assert_eq!(tool_name, "StructuredOutput");
+                        assert_eq!(block_index, 1);
+                        assert_eq!(input_bytes, input.len());
+                        assert!(!reason.is_empty());
+                        assert_eq!(has_other_tool_calls, other_tool.is_some());
+                    }
+                    other => panic!("expected malformed tool input, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_output_checks_later_tools_and_incomplete_streams() {
+        for later_tool in [false, true] {
+            for terminal in [false, true] {
+                let mut evs = vec![
+                    message_start("m1", "mock"),
+                    LlmEvent::ContentBlockStart {
+                        index: 0,
+                        content_block: ContentBlock::ToolCall {
+                            id: "output".into(),
+                            name: "StructuredOutput".into(),
+                            input: Value::Null,
+                        },
+                    },
+                    LlmEvent::ContentBlockDelta {
+                        index: 0,
+                        delta: ContentDelta::InputJsonDelta {
+                            partial_json: "{".into(),
+                        },
+                    },
+                    LlmEvent::ContentBlockStop { index: 0 },
+                ];
+                if later_tool {
+                    evs.push(LlmEvent::ContentBlockStart {
+                        index: 1,
+                        content_block: ContentBlock::ToolCall {
+                            id: "later".into(),
+                            name: "Write".into(),
+                            input: Value::Null,
+                        },
+                    });
+                }
+                if terminal {
+                    evs.push(LlmEvent::MessageStop);
+                }
+                let err = accumulate_stream(boxed(evs))
+                    .await
+                    .expect_err("malformed output");
+                assert!(
+                    matches!(err, LlmError::MalformedToolInput { has_other_tool_calls, .. } if has_other_tool_calls == (later_tool || !terminal))
+                );
+            }
         }
     }
 

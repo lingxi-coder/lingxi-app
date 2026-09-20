@@ -218,6 +218,8 @@ impl ToolInvokerError {
 /// A tool's structured result plus its independent model-facing text.
 #[derive(Debug, Clone)]
 pub struct ToolInvocationResult {
+    /// Tool-reported failure, distinct from an invocation/transport failure.
+    pub is_error: bool,
     /// Structured result retained for tool consumers and media handling.
     pub data: Value,
     /// Optional prose supplied by the tool's model-facing result mapper.
@@ -262,6 +264,7 @@ pub trait ToolInvoker: Send + Sync + Any {
         self.invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
             .await
             .map(|data| ToolInvocationResult {
+                is_error: false,
                 data,
                 model_content: None,
             })

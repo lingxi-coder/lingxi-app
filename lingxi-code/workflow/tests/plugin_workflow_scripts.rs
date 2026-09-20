@@ -2205,6 +2205,51 @@ fn create_denial_returns_normal_result_without_builder_or_contract_erasure() {
 }
 
 #[test]
+fn create_preparation_infrastructure_failure_stops_with_original_error() {
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_for_run = Arc::clone(&calls);
+    let outcome = workflow::run_with_progress(
+        &build_workflow_script(),
+        move |_prompts, options| {
+            options
+                .iter()
+                .map(|options| {
+                    let label = stage_label(options);
+                    calls_for_run.lock().expect("call log").push(label.clone());
+                    match label.as_str() {
+                    "template-selector" => serde_json::json!({
+                        "catalog_digest": "digest", "template_id": "react-dom-r2",
+                        "reason": "form", "rejected": [],
+                        "validated_selection_handle": "vsel_0123456789abcdef0123456789abcdef"
+                    }).to_string(),
+                    "designer" => design_subtree().to_string(),
+                    "create-preparer" => serde_json::json!({
+                        "ok": false, "approved": false, "status": "create_failed",
+                        "error": "Local App authoring contract is unavailable in this host build"
+                    }).to_string(),
+                    _ => panic!("preparation failure must stop before {label}"),
+                }
+                })
+                .collect()
+        },
+        |_progress| {},
+        None,
+        true,
+        Some(build_create_args(serde_json::json!({})).to_string()),
+        None,
+    );
+    let error = outcome.expect_err("infrastructure failure must fail the workflow");
+    assert!(error
+        .to_string()
+        .contains("Local App authoring contract is unavailable in this host build"));
+    assert!(!error.to_string().contains("user declined"));
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["template-selector", "designer", "create-preparer"]
+    );
+}
+
+#[test]
 fn qa_success_without_host_receipt_fails_closed() {
     let source = build_workflow_script();
     let outcome = workflow::run_with_progress(

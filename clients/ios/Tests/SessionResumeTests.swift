@@ -165,6 +165,46 @@ visionDelegationEnabled: true)
             XCTAssertEqual(child?.updatedAtMs, 2_000)
         }
 
+        func testTranscriptDeliveryDoesNotHideTerminalAgentUpdate() {
+            for terminalStatus in ["completed", "failed", "cancelled", "killed"] {
+                for messageArrivesFirst in [true, false] {
+                    let source = makeSource()
+                    source.model.activeSessionId = "session-a"
+                    let agentID = "agent:preparer"
+                    func update(_ status: String, at timestamp: UInt64) {
+                        source.applyForTesting(.sessionAgentUpdated(
+                            sessionId: "session-a",
+                            agent: SessionAgentSummaryDto(
+                                agentId: agentID, name: "preparer", agentType: "workflow-subagent",
+                                model: nil, modelProfile: nil, status: status,
+                                latestActivity: nil, updatedAtMs: timestamp
+                            )
+                        ))
+                    }
+                    func deliverMessage() {
+                        source.applyForTesting(.sessionAgentMessage(
+                            sessionId: "session-a", agentId: agentID, messageIndex: 0,
+                            message: MessageDto(role: "assistant", blocks: [.text(text: "Staging failed")])
+                        ))
+                    }
+                    update("running", at: 1_000)
+                    if messageArrivesFirst { deliverMessage() }
+                    update(terminalStatus, at: 2_000)
+                    if !messageArrivesFirst { deliverMessage() }
+                    let child = source.model.agentSummaries.first { $0.id == agentID }
+                    XCTAssertEqual(child?.status, terminalStatus)
+                    XCTAssertEqual(child?.updatedAtMs, 2_000, "Transcript delivery must not advance engine ordering")
+                    XCTAssertEqual(child?.latestActivity, "Staging failed")
+
+                    // A real resume is newer, while a delayed previous terminal
+                    // event must not terminate this resumed generation.
+                    update("running", at: 3_000)
+                    update(terminalStatus, at: 2_000)
+                    XCTAssertEqual(source.model.agentSummaries.first { $0.id == agentID }?.status, "running")
+                }
+            }
+        }
+
         /// A parked background agent must be able to come back.
         ///
         /// The engine reports claude-code's `completed` for one (it renders as

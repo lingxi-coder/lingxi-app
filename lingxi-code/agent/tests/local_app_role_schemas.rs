@@ -41,9 +41,13 @@ fn local_app_union_schemas_preserve_success_and_failure_constraints() {
             vec![
                 approved.clone(),
                 json!({"ok": false, "approved": false, "status": "create_declined"}),
+                json!({"ok": false, "approved": false, "status": "create_failed", "error": "Host unavailable"}),
             ],
             vec![
                 json!({"ok": true, "approved": true, "status": "approved"}),
+                json!({"ok": false, "approved": false, "status": "create_failed"}),
+                json!({"ok": false, "approved": false, "status": "create_failed", "error": ""}),
+                json!({"ok": false, "approved": true, "status": "create_failed", "error": "Host unavailable"}),
                 {
                     let mut contradictory = approved;
                     contradictory["approved"] = json!(false);

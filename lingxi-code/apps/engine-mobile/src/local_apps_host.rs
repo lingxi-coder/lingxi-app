@@ -9528,6 +9528,22 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         crate::local_app_template_catalog::resolve(&self.root, app_id, workflow_run_id, handle)
     }
 
+    async fn local_app_contract(&self, input: Value) -> Result<Value, String> {
+        LocalAppsHostBroker::local_app_contract(self, input).await
+    }
+
+    async fn qa_begin(&self, input: Value) -> Result<Value, String> {
+        LocalAppsHostBroker::qa_begin(self, input).await
+    }
+
+    async fn qa_read_evidence(&self, input: Value) -> Result<Value, String> {
+        LocalAppsHostBroker::qa_read_evidence(self, input).await
+    }
+
+    async fn qa_finalize(&self, input: Value) -> Result<Value, String> {
+        LocalAppsHostBroker::qa_finalize(self, input).await
+    }
+
     async fn stage_create(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?;
         let workflow_run_id = required_string(&input, "workflow_run_id")?;
@@ -18316,9 +18332,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authoring_dispatch_preserves_validation_errors() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let transport =
+            crate::local_apps_mcp::LocalAppsMcpTransport::new(root.path().to_path_buf());
+        assert!(transport.attach_service(Arc::clone(&service)).is_ok());
+        assert!(transport.attach_host(broker.clone()).is_ok());
+        let result = transport
+            .call_host_operation(
+                "contract",
+                json!({
+                    "operation": "stage", "app_id": shell.id,
+                }),
+            )
+            .await
+            .expect("domain error remains a tool result");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.content[0]["text"]
+                .as_str()
+                .expect("tool error text")
+                .contains("missing non-empty \"workflow_run_id\""),
+            "{result:?}"
+        );
+
+        let host: &dyn LocalAppsMcpHost = broker.as_ref();
+        for result in [
+            host.qa_begin(json!({})).await,
+            host.qa_read_evidence(json!({})).await,
+            host.qa_finalize(json!({})).await,
+        ] {
+            let error = result.expect_err("missing app id must fail validation");
+            assert!(error.contains("missing non-empty \"app_id\""), "{error}");
+        }
+    }
+
+    #[tokio::test]
     async fn staged_create_approval_does_not_author_or_enable_mcp() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let workflow_run_id = format!("wf_plain_{}", uuid::Uuid::new_v4().simple());
         let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
@@ -18347,16 +18400,25 @@ mod tests {
             "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
         ))
         .expect("authoring fixture");
-        let contract = broker
-            .local_app_contract(json!({
-                "operation": "stage",
-                "app_id": shell.id,
-                "workflow_run_id": workflow_run_id,
-                "validated_selection_handle": handle,
-                "spec": authoring_spec,
-            }))
+        let transport =
+            crate::local_apps_mcp::LocalAppsMcpTransport::new(root.path().to_path_buf());
+        assert!(transport.attach_service(Arc::clone(&service)).is_ok());
+        assert!(transport.attach_host(broker.clone()).is_ok());
+        let result = transport
+            .call_host_operation(
+                "contract",
+                json!({
+                    "operation": "stage",
+                    "app_id": shell.id,
+                    "workflow_run_id": workflow_run_id,
+                    "validated_selection_handle": handle,
+                    "spec": authoring_spec,
+                }),
+            )
             .await
-            .expect("stage authoring contract");
+            .expect("stage authoring contract through MCP");
+        assert!(!result.is_error, "{result:?}");
+        let contract = result.structured_content.expect("staged contract");
         broker
             .stage_create(json!({
                 "app_id": shell.id,

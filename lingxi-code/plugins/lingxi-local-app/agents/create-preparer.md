@@ -24,7 +24,11 @@ dependencies, mutate a manifest, or author/promote MCP. MCP is a post-create
 app-settings flow. `product.external_integrations` is user intent and is not a
 Host app-exposure capability.
 
-If staging or approval fails, preserve the failure and candidate identity. A
-user denial is terminal for this run; never retry the approval or erase a
-previous contract. The builder may write only after the receipt and scaffold
+If selection, staging, or approval fails, stop before later tools and return
+`{"ok":false,"approved":false,"status":"create_failed","error":"<concise original Host failure>"}`.
+Use `create_declined` only when the Host explicitly reports that the user denied
+the native confirmation. Tool errors and unavailable Host capabilities are never
+user denial. Do not force a failure into the approval or success branches.
+Preserve candidate identity and any previous contract. A user denial is terminal;
+never retry approval. The builder may write only after receipt and scaffold
 commit succeed.

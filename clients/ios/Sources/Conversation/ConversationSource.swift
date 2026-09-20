@@ -4367,18 +4367,18 @@ final class MockConversationSource: ConversationSource {
                     agentType: "unknown",
                     status: "working"
                 )
-            let terminalStatuses = Set(["completed", "failed", "cancelled", "killed"])
-            let currentStatus = summary.status.lowercased()
-            let status = terminalStatuses.contains(currentStatus) ? summary.status : "working"
+            // Transcript delivery has no engine lifecycle timestamp. Preserve
+            // the authoritative status and clock: a delayed message must not
+            // outrank a terminal update or resurrect an already finished agent.
             model.upsertAgentSummary(ConversationAgentSummary(
                 id: summary.id,
                 name: summary.name,
                 agentType: summary.agentType,
                 model: summary.model,
                 modelProfile: summary.modelProfile,
-                status: status,
+                status: summary.status,
                 latestActivity: activity ?? summary.latestActivity,
-                updatedAtMs: UInt64(Date().timeIntervalSince1970 * 1_000)
+                updatedAtMs: summary.updatedAtMs
             ))
         }
 

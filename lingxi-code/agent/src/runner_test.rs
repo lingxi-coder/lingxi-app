@@ -6592,3 +6592,66 @@ async fn skill_preload_read_error_fails_before_model_request() {
     assert!(api.captured().is_empty());
     assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. } if error.contains("loop.md denied"))));
 }
+
+#[tokio::test]
+async fn tool_reported_error_reaches_model_history_and_message_events() {
+    struct ReportedErrorInvoker;
+    #[async_trait]
+    impl platform_api::ToolInvoker for ReportedErrorInvoker {
+        async fn invoke(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: platform_api::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, platform_api::tool_invoker::ToolInvokerError> {
+            unreachable!("runner must preserve detailed results")
+        }
+        async fn invoke_detailed(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: platform_api::tool_invoker::SubagentInvocationContext,
+            _: Option<u64>,
+        ) -> Result<
+            platform_api::tool_invoker::ToolInvocationResult,
+            platform_api::tool_invoker::ToolInvokerError,
+        > {
+            Ok(platform_api::tool_invoker::ToolInvocationResult {
+                data: serde_json::json!({"code": "unavailable"}),
+                model_content: Some("Contract unavailable".into()),
+                is_error: true,
+            })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    let api = ResultStreamMockApiClient::new(vec![
+        streamed_tool_use_turn("Read", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        llm_client::stream_accumulator::response_to_stream_events(text_response(
+            "stopped",
+            Some("end_turn"),
+        ))
+        .into_iter()
+        .map(Ok)
+        .collect(),
+    ]);
+    let ctx = loop_ctx(api.clone(), Some(Arc::new(ReportedErrorInvoker)), 3);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(32);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(api.call_count(), 2);
+    one_completed(&events);
+    assert!(api.histories.lock().unwrap()[1].iter().any(|message| {
+        matches!(message, ConversationMessage::User { content, .. } if content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { is_error: true, content, .. } if content == "Contract unavailable")
+        }))
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(event, SubagentEvent::Message { message, .. } if message["content"].as_array().is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result" && block["is_error"] == true && block["content"] == "Contract unavailable")))
+    }));
+}

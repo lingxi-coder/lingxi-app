@@ -2320,7 +2320,7 @@ async fn run_subagent_loop(
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
                                 content,
-                                is_error: false,
+                                is_error: invocation.is_error,
                                 provider_tool_use_id: provider_id.clone(),
                                 content_blocks,
                             });

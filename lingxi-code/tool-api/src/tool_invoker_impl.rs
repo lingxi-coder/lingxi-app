@@ -497,6 +497,7 @@ impl ToolInvoker for RegistryToolInvoker {
             })?;
 
         Ok(platform_api::tool_invoker::ToolInvocationResult {
+            is_error: result.is_error,
             data: result.data,
             model_content: result.model_content,
         })
@@ -595,11 +596,11 @@ mod tests {
             _progress_tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
+                is_error: input.get("fail").and_then(Value::as_bool).unwrap_or(false),
                 data: json!({ "echo": input }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
-                is_error: false,
                 mcp_meta: None,
             })
         }
@@ -791,6 +792,19 @@ mod tests {
             json!({ "echo": { "hello": "world", "n": 42 } }),
             "invoker returns the tool's data verbatim"
         );
+    }
+
+    #[tokio::test]
+    async fn detailed_invocation_preserves_tool_reported_error() {
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        for failed in [false, true] {
+            let result = invoker
+                .invoke_detailed("TestEcho", json!({"fail": failed}), no_ctx(), None)
+                .await
+                .expect("a tool-reported failure is still a completed invocation");
+            assert_eq!(result.is_error, failed);
+            assert_eq!(result.data, json!({"echo": {"fail": failed}}));
+        }
     }
 
     #[tokio::test]

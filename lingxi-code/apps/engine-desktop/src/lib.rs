@@ -28065,6 +28065,7 @@ mod workspace_lease_forwarding_tests {
         ) -> Result<platform_api::tool_invoker::ToolInvocationResult, ToolInvokerError> {
             *self.seen.lock().unwrap() = Some(workspace_lease_token);
             Ok(platform_api::tool_invoker::ToolInvocationResult {
+                is_error: false,
                 data: serde_json::json!({"awaitingLeaderApproval": true}),
                 model_content: Some("Wait for the team lead to review your plan".into()),
             })

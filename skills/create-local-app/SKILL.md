@@ -482,8 +482,15 @@ declined the native create confirmation — that is their answer, not a host
 failure: re-confirm the name/brief/AuthoringSpec (offering to change them) and relaunch
 `operation: "create"` once the user is ready to try again. A structured
 `verification_failed` result preserves the existing app, preview, Host receipt,
-and findings. An infrastructure failure is reported without source repair. If
-the workflow throws after scaffold succeeded because build tooling failed, the
+and findings. An infrastructure failure is reported without source repair.
+If Host contract staging or QA is unavailable, report the exact failed operation
+and preserve the confirmed requirements. Do not suggest removing notifications,
+switching renderers, or other product changes as a workaround for missing Host
+infrastructure. Offer a capability fallback only when Host evidence specifically
+identifies that capability as unsupported. A chosen fallback must be reflected
+in the AuthoringSpec and acceptance checks before a new run; selecting a generic
+“adjust the plan” option is not proof that a fallback has been applied.
+If the workflow throws after scaffold succeeded because build tooling failed, the
 app record and workspace still exist under `app_id`; continue from that same
 app only after the failure is understood.
 

@@ -141,6 +141,15 @@
           "additionalProperties": false,
           "properties": { "ok": { "const": false }, "approved": { "const": false }, "status": { "const": "create_declined" }, "summary": { "type": "string" } },
           "required": ["ok", "approved", "status"]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ok": { "const": false }, "approved": { "const": false }, "status": { "const": "create_failed" },
+            "error": { "type": "string", "minLength": 1 }, "summary": { "type": "string" }
+          },
+          "required": ["ok", "approved", "status", "error"]
         }
       ]
     },

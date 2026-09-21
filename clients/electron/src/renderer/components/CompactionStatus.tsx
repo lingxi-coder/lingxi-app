@@ -49,6 +49,9 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
     '--compact-muted': t.text3,
     '--compact-track': t.surfaceActive,
     '--compact-progress': t.accent,
+    '--compact-accent': t.accent,
+    '--compact-surface': t.surface,
+    '--compact-border': t.border,
     '--sweep-base': t.text3,
     '--sweep-highlight': t.text,
   } as CSSProperties;
@@ -61,11 +64,9 @@ export const CompactionStatus = memo(function CompactionStatus({ item }: { item:
       aria-live="polite"
       style={style}
     >
-      {item.status !== 'complete' && (
-        <span className="compact-status-icon" aria-hidden="true">
-          <Icon name={item.status === 'error' || item.status === 'cancelled' ? 'x' : 'compact'} size={17} stroke={1.75} />
-        </span>
-      )}
+      <span className="compact-status-icon" aria-hidden="true">
+        <Icon name={item.status === 'error' || item.status === 'cancelled' ? 'x' : 'compact'} size={17} stroke={1.75} />
+      </span>
       <div className="compact-status-content">
         <div className={running ? 'compact-status-title running-sweep' : 'compact-status-title'}>{title}</div>
         {detail && <div className="compact-status-detail">{detail}</div>}

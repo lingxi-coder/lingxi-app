@@ -39,6 +39,20 @@ async function main() {
         id: state.items.find((item) => item.type === 'compaction')?.id,
         item: state.items.find((item) => item.type === 'compaction'),
         summaries: state.summaries,
+        layout: (() => {
+          const rect = (selector) => {
+            const element = document.querySelector(selector);
+            if (!element) return null;
+            const { left, top, width, height } = element.getBoundingClientRect();
+            return { left, top, width, height };
+          };
+          return {
+            compact: rect('.compact-status'),
+            compactIcon: rect('.compact-status-icon'),
+            agent: rect('.transcript-agent-row'),
+            agentIcon: rect('.transcript-agent-icon'),
+          };
+        })(),
       };
     })()`);
     const results = {};

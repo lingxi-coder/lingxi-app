@@ -97,6 +97,8 @@ test('real Electron compaction follows engine phases, preserves elapsed time, an
     assert.match(result.summary.text, /38 KB saved/);
     assert.equal(result.summary.summaries.length, 1);
     assert.equal(result.summary.summaries[0].content, 'Preserved the actual conversation context.');
+    assert.equal(result.summary.layout.compact.left, result.summary.layout.agent.left, 'compact and subagent rows share the conversation rail');
+    assert.equal(result.summary.layout.compactIcon.left, result.summary.layout.agentIcon.left, 'compact and subagent icons share the conversation rail');
     for (const status of ['cancelled', 'error', 'skipped']) {
       assert.equal(result[status].rowCount, 1);
       assert.equal(result[status].progressCount, 0);

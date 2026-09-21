@@ -5,9 +5,11 @@ import type { ClientEvent } from '@lingxi/bridge-client';
 
 import { emptyConversation, reduceEvent, type ConversationState } from '../../src/renderer/bridge/conversation';
 import { CompactionStatus } from '../../src/renderer/components/CompactionStatus';
+import { TranscriptAgents } from '../../src/renderer/components/TranscriptAgents';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+import '../../src/renderer/components/TranscriptAgents.css';
 
 // Only the real pure reducer and progress component are loaded. No desktop
 // bridge, preload, config, session files, or credentials are used by this fixture.
@@ -47,6 +49,9 @@ function Fixture() {
           {state.items.map((item) => item.type === 'compaction'
             ? <CompactionStatus key={item.id} item={item} />
             : null)}
+          <TranscriptAgents agents={[{
+            agent_id: 'agent:compact-layout', name: 'fork-b24c', agent_type: 'explore', status: 'running', latest_activity: '4 tool uses · 0 tokens',
+          }]} />
         </div>
       </main>
     </Theme.Provider>

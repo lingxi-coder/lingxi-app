@@ -9227,7 +9227,46 @@ impl MobileEngineHandle {
     /// test. The public signature is unchanged, so the UniFFI bindings are not
     /// affected.
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
-        Box::pin(self.submit_impl(command)).await
+        // A questionnaire parks work that can itself be holding the transition
+        // lock (for example, a Local App verification workflow). Its answer is
+        // connection-scoped and only resolves the broker's oneshot, so waiting
+        // behind that lock turns the native sheet's submit spinner into a
+        // deadlock. Resolve these two commands before serializing session state.
+        match command {
+            ClientCommand::AnswerAskUserQuestion {
+                request_id,
+                answers,
+            } => {
+                self.resolve_ask_user_question(request_id, Some(answers))
+                    .await
+            }
+            ClientCommand::CancelAskUserQuestion { request_id } => {
+                self.resolve_ask_user_question(request_id, None).await
+            }
+            command => Box::pin(self.submit_impl(command)).await,
+        }
+    }
+
+    async fn resolve_ask_user_question(
+        &self,
+        request_id: u64,
+        answers: Option<HashMap<String, String>>,
+    ) -> Result<(), ClientError> {
+        let resolved = match answers {
+            Some(answers) => {
+                self.ask_user_question_broker
+                    .resolve(request_id, answers)
+                    .await
+            }
+            None => self.ask_user_question_broker.cancel(request_id).await,
+        };
+        if !resolved {
+            tracing::debug!(
+                request_id,
+                "mobile: resolve for unknown / already-resolved AskUserQuestion id"
+            );
+        }
+        Ok(())
     }
 
     async fn submit_impl(&self, command: ClientCommand) -> Result<(), ClientError> {
@@ -9429,26 +9468,11 @@ impl MobileEngineHandle {
                 request_id,
                 answers,
             } => {
-                if !self
-                    .ask_user_question_broker
-                    .resolve(request_id, answers)
+                self.resolve_ask_user_question(request_id, Some(answers))
                     .await
-                {
-                    tracing::debug!(
-                        request_id,
-                        "mobile: resolve for unknown / already-resolved AskUserQuestion id"
-                    );
-                }
-                Ok(())
             }
             ClientCommand::CancelAskUserQuestion { request_id } => {
-                if !self.ask_user_question_broker.cancel(request_id).await {
-                    tracing::debug!(
-                        request_id,
-                        "mobile: cancel for unknown / already-resolved AskUserQuestion id"
-                    );
-                }
-                Ok(())
+                self.resolve_ask_user_question(request_id, None).await
             }
 
             ClientCommand::SetPermissionMode { mode } => {
@@ -21220,6 +21244,57 @@ mod tests {
                 handle.message_queue.take_mid_turn_prompt().await.as_deref(),
                 Some("pending guidance")
             );
+        });
+    }
+
+    /// A `AskUserQuestion` response only touches the connection-scoped broker.
+    /// It must not wait behind a transition held by the workflow that asked it,
+    /// otherwise iOS leaves the native question sheet permanently submitting.
+    #[test]
+    fn submit_question_answer_bypasses_a_held_transition_lock() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            handle
+                .ask_user_question_tx
+                .send(tool_ui::AskUserQuestionExchange {
+                    questions: Vec::new(),
+                    timeout_secs: None,
+                    resp_tx: response_tx,
+                })
+                .await
+                .expect("enqueue question");
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while handle.ask_user_question_broker.pending_count().await != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("question must be parked");
+
+            let transition = handle.loop_transition.lock().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle.submit(ClientCommand::AnswerAskUserQuestion {
+                    request_id: 1,
+                    answers: HashMap::from([("When?".to_string(), "Now".to_string())]),
+                }),
+            )
+            .await
+            .expect("answer must not wait for the transition lock")
+            .expect("answer accepted");
+            drop(transition);
+
+            assert_eq!(
+                response_rx.await.expect("broker response"),
+                HashMap::from([("When?".to_string(), "Now".to_string())])
+            );
+            assert!(listener.received.lock().await.iter().any(|event| matches!(
+                event,
+                ClientEvent::AskUserQuestionResolved { request_id: 1 }
+            )));
         });
     }
 

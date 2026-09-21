@@ -349,6 +349,19 @@ pub async fn load_mobile_disk_commands_into_registry(
 
 #[async_trait::async_trait]
 impl ToolSkillLoader for MobileDiskSkillLoader {
+    // Supply canonical names for the Skill tool's unknown-name suggestions.
+    // Read the live registry and apply the same visibility rules as load().
+    async fn list_names(&self) -> Vec<String> {
+        self.registry
+            .read()
+            .await
+            .list_all()
+            .into_iter()
+            .filter(|command| command_visible_in_session_mode(command, self.session_mode))
+            .map(|command| command.name.clone())
+            .collect()
+    }
+
     async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
         let reg = self.registry.read().await;
         Ok(reg.resolve(name).and_then(|cmd| {
@@ -537,6 +550,49 @@ mod tests {
             .await
             .register_plugin_commands(plugin_id, commands);
         MobileDiskSkillLoader::new(registry)
+    }
+
+    #[tokio::test]
+    async fn mobile_skill_tool_suggests_canonical_plugin_name_and_accepts_retry() {
+        use tool_api::test_support::{fresh_ctx, shell_test_ctx};
+        use tool_api::tool_trait::Tool;
+
+        let loader = Arc::new(loaded_local_app_skill_registry().await);
+        let canonical = "lingxi-local-app:canvas-2d-local-app";
+        assert!(loader.list_names().await.contains(&canonical.to_owned()));
+        assert!(loader.load("canvas-2d-local-app").await.unwrap().is_none());
+        let tool = tool_skill::skill::SkillTool::with_loader(
+            shell_test_ctx(platform_api::process::ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            }),
+            loader,
+        );
+        let error = tool
+            .validate_input(
+                &serde_json::json!({ "skill": "canvas-2d-local-app" }),
+                &fresh_ctx(),
+            )
+            .await
+            .expect_err("bare plugin names must suggest an exact retry");
+        assert!(error.to_string().contains(canonical));
+        tool.validate_input(&serde_json::json!({ "skill": canonical }), &fresh_ctx())
+            .await
+            .expect("the suggested canonical name must validate");
+    }
+
+    #[tokio::test]
+    async fn list_names_observes_registry_updates() {
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let loader = MobileDiskSkillLoader::new(registry.clone());
+        assert!(loader.list_names().await.is_empty());
+        registry.write().await.register_command(SlashCommand {
+            name: "later-skill".into(),
+            ..SlashCommand::default()
+        });
+        assert_eq!(loader.list_names().await, vec!["later-skill"]);
     }
 
     async fn measure_plugin_agent_guide_bytes(agent: &str) -> usize {
@@ -747,7 +803,9 @@ mod tests {
             "undeclared disk commands stay code-only in chat mode"
         );
 
+        assert!(chat_loader.list_names().await.is_empty());
         let code_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Code);
+        assert_eq!(code_loader.list_names().await, vec!["review-pr"]);
         assert!(
             code_loader.load("review-pr").await.unwrap().is_some(),
             "code mode keeps the existing skill catalog"
@@ -782,6 +840,7 @@ mod tests {
         let chat_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Chat);
         assert!(chat_loader.load("research").await.unwrap().is_some());
         assert!(chat_loader.load("mutate").await.unwrap().is_none());
+        assert_eq!(chat_loader.list_names().await, vec!["research"]);
     }
 
     #[tokio::test]
@@ -817,6 +876,7 @@ mod tests {
         }
         let chat_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Chat);
 
+        assert!(chat_loader.list_names().await.is_empty());
         for denied in ["forked", "shell-frontmatter", "embedded-shell"] {
             assert!(
                 chat_loader.load(denied).await.unwrap().is_none(),

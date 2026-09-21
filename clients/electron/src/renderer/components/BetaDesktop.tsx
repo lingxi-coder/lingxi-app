@@ -412,6 +412,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       data-resizing={resizingSidebar || undefined}
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: `0.5px solid ${t.border}`, paddingTop: 38, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
     >
+      <div className="drag-region desktop-sidebar-drag-strip" aria-hidden="true" />
       <div className="drag-region desktop-sidebar-brand" style={{ minHeight: 48, padding: '7px 14px 6px', display: 'flex', alignItems: 'center', gap: 9 }}>
         <span className="desktop-brand-mark" style={{ color: t.accent, background: t.accentBg, boxShadow: `0 0 0 1px ${t.accentBorder}` }} aria-hidden="true"><Icon name="spark" size={13} stroke={1.7} /></span>
         <strong style={{ color: t.text, fontSize: 16, fontWeight: 600, letterSpacing: '-.02em' }}>LingXi</strong>

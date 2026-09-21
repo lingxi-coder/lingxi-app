@@ -47,6 +47,17 @@ body {
   font-family: var(--font-sans-default);
   user-select: none;
 }
+/* The sidebar's own paddingTop covers the title bar strip, so with
+   `hiddenInset` nothing at the top of the left panel was draggable. Like
+   `.settings-window-drag-region`, it starts at 88px so the traffic lights
+   keep their clicks. */
+.desktop-sidebar-drag-strip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 88px;
+  height: 38px;
+}
 .desktop-brand-mark {
   width: 26px;
   height: 26px;

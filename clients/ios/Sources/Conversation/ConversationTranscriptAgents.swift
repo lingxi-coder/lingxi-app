@@ -5,6 +5,7 @@ import SwiftUI
 /// open the child transcript in a detail sheet.
 struct ConversationTranscriptAgents: View {
     @Environment(\.theme) private var t
+    @FocusState private var focusedAgentID: String?
 
     let agents: [ConversationAgentSummary]
     let activeAgentID: String
@@ -26,12 +27,16 @@ struct ConversationTranscriptAgents: View {
         if !childAgents.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(childAgents) { agent in
+                    let isFocused = focusedAgentID == agent.id
+                    // Selecting a child opens its transcript sheet, so the
+                    // selected row is the expanded state of this disclosure.
+                    let isExpanded = activeAgentID == agent.id
                     Button { onSelect(agent.id) } label: {
                         HStack(spacing: 6) {
                             AgentAvatar(agentID: agent.id, size: 18)
                             Text(agent.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? agent.agentType : agent.name)
                                 .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(t.text2)
+                                .foregroundStyle(isFocused || isExpanded ? t.text : t.text2)
                                 .lineLimit(1)
                                 .runtimeTextSweep(
                                     isActive: AgentStatusPresentation(rawValue: agent.status) == .running,
@@ -50,14 +55,22 @@ struct ConversationTranscriptAgents: View {
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(activeAgentID == agent.id ? t.accent : t.text4)
+                                .foregroundStyle(t.accent)
+                                .opacity(isFocused || isExpanded ? 1 : 0)
                         }
                         .frame(minHeight: 28)
+                        .padding(.horizontal, 6)
+                        .background {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(t.accent.opacity(isFocused || isExpanded ? 0.12 : 0))
+                        }
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .focused($focusedAgentID, equals: agent.id)
                     .accessibilityIdentifier(Self.rowIdentifier(for: agent.id))
                     .accessibilityLabel(accessibilityLabel(for: agent))
+                    .accessibilityValue(isExpanded ? String(localized: "chat_agent_details_collapse") : "")
                 }
             }
             .padding(.horizontal, 10)

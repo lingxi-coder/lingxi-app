@@ -98,9 +98,6 @@ struct MessageBubble: View, Equatable {
     var onToggleToolBlock: (String) -> Void = { _ in }
     /// When the most-recent AI reply is dimmed during voice flow ("上下文已记入").
     var dimmed: Bool = false
-    /// Tapping the assistant bubble's share affordance surfaces the native share
-    /// sheet for this reply's text (mirrors Android `MessageBubble onShare`).
-    var onShare: (String) -> Void = { _ in }
     /// Fold state for a long USER bubble, owned by `ConversationTimelineView`.
     /// Row-local `@State` would be discarded when the `LazyVStack` releases an
     /// off-screen row, silently re-collapsing a prompt the user expanded.
@@ -200,10 +197,6 @@ struct MessageBubble: View, Equatable {
                             alignment: .top
                         )
                         .clipped()
-                    // Share affordance: surfaces the native chooser for this
-                    // reply's text through the same ShareImpl the engine bridges
-                    // onto `traits::SharingService` — so a bubble share and a
-                    // `tool-share` invocation are the identical launch path.
                     HStack(spacing: 4) {
                         if assistantIsCollapsible {
                             Button {
@@ -226,13 +219,6 @@ struct MessageBubble: View, Equatable {
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("conversation.message.assistant.toggle")
                         }
-                        Button(action: { onShare(message.text) }) {
-                            LXIcon(name: .share, size: 15, color: t.text3, stroke: 1.8)
-                                .frame(width: 28, height: 28)
-                                .contentShape(RoundedRectangle(cornerRadius: 8))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("chat_share_reply")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

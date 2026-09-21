@@ -301,23 +301,3 @@ final class CameraCapture {
         }
     #endif
 }
-
-// MARK: - Share
-
-/// Presents the native share sheet for a message's text through the same
-/// `ShareImpl` (`UIActivityViewController` via `Presenter`) the engine bridges
-/// onto its share seam — so a bubble share and a `tool-share` invocation are the
-/// identical launch path (mirrors Android `rememberShare`). Fire-and-forget: no
-/// permission gate, the result is ignored.
-@MainActor
-enum ShareCapture {
-    static func share(text: String) {
-        #if canImport(UIKit)
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return }
-            Task {
-                _ = try? await ShareImpl().share(text: trimmed, url: nil, imageBytes: nil)
-            }
-        #endif
-    }
-}

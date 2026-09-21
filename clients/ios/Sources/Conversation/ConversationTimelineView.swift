@@ -12,7 +12,6 @@ struct ConversationTimelineView: View {
     let messageDetails: [UUID: ConversationMessageDetail]
     let expandedToolCalls: Set<String>
     let onToggleToolCall: (String) -> Void
-    let onShareMessage: (String) -> Void
     var transcriptAgents: [ConversationAgentSummary] = []
     var transcriptAgentAnchors: [String: String] = [:]
     var activeAgentID: String = ConversationModel.mainAgentID
@@ -69,7 +68,6 @@ struct ConversationTimelineView: View {
                         )
                     )
                 },
-                onShare: onShareMessage,
                 isUserExpanded: expandedToolCalls.contains("user:\(rowID)"),
                 onToggleUserExpanded: { onToggleToolCall("user:\(rowID)") },
                 isAssistantExpanded: expandedToolCalls.contains("assistant:\(rowID)"),
@@ -319,7 +317,6 @@ private struct ConversationToolBatchRow: View {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var isFocused: Bool
-    @State private var isHovering = false
 
     let id: String
     let tools: [ConversationToolTrace]
@@ -356,18 +353,21 @@ private struct ConversationToolBatchRow: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(t.text4)
                         .timelineChevron(
-                            isHighlighted: isFocused || isHovering,
+                            isHighlighted: isFocused,
                             isExpanded: isExpanded,
                             reduceMotion: reduceMotion
                         )
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(t.accent.opacity(isFocused || isExpanded ? 0.10 : 0))
+                }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .focused($isFocused)
-            .onHover { isHovering = $0 }
             .accessibilityLabel(String(localized: "chat_tool_batch_count \(tools.count)"))
             .accessibilityValue(isExpanded
                 ? String(localized: "chat_agent_details_collapse")
@@ -416,7 +416,7 @@ private struct ConversationToolBatchRow: View {
     }
 }
 
-/// Reveal disclosure marks on focus, hover, or expansion without shifting layout.
+/// Reveal disclosure marks on focus or expansion without shifting layout.
 enum ConversationTimelineChevronPresentation {
     static let restingOpacity = 0.0
     static let highlightedOpacity = 1.0

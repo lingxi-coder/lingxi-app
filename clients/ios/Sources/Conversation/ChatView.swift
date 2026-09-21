@@ -457,10 +457,9 @@ struct ChatView: View {
                     messageDetails: visibleMessageDetails,
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
-                    onShareMessage: shareMessage,
                     transcriptAgents: convo.orderedAgentSummaries,
                     transcriptAgentAnchors: convo.transcriptAgentAnchors,
-                    activeAgentID: ConversationModel.mainAgentID,
+                    activeAgentID: convo.selectedAgentID,
                     onSelectAgent: { source.selectAgent($0) },
                     streaming: streaming,
                     showThinking: canShowTranscriptThinking
@@ -479,7 +478,6 @@ struct ChatView: View {
                     messageDetails: visibleMessageDetails,
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
-                    onShareMessage: shareMessage,
                     streaming: streaming,
                     showThinking: canShowTranscriptThinking
                 )
@@ -865,9 +863,6 @@ struct ChatView: View {
             }
         }
     }
-
-    /// Share an assistant reply's text via the native share sheet.
-    private func shareMessage(_ text: String) { ShareCapture.share(text: text) }
 
     /// Retry from the offline banner: re-warm the engine source so a recovered
     /// connection rebuilds the handle / re-lists models. `NWPathMonitor` clears

@@ -249,6 +249,7 @@ function validateTaskRow(v: unknown): void {
 // here too.
 test('ALL_TASK_ROW_DTO_KEYS (src/protocolCoverage.ts) matches TaskRowDto exactly', () => {
   assert.deepEqual(Object.keys(ALL_TASK_ROW_DTO_KEYS).sort(), [
+    'agent_id',
     'awaiting_plan_approval',
     'can_resume',
     'description',

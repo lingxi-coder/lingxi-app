@@ -150,7 +150,7 @@ test('Subagents detail identifies background tasks and preserves their stage', (
   bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active] };
   const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
   assert.ok(html.includes('Background task'));
-  assert.ok(html.includes('local_fusion'));
+  assert.ok(html.includes('/fusion compare two approaches'));
   assert.ok(html.includes('Running panels 2/3'));
 });
 
@@ -374,4 +374,30 @@ test('summary owns context browsing and compaction controls', () => {
   assert.match(html, /aria-label="Open context summaries"/);
   assert.match(html, /aria-label="Compact conversation"/);
   assert.match(html, /Compact/);
+});
+
+test('background agents show task titles and avatars without duplicating linked agents', () => {
+  const bridge = runtimeBridge();
+  const active = { kind: 'section', id: 'agents' } as const;
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active], agents: {
+    linked: { agent_id: 'linked', name: 'Reviewer', agent_type: 'Explore', status: 'completed' },
+    unrelated: { agent_id: 'unrelated', name: 'Other reviewer', agent_type: 'Explore', status: 'running' },
+  } };
+  bridge.desktop.tasks = {
+    first: { task_id: 'first', task_type: 'local_agent', agent_id: 'linked', description: 'Audit build scripts', status: { type: 'completed' } },
+    second: { task_id: 'second', task_type: 'local_agent', description: 'Review test coverage', status: { type: 'completed' } },
+    empty: { task_id: 'empty', task_type: 'local_bash', description: '  ', status: { type: 'running' } },
+  };
+  const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(html.includes('>Audit build scripts</span>'));
+  assert.ok(html.includes('>Review test coverage</span>'));
+  assert.ok(html.includes('Background agent · Reviewer'));
+  assert.ok(html.includes('Other reviewer'));
+  assert.ok(!html.includes('>Reviewer</span>'));
+  assert.ok(!html.includes('local_agent'));
+  assert.equal((html.match(/data-agent-avatar=/g) || []).length, 3);
+  assert.ok(html.includes('Background task empty'));
+  const overview = render(React.createElement(RuntimeCenterOverview, { bridge }));
+  assert.ok(overview.includes('1 running'));
+  assert.ok(overview.includes('3 background tasks'));
 });

@@ -769,6 +769,11 @@ pub struct TaskRowDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub effort: Option<String>,
+    /// Persistent identity of the agent executing a `local_agent` task.
+    /// Never the creator identity of a shell or other background task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub agent_id: Option<String>,
 }
 
 /// Task status — the lowered `tasks::TaskStatus` (`tasks/src/state.rs:11`), the

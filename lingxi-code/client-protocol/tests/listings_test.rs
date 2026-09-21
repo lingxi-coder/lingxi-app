@@ -806,17 +806,20 @@ fn task_row_old_payload_defaults_new_display_fields_and_nondefaults_round_trip()
     assert!(!row.unread);
     assert_eq!(row.model, None);
     assert_eq!(row.effort, None);
+    assert_eq!(row.agent_id, None);
     let encoded = serde_json::to_value(&row).unwrap();
-    for field in ["unread", "model", "effort"] {
+    for field in ["unread", "model", "effort", "agent_id"] {
         assert!(
             encoded.get(field).is_none(),
             "default {field} must remain wire-additive"
         );
     }
+    row.agent_id = Some("agent:runner".into());
     row.unread = true;
     row.model = Some("resolved-model".into());
     row.effort = Some("high".into());
     let encoded = serde_json::to_value(&row).unwrap();
+    assert_eq!(encoded["agent_id"], "agent:runner");
     assert_eq!(encoded["unread"], true);
     assert_eq!(encoded["model"], "resolved-model");
     assert_eq!(encoded["effort"], "high");
@@ -827,6 +830,7 @@ fn task_row_old_payload_defaults_new_display_fields_and_nondefaults_round_trip()
 fn task_row_round_trips() {
     let ev = ClientEvent::TaskRow {
         task: TaskRowDto {
+            agent_id: None,
             unread: false,
             model: None,
             effort: None,

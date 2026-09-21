@@ -456,6 +456,12 @@ pub fn lower_doctor_report(report: &DoctorReport) -> DoctorReportDto {
 #[must_use]
 pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
     TaskRowDto {
+        // For shell tasks owner_agent_id identifies the creator, not a runner.
+        agent_id: if rec.task_type == "local_agent" {
+            rec.owner_agent_id.clone()
+        } else {
+            None
+        },
         unread: rec.status == "completed" && !rec.notified,
         model: rec.model.clone(),
         effort: rec.effort.clone(),

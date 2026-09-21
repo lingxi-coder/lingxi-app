@@ -135,6 +135,19 @@ function shorten(value: string, max = 90): string {
   return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 }
 
+function taskLabel(task: TaskRowDto): string {
+  return task.description.trim() || `Background task ${task.task_id}`;
+}
+
+function taskAvatarId(task: TaskRowDto): string | undefined {
+  return task.agent_id || (['local_agent', 'remote_agent', 'in_process_teammate'].includes(task.task_type) ? task.task_id : undefined);
+}
+
+function standaloneAgents(agents: Record<string, SessionAgentSummaryDto>, tasks: TaskRowDto[]): SessionAgentSummaryDto[] {
+  const linkedIds = new Set(tasks.map((task) => task.agent_id).filter(Boolean));
+  return Object.values(agents).filter((agent) => agent.agent_id !== 'main' && !linkedIds.has(agent.agent_id));
+}
+
 function EmptyRow({ children }: { children: ReactNode }) {
   const t = useT();
   return <div style={{ padding: '7px 9px 9px', color: t.dark ? t.text2 : t.text3, fontSize: 12 }}>{children}</div>;
@@ -237,9 +250,8 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
   const ref = useRef<HTMLDivElement>(null);
   const center = bridge.runtimeCenter;
   const tasks = orderedTasks(bridge.desktop);
-  const agents = useMemo(() => Object.values(center.agents)
-    .filter((agent) => agent.agent_id !== 'main')
-    .sort((left, right) => (statusRank[left.status] ?? 99) - (statusRank[right.status] ?? 99) || (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0)), [center.agents]);
+  const agents = useMemo(() => standaloneAgents(center.agents, tasks)
+    .sort((left, right) => (statusRank[left.status] ?? 99) - (statusRank[right.status] ?? 99) || (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0)), [center.agents, tasks]);
   const plan = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
   const openerRef = useRef<HTMLElement | null>(null);
   // [Finding 5, rework round 2] Read every poll tick, never a `useEffect`
@@ -336,7 +348,10 @@ function tabLabel(item: RuntimeCenterItemRef, bridge: UseBridge): string {
     const plan = bridge.runtimeCenter.submittedPlanState.calls.find((call) => call.id === item.id);
     return plan ? planHeading(plan.content) : 'Plan';
   }
-  if (item.kind === 'task') return bridge.desktop.tasks[item.id]?.task_type ?? 'Task';
+  if (item.kind === 'task') {
+    const task = bridge.desktop.tasks[item.id];
+    return task ? taskLabel(task) : 'Task';
+  }
   if (item.kind === 'agent') return bridge.runtimeCenter.agents[item.id]?.name ?? item.id.slice(0, 13);
   if (item.kind === 'resource') return bridge.runtimeCenter.resources.find((resource) => resource.id === item.id)?.name ?? 'Resource';
   const plan = bridge.runtimeCenter.plan.length > 0 ? bridge.runtimeCenter.plan : bridge.conversation.plan;
@@ -400,6 +415,7 @@ export function TaskDetail({ task, bridge }: { task: TaskRowDto | undefined; bri
     <div style={{ padding: 15, overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: statusColor(t, taskSummaryStatus(task)), fontSize: 11 }}><Icon name="activity" size={14} /><span>{taskDisplayStatus(task)}</span></div>
       {task.stage && <div style={{ marginTop: 6, color: t.text3, fontSize: 11 }}>{task.stage}</div>}
+      {task.agent_id && <button type="button" onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: task.agent_id! })}>View agent conversation</button>}
       <p style={{ margin: '12px 0', color: t.text, fontSize: 13, lineHeight: 1.55 }}>{task.description}</p>
       {output ? <pre className="mono" style={{ margin: 0, padding: 11, borderRadius: 9, background: t.windowBg, border: `0.5px solid ${t.border}`, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || '(No output yet)'}{output.truncated ? `\n\n…${output.totalLines} lines total` : ''}</pre> : <EmptyRow>Loading task output…</EmptyRow>}
     </div>
@@ -573,7 +589,7 @@ function SubmittedPlanDetail({ plan }: { plan: SubmittedPlan | null | undefined 
 function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bridge: UseBridge }) {
   const center = bridge.runtimeCenter;
   const tasks = orderedTasks(bridge.desktop);
-  const agents = Object.values(center.agents).filter((agent) => agent.agent_id !== 'main');
+  const agents = standaloneAgents(center.agents, tasks);
   const todos = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
   if (section === 'review') return <GitReview />;
   if (section === 'plan') return <SubmittedPlanDetail plan={center.submittedPlan} />;
@@ -583,7 +599,12 @@ function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bri
     {section === 'agents' && <>
       {agents.length === 0 && tasks.length === 0 && <EmptyRow>No subagents or background tasks.</EmptyRow>}
       {agents.map((agent) => <OverviewRow key={agent.agent_id} icon="subagent" agentId={agent.agent_id} title={agent.name || agent.agent_type} subtitle={`Subagent · ${agent.latest_activity ?? agent.agent_type}`} status={agent.status} statusText={statusLabel(agent.status, 'agent')} onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })} />)}
-      {tasks.map((task) => <OverviewRow key={task.task_id} icon="activity" title={task.task_type} subtitle={`Background task · ${shorten(task.status.type === 'running' && task.stage ? task.stage : task.description)}`} status={taskSummaryStatus(task)} statusText={taskDisplayStatus(task)} onClick={() => bridge.openRuntimeItem({ kind: 'task', id: task.task_id })} />)}
+      {tasks.map((task) => {
+        const agent = task.agent_id ? center.agents[task.agent_id] : undefined;
+        const typeLabel = task.task_type === 'local_bash' ? 'Background shell' : taskAvatarId(task) ? 'Background agent' : 'Background task';
+        const subtitle = [typeLabel, agent?.name || agent?.agent_type, task.status.type === 'running' ? task.stage : undefined].filter(Boolean).join(' · ');
+        return <OverviewRow key={task.task_id} icon={task.task_type === 'local_bash' ? 'terminal' : 'activity'} agentId={taskAvatarId(task)} title={taskLabel(task)} subtitle={subtitle} status={taskSummaryStatus(task)} statusText={taskDisplayStatus(task)} onClick={() => bridge.openRuntimeItem({ kind: 'task', id: task.task_id })} />;
+      })}
     </>}
     {section === 'resources' && (center.resources.length === 0 ? <EmptyRow>No input resources in this session.</EmptyRow> : center.resources.map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : 'file'} title={resource.name} subtitle={resource.path ?? resource.detail} onClick={() => bridge.openRuntimeItem({ kind: 'resource', id: resource.id })} />))}
   </div>;

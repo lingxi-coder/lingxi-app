@@ -294,8 +294,8 @@ pub struct TaskRecord {
     /// `agentId` upstream, so this stays `None` and only the main session may
     /// stop them.
     ///
-    /// Engine-internal: deliberately NOT lowered into the client protocol's
-    /// task rows. Additive default `None`.
+    /// Only `local_agent` runner identities are lowered as client task-row
+    /// `agent_id`; shell creator identities remain internal. Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_id: Option<String>,
     /// Who stopped this task, when something did — `"user"` or `"parent"`.

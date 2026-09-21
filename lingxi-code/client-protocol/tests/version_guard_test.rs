@@ -3196,6 +3196,7 @@ fn contract_index_covers_every_dto() {
             },
         },
         TaskRowDto {
+            agent_id: None,
             unread: false,
             model: None,
             effort: None,

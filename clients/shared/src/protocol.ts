@@ -1073,6 +1073,8 @@ export interface TaskRowDto {
   /** The teammate is waiting for its leader's plan decision. */
   awaiting_plan_approval?: boolean;
   task_id: string;
+  /** Persistent runner identity for local_agent tasks; never the task creator. */
+  agent_id?: string;
   task_type: string;
   status: TaskStatusDto;
   description: string;

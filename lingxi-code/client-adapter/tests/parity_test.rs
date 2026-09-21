@@ -214,6 +214,35 @@ fn task_record_parity() {
     assert_eq!(completed_dto.status, TaskStatusDto::Completed);
 }
 
+#[test]
+fn task_agent_identity_is_the_runner_and_never_a_shell_creator() {
+    for task_type in [
+        "local_agent",
+        "local_bash",
+        "remote_agent",
+        "in_process_teammate",
+    ] {
+        let record = TaskRecord {
+            task_type: task_type.into(),
+            owner_agent_id: Some("agent:runner-or-creator".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            lower_task_record(&record).agent_id,
+            (task_type == "local_agent").then(|| "agent:runner-or-creator".into()),
+            "{task_type} must only link an actual runner identity",
+        );
+    }
+    assert_eq!(
+        lower_task_record(&TaskRecord {
+            task_type: "local_agent".into(),
+            ..Default::default()
+        })
+        .agent_id,
+        None,
+    );
+}
+
 /// Parity anchor: `tui/src/components/tasks/output_tail.rs` `tests` drive a
 /// `TaskOutputChunk` (`content: "a\nb\nc\nd\ne"`, `total_lines: 5`) through the
 /// output-tail state. `TaskOutputChunk` has no standalone DTO struct — it is

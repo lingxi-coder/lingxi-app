@@ -260,6 +260,7 @@ export const ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES: Record<ManagedLocalAppMcpSt
 export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
   awaiting_plan_approval: true,
   task_id: true,
+  agent_id: true,
   task_type: true,
   status: true,
   description: true,

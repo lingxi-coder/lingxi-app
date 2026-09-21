@@ -2391,6 +2391,7 @@ fn canonical_doctor() -> DoctorReportDto {
 
 fn canonical_task_row() -> TaskRowDto {
     TaskRowDto {
+        agent_id: None,
         unread: false,
         model: None,
         effort: None,

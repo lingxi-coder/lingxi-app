@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
@@ -589,7 +589,7 @@ export function sanitizeDiagnostic(input: unknown, secrets: readonly string[] = 
     if (secret.length >= 4) message = message.split(secret).join('[REDACTED]');
   }
   message = message
-    .replace(/(authorization|api[-_ ]?key|token|secret|password)(\s*[=:]\s*)([^\s,;]+)/gi, '$1$2[REDACTED]')
+    .replace(/(authorization|api[-_ ]?key|token|secret|password)(\s*[=:]\s*)([^\s,;"\\]+)/gi, '$1$2[REDACTED]')
     .replace(/\b(sk-[A-Za-z0-9_-]{8,})\b/g, '[REDACTED]')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
     .trim();
@@ -647,7 +647,21 @@ export class DiagnosticBuffer {
   }
 
   add(level: DiagnosticEntry['level'], source: DiagnosticEntry['source'], input: unknown, secrets: readonly string[] = []): void {
-    this.entries.push({ timestamp: new Date().toISOString(), level, source, message: sanitizeDiagnostic(input, secrets) });
+    const entry = { timestamp: new Date().toISOString(), level, source, message: sanitizeDiagnostic(input, secrets) };
+    this.entries.push(entry);
+    // Keep failures independently of the busy 200-entry live diagnostics buffer.
+    if (this.filePath && level !== 'info') {
+      try {
+        const errorsPath = `${this.filePath}.errors`;
+        mkdirSync(dirname(errorsPath), { recursive: true, mode: 0o700 });
+        if (existsSync(errorsPath) && statSync(errorsPath).size >= 2_000_000) {
+          renameSync(errorsPath, `${errorsPath}.1`);
+        }
+        appendFileSync(errorsPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+      } catch {
+        // Logging must not interrupt the session, including on a full disk.
+      }
+    }
     if (this.entries.length > MAX_DIAGNOSTICS) this.entries.splice(0, this.entries.length - MAX_DIAGNOSTICS);
     this.persist();
   }

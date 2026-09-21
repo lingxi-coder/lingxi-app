@@ -3121,6 +3121,24 @@ mod tests {
     }
 
     #[test]
+    fn string_payload_fusion_errors_are_durable_terminal_records() {
+        let (_directory, coordinator, session_id) = coordinator();
+        let identity = fusion_identity(session_id, platform_api::FusionOrigin::Slash);
+        let mut record = fusion_terminal(identity, None);
+        record.result = Err(FusionError::InvalidConfiguration(
+            "a configuration value is invalid".into(),
+        ));
+
+        coordinator
+            .state
+            .persist_fusion_terminal(&record.event_id, &record)
+            .expect("string-payload Fusion errors must serialize into the journal");
+
+        assert_eq!(coordinator.fusion_terminal(&record.event_id), Some(record));
+        assert!(coordinator.durability_gate().frozen_reason().is_none());
+    }
+
+    #[test]
     fn replay_reuses_the_same_terminal_semantic_validator() {
         let (_directory, coordinator, session_id) = coordinator();
         let identity = fusion_identity(session_id, platform_api::FusionOrigin::Agent);

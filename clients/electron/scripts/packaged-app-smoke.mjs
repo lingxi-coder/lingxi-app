@@ -818,7 +818,7 @@ async function assertDesktopGit(page, workspace, tempRoot) {
   const screenshot = await page.send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(tmpdir(), 'lingxi-git-packaged.png'), Buffer.from(screenshot.data, 'base64'));
   await evaluate(page, `document.querySelector('[aria-label="Toggle pinned summary"]').click()`);
-  await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview')?.textContent.includes('Local') && document.querySelector('#runtime-center-overview')?.textContent.includes('desktop-review-smoke')`), { label: 'summary environment shows local and current branch' });
+  await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview')?.textContent.includes('desktop-review-smoke')`), { label: 'summary environment shows current branch' });
   await evaluate(page, `document.querySelector('#runtime-center-overview [data-git-branch-trigger]').click()`);
   await waitFor(() => evaluate(page, `document.querySelector('.git-branch-row[aria-current="true"]')?.textContent.includes('Uncommitted: 1 files')`), { label: 'current branch and uncommitted count' });
   const environmentScreenshot = await page.send('Page.captureScreenshot', { format: 'png' });

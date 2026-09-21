@@ -24,6 +24,16 @@ and depends on the macOS speech-recognition permission.
 
 Internal testers should follow [INTERNAL_BETA.md](./INTERNAL_BETA.md).
 
+## Diagnostic logs
+
+macOS logs are stored in `~/Library/Application Support/lingxi-code-desktop/logs/`.
+`desktop.jsonl` contains the latest 200 entries. `desktop.jsonl.errors` retains
+sanitized warnings and errors independently, rotating at 2 MB to
+`desktop.jsonl.errors.1`. Collect both error files when reporting a failure.
+Bridge error events and engine output include the session ID, project path and
+runtime generation. Fusion failures log the original error and run ID before
+terminal persistence, so a later storage error does not hide the original cause.
+
 ## Security model
 
 Electron main is the local authority. The sandboxed renderer receives a narrow,

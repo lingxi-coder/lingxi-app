@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { BridgeClient } from '@lingxi/bridge-client';
 
 import {
@@ -2465,6 +2466,46 @@ for (const interruption of ['cancel', 'restart'] as const) {
     assert.equal(runtime.turnActive, false);
   });
 }
+
+test('engine warnings and errors retain severity and their originating session', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const runtime = new SessionRuntime({ sessionId: '11111111-2222-4333-8444-555555555555',
+    projectPath: '/workspace', launchConfig: () => ({ workspace: '/workspace', trusted: true }), diagnostics });
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  (runtime as any).captureLogs({ stdout, stderr }, ['private-value']);
+  (runtime as any).generation = 1;
+  stdout.write('\u001b[31mERROR\u001b[0m Fusion failed private-value\n');
+  stdout.write('\u001b[33m WARN\u001b[0m terminal persistence failed\n');
+  const entries = diagnostics.snapshot();
+  assert.deepEqual(entries.map(entry => entry.level), ['error', 'warn']);
+  const event = JSON.parse(entries[0]!.message);
+  assert.equal(event.generation, 0);
+  assert.equal(event.sessionId, '11111111-2222-4333-8444-555555555555');
+  assert.doesNotMatch(event.message, /private-value|\[31m/);
+  stdout.destroy(); stderr.destroy();
+});
+
+test('bridge error diagnostics identify the session and preserve sanitized failure details', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const runtime = new SessionRuntime({
+    sessionId: '11111111-2222-4333-8444-555555555555', projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }), diagnostics,
+  });
+  const client = new EventEmitter();
+  (runtime as any).wireClient(client, 0);
+  client.emit('event', { type: 'error', kind: { type: 'internal' }, message: 'Fusion failed token=private-value' });
+  client.emit('event', { type: 'slash_command_result', is_error: true, display: 'invalid fusion configuration' });
+  const entries = diagnostics.snapshot().filter(entry => entry.level === 'error');
+  assert.equal(entries.length, 2);
+  const error = JSON.parse(entries[0]!.message);
+  assert.equal(error.event, 'client_error');
+  assert.equal(error.sessionId, '11111111-2222-4333-8444-555555555555');
+  assert.equal(error.projectPath, '/workspace');
+  assert.match(error.message, /Fusion failed/);
+  assert.doesNotMatch(JSON.stringify(entries), /private-value/);
+  assert.equal(JSON.parse(entries[1]!.message).event, 'slash_command_error');
+});
 
 test('Codex refreshed credentials are persisted privately and never replayed or logged', async () => {
   const diagnostics = new DiagnosticBuffer();

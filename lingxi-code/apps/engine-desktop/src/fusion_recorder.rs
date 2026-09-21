@@ -844,6 +844,18 @@ impl FusionRunRecorder for DesktopFusionRecorder {
         slash_target: Option<FusionSlashPublicationTarget>,
     ) -> FusionPublicationReceipt {
         let event_id = Self::event_id(&outcome);
+        let run_id = outcome.identity.run_id.clone();
+        let session_id = outcome.identity.session_id;
+        // Capture the computation error before serialization can replace it
+        // with a persistence error. Do not log the outcome or its prompt data.
+        if let Err(error) = &outcome.result {
+            tracing::error!(
+                %run_id,
+                ?session_id,
+                %error,
+                "Fusion computation failed before terminal persistence"
+            );
+        }
         if slash_target.is_some_and(|target| Some(target.session_id) != outcome.identity.session_id)
         {
             return FusionPublicationReceipt::storage_failure(
@@ -882,7 +894,15 @@ impl FusionRunRecorder for DesktopFusionRecorder {
             };
             return match self.coordinator.append_fusion_terminal(record).await {
                 Ok(_) => FusionPublicationReceipt::not_required(),
-                Err(error) => FusionPublicationReceipt::storage_failure(error.to_string()),
+                Err(error) => {
+                    tracing::error!(
+                        %run_id,
+                        ?session_id,
+                        %error,
+                        "Fusion terminal persistence failed"
+                    );
+                    FusionPublicationReceipt::storage_failure(error.to_string())
+                }
             };
         };
         let cwd = self
@@ -919,6 +939,12 @@ impl FusionRunRecorder for DesktopFusionRecorder {
             outbox: Some(outbox.clone()),
         };
         if let Err(error) = self.coordinator.append_fusion_terminal(record).await {
+            tracing::error!(
+                %run_id,
+                ?session_id,
+                %error,
+                "Fusion terminal persistence failed"
+            );
             return FusionPublicationReceipt::storage_failure(error.to_string());
         }
         self.deliver_with_backoff(outbox, false).await

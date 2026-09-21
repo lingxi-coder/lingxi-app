@@ -339,6 +339,21 @@ test('sanitized diagnostics persist across host restarts without secret plaintex
   assert.match(second.snapshot()[0]?.message ?? '', /REDACTED/);
 });
 
+test('failure diagnostics survive live buffer eviction and rotate with redaction', () => {
+  const logPath = join(temporaryDirectory(), 'desktop.jsonl');
+  const buffer = new DiagnosticBuffer(logPath);
+  buffer.add('error', 'bridge', 'fusion failed token=private-value', ['private-value']);
+  for (let i = 0; i < MAX_DIAGNOSTICS; i++) buffer.add('info', 'bridge', `activity ${i}`);
+  assert.equal(buffer.snapshot().some(entry => entry.level === 'error'), false);
+  const saved = readFileSync(`${logPath}.errors`, 'utf8');
+  assert.match(saved, /fusion failed/);
+  assert.doesNotMatch(saved, /private-value|activity/);
+  writeFileSync(`${logPath}.errors`, 'x'.repeat(2_000_000));
+  buffer.add('warn', 'bridge', 'next failure');
+  assert.equal(readFileSync(`${logPath}.errors.1`, 'utf8').length, 2_000_000);
+  assert.equal(JSON.parse(readFileSync(`${logPath}.errors`, 'utf8')).message, 'next failure');
+});
+
 test('settings reject secret-bearing API URLs and only activate recorded projects', () => {
   const userData = temporaryDirectory();
   writeFileSync(join(userData, 'settings.v1.json'), JSON.stringify({

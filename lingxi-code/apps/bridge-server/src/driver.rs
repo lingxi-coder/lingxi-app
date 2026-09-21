@@ -758,7 +758,8 @@ impl OrchestratorTurnDriver {
         // just-completed turn was a dynamic `/loop` tick that did NOT reschedule,
         // arm one fallback heartbeat (`lKi`). `maybe_arm_keepalive` is a no-op
         // for non-loop-tick turns (no in-flight prompt) and when the keepalive
-        // gate is off, so it is safe to call after EVERY other turn.
+        // gate is off. A hard turn failure is terminal for automatic work: it
+        // must end the loop instead of scheduling the same failing work again.
         let user_aborted = cancel_probe.is_cancelled()
             && self.cancel_reason.as_ref().is_none_or(|reason| {
                 reason.get() == orchestrator::prompt::mid_turn_input::CancelReason::UserInterrupt
@@ -818,9 +819,12 @@ impl OrchestratorTurnDriver {
                 },
             );
         }
+        let hard_failure = result.is_err();
         if let Some(scheduler) = self.wakeup_scheduler.as_ref() {
             if user_aborted {
                 tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
+            } else if hard_failure {
+                tool_cron::stop_dynamic_loop(Some(scheduler)).await;
             } else if let Some(runtime) = self.loop_runtime.as_ref() {
                 tool_cron::maybe_arm_keepalive_with_runtime(scheduler, runtime).await;
             } else {
@@ -1051,6 +1055,7 @@ mod tests {
     };
     use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
     use permission::gate::PermissionGate;
+    use platform_api::{BudgetError, WorkflowOutputScope, WorkflowOutputScopes};
     use protocol::{ContentBlock, ConversationMessage};
 
     use super::OrchestratorTurnDriver;
@@ -1091,6 +1096,37 @@ mod tests {
             PathBuf::from("/tmp"),
         ));
         OrchestratorTurnDriver::new(orchestrator)
+    }
+
+    struct RejectingOutputScopes;
+
+    #[async_trait::async_trait]
+    impl WorkflowOutputScopes for RejectingOutputScopes {
+        async fn begin_turn(
+            &self,
+            _: protocol::SessionId,
+            _: protocol::MessageId,
+            _: Option<u64>,
+        ) -> Result<WorkflowOutputScope, BudgetError> {
+            Err(BudgetError::Internal(
+                "output persistence is unavailable".into(),
+            ))
+        }
+
+        fn capture(&self, _: protocol::SessionId) -> Result<WorkflowOutputScope, BudgetError> {
+            Err(BudgetError::Internal(
+                "output persistence is unavailable".into(),
+            ))
+        }
+    }
+
+    fn build_driver_with_rejected_output_scope() -> OrchestratorTurnDriver {
+        let driver = build_driver(streaming_one_turn());
+        let orchestrator = Arc::try_unwrap(driver.orchestrator)
+            .ok()
+            .expect("test driver is the sole orchestrator owner")
+            .with_workflow_output_scopes(Arc::new(RejectingOutputScopes));
+        OrchestratorTurnDriver::new(Arc::new(orchestrator))
     }
 
     #[test]
@@ -1811,6 +1847,35 @@ mod tests {
             "the aborted tick must be dropped"
         );
         assert!(loop_runtime.loop_ended(), "user abort ends the loop");
+        telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
+        loop_runtime.reset();
+    }
+
+    #[tokio::test]
+    async fn failed_loop_tick_ends_the_loop_instead_of_retrying_forever() {
+        let _serial = LOOP_KA_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
+        let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
+        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        let rec = Arc::new(KaRec {
+            calls: std::sync::Mutex::new(Vec::new()),
+            runtime: loop_runtime.clone(),
+        });
+        let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
+        let driver = build_driver_with_rejected_output_scope().with_wakeup_scheduler(sched);
+
+        driver.run_turn("loop tick".to_string()).await;
+
+        assert!(
+            rec.calls.lock().unwrap().is_empty(),
+            "a failed loop tick must not schedule another attempt"
+        );
+        assert!(
+            loop_runtime.loop_ended(),
+            "a hard failure must end the loop"
+        );
         telemetry::test_clear_flag("tengu_kairos_loop_keepalive");
         loop_runtime.reset();
     }

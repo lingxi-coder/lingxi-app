@@ -1731,21 +1731,31 @@ export class SessionRuntime {
   }
 
   private captureLogs(child: ChildProcess, secrets: readonly string[] = []): void {
+    const generation = this.generation;
+    const record = (line: string, fallbackLevel: 'info' | 'error'): void => {
+      const text = sanitizeDiagnostic(line.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ''), secrets);
+      if (!text) return;
+      const level = /\bERROR\b/.test(text) ? 'error' : /\bWARN\b/.test(text) ? 'warn' : fallbackLevel;
+      this.diagnostics.add(level, 'bridge', diagnosticEvent('engine_log', {
+        sessionId: this.opts.sessionId,
+        projectPath: this.opts.projectPath,
+        generation,
+        message: text,
+      }), secrets);
+    };
     const attach = (stream: NodeJS.ReadableStream | null, level: 'info' | 'error'): void => {
       if (!stream) return;
       let buffered = '';
       const flush = (): void => {
-        const text = sanitizeDiagnostic(buffered, secrets);
+        record(buffered, level);
         buffered = '';
-        if (text) this.diagnostics.add(level, 'bridge', text, secrets);
       };
       stream.on('data', (chunk: Buffer | string) => {
         buffered += chunk.toString();
         const lines = buffered.split(/\r?\n/);
         buffered = lines.pop() ?? '';
         for (const line of lines) {
-          const text = sanitizeDiagnostic(line, secrets);
-          if (text) this.diagnostics.add(level, 'bridge', text, secrets);
+          record(line, level);
         }
         if (buffered.length > 8_000) flush();
       });
@@ -1923,8 +1933,24 @@ export class SessionRuntime {
         this.pendingPermissionSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
       }
       if (event.type === 'error') {
+        this.diagnostics.add('error', 'bridge', diagnosticEvent('client_error', {
+          sessionId: this.opts.sessionId,
+          projectPath: this.opts.projectPath,
+          generation,
+          turnId: this.activeTurnId,
+          kind: event.kind,
+          message: event.message,
+        }));
         this.pendingCredentialSettings?.reject(new Error('Provider settings loading failed.'));
         this.pendingModelSwitch?.fail(new Error('Model switch failed.'));
+      }
+      if (event.type === 'slash_command_result' && event.is_error) {
+        this.diagnostics.add('error', 'bridge', diagnosticEvent('slash_command_error', {
+          sessionId: this.opts.sessionId,
+          projectPath: this.opts.projectPath,
+          generation,
+          message: event.display,
+        }));
       }
       if (event.type === 'error' && this.pendingSessionResume) {
         this.rejectPendingSessionResume(new Error(sanitizeDiagnostic(event.message)));

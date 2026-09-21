@@ -2229,8 +2229,7 @@ pub struct FusionProgress {
 }
 
 /// Fusion failure. Preflight variants guarantee zero provider calls.
-#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
-#[serde(tag = "error", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FusionError {
     /// Agent/workflow gated off.
     #[error("fusion is disabled")]
@@ -2339,6 +2338,177 @@ pub enum FusionError {
     /// Internal error. User-facing text stays short; correlation is elsewhere.
     #[error("internal fusion error")]
     Internal,
+}
+
+/// Durable representation of [`FusionError`].
+///
+/// Serde's internally tagged enums cannot contain newtype variants. The public
+/// error keeps string payloads for ergonomic callers, while this wire form
+/// stores them as named `message` fields so terminal records remain durable.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
+enum FusionErrorWire {
+    Disabled,
+    UnavailableOnPlatform,
+    InvalidConfiguration {
+        message: String,
+    },
+    InvalidRequest {
+        message: String,
+    },
+    TooFewModels {
+        eligible: usize,
+        required: u8,
+        same_provider_only: bool,
+        parent_profile: String,
+    },
+    NotConfigured {
+        missing: Vec<FusionModelRole>,
+    },
+    InvalidCustomModels {
+        message: String,
+    },
+    CrossProviderDenied,
+    NoJudgeModel {
+        eligible: usize,
+        required: u8,
+        same_provider_only: bool,
+        parent_profile: String,
+    },
+    StructuredOutputUnsupported,
+    BudgetReservationUnavailable,
+    BudgetExceeded,
+    SpawnLimitExceeded,
+    PanelAdmissionRejected {
+        message: String,
+    },
+    AllPanelsFailed,
+    AllPanelsFailedPreflight,
+    MinPanelsNotMet,
+    PanelSetIncomplete,
+    TimedOutEmpty,
+    Cancelled,
+    Internal,
+}
+
+impl From<FusionError> for FusionErrorWire {
+    fn from(error: FusionError) -> Self {
+        match error {
+            FusionError::Disabled => Self::Disabled,
+            FusionError::UnavailableOnPlatform => Self::UnavailableOnPlatform,
+            FusionError::InvalidConfiguration(message) => Self::InvalidConfiguration { message },
+            FusionError::InvalidRequest(message) => Self::InvalidRequest { message },
+            FusionError::TooFewModels {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            } => Self::TooFewModels {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            },
+            FusionError::NotConfigured { missing } => Self::NotConfigured { missing },
+            FusionError::InvalidCustomModels(message) => Self::InvalidCustomModels { message },
+            FusionError::CrossProviderDenied => Self::CrossProviderDenied,
+            FusionError::NoJudgeModel {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            } => Self::NoJudgeModel {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            },
+            FusionError::StructuredOutputUnsupported => Self::StructuredOutputUnsupported,
+            FusionError::BudgetReservationUnavailable => Self::BudgetReservationUnavailable,
+            FusionError::BudgetExceeded => Self::BudgetExceeded,
+            FusionError::SpawnLimitExceeded => Self::SpawnLimitExceeded,
+            FusionError::PanelAdmissionRejected(message) => {
+                Self::PanelAdmissionRejected { message }
+            }
+            FusionError::AllPanelsFailed => Self::AllPanelsFailed,
+            FusionError::AllPanelsFailedPreflight => Self::AllPanelsFailedPreflight,
+            FusionError::MinPanelsNotMet => Self::MinPanelsNotMet,
+            FusionError::PanelSetIncomplete => Self::PanelSetIncomplete,
+            FusionError::TimedOutEmpty => Self::TimedOutEmpty,
+            FusionError::Cancelled => Self::Cancelled,
+            FusionError::Internal => Self::Internal,
+        }
+    }
+}
+
+impl From<FusionErrorWire> for FusionError {
+    fn from(error: FusionErrorWire) -> Self {
+        match error {
+            FusionErrorWire::Disabled => Self::Disabled,
+            FusionErrorWire::UnavailableOnPlatform => Self::UnavailableOnPlatform,
+            FusionErrorWire::InvalidConfiguration { message } => {
+                Self::InvalidConfiguration(message)
+            }
+            FusionErrorWire::InvalidRequest { message } => Self::InvalidRequest(message),
+            FusionErrorWire::TooFewModels {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            } => Self::TooFewModels {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            },
+            FusionErrorWire::NotConfigured { missing } => Self::NotConfigured { missing },
+            FusionErrorWire::InvalidCustomModels { message } => Self::InvalidCustomModels(message),
+            FusionErrorWire::CrossProviderDenied => Self::CrossProviderDenied,
+            FusionErrorWire::NoJudgeModel {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            } => Self::NoJudgeModel {
+                eligible,
+                required,
+                same_provider_only,
+                parent_profile,
+            },
+            FusionErrorWire::StructuredOutputUnsupported => Self::StructuredOutputUnsupported,
+            FusionErrorWire::BudgetReservationUnavailable => Self::BudgetReservationUnavailable,
+            FusionErrorWire::BudgetExceeded => Self::BudgetExceeded,
+            FusionErrorWire::SpawnLimitExceeded => Self::SpawnLimitExceeded,
+            FusionErrorWire::PanelAdmissionRejected { message } => {
+                Self::PanelAdmissionRejected(message)
+            }
+            FusionErrorWire::AllPanelsFailed => Self::AllPanelsFailed,
+            FusionErrorWire::AllPanelsFailedPreflight => Self::AllPanelsFailedPreflight,
+            FusionErrorWire::MinPanelsNotMet => Self::MinPanelsNotMet,
+            FusionErrorWire::PanelSetIncomplete => Self::PanelSetIncomplete,
+            FusionErrorWire::TimedOutEmpty => Self::TimedOutEmpty,
+            FusionErrorWire::Cancelled => Self::Cancelled,
+            FusionErrorWire::Internal => Self::Internal,
+        }
+    }
+}
+
+impl Serialize for FusionError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        FusionErrorWire::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FusionError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(FusionErrorWire::deserialize(deserializer)?.into())
+    }
 }
 
 impl FusionError {
@@ -3191,6 +3361,24 @@ mod tests {
             normalize_dimensions(raw),
             Err(FusionError::InvalidRequest(_))
         ));
+    }
+
+    #[test]
+    fn string_payload_fusion_errors_use_a_durable_internal_tag_shape() {
+        for error in [
+            FusionError::InvalidConfiguration("invalid configuration".into()),
+            FusionError::InvalidRequest("invalid request".into()),
+            FusionError::InvalidCustomModels("invalid models".into()),
+            FusionError::PanelAdmissionRejected("admission rejected".into()),
+        ] {
+            let encoded =
+                serde_json::to_value(&error).expect("string-payload Fusion error must serialize");
+            assert!(encoded.get("message").is_some(), "encoded: {encoded}");
+            assert_eq!(
+                serde_json::from_value::<FusionError>(encoded).expect("error must deserialize"),
+                error
+            );
+        }
     }
 
     #[test]

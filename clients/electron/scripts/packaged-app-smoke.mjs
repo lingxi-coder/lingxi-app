@@ -25,11 +25,9 @@ const TRUST_DIRECTORY_PATHS = [
   '.claude/agents',
   '.claude/commands',
   '.claude/plugins',
-  '.claude/skills',
   '.lingxi/agents',
   '.lingxi/commands',
   '.lingxi/plugins',
-  '.lingxi/skills',
 ];
 const TRUST_MEMORY_PATHS = [
   'CLAUDE.md',

@@ -266,6 +266,19 @@ test('trust is revoked when project config, agents, plugins, or memory content c
   assert.equal(workspaceTrust(trusted, workspace).trusted, false);
 });
 
+test('skill content does not participate in the bounded workspace trust fingerprint', () => {
+  const workspace = temporaryDirectory();
+  mkdirSync(join(workspace, '.claude/skills/reviewer'), { recursive: true });
+  mkdirSync(join(workspace, '.lingxi/skills/reviewer'), { recursive: true });
+  writeFileSync(join(workspace, '.claude/skills/reviewer/SKILL.md'), '# reviewer\n');
+  writeFileSync(join(workspace, '.lingxi/skills/reviewer/SKILL.md'), '# reviewer\n');
+
+  const before = workspaceFingerprint(workspace);
+  writeFileSync(join(workspace, '.claude/skills/reviewer/SKILL.md'), 'x'.repeat(512 * 1024 + 1));
+  writeFileSync(join(workspace, '.lingxi/skills/reviewer/SKILL.md'), 'y'.repeat(512 * 1024 + 1));
+  assert.equal(workspaceFingerprint(workspace), before);
+});
+
 test('trust follows symlink targets and fails closed when executable config exceeds its budget', () => {
   const workspace = temporaryDirectory();
   const target = join(temporaryDirectory(), 'settings-target.json');

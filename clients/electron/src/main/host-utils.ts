@@ -53,12 +53,16 @@ export const TRUST_DIRECTORY_PATHS = [
   '.claude/agents',
   '.claude/commands',
   '.claude/plugins',
-  '.claude/skills',
   '.lingxi/agents',
   '.lingxi/commands',
   '.lingxi/plugins',
-  '.lingxi/skills',
 ] as const;
+
+// Skills are on-demand instruction and reference content. They often contain
+// bundled assets and documentation, so including them in the bounded trust
+// fingerprint can make an otherwise trusted workspace unavailable merely
+// because its skill library grew. Trust applies to the workspace, not to an
+// arbitrary byte budget for its skills.
 
 export const TRUST_MEMORY_PATHS = [
   'CLAUDE.md',
@@ -636,7 +640,12 @@ export function sanitizeDiagnostic(input: unknown, secrets: readonly string[] = 
     if (secret.length >= 4) message = message.split(secret).join('[REDACTED]');
   }
   message = message
-    .replace(/(authorization|api[-_ ]?key|token|secret|password)(\s*[=:]\s*)([^\s,;"\\]+)/gi, '$1$2[REDACTED]')
+    // The value stops at `"` and `\` so a JSON-encoded diagnostic keeps its
+    // structure, but the opening quote (plain, or the `\"` of an
+    // already-escaped JSON string) is captured and re-emitted: without it a
+    // quoted value (`password: "hunter2"`) would not match at all and would be
+    // written out verbatim.
+    .replace(/(authorization|api[-_ ]?key|token|secret|password)(\s*[=:]\s*)(\\?"?)([^\s,;"\\]+)/gi, '$1$2$3[REDACTED]')
     .replace(/\b(sk-[A-Za-z0-9_-]{8,})\b/g, '[REDACTED]')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
     .trim();

@@ -256,6 +256,26 @@ test('task commands are echoed once only after a real turn starts', () => {
   assert.equal(reduceEvent(running, { type: 'turn_started' }).items.length, 1);
 });
 
+test('/plan request is visible on submission and not duplicated when its turn starts', () => {
+  const request = '/plan Fix the sidebar\nKeep existing sessions visible.';
+  const pending = beginSlashCommand(emptyConversation(), request);
+  assert.deepEqual(pending.items.map(item => item.type === 'narration' ? item.text : ''), [request]);
+  assert.equal(pending.pendingSlashPrompt, null);
+  const running = reduceEvent(pending, { type: 'turn_started' });
+  assert.equal(running.items.length, 1);
+  assert.equal(reduceEvent(running, { type: 'turn_started' }).items.length, 1);
+});
+
+test('bare /plan and its view actions do not create conversation messages', () => {
+  for (const command of ['/plan', '/plan open', '/plan share']) {
+    const started = beginSlashCommand(emptyConversation(), command);
+    assert.deepEqual(started.items, []);
+    const result = reduceEvent(started, { type: 'slash_command_result', display: 'Plan mode enabled.' });
+    assert.deepEqual(result.items, []);
+    assert.equal(result.commandResult?.output, 'Plan mode enabled.');
+  }
+});
+
 test('failed utility commands and session switches do not create messages', () => {
   const failed = reduceEvent(beginSlashCommand(emptyConversation(), '/usage'), { type: 'error', message: 'offline' });
   assert.deepEqual(failed.items, []);

@@ -1446,7 +1446,8 @@ impl TaskRegistry {
         let id = generate_task_id(TaskType::LocalAgent);
         let path = self
             .output_manager
-            .path_for(&id)
+            .allocate(&id)
+            .await
             .map_err(|e| TaskError::Io(e.to_string()))?;
         let base = TaskStateBase {
             id: id.clone(),
@@ -5983,6 +5984,40 @@ mod adopted_workflow_scope_test {
             fs.clone(),
         ));
         (dir, in_memory_fs, TaskRegistry::new(runtime, fs, out_mgr))
+    }
+
+    #[tokio::test]
+    async fn foreground_agent_output_is_readable_before_transcript_link() {
+        let (_dir, fs, registry) = make_registry();
+        let state = registry
+            .register_foreground_agent(platform_api::task_registry::ForegroundAgentRegistration {
+                agent_id: protocol::AgentId::new(),
+                agent_type: "Plan".into(),
+                description: "plan the change".into(),
+                prompt: "design".into(),
+                tool_use_id: None,
+                creator_agent_id: None,
+                creator_teammate_name: None,
+                creator_team_name: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            fs.files
+                .lock()
+                .await
+                .contains_key(state.base().output_file.to_str().unwrap()),
+            "foreground task must allocate its spool before the row is visible"
+        );
+        let output = platform_api::task_registry::TaskRegistryHandle::output(
+            &registry,
+            &state.base().id,
+            Some(0),
+        )
+        .await
+        .unwrap();
+        assert!(output.content.is_empty());
+        assert!(!output.done);
     }
 
     #[tokio::test]

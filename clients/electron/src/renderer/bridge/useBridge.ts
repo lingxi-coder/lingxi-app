@@ -1,5 +1,5 @@
 import type { ScheduledScope, ScheduledContext } from '../../shared/scheduled';
-import { submittedSessionCatalogs, type SubmittedSession } from './submittedSessionCatalog';
+import { firstSubmittedSession, submittedSessionCatalogs, type SubmittedSession } from './submittedSessionCatalog';
 import { saveProviderSettings } from './providerSettingsSave';
 import { requestCronManagement } from './cronManagement';
 import { beginSideQuestion, finishSideQuestion, isSideQuestionCommand, SIDE_QUESTION_AGENT_PREFIX } from './sideQuestion';
@@ -52,6 +52,7 @@ import {
   beginSlashCommand,
   failSlashCommand,
   reduceEventWithPendingFusion,
+  slashCommandEchoesRequest,
   isPendingFusionSessionRestore,
   emptyConversation,
   reduceEvent,
@@ -1738,6 +1739,13 @@ export function useBridge(): UseBridge {
     ]).catch((cause) => setError(messageFrom(cause)));
   }, [activeSessionId, bootstrap?.workspace.trusted, connection.status, host, requestTaskList, sessionLoading]);
 
+  const submittedSessionFor = useCallback((sessionId: string, text: string): SubmittedSession | undefined => {
+    const ref = bootstrapRef.current?.runtimes.find((entry) => entry.sessionId === sessionId)
+      ?? (activeSession?.sessionId === sessionId ? activeSession : undefined);
+    const saved = ref && bootstrapRef.current?.projectCatalogs[ref.projectPath]?.sessions.find((entry) => entry.uuid === sessionId);
+    return firstSubmittedSession(ref, text, saved);
+  }, [activeSession]);
+
   const sendTrackedPrompt = useCallback((
     text: string,
     images: ImageRefDto[] = [],
@@ -1756,17 +1764,7 @@ export function useBridge(): UseBridge {
     enqueueTrackedTurn(pendingTrackedTurns.current, token);
     const sendToken = `${sessionId}:${runtimeResourceSendSequence.current}`;
     const resources = promptRuntimeResources(sessionId, sendToken, images, imageNames, filePaths);
-    const sessionRef = bootstrapRef.current?.runtimes.find((entry) => entry.sessionId === sessionId)
-      ?? activeSession;
-    const saved = sessionRef && bootstrapRef.current?.projectCatalogs[sessionRef.projectPath]?.sessions.find((entry) => entry.uuid === sessionId);
-    const submittedSession: SubmittedSession | undefined = sessionRef && (!saved || saved.message_count === 0) ? {
-      projectPath: sessionRef.projectPath,
-      row: {
-        uuid: sessionId, title: trimmed.replace(/\s+/g, ' ').slice(0, 120),
-        modified_rfc3339: new Date().toISOString(), message_count: 1,
-        mode: saved?.mode ?? 'code', path: saved?.path ?? '',
-      },
-    } : undefined;
+    const submittedSession = submittedSessionFor(sessionId, trimmed);
     let promptItem: ConversationState['items'][number] | undefined;
     updateRuntime(sessionId, (state) => {
       const conversation = appendPendingUserPrompt(state.conversation, trimmed, images);
@@ -1806,7 +1804,7 @@ export function useBridge(): UseBridge {
       throw cause;
     });
     return { token, queued };
-  }, [activeSession, capture, host, updateRuntime]);
+  }, [capture, host, submittedSessionFor, updateRuntime]);
 
   const sendPrompt = useCallback(async (
     text: string,
@@ -1860,7 +1858,14 @@ export function useBridge(): UseBridge {
     if (pendingFusion) pendingFusionDispatches.current.set(sessionId, pendingFusion);
     turnActiveRefs.current.set(sessionId, true);
     claimSlashTurn(slashPendingRefs.current, sessionId);
-    updateRuntime(sessionId, (state) => ({ ...state, conversation: beginSlashCommand(state.conversation, command) }));
+    const submittedSession = slashCommandEchoesRequest(command)
+      ? submittedSessionFor(sessionId, command)
+      : undefined;
+    updateRuntime(sessionId, (state) => ({
+      ...state,
+      submittedSession: state.submittedSession ?? submittedSession,
+      conversation: beginSlashCommand(state.conversation, command),
+    }));
     try {
       await host.command(sessionId, { type: 'run_slash_command', raw: command });
     } catch (cause) {
@@ -1897,7 +1902,7 @@ export function useBridge(): UseBridge {
     } catch (cause) {
       capture(cause);
     }
-  }, [capture, host, updateRuntime]);
+  }, [capture, host, submittedSessionFor, updateRuntime]);
 
   const beginLocalCommand = useCallback((raw: string) => {
     const sessionId = activeSessionIdRef.current;

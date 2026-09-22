@@ -244,12 +244,27 @@ function isTaskControl(name: string | null): boolean {
   return name === '/compact' || name === '/goal';
 }
 
-/** Fusion starts background work without turn_started, so echo its request now. */
+/** `/plan <request>` starts a turn, while bare `/plan` and its view actions do not. */
+function isPlanRequest(name: string, raw: string): boolean {
+  if (name !== '/plan') return false;
+  const request = raw.slice(name.length).trim();
+  return request.length > 0 && request !== 'open' && request !== 'share';
+}
+
+/** Task requests that create a visible user message at submission. */
+export function slashCommandEchoesRequest(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const name = trimmed.split(/\s/, 1)[0]?.toLowerCase() ?? '';
+  return isTaskControl(name) || name === '/fusion' || isPlanRequest(name, trimmed);
+}
+
+/** Echo task requests that should be visible before the engine starts their turn. */
 export function beginSlashCommand(state: ConversationState, raw: string): ConversationState {
   const trimmed = raw.trim();
   if (!trimmed) return state;
   const name = trimmed.split(/\s/, 1)[0]?.toLowerCase() ?? '';
-  const echo = isTaskControl(name) || name === '/fusion';
+  const echo = slashCommandEchoesRequest(trimmed);
   const next = echo ? appendUserPrompt(state, trimmed) : state;
   return {
     ...next, pendingSlashName: name, pendingSlashPrompt: echo ? null : trimmed,

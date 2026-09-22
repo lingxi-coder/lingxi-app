@@ -102,6 +102,7 @@ async fn ordinary_shell_commands_reach_the_classifier_instead_of_a_prompt() {
         "./gradlew assembleDebug",
         "echo hi > out.txt",
         "awk '{print $1}' f.txt",
+        r#"cd /Users/luolingfeng/Projects/LingXi-Next/clients/android/app/src/main/res && for f in values values-en values-ja values-ko values-zh-rTW; do echo "--- $f ---"; grep -n "name=\"chat_live\" \|name=\"chat_i\"" $f/strings.xml | head -4; done"#,
     ] {
         let input = json!({ "command": command });
         let (decision, classified, prompted) = auto_call("Bash", &input, allow_verdict()).await;

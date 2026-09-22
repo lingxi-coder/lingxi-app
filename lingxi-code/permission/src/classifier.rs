@@ -131,12 +131,19 @@ pub enum AutoModeClassifierVerdict {
 #[must_use]
 pub fn reason_allows_classifier(reason: &PermissionDecisionReason) -> bool {
     match reason {
-        PermissionDecisionReason::PermissionMode { mode } => *mode == crate::PermissionMode::Auto,
+        // Explicit ask rules are user-authored prompt floors. Claude's
+        // hasPermissionsToUseToolInner returns these before the Auto
+        // classifier, so an Auto verdict must not silently override them.
+        PermissionDecisionReason::MatchedRule { .. } => false,
         PermissionDecisionReason::SafetyCheck {
             classifier_approvable,
             ..
         } => *classifier_approvable,
-        _ => false,
+        // All other Ask reasons (including Other, which is the reason used by
+        // the Bash AST too-complex/injection path) are eligible here. The
+        // policy gate already runs only for an effective Auto mode, and the
+        // non-approvable safety-check branch above remains a hard floor.
+        _ => true,
     }
 }
 
@@ -724,6 +731,36 @@ mod tests {
         };
         assert!(!reason_allows_classifier(
             &PermissionDecisionReason::MatchedRule { rule }
+        ));
+    }
+
+    #[test]
+    fn ordinary_other_asks_reach_auto_classifier() {
+        assert!(reason_allows_classifier(&PermissionDecisionReason::Other {
+            reason: "Bash AST could not be analyzed statically".into(),
+        }));
+        assert!(reason_allows_classifier(
+            &PermissionDecisionReason::PermissionMode {
+                mode: crate::PermissionMode::Auto,
+            }
+        ));
+    }
+
+    #[test]
+    fn non_approvable_safety_checks_stay_on_manual_path() {
+        assert!(!reason_allows_classifier(
+            &PermissionDecisionReason::SafetyCheck {
+                reason: "This command defers execution past approval-time checks".into(),
+                classifier_approvable: false,
+                circuit_breaker: None,
+            }
+        ));
+        assert!(reason_allows_classifier(
+            &PermissionDecisionReason::SafetyCheck {
+                reason: "This path needs contextual review".into(),
+                classifier_approvable: true,
+                circuit_breaker: None,
+            }
         ));
     }
 }

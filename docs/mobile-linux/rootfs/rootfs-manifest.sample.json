@@ -3,14 +3,14 @@
   "runtime": "android-proot",
   "platform": "android",
   "abi": "arm64",
-  "rootfs_version": "1.0.0",
+  "rootfs_version": "3.24.2",
   "content_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
   "sbom_filename": "rootfs.spdx.json",
   "source_pins_filename": "mobile-linux-pins.json",
   "archive": {
-    "filename": "alpine-minirootfs-3.21.3-aarch64.tar.gz",
-    "sha256": "ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea",
-    "size_bytes": 3900000
+    "filename": "rootfs.tar.gz",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "size_bytes": 0
   },
   "packages": [
     {
@@ -29,7 +29,7 @@
     },
     {
       "name": "ca-certificates",
-      "version": "20260611-r0",
+      "version": "20260909-r0",
       "license": "MPL-2.0 AND MIT",
       "architecture": "arm64",
       "origin": "ca-certificates"
@@ -42,22 +42,22 @@
       "origin": "git"
     },
     {
-      "name": "nodejs",
-      "version": "24.18.1-r0",
+      "name": "node-source",
+      "version": "26.9.0",
       "license": "MIT",
       "architecture": "arm64",
-      "origin": "nodejs"
+      "origin": "https://nodejs.org/dist/v26.9.0/node-v26.9.0.tar.xz"
     },
     {
       "name": "npm",
-      "version": "11.12.1-r0",
+      "version": "12.0.2",
       "license": "Artistic-2.0",
       "architecture": "arm64",
-      "origin": "npm"
+      "origin": "https://registry.npmjs.org/npm/-/npm-12.0.2.tgz"
     },
     {
       "name": "openssh-client-default",
-      "version": "10.3_p1-r0",
+      "version": "10.3_p1-r1",
       "license": "SSH-OpenSSH",
       "architecture": "arm64",
       "origin": "openssh"
@@ -89,6 +89,13 @@
       "license": "Apache-2.0",
       "architecture": "aarch64",
       "origin": "@typescript/typescript-linux-arm64"
+    },
+    {
+      "name": "pnpm",
+      "version": "12.5.1",
+      "license": "MIT",
+      "architecture": "arm64",
+      "origin": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz"
     }
   ],
   "executable_allowlist": [

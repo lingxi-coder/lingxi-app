@@ -1,4 +1,4 @@
-# Alpine 3.24.1 Android rootfs pipeline
+# Alpine 3.24.2 Android rootfs pipeline
 
 This directory defines the reproducible evidence contract for the Android
 MobileLinux rootfs. Release archives come from the official Alpine mirrors and
@@ -6,7 +6,7 @@ must match `docs/mobile-linux/mobile-linux-pins.json`.
 
 Pinned distribution baseline:
 
-- Alpine release: `3.24.1`
+- Alpine release: `3.24.2`
 - Repository branch: `v3.24`
 - Supported targets:
   - `android-proot` / `android` / `arm64`
@@ -25,11 +25,12 @@ Fixed primary package set:
 
 Local-app runtime pins:
 
-- `nodejs 24.18.1-r0`
+- Official Node `26.9.0` source built for musl; source hash, compiler inputs,
+  builder image and binary provenance are verified.
 - `git 2.54.0-r0`
-- `npm 11.12.1-r0` (including `npx`) remains available for user terminals;
-  the host-owned dependency job uses the pinned `pnpm 11.22.0` CLI installed
-  from its integrity-pinned npm tarball. `corepack` and `yarn` remain excluded.
+- `npm 12.0.2` (including `npx`) remains available for user terminals;
+  the host-owned dependency job uses the pinned `pnpm 12.5.1` CLI installed
+  from integrity-pinned npm and native platform tarballs. `corepack` and `yarn` remain excluded.
 - Native TypeScript `7.0.2` is installed from the integrity-pinned official
   per-architecture package at `/opt/lingxi/toolchains/typescript/7.0.2/tsc`.
   Each rootfs build must pass both `--version` and an LSP `initialize` exchange.
@@ -39,9 +40,8 @@ Local-app runtime pins:
   inside the isolated runtime, writing dependencies to its own workspace and
   using a host-owned cache mount only for that install. Generated code cannot
   invoke package managers.
-- No app bundle carries a prebuilt local-app dependency seed; Node and the
-  pinned pnpm CLI live in the rootfs and dependencies are materialized on first
-  use per workspace.
+- iOS development/full bundles carry a verified dependency seed keyed by the
+  r4 lockfile digest; drifted dependency requests are installed per workspace.
 
 `docs/mobile-linux/local-app-runtime-pins.json` records the exact APK, npm, pnpm,
 and native TypeScript
@@ -93,7 +93,7 @@ Policy decisions:
 
 Recommended build flow:
 
-1. Download both official Alpine 3.24.1 minirootfs archives named in the pin
+1. Download both official Alpine 3.24.2 minirootfs archives named in the pin
    manifest and verify SHA-256 before extraction or modification.
 2. Produce the complete package/license inventory and immutable content digest.
 3. Generate `rootfs-manifest.json` and `rootfs.spdx.json` for each ABI.

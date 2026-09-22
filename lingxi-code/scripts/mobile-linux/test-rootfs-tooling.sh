@@ -14,6 +14,7 @@ fixture_root="${tmp_root}/rootfs"
 mkdir -p "${fixture_root}/bin" "${fixture_root}/sbin" "${fixture_root}/usr/bin" "${fixture_root}/usr/lib" "${fixture_root}/lib/apk/db" "${fixture_root}/etc/apk" "${fixture_root}/tmp" "${fixture_root}/var/tmp" "${fixture_root}/workspace" "${fixture_root}/root"
 
 python3 - <<'PY' "${fixture_root}" "${repo_root}/docs/mobile-linux/local-app-runtime-pins.json"
+import hashlib
 import json
 import os
 import pathlib
@@ -26,7 +27,10 @@ root = pathlib.Path(sys.argv[1])
 
 def write_elf(path: pathlib.Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"\x7fELF" + payload)
+    header = bytearray(20)
+    header[:6] = b"\x7fELF\x02\x01"  # ELF64, little-endian
+    header[18:20] = (183).to_bytes(2, "little")  # EM_AARCH64
+    path.write_bytes(header + payload)
     path.chmod(0o755)
 
 write_elf(root / "bin" / "busybox", b"busybox")
@@ -47,6 +51,26 @@ write_elf(root / "usr" / "lib" / "libpython3.12.so.1.0", b"libpython")
 # moment the product moved to Alpine 3.24.1.
 _pins = json.loads(PINS_PATH.read_text(encoding="utf-8"))
 _alpine = _pins["alpine"]
+_node_root = root / "opt/lingxi/toolchains/node"
+_node_root.mkdir(parents=True, exist_ok=True)
+(_node_root / "provenance.json").write_text(json.dumps({
+    **_pins["node_source"],
+    "architecture": "aarch64",
+    "binary_sha256": hashlib.sha256((root / "usr/bin/node").read_bytes()).hexdigest(),
+}))
+(_node_root / "LICENSE").write_text("fixture Node license\n")
+for name in ("npm", "pnpm"):
+    directory = root / "usr/lib/node_modules" / name
+    (directory / "bin").mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text(json.dumps({
+        "name": name, "version": _pins[name]["version"], "license": "MIT",
+    }))
+    (directory / "LICENSE").write_text("fixture license\n")
+write_elf(root / "usr/lib/node_modules/pnpm/pnpm", b"pnpm-native-fixture")
+for name in ("npm", "npx", "pnpm"):
+    executable = root / "usr/bin" / name
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
 _typescript = _pins["typescript_native"]
 _typescript_package = _typescript["packages"]["aarch64"]
 (root / _typescript["install_root"].lstrip("/")).mkdir(parents=True, exist_ok=True)
@@ -90,6 +114,54 @@ export ROOTFS_TOOL_TEST_TSC_SHA256
 ROOTFS_TOOL_TEST_TSC_SHA256="$(shasum -a 256 "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc" | awk '{print $1}')"
 
 python3 "${tool}" verify-tree --root "${fixture_root}"
+
+# Each mutation starts from the valid fixture and checks the precise failure,
+# so an unrelated malformed fixture cannot make these negative tests pass.
+python3 - "${fixture_root}" "${tool}" <<'TOOLCHAIN_DRIFT'
+import json
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1])
+tool = sys.argv[2]
+
+def reject(relative, mutate, expected):
+    path = root / relative
+    original = path.read_bytes()
+    try:
+        path.write_bytes(mutate(original))
+        result = subprocess.run([sys.executable, tool, "verify-tree", "--root", str(root)],
+                                capture_output=True, text=True)
+        output = result.stdout + result.stderr
+        if result.returncode == 0 or expected not in output:
+            raise SystemExit(f"expected {relative}: {expected}; got {result.returncode}: {output}")
+    finally:
+        path.write_bytes(original)
+
+def wrong_version(data):
+    document = json.loads(data)
+    document["version"] = "0.0.0"
+    return json.dumps(document).encode()
+
+def wrong_architecture(data):
+    header = bytearray(data)
+    header[18:20] = (62).to_bytes(2, "little")  # x86_64 in an ARM64 rootfs
+    return bytes(header)
+
+def wrong_provenance_architecture(data):
+    document = json.loads(data)
+    document["architecture"] = "x86_64"
+    return json.dumps(document).encode()
+
+reject("opt/lingxi/toolchains/node/provenance.json", wrong_provenance_architecture, "source Node architecture diverged from provenance or guest")
+reject("usr/lib/node_modules/pnpm/pnpm", wrong_architecture, "native pnpm architecture diverged from guest")
+reject("opt/lingxi/toolchains/typescript/7.0.2/tsc", wrong_architecture, "native TypeScript architecture diverged from its pin or guest")
+reject("usr/bin/node", lambda data: data + b"tampered", "source Node binary diverged from build provenance")
+reject("opt/lingxi/toolchains/node/provenance.json", wrong_version, "source Node provenance diverged from pins")
+for name in ("npm", "pnpm"):
+    reject(f"usr/lib/node_modules/{name}/package.json", wrong_version, f"{name} package metadata diverged from pins")
+TOOLCHAIN_DRIFT
 
 cp "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc" "${tmp_root}/tsc.good"
 printf 'tampered' >> "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc"
@@ -181,7 +253,7 @@ if python3 "${tool}" verify-tree --root "${fixture_root}" >/dev/null 2>&1; then
   exit 1
 fi
 rm -f "${fixture_root}/usr/bin/lx-dir"
-rm -rf "${fixture_root}/usr/lib/node_modules"
+
 
 # The blanket ban that used to cover binary directories made it impossible for
 # anything on PATH to resolve into a guest-writable directory, or to reach a

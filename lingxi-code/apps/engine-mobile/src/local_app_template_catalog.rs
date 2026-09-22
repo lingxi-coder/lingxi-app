@@ -360,19 +360,13 @@ pub(crate) fn validate_and_journal(
             .collect(),
     };
     let path = journal_path(root, app_id, workflow_run_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("create candidate journal: {error}"))?;
-    }
-    let row = CandidateJournalRow {
-        handle: handle.clone(),
-        selection: selection.clone(),
-    };
-    let bytes = serde_json::to_vec_pretty(&row)
-        .map_err(|error| format!("serialize candidate journal: {error}"))?;
-    let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, bytes).map_err(|error| format!("write candidate journal: {error}"))?;
-    std::fs::rename(&temp, &path).map_err(|error| format!("commit candidate journal: {error}"))?;
+    write_journal_row(
+        &path,
+        &CandidateJournalRow {
+            handle: handle.clone(),
+            selection: selection.clone(),
+        },
+    )?;
     // Consume only after the durable selection row is committed. A failed
     // proposal (including stale catalog) remains retryable with the same
     // Host-issued selector capability; a successful proposal cannot be
@@ -390,6 +384,93 @@ pub(crate) fn validate_and_journal(
             "rejected": selection.rejected,
         }
     }))
+}
+
+fn write_journal_row(path: &Path, row: &CandidateJournalRow) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create candidate journal: {error}"))?;
+    }
+    let bytes =
+        serde_json::to_vec_pretty(row).map_err(|error| format!("serialize candidate journal: {error}"))?;
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, bytes).map_err(|error| format!("write candidate journal: {error}"))?;
+    std::fs::rename(&temp, path).map_err(|error| format!("commit candidate journal: {error}"))
+}
+
+/// Journal a template selection the HOST derived from a plan the user approved.
+///
+/// The plan-driven path has no Host-launched selector agent, so there is no
+/// `selector_capability` to spend; the authority is the plan approval the Host
+/// observed itself ([`crate::plan_approval`]), and the caller passes the
+/// template id that approval named. Everything else the journal row carries is
+/// still derived HERE from the compiled catalog, so [`resolve_typed`] keeps
+/// re-validating the row against the live catalog — a template that disappears
+/// or changes between planning and preparation is refused there, and the caller
+/// sends the user back through planning instead of silently swapping templates.
+///
+/// Returns the journaled row together with the opaque `vsel_` handle that
+/// `local_app_contract`/`stage_create` consume (the same pair [`validate_and_journal`]
+/// returns, minus the display payload).
+pub(crate) fn journal_plan_selection(
+    root: &Path,
+    app_id: &str,
+    execution_id: &str,
+    template_id: &str,
+    reason: &str,
+) -> Result<(String, ValidatedTemplateSelection), String> {
+    safe_segment(app_id, "app_id")?;
+    safe_segment(execution_id, "execution_id")?;
+    let (catalog_file, catalog_digest) = parse_catalog()?;
+    let template = catalog_file
+        .templates
+        .iter()
+        .find(|candidate| candidate.template_id == template_id)
+        .ok_or_else(|| {
+            format!(
+                "template_stale: the approved plan selected {template_id}, which is not in the \
+                 current template catalog; plan again against the current catalog"
+            )
+        })?;
+    if !template.available {
+        return Err(format!(
+            "template_stale: the approved plan selected {template_id}, which is not available in \
+             this build; plan again against the current catalog"
+        ));
+    }
+    let binding = AppRuntimeProfileBinding {
+        family: template.family,
+        revision: template.revision,
+        contract_sha256: template.contract_sha256.clone(),
+    };
+    let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+        .map_err(|error| format!("template_contract_invalid: {error}"))?;
+    if contract.surface != template.surface {
+        return Err(format!("template_surface_mismatch: {template_id}"));
+    }
+    let handle = format!("{HANDLE_PREFIX}{}", uuid::Uuid::new_v4().simple());
+    let selection = ValidatedTemplateSelection {
+        app_id: app_id.to_string(),
+        workflow_run_id: execution_id.to_string(),
+        plugin_name: "lingxi-local-app@builtin".into(),
+        plugin_bundle_sha256: crate::builtin_bundle::compiled_plugin_bundle_digest().into(),
+        catalog_digest,
+        template_id: template.template_id.clone(),
+        template_sha256: template.contract_sha256.clone(),
+        runtime_profile: binding,
+        template_inventory_sha256: template.inventory_sha256.clone(),
+        surface: template.surface,
+        reason: reason.trim().chars().take(4000).collect(),
+        rejected: Vec::new(),
+    };
+    write_journal_row(
+        &journal_path(root, app_id, execution_id),
+        &CandidateJournalRow {
+            handle: handle.clone(),
+            selection: selection.clone(),
+        },
+    )?;
+    Ok((handle, selection))
 }
 
 pub(crate) fn resolve(
@@ -537,8 +618,8 @@ mod tests {
         let value = serde_json::to_value(&view).expect("view JSON");
         assert_no_host_only_keys(&value);
         let encoded = value.to_string();
-        assert!(!encoded.contains("babylon-3d-r1"));
-        assert!(encoded.contains("react-dom-r2"));
+        assert!(!encoded.contains("babylon-3d-r4"));
+        assert!(encoded.contains("react-dom-r4"));
         assert!(view
             .templates
             .iter()
@@ -561,7 +642,7 @@ mod tests {
             "app_id": app_id,
             "workflow_run_id": run_id,
             "catalog_digest": view.catalog_digest,
-            "template_id": "react-dom-r2",
+            "template_id": "react-dom-r4",
             "reason": "ordinary form",
             "rejected": [],
             "selector_capability": capability.clone(),
@@ -645,7 +726,7 @@ mod tests {
                 "app_id": app_id,
                 "workflow_run_id": run_id,
                 "catalog_digest": view.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "ordinary form",
                 "rejected": [],
                 "selector_capability": capability,

@@ -11,9 +11,14 @@ The source baseline is immutable and machine-readable in
 - OpenMinis PRoot fork `8cf13e997cdc9472997aae19df8050c073c9a86c`
 - talloc 2.4.2
 - Base MobileLinux rootfs: Alpine 3.21.3 for `arm64-v8a` and `x86_64`
-- Local-app rootfs: Alpine 3.24.1, Node `24.18.1-r0`, Git `2.54.0-r0`,
-  npm `11.12.1-r0`, pinned pnpm `11.22.0`, native TypeScript/LSP `7.0.2`, Vite `8.2.1`, Rolldown `1.2.4`, Tailwind CSS/Oxide `4.3.3`,
-  and React/ReactDOM `19.2.8`
+- Local-app rootfs: Alpine 3.24.2; official Node `26.9.0` source built for musl,
+  npm `12.0.2`, pnpm `12.5.1` with integrity-pinned platform executables,
+  native TypeScript/LSP `7.0.2`, Vite `8.3.0`, Rolldown `1.2.9`,
+  Lightning CSS `1.33.0`, and React/ReactDOM `19.3.0`.
+- All apps use runtime profile revision 4 with the current Node/pnpm toolchain.
+  Older template revisions and their toolchains are no longer supported.
+  React Router remains at `6.30.6`, the latest compatible line for Ionic
+  `9.0.4` (its router requires `<7`).
 
 Android keeps one distribution dimension:
 
@@ -32,8 +37,8 @@ Full local-app release builds pass `--local-app-runtime --apk-dir <closure>`;
 that path validates the exact Node/Git closure before doing the expensive iSH
 build and verifies the resulting rootfs package database before staging.
 
-A `Full*` **device** build also packages a resolved dependency tree, so the
-first `create_local_app` on a device does not resolve the template's ~169
+A `Full*` or `StoreDebug` **device** build also packages a resolved dependency tree, so the
+first `create_local_app` on a device does not resolve the template's
 packages over the network inside the emulated guest. The Xcode phase fails
 closed when it is absent, so produce it first:
 
@@ -69,11 +74,12 @@ clients/android/scripts/verify-local-app-supply-chain.sh [--release --apk-dir <c
 clients/ios/scripts/verify-local-app-supply-chain.sh [--release --apk-dir <closure>]
 ```
 
-The local-app release check is fail-closed. The arm64 APK closure is complete;
-the x86_64 closure has all 60 artifacts resolved and hashed, but its offline
-install is not verified because Rosetta cannot execute Alpine post-install
-scripts through `/proc/self/exe`. `release_ready` remains false until the same
-closure is installed and checked on an x86_64 or qemu-backed host.
+The local-app release check is fail-closed. Native ARM64 builds verify the
+source-built Node binary and the exact installed tool versions. The x86_64
+closure retains its recorded Rosetta limitation and the source-built Node path
+must also be verified on an x86_64 or qemu-backed host before release readiness.
+Node ARM64/musl on iSH is not an upstream Tier 1 platform: device smoke testing
+is required independently of native Linux compilation.
 
 The staging scripts accept only a host-prepared `node_modules` tree containing
 the exact Linux musl Rolldown, Lightning CSS, and Tailwind Oxide bindings for

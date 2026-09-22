@@ -1,11 +1,11 @@
 {
   "schemaVersion": 2,
-  "toolchainKey": "pnpm@11.22.0/node@24.18.1",
+  "toolchainKey": "pnpm@12.5.1/node@26.9.0",
   "templates": [
     {
-      "templateId": "react-dom-r2",
+      "templateId": "react-dom-r4",
       "family": "react_dom",
-      "revision": 2,
+      "revision": 4,
       "surface": "dom",
       "summary": "DOM app shell with Ionic React routing",
       "recommendedFor": [
@@ -16,8 +16,8 @@
       "notFor": [
         "custom game loop"
       ],
-      "contractSha256": "fabf1aaa60614923b299dabc63a9c99d6ca2b42a8e00d22729cadbef0528ff5c",
-      "inventorySha256": "13ad59f15f1767688c507318611424b3157346ef53c3d22e1f053207e4b7dee7",
+      "contractSha256": "04d33ddb7b05787e65cfaa476a1510c97d599a571c0e9e41518e73b30faa5ef0",
+      "inventorySha256": "6fbda4d4bdc84a514c19c3d020c7d4a930f99c926adebd658b9ba64562473565",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Post-create exposure: start with a read-only search or lookup tool over the app's existing collections.",
@@ -27,9 +27,9 @@
       "available": true
     },
     {
-      "templateId": "canvas-2d-r2",
+      "templateId": "canvas-2d-r4",
       "family": "canvas_2d",
-      "revision": 2,
+      "revision": 4,
       "surface": "canvas",
       "summary": "Whole-surface 2D canvas runtime with a bounded frame loop",
       "recommendedFor": [
@@ -40,8 +40,8 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "a190bb3fa63cbb835ab726783512a465b0210f4505c0b3a6921713c35129b3ef",
-      "inventorySha256": "9f6aae99d72b6e29384aa60980f6b8c08bf3c3b9c61a8421d4a6e74c3d488122",
+      "contractSha256": "9d67bf7d72da635a8c2ace4f8000d065977c95a55dc6ab47b695b9ce84e4a3ff",
+      "inventorySha256": "cc46172b07b84debf25fc06a3b7a7fbcbde40a2db8f52cfe56d946ee01ed88d2",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Post-create exposure: expose read-only scene or frame state before adding write paths.",
@@ -51,9 +51,9 @@
       "available": true
     },
     {
-      "templateId": "three-3d-r2",
+      "templateId": "three-3d-r4",
       "family": "three_3d",
-      "revision": 2,
+      "revision": 4,
       "surface": "canvas",
       "summary": "Three.js 3D scene runtime with lifecycle helpers",
       "recommendedFor": [
@@ -64,8 +64,8 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "09c508cbde423c9ee45e73eb05dab7f9d60c3547962df3adbfa1869c2b9a5259",
-      "inventorySha256": "8a10ee6d98ff66cfe61f62936e07ccd437787554e2a9525171659caee6addc55",
+      "contractSha256": "65c09a0c41903a1f2e5b9a948b93f10dcd4483f4b5be44f2bb65c92dac94f673",
+      "inventorySha256": "a591bceb4d3f1b07ac189a1ea30b053466fab1b9335321585d3c48bfb15b8b34",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Post-create exposure: expose semantic scene queries such as selected object, camera, or asset inspection.",
@@ -75,9 +75,9 @@
       "available": true
     },
     {
-      "templateId": "phaser-2d-r2",
+      "templateId": "phaser-2d-r4",
       "family": "phaser_2d",
-      "revision": 2,
+      "revision": 4,
       "surface": "canvas",
       "summary": "Scene-based 2D game runtime with sprite support",
       "recommendedFor": [
@@ -90,8 +90,8 @@
         "ordinary forms",
         "static data pages"
       ],
-      "contractSha256": "af4ed3e15f2189dfbdf33a944ab8b317d6b70bbd9fd384e5ce4cbee005c6af23",
-      "inventorySha256": "3b809779e2f661b2ed62c89cc97c1cabedb4209d8bb35146e8913f06e40f940b",
+      "contractSha256": "f238192f55367317ef2330d27cca4032f337805526eaf7646208df50245b28dd",
+      "inventorySha256": "e241d315846dbb5fdac9abbc3251483f0fd74323e3f710262aea58443adc710d",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Post-create exposure: start with read-only gameplay state or inventory lookups.",
@@ -101,9 +101,9 @@
       "available": true
     },
     {
-      "templateId": "babylon-3d-r1",
+      "templateId": "babylon-3d-r4",
       "family": "babylon_3d",
-      "revision": 1,
+      "revision": 4,
       "surface": "canvas",
       "summary": "Babylon 3D runtime with glTF and Havok integration (availability gated)",
       "recommendedFor": [
@@ -114,8 +114,8 @@
       "notFor": [
         "ordinary forms"
       ],
-      "contractSha256": "82827767bbc86238031a90bf8433eda71a7e111fb4468e726433328739fd4bb4",
-      "inventorySha256": "12c7652fed18857d0693c1aa21e3bacc61c24183831a221eb99634c3d2807fab",
+      "contractSha256": "2f63ea6fe3d3032980bcc106cf36a4216c71b7fafa52c724a37acd36201963f5",
+      "inventorySha256": "67120b030d7179ffde3af1953e1617be4940d1e8fc407f11676d48698dbeceaa",
       "mcpDefaultEnabled": false,
       "mcpSuggestions": [
         "Post-create exposure unavailable until Babylon real-device validation is complete."

@@ -23,8 +23,6 @@ INNER="${SCRIPT_DIR}/rootfs-build-inner.sh"
 # single arch's digest with --platform for the other arch does NOT cross-build,
 # it silently hands back the pinned image and warns, so the "x86_64" build would
 # run an arm64 builder while claiming to have produced an x86_64 rootfs.
-BUILDER_IMAGE_AARCH64="docker.io/library/alpine:3.24@sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18"
-BUILDER_IMAGE_X86_64="docker.io/library/alpine:3.24@sha256:79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f"
 
 ARCH=""
 OUTPUT=""
@@ -42,8 +40,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${ARCH}" in
-  aarch64) PLATFORM="linux/arm64"; BUILDER_IMAGE="${BUILDER_IMAGE_AARCH64}" ;;
-  x86_64) PLATFORM="linux/amd64"; BUILDER_IMAGE="${BUILDER_IMAGE_X86_64}" ;;
+  aarch64) PLATFORM="linux/arm64" ;;
+  x86_64) PLATFORM="linux/amd64" ;;
   *) echo "--arch must be aarch64 or x86_64" >&2; exit 2 ;;
 esac
 [[ -n "${OUTPUT}" ]] || OUTPUT="${REPO_ROOT}/clients/ios/build/local-app-rootfs"
@@ -51,6 +49,7 @@ if [[ "${OUTPUT}" != /* ]]; then
   OUTPUT="${REPO_ROOT}/${OUTPUT}"
 fi
 [[ -f "${PINS}" ]] || { echo "missing pins: ${PINS}" >&2; exit 1; }
+BUILDER_IMAGE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["node_source"]["builder_images"][sys.argv[2]])' "${PINS}" "${ARCH}")"
 
 if [[ -z "${CONTAINER_RUNTIME}" ]]; then
   if command -v podman >/dev/null 2>&1; then CONTAINER_RUNTIME=podman
@@ -88,9 +87,11 @@ echo "[rootfs] alpine ${ALPINE_VERSION} (${ALPINE_BRANCH}) arch=${ARCH}"
 echo "[rootfs] packages: ${PACKAGES}"
 
 mkdir -p "${OUTPUT}"
+NODE_SOURCE_CACHE="${LINGXI_NODE_SOURCE_CACHE:-lingxi-local-app-node-source-${ARCH}}"
 
 "${CONTAINER_RUNTIME}" run --rm --platform "${PLATFORM}" \
   -e LINGXI_ARCH="${ARCH}" \
+  -e LINGXI_NODE_BUILD_JOBS="${LINGXI_NODE_BUILD_JOBS:-4}" \
   -e LINGXI_ALPINE_VERSION="${ALPINE_VERSION}" \
   -e LINGXI_ALPINE_BRANCH="${ALPINE_BRANCH}" \
   -e LINGXI_ROOTFS_SHA256="${ROOTFS_SHA}" \
@@ -106,6 +107,8 @@ mkdir -p "${OUTPUT}"
   -e LINGXI_TYPESCRIPT_SHA512="${TS_SHA512}" \
   -e LINGXI_TYPESCRIPT_TSC_SHA256="${TS_TSC_SHA256}" \
   -v "${INNER}:/inner.sh:ro" \
+  -v "${SCRIPT_DIR}/install-local-app-toolchains.py:/install-toolchains.py:ro" \
+  -v "${NODE_SOURCE_CACHE}:/node-source-cache" \
   -v "${PINS}:/pins.json:ro" \
   -v "${OUTPUT}:/out" \
   "${BUILDER_IMAGE}" \

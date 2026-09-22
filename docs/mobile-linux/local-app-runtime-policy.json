@@ -3,7 +3,7 @@
   "node_executable": "/usr/bin/node",
   "vite_executable": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js",
   "dependency_snapshot": {
-    "source": "embedded:runtime-profiles/react-dom/r1/pnpm-lock.yaml",
+    "source": "embedded:runtime-profiles/react-dom/r4/pnpm-lock.yaml",
     "materialize_into": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules",
     "guest_mount": "forbidden",
     "selection_policy": "exact_lock_only",

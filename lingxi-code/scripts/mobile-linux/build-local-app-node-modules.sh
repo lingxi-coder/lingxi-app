@@ -110,6 +110,11 @@ mkdir -p "${WORK}/project" "${WORK}/store" "${WORK}/state"
 for file in package.json pnpm-lock.yaml pnpm-workspace.yaml; do
   cp "${TEMPLATE}/${file}" "${WORK}/project/${file}"
 done
+# pnpm 12 frozen workspace resolution also checks the widget importer.
+if [[ -f "${TEMPLATE}/app/mcp-widget/package.json" ]]; then
+  mkdir -p "${WORK}/project/app/mcp-widget"
+  cp "${TEMPLATE}/app/mcp-widget/package.json" "${WORK}/project/app/mcp-widget/package.json"
+fi
 
 echo "[node_modules:${ARCH}] resolving the pinned lockfile inside the rootfs"
 # The flags are the engine's own (local_apps_host.rs run_dependency_install), so

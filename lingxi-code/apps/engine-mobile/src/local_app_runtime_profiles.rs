@@ -6,7 +6,47 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-pub(crate) const RUNTIME_PROFILE_TOOLCHAIN_KEY: &str = "pnpm@11.22.0/node@24.18.1";
+pub(crate) const RUNTIME_PROFILE_TOOLCHAIN_KEY: &str = "pnpm@12.5.1/node@26.9.0";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeToolchain {
+    Current,
+}
+
+impl RuntimeToolchain {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Current => RUNTIME_PROFILE_TOOLCHAIN_KEY,
+        }
+    }
+    pub(crate) fn node_command(self) -> &'static str {
+        match self {
+            Self::Current => "/usr/bin/node",
+        }
+    }
+    pub(crate) fn pnpm_command(self) -> &'static str {
+        match self {
+            Self::Current => "/usr/bin/pnpm",
+        }
+    }
+    pub(crate) fn path(self) -> &'static str {
+        match self {
+            Self::Current => "/usr/bin:/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin",
+        }
+    }
+}
+
+pub(crate) fn toolchain_for_binding(
+    binding: &AppRuntimeProfileBinding,
+) -> Result<RuntimeToolchain, AppError> {
+    let contract = contract_for_binding(binding)?;
+    match contract.toolchain_key {
+        RUNTIME_PROFILE_TOOLCHAIN_KEY => Ok(RuntimeToolchain::Current),
+        _ => Err(AppError::StorageCorrupt(
+            "unsupported runtime profile toolchain".into(),
+        )),
+    }
+}
+
 pub(crate) const REQUESTED_FILE_REL: &str = ".lingxi/dependencies/requested.json";
 pub(crate) const EFFECTIVE_PACKAGE_FILE_REL: &str = ".lingxi/dependencies/effective-package.json";
 pub(crate) const LOCKFILE_FILE_REL: &str = ".lingxi/dependencies/pnpm-lock.yaml";
@@ -23,14 +63,25 @@ macro_rules! profile_file {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../plugins/lingxi-local-app/assets/templates/",
                 $family,
-                "/r1/",
+                "/r4/",
                 $path
             )) as &[u8],
         )
     };
 }
-
-pub(crate) const REACT_DOM_MANAGED_FILES: &[(&str, &[u8])] = &[
+macro_rules! widget_file {
+    ($path:literal) => {
+        (
+            concat!("app/mcp-widget/", $path),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../plugins/lingxi-local-app/assets/templates/shared/mcp-widget/r4/",
+                $path
+            )) as &[u8],
+        )
+    };
+}
+pub(crate) const REACT_DOM_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", ".gitignore"),
     profile_file!("react-dom", "package.json"),
     profile_file!("react-dom", "pnpm-lock.yaml"),
@@ -46,7 +97,7 @@ pub(crate) const REACT_DOM_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", "styles/foundation.css"),
 ];
 
-pub(crate) const REACT_DOM_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub(crate) const REACT_DOM_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", "app/main.jsx"),
     profile_file!("react-dom", "app/app.jsx"),
     profile_file!("react-dom", "app/providers.jsx"),
@@ -56,9 +107,15 @@ pub(crate) const REACT_DOM_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("react-dom", "app/screens/detail-screen.jsx"),
     profile_file!("react-dom", "src/stores/app-store.js"),
     profile_file!("react-dom", "public/.gitkeep"),
+    widget_file!("package.json"),
+    widget_file!("pnpm-lock.yaml"),
+    widget_file!("index.html"),
+    widget_file!("vite.config.mjs"),
+    widget_file!("src/main.jsx"),
+    widget_file!("src/widget.jsx"),
 ];
 
-pub(crate) const CANVAS_2D_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub(crate) const CANVAS_2D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("canvas-2d", ".gitignore"),
     profile_file!("canvas-2d", "package.json"),
     profile_file!("canvas-2d", "pnpm-lock.yaml"),
@@ -75,7 +132,7 @@ pub(crate) const CANVAS_2D_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("canvas-2d", "styles/foundation.css"),
 ];
 
-pub(crate) const CANVAS_2D_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub(crate) const CANVAS_2D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("canvas-2d", "app/main.jsx"),
     profile_file!("canvas-2d", "app/app.jsx"),
     profile_file!("canvas-2d", "app/providers.jsx"),
@@ -84,9 +141,15 @@ pub(crate) const CANVAS_2D_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("canvas-2d", "app/screens/game-screen.jsx"),
     profile_file!("canvas-2d", "src/stores/game-store.js"),
     profile_file!("canvas-2d", "public/.gitkeep"),
+    widget_file!("package.json"),
+    widget_file!("pnpm-lock.yaml"),
+    widget_file!("index.html"),
+    widget_file!("vite.config.mjs"),
+    widget_file!("src/main.jsx"),
+    widget_file!("src/widget.jsx"),
 ];
 
-pub(crate) const THREE_3D_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub(crate) const THREE_3D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("three-3d", ".gitignore"),
     profile_file!("three-3d", "package.json"),
     profile_file!("three-3d", "pnpm-lock.yaml"),
@@ -103,7 +166,7 @@ pub(crate) const THREE_3D_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("three-3d", "styles/foundation.css"),
 ];
 
-pub(crate) const THREE_3D_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub(crate) const THREE_3D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("three-3d", "app/main.jsx"),
     profile_file!("three-3d", "app/app.jsx"),
     profile_file!("three-3d", "app/providers.jsx"),
@@ -112,9 +175,15 @@ pub(crate) const THREE_3D_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("three-3d", "app/screens/game-screen.jsx"),
     profile_file!("three-3d", "src/stores/game-store.js"),
     profile_file!("three-3d", "public/.gitkeep"),
+    widget_file!("package.json"),
+    widget_file!("pnpm-lock.yaml"),
+    widget_file!("index.html"),
+    widget_file!("vite.config.mjs"),
+    widget_file!("src/main.jsx"),
+    widget_file!("src/widget.jsx"),
 ];
 
-pub(crate) const PHASER_2D_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub(crate) const PHASER_2D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("phaser-2d", ".gitignore"),
     profile_file!("phaser-2d", "package.json"),
     profile_file!("phaser-2d", "pnpm-lock.yaml"),
@@ -132,7 +201,7 @@ pub(crate) const PHASER_2D_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("phaser-2d", "styles/foundation.css"),
 ];
 
-pub(crate) const PHASER_2D_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub(crate) const PHASER_2D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("phaser-2d", "app/main.jsx"),
     profile_file!("phaser-2d", "app/app.jsx"),
     profile_file!("phaser-2d", "app/providers.jsx"),
@@ -141,9 +210,15 @@ pub(crate) const PHASER_2D_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("phaser-2d", "app/screens/game-screen.jsx"),
     profile_file!("phaser-2d", "src/stores/game-store.js"),
     profile_file!("phaser-2d", "public/.gitkeep"),
+    widget_file!("package.json"),
+    widget_file!("pnpm-lock.yaml"),
+    widget_file!("index.html"),
+    widget_file!("vite.config.mjs"),
+    widget_file!("src/main.jsx"),
+    widget_file!("src/widget.jsx"),
 ];
 
-pub(crate) const BABYLON_3D_MANAGED_FILES: &[(&str, &[u8])] = &[
+pub(crate) const BABYLON_3D_R4_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", ".gitignore"),
     profile_file!("babylon-3d", "package.json"),
     profile_file!("babylon-3d", "pnpm-lock.yaml"),
@@ -161,7 +236,7 @@ pub(crate) const BABYLON_3D_MANAGED_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", "styles/foundation.css"),
 ];
 
-pub(crate) const BABYLON_3D_EDITABLE_FILES: &[(&str, &[u8])] = &[
+pub(crate) const BABYLON_3D_R4_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", "app/main.jsx"),
     profile_file!("babylon-3d", "app/app.jsx"),
     profile_file!("babylon-3d", "app/providers.jsx"),
@@ -170,77 +245,12 @@ pub(crate) const BABYLON_3D_EDITABLE_FILES: &[(&str, &[u8])] = &[
     profile_file!("babylon-3d", "app/screens/game-screen.jsx"),
     profile_file!("babylon-3d", "src/stores/game-store.js"),
     profile_file!("babylon-3d", "public/.gitkeep"),
-];
-
-// r1-critic-01: these four R2 sets used to append `shared_widget_file!`'s
-// `app/mcp-widget/*` starter (package.json, index.html, vite.config.mjs,
-// src/main.jsx, src/widget.jsx) from
-// `plugins/lingxi-local-app/assets/templates/shared/mcp-widget/r2/`. That
-// starter's package.json declares eight dependencies —
-// `@modelcontextprotocol/ext-apps`, `@modelcontextprotocol/sdk`,
-// `@vitejs/plugin-react`, `react`, `react-dom`, `vite`,
-// `vite-plugin-singlefile`, `zod` — of which `ext-apps` and
-// `vite-plugin-singlefile` (imported directly by `src/widget.jsx` and
-// `vite.config.mjs`) are in NONE of these profiles' root `package.json`, in
-// no `pnpm-workspace.yaml` `packages:` entry (there is none), and in no
-// `pnpm-lock.yaml` (`grep -c` for either name across the four families'
-// lockfiles is 0). Every app built from one of these R2 profiles was
-// therefore seeded with a widget starter that cannot resolve its own
-// imports the moment anything tries to build it.
-//
-// The three shared managed files the widget's package.json would need
-// entries alongside (`package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`)
-// are the SAME bytes `REACT_DOM_R1`/`CANVAS_2D_R1`/etc. use — see
-// `REACT_DOM_MANAGED_FILES` and friends below — and `PUBLISHED_R1_CONTRACTS`
-// pins their r1 digest as immutable, so wiring the widget's dependencies in
-// by editing those shared files is not a same-lane fix: it would first need
-// the r1/r2 managed-file split this module does not have. Removing the
-// unbuildable starter from the editable set is the safe half of the fix
-// available here; re-adding it needs the dependency/workspace wiring above
-// done first, not just the files copied back in.
-pub(crate) const REACT_DOM_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
-    profile_file!("react-dom", "app/main.jsx"),
-    profile_file!("react-dom", "app/app.jsx"),
-    profile_file!("react-dom", "app/providers.jsx"),
-    profile_file!("react-dom", "app/error-boundary.jsx"),
-    profile_file!("react-dom", "app/globals.css"),
-    profile_file!("react-dom", "app/screens/home-screen.jsx"),
-    profile_file!("react-dom", "app/screens/detail-screen.jsx"),
-    profile_file!("react-dom", "src/stores/app-store.js"),
-    profile_file!("react-dom", "public/.gitkeep"),
-];
-
-pub(crate) const CANVAS_2D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
-    profile_file!("canvas-2d", "app/main.jsx"),
-    profile_file!("canvas-2d", "app/app.jsx"),
-    profile_file!("canvas-2d", "app/providers.jsx"),
-    profile_file!("canvas-2d", "app/error-boundary.jsx"),
-    profile_file!("canvas-2d", "app/globals.css"),
-    profile_file!("canvas-2d", "app/screens/game-screen.jsx"),
-    profile_file!("canvas-2d", "src/stores/game-store.js"),
-    profile_file!("canvas-2d", "public/.gitkeep"),
-];
-
-pub(crate) const THREE_3D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
-    profile_file!("three-3d", "app/main.jsx"),
-    profile_file!("three-3d", "app/app.jsx"),
-    profile_file!("three-3d", "app/providers.jsx"),
-    profile_file!("three-3d", "app/error-boundary.jsx"),
-    profile_file!("three-3d", "app/globals.css"),
-    profile_file!("three-3d", "app/screens/game-screen.jsx"),
-    profile_file!("three-3d", "src/stores/game-store.js"),
-    profile_file!("three-3d", "public/.gitkeep"),
-];
-
-pub(crate) const PHASER_2D_R2_EDITABLE_FILES: &[(&str, &[u8])] = &[
-    profile_file!("phaser-2d", "app/main.jsx"),
-    profile_file!("phaser-2d", "app/app.jsx"),
-    profile_file!("phaser-2d", "app/providers.jsx"),
-    profile_file!("phaser-2d", "app/error-boundary.jsx"),
-    profile_file!("phaser-2d", "app/globals.css"),
-    profile_file!("phaser-2d", "app/screens/game-screen.jsx"),
-    profile_file!("phaser-2d", "src/stores/game-store.js"),
-    profile_file!("phaser-2d", "public/.gitkeep"),
+    widget_file!("package.json"),
+    widget_file!("pnpm-lock.yaml"),
+    widget_file!("index.html"),
+    widget_file!("vite.config.mjs"),
+    widget_file!("src/main.jsx"),
+    widget_file!("src/widget.jsx"),
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -283,206 +293,143 @@ pub(crate) struct RuntimeProfileSnapshotArtifacts {
     pub(crate) files: Vec<(&'static str, Vec<u8>)>,
 }
 
-const REACT_DOM_PACKAGES: &[(&str, &str)] = &[
-    ("@ionic/react", "9.0.0"),
-    ("@ionic/react-router", "9.0.0"),
-    ("@vitejs/plugin-react", "6.0.4"),
-    ("react", "19.2.8"),
-    ("react-dom", "19.2.8"),
+const REACT_DOM_R4_PACKAGES: &[(&str, &str)] = &[
+    ("@ionic/react", "9.0.4"),
+    ("@ionic/react-router", "9.0.4"),
+    ("@vitejs/plugin-react", "6.1.1"),
+    ("react", "19.3.0"),
+    ("react-dom", "19.3.0"),
     ("react-router", "6.30.6"),
     ("react-router-dom", "6.30.6"),
-    ("vite", "8.2.1"),
-    ("zod", "4.4.3"),
+    ("vite", "8.3.0"),
+    ("zod", "4.6.5"),
     ("zustand", "5.0.15"),
 ];
 
-const CANVAS_2D_PACKAGES: &[(&str, &str)] = &[
-    ("@ionic/react", "9.0.0"),
-    ("@ionic/react-router", "9.0.0"),
-    ("@vitejs/plugin-react", "6.0.4"),
-    ("react", "19.2.8"),
-    ("react-dom", "19.2.8"),
+const REACT_DOM_R4: RuntimeProfileContract = RuntimeProfileContract {
+    family: AppRuntimeProfile::ReactDom,
+    revision: 4,
+    surface: AppSurface::Dom,
+    source_seed_id: "react-dom/r4",
+    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
+    core_packages: REACT_DOM_R4_PACKAGES,
+    managed_files: REACT_DOM_R4_MANAGED_FILES,
+    editable_files: REACT_DOM_R4_EDITABLE_FILES,
+};
+
+const CANVAS_2D_R4_PACKAGES: &[(&str, &str)] = &[
+    ("@ionic/react", "9.0.4"),
+    ("@ionic/react-router", "9.0.4"),
+    ("@vitejs/plugin-react", "6.1.1"),
+    ("react", "19.3.0"),
+    ("react-dom", "19.3.0"),
     ("react-router", "6.30.6"),
     ("react-router-dom", "6.30.6"),
-    ("vite", "8.2.1"),
-    ("zod", "4.4.3"),
+    ("vite", "8.3.0"),
+    ("zod", "4.6.5"),
     ("zustand", "5.0.15"),
 ];
 
-const THREE_3D_PACKAGES: &[(&str, &str)] = &[
-    ("@ionic/react", "9.0.0"),
-    ("@ionic/react-router", "9.0.0"),
-    ("@vitejs/plugin-react", "6.0.4"),
-    ("react", "19.2.8"),
-    ("react-dom", "19.2.8"),
+const CANVAS_2D_R4: RuntimeProfileContract = RuntimeProfileContract {
+    family: AppRuntimeProfile::Canvas2d,
+    revision: 4,
+    surface: AppSurface::Canvas,
+    source_seed_id: "canvas-2d/r4",
+    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
+    core_packages: CANVAS_2D_R4_PACKAGES,
+    managed_files: CANVAS_2D_R4_MANAGED_FILES,
+    editable_files: CANVAS_2D_R4_EDITABLE_FILES,
+};
+
+const THREE_3D_R4_PACKAGES: &[(&str, &str)] = &[
+    ("@ionic/react", "9.0.4"),
+    ("@ionic/react-router", "9.0.4"),
+    ("@vitejs/plugin-react", "6.1.1"),
+    ("react", "19.3.0"),
+    ("react-dom", "19.3.0"),
     ("react-router", "6.30.6"),
     ("react-router-dom", "6.30.6"),
-    ("three", "0.185.1"),
-    ("vite", "8.2.1"),
-    ("zod", "4.4.3"),
+    ("three", "0.186.0"),
+    ("vite", "8.3.0"),
+    ("zod", "4.6.5"),
     ("zustand", "5.0.15"),
 ];
 
-const PHASER_2D_PACKAGES: &[(&str, &str)] = &[
-    ("@ionic/react", "9.0.0"),
-    ("@ionic/react-router", "9.0.0"),
-    ("@vitejs/plugin-react", "6.0.4"),
+const THREE_3D_R4: RuntimeProfileContract = RuntimeProfileContract {
+    family: AppRuntimeProfile::Three3d,
+    revision: 4,
+    surface: AppSurface::Canvas,
+    source_seed_id: "three-3d/r4",
+    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
+    core_packages: THREE_3D_R4_PACKAGES,
+    managed_files: THREE_3D_R4_MANAGED_FILES,
+    editable_files: THREE_3D_R4_EDITABLE_FILES,
+};
+
+const PHASER_2D_R4_PACKAGES: &[(&str, &str)] = &[
+    ("@ionic/react", "9.0.4"),
+    ("@ionic/react-router", "9.0.4"),
+    ("@vitejs/plugin-react", "6.1.1"),
     ("phaser", "4.2.1"),
-    ("react", "19.2.8"),
-    ("react-dom", "19.2.8"),
+    ("react", "19.3.0"),
+    ("react-dom", "19.3.0"),
     ("react-router", "6.30.6"),
     ("react-router-dom", "6.30.6"),
-    ("vite", "8.2.1"),
-    ("zod", "4.4.3"),
+    ("vite", "8.3.0"),
+    ("zod", "4.6.5"),
     ("zustand", "5.0.15"),
 ];
 
-const BABYLON_3D_PACKAGES: &[(&str, &str)] = &[
-    ("@babylonjs/core", "9.22.1"),
+const PHASER_2D_R4: RuntimeProfileContract = RuntimeProfileContract {
+    family: AppRuntimeProfile::Phaser2d,
+    revision: 4,
+    surface: AppSurface::Canvas,
+    source_seed_id: "phaser-2d/r4",
+    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
+    core_packages: PHASER_2D_R4_PACKAGES,
+    managed_files: PHASER_2D_R4_MANAGED_FILES,
+    editable_files: PHASER_2D_R4_EDITABLE_FILES,
+};
+
+const BABYLON_3D_R4_PACKAGES: &[(&str, &str)] = &[
+    ("@babylonjs/core", "9.27.1"),
     ("@babylonjs/havok", "1.3.14"),
-    ("@babylonjs/loaders", "9.22.1"),
-    ("@ionic/react", "9.0.0"),
-    ("@ionic/react-router", "9.0.0"),
-    ("@vitejs/plugin-react", "6.0.4"),
-    ("react", "19.2.8"),
-    ("react-dom", "19.2.8"),
+    ("@babylonjs/loaders", "9.27.1"),
+    ("@ionic/react", "9.0.4"),
+    ("@ionic/react-router", "9.0.4"),
+    ("@vitejs/plugin-react", "6.1.1"),
+    ("react", "19.3.0"),
+    ("react-dom", "19.3.0"),
     ("react-router", "6.30.6"),
     ("react-router-dom", "6.30.6"),
-    ("vite", "8.2.1"),
-    ("zod", "4.4.3"),
+    ("vite", "8.3.0"),
+    ("zod", "4.6.5"),
     ("zustand", "5.0.15"),
 ];
 
-const REACT_DOM_R1: RuntimeProfileContract = RuntimeProfileContract {
-    family: AppRuntimeProfile::ReactDom,
-    revision: 1,
-    surface: AppSurface::Dom,
-    source_seed_id: "react-dom/r1",
-    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: REACT_DOM_PACKAGES,
-    managed_files: REACT_DOM_MANAGED_FILES,
-    editable_files: REACT_DOM_EDITABLE_FILES,
-};
-
-const CANVAS_2D_R1: RuntimeProfileContract = RuntimeProfileContract {
-    family: AppRuntimeProfile::Canvas2d,
-    revision: 1,
-    surface: AppSurface::Canvas,
-    source_seed_id: "canvas-2d/r1",
-    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: CANVAS_2D_PACKAGES,
-    managed_files: CANVAS_2D_MANAGED_FILES,
-    editable_files: CANVAS_2D_EDITABLE_FILES,
-};
-
-const THREE_3D_R1: RuntimeProfileContract = RuntimeProfileContract {
-    family: AppRuntimeProfile::Three3d,
-    revision: 1,
-    surface: AppSurface::Canvas,
-    source_seed_id: "three-3d/r1",
-    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: THREE_3D_PACKAGES,
-    managed_files: THREE_3D_MANAGED_FILES,
-    editable_files: THREE_3D_EDITABLE_FILES,
-};
-
-const PHASER_2D_R1: RuntimeProfileContract = RuntimeProfileContract {
-    family: AppRuntimeProfile::Phaser2d,
-    revision: 1,
-    surface: AppSurface::Canvas,
-    source_seed_id: "phaser-2d/r1",
-    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: PHASER_2D_PACKAGES,
-    managed_files: PHASER_2D_MANAGED_FILES,
-    editable_files: PHASER_2D_EDITABLE_FILES,
-};
-
-const BABYLON_3D_R1: RuntimeProfileContract = RuntimeProfileContract {
+const BABYLON_3D_R4: RuntimeProfileContract = RuntimeProfileContract {
     family: AppRuntimeProfile::Babylon3d,
-    revision: 1,
+    revision: 4,
     surface: AppSurface::Canvas,
-    source_seed_id: "babylon-3d/r1",
+    source_seed_id: "babylon-3d/r4",
     toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: BABYLON_3D_PACKAGES,
-    managed_files: BABYLON_3D_MANAGED_FILES,
-    editable_files: BABYLON_3D_EDITABLE_FILES,
-};
-
-const REACT_DOM_R2: RuntimeProfileContract = RuntimeProfileContract {
-    family: AppRuntimeProfile::ReactDom,
-    revision: 2,
-    surface: AppSurface::Dom,
-    source_seed_id: "react-dom/r2",
-    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: REACT_DOM_PACKAGES,
-    managed_files: REACT_DOM_MANAGED_FILES,
-    editable_files: REACT_DOM_R2_EDITABLE_FILES,
-};
-
-const CANVAS_2D_R2: RuntimeProfileContract = RuntimeProfileContract {
-    family: AppRuntimeProfile::Canvas2d,
-    revision: 2,
-    surface: AppSurface::Canvas,
-    source_seed_id: "canvas-2d/r2",
-    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: CANVAS_2D_PACKAGES,
-    managed_files: CANVAS_2D_MANAGED_FILES,
-    editable_files: CANVAS_2D_R2_EDITABLE_FILES,
-};
-
-const THREE_3D_R2: RuntimeProfileContract = RuntimeProfileContract {
-    family: AppRuntimeProfile::Three3d,
-    revision: 2,
-    surface: AppSurface::Canvas,
-    source_seed_id: "three-3d/r2",
-    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: THREE_3D_PACKAGES,
-    managed_files: THREE_3D_MANAGED_FILES,
-    editable_files: THREE_3D_R2_EDITABLE_FILES,
-};
-
-const PHASER_2D_R2: RuntimeProfileContract = RuntimeProfileContract {
-    family: AppRuntimeProfile::Phaser2d,
-    revision: 2,
-    surface: AppSurface::Canvas,
-    source_seed_id: "phaser-2d/r2",
-    toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY,
-    core_packages: PHASER_2D_PACKAGES,
-    managed_files: PHASER_2D_MANAGED_FILES,
-    editable_files: PHASER_2D_R2_EDITABLE_FILES,
+    core_packages: BABYLON_3D_R4_PACKAGES,
+    managed_files: BABYLON_3D_R4_MANAGED_FILES,
+    editable_files: BABYLON_3D_R4_EDITABLE_FILES,
 };
 
 const UNAVAILABLE_PROFILES: &[RuntimeProfileUnavailable] = &[RuntimeProfileUnavailable {
-    contract: BABYLON_3D_R1,
+    contract: BABYLON_3D_R4,
     reason:
         "babylon_3d remains gated pending iOS/Android Babylon + glTF + Havok real-device validation",
 }];
 
-/// r1-critic-05: an already-scaffolded app's manifest pins one of these
-/// contracts by family + revision (`AppRuntimeProfileBinding`), and nothing
-/// re-validates that pin against this list after scaffold. The design doc's
-/// §9.6 per-App template snapshot (`<app-data>/templates/<snapshot-digest>/`)
-/// was meant to let such an app survive a revision being retired from here,
-/// but it was never implemented in any language — `grep -rn 'templates/'
-/// local-apps/src/*.rs` finds only a comment, no writer. Removing an entry a
-/// live app has pinned therefore leaves that app with NO restore source for
-/// its managed files; retire a revision here only alongside an app-side
-/// migration (or once §9.6 lands for real).
 fn published_available_contracts() -> &'static [RuntimeProfileContract] {
-    &[
-        REACT_DOM_R1,
-        CANVAS_2D_R1,
-        THREE_3D_R1,
-        PHASER_2D_R1,
-        REACT_DOM_R2,
-        CANVAS_2D_R2,
-        THREE_3D_R2,
-        PHASER_2D_R2,
-    ]
+    &[REACT_DOM_R4, CANVAS_2D_R4, THREE_3D_R4, PHASER_2D_R4]
 }
 
 fn current_catalog_contracts() -> &'static [RuntimeProfileContract] {
-    &[REACT_DOM_R2, CANVAS_2D_R2, THREE_3D_R2, PHASER_2D_R2]
+    &[REACT_DOM_R4, CANVAS_2D_R4, THREE_3D_R4, PHASER_2D_R4]
 }
 
 pub(crate) fn contract_for_binding(
@@ -525,6 +472,21 @@ pub(crate) fn current_binding_for_family(
         revision: contract.revision,
         contract_sha256: contract_sha256(contract)?,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn binding_for_family_revision(
+    family: AppRuntimeProfile,
+    revision: u32,
+) -> Option<AppRuntimeProfileBinding> {
+    published_available_contracts()
+        .iter()
+        .find(|contract| contract.family == family && contract.revision == revision)
+        .map(|contract| AppRuntimeProfileBinding {
+            family,
+            revision,
+            contract_sha256: contract_sha256(contract).expect("published contract digest"),
+        })
 }
 
 pub(crate) fn list_runtime_profiles() -> Vec<RuntimeProfileCatalogEntry> {
@@ -721,7 +683,7 @@ fn snapshot_json(snapshot: &AppDependencySnapshot) -> Result<Vec<u8>, AppError> 
     Ok(bytes)
 }
 
-fn tree_proof_json(tree_sha256: &str) -> Result<Vec<u8>, AppError> {
+fn tree_proof_json(tree_sha256: &str, toolchain_key: &str) -> Result<Vec<u8>, AppError> {
     let body = Value::Object(Map::from_iter([
         (
             "schemaVersion".to_string(),
@@ -733,7 +695,7 @@ fn tree_proof_json(tree_sha256: &str) -> Result<Vec<u8>, AppError> {
         ),
         (
             "toolchainKey".to_string(),
-            Value::String(RUNTIME_PROFILE_TOOLCHAIN_KEY.to_string()),
+            Value::String(toolchain_key.to_string()),
         ),
     ]));
     let mut bytes = serde_json::to_vec_pretty(&body)
@@ -770,20 +732,23 @@ pub(crate) fn snapshot_artifacts_for_binding(
     tree_sha256: String,
     sbom_bytes: &[u8],
 ) -> Result<RuntimeProfileSnapshotArtifacts, AppError> {
-    contract_for_binding(binding)?;
+    let contract = contract_for_binding(binding)?;
     let snapshot = AppDependencySnapshot {
         requested_sha256,
         package_sha256,
         lockfile_sha256,
         dependency_tree_sha256: tree_sha256.clone(),
         sbom_sha256: hash_bytes(sbom_bytes),
-        toolchain_key: RUNTIME_PROFILE_TOOLCHAIN_KEY.to_string(),
+        toolchain_key: contract.toolchain_key.to_string(),
         verified_profile_contract_sha256: binding.contract_sha256.clone(),
     };
     Ok(RuntimeProfileSnapshotArtifacts {
         files: vec![
             (SBOM_FILE_REL, sbom_bytes.to_vec()),
-            (TREE_PROOF_FILE_REL, tree_proof_json(&tree_sha256)?),
+            (
+                TREE_PROOF_FILE_REL,
+                tree_proof_json(&tree_sha256, contract.toolchain_key)?,
+            ),
             (SNAPSHOT_FILE_REL, snapshot_json(&snapshot)?),
         ],
         snapshot,
@@ -808,53 +773,13 @@ fn canonicalize(value: Value) -> Value {
 mod tests {
     use super::*;
 
-    // Pre-release r1 baseline. Phaser/Babylon were corrected before any Local
-    // App Plugin release; these values are the compatibility boundary from the
-    // first published build onward.
-    const PUBLISHED_R1_CONTRACTS: &[(AppRuntimeProfile, &str)] = &[
-        (
-            AppRuntimeProfile::ReactDom,
-            "5fe4940d24bd8ebc065acfd96b9bcf3b6c6ee35b8cda881f3ee0c8d89afe2cfd",
-        ),
-        (
-            AppRuntimeProfile::Canvas2d,
-            "762c4e6ab401a428a99c05626dfcae1c03600f536b3cf432c080ca892ea8bda0",
-        ),
-        (
-            AppRuntimeProfile::Three3d,
-            "5aa58fabc2ef442ef8107c1f8fd55d6674081e9481b8a7761bf12180fb22c047",
-        ),
-        (
-            AppRuntimeProfile::Phaser2d,
-            "7fd39e60eff9b7491062506f97a7b39f796f4d735e8716a7ed6d9fd7604695b1",
-        ),
-        (
-            AppRuntimeProfile::Babylon3d,
-            "82827767bbc86238031a90bf8433eda71a7e111fb4468e726433328739fd4bb4",
-        ),
-    ];
-
-    fn published_contracts() -> [RuntimeProfileContract; 9] {
-        [
-            REACT_DOM_R1,
-            CANVAS_2D_R1,
-            THREE_3D_R1,
-            PHASER_2D_R1,
-            BABYLON_3D_R1,
-            REACT_DOM_R2,
-            CANVAS_2D_R2,
-            THREE_3D_R2,
-            PHASER_2D_R2,
-        ]
-    }
-
     fn catalog_contracts() -> [RuntimeProfileContract; 5] {
         [
-            REACT_DOM_R2,
-            CANVAS_2D_R2,
-            THREE_3D_R2,
-            PHASER_2D_R2,
-            BABYLON_3D_R1,
+            REACT_DOM_R4,
+            CANVAS_2D_R4,
+            THREE_3D_R4,
+            PHASER_2D_R4,
+            BABYLON_3D_R4,
         ]
     }
 
@@ -896,13 +821,46 @@ mod tests {
     }
 
     #[test]
-    fn published_r1_contract_digests_are_immutable() {
-        for (family, expected) in PUBLISHED_R1_CONTRACTS {
-            let contract = published_contracts()
-                .into_iter()
-                .find(|contract| contract.family == *family && contract.revision == 1)
-                .expect("published r1 contract");
-            assert_eq!(contract_sha256(&contract).unwrap(), *expected, "{family}");
+    fn current_widget_starter_has_a_locked_workspace() {
+        for contract in catalog_contracts() {
+            assert_eq!(contract.toolchain_key, RUNTIME_PROFILE_TOOLCHAIN_KEY);
+            let workspace =
+                std::str::from_utf8(managed_file_bytes(&contract, "pnpm-workspace.yaml").unwrap())
+                    .unwrap();
+            assert!(workspace.contains("app/mcp-widget"));
+            let lockfile =
+                std::str::from_utf8(managed_file_bytes(&contract, "pnpm-lock.yaml").unwrap())
+                    .unwrap();
+            assert!(lockfile.contains("app/mcp-widget:"));
+            for path in [
+                "package.json",
+                "pnpm-lock.yaml",
+                "index.html",
+                "vite.config.mjs",
+                "src/main.jsx",
+                "src/widget.jsx",
+            ] {
+                assert!(contract
+                    .editable_files
+                    .iter()
+                    .any(|(candidate, _)| *candidate == format!("app/mcp-widget/{path}")));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "prints reviewed current profile contracts for catalog regeneration"]
+    fn print_current_profile_contracts() {
+        for contract in catalog_contracts() {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "family": contract.family.as_str(), "revision": contract.revision,
+                    "contractSha256": contract_sha256(&contract).unwrap(),
+                    "managedFiles": file_digest_map(contract.managed_files),
+                    "editableFiles": file_digest_map(contract.editable_files),
+                })
+            );
         }
     }
 
@@ -962,7 +920,7 @@ mod tests {
             let binding = current_binding_for_family(family).expect("binding");
             let contract = contract_for_binding(&binding).expect("exact contract");
             assert_eq!(contract.family, family);
-            assert_eq!(contract.revision, 2, "{family} should default to r2");
+            assert_eq!(contract.revision, 4, "{family} should default to r4");
         }
     }
 
@@ -984,6 +942,56 @@ mod tests {
                 && !entry.contract_sha256.is_empty()
                 && entry.availability_reason.is_some()
         }));
+    }
+
+    #[test]
+    fn current_profiles_own_all_managed_and_editable_template_bytes() {
+        for contract in catalog_contracts() {
+            assert_eq!(contract.revision, 4);
+            let family = contract.family.as_str().replace('_', "-");
+            let template = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../plugins/lingxi-local-app/assets/templates")
+                .join(family)
+                .join("r4");
+            for (path, bytes) in contract.managed_files.iter().chain(contract.editable_files) {
+                let source = if let Some(widget_path) = path.strip_prefix("app/mcp-widget/") {
+                    template
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join("shared/mcp-widget/r4")
+                        .join(widget_path)
+                } else {
+                    template.join(path)
+                };
+                assert_eq!(
+                    std::fs::read(source).unwrap(),
+                    *bytes,
+                    "{} {path}",
+                    contract.family
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retired_runtime_revisions_are_not_supported() {
+        for family in [
+            AppRuntimeProfile::ReactDom,
+            AppRuntimeProfile::Canvas2d,
+            AppRuntimeProfile::Three3d,
+            AppRuntimeProfile::Phaser2d,
+        ] {
+            let mut binding = current_binding_for_family(family).unwrap();
+            for revision in 1..4 {
+                binding.revision = revision;
+                assert!(matches!(
+                    contract_for_binding(&binding),
+                    Err(AppError::NotYetAvailable(_))
+                ));
+            }
+        }
     }
 
     #[test]
@@ -1028,7 +1036,7 @@ mod tests {
 
     #[test]
     fn catalog_core_packages_match_the_checked_in_package_json() {
-        for contract in [REACT_DOM_R2, CANVAS_2D_R2, THREE_3D_R2, PHASER_2D_R2] {
+        for contract in catalog_contracts() {
             let expected = contract
                 .core_packages
                 .iter()
@@ -1038,56 +1046,17 @@ mod tests {
         }
     }
 
-    /// r1-critic-01: the `app/mcp-widget/*` starter used to be seeded into
-    /// every R2 profile via `shared_widget_file!`, but its package.json
-    /// depends on `@modelcontextprotocol/ext-apps` and
-    /// `vite-plugin-singlefile` — both imported directly by its own
-    /// `src/widget.jsx` / `vite.config.mjs` — and neither package is
-    /// declared by any profile's root `package.json`, listed under any
-    /// `pnpm-workspace.yaml` `packages:` entry (there is none), or present in
-    /// any profile's `pnpm-lock.yaml`. Every app built from an R2 profile was
-    /// shipping a starter that could never resolve its own imports. This
-    /// test used to assert the OPPOSITE — that the starter is present — and
-    /// stayed green the whole time the seeded starter was unbuildable,
-    /// because presence was never cross-checked against resolvability. It
-    /// now asserts the starter is gone, so accidentally reintroducing it
-    /// (without first fixing the dependency wiring the comment on the
-    /// `*_R2_EDITABLE_FILES` constants above describes) fails here again.
-    #[test]
-    fn r2_profiles_no_longer_seed_the_unbuildable_shared_mcp_widget_starter() {
-        for contract in [REACT_DOM_R2, CANVAS_2D_R2, THREE_3D_R2, PHASER_2D_R2] {
-            for path in [
-                "app/mcp-widget/package.json",
-                "app/mcp-widget/index.html",
-                "app/mcp-widget/vite.config.mjs",
-                "app/mcp-widget/src/main.jsx",
-                "app/mcp-widget/src/widget.jsx",
-            ] {
-                assert!(
-                    !contract
-                        .editable_files
-                        .iter()
-                        .any(|(candidate, _)| *candidate == path),
-                    "{} r{} must not seed the unbuildable shared MCP widget file {}",
-                    contract.family,
-                    contract.revision,
-                    path
-                );
-            }
-        }
-    }
-
     #[test]
     fn engine_templates_import_only_their_declared_runtime() {
         let phaser_source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/lingxi-local-app/assets/templates/phaser-2d/r1/app/screens/game-screen.jsx"
+            "/../../plugins/lingxi-local-app/assets/templates/phaser-2d/r4/app/screens/game-screen.jsx"
         ));
         let phaser_runtime = String::from_utf8_lossy(
-            managed_file_bytes(&PHASER_2D_R1, "lib/phaser-runtime.js")
+            managed_file_bytes(&PHASER_2D_R4, "lib/phaser-runtime.js")
                 .expect("Phaser runtime adapter is managed"),
         );
-        let phaser_packages = package_dependencies(&PHASER_2D_R1).expect("Phaser package.json");
+        let phaser_packages = package_dependencies(&PHASER_2D_R4).expect("Phaser package.json");
         assert_eq!(
             phaser_packages.get("phaser").map(String::as_str),
             Some("4.2.1")
@@ -1096,13 +1065,13 @@ mod tests {
         assert!(!phaser_packages
             .keys()
             .any(|name| name.starts_with("@babylonjs/")));
-        assert!(PHASER_2D_MANAGED_FILES
+        assert!(PHASER_2D_R4_MANAGED_FILES
             .iter()
             .any(|(path, _)| *path == "lib/phaser-runtime.js"));
-        assert!(PHASER_2D_MANAGED_FILES
+        assert!(PHASER_2D_R4_MANAGED_FILES
             .iter()
             .any(|(path, _)| *path == "lib/frame-loop.js"));
-        assert!(!PHASER_2D_EDITABLE_FILES
+        assert!(!PHASER_2D_R4_EDITABLE_FILES
             .iter()
             .any(|(path, _)| *path == "src/game/frame-loop.js"));
         assert!(phaser_source.contains("from \"@/lib/phaser-runtime\""));
@@ -1117,22 +1086,22 @@ mod tests {
 
         let babylon_source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/lingxi-local-app/assets/templates/babylon-3d/r1/app/screens/game-screen.jsx"
+            "/../../plugins/lingxi-local-app/assets/templates/babylon-3d/r4/app/screens/game-screen.jsx"
         ));
         let babylon_runtime = String::from_utf8_lossy(
-            managed_file_bytes(&BABYLON_3D_R1, "lib/babylon-runtime.js")
+            managed_file_bytes(&BABYLON_3D_R4, "lib/babylon-runtime.js")
                 .expect("Babylon runtime adapter is managed"),
         );
-        let babylon_packages = package_dependencies(&BABYLON_3D_R1).expect("Babylon package.json");
+        let babylon_packages = package_dependencies(&BABYLON_3D_R4).expect("Babylon package.json");
         assert_eq!(
             babylon_packages.get("@babylonjs/core").map(String::as_str),
-            Some("9.22.1")
+            Some("9.27.1")
         );
         assert_eq!(
             babylon_packages
                 .get("@babylonjs/loaders")
                 .map(String::as_str),
-            Some("9.22.1")
+            Some("9.27.1")
         );
         assert_eq!(
             babylon_packages.get("@babylonjs/havok").map(String::as_str),
@@ -1140,13 +1109,13 @@ mod tests {
         );
         assert!(!babylon_packages.contains_key("three"));
         assert!(!babylon_packages.contains_key("phaser"));
-        assert!(BABYLON_3D_MANAGED_FILES
+        assert!(BABYLON_3D_R4_MANAGED_FILES
             .iter()
             .any(|(path, _)| *path == "lib/babylon-runtime.js"));
-        assert!(BABYLON_3D_MANAGED_FILES
+        assert!(BABYLON_3D_R4_MANAGED_FILES
             .iter()
             .any(|(path, _)| *path == "lib/frame-loop.js"));
-        assert!(!BABYLON_3D_EDITABLE_FILES
+        assert!(!BABYLON_3D_R4_EDITABLE_FILES
             .iter()
             .any(|(path, _)| *path == "src/game/frame-loop.js"));
         assert!(babylon_source.contains("from \"@/lib/babylon-runtime\""));
@@ -1165,17 +1134,7 @@ mod tests {
 
     #[test]
     fn source_policy_covers_profile_managed_runtime_helpers() {
-        for contract in [
-            REACT_DOM_R1,
-            REACT_DOM_R2,
-            CANVAS_2D_R1,
-            CANVAS_2D_R2,
-            THREE_3D_R1,
-            THREE_3D_R2,
-            PHASER_2D_R1,
-            PHASER_2D_R2,
-            BABYLON_3D_R1,
-        ] {
+        for contract in catalog_contracts() {
             let policy_bytes = managed_file_bytes(&contract, ".lingxi/source-policy.json")
                 .expect("source policy is managed");
             let policy: Value =
@@ -1212,17 +1171,7 @@ mod tests {
 
     #[test]
     fn editable_seed_files_are_part_of_the_contract_digest() {
-        for contract in [
-            REACT_DOM_R1,
-            REACT_DOM_R2,
-            CANVAS_2D_R1,
-            CANVAS_2D_R2,
-            THREE_3D_R1,
-            THREE_3D_R2,
-            PHASER_2D_R1,
-            PHASER_2D_R2,
-            BABYLON_3D_R1,
-        ] {
+        for contract in catalog_contracts() {
             let original = contract_sha256(&contract).expect("original digest");
             let (path, _) = contract
                 .editable_files

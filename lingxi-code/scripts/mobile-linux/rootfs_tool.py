@@ -14,9 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-# Versions come from the pins, never from a second copy here. Holding the Node
-# and Alpine versions in three files independently is what let the template
-# advance to 24.18.1 while the gates still asserted 22.23.0.
+# Versions come from the pins so toolchain updates and validation stay aligned.
 _PINS_PATH = (
     pathlib.Path(__file__).resolve().parents[3]
     / "docs"
@@ -323,6 +321,8 @@ def validate_typescript_native(root: pathlib.Path) -> PackageRecord:
     if len(matching) != 1:
         fail("native TypeScript package does not match exactly one pinned architecture")
     architecture, package = matching[0]
+    if elf_architecture(tsc_path) != architecture or elf_architecture(root / "bin/busybox") != architecture:
+        fail("native TypeScript architecture diverged from its pin or guest")
     if metadata.get("version") != version or metadata.get("license") != license_id:
         fail("native TypeScript package metadata diverged from its version/license pin")
     expected_tsc_sha256 = package.get("tsc_sha256")
@@ -338,6 +338,55 @@ def validate_typescript_native(root: pathlib.Path) -> PackageRecord:
         architecture=architecture,
         origin=package["name"],
     )
+
+
+def validate_source_toolchains(root: pathlib.Path) -> List[PackageRecord]:
+    node_pin = _PINS["node_source"]
+    metadata_path = root / "opt/lingxi/toolchains/node/provenance.json"
+    binary = root / "usr/bin/node"
+    if metadata_path.is_symlink() or not metadata_path.is_file():
+        fail("source Node provenance is missing or unsafe")
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"invalid source Node provenance: {exc}")
+    if any(metadata.get(key) != value for key, value in node_pin.items()):
+        fail("source Node provenance diverged from pins")
+    if binary.is_symlink() or not is_elf(binary) or not os.access(binary, os.X_OK):
+        fail("source Node must be a real executable ELF")
+    if metadata.get("binary_sha256") != read_sha256(binary):
+        fail("source Node binary diverged from build provenance")
+    architecture = metadata.get("architecture")
+    if architecture not in ("aarch64", "x86_64"):
+        fail("invalid source Node architecture")
+    if elf_architecture(binary) != architecture or elf_architecture(root / "bin/busybox") != architecture:
+        fail("source Node architecture diverged from provenance or guest")
+    native_pnpm = root / "usr/lib/node_modules/pnpm/pnpm"
+    if native_pnpm.is_symlink() or not os.access(native_pnpm, os.X_OK) or elf_architecture(native_pnpm) != architecture:
+        fail("native pnpm architecture diverged from guest")
+    records = [PackageRecord("node-source", node_pin["version"], node_pin["license"], architecture, node_pin["url"])]
+    for name in ("npm", "pnpm"):
+        manifest_path = root / "usr/lib/node_modules" / name / "package.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            fail(f"{name} manifest is missing or unsafe")
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("name") != name or manifest.get("version") != _PINS[name]["version"]:
+            fail(f"{name} package metadata diverged from pins")
+        records.append(PackageRecord(name, manifest["version"], manifest["license"], architecture, _PINS[name]["url"]))
+    return records
+
+
+def elf_architecture(path: pathlib.Path) -> str | None:
+    """Read the ELF64 machine field; package metadata alone cannot prove ISA."""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(20)
+    except OSError:
+        return None
+    if len(header) != 20 or header[:4] != b"\x7fELF" or header[4] != 2 or header[5] not in (1, 2):
+        return None
+    machine = int.from_bytes(header[18:20], "little" if header[5] == 1 else "big")
+    return {183: "aarch64", 62: "x86_64"}.get(machine)
 
 
 def is_elf(path: pathlib.Path) -> bool:
@@ -440,6 +489,7 @@ def validate_rootfs_tree(root: pathlib.Path) -> List[PackageRecord]:
 
     packages = parse_apk_installed(root / "lib" / "apk" / "db" / "installed")
     packages.append(validate_typescript_native(root))
+    packages.extend(validate_source_toolchains(root))
     return sorted(packages, key=lambda package: package.name)
 
 

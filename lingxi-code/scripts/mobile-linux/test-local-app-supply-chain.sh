@@ -12,8 +12,8 @@ TOOL="${SCRIPT_DIR}/verify-local-app-supply-chain.py"
 # red and green further down), so copying a fixture from here is copying the
 # bytes the product ships.
 PROFILE_ROOT="${REPO_ROOT}/lingxi-code/local-apps/templates/runtime-profiles"
-REACT_PROFILE="${PROFILE_ROOT}/react-dom/r1"
-CANVAS_PROFILE="${PROFILE_ROOT}/canvas-2d/r1"
+REACT_PROFILE="${PROFILE_ROOT}/react-dom/r4"
+CANVAS_PROFILE="${PROFILE_ROOT}/canvas-2d/r4"
 TEMP_ROOT="$(mktemp -d)"
 
 # A negative test must fail for the reason it names, not merely fail.
@@ -74,6 +74,7 @@ python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile babylon-3d
 python3 - "${SCRIPT_DIR}/stage-local-app-runtime.py" <<'PY'
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -85,6 +86,51 @@ spec = importlib.util.spec_from_file_location("stage_local_app_runtime", stage_p
 stage = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(stage)
 verify = stage._VERIFY
+
+# Replacement/cleanup of a read-only staged tree must unlink .bin links even
+# after their internal target disappeared, and never chmod external targets.
+with tempfile.TemporaryDirectory() as temporary:
+    base = pathlib.Path(temporary)
+    external = base / "external"
+    external.mkdir()
+    payload = external / "payload"
+    payload.write_text("outside tree remains unchanged")
+    payload.chmod(0o400)
+    external.chmod(0o500)
+    tree = base / "staged"
+    bins = tree / "node_modules/.bin"
+    bins.mkdir(parents=True)
+    (bins / "dangling").symlink_to("../removed-package/bin/tool")
+    (bins / "external-file").symlink_to(payload)
+    (bins / "external-directory").symlink_to(external, target_is_directory=True)
+    package = tree / "node_modules/package"
+    package.mkdir()
+    (package / "tool").write_text("internal tool")
+    (bins / "internal").symlink_to("../package/tool")
+    for directory in (bins, package, tree / "node_modules", tree):
+        directory.chmod(0o500)
+    try:
+        stage.remove_tree(tree)
+        assert not tree.exists(), "read-only staged tree was not fully removed"
+        assert payload.read_text() == "outside tree remains unchanged"
+        assert payload.stat().st_mode & 0o777 == 0o400, "external file permissions changed"
+        assert external.stat().st_mode & 0o777 == 0o500, "external directory permissions changed"
+        root_link = base / "root-link"
+        root_link.symlink_to(external, target_is_directory=True)
+        stage.remove_tree(root_link)
+        assert not root_link.is_symlink() and external.exists(), "root symlink followed instead of unlinked"
+        dangling_root = base / "dangling-root"
+        dangling_root.symlink_to(base / "absent")
+        stage.remove_tree(dangling_root)
+        assert not dangling_root.is_symlink(), "dangling root link retained"
+    finally:
+        # The external fixture is ours, but remove_tree itself must not touch it.
+        external.chmod(0o700)
+        payload.chmod(0o600)
+        if tree.exists():
+            for directory, _children, _files in os.walk(tree):
+                pathlib.Path(directory).chmod(0o700)
+print("read-only staging cleanup: dangling/internal/external symlinks handled safely")
 
 
 def write_package(root, name, version):
@@ -173,7 +219,7 @@ assert "scaffold" not in policy
 assert "package_manager_policy" not in policy
 assert policy["vite_executable"] == "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js"
 dependency_snapshot = policy["dependency_snapshot"]
-assert dependency_snapshot["source"] == "embedded:runtime-profiles/react-dom/r1/pnpm-lock.yaml"
+assert dependency_snapshot["source"] == "embedded:runtime-profiles/react-dom/r4/pnpm-lock.yaml"
 assert dependency_snapshot["materialize_into"] == "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules"
 assert dependency_snapshot["guest_mount"] == "forbidden"
 assert dependency_snapshot["selection_policy"] == "exact_lock_only"
@@ -311,7 +357,7 @@ expect_rejection "pnpm-lock byte drift to fail validation" \
   python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
   --template "${TEMP_ROOT}/react-dom-lock-drift"
 
-# r1-backlog-scaffold-build-13. Everything above validates the copy under
+# Everything above validates the copy under
 # lingxi-code/local-apps/templates/runtime-profiles, but the bytes the engine
 # SHIPS come from a SECOND on-disk copy: `profile_file!` in
 # lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs
@@ -372,7 +418,7 @@ with tempfile.TemporaryDirectory() as tmp:
         raise SystemExit(f"expected {len(entries)} files compared, got {compared}")
 
     # RED 1: one byte of drift is named by path.
-    drifted = attested / sample_family / "r1" / sample_rel
+    drifted = attested / sample_family / "r4" / sample_rel
     drifted.write_bytes(drifted.read_bytes() + b"\n")
     message = expect_fail(
         "byte drift between the attested and compiled template trees",
@@ -417,7 +463,7 @@ with tempfile.TemporaryDirectory() as tmp:
 print("compiled runtime-profile tree comparison: green and red both proven")
 PY
 
-python3 - "${REACT_PROFILE}" "${CANVAS_PROFILE}" "${PROFILE_ROOT}/three-3d/r1" "${PROFILE_ROOT}/phaser-2d/r1" "${PROFILE_ROOT}/babylon-3d/r1" <<'PY'
+python3 - "${REACT_PROFILE}" "${CANVAS_PROFILE}" "${PROFILE_ROOT}/three-3d/r4" "${PROFILE_ROOT}/phaser-2d/r4" "${PROFILE_ROOT}/babylon-3d/r4" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -508,11 +554,11 @@ verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
 packages = dict(verify.EXPECTED_DEPENDENCIES)
 packages.update({
-    "rolldown": "1.2.6",
+    "rolldown": "1.2.9",
     "rollup": "4.44.0",
     "lightningcss": "1.33.0",
-    "@rolldown/binding-linux-arm64-musl": "1.2.6",
-    "@rolldown/binding-linux-x64-musl": "1.2.6",
+    "@rolldown/binding-linux-arm64-musl": "1.2.9",
+    "@rolldown/binding-linux-x64-musl": "1.2.9",
     "@rollup/rollup-linux-arm64-musl": "4.44.0",
     "@rollup/rollup-linux-x64-musl": "4.44.0",
     "lightningcss-linux-arm64-musl": "1.33.0",
@@ -709,11 +755,20 @@ printf '{"local_app_runtime":true}\n' > "${ROOTFS_MANIFEST}"
   --platform iphoneos \
   --staged "${INSTALL_STAGED}" \
   --rootfs-manifest "${ROOTFS_MANIFEST}"
-"${RUNTIME_ASSET_VALIDATOR}" \
+expect_rejection "StoreDebug iphoneos to reject missing toolchain assets" \
+  "${RUNTIME_ASSET_VALIDATOR}" \
   --configuration StoreDebug \
   --platform iphoneos \
   --staged "${TEMP_ROOT}/install-src/absent" \
   --rootfs-manifest "${TEMP_ROOT}/missing-manifest.json"
+
+"${RUNTIME_ASSET_VALIDATOR}" \
+  --configuration StoreDebug --platform iphoneos \
+  --staged "${INSTALL_STAGED}" --rootfs-manifest "${ROOTFS_MANIFEST}"
+printf '{"local_app_runtime":false}\n' > "${ROOTFS_MANIFEST}"
+expect_rejection "StoreDebug iphoneos to reject a bare rootfs" \
+  "${RUNTIME_ASSET_VALIDATOR}" --configuration StoreDebug --platform iphoneos \
+  --staged "${INSTALL_STAGED}" --rootfs-manifest "${ROOTFS_MANIFEST}"
 
 # --rootfs-only judges the ROOTFS ALONE. The Xcode staging phase has no staged
 # local-app node_modules tree (commit 1a4385f09 removed the phase that built
@@ -835,8 +890,18 @@ for abi in ${COMMITTED_ABIS}; do
   esac
 done
 
-# The optimized create-skill gate must reject semantic regressions, not merely
+# The plan-driven create gate must reject semantic regressions, not merely
 # match the current file on the happy path.
+#
+# RETIRED (2026-09-21): the fixtures here used to mutate the OLD create skill's
+# tokens ("never re-ask an answered decision", the UI-summary sentence, and an
+# `authoring_spec`/`mcp_intent` Workflow launch example) and then drove
+# `validate_optimized_create_skill_contract`. `local-app-build.js` is deleted
+# and `create-local-app/SKILL.md` was rewritten for the plan-driven flow
+# (EnterPlanMode -> ExitPlanMode -> LocalAppPrepare -> LocalAppBuild ->
+# LocalAppRuntime), so the fixtures now mutate THAT contract and drive
+# `validate_create_flow_contract`. The former `workflow_mutations` half is gone
+# with `local-app-build.js`.
 python3 - "${REPO_ROOT}" <<'PY'
 import contextlib
 import importlib.util
@@ -851,16 +916,29 @@ verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
 text = (repo / "skills/create-local-app/SKILL.md").read_text(encoding="utf-8")
 mutations = {
-    "dynamic brief": ("never re-ask an answered decision", "repeat answered decisions"),
-    "compact UI summary": (
-        "structure/navigation, light/dark/system theme and accent, style/density",
-        "UI summary",
+    "plan approval is the create confirmation": (
+        "That approval — the Allow on the plan — IS the create confirmation.",
+        "The plan is approved later by a native sheet.",
     ),
-    "complete authoring spec": ('"authoring_spec":', '"partial_spec":'),
-    "business capability intent": ('"mcp_intent":', '"auto_mcp":'),
-    "no automatic MCP": (
-        "This does not configure or\n   publish MCP during creation",
-        "This configures MCP during creation",
+    "host prepare step": (
+        "LocalAppPrepare({",
+        "LocalAppScaffold({",
+    ),
+    "build is the completion condition": (
+        "A successful `LocalAppBuild` is the completion condition.",
+        "The build is followed by an automatic verification stage.",
+    ),
+    "no automatic verification": (
+        "automatic verification stage after it",
+        "a verification stage after it",
+    ),
+    "retired build workflow reintroduced": (
+        "## 5. Deliver",
+        "## 5. Deliver\n\nLaunch the build workflow lingxi-local-app:local-app-build to finish.",
+    ),
+    "deleted create agent reintroduced": (
+        "## 1. Plan",
+        "## 1. Plan\n\nThe designer drafts the UI recommendation.",
     ),
 }
 for label, (needle, replacement) in mutations.items():
@@ -869,54 +947,10 @@ for label, (needle, replacement) in mutations.items():
         raise SystemExit(f"negative fixture {label!r} did not mutate the skill")
     try:
         with contextlib.redirect_stderr(io.StringIO()):
-            verify.validate_optimized_create_skill_contract(mutated)
+            verify.validate_create_flow_contract(mutated)
     except SystemExit:
         continue
-    raise SystemExit(f"optimized create-skill gate accepted regression: {label}")
-
-workflow = (
-    repo / "lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js"
-).read_text(encoding="utf-8")
-workflow_mutations = {
-    "scaffold identity": (
-        "name=${JSON.stringify(confirmedName)}, brief=${JSON.stringify(confirmedBrief)}, ",
-        "",
-    ),
-    "update contract identity": (
-        "operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}",
-        "operation=stage",
-    ),
-    "tester finalize receipt": (
-        "const testerDisposition = finalizeDisposition(tester, 'tester', qaHandle)",
-        "const testerDisposition = { kind: 'candidate', report: tester }",
-    ),
-    "thorough result chain": (
-        "verifier.result.previous_result_id !== tester.receipt.result_id",
-        "false",
-    ),
-    "Host candidate pass": (
-        "result.scenario_judgements.every",
-        "report.ok === true",
-    ),
-    "infrastructure repair bypass": (
-        "input.operation === 'verify' || repairRounds >= repairBudget || qa.disposition !== 'candidate' || qa.source_findings.length === 0",
-        "false",
-    ),
-    "evidence preservation": (
-        "if (Array.isArray(value)) return value.map(",
-        "if (Array.isArray(value)) return value.slice(0, 40).map(",
-    ),
-}
-for label, (needle, replacement) in workflow_mutations.items():
-    mutated = workflow.replace(needle, replacement)
-    if mutated == workflow:
-        raise SystemExit(f"negative workflow fixture {label!r} did not mutate the source")
-    try:
-        with contextlib.redirect_stderr(io.StringIO()):
-            verify.validate_optimized_build_workflow_contract(mutated)
-    except SystemExit:
-        continue
-    raise SystemExit(f"optimized workflow gate accepted regression: {label}")
+    raise SystemExit(f"plan-driven create gate accepted regression: {label}")
 PY
 
 echo "local-app supply-chain tests passed (release rootfs digest: KNOWN GAP, unanchored)"

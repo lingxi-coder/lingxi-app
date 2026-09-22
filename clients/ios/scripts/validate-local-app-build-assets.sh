@@ -36,7 +36,7 @@ fi
 REQUIRED=0
 if [[ "${CONFIGURATION}" == *Release ]]; then
   REQUIRED=1
-elif [[ "${PLATFORM}" == "iphoneos" && "${CONFIGURATION}" == Full* ]]; then
+elif [[ "${PLATFORM}" == "iphoneos" && ( "${CONFIGURATION}" == Full* || "${CONFIGURATION}" == "StoreDebug" ) ]]; then
   REQUIRED=1
 fi
 if [[ "${REQUIRED}" != "1" ]]; then

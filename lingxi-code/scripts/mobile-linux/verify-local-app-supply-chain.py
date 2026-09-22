@@ -23,18 +23,18 @@ EXPECTED_DEPENDENCIES = {
     # entry points under `@ionic/core/components` are the only tree-shakeable
     # path, but they dynamically import one another and rolldown rejects that
     # under the `iife` output format this build is pinned to.
-    "@ionic/react": "9.0.0",
+    "@ionic/react": "9.0.4",
     # Native page transitions and the platform back gesture, via IonRouterOutlet.
     # It peers on react-router 6.x, which is why react-router is pinned to 6
     # rather than 7.
-    "@ionic/react-router": "9.0.0",
-    "@vitejs/plugin-react": "6.0.4",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
+    "@ionic/react-router": "9.0.4",
+    "@vitejs/plugin-react": "6.1.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "react-router": "6.30.6",
     "react-router-dom": "6.30.6",
-    "vite": "8.2.1",
-    "zod": "4.4.3",
+    "vite": "8.3.0",
+    "zod": "4.6.5",
     "zustand": "5.0.15",
 }
 EXPECTED_OVERRIDES = {"lightningcss": "1.33.0"}
@@ -44,8 +44,8 @@ EXPECTED_SCRIPTS = {
     "preview": "vite preview",
 }
 EXPECTED_ROLLDOWN_BINDINGS = {
-    "@rolldown/binding-linux-arm64-musl": "1.2.6",
-    "@rolldown/binding-linux-x64-musl": "1.2.6",
+    "@rolldown/binding-linux-arm64-musl": "1.2.9",
+    "@rolldown/binding-linux-x64-musl": "1.2.9",
 }
 EXPECTED_LIGHTNINGCSS_BINDINGS = {
     "lightningcss-linux-arm64-musl": "1.33.0",
@@ -63,7 +63,7 @@ EXPECTED_NATIVE_PACKAGE_BINARIES = {
     "lightningcss-linux-arm64-musl": "lightningcss.linux-arm64-musl.node",
     "lightningcss-linux-x64-musl": "lightningcss.linux-x64-musl.node",
 }
-EXPECTED_ROLLDOWN_VERSION = "1.2.6"
+EXPECTED_ROLLDOWN_VERSION = "1.2.9"
 EXPECTED_LIGHTNINGCSS_VERSION = "1.33.0"
 EXPECTED_WRITABLE_ROOTS = ["app", "components", "lib", "styles", "public"]
 VITE_EXPECTED_WRITABLE_ROOTS = EXPECTED_WRITABLE_ROOTS + ["src"]
@@ -110,21 +110,21 @@ FORBIDDEN_SOURCE_PATTERNS = {
 }
 
 RUNTIME_PROFILE_COMMON_DEPENDENCIES = {
-    "@ionic/react": "9.0.0",
-    "@ionic/react-router": "9.0.0",
-    "@vitejs/plugin-react": "6.0.4",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
+    "@ionic/react": "9.0.4",
+    "@ionic/react-router": "9.0.4",
+    "@vitejs/plugin-react": "6.1.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "react-router": "6.30.6",
     "react-router-dom": "6.30.6",
-    "vite": "8.2.1",
-    "zod": "4.4.3",
+    "vite": "8.3.0",
+    "zod": "4.6.5",
     "zustand": "5.0.15",
 }
 RUNTIME_PROFILE_LOCK_PACKAGES = {
-    "rolldown": "1.2.6",
-    "@rolldown/binding-linux-arm64-musl": "1.2.6",
-    "@rolldown/binding-linux-x64-musl": "1.2.6",
+    "rolldown": "1.2.9",
+    "@rolldown/binding-linux-arm64-musl": "1.2.9",
+    "@rolldown/binding-linux-x64-musl": "1.2.9",
     "@rollup/rollup-linux-arm64-musl": "4.44.0",
     "@rollup/rollup-linux-x64-musl": "4.44.0",
     "lightningcss": "1.33.0",
@@ -132,11 +132,11 @@ RUNTIME_PROFILE_LOCK_PACKAGES = {
     "lightningcss-linux-x64-musl": "1.33.0",
 }
 RUNTIME_PROFILE_LOCK_SHA256 = {
-    "react-dom": "ff805143f51e7a9cc31a935495b64f3515a54a6ebb8d4b7374f1d5e33869aabb",
-    "canvas-2d": "ff805143f51e7a9cc31a935495b64f3515a54a6ebb8d4b7374f1d5e33869aabb",
-    "three-3d": "dee30efc799fdf0b859a21b9ba482e931ce117d83253f750f47974aeb623aed6",
-    "phaser-2d": "4673a2fa573ed431b7e48d58fb143bfda8a9ef3e379d63ebd05395d5c4935b95",
-    "babylon-3d": "a2b282f45cb5cfde7cae1fce39c06b0dd943a25ba037b911704727d959de632c",
+    "react-dom": "27675ad6bfbcb79deec7d2f4e06ae986ed63e7312696196bae377ddaacf0eada",
+    "canvas-2d": "27675ad6bfbcb79deec7d2f4e06ae986ed63e7312696196bae377ddaacf0eada",
+    "three-3d": "64cbae2ddb878a757cdf99c022887eec1e5a050859517abb6c51e4cf648d30e9",
+    "phaser-2d": "d7361a1cd59a5a9ac183b967cde2952a3e9583d39e0c9ac4b94e76b0f86e97c2",
+    "babylon-3d": "df787d493a39e7ee3765e1cf70302957176aa7bbbf180208eca7ba33f56a83d4"
 }
 RUNTIME_PROFILES = {
     "react-dom": {
@@ -148,7 +148,7 @@ RUNTIME_PROFILES = {
         "host_managed_helpers": ["lib/frame-loop.js"],
     },
     "three-3d": {
-        "extra_dependencies": {"three": "0.185.1"},
+        "extra_dependencies": {"three": "0.186.0"},
         "host_managed_helpers": ["lib/frame-loop.js"],
     },
     "phaser-2d": {
@@ -157,9 +157,9 @@ RUNTIME_PROFILES = {
     },
     "babylon-3d": {
         "extra_dependencies": {
-            "@babylonjs/core": "9.22.1",
+            "@babylonjs/core": "9.27.1",
             "@babylonjs/havok": "1.3.14",
-            "@babylonjs/loaders": "9.22.1",
+            "@babylonjs/loaders": "9.27.1",
         },
         "host_managed_helpers": ["lib/frame-loop.js", "lib/babylon-runtime.js"],
     },
@@ -227,7 +227,7 @@ def load_yaml_mapping(path: pathlib.Path) -> dict:
     this cannot represent cannot pass by being misread.
     """
     mapping: dict = {}
-    current: dict | None = None
+    current: dict | list | None = None
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
@@ -235,6 +235,12 @@ def load_yaml_mapping(path: pathlib.Path) -> dict:
             if current is None:
                 fail(f"{path}:{number}: indented entry outside a mapping")
             nested = raw[2:]
+            if isinstance(current, list):
+                match = re.fullmatch(r"-\s+(['\"])([^'\"]+)\1", nested)
+                if match is None:
+                    fail(f"{path}:{number}: unsupported workspace package syntax")
+                current.append(match.group(2))
+                continue
             # A third level would be flattened into the second if it were
             # accepted here, which is exactly the silent misreading this parser
             # must not do: the caller would compare a mapping that never
@@ -258,7 +264,7 @@ def load_yaml_mapping(path: pathlib.Path) -> dict:
             mapping[key.strip()] = value.strip()
             current = None
         else:
-            current = {}
+            current = [] if key.strip() == "packages" else {}
             mapping[key.strip()] = current
     return mapping
 
@@ -507,12 +513,14 @@ def expected_node(pins: dict) -> str:
     version = runtime.get("node")
     if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
         fail("local_app_runtime.node must be an exact three-part Node version")
-    apk_version = pins.get("runtime_packages", {}).get("nodejs")
-    if not isinstance(apk_version, str) or not apk_version.startswith(f"{version}-r"):
-        fail(
-            f"runtime_packages.nodejs ({apk_version!r}) must be the Alpine build of "
-            f"local_app_runtime.node ({version})"
-        )
+    source = pins.get("node_source", {})
+    if (source.get("version") != version
+            or source.get("url") not in {
+                f"https://nodejs.org/dist/v{version}/node-v{version}.tar.xz",
+                f"https://nodejs.org/dist/v{version}/node-v{version}.tar.gz",
+            }
+            or not re.fullmatch(r"[0-9a-f]{64}", str(source.get("sha256", "")))):
+        fail("local_app_runtime.node must match the hashed official Node source pin")
     return version
 
 
@@ -560,7 +568,7 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         fail("local-app runtime policy must not pin create-vite scaffolding policy")
     dependency_snapshot = policy.get("dependency_snapshot")
     if dependency_snapshot != {
-        "source": "embedded:runtime-profiles/react-dom/r1/pnpm-lock.yaml",
+        "source": "embedded:runtime-profiles/react-dom/r4/pnpm-lock.yaml",
         "materialize_into": f"{build_root}/node_modules",
         "guest_mount": "forbidden",
         "selection_policy": "exact_lock_only",
@@ -781,98 +789,98 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
             fail(f"{relative} still discards the bundled local-app runtime root")
 
 
-OPTIMIZED_CREATE_SKILL_TOKENS = {
-    "If no product request or usable brief is present",
-    "skip the question and use that brief",
-    "never re-ask an answered decision",
-    "Pass the complete Host-bound AuthoringSpec",
-    "structure/navigation, light/dark/system theme and accent, style/density",
-    "Keep MCP authoring separate from creation",
-    "app-exposure\n   capabilities and external integrations",
-    "`mcpSuggestions`",
-    "ask only if that intent is materially unresolved",
-    "This does not configure or\n   publish MCP during creation",
-}
+# The retired create flow launched the `local-app-build` plugin workflow, so
+# `skills/create-local-app/SKILL.md` used to carry a wrapped
+# `Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":
+# "create"...}})` example with an `authoring_spec`/`mcp_intent` payload, and
+# this module pinned those exact tokens. `local-app-build.js` is DELETED and
+# create now runs as EnterPlanMode -> ExitPlanMode (the user's plan approval IS
+# the create confirmation) -> LocalAppPrepare -> implement -> LocalAppBuild ->
+# LocalAppRuntime: the skill launches no plugin workflow and carries no such
+# example. The token set and the function that required it were removed with
+# the workflow; the replacement grounding lives in `validate_create_flow_contract`
+# below, which pins what the rewritten skill actually says.
 
 
-def validate_optimized_create_skill_contract(text: str) -> None:
-    missing = sorted(token for token in OPTIMIZED_CREATE_SKILL_TOKENS if token not in text)
-    if missing:
-        fail(f"create-local-app skill is missing optimized contract tokens: {missing}")
-    call_lines = [
-        (index + 1, line)
-        for index, line in enumerate(text.split("\n"))
-        if 'Workflow({"name":"lingxi-local-app:local-app-build"' in line
-        and '"operation":"create"' in line
-    ]
-    if not call_lines:
-        fail("create-local-app skill has no wrapped create workflow example")
-    incomplete = [
-        number
-        for number, line in call_lines
-        if '"authoring_spec":' not in line or '"name":' not in line or '"brief":' not in line
-    ]
-    if incomplete:
+# `local-app-build.js` is DELETED, so the optimized build-workflow contract it
+# pinned (`OPTIMIZED_BUILD_WORKFLOW_REQUIRED`/`_FORBIDDEN` and
+# `validate_optimized_build_workflow_contract`) went with it. The create flow no
+# longer launches a plugin workflow at all; MCP authoring and the on-demand
+# use-test workflow are the only plugin workflows left, and their live checks
+# are in `validate_create_skill` and `validate_agent_prompt_contracts`.
+
+
+def validate_create_flow_contract(text: str) -> None:
+    """Pin the plan-driven create contract that replaced the retired workflow.
+
+    The create path no longer launches a plugin workflow. Its ordered shape is
+    `EnterPlanMode` (read-only planning) -> `ExitPlanMode`, where the user's
+    approval of the plan IS the create confirmation -> `LocalAppPrepare`
+    (Host re-reads its own approval record and lands/stages from the approved
+    plan) -> implement -> `LocalAppBuild` -> `LocalAppRuntime`. Each stage is
+    pinned by its section header and by the sentence that carries its
+    authority, and the retired workflow id and its deleted agents are asserted
+    ABSENT so a reintroduced `local-app-build` launch or automatic QA/verifier
+    chain fails here instead of silently unpinning create.
+    """
+    ordered_stages = {
+        "## 1. Plan",
+        "## 2. Prepare",
+        "## 3. Implement per the plan",
+        "## 4. Build",
+        "## 5. Deliver",
+    }
+    missing_stages = sorted(stage for stage in ordered_stages if stage not in text)
+    if missing_stages:
         fail(
-            f"create-local-app skill line(s) {incomplete}: create launch examples "
-            "must carry name, brief, and the complete authoring_spec"
+            "create-local-app skill is missing the plan-driven create stages "
+            "(plan -> approval -> prepare -> implement -> build -> deliver): "
+            f"{missing_stages}"
         )
-    with_intent = [
-        number
-        for number, line in call_lines
-        if '"mcp_intent":{"status":"requested","capabilities":[' in line
-    ]
-    without_intent = [number for number, line in call_lines if '"mcp_intent":' not in line]
-    if not with_intent or not without_intent:
+    flow_tokens = {
+        "EnterPlanMode",
+        "ExitPlanMode",
+        # The plan approval IS the create confirmation; there is no second native
+        # create sheet, which is the whole point of the deferred flow.
+        "That approval — the Allow on the plan — IS the create confirmation.",
+        "After the user approves the plan, call:",
+        "LocalAppPrepare({",
+        "You never scaffold yourself",
+        # A successful build is the completion condition; create runs no
+        # automatic verification, QA scoring or repair loop.
+        "A successful `LocalAppBuild` is the completion condition.",
+        "automatic verification stage after it",
+        "no build workflow",
+    }
+    missing_flow = sorted(token for token in flow_tokens if token not in text)
+    if missing_flow:
         fail(
-            "create-local-app skill examples must demonstrate both an explicit "
-            "business-capability MCP intent and omission for never-asked"
+            "create-local-app skill no longer states the plan-driven create "
+            f"contract (plan -> approval -> LocalAppPrepare -> build -> runtime): {missing_flow}"
         )
-
-
-OPTIMIZED_BUILD_WORKFLOW_REQUIRED = {
-    "Call LocalAppScaffold first with exactly app_id=${input.app_id}, name=${JSON.stringify(confirmedName)}, brief=${JSON.stringify(confirmedBrief)}, workflow_run_id=${context.workflow_run_id}, and receipt_id=${prepared.receipt_id}",
-    "operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}",
-    "const testerDisposition = finalizeDisposition(tester, 'tester', qaHandle)",
-    "verifier.result.previous_result_id !== tester.receipt.result_id",
-    "result.scenario_judgements.every",
-    "result.findings.every",
-    "input.operation === 'verify' || repairRounds >= repairBudget || qa.disposition !== 'candidate' || qa.source_findings.length === 0",
-    "QA pass reused the previous Host qa_handle",
-    "Infrastructure failures, evidence-resample requests, and non-source findings never enter this path",
-    # The invariant is that the repair round does NOT reuse the staged handle.
-    # This token used to be spelled "LocalAppBuild with exactly app_id=... and no
-    # contract_handle", which matched ZERO characters of the workflow from the
-    # commit that introduced both (f81c57261) -- so this check has never once
-    # passed. It is now the workflow's actual sentence.
-    "call LocalAppBuild with app_id=${input.app_id} and workflow_run_id=${context.workflow_run_id}; omit contract_handle",
-    "The successful prior build consumed its staged contract_handle; do not reuse it",
-    "'LocalAppContract', 'LocalAppManifest', 'LocalAppInstallDeps'",
-}
-OPTIMIZED_BUILD_WORKFLOW_FORBIDDEN = {
-    "localPolicyFindings",
-    "checked_matrix",
-    "webview_checked",
-    "frames_captured",
-    "frames_compared",
-    ".slice(0, 40)",
-    ".slice(0, 500)",
-}
-
-
-def validate_optimized_build_workflow_contract(source: str) -> None:
-    missing = sorted(
-        token for token in OPTIMIZED_BUILD_WORKFLOW_REQUIRED if token not in source
-    )
-    if missing:
-        fail(f"local-app-build workflow is missing optimized invariants: {missing}")
-    lingering = sorted(
-        token for token in OPTIMIZED_BUILD_WORKFLOW_FORBIDDEN if token in source
-    )
-    if lingering:
+    # The build workflow is retired and the create flow launches none: the skill
+    # must not name the deleted workflow id, its deleted agents, or the Host
+    # tools only the retired workflow used (`LocalAppScaffold`,
+    # `LocalAppResolveTemplateSelection`, the QA-launch tools). A reintroduction
+    # of the old flow would otherwise pass unnoticed.
+    forbidden_tokens = {
+        "local-app-build",
+        "builder",
+        "designer",
+        "template-selector",
+        "create-preparer",
+        "LocalAppResolveTemplateSelection",
+        "LocalAppScaffold",
+        "LocalAppQaBegin",
+        "LocalAppQaReadEvidence",
+        "LocalAppQaFinalize",
+    }
+    reintroduced = sorted(token for token in forbidden_tokens if token in text)
+    if reintroduced:
         fail(
-            "local-app-build workflow still trusts or truncates model QA data: "
-            f"{lingering}"
+            "create-local-app skill names the retired build workflow or its "
+            "deleted agents/Host tools; the plan-driven flow launches no plugin "
+            f"workflow and runs no automatic QA chain: {reintroduced}"
         )
 
 
@@ -907,7 +915,14 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         )
     if not text.startswith("---\nname: create-local-app\ndescription: "):
         fail("create-local-app skill frontmatter is invalid")
-    validate_optimized_create_skill_contract(text)
+    # Every token below is a substring of the CURRENT SKILL.md. The retired
+    # create flow launched the `local-app-build` plugin workflow, so the old set
+    # pinned that workflow's wrapped launch example, the quality tiers, the
+    # rescore loop, the template-selection handshake and the add/no-outDir
+    # artifact spellings -- all gone with the workflow. This set pins the
+    # model-facing tool surface the plan-driven create actually names; the
+    # ordered plan -> prepare -> build -> runtime contract and the
+    # forbidden-token checks live in `validate_create_flow_contract` below.
     required_tokens = {
         "LocalAppCreate",
         "LocalAppRuntimeProfiles",
@@ -916,55 +931,23 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "LocalAppBuild",
         "LocalAppRuntime",
         "LocalAppLogs",
+        "LocalAppInstallDeps",
         "LocalAppInspectUi",
         "LocalAppActOnUi",
         "LocalAppQueryData",
         "LocalAppMutateData",
         "LocalAppCheckpointRestore",
-        "window.lingxi.v2",
-        "Do not call `LocalAppList` or `LocalAppGet`",
-        "call `AskUserQuestion`",
-        "Never ask unresolved questions in ordinary assistant text",
-        "Every collection requires `id`, `name`, and `fields`",
-        "Never declare host-owned record metadata",
-        # The out_dir the host actually passes is `workspace_build_output_rel()`
-        # (`local_apps_build.rs:1364`, `.lingxi-build-state/build-output/` +
-        # `VITE_OUTPUT_DIR`), spliced into `fixed_vite_build_args` at :642-660.
-        # A bare `--outDir dist` in the skill would teach the model the wrong
-        # artifact path, so pin the full production spelling here.
-        "vite build --outDir .lingxi-build-state/build-output/dist --emptyOutDir",
-        "build/store/dist/",
-        "recommended strategy",
-        "task-local workflow",
-        "lingxi-local-app:local-app-build",
-        '"operation":"create"',
-        "rescore",
-        "revised confirmed specification",
-        "For a `dom` surface",
-        "`fast`, `balanced`, or `thorough`",
-        "for a `canvas` surface, offer",
-        "Never advertise or pass",
-        "`fast` for a canvas surface",
-        "expected_writable_collections",
-        # Re-pointed: the skill used to say the host "reads the materialized
-        # manifest and overwrites it", which is what the UPDATE path does. On a
-        # create launch `sanitize_namespaced_local_app_args`
-        # (engine-mobile/src/workflow_support.rs:2224-2248) REMOVES
-        # `runtime_profile` from the caller's args outright and the create
-        # branch injects none, so the profile is not overwritten — it is absent
-        # until the Host-verified template selection fixes it later in the run.
-        # Pin the sentence that is true of the path this skill drives.
-        "strips any caller-supplied `runtime_profile` at the launch boundary",
-        "Do not supply `args.runtime_profile` as an authority",
-        "reserve the bottom-leading",
-        "Profile family CANNOT be changed afterwards",
-        "`canvas` when the whole interface is one drawn surface",
+        "LocalAppCaptureUi",
         "LocalAppConfirmDependencyChange",
         "LocalAppUpdateDependencies",
-        # The display name is the model's to write. Without this the engine
-        # falls back to the brief's first 24 characters, which is what the
-        # deferred create flow exists to stop.
-        "`name` is yours to write",
+        "window.lingxi.v2",
+        # `LocalAppList`/`LocalAppGet` must not be used to rediscover an app the
+        # workspace is already bound to; this is the skill's own sentence.
+        "`LocalAppList` or `LocalAppGet` to rediscover it",
+        "with `AskUserQuestion`",
+        "Never declare host-owned record metadata",
+        "`canvas` when the whole interface is one drawn surface",
+        "background_schedule",
         "streamLlmChat",
         "onLlmStreamFrame",
         "getClipboardText",
@@ -979,84 +962,20 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "listCalendarEvents",
         "searchContacts",
         "getMedia",
-        "background_schedule",
-        # The optimized interview is dynamic: keep a usable brief, ask only
-        # material gaps, and make one compact AuthoringSpec confirmation.
-        "If no product request or usable brief is present",
-        "skip the question and use that brief",
-        "never re-ask an answered decision",
-        "Pass the complete Host-bound AuthoringSpec",
-        "structure/navigation, light/dark/system theme and accent, style/density",
-        # App capabilities, external integrations, and optional post-create
-        # MCP exposure are separate concepts. Creation never auto-configures.
-        "Keep MCP authoring separate from creation",
-        "app-exposure\n   capabilities and external integrations",
-        "`mcpSuggestions`",
-        "ask only if that intent is materially unresolved",
-        "This does not configure or\n   publish MCP during creation",
     }
     missing = sorted(token for token in required_tokens if token not in text)
     if missing:
         fail(f"create-local-app skill is missing host contract tokens: {missing}")
+    validate_create_flow_contract(text)
 
-    # Every `local-app-build` block must be written as a CALL, not a bare
-    # payload: `Workflow({...})`, so the tool name travels with the text the
-    # model copies.
-    #
-    # Measured, not theorised: on a real device the model arrived here through
-    # the `Skill` tool, met a bare ```json {"name": ..., "args": ...} block, and
-    # called `Skill` again — `Unknown skill: lingxi-local-app:local-app-build`,
-    # create stalled. The prose did say "through the `Workflow` tool", sixteen
-    # lines earlier behind a long paragraph. Naming the tool in the block the
-    # model copies is what removes the choice; a prohibition further up the file
-    # costs tokens and still loses to the shape in front of it.
-    stray = [
-        index + 1
-        for index, line in enumerate(text.split("\n"))
-        if line.lstrip().startswith('{"name":"lingxi-local-app:local-app-build"')
-    ]
-    if stray:
-        fail(
-            f"create-local-app skill line(s) {stray}: a local-app-build block is "
-            'a bare payload. Write it as a call — Workflow({"name":...,"args":...}) '
-            "— so the tool name is inside the text the model copies."
-        )
-    # Create examples must carry a complete authoring_spec. At least one
-    # example records explicit business-capability exposure intent and one
-    # omits mcp_intent to preserve the never-asked state.
-    call_lines = [
-        (index + 1, line)
-        for index, line in enumerate(text.split("\n"))
-        if 'Workflow({"name":"lingxi-local-app:local-app-build"' in line
-        and '"operation":"create"' in line
-    ]
-    if not call_lines:
-        fail(
-            "create-local-app skill no longer shows a create launch written as "
-            'Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create"...}}) '
-            "— the tool name must ride inside the text the model copies"
-        )
-    incomplete = [
-        number
-        for number, line in call_lines
-        if '"authoring_spec":' not in line or '"name":' not in line or '"brief":' not in line
-    ]
-    if incomplete:
-        fail(
-            f"create-local-app skill line(s) {incomplete}: create launch examples "
-            "must carry name, brief, and the complete authoring_spec"
-        )
-    with_intent = [
-        number
-        for number, line in call_lines
-        if '"mcp_intent":{"status":"requested","capabilities":[' in line
-    ]
-    without_intent = [number for number, line in call_lines if '"mcp_intent":' not in line]
-    if not with_intent or not without_intent:
-        fail(
-            "create-local-app skill examples must demonstrate both an explicit "
-            "business-capability MCP intent and omission for never-asked"
-        )
+    # A pin here required every `local-app-build` launch example in this skill
+    # to be written as a `Workflow({"name":"lingxi-local-app:local-app-build"...
+    # })` CALL carrying `authoring_spec`/`mcp_intent`, plus at least one example
+    # that omitted `mcp_intent`. The skill no longer launches a plugin workflow
+    # (see `validate_create_flow_contract`), so the examples and the check are
+    # gone; `create-local-app/SKILL.md` now carries a single fenced
+    # `authoring-spec` block that `LocalAppPrepare` reads, which
+    # `validate_create_flow_contract` pins instead.
     local_apps_host_path = (
         repo / "lingxi-code" / "apps" / "engine-mobile" / "src" / "local_apps_host.rs"
     )
@@ -1077,72 +996,21 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     # absent from the guided contract -- the exact strings this pin demanded, so
     # the repository could not satisfy both and this script has failed since.
     #
-    # The behaviour is not unpinned, it moved with the text: the same commit
-    # added `validate_optimized_create_skill_contract`, called above on BOTH the
-    # skill and its plugin mirror, which requires the `mcpSuggestions` grounding
-    # and the `mcp_intent` carry-forward in their new home.
+    # There WAS a pin here requiring the retired build workflow's own contract:
+    # its `local-app-build.js` source, the create-declined/stage/scaffold/
+    # QA-launch invariants (`workflow_tokens`) and the optimized build-workflow
+    # tokens (`validate_optimized_build_workflow_contract`). All of that is
+    # deleted -- `local-app-build.js` no longer exists and create launches no
+    # plugin workflow, so the main session owns plan -> prepare -> build ->
+    # runtime and `validate_create_flow_contract` above pins those steps. Only
+    # the still-live plugin workflows are checked here.
     workflow_dir = repo / "lingxi-code" / "plugins" / "lingxi-local-app" / "workflows"
     try:
-        workflow = (workflow_dir / "local-app-build.js").read_text(encoding="utf-8")
         mcp_authoring = (workflow_dir / "local-app-mcp-authoring.js").read_text(
             encoding="utf-8"
         )
     except OSError as exc:
         fail(f"missing plugin-owned local-app workflow: {exc}")
-    validate_optimized_build_workflow_contract(workflow)
-    workflow_tokens = {
-        "const WORKFLOW_ID = 'lingxi-local-app:local-app-build';",
-        "HOST_CONTEXT_REQUIRED",
-        "PERSISTED_PROFILE_REQUIRED",
-        "HOST_AUTHORING_SPEC_REQUIRED",
-        "quality_level must be fast, balanced, or thorough",
-        "validated_selection_handle",
-        "selector_capability",
-        "create-preparer",
-        "tools-only create-preparer",
-        "LocalAppResolveTemplateSelection",
-        "LocalAppContract with operation=stage",
-        "LocalAppStageCreate",
-        "LocalAppApproveMcpProposal exactly once",
-        "create_without_mcp=true",
-        "status === 'create_declined'",
-        "prepared.approved !== true",
-        "Call LocalAppScaffold first with exactly app_id=",
-        "After scaffold succeeds, and only then, write App-managed source",
-        "Declare required collections with LocalAppManifest before source uses them",
-        "LocalAppScaffold",
-        "Invoke Skill exactly once for the one Host-profile renderer",
-        "do not preload or apply other renderer guides",
-        "base_contract_sha256=${persistedContractSha256}",
-        "operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}",
-        "LocalAppBuild",
-        "LocalAppRuntime",
-        "MCP remains unconfigured and disabled until post-create authoring from app settings",
-        "CANVAS_FAST_REJECTED",
-        "'balanced'",
-        "agent_calls",
-        "LocalAppQaBegin",
-        "LocalAppQaReadEvidence",
-        "LocalAppQaFinalize in this same pass",
-        "complete Host QA candidate and receipt",
-        "previous_result_id",
-        "result.scenario_judgements.every",
-        "result.findings.every",
-        "evidence_resample_required",
-        "infrastructure_failed",
-        "Infrastructure failures, evidence-resample requests, and non-source findings never enter this path",
-        "quality === 'thorough' ? 2 : 1",
-        "The host draws no running-app chrome",
-        "leading 80 CSS px by the bottom 80 CSS px",
-        "'name', 'brief', 'mcp_intent'",
-        "mcp_intent.status must be declined or requested",
-        "requested mcp_intent.capabilities must be non-empty strings",
-        "mcp_intent is create-only",
-        "external_integrations in the spec are separate app requirements",
-    }
-    missing_workflow = sorted(token for token in workflow_tokens if token not in workflow)
-    if missing_workflow:
-        fail(f"plugin local-app-build workflow is missing contract tokens: {missing_workflow}")
     mcp_authoring_tokens = {
         "const WORKFLOW_ID = 'lingxi-local-app:local-app-mcp-authoring';",
         "HOST_CONTEXT_REQUIRED",
@@ -1174,12 +1042,17 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     # Keep the handoff tied to the scaffold that the host actually seeds. The
     # old Template v2 paragraph described an unavailable Tailwind/shadcn stack
     # and omitted the provider/bridge helpers that generated source must use.
+    #
+    # The previous set also required the headings "DOM workflow shape", "Canvas
+    # workflow shape" and "Shared workflow core". Those named the retired
+    # workflow-shaped create path; the handoff now describes the plan-driven
+    # flow (EnterPlanMode -> ExitPlanMode -> LocalAppPrepare), so the three
+    # headings and their tokens went away with the workflow rather than being
+    # reworded. The remaining tokens all describe the scaffold the host still
+    # seeds.
     handoff_tokens = {
-        "DOM workflow shape",
-        "Canvas workflow shape",
-        "Shared workflow core",
-        "runtime-profiles/react-dom/r1",
-        "runtime-profiles/canvas-2d/r1",
+        "runtime-profiles/react-dom/r4",
+        "runtime-profiles/canvas-2d/r4",
         "@ionic/react",
         "LingXiBridgeProvider",
         "IonReactHashRouter",
@@ -1238,40 +1111,26 @@ def validate_agent_prompt_contracts(repo: pathlib.Path) -> None:
     if "do not judge scenario\npass/fail" not in operator:
         fail("operator.md no longer separates operation from QA judgement")
 
-    builder = (agents_dir / "builder.md").read_text(encoding="utf-8")
-    for token in (
-        "Call LocalAppScaffold first with that exact receipt",
-        "Do not write\nsource until scaffold succeeds",
-        "Invoke Skill exactly once for the renderer guide matching the Host profile",
-        "Evidence-resample requests, non-source findings, and\ninfrastructure/tooling failures",
-    ):
-        if token not in builder:
-            fail(f"builder.md is missing optimized boundary: {token!r}")
-    for obsolete in ("builder-stage", "BUILDER_STAGE_DENIES", "source-code-review"):
-        if obsolete in builder:
-            fail(f"builder.md still contains obsolete prompt prose: {obsolete}")
-
-    designer = (agents_dir / "designer.md").read_text(encoding="utf-8")
-    designer_frontmatter = designer.split("---", 2)[1]
-    for engine_skill in (
-        "ionic-react-local-app",
-        "canvas-2d-local-app",
-        "threejs-local-app",
-        "phaser-2d-local-app",
-        "babylon-3d-local-app",
-    ):
-        if f"  - {engine_skill}\n" in designer_frontmatter:
-            fail(f"designer.md must not preload engine guide {engine_skill}")
-    if "Do not select or change a renderer/engine" not in designer:
-        fail("designer.md no longer forbids engine selection")
-
     tester = (agents_dir / "tester.md").read_text(encoding="utf-8")
     if "For every quality level, call LocalAppQaFinalize in this same agent pass" not in tester:
         fail("tester.md no longer Finalizes in the same pass for thorough mode")
     if "previous_result_id names this result" not in tester:
         fail("tester.md no longer anchors the thorough verifier candidate")
 
-    build_js = (workflows_dir / "local-app-build.js").read_text(encoding="utf-8")
+    # `agents/builder.md` and `agents/designer.md` were the create workflow's
+    # build and design roles and are DELETED (only mcp-designer/mcp-promoter/
+    # operator/tester/verifier remain), so their frontmatter and prompt pins
+    # went with them. The create flow no longer spawns either role.
+
+    #
+    # The QA-candidate/disposition invariants below used to be pinned on
+    # `local-app-build.js`, also DELETED. The same mechanism is live in
+    # `local-app-use-test.js` (create now runs no automatic QA chain of its
+    # own), so the check is RE-POINTED there rather than dropped: the tester
+    # must finalize from the Host candidate, the verifier must attest the tester
+    # as its predecessor, success is decided by the Host result rather than a
+    # model flag, and a resample may not reuse the previous Host qa_handle.
+    use_test_js = (workflows_dir / "local-app-use-test.js").read_text(encoding="utf-8")
     for forbidden in (
         "localPolicyFindings",
         "checked_matrix",
@@ -1281,19 +1140,17 @@ def validate_agent_prompt_contracts(repo: pathlib.Path) -> None:
         ".slice(0, 40)",
         ".slice(0, 500)",
     ):
-        if forbidden in build_js:
-            fail(f"local-app-build.js still trusts or truncates model QA data: {forbidden}")
+        if forbidden in use_test_js:
+            fail(f"local-app-use-test.js still trusts or truncates model QA data: {forbidden}")
     for required in (
         "const testerDisposition = finalizeDisposition(tester, 'tester', qaHandle)",
         "verifier.result.previous_result_id !== tester.receipt.result_id",
         "result.scenario_judgements.every",
         "result.findings.every",
-        "input.operation === 'verify' || repairRounds >= repairBudget || qa.disposition !== 'candidate' || qa.source_findings.length === 0",
-        "QA pass reused the previous Host qa_handle",
-        "operation=stage, app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}",
+        "evidence resample reused the previous Host qa_handle",
     ):
-        if required not in build_js:
-            fail(f"local-app-build.js is missing Host QA/authoring invariant: {required}")
+        if required not in use_test_js:
+            fail(f"local-app-use-test.js is missing Host QA invariant: {required}")
 
     for name, titles in (
         ("local-app-use-test.js", ("Operate", "Test", "Verify")),
@@ -1356,8 +1213,7 @@ COMPILED_PROFILE_MACRO_SOURCE = (
     "local_app_runtime_profiles.rs",
 )
 COMPILED_PROFILE_ROOT_LITERAL = "/../../plugins/lingxi-local-app/assets/templates/"
-# 145 `profile_file!` call sites today, deduplicating to 112 distinct
-# (family, path-under-r1) pairs across the five families. The floor exists so a
+# The five families embed more than 100 distinct files. The floor exists so a
 # regex that silently stops matching cannot report "0 files compared, all clear"
 # -- a zero-hit scan is not evidence.
 MIN_COMPILED_PROFILE_FILES = 100
@@ -1371,7 +1227,7 @@ def compiled_runtime_profile_template_root(repo: pathlib.Path) -> pathlib.Path:
 
 
 def compiled_runtime_profile_files(repo: pathlib.Path) -> list[tuple[str, str]]:
-    """(family, path-under-r1) pairs `include_bytes!` compiles into the engine."""
+    """(family, path-under-r4) pairs `include_bytes!` compiles into the engine."""
     source_path = repo.joinpath(*COMPILED_PROFILE_MACRO_SOURCE)
     try:
         source = source_path.read_text(encoding="utf-8")
@@ -1399,25 +1255,16 @@ def compare_runtime_profile_trees(
     entries: list[tuple[str, str]],
     selected_profile: str | None = None,
 ) -> int:
-    """Byte-compare every compiled template file against the attested copy.
+    """Compare the current family files enumerated by the Rust embedding macro.
 
-    DIRECTION, and its one blind spot: the loop iterates the COMPILED list, so
-    it catches a compiled file that the attested tree lacks or has different
-    bytes for. The reverse -- a file added under `<family>/r1` in the attested
-    tree that no `profile_file!` call site references -- is attested by
-    validate_runtime_profiles yet never compared here. That set is empty in all
-    five families today: every file under each attested `<family>/r1` (22-23 of
-    them) appears in the compiled list, and the only file the compiled side has
-    beyond it is `inventory.json`, which lives on the plugin side alone. So this
-    is not a live hole; if it stops being empty, add a directory walk of
-    `attested_root` here.
+    Shared widget files are checked separately below against their compiled tree.
     """
     compared = 0
     for family, relative in entries:
         if selected_profile is not None and family != selected_profile:
             continue
-        attested = attested_root / family / "r1" / relative
-        compiled = compiled_root / family / "r1" / relative
+        attested = attested_root / family / "r4" / relative
+        compiled = compiled_root / family / "r4" / relative
         try:
             compiled_bytes = compiled.read_bytes()
         except OSError as exc:
@@ -1454,6 +1301,14 @@ def validate_runtime_profile_templates_match_compiled(
         compiled_runtime_profile_files(repo),
         selected_profile,
     )
+    source_root = runtime_profile_template_root(repo)
+    compiled_root = compiled_runtime_profile_template_root(repo)
+    for family in ([selected_profile] if selected_profile else RUNTIME_PROFILES):
+        for relative in ("package.json", "pnpm-lock.yaml", "index.html", "vite.config.mjs", "src/main.jsx", "src/widget.jsx"):
+            expected = compiled_root / "shared/mcp-widget/r4" / relative
+            actual = source_root / family / "r4/app/mcp-widget" / relative
+            if not actual.is_file() or actual.read_bytes() != expected.read_bytes():
+                fail(f"r4 MCP widget mirror differs from compiled template: {actual}")
 
 
 def expected_runtime_profile_dependencies(profile_name: str) -> dict[str, str]:
@@ -1504,7 +1359,8 @@ def validate_runtime_profile_lock(
 
     workspace_settings = load_yaml_mapping(template / "pnpm-workspace.yaml")
     expected_workspace_settings = {
-        "lockfile": "pnpm-lock.yaml",
+        "packages": [".", "app/mcp-widget"],
+        "lockfile": "true",
         "nodeLinker": "hoisted",
         "packageImportMethod": "clone-or-copy",
         "verifyStoreIntegrity": "true",
@@ -1530,20 +1386,20 @@ def validate_runtime_profile_lock(
 
 def validate_base_seed_profile_relationships(repo: pathlib.Path, pins: dict) -> None:
     base_template = repo / pins["local_app_runtime"]["template"]
-    if base_template != runtime_profile_template_root(repo) / "react-dom" / "r1":
-        fail("bundled local-app dependency seed must point to runtime-profiles/react-dom/r1")
+    if base_template != runtime_profile_template_root(repo) / "react-dom" / "r4":
+        fail("bundled local-app dependency seed must point to runtime-profiles/react-dom/r4")
     base_lock_sha = hashlib.sha256((base_template / "pnpm-lock.yaml").read_bytes()).hexdigest()
     if pins["local_app_runtime"]["lockfile_sha256"] != base_lock_sha:
         fail("bundled local-app dependency seed lock SHA diverged from the base runtime profile")
 
     canvas_lock_sha = hashlib.sha256(
-        (runtime_profile_template_root(repo) / "canvas-2d" / "r1" / "pnpm-lock.yaml").read_bytes()
+        (runtime_profile_template_root(repo) / "canvas-2d" / "r4" / "pnpm-lock.yaml").read_bytes()
     ).hexdigest()
     if canvas_lock_sha != base_lock_sha:
         fail("react_dom and canvas_2d must share the engine-free bundled seed lock")
     for profile_name in ("three-3d", "phaser-2d", "babylon-3d"):
         profile_lock_sha = hashlib.sha256(
-            (runtime_profile_template_root(repo) / profile_name / "r1" / "pnpm-lock.yaml").read_bytes()
+            (runtime_profile_template_root(repo) / profile_name / "r4" / "pnpm-lock.yaml").read_bytes()
         ).hexdigest()
         if profile_lock_sha == base_lock_sha:
             fail(f"{profile_name} must not share the engine-free bundled seed lock")
@@ -1565,7 +1421,7 @@ def validate_base_seed_profile_relationships(repo: pathlib.Path, pins: dict) -> 
             f"{sorted(forbidden_lock_entries)}"
         )
     expected_runtime = {
-        "template": "lingxi-code/local-apps/templates/runtime-profiles/react-dom/r1",
+        "template": "lingxi-code/local-apps/templates/runtime-profiles/react-dom/r4",
         "node": expected_node(pins),
         "react": EXPECTED_DEPENDENCIES["react"],
         "react_dom": EXPECTED_DEPENDENCIES["react-dom"],
@@ -1576,7 +1432,7 @@ def validate_base_seed_profile_relationships(repo: pathlib.Path, pins: dict) -> 
         "rollup_bindings": EXPECTED_ROLLUP_BINDINGS,
         "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
         "lightningcss_bindings": EXPECTED_LIGHTNINGCSS_BINDINGS,
-        "lockfile": "lingxi-code/local-apps/templates/runtime-profiles/react-dom/r1/pnpm-lock.yaml",
+        "lockfile": "lingxi-code/local-apps/templates/runtime-profiles/react-dom/r4/pnpm-lock.yaml",
         "lockfile_sha256": base_lock_sha,
     }
     if pins.get("local_app_runtime") != expected_runtime:
@@ -1712,7 +1568,7 @@ def validate_runtime_profiles(
     for profile_name in profile_names:
         if profile_name not in RUNTIME_PROFILES:
             fail(f"unknown runtime profile: {profile_name}")
-        template = root / profile_name / "r1"
+        template = root / profile_name / "r4"
         if not template.is_dir():
             fail(f"runtime profile template is missing: {template}")
         validate_runtime_profile_lock(profile_name, template, pins)
@@ -1726,7 +1582,7 @@ def main() -> None:
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--apk-dir")
     parser.add_argument("--profile", choices=sorted(RUNTIME_PROFILES), help="validate one runtime profile only")
-    parser.add_argument("--template", help="override a single runtime profile r1 directory")
+    parser.add_argument("--template", help="override a single runtime profile r4 directory")
     args = parser.parse_args()
 
     repo = pathlib.Path(args.repo_root).resolve()

@@ -216,6 +216,8 @@ for dirpath, dirnames, filenames in os.walk(root):
 print(f"   rewrote {rewritten} absolute symlinks")
 PY
 
+python3 /install-toolchains.py "${TARGET}" "${ARCH}" /node-source-cache
+
 echo "[rootfs:${ARCH}] verifying required binaries"
 MISSING=""
 for f in usr/bin/node usr/bin/npm usr/bin/npx usr/bin/git usr/bin/python3 usr/bin/pip3 usr/bin/virtualenv usr/bin/ssh; do
@@ -227,28 +229,6 @@ if [ -n "${MISSING}" ]; then
 fi
 
 apk --root "${TARGET}" info -v 2>/dev/null | sort > "${OUT}/installed.txt"
-
-echo "[rootfs:${ARCH}] installing pinned pnpm ${PNPM_VERSION}"
-PNPM_TARBALL="${OUT}/pnpm-${PNPM_VERSION}.tgz"
-curl -sSfL -o "${PNPM_TARBALL}" "${PNPM_URL}"
-actual_pnpm_sha512="$(sha512sum "${PNPM_TARBALL}" | awk '{print $1}')"
-expected_pnpm_sha512="$(printf '%s' "${PNPM_SHA512}" | base64 -d | od -An -tx1 | tr -d ' \n')"
-actual_pnpm_sha512_hex="$(printf '%s' "${actual_pnpm_sha512}" | tr '[:lower:]' '[:upper:]')"
-expected_pnpm_sha512_hex="$(printf '%s' "${expected_pnpm_sha512}" | tr '[:lower:]' '[:upper:]')"
-if [ "${actual_pnpm_sha512_hex}" != "${expected_pnpm_sha512_hex}" ]; then
-  echo "[rootfs:${ARCH}] pnpm tarball SHA-512 mismatch" >&2
-  exit 1
-fi
-PNPM_DIR="${TARGET}/usr/lib/node_modules/pnpm"
-mkdir -p "${PNPM_DIR}"
-tar -xzf "${PNPM_TARBALL}" -C "${PNPM_DIR}" --strip-components=1
-ln -s ../lib/node_modules/pnpm/bin/pnpm.mjs "${TARGET}/usr/bin/pnpm"
-rm -f "${PNPM_TARBALL}"
-
-[ -x "${TARGET}/usr/bin/pnpm" ] || {
-  echo "[rootfs:${ARCH}] pinned pnpm installation produced no usr/bin/pnpm" >&2
-  exit 1
-}
 
 case "${TYPESCRIPT_INSTALL_ROOT}" in
   /opt/lingxi/toolchains/typescript/${TYPESCRIPT_VERSION}) ;;

@@ -241,12 +241,19 @@ def inventory(root: pathlib.Path) -> list[dict]:
 
 
 def remove_tree(path: pathlib.Path) -> None:
-    def make_writable_and_retry(function, value, _error) -> None:
-        os.chmod(pathlib.Path(value).parent, 0o700)
-        os.chmod(value, 0o700)
-        function(value)
-
-    shutil.rmtree(path, onerror=make_writable_and_retry)
+    if path.is_symlink():
+        path.unlink()
+        return
+    # Unlink needs a writable parent, not a writable target. Prepare only real
+    # directories before removal: .bin links may already be dangling by the
+    # time rmtree reaches them, and chmod must never follow an external link.
+    path.chmod(0o700)
+    for directory, children, _files in os.walk(path, topdown=True, followlinks=False):
+        for name in children:
+            child = pathlib.Path(directory) / name
+            if not child.is_symlink():
+                child.chmod(0o700)
+    shutil.rmtree(path)
 
 
 def assert_safe_output(repo: pathlib.Path, output: pathlib.Path) -> None:

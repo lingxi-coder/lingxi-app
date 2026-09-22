@@ -11,6 +11,7 @@ import {
   slashMenuLabel,
   slashNavigationDirection,
 } from '../src/renderer/bridge/slashCommands';
+import { DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS } from '../src/renderer/bridge/desktopCommands';
 
 const commands = [
   { name: 'model', description: 'Switch the active model', source: 'builtin' },
@@ -87,12 +88,17 @@ test('arrow navigation survives keyup reconciliation and clamps at both ends', (
 });
 
 test('Desktop hides unsupported builtins without hiding a project command of the same name', () => {
+  // The example has to be a name Desktop still has no implementation for.
+  // `rename` used to stand here and graduated to DESKTOP_COMMANDS when Desktop
+  // grew its own rename — which is what left this test asserting behavior the
+  // product no longer wants. The guard fails loudly if the example goes stale.
+  assert.ok('rewind' in DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS, 'the example is still an unavailable builtin');
   const catalog = [
-    { name: 'rename', description: 'Unavailable builtin', source: 'builtin' },
-    { name: 'rename-project', description: 'Project rename workflow', source: 'project' },
+    { name: 'rewind', description: 'Unavailable builtin', source: 'builtin' },
+    { name: 'rewind-project', description: 'Project rewind workflow', source: 'project' },
     { name: 'help', description: 'Show help', source: 'builtin' },
   ];
-  assert.deepEqual(filterSlashCommands(catalog, '').map((command) => command.name), ['help', 'rename-project']);
+  assert.deepEqual(filterSlashCommands(catalog, '').map((command) => command.name), ['help', 'rewind-project']);
 });
 
 test('Desktop help is rendered from the same filtered live catalog as completion', () => {

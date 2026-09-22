@@ -71,10 +71,14 @@ test('sidebar running progress stays right aligned and vertically centered', asy
 
     assert.equal(result.bars.length, 4);
     for (const bar of result.bars) {
-      assert.ok(Math.abs(bar.rightGap - 8) < 1, JSON.stringify(bar));
+      // 12px at `right: 10px`, not the 16px at `right: 8px` this ring shipped
+      // with: "Reduce sidebar activity indicator visual weight" shrank it in
+      // the stylesheet alone, and these numbers were left behind. The
+      // alignment assertions below are the ones that describe the contract.
+      assert.ok(Math.abs(bar.rightGap - 10) < 1, JSON.stringify(bar));
       assert.ok(Math.abs(bar.centerOffset) < 1, JSON.stringify(bar));
-      assert.equal(bar.width, 16);
-      assert.equal(bar.height, 16);
+      assert.equal(bar.width, 12);
+      assert.equal(bar.height, 12);
       assert.notEqual(bar.animation, 'none');
     }
     assert.equal(result.pendingCount, 1);

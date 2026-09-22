@@ -977,6 +977,9 @@ test('the error mark is a ringed icon, not the old bare dot', () => {
   assert.match(icons, /case 'circleAlert'/, 'the icon exists');
   const sidebar = readFileSync(new URL('../src/renderer/components/BetaDesktop.tsx', import.meta.url), 'utf8');
   assert.match(sidebar, /className="sidebar-session-error"[\s\S]{0,400}circleAlert/, 'and the error row renders it');
-  // The inline dot must no longer double up for the error state on that row.
-  assert.match(sidebar, /attention\.label !== 'Session error' \? <span/, 'the inline dot skips the error state');
+  // The inline dot must not double up with the ringed mark. It covers the error
+  // state only where that mark is suppressed — the pinned section, whose row
+  // keeps the pin/archive actions in the same trailing slot.
+  assert.match(sidebar, /attention && \(pinnedSection \|\| attention\.label !== 'Session error'\) \? <span/, 'the inline dot skips the error state outside the pinned section');
+  assert.match(sidebar, /!pinnedSection && attention\?\.label === 'Session error' && \(/, 'and the ringed mark is suppressed exactly there');
 });

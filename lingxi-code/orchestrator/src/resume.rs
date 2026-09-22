@@ -1548,6 +1548,25 @@ impl ConversationOrchestrator {
             post_compact_skill_attachments_from_messages(messages);
     }
 
+    /// Restore only metadata that may live off the resumable model chain.
+    ///
+    /// CLI resume callers first restore runtime counters from the normalized
+    /// chain returned by `load_session`, then read the full routed transcript
+    /// again to recover prompt snapshots and skill attachments. Re-running the
+    /// full runtime projection on that raw stream would let preserved
+    /// pre-compaction assistant rows overwrite the normalized current usage.
+    pub async fn restore_resume_prompt_metadata(&self, messages: &[JsonlMessage]) {
+        if let Some(snapshot) = prompt_snapshot_from_messages(messages) {
+            *self.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot);
+        }
+        *self
+            .transcript
+            .post_compact_skill_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            post_compact_skill_attachments_from_messages(messages);
+    }
+
     /// Construct an orchestrator pre-populated with a replayed session.
     ///
     /// 1. Calls [`replay_session_state`] to load + validate the JSONL.

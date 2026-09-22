@@ -761,6 +761,7 @@ mod tests {
             system_prompt: Arc::from("test system"),
             user_context: HashMap::new(),
             system_context: HashMap::new(),
+            user_context_message: None,
             tool_use_options: ToolUseOptions {
                 debug: false,
                 verbose: false,

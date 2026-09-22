@@ -964,14 +964,15 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
 
     /// Byte-faithful `/btw` side-question wrapper, ported verbatim from
     /// claude-code `utils/sideQuestion.ts`: the `<system-reminder>` that turns
-    /// the shared context into a one-off, tool-less answer. Prepended (with a
+    /// the shared context into a one-off, tool-denied answer. Prepended (with a
     /// blank line) to the user's question as the single user turn of the
     /// isolated side query.
     pub(crate) const SIDE_QUESTION_SYSTEM_REMINDER: &str = "<system-reminder>This is a side question from the user. You must answer this question directly in a single response.\n\nIMPORTANT CONTEXT:\n- You are a separate, lightweight agent spawned to answer this one question\n- The main agent is NOT interrupted - it continues working independently in the background\n- You share the conversation context but are a completely separate instance\n- Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\nCRITICAL CONSTRAINTS:\n- You have NO tools available - you cannot read files, run commands, search, or take any actions\n- Do NOT write tool calls or tool output as text (for example invoke or function_calls XML blocks) - nothing you write here is executed; if answering would need reading files, running commands, or searching, say that can't be checked from a side question and suggest asking in the main conversation\n- This is a one-off response - there will be no follow-up turns\n- You can ONLY provide information based on what you already know from the conversation context\n- NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n- If you don't know the answer, say so - do not offer to look it up or investigate\n\nSimply answer the question with the information you have.</system-reminder>";
 
     /// Read-only, single-turn `/btw` query using the same fork runner as recap.
     /// Never changes history, the main cache-safe slot, or compaction hooks.
-    /// Tool schemas preserve the prefix, but the runner executes no tool calls.
+    /// Tool schemas preserve the cache prefix, but tool calls are denied and
+    /// the one-shot runner never starts a follow-up loop.
     ///
     /// Prefer the captured prefix. Before the first live turn after resume,
     /// rebuild from current session state like cc's
@@ -1005,6 +1006,11 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         if let Some(saved) = saved {
             params.user_context = saved.user_context;
             params.system_context = saved.system_context;
+            params.user_context_message = saved.user_context_message;
+            // A captured slot is the authoritative parent request for cache
+            // identity. Keep its ordered schemas even if the live registry
+            // has changed while the session was idle.
+            params.tools = saved.tools;
         }
         // A partial streamed assistant reply is not a complete prefix.
         if matches!(
@@ -1023,8 +1029,8 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             cache_safe_params: params,
             fork_label: "side_question".into(),
             query_source: sidequery::QuerySource::Custom("side_question".into()),
-            // Uncapped like cc's `runSideQuestion` (maxTurns=1, no maxTokens):
-            // `None` → the runner's DEFAULT_FORK_MAX_TOKENS.
+            // One turn like cc's `runSideQuestion` (maxTurns=1); `None` uses
+            // the runner's standard single-turn output cap.
             max_output_tokens: None,
         };
 
@@ -1032,7 +1038,26 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             biased;
             () = cancel.cancelled() => Ok(platform_api::RecapOutcome::Cancelled),
             r = runner.run(req) => match r {
-                Ok(res) => Ok(platform_api::RecapOutcome::Text(res.final_text.trim().to_string())),
+                Ok(res) => {
+                    // Claude's extractor prefers any non-empty text block and
+                    // only surfaces a denied tool call when the assistant had
+                    // no text at all. Preserve that ordering for mixed
+                    // [thinking, text, tool_use] responses.
+                    let text = res.final_text.trim().to_string();
+                    if text.is_empty() {
+                        if let Some(tool) = res
+                            .tool_calls
+                            .first()
+                            .and_then(|call| call.get("name"))
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            return Ok(platform_api::RecapOutcome::Text(format!(
+                                "(The model tried to call {tool} instead of answering directly. Try rephrasing or ask in the main conversation.)"
+                            )));
+                        }
+                    }
+                    Ok(platform_api::RecapOutcome::Text(text))
+                }
                 Err(e) => Err(platform_api::HandleError::ActionFailed(e.to_string())),
             }
         }
@@ -1092,12 +1117,14 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .map(serde_json::Value::String);
+        let user_context_message = self.additional_context_message().await;
         sidequery::CacheSafeParams {
             system_prompt: system.unwrap_or("").into(),
             tools: tools.to_vec(),
             effort,
             user_context: std::collections::HashMap::new(),
             system_context: std::collections::HashMap::new(),
+            user_context_message,
             tool_use_options: tool_api::ToolUseOptions {
                 debug: false,
                 verbose: false,

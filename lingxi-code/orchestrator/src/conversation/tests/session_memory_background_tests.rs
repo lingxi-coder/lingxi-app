@@ -64,6 +64,7 @@ fn cache_safe_params() -> sidequery::CacheSafeParams {
         effort: None,
         user_context: std::collections::HashMap::new(),
         system_context: std::collections::HashMap::new(),
+        user_context_message: None,
         tool_use_options: ToolUseOptions {
             debug: false,
             verbose: false,

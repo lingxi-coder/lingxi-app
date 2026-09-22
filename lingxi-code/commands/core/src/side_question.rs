@@ -1,17 +1,19 @@
 //! `/btw` — ask a quick side question answered by an isolated, read-only,
-//! tool-denied, single-turn side query.
+//! single-turn side query whose inherited tool schemas are all denied.
 //!
 //! claude-code (`commands/btw/btw.tsx` + `utils/sideQuestion.ts`) wraps the
 //! user's question in a fixed `<system-reminder>` (you are a separate
 //! lightweight agent, the main agent is NOT interrupted, NO tools, one-off
 //! response, answer from context only) and issues a single-turn forked/side
-//! query sharing the parent prompt cache, then shows the markdown answer in a
+//! query sharing the parent prompt cache. The fork keeps the parent's tool
+//! schemas for cache identity, but the one-shot runner denies every call;
+//! it then shows the markdown answer in a
 //! throwaway dialog — the answer NEVER enters the LLM conversation history.
 //!
 //! This handler is the LingXi analog: it delegates to the
 //! [`OrchestratorHandle::answer_side_question`] seam — the SAME history-inert
-//! single-turn `ForkedAgentRunner` `/recap` uses (tool-denied + single-turn by
-//! construction), differing only in the prompt (the wrapped question). The
+//! single-turn `ForkedAgentRunner` `/recap` uses (single-turn by construction),
+//! differing only in the prompt (the wrapped question). The
 //! answer is rendered as a transcript system line by the caller
 //! (`CommandResult::Done { display }`), never appended to `session.history`, so
 //! the load-bearing parity property is preserved.

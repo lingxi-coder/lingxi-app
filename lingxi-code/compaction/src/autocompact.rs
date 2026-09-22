@@ -633,6 +633,7 @@ mod tests {
             system_prompt: std::sync::Arc::from("PARENT SYSTEM PROMPT"),
             user_context: HashMap::new(),
             system_context: HashMap::new(),
+            user_context_message: None,
             tool_use_options: tool_use_options(),
             fork_context_messages: prefix,
             transcript_path: None,

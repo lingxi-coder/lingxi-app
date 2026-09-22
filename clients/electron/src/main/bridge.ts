@@ -1187,7 +1187,13 @@ export class SessionRuntime {
     if (TRANSCRIPT_REPLAY_BASE_EVENTS.has(event.type)) {
       this.replayEvents = [envelope];
     } else if (retain && this.replayEvents.length > 0 && TRANSCRIPT_REPLAY_EVENTS.has(event.type)) {
-      this.replayEvents = [...this.replayEvents, envelope];
+      // Status is a snapshot, not a transcript event. Keep only the newest
+      // one so repeated listing refreshes cannot grow the renderer replay
+      // buffer without bound or replay stale cumulative totals on reload.
+      const replay = event.type === 'status_snapshot'
+        ? this.replayEvents.filter(({ event: retained }) => retained.type !== 'status_snapshot')
+        : this.replayEvents;
+      this.replayEvents = [...replay, envelope];
     }
     return envelope;
   }

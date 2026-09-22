@@ -8,7 +8,11 @@ use protocol::{ContentBlock, ConversationMessage, MessageId};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
-struct CaptureClient(Mutex<Vec<sidequery::SideQueryRequest>>);
+struct CaptureClient(
+    Mutex<Vec<sidequery::SideQueryRequest>>,
+    Option<&'static str>,
+    Vec<serde_json::Value>,
+);
 #[async_trait::async_trait]
 impl sidequery::SideQueryClient for CaptureClient {
     async fn query(
@@ -17,15 +21,31 @@ impl sidequery::SideQueryClient for CaptureClient {
     ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
         self.0.lock().unwrap().push(request);
         Ok(sidequery::SideQueryResponse {
-            text: Some("Restored progress".into()),
+            text: Some(self.1.unwrap_or("Restored progress").into()),
             structured: None,
-            tool_calls: vec![],
+            tool_calls: self.2.clone(),
             usage: cost::Usage::default(),
             stop_reason: Some("end_turn".into()),
             retry_count: 0,
         })
     }
 }
+
+#[tokio::test]
+async fn side_question_prefers_text_over_a_mixed_tool_response() {
+    let client = Arc::new(CaptureClient(
+        Mutex::new(Vec::new()),
+        Some("Answer text"),
+        vec![serde_json::json!({"name": "Read"})],
+    ));
+    let orch = make_orch(client, Arc::new(sidequery::CacheSafeParamsSlot::new()));
+
+    assert!(matches!(
+        orch.answer_side_question("What happened?").await.unwrap(),
+        RecapOutcome::Text(text) if text == "Answer text"
+    ));
+}
+
 fn make_orch(
     client: Arc<CaptureClient>,
     slot: Arc<sidequery::CacheSafeParamsSlot>,
@@ -106,7 +126,10 @@ async fn side_question_rebuilds_resumed_context_without_writing_slot_or_history(
         Some("Custom system prompt for resumed session"),
         "fallback must honor the effective custom prompt instead of rebuilding defaults"
     );
-    assert!(req.messages[0].is_meta(), "fallback replays transient context first");
+    assert!(
+        req.messages[0].is_meta(),
+        "fallback replays transient context first"
+    );
     assert_eq!(&req.messages[1..3], &history[..2]);
     assert_eq!(
         req.messages.len(),
@@ -128,6 +151,7 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
         system_prompt: "frozen system".into(),
         user_context: Default::default(),
         system_context: Default::default(),
+        user_context_message: None,
         tool_use_options: tool_api::ToolUseOptions {
             debug: false,
             verbose: false,
@@ -139,7 +163,11 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
             custom_system_prompt: None,
             append_system_prompt: None,
         },
-        tools: vec![],
+        tools: vec![serde_json::json!({
+            "name": "Read",
+            "description": "Read a file.",
+            "input_schema": {"type": "object"}
+        })],
         effort: Some(serde_json::json!("high")),
         fork_context_messages: prefix.clone(),
         transcript_path: None,
@@ -172,6 +200,15 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
     assert_eq!(requests[0].system_prompt.as_deref(), Some("frozen system"));
     assert_eq!(requests[0].model, current_model);
     assert_eq!(requests[0].effort, Some(serde_json::json!("medium")));
+    assert_eq!(
+        requests[0].tools,
+        vec![serde_json::json!({
+            "name": "Read",
+            "description": "Read a file.",
+            "input_schema": {"type": "object"}
+        })],
+        "a captured side-query slot must preserve the parent tool schemas"
+    );
     assert_eq!(&requests[0].messages[..2], &history[..2]);
     assert_eq!(requests[0].messages.len(), 3);
 }

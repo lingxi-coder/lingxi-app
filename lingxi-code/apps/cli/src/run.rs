@@ -4123,11 +4123,13 @@ async fn resume_resolved_session(
                     return exit_codes::RUNTIME_ERROR;
                 }
             };
-            // Prompt snapshots are generic attachments and may not be part of
-            // the resumable user/assistant chain used by the seed helper.
+            // Prompt snapshots and skill attachments are generic records and
+            // may not be part of the resumable user/assistant chain used by the
+            // seed helper. Keep usage/compaction counters on that normalized
+            // chain; raw entries are only a metadata source here.
             runtime
                 .orchestrator
-                .restore_resume_runtime_metadata(&entries)
+                .restore_resume_prompt_metadata(&entries)
                 .await;
             if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
                 &runtime.orchestrator,
@@ -4292,12 +4294,13 @@ async fn mount_resumed_tui_inner(
             return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
         }
     };
-    // Restore from the full routed entry set so an off-chain prompt_snapshot
-    // attachment survives the CLI's chain-only history seed.
+    // Restore off-chain prompt/skill metadata from the full routed entry set;
+    // usage and compaction counters were already restored from the normalized
+    // chain and must not be recomputed from preserved raw rows.
     tui_build
         .runtime
         .orchestrator
-        .restore_resume_runtime_metadata(&entries)
+        .restore_resume_prompt_metadata(&entries)
         .await;
     if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
         &tui_build.runtime.orchestrator,

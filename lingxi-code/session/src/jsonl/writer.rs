@@ -141,6 +141,28 @@ fn writes_compact_boundary(msg: &JsonlMessage) -> bool {
         && msg.extra.get("subtype").and_then(serde_json::Value::as_str) == Some("compact_boundary")
 }
 
+/// Read the newest custom-title record when the bounded tail no longer
+/// contains one. This protects the in-process metadata state from a title
+/// appended by another host (for example Electron's metadata-only rename)
+/// before a large transcript write crosses the backstop in one operation.
+fn latest_custom_title(path: &Path, session_id: &str) -> Option<Option<String>> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.lines().rev().find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("custom-title")
+            || value.get("sessionId").and_then(serde_json::Value::as_str) != Some(session_id)
+        {
+            return None;
+        }
+        Some(
+            value
+                .get("customTitle")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        )
+    })
+}
+
 /// Linux/macOS `EXDEV` and Windows `ERROR_NOT_SAME_DEVICE` are intentionally
 /// handled without a libc dependency: this leaf crate builds on both native
 /// and mobile targets, while the fallback is only reached after `rename`
@@ -1444,6 +1466,16 @@ impl JsonlWriter {
             .store(0, Ordering::Relaxed);
         let path = self.active_path();
         let tail = read_tail(&path);
+        // Electron can append a title through its host process while this
+        // writer remains live. If a single large append pushed that record
+        // beyond the 64 KiB tail window, the normal tail adoption would miss
+        // it and re-emit the writer's stale in-memory title. The full-file
+        // fallback is only needed when the cheap tail scan has no title.
+        if !skip_title_adopt && !tail.contains("\"type\":\"custom-title\"") {
+            if let Some(title) = latest_custom_title(&path, session_id) {
+                state.title = title;
+            }
+        }
         let Some(plan) = plan_re_append(&tail, state, session_id, skip_title_adopt, skip_dedup)
         else {
             return Ok(0);
@@ -2152,6 +2184,57 @@ mod tests {
             "the backstop must have restored the title into the tail window \
              without an explicit re_append call"
         );
+    }
+
+    #[tokio::test]
+    async fn external_title_append_survives_a_large_writer_append() {
+        let (dir, path, writer) = temp_writer("external-title");
+        let sid = "11111111-2222-3333-4444-555555555555";
+        writer.append_custom_title(sid, "old").await.unwrap();
+
+        // Simulate Electron's metadata-only append while the engine writer is
+        // still alive, then push the new title outside the bounded tail before
+        // the writer's own counter crosses its backstop.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "type": "custom-title",
+                    "customTitle": "new",
+                    "sessionId": sid,
+                })
+            )
+            .unwrap();
+            write!(
+                file,
+                "{}\n",
+                "x".repeat(crate::jsonl::LITE_READ_BUF_SIZE + 1024)
+            )
+            .unwrap();
+        }
+
+        let mut wrote = 0usize;
+        while wrote < super::METADATA_REAPPEND_BACKSTOP_BYTES {
+            writer
+                .append_side_record_for_test(&serde_json::json!({
+                    "type": "filler",
+                    "pad": "f".repeat(4000),
+                }))
+                .await;
+            wrote += 4050;
+        }
+
+        let tail = crate::jsonl::read_tail(&path);
+        assert!(tail.contains("\"customTitle\":\"new\""));
+        assert!(!tail.contains("\"customTitle\":\"old\""));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// End-to-end: metadata that has scrolled out of the 64 KiB tail window is

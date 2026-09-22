@@ -31,6 +31,11 @@ pub struct CacheSafeParams {
     pub user_context: HashMap<String, String>,
     /// Engine-tier context bindings (model id, working dir, ...).
     pub system_context: HashMap<String, String>,
+    /// The transient `additionalContext` user message that Claude prepends to
+    /// every model request. It is kept outside `fork_context_messages` so the
+    /// cacheable prefix remains byte-identical, then replayed immediately
+    /// before that prefix by forked-agent callers.
+    pub user_context_message: Option<ConversationMessage>,
     /// Tool-set options the parent rendered in this turn.
     pub tool_use_options: tool_api::ToolUseOptions,
     /// Tool schemas sent with the parent's prompt, in their original order.

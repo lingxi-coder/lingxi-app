@@ -89,6 +89,11 @@ pub struct ForkedAgentRequest {
 pub struct ForkedAgentResult {
     /// Aggregated final assistant text.
     pub final_text: String,
+    /// Tool calls emitted by the one-shot provider response. The runner does
+    /// not execute them, but callers such as `/btw` must be able to render an
+    /// explicit denial instead of silently turning a tool-only response into
+    /// an empty answer.
+    pub tool_calls: Vec<serde_json::Value>,
     /// Token / cost usage for COGS attribution.
     pub usage: cost::Usage,
 }
@@ -216,6 +221,7 @@ impl ForkedAgentRunner {
             // No single-turn backend wired: preserve the legacy stub.
             return Ok(ForkedAgentResult {
                 final_text: "[forked-agent-stub]".into(),
+                tool_calls: Vec::new(),
                 usage: cost::Usage::default(),
             });
         };
@@ -224,7 +230,14 @@ impl ForkedAgentRunner {
 
         // Replay the cache-safe PREFIX first, then the fork's own prompt, so
         // Anthropic's prompt cache hits on the shared, byte-identical prefix.
-        let mut messages = cp.fork_context_messages.clone();
+        let user_context_count = usize::from(cp.user_context_message.is_some());
+        let mut messages = Vec::with_capacity(
+            user_context_count + cp.fork_context_messages.len() + req.prompt_messages.len(),
+        );
+        if let Some(message) = &cp.user_context_message {
+            messages.push(message.clone());
+        }
+        messages.extend(cp.fork_context_messages.iter().cloned());
         messages.extend(req.prompt_messages.iter().cloned());
 
         // Inherit the live parent's model so /model switches affect later forks.
@@ -290,6 +303,7 @@ impl ForkedAgentRunner {
 
         Ok(ForkedAgentResult {
             final_text: resp.text.unwrap_or_default(),
+            tool_calls: resp.tool_calls,
             usage: resp.usage,
         })
     }
@@ -324,6 +338,7 @@ mod tests {
             Ok(SideQueryResponse {
                 text: Some(self.canned_text.clone()),
                 structured: None,
+                tool_calls: Vec::new(),
                 usage: self.canned_usage,
                 stop_reason: Some("end_turn".into()),
                 retry_count: 0,
@@ -334,6 +349,32 @@ mod tests {
     /// Mock `SideQueryClient` that always fails so typed errors can be checked.
     struct FailingClient {
         error: SideQueryError,
+    }
+
+    struct ToolCallClient {
+        seen: Mutex<Option<SideQueryRequest>>,
+    }
+
+    #[async_trait]
+    impl SideQueryClient for ToolCallClient {
+        async fn query(
+            &self,
+            request: SideQueryRequest,
+        ) -> Result<SideQueryResponse, SideQueryError> {
+            *self.seen.lock().unwrap() = Some(request);
+            Ok(SideQueryResponse {
+                text: None,
+                structured: None,
+                tool_calls: vec![serde_json::json!({
+                    "id": "toolu_1",
+                    "name": "Read",
+                    "input": {"file_path": "README.md"}
+                })],
+                usage: Usage::default(),
+                stop_reason: Some("tool_use".into()),
+                retry_count: 0,
+            })
+        }
     }
 
     #[async_trait]
@@ -375,6 +416,7 @@ mod tests {
                 system_prompt: Arc::from("PARENT SYSTEM PROMPT"),
                 user_context: std::collections::HashMap::new(),
                 system_context: std::collections::HashMap::new(),
+                user_context_message: None,
                 tool_use_options: tool_use_options(),
                 tools: Vec::new(),
                 effort: None,
@@ -678,4 +720,54 @@ mod tests {
         assert_eq!(order, vec!["only-prompt"]);
     }
 
+    #[tokio::test]
+    async fn one_shot_runner_preserves_tool_calls_for_callers_to_deny() {
+        let client = Arc::new(ToolCallClient {
+            seen: Mutex::new(None),
+        });
+        let runner =
+            ForkedAgentRunner::new().with_side_query_client(client, "claude-sonnet-4-6".into());
+        let result = runner
+            .run(request_with(vec![], vec![user_msg("question")], Some(128)))
+            .await
+            .expect("tool-only response is still a decoded result");
+
+        assert_eq!(result.final_text, "");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0]["name"], "Read");
+    }
+
+    #[tokio::test]
+    async fn transient_user_context_precedes_the_cacheable_prefix() {
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "answer".into(),
+            canned_usage: Usage::default(),
+        });
+        let runner = ForkedAgentRunner::new()
+            .with_side_query_client(client.clone(), "claude-sonnet-4-6".into());
+        let mut req = request_with(vec![user_msg("prefix")], vec![user_msg("question")], None);
+        req.cache_safe_params.user_context_message = Some(ConversationMessage::user_meta(
+            MessageId::new(),
+            "<system-reminder>context</system-reminder>".into(),
+        ));
+        runner.run(req).await.expect("context request succeeds");
+        let sent = client
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request captured");
+        assert_eq!(
+            sent.messages
+                .iter()
+                .map(ConversationMessage::text_content)
+                .collect::<Vec<_>>(),
+            vec![
+                "<system-reminder>context</system-reminder>",
+                "prefix",
+                "question"
+            ]
+        );
+    }
 }

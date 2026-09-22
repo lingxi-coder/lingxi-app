@@ -626,7 +626,10 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> String {
                     (&n.workflow_script_path, &n.workflow_run_id)
                 {
                     lines.push(format!(
-                        "To resume after editing the script, call: Workflow({{scriptPath: '{script_path}', resumeFromRunId: '{run_id}'{args_clause}}})"
+                        "For a workflow launched by plugin name, use the original name and original caller args with resumeFromRunId: '{run_id}' (as shown in its launch result). Do not edit its Host-owned script or copy Host-injected context from recovery metadata."
+                    ));
+                    lines.push(format!(
+                        "For a custom editable script only, call: Workflow({{scriptPath: '{script_path}', resumeFromRunId: '{run_id}'{args_clause}}})"
                     ));
                 }
                 if let Some(transcript_dir) = &n.workflow_transcript_dir {
@@ -675,7 +678,7 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> String {
                             (&n.workflow_script_path, &n.workflow_run_id)
                         {
                             lines.push(format!(
-                                "To re-run with edited post-processing: Workflow({{scriptPath: '{script_path}', resumeFromRunId: '{run_id}'{args_clause}}}) — agents whose (prompt, opts) are unchanged replay from cache."
+                                "For a custom editable script only, re-run post-processing: Workflow({{scriptPath: '{script_path}', resumeFromRunId: '{run_id}'{args_clause}}}) — agents whose (prompt, opts) are unchanged replay from cache."
                             ));
                         }
                         format!(
@@ -1492,7 +1495,7 @@ mod tests {
             "<diagnostics>Per-agent results: /tmp/transcripts/wf_abcdef/journal.jsonl — one {\"type\":\"result\",...} line per completed agent with its full return value."
         ));
         assert!(block.contains(
-            "To re-run with edited post-processing: Workflow({scriptPath: '/tmp/workflow.js', resumeFromRunId: 'wf_abcdef', args: {\"q\":\"x\"}}) — agents whose (prompt, opts) are unchanged replay from cache.</diagnostics>"
+            "For a custom editable script only, re-run post-processing: Workflow({scriptPath: '/tmp/workflow.js', resumeFromRunId: 'wf_abcdef', args: {\"q\":\"x\"}}) — agents whose (prompt, opts) are unchanged replay from cache.</diagnostics>"
         ));
         assert!(block.contains(
             "<usage><agent_count>2</agent_count><agents_done>1</agents_done><agents_error>1</agents_error><agents_skipped>0</agents_skipped><agents_empty_result>0</agents_empty_result><subagent_tokens>17</subagent_tokens><tool_uses>5</tool_uses><duration_ms>91</duration_ms></usage>"
@@ -1547,8 +1550,11 @@ mod tests {
 
         let block = render_one(&n);
         assert!(block.contains(
-            "<recovery>To resume after editing the script, call: Workflow({scriptPath: '/tmp/a&amp;b.js', resumeFromRunId: 'wf_abcdef', args: [1,2]})\nAgent transcripts: /tmp/transcripts/wf_abcdef</recovery>"
+            "For a custom editable script only, call: Workflow({scriptPath: '/tmp/a&amp;b.js', resumeFromRunId: 'wf_abcdef', args: [1,2]})\nAgent transcripts: /tmp/transcripts/wf_abcdef</recovery>"
         ));
+        assert!(block.contains("For a workflow launched by plugin name, use the original name and original caller args"));
+        assert!(block.contains("Do not edit its Host-owned script"));
+        assert!(!block.contains("To resume after editing the script"));
         assert!(!block.contains("<diagnostics>"));
         assert!(!block.contains("<result>"));
     }

@@ -838,6 +838,7 @@ fn spawn_panel_tasks(
         let panel_watchdog = WorkflowQueryWatchdog {
             stall_timeout_ms: panel_stall_timeout_ms(config),
             max_retries: 0,
+            retry_response_body: false,
         };
         let name_index = anon_rank[index];
         let dispatch = Arc::clone(dispatch);

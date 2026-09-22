@@ -232,6 +232,8 @@ pub struct SubagentSpawnRequest {
     #[serde(default)]
     pub structured_output_mode: StructuredOutputMode,
     /// Opt-in malformed StructuredOutput argument recovery; supported range is 0..=2.
+    /// A Host-verified Create workflow also shares this budget with malformed
+    /// arguments to advertised local tools; ordinary callers retain the default.
     #[serde(default, skip_serializing_if = "is_zero_parse_retries")]
     pub structured_output_parse_retries: u32,
     /// Per-spawn thinking-effort override (claude-code workflow `agent({effort})`
@@ -356,15 +358,20 @@ pub struct SubagentSpawnRequest {
 /// The timeout is an *idle* timeout: it is applied independently to opening a
 /// response stream and to each `stream.next()` wait. A stream that continues to
 /// produce events may run longer than this duration. `max_retries` counts
-/// retries after the initial attempt, matching Claude Code's workflow query
-/// behavior (default: one initial attempt plus at most five retries).
+/// retries after the initial attempt (default: one initial attempt plus at most
+/// five retries). Response-body recovery is disabled unless a trusted Local App
+/// create workflow explicitly enables it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowQueryWatchdog {
     /// Maximum idle time for stream-open or the next stream event.
     pub stall_timeout_ms: u64,
-    /// Maximum number of retries after watchdog timeouts.
+    /// Retry limit for watchdog timeouts, also shared by opted-in body recovery.
     pub max_retries: u32,
+    /// Host-only opt-in for Local App creation. Ordinary workflows retain their
+    /// existing watchdog behavior, and serialized callers cannot enable it.
+    #[serde(skip)]
+    pub retry_response_body: bool,
 }
 
 impl WorkflowQueryWatchdog {
@@ -379,6 +386,7 @@ impl Default for WorkflowQueryWatchdog {
         Self {
             stall_timeout_ms: Self::DEFAULT_STALL_TIMEOUT_MS,
             max_retries: Self::DEFAULT_MAX_RETRIES,
+            retry_response_body: false,
         }
     }
 }
@@ -1199,6 +1207,34 @@ pub trait SubagentSpawner: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workflow_body_recovery_is_host_only_and_defaults_to_disabled() {
+        use super::WorkflowQueryWatchdog;
+
+        let policy = WorkflowQueryWatchdog::default();
+        assert!(!policy.retry_response_body);
+        let value = serde_json::to_value(policy).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "stallTimeoutMs": WorkflowQueryWatchdog::DEFAULT_STALL_TIMEOUT_MS,
+                "maxRetries": WorkflowQueryWatchdog::DEFAULT_MAX_RETRIES,
+            })
+        );
+        let restored: WorkflowQueryWatchdog = serde_json::from_value(value).unwrap();
+        assert!(!restored.retry_response_body);
+        let forged: WorkflowQueryWatchdog = serde_json::from_value(serde_json::json!({
+            "stallTimeoutMs": 1000,
+            "maxRetries": 2,
+            "retryResponseBody": true,
+        }))
+        .unwrap();
+        assert!(
+            !forged.retry_response_body,
+            "JSON must not grant the Host opt-in"
+        );
+    }
+
     #[test]
     fn structured_output_parse_retries_defaults_and_round_trips() {
         let request = super::SubagentSpawnRequest::default();

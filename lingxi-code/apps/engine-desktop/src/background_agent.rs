@@ -810,6 +810,7 @@ mod tests {
                 platform_api::subagent_spawn::WorkflowQueryWatchdog {
                     stall_timeout_ms: 4321,
                     max_retries: 2,
+                    retry_response_body: false,
                 },
             )
             .await;

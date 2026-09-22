@@ -1994,19 +1994,32 @@ impl ConversationOrchestrator {
         }
 
         // Snapshot history + estimate tokens WITHOUT holding the lock across
-        // the (possibly networked) compaction call.
-        let (snapshot, last_assistant_at) = {
+        // the (possibly networked) compaction call. The session's CURRENT model
+        // rides along for the threshold resolution below.
+        let (snapshot, last_assistant_at, model) = {
             let s = self.session.lock().await;
             (
                 s.model_context_history(),
                 s.message_timing.last_assistant_at,
+                s.model.clone(),
             )
         };
         let estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
 
+        // The gate's ceiling belongs to the model, not to the engine:
+        // claude-code resolves `getAutoCompactThreshold(model)`
+        // (`autoCompact.ts:72-91`) at its `autoCompactIfNeeded` call site, so a
+        // 1M-token catalog model must not be compacted at a boot-time constant
+        // sized for the 200k Claude window, and a mid-session model switch must
+        // move the gate with it. `refresh_autocompact_threshold` is a no-op for
+        // fixed-threshold callers (tests, embedded hosts) — it returns their
+        // configured value.
+        let threshold =
+            compactor.refresh_autocompact_threshold(&model, &self.api.active_betas());
+
         // Threshold gate: under threshold ⇒ strict no-op. `snip_freed = 0`
         // because we have done no snip work yet at the call site.
-        if !compaction::should_auto_compact(estimate, 0, compactor.autocompact_threshold) {
+        if !compaction::should_auto_compact(estimate, 0, threshold) {
             return;
         }
 
@@ -2046,7 +2059,7 @@ impl ConversationOrchestrator {
         if let Some(overflow) = compaction::compaction_prefix_overflow(
             total_input,
             estimate,
-            compactor.autocompact_threshold,
+            threshold,
             0,
             doc_blocks,
             img_blocks,

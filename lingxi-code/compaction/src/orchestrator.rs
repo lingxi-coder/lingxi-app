@@ -25,6 +25,7 @@ use crate::thresholds::{
 };
 use cost::Usage;
 use protocol::{ContentBlock, ConversationMessage};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 fn media_analysis_messages(messages: &[ConversationMessage]) -> Vec<ConversationMessage> {
@@ -133,8 +134,15 @@ pub struct CompactionOrchestrator {
     pub context_collapse: ContextCollapse,
     /// Autocompact layer.
     pub auto: Autocompactor,
-    /// Token threshold above which autocompact fires.
-    pub autocompact_threshold: u64,
+    /// Token threshold above which autocompact fires. Interior-mutable because
+    /// [`Self::refresh_autocompact_threshold`] can move it between calls when
+    /// the orchestrator was built with [`Self::with_model_derived_threshold`];
+    /// read it through [`Self::autocompact_threshold`].
+    autocompact_threshold: AtomicU64,
+    /// `true` when the threshold follows the session's current model instead of
+    /// the value passed to the constructor. See
+    /// [`Self::with_model_derived_threshold`].
+    model_derived_threshold: bool,
 }
 
 impl CompactionOrchestrator {
@@ -149,7 +157,8 @@ impl CompactionOrchestrator {
             cached_micro: CachedMicrocompact::default(),
             context_collapse: ContextCollapse::default(),
             auto: Autocompactor::new(),
-            autocompact_threshold,
+            autocompact_threshold: AtomicU64::new(autocompact_threshold),
+            model_derived_threshold: false,
         }
     }
 
@@ -171,8 +180,49 @@ impl CompactionOrchestrator {
             cached_micro: CachedMicrocompact::default(),
             context_collapse: ContextCollapse::default(),
             auto,
-            autocompact_threshold,
+            autocompact_threshold: AtomicU64::new(autocompact_threshold),
+            model_derived_threshold: false,
         }
+    }
+
+    /// Follow the session's current model: before every proactive pass,
+    /// [`Self::refresh_autocompact_threshold`] re-resolves the autocompact
+    /// threshold from the model the session is on NOW.
+    ///
+    /// claude-code resolves `getAutoCompactThreshold(model)`
+    /// (`autoCompact.ts:72-91`) at its `autoCompactIfNeeded` call site, not once
+    /// at construction. A fixed ceiling baked in at boot is wrong for any
+    /// session that switches models, and for every non-Claude catalog model —
+    /// their real window comes from the model registry, not the 200k Claude
+    /// default the fixed constants were sized against. Callers that pin an
+    /// explicit threshold (tests, embedded hosts) keep the constructor value
+    /// verbatim.
+    #[must_use]
+    pub fn with_model_derived_threshold(mut self) -> Self {
+        self.model_derived_threshold = true;
+        self
+    }
+
+    /// The autocompact threshold in force for the next pass.
+    #[must_use]
+    pub fn autocompact_threshold(&self) -> u64 {
+        self.autocompact_threshold.load(Ordering::Relaxed)
+    }
+
+    /// Re-resolve the autocompact threshold for `model` and return it.
+    ///
+    /// A no-op unless the orchestrator was built with
+    /// [`Self::with_model_derived_threshold`]: pinned-threshold callers get
+    /// their configured value back untouched. Cheap enough to run before every
+    /// proactive pass.
+    pub fn refresh_autocompact_threshold(&self, model: &str, betas: &[String]) -> u64 {
+        if self.model_derived_threshold {
+            self.autocompact_threshold.store(
+                crate::thresholds::auto_compact_threshold(model, betas),
+                Ordering::Relaxed,
+            );
+        }
+        self.autocompact_threshold()
     }
 
     /// Run one full orchestrator pass with a **fresh** tracking state.
@@ -459,7 +509,7 @@ impl CompactionOrchestrator {
         // outcome — see `process_iteration`).
         if history_snip_enabled() {
             let current_tokens = crate::grouping::estimate_tokens_for_range(&messages);
-            let snip = SnipCompactor::snip(messages, current_tokens, self.autocompact_threshold);
+            let snip = SnipCompactor::snip(messages, current_tokens, self.autocompact_threshold());
             if snip.removed_count > 0 {
                 layers.push(CompactionLayer::Snip);
                 freed = freed.saturating_add(snip.tokens_freed);
@@ -530,7 +580,7 @@ impl CompactionOrchestrator {
             // applied here (snip_freed = 0). The freed total still carries the
             // savings for the caller's accounting.
             0,
-            self.autocompact_threshold,
+            self.autocompact_threshold(),
         );
         // Circuit breaker: after N consecutive failures, stop trying so a
         // hopelessly-over-limit session does not hammer the summarizer every
@@ -755,6 +805,61 @@ mod tests {
             content: vec![ContentBlock::Text { text: text.into() }],
             stop_reason: Some("end_turn".into()),
         }
+    }
+
+    /// Snapshot + clear the window-related env vars under [`ENV_LOCK`], run
+    /// `body`, then restore. Mirrors `thresholds::tests::with_clean_env`, which
+    /// is private to that module.
+    fn with_clean_window_env(body: impl FnOnce()) {
+        const KEYS: &[&str] = &[
+            "LINGXI_AUTO_COMPACT_WINDOW",
+            "LINGXI_AUTOCOMPACT_PCT_OVERRIDE",
+            "LINGXI_MAX_CONTEXT_TOKENS",
+            "LINGXI_MAX_OUTPUT_TOKENS",
+            "USER_TYPE",
+        ];
+        let _guard = crate::thresholds::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved: Vec<(&str, Option<String>)> =
+            KEYS.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+        for &k in KEYS {
+            std::env::remove_var(k);
+        }
+        body();
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    #[test]
+    fn model_derived_threshold_follows_the_model_only_when_opted_in() {
+        with_clean_window_env(|| {
+            // A 1M-token catalog window with a 384k output cap: the threshold is
+            // 1_000_000 − min(384_000, MAX_OUTPUT_TOKENS_FOR_SUMMARY) − buffer
+            // = 1_000_000 − 32_000 − 13_000.
+            const MODEL: &str = "test-model-derived-threshold";
+            llm_client::model::model_limits::register(
+                MODEL,
+                llm_client::model::model_limits::ModelLimits {
+                    context_window: 1_000_000,
+                    max_output_tokens: 384_000,
+                },
+            );
+
+            // A pinned threshold survives the refresh untouched.
+            let pinned = CompactionOrchestrator::new(150_000);
+            assert_eq!(pinned.refresh_autocompact_threshold(MODEL, &[]), 150_000);
+            assert_eq!(pinned.autocompact_threshold(), 150_000);
+
+            // Opted in, the threshold follows the model the session is on.
+            let derived = CompactionOrchestrator::new(150_000).with_model_derived_threshold();
+            assert_eq!(derived.refresh_autocompact_threshold(MODEL, &[]), 955_000);
+            assert_eq!(derived.autocompact_threshold(), 955_000);
+        });
     }
 
     #[tokio::test]

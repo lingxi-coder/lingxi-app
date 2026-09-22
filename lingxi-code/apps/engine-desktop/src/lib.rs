@@ -13754,14 +13754,19 @@ pub async fn build_with_credential_stack(
     // Arc is moved into the orchestrator builder below via `with_mcp_registry`).
     let runtime_mcp_registry = mcp_registry.clone();
 
-    // (5.4) Real compaction. Threshold 150_000 tokens (M3 design lock for the
-    //       Anthropic prod context window). In-Loop Compaction Batch 6: back the
-    //       autocompact layer with a REAL forked summary call (sharing the
-    //       parent's prompt cache) instead of the deterministic-fallback
-    //       summarizer. The same `cache_safe_slot` is handed to BOTH the
-    //       summarizer (here) and the orchestrator (`with_cache_safe_slot`
-    //       below), so the turn loop's per-call snapshot is what the summary
-    //       call replays.
+    // (5.4) Real compaction. In-Loop Compaction Batch 6: back the autocompact
+    //       layer with a REAL forked summary call (sharing the parent's prompt
+    //       cache) instead of the deterministic-fallback summarizer. The same
+    //       `cache_safe_slot` is handed to BOTH the summarizer (here) and the
+    //       orchestrator (`with_cache_safe_slot` below), so the turn loop's
+    //       per-call snapshot is what the summary call replays.
+    //
+    //       The autocompact threshold follows the session's CURRENT model
+    //       (`with_model_derived_threshold`): the proactive pre-call trigger
+    //       re-resolves it on every call, so a catalog model with a 1M-token
+    //       window is not compacted at a fixed 200k-era constant, and a
+    //       mid-session model switch moves the gate with it. This expression is
+    //       only the seed for the model the session boots on.
     let cache_safe_slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
     let side_query_client: Arc<dyn sidequery::SideQueryClient> =
         Arc::new(sidequery::ProviderSideQueryClient::new(
@@ -13792,10 +13797,13 @@ pub async fn build_with_credential_stack(
     let recap_runner = forked_runner.clone();
     let autocompactor =
         compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone());
-    let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
-        autocompactor,
-        150_000,
-    ));
+    let compactor = Arc::new(
+        compaction::CompactionOrchestrator::with_autocompactor(
+            autocompactor,
+            compaction::thresholds::auto_compact_threshold(&orch_cfg.model, &[]),
+        )
+        .with_model_derived_threshold(),
+    );
 
     // (5.45) The real desktop `TaskRegistry`, wired into the tool context. Tasks
     //        materialize stdout/stderr under a SESSION-SCOPED project temp dir

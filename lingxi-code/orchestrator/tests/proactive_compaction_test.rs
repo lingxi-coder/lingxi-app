@@ -32,6 +32,20 @@ fn make_orch(
     Arc<MockApiClient>,
     Arc<MockOutputStream>,
 ) {
+    make_orch_with(threshold, false)
+}
+
+/// [`make_orch`], optionally wiring the compactor with
+/// `with_model_derived_threshold` so the gate follows the session's model
+/// instead of the fixed constructor value.
+fn make_orch_with(
+    threshold: Option<u64>,
+    model_derived: bool,
+) -> (
+    Arc<ConversationOrchestrator>,
+    Arc<MockApiClient>,
+    Arc<MockOutputStream>,
+) {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".to_string(),
@@ -55,9 +69,32 @@ fn make_orch(
         std::env::temp_dir(),
     );
     if let Some(t) = threshold {
-        orch = orch.with_compaction(Arc::new(CompactionOrchestrator::new(t)));
+        let compactor = CompactionOrchestrator::new(t);
+        let compactor = if model_derived {
+            compactor.with_model_derived_threshold()
+        } else {
+            compactor
+        };
+        orch = orch.with_compaction(Arc::new(compactor));
     }
     (Arc::new(orch), api, output)
+}
+
+/// Register `id` with the process-global model registry so
+/// `context_window_for_model` answers with the real catalog window instead of
+/// the 200k Claude default.
+fn register_model(id: &str, context_window: u64, max_output_tokens: u64) {
+    llm_client::model::model_limits::register(
+        id,
+        llm_client::model::model_limits::ModelLimits {
+            context_window,
+            max_output_tokens,
+        },
+    );
+}
+
+async fn set_session_model(orch: &ConversationOrchestrator, model: &str) {
+    orch.session().lock().await.model = model.to_string();
 }
 
 /// Seed `n` filler user messages so the token estimate clears a small threshold.
@@ -183,6 +220,78 @@ async fn under_threshold_is_strict_noop() {
             .iter()
             .any(|e| matches!(e, OutputEvent::CompactionCompleted { .. })),
         "no CompactionCompleted may fire under threshold"
+    );
+}
+
+#[tokio::test]
+async fn gate_follows_a_wide_catalog_model_instead_of_the_engine_threshold() {
+    // The engine used to wire the compactor with a fixed 150_000-token ceiling
+    // — a constant sized for the 200k Anthropic window — so a 1M-token catalog
+    // model was compacted at ~15% of its context. With
+    // `with_model_derived_threshold` the gate resolves the session model's real
+    // window, so the same small history stays untouched even though the
+    // compactor was constructed with a 100-token threshold.
+    register_model("test-gate-wide-model", 1_000_000, 384_000);
+    let (orch, _api, output) = make_orch_with(Some(100), true);
+    set_session_model(&orch, "test-gate-wide-model").await;
+    seed_history(&orch, 60).await;
+    let before = history(&orch).await;
+
+    orch.run_turn("hello").await.expect("turn ok");
+
+    assert!(
+        output.compaction_phase_snapshot().await.is_empty(),
+        "a 1M-window model must not compact a ~1.5k-token history"
+    );
+    let after = history(&orch).await;
+    assert!(
+        !after.iter().any(|m| matches!(
+            m,
+            ConversationMessage::System { content, .. } if content == "Conversation compacted"
+        )),
+        "no compaction boundary may appear below the model's own threshold"
+    );
+    assert_eq!(
+        &after[..before.len()],
+        &before[..],
+        "the seeded history prefix must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn gate_compacts_a_narrow_model_despite_a_huge_engine_threshold() {
+    // The inverse direction: a model whose real window is small must compact
+    // even when the compactor was constructed with a 10M-token threshold.
+    // 30k window − min(1k, 20k) reserved output − 13k buffer ⇒ a 16k threshold,
+    // which 1000 filler messages (~21k estimated tokens) clear.
+    register_model("test-gate-narrow-model", 30_000, 1_000);
+    // `USER_TYPE=ant` + `LINGXI_MAX_CONTEXT_TOKENS` would override every
+    // model's window process-wide; neutralize it for the assertion and restore.
+    let saved_max_context = std::env::var("LINGXI_MAX_CONTEXT_TOKENS").ok();
+    std::env::remove_var("LINGXI_MAX_CONTEXT_TOKENS");
+
+    let (orch, _api, output) = make_orch_with(Some(10_000_000), true);
+    set_session_model(&orch, "test-gate-narrow-model").await;
+    seed_history(&orch, 1000).await;
+    let before = history(&orch).await.len();
+
+    let turn = orch.run_turn("hello").await;
+    match saved_max_context {
+        Some(value) => std::env::set_var("LINGXI_MAX_CONTEXT_TOKENS", value),
+        None => std::env::remove_var("LINGXI_MAX_CONTEXT_TOKENS"),
+    }
+    turn.expect("turn ok");
+
+    let events = output.snapshot().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OutputEvent::CompactionCompleted { .. })),
+        "the model's own window, not the engine threshold, must gate autocompact"
+    );
+    assert!(
+        history(&orch).await.len() < before,
+        "the compacted history must be smaller than the seeded {before} messages"
     );
 }
 

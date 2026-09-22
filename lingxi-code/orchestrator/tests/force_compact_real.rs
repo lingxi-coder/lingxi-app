@@ -323,24 +323,16 @@ async fn cancel_during_compaction_leaves_history_unchanged() {
 /// `CompactionError::Internal("no cache-safe params")`.
 fn errored_compactor() -> Arc<CompactionOrchestrator> {
     use compaction::autocompact::Autocompactor;
-    use compaction::microcompact::{Microcompactor, TimeBasedMCConfig};
-    use compaction::snip::SnipCompactor;
     use sidequery::{CacheSafeParamsSlot, ForkedAgentRunner};
 
     let runner = Arc::new(ForkedAgentRunner::new());
     let slot = Arc::new(CacheSafeParamsSlot::new()); // empty — triggers Internal err
 
-    let orch = CompactionOrchestrator {
-        snip: SnipCompactor,
-        micro: Microcompactor {
-            config: TimeBasedMCConfig::default(),
-        },
-        auto: Autocompactor::with_forked_runner(runner, slot),
-        cached_micro: compaction::cached_microcompact::CachedMicrocompact::default(),
-        context_collapse: compaction::ContextCollapse::default(),
-        // Threshold 1 token → autocompact ALWAYS fires.
-        autocompact_threshold: 1,
-    };
+    // Threshold 1 token → autocompact ALWAYS fires.
+    let orch = CompactionOrchestrator::with_autocompactor(
+        Autocompactor::with_forked_runner(runner, slot),
+        1,
+    );
     Arc::new(orch)
 }
 

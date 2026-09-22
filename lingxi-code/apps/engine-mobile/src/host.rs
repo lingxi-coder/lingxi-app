@@ -5147,17 +5147,21 @@ async fn build_mobile_inner_with_ask(
     };
 
     // Audit fix (#3): autocompaction parity with desktop. Build the real
-    // CompactionOrchestrator (threshold 150_000 tokens — the M3 Anthropic prod
-    // context lock) backed by a forked summary side-query over the SAME device
-    // HTTP transport + cfg.api_key the memdir-prefetch uses; nothing here needs a
-    // desktop-only primitive. Without this the orchestrator's compaction stays
-    // None, the proactive `maybe_compact_before_call` is a strict no-op, and a
-    // long mobile session fails at the wire on context-window overflow with no
+    // CompactionOrchestrator backed by a forked summary side-query over the SAME
+    // device HTTP transport + cfg.api_key the memdir-prefetch uses; nothing here
+    // needs a desktop-only primitive. Without this the orchestrator's compaction
+    // stays None, the proactive `maybe_compact_before_call` is a strict no-op, and
+    // a long mobile session fails at the wire on context-window overflow with no
     // summary recovery. The same `cache_safe_slot` is handed to BOTH the forked
     // summarizer and the orchestrator so the turn loop's per-call snapshot is what
     // the summary call replays. (This is the ordinary M3 autocompaction layer, NOT
     // the flag-gated CONTEXT_COLLAPSE/REACTIVE_COMPACT path.) Built before
     // `orch_cfg` is moved into the orchestrator so it can read `orch_cfg.model`.
+    //
+    // The autocompact threshold follows the session's CURRENT model
+    // (`with_model_derived_threshold`); this expression is only the seed for the
+    // model the session boots on — the proactive pre-call trigger re-resolves it
+    // per call.
     let cache_safe_slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
     let compaction_side_query: Arc<dyn sidequery::SideQueryClient> = Arc::new(
         sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
@@ -5166,10 +5170,13 @@ async fn build_mobile_inner_with_ask(
         sidequery::ForkedAgentRunner::new()
             .with_side_query_client(compaction_side_query, orch_cfg.model.clone()),
     );
-    let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
-        compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone()),
-        150_000,
-    ));
+    let compactor = Arc::new(
+        compaction::CompactionOrchestrator::with_autocompactor(
+            compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone()),
+            compaction::thresholds::auto_compact_threshold(&orch_cfg.model, &[]),
+        )
+        .with_model_derived_threshold(),
+    );
     let app_agent_executor: Arc<dyn LocalAppsAgentExecutor> =
         Arc::new(MobileAppAgentExecutor::new(
             orch_cfg.clone(),

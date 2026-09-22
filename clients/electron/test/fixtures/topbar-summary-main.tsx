@@ -14,6 +14,8 @@ import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
 import '../../src/renderer/components/RuntimeCenter.css';
+// `.desktop-chat-layout`'s flex row lives here, as it does in the app.
+import '../../src/renderer/components/TerminalPanel.css';
 
 const idle = async () => undefined;
 const todos = [
@@ -95,15 +97,21 @@ function Fixture() {
       <div data-compact-calls={compactCalls} className="desktop-shell" style={{ width: '100vw', height: '100vh', position: 'relative', display: 'flex', overflow: 'hidden', background: palette.stageBg, color: palette.text }}>
         <main className="desktop-main" style={{ minWidth: 0, position: 'relative', flex: 1, display: 'flex', flexDirection: 'column' }}>
           <BetaTopBar bridge={bridge as never} runtimeCenterOpen={center.overviewOpen} onToggleRuntimeCenter={() => setOverview(!center.overviewOpen)} />
-          <RuntimeCenterOverview bridge={bridge as never} />
-          <div data-fixture-chat="true" tabIndex={0} style={{ flex: 1, padding: '60px 40px', overflow: 'auto', fontSize: 14, lineHeight: 1.7 }}>
-            <div style={{ maxWidth: 640, margin: '0 auto' }}>
-              <p style={{ display: 'inline-block', borderRadius: 20, background: palette.surfaceHover, padding: '12px 18px', marginBottom: 30 }}>Align the desktop topbar with Codex.</p>
-              <p>The summary keeps subagents, todos, resources, and the submitted plan close at hand.</p>
-              <p style={{ color: palette.text3 }}>Select an item to see its details in the right panel.</p>
+          {/* Mirrors App.tsx: the summary is a rail inside `.desktop-chat-layout`,
+              so this fixture exercises the same container query the app does. */}
+          <div className="desktop-chat-layout" data-runtime-inspector-open={center.inspectorOpen ? 'true' : undefined}>
+            <div className="desktop-message-list-view">
+              <div data-fixture-chat="true" tabIndex={0} style={{ flex: 1, minHeight: 0, padding: '60px 40px', overflow: 'auto', fontSize: 14, lineHeight: 1.7 }}>
+                <div style={{ maxWidth: 640, margin: '0 auto' }}>
+                  <p style={{ display: 'inline-block', borderRadius: 20, background: palette.surfaceHover, padding: '12px 18px', marginBottom: 30 }}>Align the desktop topbar with Codex.</p>
+                  <p>The summary keeps subagents, todos, resources, and the submitted plan close at hand.</p>
+                  <p style={{ color: palette.text3 }}>Select an item to see its details in the right panel.</p>
+                </div>
+              </div>
+              <div style={{ margin: '16px 28px', padding: '18px 20px', border: `1px solid ${palette.border}`, borderRadius: 24, color: palette.text3 }}>Ask a follow-up…</div>
             </div>
+            <RuntimeCenterOverview bridge={bridge as never} />
           </div>
-          <div style={{ margin: '16px 28px', padding: '18px 20px', border: `1px solid ${palette.border}`, borderRadius: 24, color: palette.text3 }}>Ask a follow-up…</div>
         </main>
         <RuntimeCenterInspector bridge={bridge as never} />
       </div>

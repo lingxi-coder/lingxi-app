@@ -40,11 +40,13 @@
 @container (min-width: 1040px) {
   .runtime-summary {
     position: static;
-    align-self: stretch;
+    /* Hug the sections the session actually has. Stretching to the row left the
+       whole tail of the rail empty; tall summaries still scroll inside it. */
+    align-self: flex-start;
     flex: 0 0 300px;
     width: auto;
     max-width: none;
-    max-height: none;
+    max-height: calc(100% - 20px);
     margin: 10px 12px 10px 0;
     border-radius: 20px;
   }

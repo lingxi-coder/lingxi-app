@@ -84,15 +84,26 @@ async function main() {
     checks.push('context browsing focus and guarded compaction in summary');
 
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
-    const overview = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); return { width: panel.getBoundingClientRect().width, radius: getComputedStyle(panel).borderRadius, sections: [...panel.querySelectorAll('h2')].map(el=>el.textContent), fourthResource: panel.textContent.includes('acceptance.md') }; })()`);
+    const overview = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); const row = panel.parentElement; return { width: panel.getBoundingClientRect().width, height: panel.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, radius: getComputedStyle(panel).borderRadius, sections: [...panel.querySelectorAll('h2')].map(el=>el.textContent), fourthResource: panel.textContent.includes('acceptance.md') }; })()`);
     assert.equal(overview.width, 300);
-    assert.equal(overview.radius, '24px');
+    assert.equal(overview.radius, '20px');
     assert.deepEqual(overview.sections, ['Context', 'Subagents', 'Resources', 'Plan']);
     assert.equal(overview.fourthResource, false);
+    // The rail hugs its sections instead of stretching to the transcript row.
+    assert.ok(overview.height < overview.rowHeight - 20, `summary rail height ${overview.height} fills row ${overview.rowHeight}`);
+    assert.equal(overview.scrollHeight, overview.clientHeight, 'content-sized rail needs no internal scroll');
+    window.setContentSize(1400, 420);
+    await delay(150);
+    const cramped = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); const row = panel.parentElement; return { height: panel.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, overflow: getComputedStyle(panel).overflowY }; })()`);
+    assert.ok(cramped.height <= cramped.rowHeight - 20, `cramped summary rail ${cramped.height} exceeds row ${cramped.rowHeight}`);
+    assert.equal(cramped.overflow, 'auto');
+    assert.ok(cramped.scrollHeight > cramped.clientHeight, 'cramped summary rail scrolls internally');
+    window.setContentSize(1400, 900);
+    await delay(150);
     await js(`document.querySelector('[data-fixture-chat]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))`);
     assert.equal(await js(`Boolean(document.querySelector('#runtime-center-overview'))`), true);
     await capture('summary-light');
-    checks.push('pinned overview outside click and resource limit');
+    checks.push('pinned overview hugs content bounded scroll and resource limit');
 
     await click('[aria-label="Toggle right panel"]');
     await waitFor(wc, `document.querySelector('.runtime-inspector-landing')?.textContent.includes('Subagents')`);

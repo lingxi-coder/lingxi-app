@@ -686,10 +686,15 @@ export class HostController {
       this.assertSender(event);
       return this.enqueueNavigation(() => this.archiveSessionInternal(this.archiveRef(projectPath, sessionId)));
     });
-    this.ipc.handle(CH_SESSION_CLEAR, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
+    this.ipc.handle(CH_SESSION_CLEAR, async (event: IpcMainInvokeEvent, sessionId: unknown, name?: unknown) => {
       this.assertSender(event);
       if (!isSessionId(sessionId)) throw new Error('invalid session id');
-      await this.enqueueNavigation(() => this.clearActiveSession(sessionId));
+      if (name !== undefined && typeof name !== 'string') throw new Error('invalid session name');
+      const clearName = typeof name === 'string' ? name.trim() : '';
+      if (clearName.length > 200 || /[\u0000-\u001f\u007f]/.test(clearName)) {
+        throw new Error('session name must be 1–200 printable characters');
+      }
+      await this.enqueueNavigation(() => this.clearActiveSession(sessionId, clearName || undefined));
     });
     this.ipc.handle(CH_SESSION_TOUCH, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
       this.assertSender(event);
@@ -714,41 +719,7 @@ export class HostController {
         if (!customTitle || customTitle.length > 200 || /[\u0000-\u001f\u007f]/.test(customTitle)) {
           throw new Error('session title must be 1–200 printable characters');
         }
-        const row = await this.assertSessionBelongsToProject(ref) ?? await this.sessionCatalog.find(ref.projectPath, ref.sessionId);
-        if (!row) throw new Error('session must be persisted before it can be renamed');
-        // Renaming is persisted metadata, not a model operation. Starting or
-        // resuming an engine here can wait on credentials or an active turn.
-        // Use the same append-only side record as JsonlWriter::append_custom_title;
-        // its metadata backstop adopts the newest on-disk title on later writes.
-        const file = await open(row.path, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
-        try {
-          if (!(await file.stat()).isFile()) throw new Error('session path is not a file');
-          await file.writeFile(`${JSON.stringify({ type: 'custom-title', customTitle, sessionId: ref.sessionId })}\n`);
-          await file.sync();
-        } finally {
-          await file.close();
-        }
-        const previousCatalog = this.catalogs.get(ref.projectPath);
-        const catalog = await this.loadProjectSessions(ref.projectPath);
-        if (catalog.error && previousCatalog) {
-          // The append is already durable. Keep the last usable snapshot so a
-          // transient catalog failure cannot turn a successful rename into a
-          // retryable error (and a duplicate custom-title record).
-          const fallback = {
-            projectPath: ref.projectPath,
-            sessions: previousCatalog.sessions.map((session) => session.uuid === ref.sessionId
-              ? { ...session, title: customTitle }
-              : session),
-            error: catalog.error,
-          };
-          // Do not overwrite a newer successful catalog request that raced the
-          // refresh, but keep the fallback available for a later rename while
-          // the catalog process remains unavailable.
-          if (this.catalogs.get(ref.projectPath)?.error === catalog.error) {
-            this.catalogs.set(ref.projectPath, fallback);
-          }
-          return fallback;
-        }
+        const catalog = await this.persistSessionTitle(ref, customTitle);
         return { projectPath: ref.projectPath, ...catalog };
       });
     });
@@ -1590,7 +1561,45 @@ export class HostController {
     return ref;
   }
 
-  private async clearActiveSession(sessionId: string): Promise<void> {
+  private async persistSessionTitle(ref: SessionRef, customTitle: string): Promise<ProjectSessionCatalogState> {
+    const row = await this.assertSessionBelongsToProject(ref) ?? await this.sessionCatalog.find(ref.projectPath, ref.sessionId);
+    if (!row) throw new Error('session must be persisted before it can be renamed');
+    // Renaming is persisted metadata, not a model operation. Starting or
+    // resuming an engine here can wait on credentials or an active turn.
+    // Use the same append-only side record as JsonlWriter::append_custom_title;
+    // its metadata backstop adopts the newest on-disk title on later writes.
+    const file = await open(row.path, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+    try {
+      if (!(await file.stat()).isFile()) throw new Error('session path is not a file');
+      await file.writeFile(`${JSON.stringify({ type: 'custom-title', customTitle, sessionId: ref.sessionId })}\n`);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    const previousCatalog = this.catalogs.get(ref.projectPath);
+    const catalog = await this.loadProjectSessions(ref.projectPath);
+    if (catalog.error && previousCatalog) {
+      // The append is already durable. Keep the last usable snapshot so a
+      // transient catalog failure cannot turn a successful rename into a
+      // retryable error (and a duplicate custom-title record).
+      const fallback = {
+        sessions: previousCatalog.sessions.map((session) => session.uuid === ref.sessionId
+          ? { ...session, title: customTitle }
+          : session),
+        error: catalog.error,
+      };
+      // Do not overwrite a newer successful catalog request that raced the
+      // refresh, but keep the fallback available for a later rename while the
+      // catalog process remains unavailable.
+      if (this.catalogs.get(ref.projectPath)?.error === catalog.error) {
+        this.catalogs.set(ref.projectPath, fallback);
+      }
+      return fallback;
+    }
+    return catalog;
+  }
+
+  private async clearActiveSession(sessionId: string, name?: string): Promise<void> {
     const active = this.settings.getPublic().activeSession;
     if (!active || active.sessionId !== sessionId) {
       throw new Error('the requested session is no longer active');
@@ -1601,6 +1610,13 @@ export class HostController {
     }
     if ((runtime?.pendingInteractions ?? 0) > 0 || (runtime?.pendingAskUserQuestions.length ?? 0) > 0) {
       throw new Error('resolve pending interactions before clearing the session');
+    }
+    // Claude Code's `/clear [name]` labels the conversation being left, not
+    // the empty conversation it starts. Draft sessions have no persisted
+    // transcript yet, so there is nothing to label in that case.
+    if (name) {
+      const previous = await this.sessionCatalog.find(active.projectPath, active.sessionId);
+      if (previous) await this.persistSessionTitle(active, name);
     }
     await this.terminals?.closeScope(active);
     await this.bridge.closeSession(active);

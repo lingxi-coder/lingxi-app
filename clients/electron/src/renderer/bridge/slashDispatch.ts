@@ -41,7 +41,7 @@ export interface DesktopCommandContext {
   addWorkspaceDirectory(path: string): Promise<void>;
   chooseProject(): Promise<void>;
   activateProject(path: string): Promise<void>;
-  clearSession(): Promise<void>;
+  clearSession(name?: string): Promise<void>;
   forceCompact(instructions?: string): Promise<void>;
   copyLastResponse(): Promise<boolean>;
   login(): Promise<void>;

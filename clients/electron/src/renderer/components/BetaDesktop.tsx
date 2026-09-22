@@ -1707,9 +1707,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     addWorkspaceDirectory: (path) => bridge.updateWorkspaceDirectories('project', [path], []),
     chooseProject: async () => { await bridge.addProject(); },
     activateProject: async (path) => { await bridge.activateProject(path); },
-    clearSession: async () => {
-      if (window.confirm('Clear the current session and start a new draft?')) await bridge.clearSession();
-    },
+    clearSession: (name) => bridge.clearSession(name),
     forceCompact: (instructions) => bridge.forceCompact(instructions),
     copyLastResponse: async () => {
       const item = [...bridge.conversation.items].reverse().find((entry) => (

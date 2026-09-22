@@ -161,7 +161,7 @@ export interface LingxiApi {
   archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
-  clearSession(sessionId: string): Promise<void>;
+  clearSession(sessionId: string, name?: string): Promise<void>;
   sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(sessionId: string, requestId: number): Promise<void>;

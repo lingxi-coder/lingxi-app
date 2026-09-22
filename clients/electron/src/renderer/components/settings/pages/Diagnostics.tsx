@@ -146,7 +146,7 @@ export function Diagnostics({ bridge, snapshot }: PageContentProps) {
           </button>
         </Row>
         <Row title="API 重试" desc={retry ? `${retry.message} · 第 ${retry.attempt}/${retry.max_retries} 次 · ${retry.delay_ms}ms` : '暂无 API 重试事件。'} align="center">
-          <button type="button" onClick={() => { if (window.confirm('Clear the current session and start a new draft?')) void bridge.clearSession().catch(() => undefined); }} disabled={!hasSession || bridge.running || bridge.sessionLoading} style={ghostButtonStyle(t, !hasSession || bridge.running || bridge.sessionLoading)}>
+          <button type="button" onClick={() => void bridge.clearSession().catch(() => undefined)} disabled={!hasSession || bridge.running || bridge.sessionLoading} style={ghostButtonStyle(t, !hasSession || bridge.running || bridge.sessionLoading)}>
             清空会话
           </button>
         </Row>

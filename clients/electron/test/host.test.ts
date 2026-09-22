@@ -259,6 +259,69 @@ test('session clear uses dedicated IPC and re-checks active work plus pending in
   }
 });
 
+test('session clear accepts Claude Code name syntax and labels the session being left', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-clear-named-settings-'));
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-clear-named-project-'));
+  const project = realpathSync.native(projectDirectory);
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const replacementId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const transcriptPath = join(project, `${sessionId}.jsonl`);
+  writeFileSync(transcriptPath, '{"type":"user"}\n');
+  const row = {
+    uuid: sessionId,
+    title: 'old title',
+    modified_rfc3339: '2026-09-22T00:00:00Z',
+    message_count: 1,
+    mode: 'code',
+    path: transcriptPath,
+    empty_session: false,
+  };
+  const settings = new SettingsStore(userData);
+  settings.addProject(project);
+  settings.activateProject(project);
+  settings.setActiveSession({ projectPath: project, sessionId });
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  const runtime = {
+    projectPath: project,
+    connectionState: { status: 'connected' as const },
+    pendingInteractions: 0,
+    pendingAskUserQuestions: [],
+  };
+  const bridge = {
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    get: (requestedSessionId: string) => requestedSessionId === sessionId ? runtime : undefined,
+    hasActiveWork: () => false,
+    closeSession: async () => undefined,
+    newSession: async () => ({ projectPath: project, sessionId: replacementId }),
+  };
+  const catalog = {
+    find: async () => row,
+    list: async () => ({ sessions: [row] }),
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once: () => undefined, removeListener: () => undefined };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  const clear = handlers.get(CH_SESSION_CLEAR);
+  assert.ok(clear);
+
+  try {
+    await clear!({ sender, senderFrame: frame }, sessionId, 'investigation');
+    assert.match(readFileSync(transcriptPath, 'utf8'), /"customTitle":"investigation"/);
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId: replacementId });
+  } finally {
+    host.dispose();
+    rmSync(userData, { recursive: true, force: true });
+    rmSync(projectDirectory, { recursive: true, force: true });
+  }
+});
+
 test('adding the first project uses the real settings store, trusts it, and starts one session without restarting', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-auto-trust-settings-'));
   const workspace = mkdtempSync(join(tmpdir(), 'lingxi-auto-trust-project-'));

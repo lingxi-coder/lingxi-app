@@ -22,10 +22,9 @@ export const DESKTOP_COMMANDS: readonly DesktopCommand[] = [
   {
     name: 'clear',
     aliases: ['reset', 'new'],
-    args: 'none',
+    args: 'optional',
     async run(args, ctx) {
-      if (args) return ctx.emit('/clear takes no arguments', true);
-      await ctx.clearSession();
+      await ctx.clearSession(args || undefined);
     },
   },
   {

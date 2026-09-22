@@ -349,7 +349,7 @@ export interface UseBridge {
   login(): Promise<void>;
   logout(): Promise<void>;
   forceCompact(instructions?: string): Promise<void>;
-  clearSession(): Promise<void>;
+  clearSession(name?: string): Promise<void>;
   refreshTasks(options?: { preserve?: boolean }): Promise<void>;
   refreshAuth(): Promise<void>;
   refreshHooks(): Promise<void>;
@@ -2348,11 +2348,11 @@ export function useBridge(): UseBridge {
       capture(cause);
     }
   }, [capture, host, updateRuntime]);
-  const clearSession = useCallback(async () => {
+  const clearSession = useCallback(async (name?: string) => {
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId) return;
     try {
-      await host.clearSession(sessionId);
+      await host.clearSession(sessionId, name);
       const snapshot = await host.bootstrap();
       applyBootstrap(snapshot);
       setError(null);

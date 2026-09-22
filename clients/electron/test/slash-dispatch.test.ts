@@ -81,7 +81,7 @@ function recordingContext() {
     addWorkspaceDirectory: async (path: string) => { calls.push(`addWorkspaceDirectory:${path}`); },
     chooseProject: async () => { calls.push('chooseProject'); },
     activateProject: async (path: string) => { calls.push(`activateProject:${path}`); },
-    clearSession: async () => { calls.push('clearSession'); },
+    clearSession: async (name?: string) => { calls.push(name ? `clearSession:${name}` : 'clearSession'); },
     forceCompact: async (instructions?: string) => { calls.push(instructions ? `forceCompact:${instructions}` : 'forceCompact'); },
     copyLastResponse: async () => { calls.push('copyLastResponse'); return true; },
     login: async () => { calls.push('login'); },
@@ -147,6 +147,8 @@ test('/theme with an unrecognized argument reports itself instead of silently do
 test('Desktop-owned slash commands call real GUI and IPC actions', async () => {
   assert.deepEqual(await run('/help'), ['showHelp']);
   assert.deepEqual(await run('/clear'), ['clearSession']);
+  assert.deepEqual(await run('/clear old investigation'), ['clearSession:old investigation']);
+  assert.deepEqual(await run('/reset archived context'), ['clearSession:archived context']);
   assert.deepEqual(await run('/compact'), ['forceCompact']);
   assert.deepEqual(await run('/compact focus on the API changes'), ['forceCompact:focus on the API changes']);
   assert.deepEqual(await run('/login'), ['login']);

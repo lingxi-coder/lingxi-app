@@ -223,6 +223,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   bridge = new SessionRuntimeManager({
     getSavedPermissionMode: () => settings.getLastPermissionMode(),
     onPermissionModeSelected: (mode) => settings.setLastPermissionMode(mode),
+    getSavedFastMode: () => settings.getLastFastMode(),
+    onFastModeSelected: (enabled) => settings.setLastFastMode(enabled),
     notifier,
     onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     isPackaged: app.isPackaged,

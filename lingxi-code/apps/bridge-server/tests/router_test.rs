@@ -1012,6 +1012,61 @@ async fn set_model_routes() {
 }
 
 #[tokio::test]
+async fn set_reasoning_selection_persists_the_desktop_default() {
+    use client_protocol::controls::ReasoningSelectionDto;
+    use platform_api::{ConversationControls, PermissionControlState, ReasoningSelection};
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_conversation_controls(ConversationControls {
+        model_reference: "claude-opus-4-8".into(),
+        permission: PermissionControlState {
+            requested: "default".into(),
+            effective: "default".into(),
+            modes: Vec::new(),
+        },
+        requested_reasoning_selection: ReasoningSelection::Automatic,
+        effective_reasoning_selection: ReasoningSelection::Automatic,
+        reasoning_spec: platform_api::ReasoningControlSpec {
+            available: vec![
+                ReasoningSelection::Automatic,
+                ReasoningSelection::Level { id: "high".into() },
+            ],
+            selections_persistable: true,
+            modifiable: true,
+            ..Default::default()
+        },
+    });
+    let router = router_with_store(handle, root.path());
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetReasoningSelection {
+                selection: ReasoningSelectionDto::Level { id: "high".into() },
+            },
+            sink,
+        )
+        .await;
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.path().join(".lingxi/settings.json"))
+            .expect("reasoning default should be persisted"),
+    )
+    .expect("settings should remain valid JSON");
+    assert_eq!(
+        settings["reasoning"]["defaultSelection"],
+        serde_json::json!({"type": "level", "id": "high"})
+    );
+    assert_eq!(
+        command_core::effort::load_reasoning_default_selection_at(
+            &root.path().join(".lingxi/settings.json")
+        ),
+        Some(ReasoningSelection::Level { id: "high".into() })
+    );
+}
+
+#[tokio::test]
 async fn set_fast_mode_routes_and_acknowledges_authoritative_state() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));

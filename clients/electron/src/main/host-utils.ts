@@ -84,6 +84,8 @@ export interface PersistedSettings {
   model?: string;
   /** Last user-selected permission mode on this device. */
   lastPermissionMode?: PermissionModeId;
+  /** Last user-selected fast-mode state on this device. */
+  fastMode?: boolean;
   apiBaseUrl?: string;
   activeProject?: string;
   activeSession?: SessionRef;
@@ -170,6 +172,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   settings.model = boundedString(value['model'], 256);
   if (isPermissionModeId(value['lastPermissionMode'])) {
     settings.lastPermissionMode = value['lastPermissionMode'];
+  }
+  if (typeof value['fastMode'] === 'boolean') {
+    settings.fastMode = value['fastMode'];
   }
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   if (value['bypassPermissionsModeAccepted'] === true) {

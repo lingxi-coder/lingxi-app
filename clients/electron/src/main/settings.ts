@@ -276,6 +276,24 @@ export class SettingsStore {
     }
   }
 
+  /** Return the last explicitly selected Fast mode state, if any. */
+  getLastFastMode(): boolean | undefined {
+    return this.settings.fastMode;
+  }
+
+  /** Persist Fast mode only after the engine confirms the selection. */
+  setLastFastMode(enabled: boolean): void {
+    if (typeof enabled !== 'boolean') throw new Error('invalid fast mode');
+    const previous = this.settings;
+    this.settings = { ...previous, fastMode: enabled };
+    try {
+      this.persist();
+    } catch (error) {
+      this.settings = previous;
+      throw error;
+    }
+  }
+
   /** Whether the user has previously accepted Bypass Permissions mode. */
   getBypassPermissionsAccepted(): boolean {
     return this.settings.bypassPermissionsModeAccepted === true;

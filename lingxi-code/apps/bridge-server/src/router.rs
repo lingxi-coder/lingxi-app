@@ -746,6 +746,38 @@ impl EngineCommandRouter {
         self.turn_active.load(Ordering::SeqCst)
     }
 
+    fn reasoning_settings_path(&self) -> Option<PathBuf> {
+        self.session_store
+            .as_ref()
+            .map(|store| store.lingxi_home.join("settings.json"))
+    }
+
+    fn persisted_reasoning_selection(&self) -> Option<platform_api::ReasoningSelection> {
+        self.reasoning_settings_path()
+            .and_then(|path| command_core::effort::load_reasoning_default_selection_at(&path))
+    }
+
+    fn persist_reasoning_selection(
+        &self,
+        selection: &platform_api::ReasoningSelection,
+    ) -> Result<(), String> {
+        let Some(path) = self.reasoning_settings_path() else {
+            return Ok(());
+        };
+        command_core::effort::persist_reasoning_default_selection_at(&path, Some(selection))
+    }
+
+    async fn restore_persisted_reasoning_selection(&self) -> Result<(), String> {
+        let Some(selection) = self.persisted_reasoning_selection() else {
+            return Ok(());
+        };
+        self.handle
+            .set_reasoning_selection(selection)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     async fn emit_controls_snapshot(&self, sink: &dyn ClientEventSink) {
         let Some(controls) = self.handle.conversation_controls().await else {
             return;
@@ -3569,7 +3601,16 @@ impl CommandRouter for EngineCommandRouter {
                             platform_api::qualified_model_ref(&model_id, profile.as_deref());
                         sink.emit(ClientEvent::ModelChanged { model: selected })
                             .await;
-                        if let Some(controls) = self.handle.conversation_controls().await {
+                        if self.persisted_reasoning_selection().is_some() {
+                            if self.restore_persisted_reasoning_selection().await.is_err() {
+                                let _ = self
+                                    .handle
+                                    .set_reasoning_selection(
+                                        platform_api::ReasoningSelection::Automatic,
+                                    )
+                                    .await;
+                            }
+                        } else if let Some(controls) = self.handle.conversation_controls().await {
                             if controls.requested_reasoning_selection
                                 != platform_api::ReasoningSelection::Automatic
                                 && controls.requested_reasoning_selection
@@ -3601,17 +3642,60 @@ impl CommandRouter for EngineCommandRouter {
                 self.emit_controls_snapshot(&*sink).await;
             }
             ClientCommand::SetReasoningSelection { selection } => {
-                if let Err(error) = self
-                    .handle
-                    .set_reasoning_selection(decode_reasoning_selection(selection))
-                    .await
-                {
+                let requested = decode_reasoning_selection(selection);
+                let previous = self.handle.conversation_controls().await.map(|controls| {
+                    (
+                        controls.requested_reasoning_selection,
+                        controls.effective_reasoning_selection,
+                        controls.reasoning_spec.selections_persistable,
+                    )
+                });
+                if let Err(error) = self.handle.set_reasoning_selection(requested).await {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Rejected,
                         message: format!("set_reasoning_selection failed: {error}"),
                     })
                     .await;
                     return;
+                }
+                let (effective, persistable) = self
+                    .handle
+                    .conversation_controls()
+                    .await
+                    .map(|controls| {
+                        (
+                            controls.effective_reasoning_selection,
+                            controls.reasoning_spec.selections_persistable,
+                        )
+                    })
+                    .unwrap_or((platform_api::ReasoningSelection::Automatic, true));
+                let persisted_default = if persistable {
+                    effective
+                } else {
+                    platform_api::ReasoningSelection::Automatic
+                };
+                if let Err(error) = self.persist_reasoning_selection(&persisted_default) {
+                    let rollback = previous
+                        .as_ref()
+                        .map(|(requested, _, _)| requested.clone())
+                        .unwrap_or(platform_api::ReasoningSelection::Automatic);
+                    let _ = self.handle.set_reasoning_selection(rollback).await;
+                    let previous_default = previous.as_ref().map_or(
+                        platform_api::ReasoningSelection::Automatic,
+                        |(_, effective, persistable)| {
+                            if *persistable {
+                                effective.clone()
+                            } else {
+                                platform_api::ReasoningSelection::Automatic
+                            }
+                        },
+                    );
+                    let _ = self.persist_reasoning_selection(&previous_default);
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: format!("persist reasoning selection failed: {error}"),
+                    })
+                    .await;
                 }
                 self.emit_controls_snapshot(&*sink).await;
             }
@@ -3887,6 +3971,7 @@ impl CommandRouter for EngineCommandRouter {
                         return;
                     }
                 }
+                let _ = self.restore_persisted_reasoning_selection().await;
 
                 let session_id = self.handle.current_session_id().await.to_string();
                 sink.emit(ClientEvent::SessionStarted {
@@ -4027,6 +4112,12 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
                     return;
                 }
+
+                // The device-level reasoning default is the counterpart to
+                // Electron's persisted model/permission preferences. Apply it
+                // after transcript hydration so an old assistant row cannot
+                // silently replace the user's last selected effort on restart.
+                let _ = self.restore_persisted_reasoning_selection().await;
 
                 let presence_warning = self
                     .refresh_process_session_presence(

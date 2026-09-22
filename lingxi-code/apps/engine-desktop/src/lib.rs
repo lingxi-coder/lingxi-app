@@ -12057,6 +12057,16 @@ pub async fn build_with_credential_stack(
     let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
+    // The bridge persists the structured effort choice in the same user
+    // settings file used by `/effort`. Seed it before the first turn; an
+    // explicit CLI effort remains higher priority and is left untouched.
+    let persisted_reasoning_selection = if cfg.initial_effort.is_none() {
+        command_core::effort::load_reasoning_default_selection_at(
+            &cfg.lingxi_home.join("settings.json"),
+        )
+    } else {
+        None
+    };
     let mut orch_cfg = OrchestratorConfig::default();
     orch_cfg.interactive_session = interactive_session;
     // Bridge hosts have a live permission surface even though their session
@@ -15943,6 +15953,13 @@ pub async fn build_with_credential_stack(
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
     let orch = Arc::new(orch_builder);
+    if let Some(selection) = persisted_reasoning_selection {
+        orch.initialize_reasoning_selection_for_model(
+            &default_model_id,
+            default_model_profile.as_deref(),
+            selection,
+        );
+    }
     orch.enable_goal_retries();
     orch.attach_owned_session_switches();
     async_hook_response_buffer.attach_rewake_target(&orch);
@@ -23311,6 +23328,41 @@ must be filtered out: got {after:?}"
         assert!(
             rt.permission_gate.is_none(),
             "noop build must not surface an adapter gate handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_applies_persisted_reasoning_default_before_the_first_turn() {
+        use platform_api::OrchestratorHandle as _;
+
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.default_model = "claude-opus-4-8".to_string();
+        std::fs::create_dir_all(&cfg.lingxi_home).expect("create settings home");
+        std::fs::write(
+            cfg.lingxi_home.join("settings.json"),
+            r#"{"reasoning":{"defaultSelection":{"type":"level","id":"high"}}}"#,
+        )
+        .expect("write persisted reasoning default");
+        let output: Arc<dyn platform_api::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must apply the persisted reasoning default");
+        let controls = rt
+            .orchestrator
+            .conversation_controls()
+            .await
+            .expect("conversation controls should be available");
+        assert_eq!(
+            controls.requested_reasoning_selection,
+            platform_api::ReasoningSelection::Level { id: "high".into() }
+        );
+        assert_eq!(
+            controls.effective_reasoning_selection,
+            platform_api::ReasoningSelection::Level { id: "high".into() }
         );
     }
 

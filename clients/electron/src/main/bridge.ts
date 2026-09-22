@@ -120,6 +120,8 @@ export interface BridgeManagerOptions {
   getSavedModel?: () => string | undefined;
   getSavedPermissionMode?: () => PermissionModeId | undefined;
   onPermissionModeSelected?: (mode: PermissionModeId) => void;
+  getSavedFastMode?: () => boolean | undefined;
+  onFastModeSelected?: (enabled: boolean) => void;
   /**
    * OS notifications. Lives here rather than in the renderer because the
    * renderer's session denies every Web permission but `media`, and because
@@ -751,6 +753,12 @@ export class SessionRuntime {
     fail(error: Error): void;
   } | undefined;
 
+  private pendingFastModeSwitch: {
+    enabled: boolean;
+    complete(): void;
+    fail(error: Error): void;
+  } | undefined;
+
   private applyPermissionMode(mode: PermissionModeId, persist: boolean): Promise<void> {
     if (this.pendingPermissionSwitch) return Promise.reject(new Error('A permission mode change is already in progress.'));
     const client = this.requireClient();
@@ -793,6 +801,51 @@ export class SessionRuntime {
       // A changed policy/provider may reject a previously valid preference.
       // Keep the engine usable so the user can select another mode.
       const message = `Could not restore permission mode: ${sanitizeDiagnostic(error)}`;
+      this.diagnostics.add('warn', 'host', message);
+      this.broadcastClientEvent({ type: 'error', kind: { type: 'rejected' }, message });
+    }
+  }
+
+  private applyFastMode(enabled: boolean, persist: boolean): Promise<void> {
+    if (this.pendingFastModeSwitch) return Promise.reject(new Error('A Fast mode change is already in progress.'));
+    const client = this.requireClient();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => pending.fail(new Error('Fast mode change timed out.')), 10_000);
+      timer.unref();
+      const finish = (error?: Error) => {
+        if (this.pendingFastModeSwitch !== pending) return;
+        this.pendingFastModeSwitch = undefined;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      };
+      const pending = {
+        enabled,
+        complete: () => {
+          try {
+            if (persist) this.opts.onFastModeSelected?.(enabled);
+            finish();
+          } catch (error) {
+            finish(new Error(`Could not save Fast mode: ${sanitizeDiagnostic(error)}`));
+          }
+        },
+        fail: (error: Error) => finish(error),
+      };
+      this.pendingFastModeSwitch = pending;
+      try { client.sendCommand({ type: 'set_fast_mode', enabled }); }
+      catch (error) { pending.fail(error instanceof Error ? error : new Error(String(error))); }
+    });
+  }
+
+  private async restoreFastMode(): Promise<void> {
+    const enabled = this.opts.getSavedFastMode?.();
+    if (enabled === undefined) return;
+    try {
+      await this.applyFastMode(enabled, false);
+    } catch (error) {
+      // A changed provider/model policy may make Fast mode unavailable. Keep
+      // the session usable and retain the saved preference for a later model
+      // that supports it.
+      const message = `Could not restore Fast mode: ${sanitizeDiagnostic(error)}`;
       this.diagnostics.add('warn', 'host', message);
       this.broadcastClientEvent({ type: 'error', kind: { type: 'rejected' }, message });
     }
@@ -1627,7 +1680,22 @@ export class SessionRuntime {
       'bridge',
       bridgeVersionDiagnostic(hello.server_name, hello.protocol_version, hello.capabilities.client_protocol_version),
     );
-    if (restorePermission) await this.restorePermissionMode();
+    if (restorePermission) {
+      const permissionStartedAt = Date.now();
+      await this.restorePermissionMode();
+      this.startupDiagnostic('bridge_connect_phase', {
+        durationMs: Date.now() - permissionStartedAt,
+        generation,
+        phase: 'restore_permission_mode',
+      });
+      const fastStartedAt = Date.now();
+      await this.restoreFastMode();
+      this.startupDiagnostic('bridge_connect_phase', {
+        durationMs: Date.now() - fastStartedAt,
+        generation,
+        phase: 'restore_fast_mode',
+      });
+    }
     if (generation !== this.generation || this.disposed) return;
     this.setState({ status: 'connected' });
     this.startupDiagnostic('bridge_connect_completed', {
@@ -2013,8 +2081,14 @@ export class SessionRuntime {
       if (event.type === 'permission_mode_changed' && event.mode === this.pendingPermissionSwitch?.mode) {
         this.pendingPermissionSwitch.complete();
       }
+      if (event.type === 'fast_mode_changed' && event.enabled === this.pendingFastModeSwitch?.enabled) {
+        this.pendingFastModeSwitch.complete();
+      }
       if (event.type === 'error' && event.message.startsWith('set_permission_mode failed:')) {
         this.pendingPermissionSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
+      }
+      if (event.type === 'error' && event.message.startsWith('set_fast_mode failed:')) {
+        this.pendingFastModeSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
       }
       if (event.type === 'error') {
         this.diagnostics.add('error', 'bridge', diagnosticEvent('client_error', {
@@ -2547,6 +2621,9 @@ export class SessionRuntime {
     if (validated.type === 'set_permission_mode' && (this.opts.getSavedPermissionMode || this.opts.onPermissionModeSelected)) {
       return this.applyPermissionMode(validated.mode, true);
     }
+    if (validated.type === 'set_fast_mode' && (this.opts.getSavedFastMode || this.opts.onFastModeSelected)) {
+      return this.applyFastMode(validated.enabled, true);
+    }
     this.requireClient().sendCommand(validated);
     this.commitFusionHistory(validated);
   }
@@ -2735,6 +2812,7 @@ export class SessionRuntime {
     }).then(async () => {
       await this.restoreModel();
       await this.restorePermissionMode();
+      await this.restoreFastMode();
     });
   }
 
@@ -2813,7 +2891,8 @@ export class SessionRuntime {
     this.state = next;
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
-    this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+      this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
+      this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
       // `runScheduledTurn` sets `activeTurn` by hand and only the
       // `scheduled_run_finished` handler clears it — and that handler needs the
       // pending entry this block is about to delete. Without this the latch
@@ -2859,6 +2938,7 @@ export class SessionRuntime {
     ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
+    this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
     this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
     this.pendingCredentialSettings?.reject(new Error('Provider settings loading was interrupted.'));
     this.pendingCredentialSettings = undefined;

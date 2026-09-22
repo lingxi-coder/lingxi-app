@@ -34,6 +34,7 @@
 //! `Cargo.toml`, so this module never names a device crate.
 
 mod configuration_admin;
+mod fast_mode_preference;
 mod model_preference;
 mod permission_preference;
 mod settings_commands;
@@ -47,6 +48,7 @@ use client_adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
     PermissionRequestSink, TurnWrapper,
 };
+use client_adapter::lowering::lower_status_snapshot;
 use client_protocol::commands::{
     AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto as ProtocolListingKind,
     PromptModeDto, ProviderCredentialSecretDto,
@@ -3413,6 +3415,9 @@ async fn build_mobile_inner_with_ask(
     let saved_model = interactive_launch
         .then(|| model_preference::load(&cfg.lingxi_home))
         .flatten();
+    let saved_fast_mode = interactive_launch
+        .then(|| fast_mode_preference::load(&cfg.lingxi_home))
+        .flatten();
     let (default_model_id, default_model_profile) = saved_model
         .as_deref()
         .and_then(|model| model_preference::resolve(model, &default_listings))
@@ -3610,7 +3615,9 @@ async fn build_mobile_inner_with_ask(
         )
         .with_cost_tracking(cost_tracker.clone(), api_calls_recorded.clone()),
     )));
-    let provider_adapter = Arc::new(ProviderApiAdapter::new(api_service.clone()));
+    let fast_flag = Arc::new(AtomicBool::new(saved_fast_mode.unwrap_or(false)));
+    let provider_adapter =
+        Arc::new(ProviderApiAdapter::new(api_service.clone()).with_fast_mode(fast_flag.clone()));
     let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
     let streaming_api: Arc<dyn StreamingApiClient> =
         streaming_override.unwrap_or(provider_adapter.clone() as Arc<dyn StreamingApiClient>);
@@ -5260,6 +5267,10 @@ async fn build_mobile_inner_with_ask(
     // `.with_session_cwd(session_cwd)`; inert today — see the binding note
     // above).
     .with_session_cwd(session_cwd);
+    // Keep the mobile request adapter and orchestrator on the same persisted
+    // device preference. The adapter reads this flag when building the next
+    // provider request; the handle exposes it to native controls.
+    orch_inner = orch_inner.with_fast_mode(fast_flag);
     if let Some(selection) = persisted_reasoning_selection {
         orch_inner.initialize_reasoning_selection_for_model(
             &default_model_id,
@@ -7237,6 +7248,11 @@ impl MobileEngineHandle {
                 controls: lower_controls(controls, requested_permission),
             })
             .await;
+        self.event_sink
+            .emit(ClientEvent::FastModeChanged {
+                enabled: handle.fast_mode().await,
+            })
+            .await;
     }
 
     async fn emit_typescript_lsp_mode(&self) {
@@ -7503,6 +7519,42 @@ impl MobileEngineHandle {
         self.restore_session_permission_mode(fallback).await
     }
 
+    async fn restore_preferred_reasoning_selection(&self) {
+        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+        let saved = command_core::effort::load_reasoning_default_selection_at(
+            &self.lingxi_home.join("settings.json"),
+        );
+        if let Some(selection) = saved {
+            if let Err(error) = handle.set_reasoning_selection(selection).await {
+                tracing::warn!(%error, "saved mobile reasoning selection rejected by current model");
+                let _ = handle
+                    .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
+                    .await;
+            }
+            return;
+        }
+        if let Some(controls) = handle.conversation_controls().await {
+            if controls.requested_reasoning_selection != controls.effective_reasoning_selection {
+                let _ = handle
+                    .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
+                    .await;
+            }
+        }
+    }
+
+    async fn restore_preferred_fast_mode(&self) {
+        if !self.inner.interactive_launch {
+            return;
+        }
+        let Some(enabled) = fast_mode_preference::load(&self.lingxi_home) else {
+            return;
+        };
+        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+        if let Err(error) = handle.set_fast_mode(enabled).await {
+            tracing::warn!(%error, "saved mobile Fast mode rejected by current runtime");
+        }
+    }
+
     async fn restore_session_permission_mode(&self, mode: &str) -> Result<String, ClientError> {
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
         let result = if mode == "bypassPermissions" {
@@ -7706,6 +7758,8 @@ impl MobileEngineHandle {
                         message: format!("resume_session failed: {error}"),
                     });
                 }
+                self.restore_preferred_reasoning_selection().await;
+                self.restore_preferred_fast_mode().await;
                 {
                     if let Err(error) = handle.set_plan_mode(target_permission_mode == "plan").await
                     {
@@ -7817,6 +7871,8 @@ impl MobileEngineHandle {
                         message: format!("resume empty session failed: {resume_error}"),
                     });
                 }
+                self.restore_preferred_reasoning_selection().await;
+                self.restore_preferred_fast_mode().await;
                 handle
                     .set_plan_mode(target_permission_mode == "plan")
                     .await
@@ -9698,16 +9754,24 @@ impl MobileEngineHandle {
 
             ClientCommand::SetFastMode { enabled } => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                let previous = handle.fast_mode().await;
                 handle
                     .set_fast_mode(enabled)
                     .await
                     .map_err(|e| ClientError::Rejected {
                         message: format!("set_fast_mode failed: {e}"),
                     })?;
+                let active = handle.fast_mode().await;
+                if self.inner.interactive_launch {
+                    if let Err(error) = fast_mode_preference::save(&self.lingxi_home, active) {
+                        let _ = handle.set_fast_mode(previous).await;
+                        return Err(ClientError::Internal {
+                            message: format!("save Fast mode preference failed: {error}"),
+                        });
+                    }
+                }
                 self.event_sink
-                    .emit(ClientEvent::FastModeChanged {
-                        enabled: handle.fast_mode().await,
-                    })
+                    .emit(ClientEvent::FastModeChanged { enabled: active })
                     .await;
                 Ok(())
             }
@@ -9822,23 +9886,11 @@ impl MobileEngineHandle {
 
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
-                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 let (model_id, profile) = self.resolve_routable_model(&model).await?;
                 let selected = self
                     .switch_model_and_remember(&model_id, profile.as_deref(), "sdk")
                     .await?;
-                if let Some(controls) = handle.conversation_controls().await {
-                    if !matches!(
-                        controls.requested_reasoning_selection,
-                        platform_api::ReasoningSelection::Automatic
-                    ) && controls.requested_reasoning_selection
-                        != controls.effective_reasoning_selection
-                    {
-                        let _ = handle
-                            .set_reasoning_selection(platform_api::ReasoningSelection::Automatic)
-                            .await;
-                    }
-                }
+                self.restore_preferred_reasoning_selection().await;
                 self.event_sink
                     .emit(ClientEvent::ModelChanged { model: selected })
                     .await;
@@ -9901,6 +9953,7 @@ impl MobileEngineHandle {
                         .await;
                         match result {
                             Ok((model, selected)) => {
+                                self.restore_preferred_reasoning_selection().await;
                                 self.event_sink
                                     .emit(ClientEvent::SlashCommandResult {
                                         turn_id,
@@ -10335,6 +10388,8 @@ impl MobileEngineHandle {
                     self.switch_model_and_remember(&model_id, profile.as_deref(), "sdk")
                         .await?;
                 }
+                self.restore_preferred_reasoning_selection().await;
+                self.restore_preferred_fast_mode().await;
                 // Mobile clients persist this value as the resumable catalog key.
                 // `SessionId::Display` is presentation-oriented (`sess:<uuid>`),
                 // while the JSONL filename and ResumeSession contract use the
@@ -15093,8 +15148,10 @@ pub fn build_mobile_engine_inner(
 
 #[cfg(test)]
 mod tests {
+    include!("host/fast_mode_preference_tests.rs");
     include!("host/permission_preference_tests.rs");
     include!("host/model_preference_tests.rs");
+    include!("host/reasoning_preference_tests.rs");
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

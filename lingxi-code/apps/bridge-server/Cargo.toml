@@ -36,6 +36,7 @@ migrations = { path = "../../migrations" }
 # production runtime the router is built from (F2-05 binary path).
 platform-api = { path = "../../platform-api" }
 command-api = { path = "../../command-api" }
+command-core = { path = "../../commands/core" }
 # S1: the production TurnDriver (`src/driver.rs`) drives a real
 # ConversationOrchestrator's cancelable streaming entry, so `orchestrator` is now
 # a LIBRARY dependency (it was dev-only when the only driver was the test one).
@@ -107,10 +108,6 @@ tool-api = { path = "../../tool-api" }
 # fixture tool, exercising the exact resolver the production `computer` tool
 # uses — not a reinvented test double.
 tool-computer-use = { path = "../../tools/computer-use" }
-# F2-08 routing tests: the real builtin slash-command set the desktop
-# composition root seeds, so `RunSlashCommand` routes through the production
-# registry (not a test-only stub).
-command-core = { path = "../../commands/core" }
 # `test-util` (dev-only) gives the audio_bridge tests `#[tokio::test(start_paused
 # = true)]`, so the "client never answers" deadline is exercised by advancing the
 # runtime's clock rather than by sleeping for the real timeout.

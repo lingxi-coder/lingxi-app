@@ -32,6 +32,7 @@ test('rename persists and returns a title without starting or dispatching to an 
       if (catalogFailure) throw new Error('catalog temporarily unavailable');
       return { sessions: [row()] };
     },
+    invalidate: () => undefined,
   };
   const ipc = { handle: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), removeHandler: (name: string) => handlers.delete(name) };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any, ipc as any);

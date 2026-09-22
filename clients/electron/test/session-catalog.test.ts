@@ -165,3 +165,37 @@ test('project catalog preserves validated zero-count rows and applies the sideba
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test('project catalog coalesces concurrent reads and invalidates after a mutation', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-cache-'));
+  const uuid = '33333333-4444-4555-8666-777777777777';
+  let spawns = 0;
+  const catalog = new ProjectSessionCatalog({
+    serverBin: '/bridge-server',
+    spawnProcess: (() => {
+      spawns += 1;
+      return fakeChild(JSON.stringify({
+        version: 1,
+        sessions: [{ uuid, title: 'Cached', modified_rfc3339: '', message_count: 1, path: 'cached.jsonl', empty_session: false }],
+      }));
+    }) as any,
+  });
+  try {
+    const [listed, repeated, found] = await Promise.all([
+      catalog.list(project),
+      catalog.list(project),
+      catalog.find(project, uuid),
+    ]);
+    assert.equal(spawns, 1);
+    assert.equal(listed.sessions[0]?.uuid, uuid);
+    assert.equal(repeated.sessions[0]?.title, 'Cached');
+    assert.equal(found?.uuid, uuid);
+    await catalog.list(project);
+    assert.equal(spawns, 1);
+    catalog.invalidate(project);
+    await catalog.list(project);
+    assert.equal(spawns, 2);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});

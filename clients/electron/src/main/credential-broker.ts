@@ -299,6 +299,98 @@ export async function resolveCodexOAuthSession(broker?: ProviderCredentialResolv
   catch { throw new Error('Codex 登录凭据无效，请重新登录。'); }
 }
 
+type SessionLaunchCredentials = { apiKey?: string; providerCredentials?: Record<string, string> };
+
+interface LaunchCacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+/**
+ * Reuse broker-owned launch material across the short burst of runtimes a
+ * Desktop window commonly creates. The cache lives only in the Electron main
+ * process, expires quickly, and is explicitly invalidated after credential or
+ * plugin-secret mutations; secret bytes never cross into renderer state.
+ */
+export class SessionLaunchCache {
+  private readonly credentialEntries = new Map<string, LaunchCacheEntry<SessionLaunchCredentials>>();
+  private readonly credentialPending = new Map<string, Promise<SessionLaunchCredentials>>();
+  private pluginSecretsEntry?: LaunchCacheEntry<Record<string, Record<string, string>>>;
+  private pluginSecretsPending?: Promise<Record<string, Record<string, string>>>;
+  private oauthEntry?: LaunchCacheEntry<CodexOAuthSession | undefined>;
+  private oauthPending?: Promise<CodexOAuthSession | undefined>;
+  private generation = 0;
+
+  constructor(private readonly ttlMs = 30_000) {}
+
+  credentials(model: string | null | undefined, broker?: ProviderCredentialResolver): Promise<SessionLaunchCredentials> {
+    const key = model ?? '';
+    const now = Date.now();
+    const cached = this.credentialEntries.get(key);
+    if (cached && cached.expiresAt > now) return Promise.resolve(cached.value);
+    if (cached) this.credentialEntries.delete(key);
+    const pending = this.credentialPending.get(key);
+    if (pending) return pending;
+    const generation = this.generation;
+    const operation = resolveSessionLaunchCredentials(model, { credentialBroker: broker })
+      .then((value) => {
+        if (generation === this.generation) this.credentialEntries.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+        return value;
+      })
+      .finally(() => {
+        if (this.credentialPending.get(key) === operation) this.credentialPending.delete(key);
+      });
+    this.credentialPending.set(key, operation);
+    return operation;
+  }
+
+  pluginSecrets(broker?: ProviderCredentialBroker): Promise<Record<string, Record<string, string>>> {
+    const now = Date.now();
+    if (this.pluginSecretsEntry && this.pluginSecretsEntry.expiresAt > now) return Promise.resolve(this.pluginSecretsEntry.value);
+    this.pluginSecretsEntry = undefined;
+    if (this.pluginSecretsPending) return this.pluginSecretsPending;
+    const generation = this.generation;
+    const operation = resolveSessionLaunchPluginSecrets(broker)
+      .then((value) => {
+        if (generation === this.generation) this.pluginSecretsEntry = { value, expiresAt: Date.now() + this.ttlMs };
+        return value;
+      })
+      .finally(() => {
+        if (this.pluginSecretsPending === operation) this.pluginSecretsPending = undefined;
+      });
+    this.pluginSecretsPending = operation;
+    return operation;
+  }
+
+  openAiOAuth(broker?: ProviderCredentialResolver): Promise<CodexOAuthSession | undefined> {
+    const now = Date.now();
+    if (this.oauthEntry && this.oauthEntry.expiresAt > now) return Promise.resolve(this.oauthEntry.value);
+    this.oauthEntry = undefined;
+    if (this.oauthPending) return this.oauthPending;
+    const generation = this.generation;
+    const operation = resolveCodexOAuthSession(broker)
+      .then((value) => {
+        if (generation === this.generation) this.oauthEntry = { value, expiresAt: Date.now() + this.ttlMs };
+        return value;
+      })
+      .finally(() => {
+        if (this.oauthPending === operation) this.oauthPending = undefined;
+      });
+    this.oauthPending = operation;
+    return operation;
+  }
+
+  invalidate(): void {
+    this.generation += 1;
+    this.credentialEntries.clear();
+    this.pluginSecretsEntry = undefined;
+    this.oauthEntry = undefined;
+    this.credentialPending.clear();
+    this.pluginSecretsPending = undefined;
+    this.oauthPending = undefined;
+  }
+}
+
 export async function resolveSessionLaunchCredentials(
   model: string | null | undefined,
   options: {

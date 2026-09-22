@@ -9,16 +9,14 @@ import { SessionRuntimeManager, stopLegacyOrphanBridges, type SessionRef } from 
 import {
   createMacCredentialBrokerClient,
   resolveProviderCredential,
-  resolveSessionLaunchCredentials,
-  resolveSessionLaunchPluginSecrets,
-  resolveCodexOAuthSession,
+  SessionLaunchCache,
 } from './credential-broker.js';
 import { CODEX_PROVIDER_ID, parseCodexSession } from './codex-auth.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { TerminalManager } from './terminal.js';
 import { HostController } from './host.js';
 import { HostNotifier } from './notifications.js';
-import { DiagnosticBuffer, sanitizeDiagnostic } from './host-utils.js';
+import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
 import { requestMicrophoneAccess } from './microphoneAccess.js';
 import { ProjectSessionCatalog } from './session-catalog.js';
@@ -201,6 +199,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     resourcesPath: process.resourcesPath,
     serverBin: app.isPackaged ? undefined : process.env['LINGXI_BRIDGE_SERVER_BIN'],
   });
+  const launchCache = new SessionLaunchCache();
   /**
    * The one place an OS notification is raised. Shared by the scheduled-task
    * service and `HostNotifier` so both get the same click behaviour: restore
@@ -249,16 +248,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     onModelSelected: (model) => settings.setLastModel(model),
     getSavedModel: () => settings.getPublic().model,
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
-    resolveOpenAiOAuth: () => resolveCodexOAuthSession(credentialBroker),
+    resolveOpenAiOAuth: () => launchCache.openAiOAuth(credentialBroker),
     onOpenAiOAuthUpdated: async (session) => {
       if (!credentialBroker) throw new Error('Codex secure credential storage is unavailable');
       await credentialBroker.set(CODEX_PROVIDER_ID, JSON.stringify(parseCodexSession(session)));
+      launchCache.invalidate();
     },
+    invalidateLaunchConfigCache: () => launchCache.invalidate(),
     onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
-    sessionIdAvailable: async (ref) => {
-      const catalog = await sessionCatalog.list(ref.projectPath);
-      return !catalog.sessions.some((session) => session.uuid === ref.sessionId);
-    },
     confirmBypassPermissions: async () => {
       // Shown ONCE per install (persisted), mirroring the oracle's
       // `bypassPermissionsModeAccepted`. Body text is the oracle's Bypass
@@ -290,12 +287,62 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
       const model = resumeModel ?? configured.model;
-      const credentials = await resolveSessionLaunchCredentials(model, {
-        credentialBroker,
+      const startedAt = Date.now();
+      const credentialStartedAt = Date.now();
+      const credentialsPromise = launchCache.credentials(model, credentialBroker).then((credentials) => {
+        diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
+          durationMs: Date.now() - credentialStartedAt,
+          parallel: true,
+          phase: 'provider_credentials',
+          projectPath: workspace,
+          sessionId: ref.sessionId,
+        }));
+        return credentials;
       });
-      const pluginSecrets = await resolveSessionLaunchPluginSecrets(credentialBroker);
-      const openaiOAuth = model?.startsWith(`${CODEX_PROVIDER_ID}/`)
-        ? await resolveCodexOAuthSession(credentialBroker) : undefined;
+      const pluginSecretsStartedAt = Date.now();
+      const pluginSecretsPromise = launchCache.pluginSecrets(credentialBroker).then((pluginSecrets) => {
+        diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
+          durationMs: Date.now() - pluginSecretsStartedAt,
+          parallel: true,
+          phase: 'plugin_secrets',
+          projectPath: workspace,
+          sessionId: ref.sessionId,
+        }));
+        return pluginSecrets;
+      });
+      const openAiOAuthSelected = model?.startsWith(`${CODEX_PROVIDER_ID}/`) === true;
+      const oauthStartedAt = Date.now();
+      const openAiOAuthPromise = (openAiOAuthSelected
+        ? launchCache.openAiOAuth(credentialBroker)
+        : Promise.resolve(undefined)
+      ).then((openaiOAuth) => {
+        if (openAiOAuthSelected) {
+          diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
+            durationMs: Date.now() - oauthStartedAt,
+            parallel: true,
+            phase: 'openai_oauth',
+            projectPath: workspace,
+            sessionId: ref.sessionId,
+          }));
+        }
+        return openaiOAuth;
+      });
+      const [credentials, pluginSecrets, openaiOAuth] = await Promise.all([
+        credentialsPromise,
+        pluginSecretsPromise,
+        openAiOAuthPromise,
+      ]);
+      diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_ready', {
+        durationMs: Date.now() - startedAt,
+        parallel: true,
+        hasApiKey: Boolean(credentials.apiKey),
+        hasOpenAiOAuth: Boolean(openaiOAuth),
+        model,
+        pluginSecretCount: Object.values(pluginSecrets).reduce((count, values) => count + Object.keys(values).length, 0),
+        projectPath: workspace,
+        providerCredentialCount: Object.keys(credentials.providerCredentials ?? {}).length,
+        sessionId: ref.sessionId,
+      }));
       return {
         workspace,
         sessionId: ref.sessionId,

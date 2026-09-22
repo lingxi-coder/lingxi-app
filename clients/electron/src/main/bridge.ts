@@ -134,6 +134,8 @@ export interface BridgeManagerOptions {
   beforeOpenAiOAuthLaunch?: () => Promise<void>;
   /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
   onActivityChanged?: () => void;
+  /** Invalidate Electron-main launch material after a credential/config mutation. */
+  invalidateLaunchConfigCache?: () => void;
   onFirstPromptSent?: () => boolean | void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
    * command is forwarded to the engine. Must show a blocking acceptance dialog
@@ -657,7 +659,6 @@ export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions,
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
-  sessionIdAvailable?: (ref: SessionRef) => boolean | Promise<boolean>;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;
 }
@@ -935,6 +936,14 @@ export class SessionRuntime {
     this.sessionId = opts.sessionId ?? randomUUID();
     this.projectPath = opts.projectPath ?? '';
     this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
+  }
+
+  private startupDiagnostic(event: string, details: Record<string, unknown> = {}): void {
+    this.diagnostics.add('info', 'host', diagnosticEvent(event, {
+      projectPath: this.projectPath,
+      sessionId: this.sessionId,
+      ...details,
+    }));
   }
 
   beginArchive(): () => void {
@@ -1371,6 +1380,7 @@ export class SessionRuntime {
     if (this.startPromise) return this.startPromise;
     if (this.child || this.client) return;
     if (this.opts.registerIpc !== false) this.registerIpc();
+    const startedAt = Date.now();
     this.startPromise = (async () => {
       try {
         await this.startInternal();
@@ -1378,6 +1388,10 @@ export class SessionRuntime {
         // launchConfig runs before the child lifecycle begins. Surface failures
         // such as an unreadable Keychain credential through the same renderer
         // connection state as spawn/protocol failures.
+        this.startupDiagnostic('bridge_start_failed', {
+          durationMs: Date.now() - startedAt,
+          error: sanitizeDiagnostic(error),
+        });
         if (this.state.status !== 'error') this.fail(error);
         throw error;
       } finally {
@@ -1426,9 +1440,12 @@ export class SessionRuntime {
     this.pendingCredentialSettings?.reject(new Error('Provider settings loading was interrupted.'));
     this.pendingCredentialSettings = undefined;
     let generation = ++this.generation;
+    const startedAt = Date.now();
+    this.startupDiagnostic('bridge_start_started', { generation });
     const bridgeRoot = this.opts.bridgeRoot;
     if (bridgeRoot && this.projectPath) {
       const ref = { projectPath: this.projectPath, sessionId: this.sessionId };
+      const discoveryStartedAt = Date.now();
       const reusable = discoverReusableBridge(
         bridgeRoot,
         ref,
@@ -1437,6 +1454,12 @@ export class SessionRuntime {
         ref,
         (this.opts.listProcessCommands ?? listProcessCommands)(),
       );
+      this.startupDiagnostic('bridge_start_phase', {
+        durationMs: Date.now() - discoveryStartedAt,
+        generation,
+        phase: 'reusable_bridge_discovery',
+        reused: Boolean(reusable),
+      });
       if (reusable) {
         const command = (this.opts.readProcessCommand ?? readProcessCommand)(reusable.pid)
           ?? (this.opts.listProcessCommands ?? listProcessCommands)().find(process => process.pid === reusable.pid)?.command;
@@ -1457,6 +1480,11 @@ export class SessionRuntime {
         );
         try {
           await this.connectBridgeClient(reusable.lockfilePath, generation, false);
+          this.startupDiagnostic('bridge_start_completed', {
+            adopted: true,
+            durationMs: Date.now() - startedAt,
+            generation,
+          });
           this.diagnostics.add('info', 'host', diagnosticEvent('bridge_adopted', {
             pid: reusable.pid,
             sessionId: this.sessionId,
@@ -1471,10 +1499,17 @@ export class SessionRuntime {
       }
     }
 
+    const launchConfigStartedAt = Date.now();
     const launch = await this.opts.launchConfig();
+    this.startupDiagnostic('bridge_start_phase', {
+      durationMs: Date.now() - launchConfigStartedAt,
+      generation,
+      phase: 'launch_config',
+    });
     if (this.launchOAuthOverride) launch.openaiOAuth = this.launchOAuthOverride;
     if (this.launchOAuthModel) launch.model = this.launchOAuthModel;
     if (launch.openaiOAuth) {
+      const oauthActivationStartedAt = Date.now();
       await this.opts.beforeOpenAiOAuthLaunch?.();
       // The previous owner may have rotated credentials while it was stopping.
       if (this.opts.resolveOpenAiOAuth) {
@@ -1482,6 +1517,11 @@ export class SessionRuntime {
         if (!launch.openaiOAuth) throw new Error('Codex authentication is unavailable. Sign in again.');
       }
       this.openAiOAuthActive = true;
+      this.startupDiagnostic('bridge_start_phase', {
+        durationMs: Date.now() - oauthActivationStartedAt,
+        generation,
+        phase: 'openai_oauth_activation',
+      });
     }
     if (this.disposed) throw new Error('SessionRuntime is disposed');
     this.selectedModelReference = launch.model;
@@ -1510,6 +1550,11 @@ export class SessionRuntime {
       throw error;
     }
     this.child = child;
+    this.startupDiagnostic('bridge_start_phase', {
+      generation,
+      phase: 'spawn',
+      pid: child.pid,
+    });
     const pluginSecretValues = Object.values(launch.pluginSecrets ?? {}).flatMap((values) => Object.values(values));
     this.captureLogs(child, [
       launch.apiKey,
@@ -1532,9 +1577,22 @@ export class SessionRuntime {
     });
 
     try {
+      const lockfileStartedAt = Date.now();
       const lockfilePath = await this.waitForLockfile(bridgeDir, launch, generation);
+      this.startupDiagnostic('bridge_start_phase', {
+        durationMs: Date.now() - lockfileStartedAt,
+        generation,
+        phase: 'wait_for_lockfile',
+      });
       if (this.disposed) throw new Error('SessionRuntime is disposed');
+      const connectStartedAt = Date.now();
       await this.connectBridgeClient(lockfilePath, generation);
+      this.startupDiagnostic('bridge_start_completed', {
+        connectDurationMs: Date.now() - connectStartedAt,
+        durationMs: Date.now() - startedAt,
+        generation,
+        lockfileWaitMs: connectStartedAt - lockfileStartedAt,
+      });
     } catch (error) {
       if (generation === this.generation) {
         this.fail(error);
@@ -1546,10 +1604,18 @@ export class SessionRuntime {
 
   private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true): Promise<void> {
     this.setState({ status: 'connecting' });
+    const startedAt = Date.now();
+    this.startupDiagnostic('bridge_connect_started', { generation, restorePermission });
     const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
     this.client = client;
     this.wireClient(client, generation);
+    const handshakeStartedAt = Date.now();
     const hello = await client.connect();
+    this.startupDiagnostic('bridge_connect_phase', {
+      durationMs: Date.now() - handshakeStartedAt,
+      generation,
+      phase: 'websocket_handshake',
+    });
     if (generation !== this.generation || this.disposed) return;
     this.lastRuntimeVersions = {
       serverName: hello.server_name,
@@ -1564,6 +1630,10 @@ export class SessionRuntime {
     if (restorePermission) await this.restorePermissionMode();
     if (generation !== this.generation || this.disposed) return;
     this.setState({ status: 'connected' });
+    this.startupDiagnostic('bridge_connect_completed', {
+      durationMs: Date.now() - startedAt,
+      generation,
+    });
     // Status refreshes use attribute-only broker queries; they do not
     // decrypt every saved credential or expose secret bytes to the renderer.
     void this.refreshProviderCredentials();
@@ -2966,6 +3036,10 @@ export class SessionRuntimeManager {
     return Object.freeze([...this.runtimes.values()].flatMap((runtime) => runtime.replaySnapshot()));
   }
 
+  invalidateLaunchConfigCache(): void {
+    this.opts.invalidateLaunchConfigCache?.();
+  }
+
   get(sessionId: string): SessionRuntime | undefined {
     return this.runtimes.get(sessionId);
   }
@@ -3195,7 +3269,13 @@ export class SessionRuntimeManager {
     let ref: SessionRef | undefined;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const candidate = { projectPath, sessionId: randomUUID() } satisfies SessionRef;
-      if (!this.opts.sessionIdAvailable || await this.opts.sessionIdAvailable(candidate)) {
+      // UUIDv4 has enough entropy that checking every persisted transcript is
+      // strictly more expensive than the collision it is trying to prevent.
+      // Only live in-process ownership matters here; the bridge itself remains
+      // the authority for durable session identity once it starts.
+      const alreadyOwned = this.runtimes.has(candidate.sessionId)
+        || [...this.draftSessions.values()].some((draft) => draft.sessionId === candidate.sessionId);
+      if (!alreadyOwned) {
         ref = candidate;
         break;
       }

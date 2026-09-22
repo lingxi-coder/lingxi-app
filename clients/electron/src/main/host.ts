@@ -34,6 +34,7 @@ import {
 import {
   canonicalWorkspace,
   DiagnosticBuffer,
+  diagnosticEvent,
   sanitizeDiagnostic,
   type DiagnosticEntry,
   type PinnedSessionRecord,
@@ -120,6 +121,7 @@ export interface WorkspaceFilePreview {
 }
 
 const MAX_WORKSPACE_FILE_PREVIEW_BYTES = 512 * 1024;
+const CREDENTIAL_STATUS_CACHE_TTL_MS = 15_000;
 
 function credentialBrokerDisplayError(diagnostic: string): string {
   if (/ENOENT|not found|code signature|TeamIdentifier|authorize broker caller/i.test(diagnostic)) {
@@ -357,6 +359,8 @@ export class HostController {
   private readonly brokerCredentialPreviews = new Map<string, string>();
   private brokerStorageError: string | undefined;
   private codexAccountEmail: string | undefined;
+  private credentialStatusPromise?: Promise<void>;
+  private credentialStatusCacheExpiresAt = 0;
   private offNativeAudio?: () => void;
   private scheduled?: ScheduledTaskService;
   private notifier?: HostNotifier;
@@ -635,14 +639,46 @@ export class HostController {
     });
     this.ipc.handle(CH_SESSION_NEW, async (event: IpcMainInvokeEvent, projectPath: unknown, model: unknown) => {
       this.assertSender(event);
+      const requestedAt = Date.now();
       return this.enqueueNavigation(async () => {
         const project = this.requireProject(projectPath);
         if (model !== undefined && typeof model !== 'string') throw new Error('invalid model');
-        const ref = await this.bridge.newSession(project, model as string | undefined);
-        this.settings.activateProject(project);
-        this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, ref);
-        this.settings.setActiveSessionDraft(ref);
-        return this.bootstrap();
+        const navigationStartedAt = Date.now();
+        this.diagnostics.add('info', 'host', diagnosticEvent('session_new_started', {
+          model: typeof model === 'string' ? model : undefined,
+          projectPath: project,
+          queueWaitMs: navigationStartedAt - requestedAt,
+        }));
+        try {
+          const runtimeStartedAt = Date.now();
+          const ref = await this.bridge.newSession(project, model as string | undefined);
+          const runtimeDurationMs = Date.now() - runtimeStartedAt;
+          this.diagnostics.add('info', 'host', diagnosticEvent('session_new_runtime_ready', {
+            durationMs: runtimeDurationMs,
+            projectPath: project,
+            sessionId: ref.sessionId,
+          }));
+          this.settings.activateProject(project);
+          this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, ref);
+          this.settings.setActiveSessionDraft(ref);
+          const bootstrapStartedAt = Date.now();
+          const snapshot = await this.bootstrap();
+          this.diagnostics.add('info', 'host', diagnosticEvent('session_new_completed', {
+            bootstrapDurationMs: Date.now() - bootstrapStartedAt,
+            durationMs: Date.now() - requestedAt,
+            projectPath: project,
+            runtimeDurationMs,
+            sessionId: ref.sessionId,
+          }));
+          return snapshot;
+        } catch (error) {
+          this.diagnostics.add('error', 'host', diagnosticEvent('session_new_failed', {
+            durationMs: Date.now() - requestedAt,
+            error: sanitizeDiagnostic(error),
+            projectPath: project,
+          }));
+          throw error;
+        }
       });
     });
     this.ipc.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
@@ -706,6 +742,7 @@ export class HostController {
         if (!lstatSync(sessionPath).isFile()) throw new Error('session path is not a file');
         const now = new Date();
         await utimes(sessionPath, now, now);
+        this.sessionCatalog.invalidate(ref.projectPath);
         const catalog = await this.loadProjectSessions(ref.projectPath);
         return { projectPath: ref.projectPath, ...catalog };
       });
@@ -821,6 +858,8 @@ export class HostController {
         this.brokerConfiguredProviders.add(CODEX_PROVIDER_ID);
         this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
         this.brokerStorageError = undefined;
+        this.invalidateCredentialBrokerStatus();
+        this.bridge.invalidateLaunchConfigCache();
         this.codexAccountEmail = session.email;
         // Authentication is durable even if the unrelated engine launch fails.
         // Keep metadata authoritative; the runtime exposes its own connection error.
@@ -848,12 +887,14 @@ export class HostController {
         this.brokerConfiguredProviders.delete(CODEX_PROVIDER_ID);
         this.brokerCredentialPreviews.delete(CODEX_PROVIDER_ID);
         this.codexAccountEmail = undefined;
+        this.bridge.invalidateLaunchConfigCache();
         return this.providerCredentialMetadata(CODEX_PROVIDER_ID);
       }
       if (this.credentialBroker) await this.clearCredentialThroughBroker(provider.id);
       else {
         this.requireWorkspace();
         await this.requireCurrentRuntime().deleteProviderCredential(provider.id);
+        this.bridge.invalidateLaunchConfigCache();
       }
       return this.providerCredentialMetadata(provider.id);
     });
@@ -918,6 +959,7 @@ export class HostController {
       }
       if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
       const preview = await this.credentialBroker.setPluginSecret(pluginId, key, secret);
+      this.bridge.invalidateLaunchConfigCache();
       let restartRequired = this.hasActiveWork();
       if (!restartRequired) {
         try {
@@ -944,6 +986,7 @@ export class HostController {
       if (typeof pluginId !== 'string' || typeof key !== 'string') throw new Error('invalid plugin secret reference');
       if (!this.credentialBroker) throw new Error('secure plugin credential broker is unavailable');
       await this.credentialBroker.deletePluginSecret(pluginId, key);
+      this.bridge.invalidateLaunchConfigCache();
       let restartRequired = this.hasActiveWork();
       if (!restartRequired) {
         try {
@@ -1044,15 +1087,26 @@ export class HostController {
   }
 
   private async bootstrap(): Promise<BootstrapState> {
+    const bootstrapStartedAt = Date.now();
     if (this.credentialBroker) {
+      const credentialStatusStartedAt = Date.now();
       try {
         await this.refreshCredentialBrokerStatus();
+        this.diagnostics.add('info', 'host', diagnosticEvent('bootstrap_phase_completed', {
+          durationMs: Date.now() - credentialStatusStartedAt,
+          phase: 'credential_broker_status',
+        }));
       } catch (error) {
         const diagnostic = sanitizeDiagnostic(error);
         this.brokerStorageError = credentialBrokerDisplayError(diagnostic);
         this.brokerConfiguredProviders.clear();
         this.brokerCredentialPreviews.clear();
         this.diagnostics.add('warn', 'host', `credential broker status refresh failed: ${diagnostic}`);
+        this.diagnostics.add('warn', 'host', diagnosticEvent('bootstrap_phase_failed', {
+          durationMs: Date.now() - credentialStatusStartedAt,
+          error: diagnostic,
+          phase: 'credential_broker_status',
+        }));
       }
     }
     const revision = ++this.bootstrapRevision;
@@ -1069,7 +1123,7 @@ export class HostController {
     // never disagree.
     const engineVersions = activeRuntime?.runtimeVersions
       ?? (this.bridge as unknown as { runtimeVersions?: BridgeRuntimeVersions }).runtimeVersions;
-    return {
+    const snapshot = {
       revision,
       scheduledWorkspace: this.settings.scheduledWorkspace,
       settings: this.settings.getPublic(),
@@ -1093,6 +1147,14 @@ export class HostController {
       },
       diagnostics: this.diagnostics.snapshot(),
     };
+    this.diagnostics.add('info', 'host', diagnosticEvent('bootstrap_completed', {
+      activeSessionId: activeSession?.sessionId,
+      catalogCount: this.catalogs.size,
+      durationMs: Date.now() - bootstrapStartedAt,
+      revision,
+      runtimeCount: this.runtimeSummaries().length,
+    }));
+    return snapshot;
   }
 
   private diagnosticReport(): string {
@@ -1228,6 +1290,20 @@ export class HostController {
 
   private async refreshCredentialBrokerStatus(previewProviderId?: string): Promise<void> {
     if (!this.credentialBroker) return;
+    if (previewProviderId === undefined) {
+      if (Date.now() < this.credentialStatusCacheExpiresAt) return;
+      if (this.credentialStatusPromise) return this.credentialStatusPromise;
+      const operation = this.refreshCredentialBrokerStatusUncached();
+      this.credentialStatusPromise = operation
+        .then(() => { this.credentialStatusCacheExpiresAt = Date.now() + CREDENTIAL_STATUS_CACHE_TTL_MS; })
+        .finally(() => { this.credentialStatusPromise = undefined; });
+      return this.credentialStatusPromise;
+    }
+    await this.refreshCredentialBrokerStatusUncached(previewProviderId);
+  }
+
+  private async refreshCredentialBrokerStatusUncached(previewProviderId?: string): Promise<void> {
+    if (!this.credentialBroker) return;
     const nextConfigured = new Set(
       (await this.credentialBroker.listStatus(this.credentialProviderIds()))
         .filter((entry: CredentialBrokerStatus) => entry.configured)
@@ -1262,12 +1338,17 @@ export class HostController {
     else this.brokerCredentialPreviews.delete(previewProviderId);
   }
 
+  private invalidateCredentialBrokerStatus(): void {
+    this.credentialStatusCacheExpiresAt = 0;
+  }
+
   private async setCredentialThroughRuntime(providerId: string, credential: string): Promise<ProviderCredentialMetadata> {
     this.requireWorkspace();
     const stored = await this.requireCurrentRuntime().setProviderCredential(providerId, credential);
     if (!stored.configured_provider_ids.includes(providerId)) {
       throw new Error(`provider credential was not persisted (${providerId})`);
     }
+    this.bridge.invalidateLaunchConfigCache();
     return {
       providerId,
       configured: true,
@@ -1282,8 +1363,10 @@ export class HostController {
     const stored = await this.credentialBroker!.set(providerId, credential);
     if (!stored.configured) throw new Error(`provider credential was not persisted (${providerId})`);
     await this.bridge.refreshCachedProviderCredential(providerId, credential);
+    this.bridge.invalidateLaunchConfigCache();
     this.brokerStorageError = undefined;
     this.brokerConfiguredProviders.add(providerId);
+    this.invalidateCredentialBrokerStatus();
     if (stored.maskedValue) this.brokerCredentialPreviews.set(providerId, stored.maskedValue);
     else this.brokerCredentialPreviews.delete(providerId);
     return {
@@ -1300,6 +1383,7 @@ export class HostController {
     this.brokerConfiguredProviders.delete(providerId);
     this.brokerCredentialPreviews.delete(providerId);
     this.brokerStorageError = undefined;
+    this.invalidateCredentialBrokerStatus();
   }
 
   private credentialProviderIds(): string[] {
@@ -1485,6 +1569,7 @@ export class HostController {
         this.settings.setSessionArchived(ref, true, title);
         await this.terminals?.closeScope(ref);
         await this.bridge.closeSession(ref);
+        this.sessionCatalog.invalidate(ref.projectPath);
         await this.loadProjectSessions(ref.projectPath);
         if (active) {
           const replacement = await this.bridge.newSession(ref.projectPath);
@@ -1522,6 +1607,7 @@ export class HostController {
       }
       this.workspaceFiles.invalidate();
       this.catalogs.delete(project);
+      this.sessionCatalog.invalidate(project);
       this.catalogRequestGenerations.set(project, (this.catalogRequestGenerations.get(project) ?? 0) + 1);
       return this.bootstrap();
     } finally {
@@ -1576,6 +1662,7 @@ export class HostController {
     } finally {
       await file.close();
     }
+    this.sessionCatalog.invalidate(ref.projectPath);
     const previousCatalog = this.catalogs.get(ref.projectPath);
     const catalog = await this.loadProjectSessions(ref.projectPath);
     if (catalog.error && previousCatalog) {

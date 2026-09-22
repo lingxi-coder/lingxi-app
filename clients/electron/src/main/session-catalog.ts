@@ -7,12 +7,15 @@ import { isSessionId, resolveServerBin, type BridgeManagerOptions } from './brid
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SESSIONS = 200;
+const DEFAULT_CACHE_TTL_MS = 15_000;
 
 export interface ProjectSessionCatalogOptions {
   serverBin?: string;
   isPackaged?: boolean;
   resourcesPath?: string;
   timeoutMs?: number;
+  /** Keep project metadata warm while session/runtime work is in flight. */
+  cacheTtlMs?: number;
   spawnProcess?: typeof spawn;
 }
 
@@ -25,6 +28,11 @@ export interface ProjectSessionCatalogRow extends SessionRowDto {
   empty_session: boolean;
   /** Private launch hint reconstructed from the session transcript. */
   resume_model?: string;
+}
+
+interface CatalogCacheEntry {
+  result: ProjectSessionCatalogResult;
+  expiresAt: number;
 }
 
 function boundedOutput(value: string): string {
@@ -86,10 +94,18 @@ function parseCatalog(output: string, maxSessions?: number): ProjectSessionCatal
 
 /** Reads persisted sessions without assembling an engine or touching credentials. */
 export class ProjectSessionCatalog {
+  private readonly cache = new Map<string, CatalogCacheEntry>();
+  private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
+
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
 
-  list(projectPath: string): Promise<ProjectSessionCatalogResult> {
-    return this.run(projectPath, MAX_SESSIONS);
+  async list(projectPath: string): Promise<ProjectSessionCatalogResult> {
+    const result = await this.load(projectPath);
+    return {
+      // Never hand callers the cached array itself: restore/archive code filters
+      // its local result and must not mutate the shared project snapshot.
+      sessions: result.sessions.slice(0, MAX_SESSIONS).map((session) => ({ ...session })),
+    };
   }
 
   /**
@@ -102,12 +118,43 @@ export class ProjectSessionCatalog {
    */
   async find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined> {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
-    const result = await this.run(projectPath);
-    return result.sessions.find((session) => session.uuid === sessionId);
+    const result = await this.load(projectPath);
+    const session = result.sessions.find((candidate) => candidate.uuid === sessionId);
+    return session ? { ...session } : undefined;
   }
 
-  private run(projectPath: string, maxSessions?: number): Promise<ProjectSessionCatalogResult> {
+  /** Invalidate after a durable transcript/metadata mutation. */
+  invalidate(projectPath?: string): void {
+    if (!projectPath) {
+      this.cache.clear();
+      return;
+    }
+    try { this.cache.delete(realpathSync.native(projectPath)); } catch { this.cache.delete(projectPath); }
+  }
+
+  private load(projectPath: string): Promise<ProjectSessionCatalogResult> {
     const canonical = realpathSync.native(projectPath);
+    const cached = this.cache.get(canonical);
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.result);
+    if (cached) this.cache.delete(canonical);
+    const existing = this.pending.get(canonical);
+    if (existing) return existing;
+    const operation = this.run(canonical)
+      .then((result) => {
+        this.cache.set(canonical, {
+          result,
+          expiresAt: Date.now() + (this.options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS),
+        });
+        return result;
+      })
+      .finally(() => {
+        if (this.pending.get(canonical) === operation) this.pending.delete(canonical);
+      });
+    this.pending.set(canonical, operation);
+    return operation;
+  }
+
+  private run(canonical: string): Promise<ProjectSessionCatalogResult> {
     const args = buildBridgeArguments({
       workspace: canonical,
       bridgeDir: '',
@@ -160,7 +207,7 @@ export class ProjectSessionCatalog {
           return;
         }
         try {
-          resolve(parseCatalog(stdout, maxSessions));
+          resolve(parseCatalog(stdout));
         } catch (error) {
           reject(error instanceof Error ? error : new Error(String(error)));
         }

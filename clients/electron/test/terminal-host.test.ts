@@ -95,7 +95,7 @@ test('the host tells the terminal manager when a chat or project goes away', asy
     // A draft chat's shells follow it into the session it becomes: the scope id
     // is what addresses a shell, and `__draft__` stops addressing anything the
     // moment the engine hands back a real session id.
-    (host as any).sessionCatalog = { list: async () => ({ sessions: [] }) };
+    (host as any).sessionCatalog = { list: async () => ({ sessions: [] }), invalidate: () => undefined };
     const restored = await host.restoreProjectSession(project);
     assert.equal(restored.sessionId, replacement.sessionId);
     assert.deepEqual(calls, [`migrate:__draft__->${replacement.sessionId}`]);

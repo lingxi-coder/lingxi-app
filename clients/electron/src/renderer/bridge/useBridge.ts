@@ -736,6 +736,59 @@ interface RuntimeState {
   error?: string;
 }
 
+/** Project-scoped listing data that is safe to paint while a new runtime refreshes. */
+interface SharedDesktopCache {
+  models: string[];
+  modelDetails: DesktopState['modelDetails'];
+  providerModelCatalog: DesktopState['providerModelCatalog'];
+  slashCommands: DesktopState['slashCommands'];
+}
+
+function updateSharedDesktopCache(
+  cache: SharedDesktopCache | undefined,
+  event: ClientEvent,
+): SharedDesktopCache | undefined {
+  switch (event.type) {
+    case 'model_list':
+      return {
+        models: [...event.models],
+        modelDetails: [...(event.details ?? [])],
+        providerModelCatalog: cache?.providerModelCatalog ?? [],
+        slashCommands: cache?.slashCommands ?? [],
+      };
+    case 'provider_model_catalog':
+      return {
+        models: cache?.models ?? [],
+        modelDetails: cache?.modelDetails ?? [],
+        providerModelCatalog: [...event.providers],
+        slashCommands: cache?.slashCommands ?? [],
+      };
+    case 'slash_command_catalog':
+    case 'commands_changed':
+      return {
+        models: cache?.models ?? [],
+        modelDetails: cache?.modelDetails ?? [],
+        providerModelCatalog: cache?.providerModelCatalog ?? [],
+        slashCommands: [...event.commands],
+      };
+    default:
+      return cache;
+  }
+}
+
+function seedDesktopFromCache(state: DesktopState, cache: SharedDesktopCache | undefined): DesktopState {
+  if (!cache) return state;
+  return {
+    ...state,
+    models: state.models.length > 0 ? state.models : [...cache.models],
+    modelDetails: state.modelDetails.length > 0 ? state.modelDetails : [...cache.modelDetails],
+    providerModelCatalog: state.providerModelCatalog.length > 0
+      ? state.providerModelCatalog
+      : [...cache.providerModelCatalog],
+    slashCommands: state.slashCommands.length > 0 ? state.slashCommands : [...cache.slashCommands],
+  };
+}
+
 interface ActiveTrackedTurn {
   token: DesktopTurnToken;
   text: string;
@@ -875,7 +928,12 @@ export function useBridge(): UseBridge {
   const [loading, setLoading] = useState(hosted);
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
   const [pendingSession, setPendingSession] = useState<SessionRef | null>(null);
+  // A new runtime can be used as soon as its bridge handshake completes. The
+  // host may still be finishing bootstrap metadata in parallel, so keep that
+  // separate from the navigation target itself.
+  const [sessionReady, setSessionReady] = useState(false);
   const [runtimeStates, setRuntimeStates] = useState<Map<string, RuntimeState>>(new Map());
+  const sharedDesktopCacheRef = useRef(new Map<string, SharedDesktopCache>());
   // `updateRuntime` replaces this Map on every engine event, so any callback
   // that lists it as a dependency changes identity per streamed token. Consumers
   // that only need to READ the latest snapshot at call time go through the ref
@@ -950,7 +1008,7 @@ export function useBridge(): UseBridge {
 
   const persistedActiveSession = bootstrap?.activeSession ?? bootstrap?.settings.activeSession;
   const activeSession = displayedSession(persistedActiveSession, pendingSession);
-  const sessionLoading = pendingSession !== null;
+  const sessionLoading = pendingSession !== null && !sessionReady;
   const activeSessionId = activeSession?.sessionId ?? null;
   const providerSettingsSaves = useRef(new Set<AbortController>());
   useEffect(() => () => {
@@ -1155,10 +1213,15 @@ export function useBridge(): UseBridge {
       return next;
     });
     setBootstrap(snapshot);
+    const activeProjects = new Set(snapshot.settings.projects);
+    for (const projectPath of sharedDesktopCacheRef.current.keys()) {
+      if (!activeProjects.has(projectPath)) sharedDesktopCacheRef.current.delete(projectPath);
+    }
   }, [completeTrackedSpeech]);
 
   const beginNavigationOperation = useCallback((): number => {
     pendingSessionRef.current = null;
+    setSessionReady(false);
     sessionLoadingRef.current = false;
     setPendingSession(null);
     const operationId = nextOperationId(navigationOperationRef.current);
@@ -1248,6 +1311,14 @@ export function useBridge(): UseBridge {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
       const event = envelope.event;
+      const eventProjectPath = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId)?.projectPath
+        ?? (pendingSessionRef.current?.sessionId.startsWith('pending-new:')
+          ? pendingSessionRef.current.projectPath
+          : pendingSessionRef.current?.sessionId === sessionId ? pendingSessionRef.current.projectPath : undefined);
+      if (eventProjectPath) {
+        const cached = updateSharedDesktopCache(sharedDesktopCacheRef.current.get(eventProjectPath), event);
+        if (cached) sharedDesktopCacheRef.current.set(eventProjectPath, cached);
+      }
       // Side answers use the existing slash protocol, but never claim or release
       // the main turn, enter its transcript, or reach its speech/plan reducers.
       if (event.type === 'slash_command_result' && event.turn_id !== undefined
@@ -1512,13 +1583,23 @@ export function useBridge(): UseBridge {
       }
       if (removedRuntimeIds.current.has(sessionId)) return;
       if (state.status === 'error' || state.status === 'disconnected' || state.status === 'idle') pendingFusionDispatches.current.delete(sessionId);
+      const stateProjectPath = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId)?.projectPath
+        ?? (pendingSessionRef.current?.sessionId.startsWith('pending-new:')
+          ? pendingSessionRef.current.projectPath
+          : pendingSessionRef.current?.sessionId === sessionId ? pendingSessionRef.current.projectPath : undefined);
+      const cachedDesktop = stateProjectPath ? sharedDesktopCacheRef.current.get(stateProjectPath) : undefined;
       updateRuntime(sessionId, (current) => {
-        const next: RuntimeState = { ...current, connection: state };
+        const next: RuntimeState = {
+          ...current,
+          connection: state,
+          desktop: seedDesktopFromCache(current.desktop, cachedDesktop),
+        };
         if (shouldResetBridgeRuntime(state)) {
           const reset = emptyRuntimeState(state);
           return {
             ...reset,
             connection: state,
+            desktop: seedDesktopFromCache(reset.desktop, cachedDesktop),
             runtimeCenter: resetRuntimeCenterConnection(current.runtimeCenter),
           };
         }
@@ -1554,7 +1635,26 @@ export function useBridge(): UseBridge {
       if (activeSessionIdRef.current === sessionId && state.status === 'error') setError(state.message);
       if (activeSessionIdRef.current === sessionId && state.status === 'disconnected' && state.reason) setError(state.reason);
       if (state.status === 'connected') {
-        void host.bootstrap().then(applyBootstrap).catch((cause) => setError(messageFrom(cause)));
+        void host.bootstrap().then((snapshot) => {
+          // `newSession` publishes a synthetic target while the main process
+          // finishes its navigation transaction. Once the actual runtime has
+          // handshaken, promote that target immediately so prompt/model/file
+          // actions can use the live bridge while catalog and diagnostics
+          // metadata continue to arrive in the background.
+          const pending = pendingSessionRef.current;
+          const connectedRuntime = pending?.sessionId.startsWith('pending-new:')
+            ? snapshot.runtimes.find((runtime) => runtime.sessionId === sessionId
+              && runtime.projectPath === pending.projectPath
+              && runtime.connection.status === 'connected')
+            : undefined;
+          if (connectedRuntime && pending && pendingSessionRef.current?.sessionId === pending.sessionId) {
+            const target = { projectPath: connectedRuntime.projectPath, sessionId: connectedRuntime.sessionId } satisfies SessionRef;
+            pendingSessionRef.current = target;
+            setPendingSession(target);
+            setSessionReady(true);
+          }
+          applyBootstrap(snapshot);
+        }).catch((cause) => setError(messageFrom(cause)));
       }
     });
     const offPermission = host.onPermission((envelope) => {
@@ -2039,6 +2139,7 @@ export function useBridge(): UseBridge {
     const operationId = beginNavigationOperation();
     const target = { projectPath, sessionId } satisfies SessionRef;
     pendingSessionRef.current = target;
+    setSessionReady(false);
     sessionLoadingRef.current = true;
     setPendingSession(target);
     removedRuntimeIds.current.delete(sessionId);
@@ -2046,6 +2147,7 @@ export function useBridge(): UseBridge {
       const snapshot = await host.openSession(projectPath, sessionId);
       if (isCurrentNavigationOperation(operationId)) {
         pendingSessionRef.current = null;
+        setSessionReady(false);
         sessionLoadingRef.current = false;
         setPendingSession(null);
         applyBootstrap(snapshot);
@@ -2055,6 +2157,7 @@ export function useBridge(): UseBridge {
     catch (cause) {
       if (!isCurrentNavigationOperation(operationId)) return;
       pendingSessionRef.current = null;
+      setSessionReady(false);
       sessionLoadingRef.current = false;
       setPendingSession(null);
       try {
@@ -2298,6 +2401,7 @@ export function useBridge(): UseBridge {
     // Reserve a local draft while the host creates the real session and starts its engine.
     const target = { projectPath, sessionId: `pending-new:${operationId}` };
     pendingSessionRef.current = target;
+    setSessionReady(false);
     sessionLoadingRef.current = true;
     setPendingSession(target);
     setError(null);
@@ -2305,6 +2409,7 @@ export function useBridge(): UseBridge {
       const snapshot = await host.newSession(projectPath, desktop.currentModel ?? undefined);
       if (isCurrentNavigationOperation(operationId)) {
         pendingSessionRef.current = null;
+        setSessionReady(false);
         sessionLoadingRef.current = false;
         setPendingSession(null);
         applyBootstrap(snapshot);
@@ -2313,6 +2418,7 @@ export function useBridge(): UseBridge {
     catch (cause) {
       if (!isCurrentNavigationOperation(operationId)) return;
       pendingSessionRef.current = null;
+      setSessionReady(false);
       sessionLoadingRef.current = false;
       setPendingSession(null);
       capture(cause);

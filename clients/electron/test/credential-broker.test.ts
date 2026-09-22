@@ -10,7 +10,28 @@ import {
   resolveProviderTestCredential,
   resolveSessionLaunchCredentials,
   resolveSessionLaunchPluginSecrets,
+  SessionLaunchCache,
 } from '../src/main/credential-broker';
+
+test('session launch cache single-flights repeated runtime startup reads and invalidates', async () => {
+  let reads = 0;
+  const broker = { resolve: async () => { reads += 1; await new Promise((resolve) => setTimeout(resolve, 2)); return 'cached-secret'; } };
+  const cache = new SessionLaunchCache(60_000);
+
+  const [first, second] = await Promise.all([
+    cache.credentials('openrouter/model', broker),
+    cache.credentials('openrouter/model', broker),
+  ]);
+  assert.deepEqual(first, { providerCredentials: { openrouter: 'cached-secret' } });
+  assert.deepEqual(second, first);
+  assert.equal(reads, 1);
+  await cache.credentials('openrouter/model', broker);
+  assert.equal(reads, 1);
+
+  cache.invalidate();
+  await cache.credentials('openrouter/model', broker);
+  assert.equal(reads, 2);
+});
 
 test('plugin secrets use an independent broker service and launch envelope map', async () => {
   const requests: Array<Record<string, unknown>> = [];

@@ -302,6 +302,7 @@ test('session clear accepts Claude Code name syntax and labels the session being
   const catalog = {
     find: async () => row,
     list: async () => ({ sessions: [row] }),
+    invalidate: () => undefined,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any, ipc as any);
   const frame = { url: 'http://127.0.0.1:4242' };
@@ -408,6 +409,7 @@ test('failed session resume does not change the selected project or active sessi
     find: async (_projectPath: string, requestedId: string) => requestedId === targetSession
       ? { uuid: targetSession, title: 'Target', modified_rfc3339: '', message_count: 1, path: 'target.jsonl' }
       : undefined,
+    invalidate: () => undefined,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
   try {
@@ -455,6 +457,7 @@ test('navigation mutations execute in invocation order and the last open wins', 
       message_count: 1,
       path: `${sessionId}.jsonl`,
     }),
+    invalidate: () => undefined,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
 
@@ -496,6 +499,7 @@ test('historical startup opens the catalog session before persisting it active',
   };
   const catalog = {
     list: async () => ({ sessions: [{ uuid: sessionId, title: 'History', modified_rfc3339: '', message_count: 2, path: 'history.jsonl' }] }),
+    invalidate: () => undefined,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
   try {
@@ -520,6 +524,7 @@ test('history-less startup keeps the host-created session volatile until first p
   };
   const catalog = {
     list: async () => ({ sessions: [] }),
+    invalidate: () => undefined,
   };
   const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
   try {
@@ -899,6 +904,7 @@ test('project session catalogs are patched independently and preserved in bootst
       calls.push(projectPath);
       return { sessions: [row(projectPath === projectA ? 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' : 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', projectPath)] };
     },
+    invalidate: () => undefined,
   };
   const host = new HostController(settings as any, { turnActive: false } as any, new DiagnosticBuffer(), catalog as any);
 
@@ -919,6 +925,7 @@ test('host catalog generations keep only the newest deferred response', async ()
   let calls = 0;
   const catalog = {
     list: async () => (++calls === 1 ? first.promise : second.promise),
+    invalidate: () => undefined,
   };
   const settings = {
     isSessionArchived: () => false,
@@ -965,6 +972,7 @@ test('provider credential IPC uses the broker path, hot-syncs cached sessions, a
     registerWindow: () => undefined,
     turnActive: false,
     hasActiveWork: () => false,
+    invalidateLaunchConfigCache: () => undefined,
     refreshCachedProviderCredential: async (providerId: string, credential: string) => {
       assert.equal(credential, 'sk-replacement-secret');
       operations.push(`runtime:set:${providerId}`);
@@ -1046,6 +1054,7 @@ test('custom provider credentials use the current runtime configuration and rema
     registerWindow: () => undefined,
     turnActive: false,
     hasActiveWork: () => false,
+    invalidateLaunchConfigCache: () => undefined,
     refreshCachedProviderCredential: async (providerId: string, credential: string) => {
       assert.equal(credential, 'sk-replacement-secret');
       operations.push(`runtime:set:${providerId}`);
@@ -1243,6 +1252,7 @@ test('Codex login keeps tokens in broker and stops OAuth before logout', async (
     { getPublic: () => ({ projects: [], pinnedSessions: [], activeSession: { projectPath: '/workspace', sessionId: 'session-1' } }) } as any,
     { registerIpc() {}, registerWindow() {}, hasActiveWork: () => false,
       get: () => ({ connectionState: { status: 'disconnected' } }),
+      invalidateLaunchConfigCache() {},
       restart: async () => { throw new Error('engine unavailable after credential persistence'); },
       withCodexAuthMutation: async (mutation: () => Promise<unknown>) => { operations.push('stop-oauth'); return mutation(); },
     } as any,

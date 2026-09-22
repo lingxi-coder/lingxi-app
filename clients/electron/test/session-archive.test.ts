@@ -61,7 +61,7 @@ test('archive pauses only execution-dependent schedules before persistence, and 
         closeSession: async () => { assert.equal(settings.isSessionArchived(ref), true); calls.push('close'); },
       };
       const row = { uuid: sessionId, title: 'Saved chat', modified_rfc3339: '', message_count: 1, mode: 'code', path: '', empty_session: false };
-      const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { list: async () => ({ sessions: [row] }) } as any);
+      const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { list: async () => ({ sessions: [row] }), invalidate: () => undefined } as any);
       // Isolate orchestration from unrelated platform bootstrap services.
       (host as any).bootstrap = () => ({ settings: settings.getPublic() });
       if (fail) {
@@ -112,7 +112,7 @@ test('opening an archived chat restores it only after the existing session resum
     let fail = true;
     const row = { uuid: sessionId, empty_session: false };
     const bridge = { get: () => undefined, openSession: async () => { if (fail) throw new Error('resume failed'); } };
-    const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { find: async () => row, list: async () => ({ sessions: [row] }) } as any);
+    const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { find: async () => row, list: async () => ({ sessions: [row] }), invalidate: () => undefined } as any);
     (host as any).bootstrap = () => ({ settings: settings.getPublic() });
     await assert.rejects((host as any).openSessionAndActivateInternal(ref), /resume failed/);
     assert.equal(settings.isSessionArchived(ref), true);
@@ -134,7 +134,7 @@ test('failure to create the replacement keeps the durable archive and cleared ac
     settings.setActiveSession(ref);
     const runtime = { projectPath, connectionState: { status: 'connected' }, beginArchive: () => () => {}, manageCron: async () => [] };
     const bridge = { get: () => runtime, withBackgroundSession: async (_ref: unknown, _empty: unknown, _model: unknown, operation: (runtime: any) => Promise<unknown>) => operation(runtime), closeSession: async () => {}, newSession: async () => { throw new Error('fixture launch failure'); } };
-    const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { list: async () => ({ sessions: [] }) } as any);
+    const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), { list: async () => ({ sessions: [] }), invalidate: () => undefined } as any);
     await assert.rejects((host as any).archiveSessionInternal(ref), /Chat was archived.*fixture launch failure/);
     assert.equal(settings.getPublic().activeSession, undefined);
     assert.equal(new SettingsStore(dir).isSessionArchived(ref), true);

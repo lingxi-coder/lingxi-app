@@ -87,6 +87,7 @@ const SESSION_ACTIONS_LONG_PRESS_DELAY = 500;
 
 type SidebarOrganization = 'project' | 'list';
 type ChatSort = 'priority' | 'updated' | 'manual';
+type SessionDropTarget = { projectPath: string; sessionId: string };
 
 function sidebarSessionTimestamp(session: SessionRowDto): number {
   const value = Date.parse(session.modified_rfc3339);
@@ -175,7 +176,8 @@ function SidebarSessionProgress({ label }: { label: string }) {
     style={{ color: t.text3 }}><span /></span>;
 }
 
-function SessionRow({ session, active, pinned, opening, status, onClick, onPin, onArchive, onRename, draggable = false, dragging = false, dragTarget = false, onDragStart, onDragOver, onDrop, onDragEnd }: {
+function SessionRow({ projectPath, session, active, pinned, opening, status, onClick, onPin, onArchive, onRename, reorderable = false, dragging = false, dragTarget = false, onDragStart, onDragMove, onDrop, onDragEnd }: {
+  projectPath: string;
   session: SessionRowDto;
   active: boolean;
   pinned: boolean;
@@ -185,12 +187,12 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
   onPin(): void;
   onArchive(): void;
   onRename(): void;
-  draggable?: boolean;
+  reorderable?: boolean;
   dragging?: boolean;
   dragTarget?: boolean;
   onDragStart?(): void;
-  onDragOver?(): void;
-  onDrop?(): void;
+  onDragMove?(target: SessionDropTarget): void;
+  onDrop?(target: SessionDropTarget): void;
   onDragEnd?(): void;
 }) {
   const t = useT();
@@ -198,6 +200,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
   const actionsMenuRef = useRef<HTMLDivElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressOrigin = useRef<{ x: number; y: number } | null>(null);
+  const pointerGesture = useRef<{ pointerId: number; x: number; y: number; dragging: boolean } | null>(null);
   const suppressClick = useRef(false);
   const highlighted = active || opening;
   const attention = opening
@@ -235,50 +238,64 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
     suppressClick.current = true;
     setActionsPosition({ left, top });
   }, []);
+  const sessionAtPointer = useCallback((x: number, y: number): SessionDropTarget | undefined => {
+    const button = document.elementFromPoint(x, y)?.closest<HTMLButtonElement>('[data-session-id]');
+    const sessionId = button?.dataset.sessionId;
+    const targetProjectPath = button?.dataset.sessionProjectPath;
+    return sessionId && targetProjectPath ? { sessionId, projectPath: targetProjectPath } : undefined;
+  }, []);
   return (
     <div
       className="sidebar-tree-row"
-      data-session-draggable={draggable || undefined}
+      data-session-reorderable={reorderable || undefined}
       data-dragging={dragging || undefined}
       data-drag-target={dragTarget || undefined}
-      draggable={draggable || undefined}
-      onDragStart={(event) => {
-        if (!draggable) return;
-        event.dataTransfer.effectAllowed = 'move';
-        onDragStart?.();
-      }}
-      onDragOver={(event) => {
-        if (!draggable) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
-        onDragOver?.();
-      }}
-      onDrop={(event) => {
-        if (!draggable) return;
-        event.preventDefault();
-        onDrop?.();
-      }}
-      onDragEnd={onDragEnd}
-      onPointerDown={(event) => {
-        if (draggable || event.button !== 0) return;
-        event.currentTarget.setPointerCapture(event.pointerId);
-        longPressOrigin.current = { x: event.clientX, y: event.clientY };
-        longPressTimer.current = setTimeout(() => openActions(event.clientX, event.clientY), SESSION_ACTIONS_LONG_PRESS_DELAY);
-      }}
-      onPointerMove={(event) => {
-        const origin = longPressOrigin.current;
-        if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 8) clearLongPress();
-      }}
-      onPointerUp={(event) => {
-        clearLongPress();
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-      }}
-      onPointerCancel={clearLongPress}
-      onContextMenu={(event) => { event.preventDefault(); clearLongPress(); openActions(event.clientX, event.clientY); }}
       style={{ position: 'relative' }}
     >
       <button
         type="button"
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          pointerGesture.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, dragging: false };
+          longPressOrigin.current = { x: event.clientX, y: event.clientY };
+          longPressTimer.current = setTimeout(() => openActions(event.clientX, event.clientY), SESSION_ACTIONS_LONG_PRESS_DELAY);
+        }}
+        onPointerMove={(event) => {
+          const gesture = pointerGesture.current;
+          if (!gesture || gesture.pointerId !== event.pointerId) return;
+          if (!gesture.dragging && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 8) {
+            clearLongPress();
+            if (reorderable) {
+              gesture.dragging = true;
+              suppressClick.current = true;
+              onDragStart?.();
+            }
+          }
+          if (gesture.dragging) {
+            const target = sessionAtPointer(event.clientX, event.clientY);
+            if (target) onDragMove?.(target);
+          }
+        }}
+        onPointerUp={(event) => {
+          const gesture = pointerGesture.current;
+          clearLongPress();
+          if (gesture?.pointerId === event.pointerId) {
+            if (gesture.dragging) {
+              const target = sessionAtPointer(event.clientX, event.clientY);
+              if (target) onDrop?.(target);
+              onDragEnd?.();
+            }
+            pointerGesture.current = null;
+          }
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        onPointerCancel={(event) => {
+          const gesture = pointerGesture.current;
+          clearLongPress();
+          if (gesture?.pointerId === event.pointerId && gesture.dragging) onDragEnd?.();
+          pointerGesture.current = null;
+        }}
         onClick={(event) => {
           if (suppressClick.current) { event.preventDefault(); suppressClick.current = false; return; }
           onClick();
@@ -288,6 +305,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
         data-session-id={session.uuid}
         aria-current={active ? 'page' : undefined}
         title={session.title || 'Untitled session'}
+        data-session-project-path={projectPath}
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
           padding: '6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
@@ -673,7 +691,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
         </button>
       </div>
 
-      <nav aria-label="Projects and sessions" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 8px 12px' }}>
+      {/* Electron drag regions discard pointer events. Keep every session control in
+          an explicit no-drag region even if the title-bar geometry changes. */}
+      <nav className="no-drag" aria-label="Projects and sessions" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 8px 12px' }}>
         {pinnedSessions.length > 0 ? (
           <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 16 }}>
             <h2 id="pinned-sessions-heading" style={{ padding: '7px 8px 6px', color: t.text4, fontSize: 12.5, fontWeight: 600, letterSpacing: '.01em' }}>Pinned</h2>
@@ -757,7 +777,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
           <h2 id="general-chats-heading" style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>Chats</h2>
           {(showAllSessions[scheduledWorkspace] ? generalCatalog.sessions : generalCatalog.sessions.slice(0, 5)).map((session) => {
             const pinned = pinnedKeys.has(`${scheduledWorkspace}\0${session.uuid}`);
-            return <SessionRow key={session.uuid} session={session}
+            return <SessionRow key={session.uuid} projectPath={scheduledWorkspace} session={session}
               active={!scheduled && visibleSession?.projectPath === scheduledWorkspace && visibleSession?.sessionId === session.uuid}
               pinned={pinned} opening={openingSessionKey === `${scheduledWorkspace}\0${session.uuid}`}
               status={bridge.sessionRuntimeStatus(session.uuid)}
@@ -866,20 +886,20 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
               ) : allProjectSessions.map(({ projectPath, session }) => {
                 const pinned = pinnedKeys.has(`${projectPath}\0${session.uuid}`);
                 const opening = openingSessionKey === `${projectPath}\0${session.uuid}`;
-                return <SessionRow key={`${projectPath}\0${session.uuid}`} session={session}
+                return <SessionRow key={`${projectPath}\0${session.uuid}`} projectPath={projectPath} session={session}
                   active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
                   pinned={pinned} opening={opening} status={bridge.sessionRuntimeStatus(session.uuid)}
                   onClick={() => openSidebarSession(projectPath, session.uuid)}
                   onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
                   onRename={() => prepareRename(projectPath, session.uuid, session.title || 'Untitled chat')}
                   onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
-                  draggable={chatSort === 'manual' && !opening}
+                  reorderable={chatSort === 'manual' && !opening}
                   dragging={draggedSession?.projectPath === projectPath && draggedSession.sessionId === session.uuid}
                   dragTarget={draggedSession?.projectPath === projectPath && dragTargetSessionId === session.uuid}
                   onDragStart={() => setDraggedSession({ projectPath, sessionId: session.uuid })}
-                  onDragOver={() => { if (draggedSession?.projectPath === projectPath) setDragTargetSessionId(session.uuid); }}
-                  onDrop={() => {
-                    if (draggedSession?.projectPath === projectPath) moveSessionBefore(projectPath, draggedSession.sessionId, session.uuid);
+                  onDragMove={(target) => { if (target.projectPath === projectPath) setDragTargetSessionId(target.sessionId); }}
+                  onDrop={(target) => {
+                    if (target.projectPath === projectPath) moveSessionBefore(projectPath, session.uuid, target.sessionId);
                     setDraggedSession(null); setDragTargetSessionId(null);
                   }}
                   onDragEnd={() => { setDraggedSession(null); setDragTargetSessionId(null); }} />;
@@ -975,6 +995,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                       return (
                         <SessionRow
                           key={session.uuid}
+                          projectPath={projectPath}
                           session={session}
                           active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
                           pinned={pinned}
@@ -984,13 +1005,13 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                           onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
                           onRename={() => prepareRename(projectPath, session.uuid, session.title || 'Untitled chat')}
                           onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
-                          draggable={chatSort === 'manual' && !opening}
+                          reorderable={chatSort === 'manual' && !opening}
                           dragging={draggedSession?.projectPath === projectPath && draggedSession.sessionId === session.uuid}
                           dragTarget={draggedSession?.projectPath === projectPath && dragTargetSessionId === session.uuid}
                           onDragStart={() => setDraggedSession({ projectPath, sessionId: session.uuid })}
-                          onDragOver={() => { if (draggedSession?.projectPath === projectPath) setDragTargetSessionId(session.uuid); }}
-                          onDrop={() => {
-                            if (draggedSession?.projectPath === projectPath) moveSessionBefore(projectPath, draggedSession.sessionId, session.uuid);
+                          onDragMove={(target) => { if (target.projectPath === projectPath) setDragTargetSessionId(target.sessionId); }}
+                          onDrop={(target) => {
+                            if (target.projectPath === projectPath) moveSessionBefore(projectPath, session.uuid, target.sessionId);
                             setDraggedSession(null); setDragTargetSessionId(null);
                           }}
                           onDragEnd={() => { setDraggedSession(null); setDragTargetSessionId(null); }}

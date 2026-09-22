@@ -1790,10 +1790,10 @@ body {
 .sidebar-row-action:hover:not(:disabled) {
   background: color-mix(in oklab, currentColor 10%, transparent) !important;
 }
-.sidebar-tree-row[data-session-draggable='true'] > button:first-child {
+.sidebar-tree-row[data-session-reorderable='true'] > button:first-child {
   cursor: grab !important;
 }
-.sidebar-tree-row[data-session-draggable='true']:active > button:first-child {
+.sidebar-tree-row[data-session-reorderable='true'][data-dragging='true'] > button:first-child {
   cursor: grabbing !important;
 }
 .sidebar-tree-row[data-dragging='true'] { opacity: .46; }

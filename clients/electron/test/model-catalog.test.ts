@@ -152,6 +152,7 @@ test('summarizes shared model capabilities for provider settings', () => {
     attachments: true,
     context_window_tokens: 128_000,
   } as never), 'Tools · Vision · Reasoning · Attachments · 128k context');
+  assert.equal(modelCapabilitySummary({ context_window_tokens: 1_000_000 } as never), '1M context');
 });
 
 test('defaults Kimi Code to the model available on every membership tier', () => {

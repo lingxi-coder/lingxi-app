@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { contextWindowUsage, ContextWindow } from '../src/renderer/components/ContextWindow';
+import { formatTokens } from '../src/renderer/formatTokens';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
@@ -25,9 +26,23 @@ test('accessible trigger reports estimate and unknown state', () => {
     { value: tokens(true) }, React.createElement(ContextWindow, { usage: value, capacity: 475000 })));
   assert.match(render(usage), /17% used \(83% left\)/);
   assert.match(render(usage), /79k \/ 475k tokens used/);
+  assert.doesNotMatch(render(usage), /≈/);
   assert.match(render(usage), /estimated/);
   assert.match(render(null), /Usage unavailable/);
   assert.doesNotMatch(render(null), /0% used/);
+});
+test('million-scale values read as M instead of a four-digit k count', () => {
+  const render = (value: typeof usage | null, capacity: number) => renderToStaticMarkup(React.createElement(Theme.Provider,
+    { value: tokens(true) }, React.createElement(ContextWindow, { usage: value, capacity })));
+  const promptOnly = { inputTokens: 79_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+  assert.match(render(promptOnly, 1_000_000), /79k \/ 1M tokens used/);
+  assert.match(render(null, 1_000_000), /1M token capacity/);
+  assert.doesNotMatch(render(promptOnly, 999_999), /1000k/);
+  assert.equal(formatTokens(1_000_000), '1M');
+  assert.equal(formatTokens(1_048_576), '1M');
+  assert.equal(formatTokens(1_310_720), '1.3M');
+  assert.equal(formatTokens(475_000), '475k');
+  assert.equal(formatTokens(999), '999');
 });
 test('output-only usage preserves prompt cache, next request replaces it, compaction clears it', () => {
   let state = reduceEvent(emptyConversation(), { type: 'usage_update', input_tokens: 9000, output_tokens: 0, cache_read_tokens: 65000, cache_creation_tokens: 4000 });

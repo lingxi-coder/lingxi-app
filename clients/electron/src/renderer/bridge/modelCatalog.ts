@@ -1,4 +1,5 @@
 import type { ModelDetailsDto, ProviderModelCatalogEntryDto } from '@lingxi/bridge-client';
+import { formatTokens } from '../formatTokens';
 import { providerById } from '../../shared/providers';
 import type {
   ModelPickerVisibilitySettings,
@@ -46,7 +47,7 @@ export function modelCapabilitySummary(model: ModelDetailsDto): string {
     model.attachments ? 'Attachments' : null,
   ].filter((label): label is string => label !== null);
   if (model.context_window_tokens) {
-    labels.push(`${Math.round(model.context_window_tokens / 1_000)}k context`);
+    labels.push(`${formatTokens(model.context_window_tokens)} context`);
   }
   return labels.join(' · ');
 }

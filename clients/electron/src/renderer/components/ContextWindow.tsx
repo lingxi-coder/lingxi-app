@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import type { UsageSnapshot } from '../bridge/conversation';
+import { formatTokens } from '../formatTokens';
 import { useT } from '../theme/ThemeContext';
 
 export function contextWindowUsage(usage: UsageSnapshot | null, capacity?: number) {
@@ -12,10 +13,6 @@ export function contextWindowUsage(usage: UsageSnapshot | null, capacity?: numbe
   return { used, capacity, percent: Math.min(100, Math.round(used / capacity * 100)) };
 }
 
-const formatTokens = (value: number) => value < 1000
-  ? String(Math.round(value))
-  : `${Number((value / 1000).toFixed(1))}k`;
-
 /** Latest API context footprint; session-wide billing totals are deliberately separate. */
 export function ContextWindow({ usage, capacity }: { usage: UsageSnapshot | null; capacity?: number }) {
   const t = useT();
@@ -26,7 +23,14 @@ export function ContextWindow({ usage, capacity }: { usage: UsageSnapshot | null
   const [dismissed, setDismissed] = useState(false);
   const open = (hovered || focused) && !dismissed;
   const [position, setPosition] = useState({ left: 0, bottom: 0 });
-  const snapshot = contextWindowUsage(usage, capacity);
+  // `usage` drops to null between requests — the provider's all-zero start
+  // placeholder clears it, and session loading hands over null — which flipped
+  // this readout to "Usage unavailable" on every round-trip of a running turn.
+  // Hold the last real snapshot instead; the parent remounts per session, so a
+  // session that has not answered yet still reads as unknown.
+  const [lastUsage, setLastUsage] = useState<UsageSnapshot | null>(null);
+  useEffect(() => { if (usage) setLastUsage(usage); }, [usage]);
+  const snapshot = contextWindowUsage(usage ?? lastUsage, capacity);
   const summary = snapshot ? `${snapshot.percent}% used (${100 - snapshot.percent}% left)` : 'Usage unavailable';
   const tokens = snapshot ? `${formatTokens(snapshot.used)} / ${formatTokens(snapshot.capacity)} tokens used`
     : capacity && Number.isFinite(capacity) && capacity > 0 ? `${formatTokens(capacity)} token capacity` : 'Context size unavailable';
@@ -66,7 +70,7 @@ export function ContextWindow({ usage, capacity }: { usage: UsageSnapshot | null
     {open && createPortal(<div id={id} role="tooltip" className="context-window-tooltip" style={position}>
       <div className="context-window-heading">Context window:</div>
       <div>{summary}</div>
-      <div>{snapshot ? '≈ ' : ''}{tokens}</div>
+      <div>{tokens}</div>
     </div>, document.body)}
   </>;
 }

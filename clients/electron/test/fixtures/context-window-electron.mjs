@@ -75,6 +75,18 @@ async function main() {
     await hover(false);
     await expectOpen(true, 'reopened tooltip preserves physical focus');
 
+    // A running turn clears `usage` between requests (the provider's all-zero
+    // start placeholder, then session loading); the readout must hold the last
+    // real numbers rather than flashing back to "Usage unavailable".
+    const tooltipText = () => evaluate(`document.querySelector('[role="tooltip"]')?.textContent ?? ''`);
+    assert.match(await tooltipText(), /79k \/ 475k tokens used/, 'live snapshot shown');
+    assert.doesNotMatch(await tooltipText(), /≈/, 'token line is not prefixed as an estimate');
+    await act(`window.setUsage(null)`);
+    assert.match(await tooltipText(), /79k \/ 475k tokens used/, 'clearing usage keeps the last snapshot');
+    assert.doesNotMatch(await tooltipText(), /Usage unavailable/, 'no flash back to the unknown state');
+    await act(`window.setUsage({ inputTokens: 12000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 })`);
+    assert.match(await tooltipText(), /12k \/ 475k tokens used/, 'the next snapshot replaces the retained one');
+
     const screenshot = process.env.LINGXI_CONTEXT_WINDOW_SCREENSHOT;
     if (screenshot) {
       await mkdir(dirname(screenshot), { recursive: true });

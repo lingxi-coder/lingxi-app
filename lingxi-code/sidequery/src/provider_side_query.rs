@@ -249,6 +249,7 @@ fn decode_response(
     resp: llm_client::LlmResponse,
     want_structured: bool,
     first_text_only: bool,
+    separate_text_blocks: bool,
 ) -> SideQueryResponse {
     let retry_count = resp
         .provider_metadata
@@ -264,7 +265,14 @@ fn decode_response(
         match block {
             llm_client::ContentBlock::Text { text, .. }
             | llm_client::ContentBlock::TextJsUtf16 { text, .. } => {
-                if !first_text_only || !saw_text {
+                if first_text_only {
+                    if !saw_text {
+                        text_acc.push_str(&text);
+                    }
+                } else {
+                    if separate_text_blocks && saw_text {
+                        text_acc.push_str("\n\n");
+                    }
                     text_acc.push_str(&text);
                 }
                 saw_text = true;
@@ -397,6 +405,10 @@ impl SideQueryClient for ProviderSideQueryClient {
 
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
         let first_text_only = request.query_source == crate::purposes::QuerySource::Compaction;
+        let separate_text_blocks = matches!(
+            &request.query_source,
+            crate::purposes::QuerySource::Custom(source) if source == "side_question"
+        );
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
             let wants_structured = request.output_format.is_some();
             let query_source = request.query_source.as_str();
@@ -418,7 +430,12 @@ impl SideQueryClient for ProviderSideQueryClient {
             )?;
             canonical.model_attempt = request.model_attempt;
             let resp = service.execute_side_query_request(canonical).await?;
-            return Ok(decode_response(resp, wants_structured, first_text_only));
+            return Ok(decode_response(
+                resp,
+                wants_structured,
+                first_text_only,
+                separate_text_blocks,
+            ));
         }
 
         let ProviderSideQueryBackend::Direct { client, transport } = &self.backend else {
@@ -492,6 +509,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             resp,
             request.output_format.is_some(),
             first_text_only,
+            separate_text_blocks,
         ))
     }
 
@@ -589,7 +607,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             }
         };
         let request_id = (!resp.id.is_empty()).then(|| resp.id.clone());
-        let decoded = decode_response(resp, true, false);
+        let decoded = decode_response(resp, true, false, false);
         let Some(value) = decoded.structured else {
             return Err(SideQueryError::InvalidResponse(
                 "structured output was not valid JSON".into(),
@@ -1106,6 +1124,29 @@ mod tests {
             body.get("stop_sequences").is_none(),
             "stop_sequences dropped"
         );
+    }
+
+    #[tokio::test]
+    async fn side_question_text_blocks_use_claude_separator() {
+        let body = serde_json::json!({
+            "id": "msg_side_question",
+            "model": "claude-haiku-4-5",
+            "content": [
+                { "type": "text", "text": "first" },
+                { "type": "text", "text": "second" }
+            ],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        })
+        .to_string();
+        let transport = Arc::new(StubTransport::new(body));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport);
+        let mut request = req(None);
+        request.query_source = QuerySource::Custom("side_question".into());
+
+        let response = client.query(request).await.expect("query ok");
+
+        assert_eq!(response.text.as_deref(), Some("first\n\nsecond"));
     }
 
     #[tokio::test]

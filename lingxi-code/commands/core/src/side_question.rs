@@ -44,9 +44,8 @@ const CANCELLED_MESSAGE: &str = "Side question cancelled.";
 ///
 /// The side query has no tools, so anything shaped like a tool call in its
 /// answer is invented — and an invented `Read` result reads exactly like a real
-/// one. The reminder now tells the model not to do it; this catches the case
-/// where it does anyway, because a silently fabricated file listing is worse
-/// than a refusal.
+/// one. This catches the case where the model writes one anyway, because a
+/// silently fabricated file listing is worse than a refusal.
 const FABRICATED_TOOL_CALL_NOTICE: &str = "_/btw can't run tools: any tool calls or tool output shown above were not executed and may not reflect your actual files or data. Ask in the main conversation to check._";
 
 /// Does `answer` contain something shaped like a tool call?

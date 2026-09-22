@@ -31,6 +31,22 @@ impl sidequery::SideQueryClient for CaptureClient {
     }
 }
 
+struct ErrorClient;
+
+#[async_trait::async_trait]
+impl sidequery::SideQueryClient for ErrorClient {
+    async fn query(
+        &self,
+        _request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        Err(sidequery::SideQueryError::Api(
+            llm_client::LlmError::InvalidRequest {
+                message: "bad request".into(),
+            },
+        ))
+    }
+}
+
 #[tokio::test]
 async fn side_question_prefers_text_over_a_mixed_tool_response() {
     let client = Arc::new(CaptureClient(
@@ -46,8 +62,21 @@ async fn side_question_prefers_text_over_a_mixed_tool_response() {
     ));
 }
 
+#[tokio::test]
+async fn side_question_surfaces_api_errors_as_text() {
+    let orch = make_orch(
+        Arc::new(ErrorClient),
+        Arc::new(sidequery::CacheSafeParamsSlot::new()),
+    );
+
+    assert!(matches!(
+        orch.answer_side_question("What happened?").await.unwrap(),
+        RecapOutcome::Text(text) if text == "(API error: invalid request: bad request)"
+    ));
+}
+
 fn make_orch(
-    client: Arc<CaptureClient>,
+    client: Arc<dyn sidequery::SideQueryClient>,
     slot: Arc<sidequery::CacheSafeParamsSlot>,
 ) -> ConversationOrchestrator {
     ConversationOrchestrator::new(

@@ -28,10 +28,13 @@ const projectPath = '/Users/tester/Projects/LingXi-Next';
 const pinnedProjectPath = '/Users/tester/Projects/MLPlatform';
 
 function bridgeFixture() {
+  // Keep the active session in the first five updated-sorted rows while
+  // retaining a newer Session 5 than Session 4 for manual-order assertions.
+  const sessionDays = [31, 2, 3, 4, 5, 1];
   const sessions = Array.from({ length: 6 }, (_, index) => ({
     uuid: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
     title: `Session ${index + 1}`,
-    modified_rfc3339: `2026-08-${String(index + 1).padStart(2, '0')}T00:00:00Z`,
+    modified_rfc3339: `2026-08-${String(sessionDays[index]).padStart(2, '0')}T00:00:00Z`,
     message_count: index + 1,
     path: `/tmp/session-${index + 1}.jsonl`,
   }));

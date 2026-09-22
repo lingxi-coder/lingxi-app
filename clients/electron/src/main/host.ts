@@ -9,7 +9,7 @@ import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT, TERMINAL_DRAFT_SESSION, type Te
 import { createRequire } from 'node:module';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { utimes } from 'node:fs/promises';
+import { open, utimes } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
@@ -714,21 +714,42 @@ export class HostController {
         if (!customTitle || customTitle.length > 200 || /[\u0000-\u001f\u007f]/.test(customTitle)) {
           throw new Error('session title must be 1–200 printable characters');
         }
-        const row = await this.assertSessionBelongsToProject(ref);
-        await this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
-          await runtime.dispatchCommand({ type: 'run_slash_command', raw: `/rename ${customTitle}` });
-        });
-        // The engine writes the side-record asynchronously. Give the catalog
-        // a short, bounded opportunity to observe the committed title before
-        // returning its fresh snapshot to the renderer.
-        for (let attempt = 0; attempt < 8; attempt++) {
-          const catalog = await this.loadProjectSessions(ref.projectPath);
-          if (catalog.sessions.some((session) => session.uuid === ref.sessionId && session.title === customTitle)) {
-            return { projectPath: ref.projectPath, ...catalog };
-          }
-          await new Promise<void>((resolve) => setTimeout(resolve, 25));
+        const row = await this.assertSessionBelongsToProject(ref) ?? await this.sessionCatalog.find(ref.projectPath, ref.sessionId);
+        if (!row) throw new Error('session must be persisted before it can be renamed');
+        // Renaming is persisted metadata, not a model operation. Starting or
+        // resuming an engine here can wait on credentials or an active turn.
+        // Use the same append-only side record as JsonlWriter::append_custom_title;
+        // its metadata backstop adopts the newest on-disk title on later writes.
+        const file = await open(row.path, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+        try {
+          if (!(await file.stat()).isFile()) throw new Error('session path is not a file');
+          await file.writeFile(`${JSON.stringify({ type: 'custom-title', customTitle, sessionId: ref.sessionId })}\n`);
+          await file.sync();
+        } finally {
+          await file.close();
         }
-        return { projectPath: ref.projectPath, ...await this.loadProjectSessions(ref.projectPath) };
+        const previousCatalog = this.catalogs.get(ref.projectPath);
+        const catalog = await this.loadProjectSessions(ref.projectPath);
+        if (catalog.error && previousCatalog) {
+          // The append is already durable. Keep the last usable snapshot so a
+          // transient catalog failure cannot turn a successful rename into a
+          // retryable error (and a duplicate custom-title record).
+          const fallback = {
+            projectPath: ref.projectPath,
+            sessions: previousCatalog.sessions.map((session) => session.uuid === ref.sessionId
+              ? { ...session, title: customTitle }
+              : session),
+            error: catalog.error,
+          };
+          // Do not overwrite a newer successful catalog request that raced the
+          // refresh, but keep the fallback available for a later rename while
+          // the catalog process remains unavailable.
+          if (this.catalogs.get(ref.projectPath)?.error === catalog.error) {
+            this.catalogs.set(ref.projectPath, fallback);
+          }
+          return fallback;
+        }
+        return { projectPath: ref.projectPath, ...catalog };
       });
     });
     this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {

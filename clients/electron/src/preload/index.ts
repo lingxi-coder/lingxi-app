@@ -86,6 +86,8 @@ const CH_SESSION_OPEN = 'lingxi:session:open';
 const CH_SESSION_ARCHIVE = 'lingxi:session:archive';
 const CH_SESSION_ARCHIVE_PREFLIGHT = 'lingxi:session:archive-preflight';
 const CH_SESSION_CLEAR = 'lingxi:session:clear';
+const CH_SESSION_TOUCH = 'lingxi:session:touch';
+const CH_SESSION_RENAME = 'lingxi:session:rename';
 const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
 export type ConnectionState =
@@ -177,6 +179,7 @@ export interface LingxiApi {
     voice?: unknown;
     notifications?: unknown;
     modelPickerVisibility?: unknown;
+    sidebar?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
@@ -203,6 +206,8 @@ export interface LingxiApi {
   openSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
   archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
+  touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   clearSession(sessionId: string): Promise<void>;
   sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
@@ -304,6 +309,8 @@ const api: LingxiApi = {
   openSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId) as Promise<BootstrapState>,
   preflightSessionArchive: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE_PREFLIGHT, projectPath, sessionId) as Promise<CronJobDto[]>,
   archiveSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_ARCHIVE, projectPath, sessionId) as Promise<BootstrapState>,
+  touchSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_TOUCH, projectPath, sessionId) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
+  renameSession: (projectPath, sessionId, title) => ipcRenderer.invoke(CH_SESSION_RENAME, projectPath, sessionId, title) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   clearSession: (sessionId) => ipcRenderer.invoke(CH_SESSION_CLEAR, sessionId) as Promise<void>,
   sendPrompt: (sessionId, text, images) => ipcRenderer.invoke(CH_SEND_PROMPT, sessionId, text, images ?? []) as Promise<void>,
   approve: (sessionId, requestId, response) => ipcRenderer.invoke(CH_APPROVE, sessionId, requestId, response) as Promise<void>,

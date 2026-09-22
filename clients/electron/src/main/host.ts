@@ -9,6 +9,7 @@ import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT, TERMINAL_DRAFT_SESSION, type Te
 import { createRequire } from 'node:module';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
+import { utimes } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
@@ -106,6 +107,8 @@ export const CH_SESSION_OPEN = 'lingxi:session:open';
 export const CH_SESSION_ARCHIVE = 'lingxi:session:archive';
 export const CH_SESSION_ARCHIVE_PREFLIGHT = 'lingxi:session:archive-preflight';
 export const CH_SESSION_CLEAR = 'lingxi:session:clear';
+export const CH_SESSION_TOUCH = 'lingxi:session:touch';
+export const CH_SESSION_RENAME = 'lingxi:session:rename';
 export const CH_WORKSPACE_FILE_PREVIEW = 'lingxi:workspace-file:preview';
 
 export interface WorkspaceFilePreview {
@@ -580,7 +583,7 @@ export class HostController {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'notifications' && key !== 'modelPickerVisibility')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'notifications' && key !== 'modelPickerVisibility' && key !== 'sidebar')) throw new Error('unsupported setting');
       const restartsBridge = 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
       // `model` is applied to a live session through `set_model`, then mirrored
@@ -601,6 +604,7 @@ export class HostController {
         voice?: unknown;
         notifications?: unknown;
         modelPickerVisibility?: unknown;
+        sidebar?: unknown;
       });
       if ('notifications' in patch) this.notifier?.setPreferences(result.notifications);
       if (restartsBridge) await this.restartIfConfigured();
@@ -686,6 +690,46 @@ export class HostController {
       this.assertSender(event);
       if (!isSessionId(sessionId)) throw new Error('invalid session id');
       await this.enqueueNavigation(() => this.clearActiveSession(sessionId));
+    });
+    this.ipc.handle(CH_SESSION_TOUCH, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+      this.assertSender(event);
+      return this.enqueueNavigation(async () => {
+        const ref = this.archiveRef(projectPath, sessionId);
+        const row = await this.assertSessionBelongsToProject(ref) ?? await this.sessionCatalog.find(ref.projectPath, ref.sessionId);
+        if (!row) throw new Error('session must be persisted before it can be reordered');
+        const sessionPath = realpathSync.native(row.path);
+        if (!lstatSync(sessionPath).isFile()) throw new Error('session path is not a file');
+        const now = new Date();
+        await utimes(sessionPath, now, now);
+        const catalog = await this.loadProjectSessions(ref.projectPath);
+        return { projectPath: ref.projectPath, ...catalog };
+      });
+    });
+    this.ipc.handle(CH_SESSION_RENAME, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, title: unknown) => {
+      this.assertSender(event);
+      return this.enqueueNavigation(async () => {
+        const ref = this.archiveRef(projectPath, sessionId);
+        if (typeof title !== 'string') throw new Error('invalid session title');
+        const customTitle = title.trim();
+        if (!customTitle || customTitle.length > 200 || /[\u0000-\u001f\u007f]/.test(customTitle)) {
+          throw new Error('session title must be 1–200 printable characters');
+        }
+        const row = await this.assertSessionBelongsToProject(ref);
+        await this.bridge.withBackgroundSession(ref, row?.empty_session === true, row?.resume_model, async (runtime) => {
+          await runtime.dispatchCommand({ type: 'run_slash_command', raw: `/rename ${customTitle}` });
+        });
+        // The engine writes the side-record asynchronously. Give the catalog
+        // a short, bounded opportunity to observe the committed title before
+        // returning its fresh snapshot to the renderer.
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const catalog = await this.loadProjectSessions(ref.projectPath);
+          if (catalog.sessions.some((session) => session.uuid === ref.sessionId && session.title === customTitle)) {
+            return { projectPath: ref.projectPath, ...catalog };
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 25));
+        }
+        return { projectPath: ref.projectPath, ...await this.loadProjectSessions(ref.projectPath) };
+      });
     });
     this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
       this.assertSender(event);

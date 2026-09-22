@@ -169,7 +169,7 @@ export const DESKTOP_ENGINE_BUILTIN_COMMANDS = [
   'commit-push-pr', 'connect', 'context', 'diff', 'doctor', 'export', 'files',
   'fork', 'fusion', 'goal', 'hooks', 'ide', 'init', 'init-verifiers', 'insights',
   'keybindings', 'mcp', 'memory', 'output-style', 'plan', 'powerup', 'recap',
-  'release-notes', 'reload-skills', 'resume', 'security-review', 'skill-doctor',
+  'release-notes', 'reload-skills', 'rename', 'resume', 'security-review', 'skill-doctor',
   'skills', 'status',
   'stickers', 'stop', 'subtask', 'usage', 'workflows', 'worktree',
 ] as const;
@@ -200,7 +200,6 @@ export const DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS = {
   'privacy-settings': 'consumer privacy settings are not exposed by this engine',
   'rate-limit-options': 'disabled upstream',
   'remote-env': 'remote environments are outside the Desktop bridge',
-  rename: 'session-title persistence has no Desktop backend yet',
   rewind: 'checkpoint restoration has no Desktop backend yet',
   session: 'remote session sharing is outside the Desktop bridge',
   statusline: 'terminal status lines do not apply to Desktop',

@@ -55,6 +55,7 @@ import {
 import { sanitizeSpeakableText } from '../audio/flow/segmenter';
 import { shouldAutoplayTrackedReply } from '../audio/autoplay';
 import { ArchiveChatDialog } from './ArchiveChatDialog';
+import { RenameSessionDialog } from './RenameSessionDialog';
 import type { ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
 import { commandPaletteIcon } from './commandPaletteIcons';
@@ -73,11 +74,22 @@ import {
 } from './modelPickerPlacement';
 import { PERMISSION_MODE_OPTIONS } from '../model/permissionModes';
 import type { RunItem } from '../model/runItem';
+import type { SidebarPreferences } from '../../shared/settings';
 
 export const SIDEBAR_DEFAULT_WIDTH = 260;
 export const SIDEBAR_MIN_WIDTH = 200;
 export const SIDEBAR_MAX_WIDTH = 480;
 const SIDEBAR_KEYBOARD_STEP = 16;
+const PROJECT_ACTIONS_HIDE_DELAY = 700;
+const SESSION_ACTIONS_LONG_PRESS_DELAY = 500;
+
+type SidebarOrganization = 'project' | 'list';
+type ChatSort = 'priority' | 'updated' | 'manual';
+
+function sidebarSessionTimestamp(session: SessionRowDto): number {
+  const value = Date.parse(session.modified_rfc3339);
+  return Number.isNaN(value) ? 0 : value;
+}
 
 export function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
@@ -161,7 +173,7 @@ function SidebarSessionProgress({ label }: { label: string }) {
     style={{ color: t.text3 }}><span /></span>;
 }
 
-function SessionRow({ session, active, pinned, opening, status, onClick, onPin, onArchive }: {
+function SessionRow({ session, active, pinned, opening, status, onClick, onPin, onArchive, onRename, draggable = false, dragging = false, dragTarget = false, onDragStart, onDragOver, onDrop, onDragEnd }: {
   session: SessionRowDto;
   active: boolean;
   pinned: boolean;
@@ -170,8 +182,21 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
   onClick(): void;
   onPin(): void;
   onArchive(): void;
+  onRename(): void;
+  draggable?: boolean;
+  dragging?: boolean;
+  dragTarget?: boolean;
+  onDragStart?(): void;
+  onDragOver?(): void;
+  onDrop?(): void;
+  onDragEnd?(): void;
 }) {
   const t = useT();
+  const [actionsPosition, setActionsPosition] = useState<{ left: number; top: number } | null>(null);
+  const actionsMenuRef = useRef<HTMLDivElement>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressOrigin = useRef<{ x: number; y: number } | null>(null);
+  const suppressClick = useRef(false);
   const highlighted = active || opening;
   const attention = opening
     ? { label: 'Opening session', color: t.accent }
@@ -182,11 +207,80 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
       : (status?.turnActive || status?.backgroundAgentsRunning)
         ? { label: 'Running', color: t.ok }
         : undefined;
+  const clearLongPress = useCallback(() => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = null;
+    longPressOrigin.current = null;
+  }, []);
+  const closeActions = useCallback(() => setActionsPosition(null), []);
+  useEffect(() => () => clearLongPress(), [clearLongPress]);
+  useEffect(() => {
+    if (!actionsPosition) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!actionsMenuRef.current?.contains(event.target as Node)) closeActions();
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); closeActions(); }
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [actionsPosition, closeActions]);
+  const openActions = useCallback((left: number, top: number) => {
+    suppressClick.current = true;
+    setActionsPosition({ left, top });
+  }, []);
   return (
-    <div className="sidebar-tree-row" style={{ position: 'relative' }}>
+    <div
+      className="sidebar-tree-row"
+      data-session-draggable={draggable || undefined}
+      data-dragging={dragging || undefined}
+      data-drag-target={dragTarget || undefined}
+      draggable={draggable || undefined}
+      onDragStart={(event) => {
+        if (!draggable) return;
+        event.dataTransfer.effectAllowed = 'move';
+        onDragStart?.();
+      }}
+      onDragOver={(event) => {
+        if (!draggable) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        onDragOver?.();
+      }}
+      onDrop={(event) => {
+        if (!draggable) return;
+        event.preventDefault();
+        onDrop?.();
+      }}
+      onDragEnd={onDragEnd}
+      onPointerDown={(event) => {
+        if (draggable || event.button !== 0) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        longPressOrigin.current = { x: event.clientX, y: event.clientY };
+        longPressTimer.current = setTimeout(() => openActions(event.clientX, event.clientY), SESSION_ACTIONS_LONG_PRESS_DELAY);
+      }}
+      onPointerMove={(event) => {
+        const origin = longPressOrigin.current;
+        if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 8) clearLongPress();
+      }}
+      onPointerUp={(event) => {
+        clearLongPress();
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      }}
+      onPointerCancel={clearLongPress}
+      onContextMenu={(event) => { event.preventDefault(); clearLongPress(); openActions(event.clientX, event.clientY); }}
+      style={{ position: 'relative' }}
+    >
       <button
         type="button"
-        onClick={onClick}
+        onClick={(event) => {
+          if (suppressClick.current) { event.preventDefault(); suppressClick.current = false; return; }
+          onClick();
+        }}
         disabled={opening}
         aria-busy={opening || undefined}
         data-session-id={session.uuid}
@@ -194,7 +288,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
         title={session.title || 'Untitled session'}
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
-          padding: '6px 62px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
+          padding: '6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
           background: active ? t.surfaceActive : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
           fontSize: 13, fontWeight: active ? 600 : 500,
@@ -226,24 +320,15 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin, 
           <Icon name="circleAlert" size={15} />
         </span>
       )}
-      <button
-        type="button"
-        className="sidebar-row-action"
-        data-visible={pinned ? 'true' : undefined}
-        aria-label={`${pinned ? 'Unpin' : 'Pin'} ${session.title || 'Untitled session'}`}
-        title={pinned ? 'Unpin session' : 'Pin session'}
-        onClick={(event) => { event.stopPropagation(); onPin(); }}
-        style={{
-          position: 'absolute', right: 32, top: 4, width: 26, height: 26,
-          display: 'grid', placeItems: 'center', border: 0, borderRadius: 6,
-          background: active ? 'transparent' : t.sidebarBg, color: pinned ? t.accent : t.text3,
-          cursor: 'pointer',
-        }}
-      >
-        <Icon name="pin" size={13} stroke={1.8} />
-      </button>
-      <button type="button" className="sidebar-row-action" aria-label={`Archive ${session.title || 'Untitled chat'}`} title="Archive chat" disabled={opening} onClick={onArchive}
-        style={{ position: 'absolute', right: 4, top: 4, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, color: t.text3, background: 'transparent', cursor: 'pointer' }}><Icon name="archive" size={13} /></button>
+      {actionsPosition && createPortal(
+        <div ref={actionsMenuRef} className="session-actions-menu" role="menu" aria-label={`Actions for ${session.title || 'Untitled session'}`}
+          style={{ left: Math.max(12, Math.min(actionsPosition.left, window.innerWidth - 220)), top: Math.max(12, Math.min(actionsPosition.top, window.innerHeight - 150)) }}>
+          <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onRename(); }}><Icon name="pencil" size={16} /> Rename</button>
+          <button type="button" role="menuitem" onClick={() => { closeActions(); onPin(); }}><Icon name="pin" size={16} /> {pinned ? 'Unpin' : 'Pin'}</button>
+          <button type="button" role="menuitem" disabled={opening} onClick={() => { closeActions(); onArchive(); }}><Icon name="archive" size={16} /> Archive</button>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -260,7 +345,10 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
   const resizingPointerRef = useRef<number | null>(null);
   const settings = bridge.bootstrap?.settings;
   const scheduledWorkspace = bridge.bootstrap?.scheduledWorkspace;
-  const projects = (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace);
+  const projects = useMemo(
+    () => (settings?.projects ?? []).filter((path) => path !== scheduledWorkspace),
+    [scheduledWorkspace, settings?.projects],
+  );
   const generalCatalog = scheduledWorkspace ? bridge.bootstrap?.projectCatalogs?.[scheduledWorkspace] : undefined;
   const pinnedSessions = settings?.pinnedSessions ?? [];
   const selectedProject = bridge.activeSession?.projectPath ?? settings?.activeProject ?? bridge.bootstrap?.workspace.path;
@@ -290,6 +378,16 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
     row.scrollIntoView({ block: 'nearest' });
   }, [revealedSessionKey, expandedProjects, showAllSessions]);
   const [menuProject, setMenuProject] = useState<string | null>(null);
+  const [projectsMenu, setProjectsMenu] = useState<'root' | 'organize' | 'sort' | null>(null);
+  const [projectsMenuPosition, setProjectsMenuPosition] = useState<{ left: number; top: number } | null>(null);
+  const [sidebarOrganization, setSidebarOrganization] = useState<SidebarOrganization>(() => settings?.sidebar?.organization ?? 'project');
+  const [chatSort, setChatSort] = useState<ChatSort>(() => settings?.sidebar?.chatSort ?? 'updated');
+  const [projectActionsVisible, setProjectActionsVisible] = useState(false);
+  const [draggedSession, setDraggedSession] = useState<{ projectPath: string; sessionId: string } | null>(null);
+  const [dragTargetSessionId, setDragTargetSessionId] = useState<string | null>(null);
+  const projectsMenuRef = useRef<HTMLDivElement>(null);
+  const projectsMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const projectActionsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [openingSessionKey, setOpeningSessionKey] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<{projectPath: string; sessionId: string; title: string} | null>(null);
@@ -297,6 +395,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState('');
+  const [renameTarget, setRenameTarget] = useState<{ projectPath: string; sessionId: string; title: string } | null>(null);
+  const [renamingSession, setRenamingSession] = useState(false);
+  const [renameError, setRenameError] = useState('');
   const archiveRequest = useRef(0);
   const closeArchive = () => { archiveRequest.current++; setArchiveTarget(null); };
   const prepareArchive = async (projectPath: string, sessionId: string, title: string) => {
@@ -314,8 +415,72 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
     catch (cause) { setArchiveError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setArchiving(false); }
   };
+  const prepareRename = (projectPath: string, sessionId: string, title: string) => {
+    setRenameTarget({ projectPath, sessionId, title });
+    setRenameError('');
+  };
+  const confirmRename = async (title: string) => {
+    if (!renameTarget || renamingSession) return;
+    setRenamingSession(true); setRenameError('');
+    try {
+      await bridge.renameSession(renameTarget.projectPath, renameTarget.sessionId, title);
+      setRenameTarget(null);
+    } catch (cause) {
+      setRenameError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setRenamingSession(false); }
+  };
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [resizingSidebar, setResizingSidebar] = useState(false);
+
+  const revealProjectActions = useCallback(() => {
+    if (projectActionsHideTimer.current) clearTimeout(projectActionsHideTimer.current);
+    setProjectActionsVisible(true);
+  }, []);
+  const scheduleProjectActionsHide = useCallback(() => {
+    if (projectActionsHideTimer.current) clearTimeout(projectActionsHideTimer.current);
+    projectActionsHideTimer.current = setTimeout(() => {
+      setProjectActionsVisible(false);
+      projectActionsHideTimer.current = null;
+    }, PROJECT_ACTIONS_HIDE_DELAY);
+  }, []);
+  const openProjectsMenu = useCallback((trigger: HTMLButtonElement) => {
+    const rect = trigger.getBoundingClientRect();
+    revealProjectActions();
+    setProjectsMenuPosition({ left: rect.left, top: rect.bottom + 6 });
+    setProjectsMenu((current) => current === 'root' ? null : 'root');
+  }, [revealProjectActions]);
+  const closeProjectsMenu = useCallback((restoreFocus = false) => {
+    setProjectsMenu(null);
+    if (restoreFocus) projectsMenuTriggerRef.current?.focus();
+  }, []);
+
+  useEffect(() => () => {
+    if (projectActionsHideTimer.current) clearTimeout(projectActionsHideTimer.current);
+  }, []);
+  useEffect(() => {
+    if (!settings?.sidebar) return;
+    setSidebarOrganization(settings.sidebar.organization);
+    setChatSort(settings.sidebar.chatSort);
+  }, [settings?.sidebar]);
+  useEffect(() => {
+    if (!projectsMenu) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (projectsMenuRef.current?.contains(target) || projectsMenuTriggerRef.current?.contains(target)) return;
+      closeProjectsMenu();
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeProjectsMenu(true);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [closeProjectsMenu, projectsMenu]);
 
   useEffect(() => {
     if (!resizingSidebar) return;
@@ -337,10 +502,11 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
   }, [selectedProject]);
 
   useEffect(() => {
-    for (const projectPath of expandedProjects) {
+    const catalogsToLoad = sidebarOrganization === 'list' ? projects : expandedProjects;
+    for (const projectPath of catalogsToLoad) {
       if (!bridge.bootstrap?.projectCatalogs?.[projectPath]) void bridge.listProjectSessions(projectPath).catch(() => undefined);
     }
-  }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, expandedProjects]);
+  }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, expandedProjects, projects, sidebarOrganization]);
 
   useEffect(() => {
     if (scheduledWorkspace && !generalCatalog) void bridge.listProjectSessions(scheduledWorkspace).catch(() => undefined);
@@ -374,6 +540,60 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       .finally(() => setEditingProject((current) => current === projectPath ? null : current));
   }, [bridge.newSession, onOpenChat]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
+  const manualSessionOrder = settings?.sidebar?.manualSessionOrder ?? {};
+  const sortedSessions = useCallback((projectPath: string, sessions: readonly SessionRowDto[]) => {
+    if (chatSort === 'manual') {
+      const order = new Map((manualSessionOrder[projectPath] ?? []).map((sessionId, index) => [sessionId, index]));
+      return [...sessions].sort((left, right) => (order.get(left.uuid) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.uuid) ?? Number.MAX_SAFE_INTEGER));
+    }
+    return [...sessions].sort((left, right) => {
+      if (chatSort === 'priority') {
+        const leftActive = visibleSession?.projectPath === projectPath && visibleSession.sessionId === left.uuid;
+        const rightActive = visibleSession?.projectPath === projectPath && visibleSession.sessionId === right.uuid;
+        if (leftActive !== rightActive) return leftActive ? -1 : 1;
+      }
+      return sidebarSessionTimestamp(right) - sidebarSessionTimestamp(left);
+    });
+  }, [chatSort, manualSessionOrder, visibleSession]);
+  const allProjectSessions = useMemo(() => projects.flatMap((projectPath) => (
+    sortedSessions(projectPath, bridge.bootstrap?.projectCatalogs?.[projectPath]?.sessions ?? [])
+      .map((session) => ({ projectPath, session }))
+  )).sort((left, right) => {
+    if (chatSort === 'manual') return 0;
+    if (chatSort === 'priority') {
+      const leftActive = visibleSession?.projectPath === left.projectPath && visibleSession.sessionId === left.session.uuid;
+      const rightActive = visibleSession?.projectPath === right.projectPath && visibleSession.sessionId === right.session.uuid;
+      if (leftActive !== rightActive) return leftActive ? -1 : 1;
+    }
+    return sidebarSessionTimestamp(right.session) - sidebarSessionTimestamp(left.session);
+  }), [bridge.bootstrap?.projectCatalogs, chatSort, projects, sortedSessions, visibleSession]);
+  const persistSidebarPreferences = useCallback((next: Partial<SidebarPreferences>) => {
+    void bridge.updateSidebarPreferences({
+      organization: next.organization ?? sidebarOrganization,
+      chatSort: next.chatSort ?? chatSort,
+      manualSessionOrder: next.manualSessionOrder ?? manualSessionOrder,
+    });
+  }, [bridge, chatSort, manualSessionOrder, sidebarOrganization]);
+  const chooseSidebarOrganization = useCallback((organization: SidebarOrganization) => {
+    setSidebarOrganization(organization);
+    persistSidebarPreferences({ organization });
+    closeProjectsMenu(true);
+  }, [closeProjectsMenu, persistSidebarPreferences]);
+  const chooseChatSort = useCallback((sort: ChatSort) => {
+    setChatSort(sort);
+    persistSidebarPreferences({ chatSort: sort });
+    closeProjectsMenu(true);
+  }, [closeProjectsMenu, persistSidebarPreferences]);
+  const moveSessionBefore = useCallback((projectPath: string, sessionId: string, targetSessionId: string) => {
+    if (chatSort !== 'manual' || sessionId === targetSessionId) return;
+    const sessions = sortedSessions(projectPath, bridge.bootstrap?.projectCatalogs?.[projectPath]?.sessions ?? []);
+    const order = sessions.map((session) => session.uuid).filter((id) => id !== sessionId);
+    const targetIndex = order.indexOf(targetSessionId);
+    if (targetIndex < 0) return;
+    order.splice(targetIndex, 0, sessionId);
+    persistSidebarPreferences({ manualSessionOrder: { ...manualSessionOrder, [projectPath]: order } });
+    void bridge.touchSession(projectPath, sessionId);
+  }, [bridge, chatSort, manualSessionOrder, persistSidebarPreferences, sortedSessions]);
   const startSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
@@ -484,7 +704,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                     onClick={() => openSidebarSession(pinned.projectPath, pinned.sessionId)}
                     title={`${title}\n${pinned.projectPath}`}
                     style={{
-                      width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 62px 6px 10px',
+                      width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 92px 6px 10px',
                       border: 0, borderRadius: 8, background: active ? t.surfaceActive : opening ? t.surface : 'transparent',
                       color: t.text2, textAlign: 'left', cursor: opening ? 'wait' : 'pointer',
                     }}
@@ -501,6 +721,16 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
                       {basename(pinned.projectPath)} · {metadata}
                     </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="sidebar-row-action"
+                    aria-label={`Rename ${title}`}
+                    title="Rename chat"
+                    onClick={() => prepareRename(pinned.projectPath, pinned.sessionId, title)}
+                    style={{ position: 'absolute', right: 60, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}
+                  >
+                    <Icon name="pencil" size={13} stroke={1.8} />
                   </button>
                   <button
                     type="button"
@@ -531,6 +761,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
               status={bridge.sessionRuntimeStatus(session.uuid)}
               onClick={() => openSidebarSession(scheduledWorkspace, session.uuid)}
               onArchive={() => void prepareArchive(scheduledWorkspace, session.uuid, session.title || 'Untitled chat')}
+              onRename={() => prepareRename(scheduledWorkspace, session.uuid, session.title || 'Untitled chat')}
               onPin={() => invoke(() => bridge.setSessionPinned(pinInput(scheduledWorkspace, session.uuid, session.title || 'Untitled session'), !pinned))} />;
           })}
           {generalCatalog.sessions.length > 5 && <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [scheduledWorkspace]: !current[scheduledWorkspace] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
@@ -538,30 +769,125 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
           </button>}
         </section>}
 
-        <section aria-labelledby="projects-heading">
-          <div style={{ minHeight: 31, padding: '2px 4px 4px 8px', display: 'flex', alignItems: 'center' }}>
-            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>Projects</h2>
+        <section
+          className="projects-sidebar-section"
+          aria-labelledby="projects-heading"
+          tabIndex={0}
+          data-project-actions-visible={projectActionsVisible || projectsMenu !== null || undefined}
+          onPointerEnter={revealProjectActions}
+          onPointerLeave={scheduleProjectActionsHide}
+          onFocusCapture={revealProjectActions}
+          onBlurCapture={(event) => {
+            const section = event.currentTarget;
+            window.setTimeout(() => {
+              if (!section.contains(document.activeElement)) scheduleProjectActionsHide();
+            }, 0);
+          }}
+        >
+          <div className="projects-sidebar-heading" style={{ minHeight: 35, padding: '3px 4px 5px 8px', display: 'flex', alignItems: 'center' }}>
+            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 600, letterSpacing: '.01em' }}>Projects</h2>
+            <div className="projects-sidebar-actions">
+              <button
+                ref={projectsMenuTriggerRef}
+                type="button"
+                className="sidebar-header-action projects-sidebar-action"
+                tabIndex={projectActionsVisible || projectsMenu !== null ? 0 : -1}
+                aria-label="Project sidebar options"
+                aria-haspopup="menu"
+                aria-expanded={projectsMenu !== null}
+                title="Project sidebar options"
+                onClick={(event) => openProjectsMenu(event.currentTarget)}
+                style={{ width: 28, height: 28, display: 'grid', placeItems: 'center', border: 0, borderRadius: 7, background: 'transparent', color: t.text3, cursor: 'pointer' }}
+              >
+                <Icon name="more" size={16} stroke={2} />
+              </button>
             <button
               type="button"
-              className="sidebar-header-action"
+              className="sidebar-header-action projects-sidebar-action"
+              tabIndex={projectActionsVisible || projectsMenu !== null ? 0 : -1}
               aria-label="Add project"
               title="Add project"
               onClick={() => invoke(bridge.addProject)}
               style={{ width: 28, height: 28, display: 'grid', placeItems: 'center', border: 0, borderRadius: 7, background: 'transparent', color: t.text3, cursor: 'pointer' }}
             >
-              <Icon name="plus" size={14} stroke={1.9} />
+              <Icon name="plus" size={17} stroke={1.8} />
             </button>
+            </div>
           </div>
+
+          {projectsMenu && projectsMenuPosition && createPortal(
+            <div
+              ref={projectsMenuRef}
+              className="projects-sidebar-menu-layer"
+              style={{ left: projectsMenuPosition.left, top: projectsMenuPosition.top }}
+              onPointerEnter={revealProjectActions}
+            >
+              <div className="projects-sidebar-menu" role="menu" aria-label="Project sidebar options">
+                <button type="button" role="menuitem" className="projects-sidebar-menu-item" data-active={projectsMenu === 'organize' || undefined} onPointerEnter={() => setProjectsMenu('organize')} onClick={() => setProjectsMenu('organize')}>
+                  <span>Organize sidebar</span><Icon name="chevronR" size={16} stroke={2.1} />
+                </button>
+                <button type="button" role="menuitem" className="projects-sidebar-menu-item" data-active={projectsMenu === 'sort' || undefined} onPointerEnter={() => setProjectsMenu('sort')} onClick={() => setProjectsMenu('sort')}>
+                  <span>Sort chats by</span><Icon name="chevronR" size={16} stroke={2.1} />
+                </button>
+              </div>
+              {projectsMenu === 'organize' ? (
+                <div className="projects-sidebar-menu projects-sidebar-submenu" role="menu" aria-label="Organize sidebar">
+                  <button type="button" role="menuitemradio" aria-checked={sidebarOrganization === 'project'} className="projects-sidebar-menu-item" onClick={() => chooseSidebarOrganization('project')}>
+                    <span className="projects-sidebar-menu-check">{sidebarOrganization === 'project' ? <Icon name="check" size={17} stroke={2.5} /> : null}</span><span>By project</span>
+                  </button>
+                  <button type="button" role="menuitemradio" aria-checked={sidebarOrganization === 'list'} className="projects-sidebar-menu-item" onClick={() => chooseSidebarOrganization('list')}>
+                    <span className="projects-sidebar-menu-check">{sidebarOrganization === 'list' ? <Icon name="check" size={17} stroke={2.5} /> : null}</span><span>In one list</span>
+                  </button>
+                </div>
+              ) : null}
+              {projectsMenu === 'sort' ? (
+                <div className="projects-sidebar-menu projects-sidebar-submenu" role="menu" aria-label="Sort chats by">
+                  {([['priority', 'Priority'], ['updated', 'Last updated'], ['manual', 'Manual order']] as const).map(([value, label]) => (
+                    <button key={value} type="button" role="menuitemradio" aria-checked={chatSort === value} className="projects-sidebar-menu-item" onClick={() => chooseChatSort(value)}>
+                      <span className="projects-sidebar-menu-check">{chatSort === value ? <Icon name="check" size={17} stroke={2.5} /> : null}</span><span>{label}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>,
+            document.body,
+          )}
 
           {projects.length === 0 ? (
             <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>
               Add a project folder to start a session.
             </div>
+          ) : sidebarOrganization === 'list' ? (
+            <div className="projects-one-list" aria-label="All project chats">
+              {allProjectSessions.length === 0 ? (
+                <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>Loading project chats…</div>
+              ) : allProjectSessions.map(({ projectPath, session }) => {
+                const pinned = pinnedKeys.has(`${projectPath}\0${session.uuid}`);
+                const opening = openingSessionKey === `${projectPath}\0${session.uuid}`;
+                return <SessionRow key={`${projectPath}\0${session.uuid}`} session={session}
+                  active={!scheduled && visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
+                  pinned={pinned} opening={opening} status={bridge.sessionRuntimeStatus(session.uuid)}
+                  onClick={() => openSidebarSession(projectPath, session.uuid)}
+                  onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
+                  onRename={() => prepareRename(projectPath, session.uuid, session.title || 'Untitled chat')}
+                  onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
+                  draggable={chatSort === 'manual' && !opening}
+                  dragging={draggedSession?.projectPath === projectPath && draggedSession.sessionId === session.uuid}
+                  dragTarget={draggedSession?.projectPath === projectPath && dragTargetSessionId === session.uuid}
+                  onDragStart={() => setDraggedSession({ projectPath, sessionId: session.uuid })}
+                  onDragOver={() => { if (draggedSession?.projectPath === projectPath) setDragTargetSessionId(session.uuid); }}
+                  onDrop={() => {
+                    if (draggedSession?.projectPath === projectPath) moveSessionBefore(projectPath, draggedSession.sessionId, session.uuid);
+                    setDraggedSession(null); setDragTargetSessionId(null);
+                  }}
+                  onDragEnd={() => { setDraggedSession(null); setDragTargetSessionId(null); }} />;
+              })}
+            </div>
           ) : projects.map((projectPath) => {
             const active = projectPath === selectedProject;
             const open = expandedProjects.has(projectPath);
             const catalog = bridge.bootstrap?.projectCatalogs?.[projectPath];
-            const allSessions = catalog?.sessions ?? [];
+            const allSessions = sortedSessions(projectPath, catalog?.sessions ?? []);
             const visibleSessions = showAllSessions[projectPath] ? allSessions : allSessions.slice(0, 5);
             const projectHasActiveWork = (bridge.bootstrap?.runtimes ?? []).some((runtime) => {
               if (runtime.projectPath !== projectPath) return false;
@@ -654,7 +980,18 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                           status={bridge.sessionRuntimeStatus(session.uuid)}
                           onClick={() => openSidebarSession(projectPath, session.uuid)}
                           onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
+                          onRename={() => prepareRename(projectPath, session.uuid, session.title || 'Untitled chat')}
                           onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
+                          draggable={chatSort === 'manual' && !opening}
+                          dragging={draggedSession?.projectPath === projectPath && draggedSession.sessionId === session.uuid}
+                          dragTarget={draggedSession?.projectPath === projectPath && dragTargetSessionId === session.uuid}
+                          onDragStart={() => setDraggedSession({ projectPath, sessionId: session.uuid })}
+                          onDragOver={() => { if (draggedSession?.projectPath === projectPath) setDragTargetSessionId(session.uuid); }}
+                          onDrop={() => {
+                            if (draggedSession?.projectPath === projectPath) moveSessionBefore(projectPath, draggedSession.sessionId, session.uuid);
+                            setDraggedSession(null); setDragTargetSessionId(null);
+                          }}
+                          onDragEnd={() => { setDraggedSession(null); setDragTargetSessionId(null); }}
                         />
                       );
                     })}
@@ -711,6 +1048,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       />
     </aside>
     {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title)} />}
+    {renameTarget && <RenameSessionDialog title={renameTarget.title} busy={renamingSession} error={renameError} onClose={() => { if (!renamingSession) setRenameTarget(null); }} onConfirm={(title) => void confirmRename(title)} />}
     </>
   );
 }

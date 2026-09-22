@@ -9,6 +9,7 @@ import type {
   PinnedSessionRecord,
   ProviderModelPickerVisibility,
   PublicSettings,
+  SidebarPreferences,
   SessionRef,
 } from '../shared/settings.js';
 import { parseVoicePreferences } from '../shared/voicePreferences.js';
@@ -98,6 +99,8 @@ export interface PersistedSettings {
   notifications?: NotificationPreferences;
   /** Device-local conversation model picker visibility by provider id. */
   modelPickerVisibility?: ModelPickerVisibilitySettings;
+  /** Device-local sidebar organization and manual session order. */
+  sidebar?: SidebarPreferences;
 }
 
 export interface DiagnosticEntry {
@@ -188,6 +191,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   settings.activeProject = requestedActive && settings.projects.includes(requestedActive)
     ? requestedActive
     : settings.projects[0];
+  if (value['sidebar'] !== undefined) {
+    settings.sidebar = parseSidebarPreferences(value['sidebar'], settings.projects);
+  }
 
   if (isPlainObject(value['activeSession'])) {
     const projectPath = boundedString(value['activeSession']['projectPath'], 32_768);
@@ -243,7 +249,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
-    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, collapseThoughtsByDefault,
+    bypassPermissionsModeAccepted, voice, notifications, modelPickerVisibility, sidebar, collapseThoughtsByDefault,
   } = settings;
   return {
     version,
@@ -260,6 +266,37 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     ...(voice ? { voice: { ...voice } } : {}),
     ...(notifications ? { notifications: { ...notifications } } : {}),
     ...(modelPickerVisibility ? { modelPickerVisibility: cloneModelPickerVisibility(modelPickerVisibility) } : {}),
+    ...(sidebar ? { sidebar: cloneSidebarPreferences(sidebar) } : {}),
+  };
+}
+
+export function parseSidebarPreferences(value: unknown, projects: readonly string[]): SidebarPreferences {
+  const input = isPlainObject(value) ? value : {};
+  const organization = input['organization'] === 'list' ? 'list' : 'project';
+  const chatSort = input['chatSort'] === 'priority' || input['chatSort'] === 'manual' ? input['chatSort'] : 'updated';
+  const manualSessionOrder: Record<string, string[]> = {};
+  if (isPlainObject(input['manualSessionOrder'])) {
+    for (const [projectPath, rawOrder] of Object.entries(input['manualSessionOrder'])) {
+      if (!projects.includes(projectPath) || !Array.isArray(rawOrder)) continue;
+      const seen = new Set<string>();
+      for (const sessionId of rawOrder) {
+        if (typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId) || seen.has(sessionId)) continue;
+        seen.add(sessionId);
+        if (seen.size >= 200) break;
+      }
+      if (seen.size > 0) manualSessionOrder[projectPath] = [...seen];
+    }
+  }
+  return { organization, chatSort, manualSessionOrder };
+}
+
+function cloneSidebarPreferences(value: SidebarPreferences): SidebarPreferences {
+  return {
+    organization: value.organization,
+    chatSort: value.chatSort,
+    manualSessionOrder: Object.fromEntries(
+      Object.entries(value.manualSessionOrder).map(([projectPath, sessionIds]) => [projectPath, [...sessionIds]]),
+    ),
   };
 }
 
@@ -371,6 +408,16 @@ export function withoutProject(settings: PersistedSettings, projectPath: string)
     pinnedSessions: settings.pinnedSessions
       .filter((session) => session.projectPath !== projectPath)
       .map((session) => ({ ...session })),
+    ...(settings.sidebar ? {
+      sidebar: {
+        ...settings.sidebar,
+        manualSessionOrder: Object.fromEntries(
+          Object.entries(settings.sidebar.manualSessionOrder)
+            .filter(([path]) => path !== projectPath)
+            .map(([path, sessionIds]) => [path, [...sessionIds]]),
+        ),
+      },
+    } : {}),
     trustedWorkspaces,
   };
 }

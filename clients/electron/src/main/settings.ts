@@ -7,6 +7,7 @@ import {
   isPermissionModeId,
   parseModelPickerVisibility,
   parseNotificationPreferences,
+  parseSidebarPreferences,
   parseSettings,
   parseVoicePreferences,
   publicSettings,
@@ -185,6 +186,7 @@ export class SettingsStore {
     voice?: unknown;
     notifications?: unknown;
     modelPickerVisibility?: unknown;
+    sidebar?: unknown;
   }): PublicSettings {
     if ('collapseThoughtsByDefault' in patch && typeof patch.collapseThoughtsByDefault !== 'boolean') {
       throw new Error('invalid collapseThoughtsByDefault');
@@ -222,6 +224,9 @@ export class SettingsStore {
       const parsed = parseModelPickerVisibility(patch.modelPickerVisibility);
       if (Object.keys(parsed).length > 0) this.settings.modelPickerVisibility = parsed;
       else delete this.settings.modelPickerVisibility;
+    }
+    if ('sidebar' in patch) {
+      this.settings.sidebar = parseSidebarPreferences(patch.sidebar, this.settings.projects);
     }
     if (typeof patch.collapseThoughtsByDefault === 'boolean') {
       this.settings.collapseThoughtsByDefault = patch.collapseThoughtsByDefault;

@@ -53,6 +53,14 @@ export interface ProviderModelPickerVisibility {
 
 export type ModelPickerVisibilitySettings = Record<string, ProviderModelPickerVisibility>;
 
+/** Preferences that govern how project chats are organized in the desktop sidebar. */
+export interface SidebarPreferences {
+  organization: 'project' | 'list';
+  chatSort: 'priority' | 'updated' | 'manual';
+  /** Session IDs in user-defined order, keyed by their canonical project path. */
+  manualSessionOrder: Record<string, string[]>;
+}
+
 /**
  * The subset of the persisted device settings that leaves the main process.
  * Everything in `PersistedSettings` that is NOT here (today:
@@ -98,4 +106,5 @@ export interface PublicSettings {
    */
   notifications?: NotificationPreferences;
   modelPickerVisibility?: ModelPickerVisibilitySettings;
+  sidebar?: SidebarPreferences;
 }

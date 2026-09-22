@@ -1654,6 +1654,118 @@ body {
 .sidebar-project-menu button {
   transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
 }
+.projects-sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+}
+.projects-sidebar-section:hover .projects-sidebar-actions,
+.projects-sidebar-section:focus-within .projects-sidebar-actions,
+.projects-sidebar-section[data-project-actions-visible='true'] .projects-sidebar-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.projects-sidebar-action:active:not(:disabled) {
+  scale: .96;
+}
+.projects-sidebar-menu-layer {
+  position: fixed;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  gap: 3px;
+  color: var(--text, #29292d);
+  font-size: 13px;
+  font-weight: 500;
+}
+.projects-sidebar-menu {
+  min-width: 184px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, currentColor 17%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--sidebar-material, #f3f1f5) 96%, white);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .18), 0 2px 7px rgba(0, 0, 0, .08);
+  backdrop-filter: blur(24px) saturate(1.18);
+}
+.projects-sidebar-submenu { margin-top: 0; }
+.projects-sidebar-menu-item {
+  width: 100%;
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: -.01em;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease, scale 100ms ease;
+}
+.projects-sidebar-menu-item > span:last-child { flex: 1; }
+.projects-sidebar-menu-item > svg { margin-left: auto; flex: 0 0 auto; }
+.projects-sidebar-menu-item:hover,
+.projects-sidebar-menu-item:focus-visible,
+.projects-sidebar-menu-item[data-active='true'] {
+  outline: none;
+  background: var(--desktop-accent, #4d98f7);
+  color: white;
+}
+.projects-sidebar-menu-item:active { scale: .985; }
+.projects-sidebar-menu-check {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 18px;
+  margin-left: -2px;
+}
+.session-actions-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 196px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, currentColor 17%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--sidebar-material, #f3f1f5) 96%, white);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .18), 0 2px 7px rgba(0, 0, 0, .08);
+  backdrop-filter: blur(24px) saturate(1.18);
+  color: var(--text, #29292d);
+}
+.session-actions-menu button {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.session-actions-menu button:hover:not(:disabled),
+.session-actions-menu button:focus-visible {
+  outline: none;
+  background: var(--desktop-accent, #4d98f7);
+  color: white;
+}
+.session-actions-menu button:disabled { opacity: .48; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) {
+  .projects-sidebar-actions,
+  .projects-sidebar-menu-item { transition: none; }
+}
 .sidebar-primary-action:hover:not(:disabled),
 .sidebar-header-action:hover:not(:disabled),
 .sidebar-tree-row > button:first-child:hover:not(:disabled),
@@ -1677,6 +1789,25 @@ body {
 .sidebar-tree-row:has(> .sidebar-row-action[data-visible='true']) > .sidebar-session-error { opacity: 0; }
 .sidebar-row-action:hover:not(:disabled) {
   background: color-mix(in oklab, currentColor 10%, transparent) !important;
+}
+.sidebar-tree-row[data-session-draggable='true'] > button:first-child {
+  cursor: grab !important;
+}
+.sidebar-tree-row[data-session-draggable='true']:active > button:first-child {
+  cursor: grabbing !important;
+}
+.sidebar-tree-row[data-dragging='true'] { opacity: .46; }
+.sidebar-tree-row[data-drag-target='true']::before {
+  content: '';
+  position: absolute;
+  z-index: 2;
+  top: -1px;
+  right: 8px;
+  left: 30px;
+  height: 2px;
+  border-radius: 99px;
+  background: var(--desktop-accent, #4d98f7);
+  pointer-events: none;
 }
 .sidebar-resize-handle {
   position: absolute;

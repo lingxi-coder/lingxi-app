@@ -224,8 +224,11 @@ export interface UseBridge {
   addProject(): Promise<WorkspaceMetadata | null>;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;
+  updateSidebarPreferences(preferences: import('../../shared/settings').SidebarPreferences): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
   archiveSession(projectPath: string, sessionId: string): Promise<void>;
+  touchSession(projectPath: string, sessionId: string): Promise<void>;
+  renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
   openSession(projectPath: string, sessionId: string): Promise<void>;
   listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState | undefined>;
@@ -1930,6 +1933,40 @@ export function useBridge(): UseBridge {
     }
     catch (cause) { if (isLatestOperation(operationId, pinOperationRef.current)) capture(cause); }
   }, [capture, host, patchBootstrap]);
+  const updateSidebarPreferences = useCallback(async (sidebar: import('../../shared/settings').SidebarPreferences) => {
+    if (!host) return;
+    try { patchBootstrap({ settings: await host.updateSettings({ sidebar }) }); }
+    catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+  const touchSession = useCallback(async (projectPath: string, sessionId: string) => {
+    if (!host) return;
+    try {
+      const result = await host.touchSession(projectPath, sessionId);
+      setBootstrap((previous) => previous ? {
+        ...previous,
+        projectCatalogs: {
+          ...previous.projectCatalogs,
+          [result.projectPath]: { sessions: result.sessions.map((session) => ({ ...session })), ...(result.error ? { error: result.error } : {}) },
+        },
+      } : previous);
+    } catch (cause) { capture(cause); }
+  }, [capture, host]);
+  const renameSession = useCallback(async (projectPath: string, sessionId: string, title: string) => {
+    if (!host) throw new Error('Desktop host unavailable.');
+    try {
+      const result = await host.renameSession(projectPath, sessionId, title);
+      setBootstrap((previous) => previous ? {
+        ...previous,
+        projectCatalogs: {
+          ...previous.projectCatalogs,
+          [result.projectPath]: { sessions: result.sessions.map((session) => ({ ...session })), ...(result.error ? { error: result.error } : {}) },
+        },
+      } : previous);
+    } catch (cause) {
+      capture(cause);
+      throw cause;
+    }
+  }, [capture, host]);
 
   const openSession = useCallback(async (projectPath: string, sessionId: string) => {
     if (!host) throw new Error('Desktop host unavailable.');
@@ -2578,9 +2615,12 @@ export function useBridge(): UseBridge {
     addProject,
     activateProject,
     removeProject,
+    updateSidebarPreferences,
     archiveSession,
     preflightSessionArchive,
     setSessionPinned,
+    touchSession,
+    renameSession,
     openSession,
     listProjectSessions,
     sessionRuntimeStatus,

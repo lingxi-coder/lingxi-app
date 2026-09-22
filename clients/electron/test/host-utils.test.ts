@@ -69,6 +69,31 @@ test("parseSettings keeps 'system' and still rejects garbage", () => {
   );
 });
 
+test('sidebar preferences persist only valid manual session orders', () => {
+  const project = '/project';
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const settings = parseSettings({
+    version: 1,
+    projects: [project],
+    sidebar: {
+      organization: 'list',
+      chatSort: 'manual',
+      manualSessionOrder: {
+        [project]: [sessionId, sessionId, 'not-a-session-id'],
+        '/not-in-projects': [sessionId],
+      },
+    },
+  });
+  assert.deepEqual(settings.sidebar, {
+    organization: 'list',
+    chatSort: 'manual',
+    manualSessionOrder: { [project]: [sessionId] },
+  });
+  const publicCopy = publicSettings(settings);
+  publicCopy.sidebar!.manualSessionOrder[project].push('123e4567-e89b-42d3-a456-426614174001');
+  assert.deepEqual(settings.sidebar!.manualSessionOrder[project], [sessionId]);
+});
+
 test('thought collapse preference is omitted for legacy settings and rejects invalid stored values', () => {
   assert.equal(new SettingsStore(temporaryDirectory()).getPublic().collapseThoughtsByDefault, undefined);
   for (const value of [undefined, null, 'false', 'true', 0, 1, {}, []]) {

@@ -131,6 +131,8 @@ export interface LingxiApi {
     voice?: unknown;
     notifications?: unknown;
     modelPickerVisibility?: unknown;
+    sidebar?: unknown;
+    sidebar?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
@@ -157,6 +159,8 @@ export interface LingxiApi {
   openSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
   preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
   archiveSession(projectPath: string, sessionId: string): Promise<BootstrapState>;
+  touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
+  renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   clearSession(sessionId: string): Promise<void>;
   sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;

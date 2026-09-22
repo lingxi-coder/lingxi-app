@@ -1418,6 +1418,14 @@ export function useBridge(): UseBridge {
         }
         return next;
       });
+      // `cost_update`/`turn_ended` normally carry the new cumulative totals,
+      // but the durable status ledger is the recovery source for engines that
+      // emit a delayed or incomplete cost snapshot. Pull it after the turn has
+      // fully settled so the toolbar cannot remain pinned to the previous
+      // session total.
+      if (event.type === 'turn_ended' && host) {
+        void host.command(sessionId, { type: 'refresh_listings', which: [{ type: 'status' }] }).catch(() => undefined);
+      }
       if (event.type === 'session_started' || event.type === 'turn_ended') scheduleProjectCatalogRefresh(sessionId);
       if (event.type === 'settings_snapshot' && activeSessionIdRef.current === sessionId) setSettingsSnapshotEvent(event);
       if (event.type === 'mcp_servers' && activeSessionIdRef.current === sessionId) setMcpServersEvent(event);

@@ -1255,9 +1255,14 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
   // Cost events include all completed calls; status seeds a resumed session
   // before its next turn. usage_update only describes the latest API response.
-  const sessionCost = bridge.cost ?? bridge.desktop?.status;
-  const sessionTokens = !bridge.sessionLoading && sessionCost
-    ? sessionCost.input_tokens + sessionCost.output_tokens : null;
+  // A status refresh after turn completion can arrive just after cost_update,
+  // so keep the greatest cumulative total visible while the two converge.
+  const costTokens = bridge.cost
+    ? bridge.cost.input_tokens + bridge.cost.output_tokens : null;
+  const statusTokens = bridge.desktop?.status
+    ? bridge.desktop.status.input_tokens + bridge.desktop.status.output_tokens : null;
+  const sessionTokens = !bridge.sessionLoading && (costTokens !== null || statusTokens !== null)
+    ? Math.max(costTokens ?? 0, statusTokens ?? 0) : null;
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,

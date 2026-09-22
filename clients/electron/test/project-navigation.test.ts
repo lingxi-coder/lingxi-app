@@ -607,6 +607,7 @@ test('topbar shows session totals instead of the latest usage update and restore
   assert.match(render(snapshot), new RegExp(`${(12_500).toLocaleString()} tok`));
   assert.doesNotMatch(render(snapshot), />15 tok/);
   assert.match(render(null, snapshot), new RegExp(`${(12_500).toLocaleString()} tok`));
+  assert.match(render(snapshot, { input_tokens: 12_000, output_tokens: 3_000 }), new RegExp(`${(15_000).toLocaleString()} tok`));
   assert.doesNotMatch(render(null), /desktop-topbar-usage/);
   assert.doesNotMatch(render(snapshot, null, true), /desktop-topbar-usage/);
   assert.match(render(snapshot), /Session total: input \+ output tokens/);

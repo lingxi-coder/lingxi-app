@@ -3141,6 +3141,42 @@ impl EngineCommandRouter {
     }
 }
 
+/// A correlated snapshot cannot be confused with periodic task-row pushes.
+async fn emit_correlated_task_list(
+    tasks: &dyn TaskRegistryHandle,
+    sink: &dyn ClientEventSink,
+    filter: TaskListFilter,
+    request_id: String,
+) {
+    let (active_count, error) = match tasks.list(filter).await {
+        Ok(records) => {
+            let active_count = records
+                .iter()
+                .filter(|record| {
+                    !matches!(
+                        record.status.as_str(),
+                        "completed" | "failed" | "killed" | "cancelled"
+                    )
+                })
+                .count() as u64;
+            for record in &records {
+                sink.emit(ClientEvent::TaskRow {
+                    task: lower_task_record(record),
+                })
+                .await;
+            }
+            (active_count, None)
+        }
+        Err(error) => (0, Some(format!("task list failed: {error}"))),
+    };
+    sink.emit(ClientEvent::TaskListComplete {
+        request_id,
+        active_count,
+        error,
+    })
+    .await;
+}
+
 /// Shared helper: list tasks through the handle and emit one `TaskRow` per task.
 async fn emit_task_rows(
     tasks: &dyn TaskRegistryHandle,
@@ -4041,11 +4077,18 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Tasks ──────────────────────────────────────────────────────
-            ClientCommand::TaskList { status_filter } => {
+            ClientCommand::TaskList {
+                status_filter,
+                request_id,
+            } => {
                 let filter = TaskListFilter {
                     status: status_filter.map(task_status_wire),
                 };
-                self.emit_task_list(filter, &*sink).await;
+                if let Some(request_id) = request_id {
+                    emit_correlated_task_list(&*self.tasks, &*sink, filter, request_id).await;
+                } else {
+                    self.emit_task_list(filter, &*sink).await;
+                }
             }
             ClientCommand::TaskOutput { task_id, offset } => {
                 match self.tasks.output(&task_id, Some(offset)).await {

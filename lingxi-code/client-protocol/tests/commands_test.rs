@@ -557,6 +557,7 @@ fn set_fast_mode_round_trips() {
 #[test]
 fn task_list_round_trips() {
     let cmd = ClientCommand::TaskList {
+        request_id: None,
         status_filter: Some(TaskStatusDto::Running),
     };
     let json = serde_json::to_value(&cmd).expect("serialize TaskList");
@@ -566,6 +567,7 @@ fn task_list_round_trips() {
     assert_eq!(back, cmd);
 
     let unfiltered = ClientCommand::TaskList {
+        request_id: None,
         status_filter: None,
     };
     let json_u = serde_json::to_value(&unfiltered).expect("serialize unfiltered TaskList");
@@ -576,6 +578,16 @@ fn task_list_round_trips() {
     let back_u: ClientCommand =
         serde_json::from_value(json_u).expect("deserialize unfiltered TaskList");
     assert_eq!(back_u, unfiltered);
+    let correlated = ClientCommand::TaskList {
+        request_id: Some("guard-1".into()),
+        status_filter: None,
+    };
+    let json = serde_json::to_value(&correlated).unwrap();
+    assert_eq!(json["request_id"], "guard-1");
+    assert_eq!(
+        serde_json::from_value::<ClientCommand>(json).unwrap(),
+        correlated
+    );
 }
 
 /// `TaskOutput` — pulls a task's output spool from a byte/line offset.
@@ -915,6 +927,7 @@ fn no_live_command_carries_session_id() {
         ClientCommand::ForceCompact,
         ClientCommand::ClearSession,
         ClientCommand::TaskList {
+            request_id: None,
             status_filter: Some(TaskStatusDto::Pending),
         },
         ClientCommand::TaskOutput {

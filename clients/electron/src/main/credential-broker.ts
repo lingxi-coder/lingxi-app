@@ -253,6 +253,22 @@ export function resolveModelCredentialProviderIds(model: string, settings: unkno
   return [...ids];
 }
 
+/** Fusion routes are explicit settings choices, independent of the parent model. */
+export function resolveFusionCredentialProviderIds(settings: unknown, explicit = false): string[] {
+  if (!isRecord(settings) || !isRecord(settings.fusion)) return [];
+  const fusion = settings.fusion;
+  if (!explicit && fusion.enabled !== true) return [];
+  const choices = [
+    ...(Array.isArray(fusion.panelModels) ? fusion.panelModels : []),
+    fusion.analystModel,
+    fusion.synthesizerModel,
+  ];
+  return [...new Set(choices.flatMap((choice) => {
+    if (!isRecord(choice) || typeof choice.profile !== 'string' || typeof choice.model !== 'string') return [];
+    return resolveModelCredentialProviderIds(`${choice.profile}/${choice.model}`, settings);
+  }))];
+}
+
 export function readProviderEnvironmentCredential(
   providerId: string,
   environment: NodeJS.ProcessEnv = process.env,

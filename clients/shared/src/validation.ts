@@ -446,6 +446,11 @@ export function validateClientEvent(value: unknown): ClientEvent {
     return { type, event: validateAppEvent(input['event']) } as ClientEvent;
   }
   switch (type) {
+    case 'task_list_complete':
+      exactKeys(input, ['type', 'request_id', 'active_count', 'error'], 'client event');
+      return { type, request_id: string(input['request_id'], 'request_id'),
+        active_count: integer(input['active_count'], 'active_count'),
+        ...(input['error'] === undefined ? {} : { error: string(input['error'], 'error') }) };
     case 'openai_oauth_updated': {
       exactKeys(input, ['type', 'session'], 'client event');
       const session = object(input['session'], 'OAuth session');

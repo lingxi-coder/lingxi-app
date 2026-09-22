@@ -50,6 +50,9 @@ import {
   beginCompaction,
   beginLocalSlashCommand,
   beginSlashCommand,
+  failSlashCommand,
+  reduceEventWithPendingFusion,
+  isPendingFusionSessionRestore,
   emptyConversation,
   reduceEvent,
   type ConversationState,
@@ -899,6 +902,7 @@ export function useBridge(): UseBridge {
   const pendingConfigurationOperations = useRef(new Map<string, PendingConfigurationOperation>());
   const turnActiveRefs = useRef(new Map<string, boolean>());
   const slashPendingRefs = useRef(new Map<string, boolean>());
+  const pendingFusionDispatches = useRef(new Map<string, { raw: string }>());
   const sideQuestionTurns = useRef(new Map<string, Set<number>>());
   const nextSideQuestionTurn = useRef(Date.now());
   const cancellingRefs = useRef(new Map<string, { current: boolean }>());
@@ -1110,7 +1114,7 @@ export function useBridge(): UseBridge {
       // The snapshot is authoritative, so disposal markers have been
       // reconciled once it arrives and must not accumulate across sessions.
       removedRuntimeIds.current.clear();
-      pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, slashPendingRefs.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
+      pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, slashPendingRefs.current, pendingFusionDispatches.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
       for (const sessionId of new Set<string>([
         ...pendingTrackedTurns.current.keys(),
         ...activeTrackedTurns.current.keys(),
@@ -1267,8 +1271,19 @@ export function useBridge(): UseBridge {
       // state). The refs half of the claim must reset in lockstep, or a stale
       // `slashPendingRefs` entry can survive a session reset and later arm the
       // `error` release branch below against an unrelated turn.
+      const pendingFusion = pendingFusionDispatches.current.get(sessionId);
+      const restoringFusion = isPendingFusionSessionRestore(event, sessionId, pendingFusion?.raw);
       if (event.type === 'session_started' || event.type === 'session_ended' || event.type === 'session_resumed') {
-        clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+        if (restoringFusion) {
+          claimSlashTurn(slashPendingRefs.current, sessionId);
+          turnActiveRefs.current.set(sessionId, true);
+        } else {
+          pendingFusionDispatches.current.delete(sessionId);
+          clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+        }
+      }
+      if (event.type === 'slash_command_result' || event.type === 'error' || event.type === 'turn_started') {
+        pendingFusionDispatches.current.delete(sessionId);
       }
       if (event.type === 'slash_command_result' && shouldReleaseSlashTurn(slashPendingRefs.current, sessionId)) {
         clearSlashTurnClaim(slashPendingRefs.current, sessionId);
@@ -1320,7 +1335,7 @@ export function useBridge(): UseBridge {
         completeTrackedSpeech(sessionId, event.type === 'turn_ended' ? 'turn_ended' : 'stale');
       }
       updateRuntime(sessionId, (state) => {
-        let next = { ...state, conversation: reduceEvent(state.conversation, event), desktop: reduceDesktopEvent(state.desktop, event), runtimeCenter: reduceRuntimeCenterEvent(state.runtimeCenter, event, sessionId) };
+        let next = { ...state, conversation: reduceEventWithPendingFusion(state.conversation, event, sessionId, restoringFusion ? pendingFusion?.raw : undefined), desktop: reduceDesktopEvent(state.desktop, event), runtimeCenter: reduceRuntimeCenterEvent(state.runtimeCenter, event, sessionId) };
         if (event.type === 'session_resumed') {
           next = {
             ...next,
@@ -1483,11 +1498,12 @@ export function useBridge(): UseBridge {
           removeRuntimeFromMaps(sessionId, next);
           return next.size === previous.size ? previous : next;
         });
-        removeRuntimeFromMaps(sessionId, turnActiveRefs.current, slashPendingRefs.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
+        removeRuntimeFromMaps(sessionId, turnActiveRefs.current, slashPendingRefs.current, pendingFusionDispatches.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
         completeTrackedSpeech(sessionId, 'stale');
         return;
       }
       if (removedRuntimeIds.current.has(sessionId)) return;
+      if (state.status === 'error' || state.status === 'disconnected' || state.status === 'idle') pendingFusionDispatches.current.delete(sessionId);
       updateRuntime(sessionId, (current) => {
         const next: RuntimeState = { ...current, connection: state };
         if (shouldResetBridgeRuntime(state)) {
@@ -1518,7 +1534,7 @@ export function useBridge(): UseBridge {
         }
         return next;
       });
-      if (shouldClearPendingPermissions(state)) {
+      if (shouldClearPendingPermissions(state) && !pendingFusionDispatches.current.has(sessionId)) {
         turnActiveRefs.current.set(sessionId, false);
         // Same lockstep requirement as the session-event reset above: a
         // connection reset (respawn/disconnect/error/idle) clears the turn
@@ -1726,6 +1742,8 @@ export function useBridge(): UseBridge {
       }
       return;
     }
+    const pendingFusion = /^\/fusion(?:\s|$)/i.test(command) ? { raw: command } : undefined;
+    if (pendingFusion) pendingFusionDispatches.current.set(sessionId, pendingFusion);
     turnActiveRefs.current.set(sessionId, true);
     claimSlashTurn(slashPendingRefs.current, sessionId);
     updateRuntime(sessionId, (state) => ({ ...state, conversation: beginSlashCommand(state.conversation, command) }));
@@ -1746,11 +1764,14 @@ export function useBridge(): UseBridge {
       }
       updateRuntime(sessionId, (state) => ({
         ...state,
-        conversation: reduceEvent(state.conversation, { type: 'error', kind: { type: 'transport' }, message: 'Failed to run the slash command.' }),
+        conversation: failSlashCommand(state.conversation, command,
+          pendingFusion ? messageFrom(cause) : 'Failed to run the slash command.'),
         isCancelling: false,
       }));
       capture(cause);
       return;
+    } finally {
+      if (pendingFusionDispatches.current.get(sessionId) === pendingFusion) pendingFusionDispatches.current.delete(sessionId);
     }
     try {
       // Best-effort refresh of the slash-command listing (a command can
@@ -1799,6 +1820,7 @@ export function useBridge(): UseBridge {
     cancellationTasks.current.set(sessionId, taskRef);
     if (cancelling.current) return taskRef.current ?? Promise.resolve();
     cancelling.current = true;
+    pendingFusionDispatches.current.delete(sessionId);
     updateRuntime(sessionId, (state) => ({ ...state, isCancelling: true }));
     let task: Promise<void>;
     const stop = foregroundActive

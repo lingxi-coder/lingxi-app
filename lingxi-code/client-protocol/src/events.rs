@@ -685,6 +685,13 @@ pub enum ClientEvent {
     ScheduledTaskFire {
         message: String,
     },
+    // Only emitted for a TaskList carrying request_id. Append-only for UniFFI.
+    TaskListComplete {
+        request_id: String,
+        active_count: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

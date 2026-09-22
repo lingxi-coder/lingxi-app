@@ -563,6 +563,76 @@ async fn fusion_meta_appends_only_to_launch_session_and_stays_out_of_model_conte
 }
 
 #[tokio::test]
+async fn fusion_command_messages_remain_in_model_context_and_durable_history() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let orch = orch_with_writer(dir.path(), path.clone());
+    let id = orch.current_session_id().await;
+    let prompt = "/fusion --quality explain the cursor issue\nPreserve these details.";
+    orch.append_fusion_command_message(&id.to_string(), prompt, true)
+        .await
+        .expect("persist original request");
+    orch.append_fusion_command_message(&id.to_string(), "Fusion started: task-1", false)
+        .await
+        .expect("persist launch reply");
+    let state = orch.session.lock().await;
+    assert_eq!(state.model_context_history().len(), 2);
+    assert!(matches!(
+        &state.history[0],
+        ConversationMessage::User { is_meta: false, .. }
+    ));
+    assert!(matches!(
+        &state.history[1],
+        ConversationMessage::Assistant { .. }
+    ));
+    let lines = read_jsonl(&path);
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        assert_ne!(
+            line.extra.get("isModelContextExcluded"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+    assert_eq!(
+        lines[1].parent_uuid.as_deref(),
+        Some(lines[0].uuid.as_str())
+    );
+    assert!(std::fs::read_to_string(path)
+        .unwrap()
+        .contains("Preserve these details."));
+}
+
+#[tokio::test]
+async fn fusion_command_off_session_reply_does_not_leak_into_active_history() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join(branding::DOT_DIR);
+    let path = dir.path().join("active.jsonl");
+    let orch = orch_with_writer(dir.path(), path).with_config_home(home.clone());
+    let launch = SessionId::new();
+    let cursor = orch.transcript.last_jsonl_uuid.lock().await.clone();
+    orch.append_fusion_command_message(
+        &launch.to_string(),
+        "fusion failed to start: unavailable model",
+        false,
+    )
+    .await
+    .expect("persist to launch session");
+    assert!(orch.session.lock().await.history.is_empty());
+    assert_eq!(*orch.transcript.last_jsonl_uuid.lock().await, cursor);
+    let target = session::jsonl::session_path(
+        &home,
+        &dir.path().to_string_lossy(),
+        &launch.as_uuid().to_string(),
+    );
+    let lines = read_jsonl(&target);
+    assert_eq!(lines.len(), 1);
+    assert_ne!(
+        lines[0].extra.get("isModelContextExcluded"),
+        Some(&serde_json::Value::Bool(true))
+    );
+}
+
+#[tokio::test]
 async fn user_lines_persist_the_live_permission_mode_before_the_common_trailer() {
     let dir = tempfile::tempdir().expect("tempdir");
     let session_path = dir.path().join("session.jsonl");

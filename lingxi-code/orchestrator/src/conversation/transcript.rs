@@ -1639,6 +1639,16 @@ impl ConversationOrchestrator {
         target_session: protocol::SessionId,
         msg: &ConversationMessage,
     ) -> Result<Option<String>, platform_api::HandleError> {
+        self.persist_conversation_message_to_session(target_session, msg, true)
+            .await
+    }
+
+    pub(crate) async fn persist_conversation_message_to_session(
+        &self,
+        target_session: protocol::SessionId,
+        msg: &ConversationMessage,
+        exclude_from_model: bool,
+    ) -> Result<Option<String>, platform_api::HandleError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return Ok(None);
         };
@@ -1733,10 +1743,12 @@ impl ConversationOrchestrator {
             None,
             None,
         );
-        persisted.extra.insert(
-            "isModelContextExcluded".to_string(),
-            serde_json::Value::Bool(true),
-        );
+        if exclude_from_model {
+            persisted.extra.insert(
+                "isModelContextExcluded".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
         if durable {
             persisted.cwd = writer
                 .session_target_cwd(target_session)

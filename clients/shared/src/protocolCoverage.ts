@@ -180,6 +180,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   auth_state: true,
   doctor_report: true,
   task_row: true,
+  task_list_complete: true,
   task_lifecycle: true,
   task_output_chunk: true,
   task_status_changed: true,

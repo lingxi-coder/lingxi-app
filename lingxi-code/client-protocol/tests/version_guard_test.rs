@@ -844,6 +844,11 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::ClearSession", "clear_session");
 
     put("ClientCommand::TaskList", "task_list");
+    put("ClientCommand::TaskList.request_id", "Option<String>");
+    put("ClientEvent::TaskListComplete", "task_list_complete");
+    put("ClientEvent::TaskListComplete.request_id", "String");
+    put("ClientEvent::TaskListComplete.active_count", "u64");
+    put("ClientEvent::TaskListComplete.error", "Option<String>");
     put(
         "ClientCommand::TaskList.status_filter",
         "Option<TaskStatusDto>",

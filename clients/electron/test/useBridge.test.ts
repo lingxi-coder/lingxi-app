@@ -620,10 +620,11 @@ test('a connection reset that clears turnActiveRefs also clears the outstanding 
   const source = useBridgeSource();
   const connectionResetBody = sliceBetweenMarkers(
     source,
-    'if (shouldClearPendingPermissions(state)) {\n        turnActiveRefs.current.set(sessionId, false);',
+    'if (shouldClearPendingPermissions(state) && !pendingFusionDispatches.current.has(sessionId)) {',
     "if (activeSessionIdRef.current === sessionId && state.status === 'error')",
     'the connection-reset turnActiveRefs clear in onConnectionStateChanged',
   );
+  assert.match(connectionResetBody, /turnActiveRefs\.current\.set\(sessionId, false\)/);
   assert.match(
     connectionResetBody,
     /clearSlashTurnClaim\(slashPendingRefs\.current, sessionId\)/,

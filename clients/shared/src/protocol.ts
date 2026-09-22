@@ -309,7 +309,7 @@ export type ClientCommand =
   | { type: 'force_compact' }
   | { type: 'clear_session' }
   // ── Tasks ───────────────────────────────────────────────────────────────────
-  | { type: 'task_list'; status_filter?: TaskStatusDto }
+  | { type: 'task_list'; status_filter?: TaskStatusDto; request_id?: string }
   | { type: 'task_output'; task_id: string; offset: number }
   | { type: 'task_stop'; task_id: string }
   | { type: 'task_message'; task_id: string; message: string }
@@ -2226,6 +2226,7 @@ export type ClientEvent =
   | { type: 'auth_state'; state: AuthStateDto }
   | { type: 'doctor_report'; report: DoctorReportDto }
   | { type: 'task_row'; task: TaskRowDto }
+  | { type: 'task_list_complete'; request_id: string; active_count: number; error?: string }
   /** SDK task lifecycle receipt (`ClientEvent::TaskLifecycle`). The payload is the
    *  already-serialized `system` / `task_*` SDK record, forwarded verbatim. */
   | { type: 'task_lifecycle'; event_json: string }

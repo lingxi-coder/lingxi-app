@@ -2947,3 +2947,153 @@ test('a session with a coordinator worker still running survives cache pressure'
     SessionRuntime.prototype.resumeOwnedSession = originalResume;
   }
 });
+
+test('Fusion waits for all configured credentials and reuses cached keys', async () => {
+  const calls: string[] = [];
+  const key = deferred<string>();
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void; cancel(): void };
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async (id) => { calls.push(`load:${id}`); return key.promise; },
+  });
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  client.cancel = () => undefined;
+  client.sendCommand = (command) => {
+    calls.push(command.type);
+    if (command.type === 'refresh_listings') queueMicrotask(() => client.emit('event', {
+      type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ fusion: {
+        enabled: false,
+        panelModels: [{ profile: 'kimi', model: 'kimi-k3' }, { profile: 'deepseek', model: 'deepseek-flash' }],
+        analystModel: { profile: 'zai', model: 'glm-5.3-flash' },
+        synthesizerModel: { profile: 'deepseek', model: 'deepseek-flash' },
+      } }),
+    }));
+    if (command.type === 'set_provider_credential') queueMicrotask(() => client.emit('event', {
+      type: 'provider_credential_status', operation_id: command.operation_id,
+      configured_provider_ids: [command.provider_id], storage_encrypted: false, credential_previews: {},
+    }));
+  };
+  const pending = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.includes('run_slash_command'), false);
+  assert.equal(runtime.turnActive, true);
+  key.resolve('test-key');
+  await pending;
+  assert.deepEqual(calls.filter((call) => call.startsWith('load:')).sort(), ['load:deepseek', 'load:kimi', 'load:zai']);
+  assert.equal(calls.at(-1), 'run_slash_command');
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion second task' });
+  assert.equal(calls.filter((call) => call.startsWith('load:')).length, 3);
+});
+
+test('cancel during Fusion credential hydration prevents delayed dispatch', async () => {
+  const key = deferred<string>();
+  let sent = false;
+  const client = new EventEmitter() as EventEmitter & { cancel(): void; sendCommand(): void };
+  client.cancel = () => undefined;
+  client.sendCommand = () => { sent = true; };
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: () => key.promise,
+  });
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  runtime.cacheProviderCredential = async (id) => { (runtime as any).runtimeCredentialProviders.add(id); };
+  client.emit('event', { type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ fusion: {
+    panelModels: [{ profile: 'kimi', model: 'kimi-k3' }],
+  } }) });
+  const pending = runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion compare approaches' });
+  runtime.cancelTurn(undefined);
+  key.resolve('test-key');
+  await assert.rejects(pending, /interrupted/);
+  assert.equal(sent, false);
+  assert.equal(runtime.turnActive, false);
+});
+
+test('Fusion setup and publication retry preserve the conversation without loading credentials', async () => {
+  let loads = 0;
+  let commits = 0;
+  const commands: unknown[] = [];
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+  client.sendCommand = (command) => { commands.push(command); };
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    resolveProviderCredential: async () => { loads++; return 'key'; },
+    onFirstPromptSent: () => { commits++; },
+  });
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 0);
+  client.emit('event', { type: 'slash_command_result', is_error: false, display: 'Fusion started: unrelated output' });
+  assert.equal(commits, 0, 'display text alone must not claim a new conversation');
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion setup' });
+  await runtime.dispatchCommand({ type: 'run_slash_command', raw: '/fusion --retry-publication fu_saved' });
+  assert.equal(loads, 0);
+  assert.equal(commands.length, 2);
+  client.emit('event', { type: 'slash_command_result', is_error: true, display: 'Fusion started: invalid' });
+  client.emit('event', { type: 'slash_command_result', is_error: false, display: 'Fusion publication task-1 retried.' });
+  assert.equal(commits, 1);
+  client.emit('event', { type: 'slash_command_result', is_error: false, display: 'Fusion started: task-1 quality cross-provider' });
+  assert.equal((runtime as any).sessionHasHistory, true);
+  assert.equal((runtime as any).sessionIdentityCommitted, true);
+  assert.equal(commits, 1);
+  client.emit('event', { type: 'slash_command_result', is_error: false, display: 'Fusion started: task-2 quality cross-provider' });
+  assert.equal(commits, 1);
+});
+
+test('normal prompts hydrate Fusion providers only while Fusion is enabled', async () => {
+  for (const enabled of [false, true]) {
+    const loads: string[] = [];
+    let sent = false;
+    const client = new EventEmitter() as EventEmitter & { sendPrompt(): void };
+    client.sendPrompt = () => { sent = true; };
+    const runtime = new SessionRuntime({
+      launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+      resolveProviderCredential: async (id) => { loads.push(id); return 'key'; },
+    });
+    (runtime as any).activeWorkspace = '/workspace';
+    (runtime as any).client = client;
+    (runtime as any).wireClient(client, 0);
+    runtime.cacheProviderCredential = async (id) => { (runtime as any).runtimeCredentialProviders.add(id); };
+    client.emit('event', { type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ fusion: {
+      enabled, panelModels: [{ profile: 'kimi', model: 'kimi-k3' }],
+    } }) });
+    await runtime.sendPrompt('Use Fusion to compare approaches');
+    assert.equal(sent, true);
+    assert.deepEqual(loads, enabled ? ['kimi'] : []);
+  }
+});
+
+test('optional Fusion credential loading cannot delay or reject a normal prompt', async () => {
+  for (const fail of [false, true]) {
+    const key = deferred<string>();
+    let sent = false;
+    const client = new EventEmitter() as EventEmitter & { sendPrompt(): void };
+    client.sendPrompt = () => { sent = true; };
+    const runtime = new SessionRuntime({
+      launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+      resolveProviderCredential: () => key.promise,
+    });
+    (runtime as any).activeWorkspace = '/workspace';
+    (runtime as any).client = client;
+    (runtime as any).wireClient(client, 0);
+    (runtime as any).selectedModelReference = 'deepseek/deepseek-flash';
+    (runtime as any).runtimeCredentialProviders.add('deepseek');
+    runtime.cacheProviderCredential = async (id) => { (runtime as any).runtimeCredentialProviders.add(id); };
+    client.emit('event', { type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ fusion: {
+      enabled: true, panelModels: [{ profile: 'kimi', model: 'kimi-k3' }],
+    } }) });
+    const pending = Promise.resolve(runtime.sendPrompt('hello'));
+    // Attach a handler before rejecting the delayed broker in the failure case.
+    void pending.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const sentBeforeCredential = sent;
+    if (fail) key.reject(new Error('optional provider unavailable'));
+    else key.resolve('key');
+    await pending;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(sentBeforeCredential, true, 'ordinary chat must not wait for optional Fusion keys');
+  }
+});

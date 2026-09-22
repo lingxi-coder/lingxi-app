@@ -6,6 +6,7 @@ import {
   resolveProviderCredential,
   resolveProviderIdForModel,
   resolveModelCredentialProviderIds,
+  resolveFusionCredentialProviderIds,
   resolveProviderTestCredential,
   resolveSessionLaunchCredentials,
   resolveSessionLaunchPluginSecrets,
@@ -271,4 +272,17 @@ test('custom aliases resolve only the selected profile and its model fallback ch
   assert.deepEqual(resolveModelCredentialProviderIds('unknown', settings), []);
   assert.deepEqual(resolveModelCredentialProviderIds('unrelated/other-model', settings), ['unrelated']);
   assert.deepEqual(resolveModelCredentialProviderIds('fast', { providers: { ...settings.providers, duplicate: { models: [{ id: 'second', aliases: ['fast'] }] } } }), []);
+});
+
+test('Fusion credential routes require opt-in for normal prompts and include custom aliases', () => {
+  const settings = {
+    providers: { custom: { models: [{ id: 'real-model', aliases: ['fast'] }] }, backup: { models: ['backup-model'] } },
+    routing: { fallback: { 'real-model': ['backup/backup-model'] } },
+    fusion: { enabled: false, panelModels: [{ profile: 'custom', model: 'fast' }], analystModel: { profile: 'kimi', model: 'kimi-k3' }, synthesizerModel: { profile: 'custom', model: 'fast' } },
+  };
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings), []);
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings, true), ['custom', 'backup', 'kimi']);
+  settings.fusion.enabled = true;
+  assert.deepEqual(resolveFusionCredentialProviderIds(settings), ['custom', 'backup', 'kimi']);
+  assert.deepEqual(resolveFusionCredentialProviderIds({ fusion: { enabled: true, panelModels: [null, 'broken', { profile: 42 }] } }), []);
 });

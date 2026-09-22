@@ -2715,6 +2715,19 @@ pub trait OrchestratorHandle: Send + Sync {
         Ok(())
     }
 
+    /// Persist a Fusion request or launch reply as model-visible conversation
+    /// history, without starting a turn or emitting a duplicate UI event.
+    async fn append_fusion_command_message(
+        &self,
+        _session_id: &str,
+        _text: &str,
+        _is_user: bool,
+    ) -> Result<(), HandleError> {
+        Err(HandleError::ActionFailed(
+            "Fusion conversation persistence is unavailable".into(),
+        ))
+    }
+
     /// Append a transcript meta message to one specific session without
     /// starting a model turn.
     ///

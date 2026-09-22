@@ -1597,6 +1597,7 @@ function validateCommand(name: string, v: unknown): void {
     case 'request_exit':
       break;
     case 'task_list':
+      if ('request_id' in o) assert.ok(isString(o['request_id']));
       if ('status_filter' in o) validateTaskStatus(o['status_filter']);
       break;
     case 'task_output':
@@ -2146,6 +2147,11 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(isNumber(sum['passed']) && isNumber(sum['warnings']) && isNumber(sum['failed']));
       break;
     }
+    case 'task_list_complete':
+      assert.ok(isString(o['request_id']));
+      assert.ok(Number.isSafeInteger(o['active_count']) && (o['active_count'] as number) >= 0);
+      if ('error' in o) assert.ok(isString(o['error']));
+      break;
     case 'task_row': {
       validateTaskRow(o['task']);
       break;

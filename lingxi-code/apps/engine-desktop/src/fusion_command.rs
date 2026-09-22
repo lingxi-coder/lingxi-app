@@ -359,9 +359,12 @@ fn publication_retry_run_id(args: &ParsedSlashCommand) -> Result<Option<FusionRu
         .map_err(|error| format!("{error}\n{FUSION_ARGUMENT_HINT}"))
 }
 
-#[async_trait]
-impl BuiltinCommandHandler for DesktopFusionCommandHandler {
-    async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+impl DesktopFusionCommandHandler {
+    async fn execute(
+        &self,
+        args: &ParsedSlashCommand,
+        session_id: protocol::SessionId,
+    ) -> CommandResult {
         let retry_run_id = match publication_retry_run_id(args) {
             Ok(retry) => retry,
             Err(message) => {
@@ -371,13 +374,6 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
             }
         };
         if let Some(run_id) = retry_run_id {
-            if !self.durable_publication_available {
-                return CommandResult::Done {
-                    display: Some(format!(
-                        "fusion publication retry failed: {FUSION_PERSISTENCE_REQUIRED}"
-                    )),
-                };
-            }
             let Some(retrier) = self.publication_retrier.as_ref() else {
                 return CommandResult::Done {
                     display: Some(
@@ -386,7 +382,6 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
                     ),
                 };
             };
-            let session_id = self.handle.current_session_id().await;
             let receipt = retrier.retry_publication(session_id, run_id.as_str()).await;
             let display = match receipt.status {
                 platform_api::FusionPublicationStatus::Published => {
@@ -419,19 +414,8 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
                 return CommandResult::Done { display: Some(msg) };
             }
         };
-        // Reject before status/catalog reads and, critically, before spawning
-        // the task that can reserve budget or issue provider requests. An
-        // ephemeral session cannot truthfully satisfy Fusion's publication
-        // contract.
-        if !self.durable_publication_available {
-            return CommandResult::Done {
-                display: Some(format!(
-                    "fusion failed to start: {FUSION_PERSISTENCE_REQUIRED}"
-                )),
-            };
-        }
         let snapshot = self.handle.get_status_snapshot().await;
-        let conversation_id = self.handle.current_session_id().await.to_string();
+        let conversation_id = session_id.to_string();
         let surface = self.executor.agent_surface();
         let preset = parsed.preset.unwrap_or(surface.default_preset);
         let cross = parsed
@@ -460,24 +444,73 @@ impl BuiltinCommandHandler for DesktopFusionCommandHandler {
             "same-provider"
         };
         let description = fusion_task_description(preset_word, scope_word, &request.prompt);
-        match self
+        let display = match self
             .registry
             .spawn(
                 TaskType::LocalFusion,
                 TaskSpawnInput::LocalFusion {
                     request,
-                    conversation_id,
+                    conversation_id: conversation_id.clone(),
                 },
                 description,
             )
             .await
         {
-            Ok(task_id) => CommandResult::Done {
-                display: Some(format!("{task_id}  {preset_word}  {scope_word}")),
-            },
-            Err(err) => CommandResult::Done {
-                display: Some(format!("fusion failed to start: {err}")),
-            },
+            Ok(task_id) => format!("Fusion started: {task_id}  {preset_word}  {scope_word}"),
+            Err(err) => format!("fusion failed to start: {err}"),
+        };
+        CommandResult::Done {
+            display: Some(display),
+        }
+    }
+}
+
+#[async_trait]
+impl BuiltinCommandHandler for DesktopFusionCommandHandler {
+    async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
+        // Persist every invocation before any publication retry or provider work.
+        // Keep the same target even if the live conversation changes meanwhile.
+        if !self.durable_publication_available {
+            return CommandResult::Done {
+                display: Some(format!(
+                    "fusion failed to start: {FUSION_PERSISTENCE_REQUIRED}"
+                )),
+            };
+        }
+        let session_id = self.handle.current_session_id().await;
+        let conversation_id = session_id.to_string();
+        let raw_request = if args.raw_args.is_empty() {
+            "/fusion".to_string()
+        } else {
+            format!("/fusion {}", args.raw_args)
+        };
+        if let Err(error) = self
+            .handle
+            .append_fusion_command_message(&conversation_id, &raw_request, true)
+            .await
+        {
+            return CommandResult::Done {
+                display: Some(format!("fusion failed to start: {error}")),
+            };
+        }
+        let result = self.execute(args, session_id).await;
+        if let CommandResult::Done {
+            display: Some(display),
+        } = result
+        {
+            let display = match self
+                .handle
+                .append_fusion_command_message(&conversation_id, &display, false)
+                .await
+            {
+                Ok(()) => display,
+                Err(error) => format!("{display}\nCould not save the Fusion reply: {error}"),
+            };
+            CommandResult::Done {
+                display: Some(display),
+            }
+        } else {
+            result
         }
     }
 
@@ -518,6 +551,130 @@ mod tests {
             timing: FusionTiming::default(),
             egress_profiles: vec![],
         }
+    }
+
+    struct UnusedExecutor;
+
+    impl FusionExecutor for UnusedExecutor {
+        fn prepare(
+            self: Arc<Self>,
+            _: platform_api::FusionSubmission,
+        ) -> Result<platform_api::PreparedFusionRun, platform_api::FusionError> {
+            panic!("the unregistered task must never dispatch a provider request")
+        }
+    }
+
+    #[tokio::test]
+    async fn every_command_branch_preserves_original_request_and_reply() {
+        use orchestrator::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("session.jsonl");
+        let fs = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let handle = Arc::new(
+            orchestrator::ConversationOrchestrator::new(
+                orchestrator::OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                dir.path().to_path_buf(),
+            )
+            .with_jsonl_writer(Arc::new(session::jsonl::writer::JsonlWriter::new(
+                transcript_path.clone(),
+                fs.clone(),
+            ))),
+        );
+        let registry = Arc::new(tasks::registry::TaskRegistry::new(
+            Arc::new(platform_posix::runtime::PosixRuntime::new()),
+            fs.clone(),
+            Arc::new(tasks::output_manager::TaskOutputManager::new(
+                dir.path().join("tasks"),
+                fs,
+            )),
+        ));
+        let command = DesktopFusionCommandHandler::new(
+            registry,
+            Arc::new(UnusedExecutor),
+            handle.clone(),
+            BTreeMap::new(),
+        );
+        let invocations = [
+            (
+                "/fusion --quality explain cursor behavior\nKeep this original detail",
+                "fusion failed to start:",
+            ),
+            ("/fusion setup", FUSION_SETUP_ELSEWHERE),
+            ("/fusion", ""),
+            ("/fusion --retry-publication invalid", ""),
+            (
+                "/fusion --retry-publication fu_0123456789abcdef0123456789abcdef",
+                "fusion publication retry failed:",
+            ),
+        ];
+        for (index, (raw, expected_prefix)) in invocations.iter().enumerate() {
+            let result = command.handle(&parse_slash_command(raw).unwrap()).await;
+            let CommandResult::Done {
+                display: Some(display),
+            } = result
+            else {
+                panic!("expected a command reply")
+            };
+            assert!(display.starts_with(expected_prefix), "{display}");
+            let text = std::fs::read_to_string(&transcript_path).unwrap();
+            let rows: Vec<serde_json::Value> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(rows.len(), (index + 1) * 2);
+            assert_eq!(rows[index * 2]["message"]["content"][0]["text"], *raw);
+            assert_eq!(
+                rows[index * 2 + 1]["message"]["content"][0]["text"],
+                display
+            );
+            assert_eq!(
+                handle.get_status_snapshot().await.n_messages,
+                u32::try_from((index + 1) * 2).unwrap()
+            );
+        }
+        let disabled = command.with_durable_publication_available(false);
+        for (raw, _) in invocations {
+            let CommandResult::Done {
+                display: Some(display),
+            } = disabled.handle(&parse_slash_command(raw).unwrap()).await
+            else {
+                panic!("expected a persistence failure")
+            };
+            assert!(display.contains(FUSION_PERSISTENCE_REQUIRED), "{display}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&transcript_path)
+                .unwrap()
+                .lines()
+                .count(),
+            10
+        );
+        // A runtime storage failure must also prevent execution, even when
+        // durable publication was enabled at composition time.
+        std::fs::remove_file(&transcript_path).unwrap();
+        std::fs::create_dir(&transcript_path).unwrap();
+        let unavailable = disabled.with_durable_publication_available(true);
+        for (raw, _) in invocations {
+            let CommandResult::Done {
+                display: Some(display),
+            } = unavailable.handle(&parse_slash_command(raw).unwrap()).await
+            else {
+                panic!("expected a storage failure")
+            };
+            assert!(display.starts_with("fusion failed to start:"), "{display}");
+        }
+        assert_eq!(handle.get_status_snapshot().await.n_messages, 10);
     }
 
     struct CountingSink(AtomicUsize);

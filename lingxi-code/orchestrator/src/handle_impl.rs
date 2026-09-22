@@ -1746,6 +1746,42 @@ impl OrchestratorHandle for ConversationOrchestrator {
         Ok(())
     }
 
+    async fn append_fusion_command_message(
+        &self,
+        session_id: &str,
+        text: &str,
+        is_user: bool,
+    ) -> Result<(), HandleError> {
+        let target = protocol::SessionId::parse_prefixed(session_id).ok_or_else(|| {
+            HandleError::ActionFailed(format!("invalid target session id {session_id:?}"))
+        })?;
+        let _turn_guard = self.turn_gate.lock().await;
+        let message = if is_user {
+            protocol::ConversationMessage::user(protocol::MessageId::new(), text.to_string())
+        } else {
+            protocol::ConversationMessage::Assistant {
+                id: protocol::MessageId::new(),
+                content: vec![protocol::ContentBlock::Text {
+                    text: text.to_string(),
+                }],
+                stop_reason: None,
+            }
+        };
+        let uuid = self
+            .persist_conversation_message_to_session(target, &message, false)
+            .await?
+            .ok_or_else(|| {
+                HandleError::ActionFailed("Fusion requires session persistence".into())
+            })?;
+        let mut session = self.session.lock().await;
+        if session.session_id == target {
+            session.history.push(message);
+            drop(session);
+            *self.transcript.last_jsonl_uuid.lock().await = Some(uuid);
+        }
+        Ok(())
+    }
+
     async fn append_meta_user_message_to_session(
         &self,
         session_id: &str,

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { beginLocalSlashCommand, beginSlashCommand, emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
+import { beginLocalSlashCommand, beginSlashCommand, failSlashCommand, emptyConversation, reduceEvent, reduceEventWithPendingFusion } from '../src/renderer/bridge/conversation';
 import {
   commandDefaultOpen,
   commandDiagnosticTone,
@@ -10,6 +10,47 @@ import {
   parseCommandHelp,
   parseCommandMetrics,
 } from '../src/renderer/model/runItem';
+
+test('Fusion echoes its complete request and renders its reply as a conversation message without a dialog', () => {
+  const prompt = '/fusion --quality Compare both approaches\nPreserve the original requirements.';
+  const started = beginSlashCommand(emptyConversation(), prompt);
+  assert.equal(started.items.length, 1);
+  assert.equal(started.items[0].type, 'narration');
+  assert.equal(started.items[0].type === 'narration' && started.items[0].text, prompt);
+  assert.equal(started.pendingSlashPrompt, null);
+  const state = reduceEvent(started, { type: 'slash_command_result', display: 'Fusion started: **quality**' });
+  assert.equal(state.commandResult, null);
+  assert.equal(state.running, false);
+  assert.equal(state.pendingSlashName, null);
+  assert.deepEqual(state.items[1], { type: 'narration', id: 'i2', role: 'assistant', text: 'Fusion started: **quality**' });
+  const followup = beginSlashCommand(state, '/fusion --fast Investigate the first option');
+  assert.equal(followup.items.length, 3);
+  assert.equal(new Set(followup.items.map((item) => item.id)).size, 3);
+});
+
+test('Fusion setup, validation failures, and transport errors stay in the conversation', () => {
+  for (const command of ['/fusion setup', '/FUSION Compare approaches']) {
+    for (const event of [
+      { type: 'slash_command_result' as const, display: 'Provider unavailable', is_error: true },
+      { type: 'error' as const, message: 'Provider unavailable' },
+    ]) {
+      const state = reduceEvent(beginSlashCommand(emptyConversation(), command), event);
+      assert.equal(state.commandResult, null);
+      assert.equal(state.running, false);
+      assert.equal(state.lastError, 'Provider unavailable');
+      assert.deepEqual(state.items[1], { type: 'narration', id: 'i2', role: 'assistant', text: 'Provider unavailable', tone: 'danger' });
+    }
+  }
+});
+
+test('Fusion empty responses add no blank reply and do not release an existing turn', () => {
+  const started = beginSlashCommand({ ...emptyConversation(), running: true }, '/fusion compare');
+  const state = reduceEvent(started, { type: 'slash_command_result', display: '  ' });
+  assert.equal(state.items.length, 1);
+  assert.equal(state.nextId, started.nextId);
+  assert.equal(state.commandResult, null);
+  assert.equal(state.running, true);
+});
 
 test('a display command result stays outside the transcript', () => {
   const started = beginSlashCommand(emptyConversation(), '/status');
@@ -222,4 +263,64 @@ test('failed utility commands and session switches do not create messages', () =
   assert.equal(failed.running, false);
   const resumed = reduceEvent(failed, { type: 'session_resumed', session_id: 'other', messages: [] });
   assert.equal(resumed.commandResult, null);
+});
+
+
+test('in-flight Fusion survives OAuth startup and history restoration, then produces an inline reply', () => {
+  const raw = '/fusion compare implementations';
+  let state = beginSlashCommand(emptyConversation(), raw);
+  state = reduceEventWithPendingFusion(state, { type: 'session_started', session_id: 'sess:owned' }, 'owned', raw);
+  assert.equal(state.pendingSlashName, '/fusion');
+  assert.equal(state.items.length, 1);
+  state = reduceEventWithPendingFusion(state, {
+    type: 'session_resumed', session_id: 'owned',
+    messages: [{ role: 'user', blocks: [{ type: 'text', text: 'Earlier question' }] }],
+  }, 'owned', raw);
+  assert.equal(state.pendingSlashName, '/fusion');
+  assert.equal(state.running, true);
+  assert.deepEqual(state.items.filter(item => item.type === 'narration').map(item => item.text), ['Earlier question', raw]);
+  state = reduceEventWithPendingFusion(state, { type: 'slash_command_result', display: 'Fusion started' }, 'owned');
+  assert.equal(state.commandResult, null);
+  assert.equal(state.running, false);
+  assert.equal(state.pendingSlashName, null);
+  assert.equal(state.items.length, 3);
+  assert.equal(new Set(state.items.map(item => item.id)).size, 3);
+});
+
+test('completed or cancelled Fusion dispatches and other runtimes do not re-arm a slash claim on restart', () => {
+  const raw = '/fusion compare';
+  const state = beginSlashCommand(emptyConversation(), raw);
+  for (const [runtimeId, pending] of [['owned', undefined], ['other', raw]] as const) {
+    const restored = reduceEventWithPendingFusion(state, {
+      type: 'session_resumed', session_id: 'owned', messages: [],
+    }, runtimeId, pending);
+    assert.equal(restored.pendingSlashName, null);
+    assert.equal(restored.running, false);
+    assert.equal(restored.items.length, 0);
+  }
+});
+
+test('a failed Fusion dispatch after history restoration stays inline and releases its claim', () => {
+  const raw = '/fusion compare';
+  const restored = reduceEventWithPendingFusion(emptyConversation(), {
+    type: 'session_resumed', session_id: 'owned', messages: [],
+  }, 'owned', raw);
+  const failed = reduceEvent(restored, { type: 'error', message: 'OAuth loading interrupted' });
+  assert.equal(failed.commandResult, null);
+  assert.equal(failed.pendingSlashName, null);
+  assert.equal(failed.running, false);
+  assert.equal(failed.items.length, 2);
+});
+
+
+test('Fusion host rejection after connection reset reconstructs its message and renders failure inline', () => {
+  const state = failSlashCommand(emptyConversation(), '/fusion compare', 'Failed to run the slash command.');
+  assert.equal(state.commandResult, null);
+  assert.equal(state.running, false);
+  assert.equal(state.pendingSlashName, null);
+  assert.deepEqual(state.items.filter(item => item.type === 'narration').map(item => item.text), [
+    '/fusion compare', 'Failed to run the slash command.',
+  ]);
+  const pending = beginSlashCommand(emptyConversation(), '/fusion compare');
+  assert.equal(failSlashCommand(pending, '/fusion compare', 'Failed').items.length, 2);
 });

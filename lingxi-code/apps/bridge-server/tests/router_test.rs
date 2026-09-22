@@ -426,6 +426,54 @@ impl TaskRegistryHandle for MockTaskRegistry {
     }
 }
 
+struct FailingTaskRegistry;
+
+#[async_trait]
+impl TaskRegistryHandle for FailingTaskRegistry {
+    async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+        Err(TaskRegistryError::Internal("unused".into()))
+    }
+    async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+        Ok(None)
+    }
+    async fn list(&self, _filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+        Err(TaskRegistryError::Internal("list unavailable".into()))
+    }
+    async fn update(
+        &self,
+        _id: &str,
+        _patch: TaskUpdatePatch,
+    ) -> Result<TaskRecord, TaskRegistryError> {
+        Err(TaskRegistryError::Internal("unused".into()))
+    }
+    async fn set_status(&self, _id: &str, _status: &str) -> Result<TaskRecord, TaskRegistryError> {
+        Err(TaskRegistryError::Internal("unused".into()))
+    }
+    async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+        Ok(TaskRecord {
+            task_id: id.to_string(),
+            task_type: "local_bash".into(),
+            status: "killed".into(),
+            description: "stopped".into(),
+            command: None,
+            ..Default::default()
+        })
+    }
+    async fn output(
+        &self,
+        id: &str,
+        _offset: Option<u64>,
+    ) -> Result<TaskOutputChunk, TaskRegistryError> {
+        Ok(TaskOutputChunk {
+            task_id: id.to_string(),
+            content: "line1\nline2".into(),
+            total_lines: 2,
+            truncated: false,
+            ..Default::default()
+        })
+    }
+}
+
 // ── Router fixtures ───────────────────────────────────────────────────────────
 
 fn router_with(
@@ -1808,6 +1856,7 @@ async fn task_list_command_emits_task_rows() {
     router
         .route(
             ClientCommand::TaskList {
+                request_id: None,
                 status_filter: None,
             },
             sink.clone(),
@@ -1825,6 +1874,57 @@ async fn task_list_command_emits_task_rows() {
     assert_eq!(rows.len(), 2, "one TaskRow per task, got {events:?}");
     assert_eq!(rows[0].task_id, "b3f9zk2xq");
     assert_eq!(rows[1].task_id, "a1c2d3e4f");
+    assert_eq!(events.len(), 2, "legacy clients receive rows only");
+    router
+        .route(
+            ClientCommand::TaskList {
+                request_id: Some("guard-1".into()),
+                status_filter: None,
+            },
+            sink.clone(),
+        )
+        .await;
+    let events = sink.events().await;
+    assert!(
+        matches!(events.last(), Some(ClientEvent::TaskListComplete { request_id, active_count: 1, error: None }) if request_id == "guard-1")
+    );
+}
+
+#[tokio::test]
+async fn correlated_task_list_reports_empty_and_failure() {
+    for (tasks, failed) in [
+        (
+            Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
+            false,
+        ),
+        (
+            Arc::new(FailingTaskRegistry) as Arc<dyn TaskRegistryHandle>,
+            true,
+        ),
+    ] {
+        let router = EngineCommandRouter::new(
+            Arc::new(MockOrchestratorHandle::new()),
+            Arc::new(MockAuth),
+            tasks,
+            None,
+            None,
+        );
+        let sink = CapturingSink::arc();
+        router
+            .route(
+                ClientCommand::TaskList {
+                    request_id: Some("guard-empty".into()),
+                    status_filter: None,
+                },
+                sink.clone(),
+            )
+            .await;
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], ClientEvent::TaskListComplete { request_id, active_count: 0, error } if request_id == "guard-empty" && error.is_some() == failed)
+        );
+    }
 }
 
 #[tokio::test]

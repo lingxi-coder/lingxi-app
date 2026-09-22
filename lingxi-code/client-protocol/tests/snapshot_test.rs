@@ -220,6 +220,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/task_list_complete.json",
+            ClientEvent::TaskListComplete { request_id: "guard-1".into(), active_count: 2, error: None },
+        ),
+        (
             "event/scheduled_task_fire.json",
             ClientEvent::ScheduledTaskFire { message: "Scheduled task fired: check the deploy".into() },
         ),
@@ -1557,6 +1561,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/task_list.json",
             ClientCommand::TaskList {
+                request_id: None,
                 status_filter: Some(TaskStatusDto::Running),
             },
         ),

@@ -504,16 +504,17 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       exactKeys(input, ['type']);
       return { type };
     case 'task_list': {
-      exactKeys(input, ['type', 'status_filter']);
+      exactKeys(input, ['type', 'status_filter', 'request_id']);
+      const request = input['request_id'] === undefined ? {} : { request_id: string(input['request_id'], 'request id') };
       const status = input['status_filter'];
-      if (status === undefined) return { type };
+      if (status === undefined) return { type, ...request };
       const filter = object(status);
       exactKeys(filter, ['type']);
       const filterType = string(filter['type'], 'task status', 32);
       if (!['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(filterType)) {
         throw new Error('invalid task status');
       }
-      return { type, status_filter: { type: filterType } as Extract<ClientCommand, { type: 'task_list' }>['status_filter'] };
+      return { type, ...request, status_filter: { type: filterType } as Extract<ClientCommand, { type: 'task_list' }>['status_filter'] };
     }
     case 'task_output':
       exactKeys(input, ['type', 'task_id', 'offset']);

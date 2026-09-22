@@ -469,6 +469,9 @@ pub enum ClientCommand {
         // Optional status filter. Skipped from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status_filter: Option<TaskStatusDto>,
+        // Optional correlator requesting an authoritative completion receipt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 
     // Pull a task's accumulated output spool from `offset`. Replied with a

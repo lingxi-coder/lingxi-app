@@ -10769,7 +10769,7 @@ impl MobileEngineHandle {
             // Replies ride the pre-existing (previously emitter-less) DTOs:
             // one `TaskRow` per record, one `TaskOutputChunk`, one
             // `TaskStatusChanged` after a stop.
-            ClientCommand::TaskList { status_filter } => {
+            ClientCommand::TaskList { status_filter, .. } => {
                 let filter = platform_api::task_registry::TaskListFilter {
                     status: status_filter.map(|s| {
                         match s {

@@ -241,16 +241,39 @@ function isTaskControl(name: string | null): boolean {
   return name === '/compact' || name === '/goal';
 }
 
-/** Defer the echo until turn_started proves the command initiated task work. */
+/** Fusion starts background work without turn_started, so echo its request now. */
 export function beginSlashCommand(state: ConversationState, raw: string): ConversationState {
   const trimmed = raw.trim();
   if (!trimmed) return state;
   const name = trimmed.split(/\s/, 1)[0]?.toLowerCase() ?? '';
-  const next = isTaskControl(name) ? appendUserPrompt(state, trimmed) : state;
+  const echo = isTaskControl(name) || name === '/fusion';
+  const next = echo ? appendUserPrompt(state, trimmed) : state;
   return {
-    ...next, pendingSlashName: name, pendingSlashPrompt: isTaskControl(name) ? null : trimmed,
+    ...next, pendingSlashName: name, pendingSlashPrompt: echo ? null : trimmed,
     pendingSlashWasRunning: state.running, running: true, commandResult: null,
   };
+}
+
+/** A failed host dispatch may follow a restart that already erased its UI claim. */
+export function failSlashCommand(state: ConversationState, raw: string, message: string): ConversationState {
+  const fusion = /^\/fusion(?:\s|$)/i.test(raw.trim());
+  const claimed = fusion && state.pendingSlashName !== '/fusion' ? beginSlashCommand(state, raw) : state;
+  return reduceEvent(claimed, { type: 'error', kind: { type: 'transport' }, message });
+}
+
+export function isPendingFusionSessionRestore(event: ClientEvent, runtimeSessionId: string, pendingRaw?: string): boolean {
+  return Boolean(pendingRaw && /^\/fusion(?:\s|$)/i.test(pendingRaw.trim())
+    && (event.type === 'session_started' || event.type === 'session_resumed')
+    && event.session_id.replace(/^sess:/, '') === runtimeSessionId.replace(/^sess:/, ''));
+}
+
+/** Restore only a host dispatch still awaiting OAuth restart in this runtime. */
+export function reduceEventWithPendingFusion(
+  state: ConversationState, event: ClientEvent, runtimeSessionId: string, pendingRaw?: string,
+): ConversationState {
+  const next = reduceEvent(state, event);
+  if (!pendingRaw || !isPendingFusionSessionRestore(event, runtimeSessionId, pendingRaw)) return next;
+  return beginSlashCommand(next, pendingRaw);
 }
 
 /** Desktop utility actions never create task messages or claim a model turn. */
@@ -754,6 +777,25 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
     }
 
     case 'slash_command_result': {
+      // Fusion is a conversation: its launch/setup/error response belongs next
+      // to the user's request, where Markdown links and follow-up remain usable.
+      if (state.pendingSlashName === '/fusion') {
+        const items = state.items.slice();
+        closeThinking(items, state.openThinkingIndex);
+        const hasOutput = event.display.trim().length > 0;
+        if (hasOutput) items.push({
+          type: 'narration', id: itemId(state.nextId), role: 'assistant',
+          text: event.display, ...(event.is_error ? { tone: 'danger' as const } : {}),
+        });
+        return {
+          ...state, items, commandResult: null,
+          running: state.pendingSlashWasRunning,
+          pendingSlashName: null, pendingSlashPrompt: null,
+          openAssistantIndex: -1, openThinkingIndex: -1,
+          nextId: state.nextId + Number(hasOutput),
+          ...(event.is_error ? { lastError: event.display } : {}),
+        };
+      }
       // A validation failure can precede the engine's first lifecycle event.
       if (state.activeCompactionId !== null && state.pendingSlashName === '/compact') {
         const cancelled = /\bcancell?ed\b/i.test(event.display);

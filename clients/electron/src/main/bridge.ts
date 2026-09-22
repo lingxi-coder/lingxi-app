@@ -35,7 +35,7 @@ import {
   validatePrompt,
   validateRequestId,
 } from './validation.js';
-import { resolveModelCredentialProviderIds } from './credential-broker.js';
+import { resolveFusionCredentialProviderIds, resolveModelCredentialProviderIds } from './credential-broker.js';
 
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 export const CH_APPROVE = 'lingxi:approve';
@@ -725,6 +725,7 @@ export class SessionRuntime {
   private openAiOAuthPreparation: Promise<void> | null = null;
   private launchOAuthOverride: OpenAiOAuthSession | undefined;
   private launchOAuthModel: string | undefined;
+  private fusionLifecycleEpoch = 0;
   private oauthPersistence: Promise<void> = Promise.resolve();
   private activeTurnId: number | undefined;
   private cancellingTurn = false;
@@ -1386,14 +1387,15 @@ export class SessionRuntime {
     return this.startPromise;
   }
 
-  restart(beforeRestart?: () => void): Promise<void> {
+  restart(beforeRestart?: () => void | Promise<void>): Promise<void> {
+    ++this.fusionLifecycleEpoch;
     if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) throw new Error('session runtime is no longer open');
       // This runs after any earlier queued lifecycle work and immediately
       // before stopping the child. Callers can re-check ownership/work here
       // to close the queueing race between IPC validation and restart.
-      beforeRestart?.();
+      await beforeRestart?.();
       this.setState({ status: 'restarting' });
       try {
         await this.stopBridge();
@@ -1407,6 +1409,7 @@ export class SessionRuntime {
   }
 
   stop(): Promise<void> {
+    ++this.fusionLifecycleEpoch;
     if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
       if (this.disposed) return;
@@ -2185,6 +2188,11 @@ export class SessionRuntime {
           if (this.pendingModelSwitch) await this.pendingModelSwitch.promise;
           if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
           if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
+          // Optional Fusion routes must not gate a turn using a healthy main
+          // model. Explicit /fusion still awaits these same cached loads.
+          void this.ensureFusionProviderCredentials(false).catch(() => {
+            this.diagnostics.add('warn', 'bridge', 'Optional Fusion credential preload failed.');
+          });
           if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
           this.sendPreparedPrompt(prompt, validatedImages);
         } finally {
@@ -2217,6 +2225,7 @@ export class SessionRuntime {
 
   cancelTurn(turnId: unknown): void {
     const id = validateOptionalTurnId(turnId);
+    ++this.fusionLifecycleEpoch;
     this.requireClient().cancel(id);
     this.pendingModelSwitch?.fail(new Error('Model switch was cancelled.'));
     if (this.pendingPromptHydrations.size > 0) {
@@ -2395,6 +2404,31 @@ export class SessionRuntime {
     }
     if ((validated.type === 'set_model' || validated.type === 'run_slash_command') && this.pendingModelSwitch) throw new Error('A model switch is already in progress.');
     assertCommandAllowedDuringTurn(validated, this.turnActive);
+    if (validated.type === 'run_slash_command' && /^\/fusion(?:\s|$)/i.test(validated.raw.trim())
+      && !/^\/fusion\s+setup\s*$/i.test(validated.raw.trim())
+      && !/(?:^|\s)--retry-publication(?:\s|$)/.test(validated.raw)
+      && (this.opts.resolveProviderCredential || this.opts.resolveOpenAiOAuth)) {
+      let generation = this.generation;
+      let client = this.requireClient();
+      const token = Symbol('fusion credential hydration');
+      this.pendingPromptHydrations.add(token);
+      this.notifyActivityChanged();
+      try {
+        await this.ensureFusionOAuth(token);
+        generation = this.generation;
+        client = this.requireClient();
+        await this.ensureFusionProviderCredentials(true);
+        if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) {
+          throw new Error('Fusion credential loading was interrupted.');
+        }
+        client.sendCommand(validated);
+        this.commitFusionHistory(validated);
+      } finally {
+        this.pendingPromptHydrations.delete(token);
+        this.notifyActivityChanged();
+      }
+      return;
+    }
     // Preserve slash hook provenance and confirm the actual model before saving.
     if (validated.type === 'run_slash_command' && this.opts.onModelSelected) {
       const model = /^\/model\s+([\s\S]+)$/.exec(validated.raw.trim())?.[1]?.trim();
@@ -2444,6 +2478,90 @@ export class SessionRuntime {
       return this.applyPermissionMode(validated.mode, true);
     }
     this.requireClient().sendCommand(validated);
+    this.commitFusionHistory(validated);
+  }
+
+  private commitFusionHistory(command: ClientCommand): void {
+    if (command.type !== 'run_slash_command' || !/^\/fusion(?:\s|$)/i.test(command.raw.trim())) return;
+    this.sessionHasHistory = true;
+    if (!this.sessionIdentityCommitted && this.opts.onFirstPromptSent?.() !== false) this.sessionIdentityCommitted = true;
+  }
+
+  /** Query the task registry before an implicit authentication restart. */
+  async assertNoBackgroundTasks(): Promise<void> {
+    const client = this.requireClient();
+    const requestId = randomUUID();
+    await new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        client.off('event', onEvent);
+        if (error) reject(error); else resolve();
+      };
+      const onEvent = (event: ClientEvent) => {
+        if (event.type !== 'task_list_complete' || event.request_id !== requestId) return;
+        if (event.error) finish(new Error('Could not check background work before activating Codex.'));
+        else if (event.active_count > 0) finish(new Error('Wait for background tasks to finish before activating Codex.'));
+        else finish();
+      };
+      const timer = setTimeout(() => finish(new Error('Background task check timed out; the session was not restarted.')), 5_000);
+      client.on('event', onEvent);
+      try { client.sendCommand({ type: 'task_list', request_id: requestId }); }
+      catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+    });
+  }
+
+  private async ensureFusionOAuth(token: symbol): Promise<void> {
+    const generation = this.generation;
+    const client = this.requireClient();
+    let epoch = this.fusionLifecycleEpoch;
+    const assertCurrent = () => {
+      if (this.disposed || this.archiving || epoch !== this.fusionLifecycleEpoch
+        || generation !== this.generation || client !== this.client || !this.pendingPromptHydrations.has(token)) {
+        throw new Error('Fusion credential loading was interrupted.');
+      }
+    };
+    if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+    assertCurrent();
+    if (this.openAiOAuthActive || !resolveFusionCredentialProviderIds(this.credentialRoutingSettings, true).includes('openai-chatgpt')) return;
+    if (!this.opts.resolveOpenAiOAuth) throw new Error('Codex authentication is unavailable. Sign in again.');
+    if (this.activeTurn || this.hasActiveAgents) throw new Error('Wait for active work to finish before activating Codex for Fusion; this requires restarting the session engine.');
+    const model = this.selectedModelReference;
+    this.preparingOpenAiOAuth = true;
+    let preparation!: Promise<void>;
+    preparation = (async () => {
+      try {
+        const session = await this.opts.resolveOpenAiOAuth!();
+        assertCurrent();
+        if (!session) throw new Error('Codex authentication is unavailable. Sign in again.');
+        this.launchOAuthOverride = session;
+        // OAuth is an additional Fusion provider; preserve the conversation model.
+        this.launchOAuthModel = model;
+        ++epoch;
+        await this.restart(async () => {
+          // restart() increments the epoch synchronously before entering its queue.
+          assertCurrent();
+          await this.assertNoBackgroundTasks();
+          assertCurrent();
+          if (this.activeTurn || this.hasActiveAgents) throw new Error('Wait for active work to finish before activating Codex for Fusion.');
+        });
+        const restartedGeneration = this.generation;
+        const restartedClient = this.requireClient();
+        await this.restoreOwnedSessionIfNeeded();
+        if (this.disposed || this.archiving || epoch !== this.fusionLifecycleEpoch
+          || restartedGeneration !== this.generation || restartedClient !== this.client) {
+          throw new Error('Fusion credential loading was interrupted.');
+        }
+        // The intentional restart clears old hydrations; continue on its new client.
+        this.pendingPromptHydrations.add(token);
+      } finally {
+        this.launchOAuthOverride = undefined;
+        this.launchOAuthModel = undefined;
+        this.preparingOpenAiOAuth = false;
+        if (this.openAiOAuthPreparation === preparation) this.openAiOAuthPreparation = null;
+      }
+    })();
+    this.openAiOAuthPreparation = preparation;
+    await preparation;
   }
 
   private async ensureProviderCredentialCached(providerId: string): Promise<void> {
@@ -2466,6 +2584,17 @@ export class SessionRuntime {
     });
     this.pendingRuntimeCredentialLoads.set(providerId, loading);
     return loading;
+  }
+
+  private async ensureFusionProviderCredentials(explicit: boolean): Promise<void> {
+    if (!this.opts.resolveProviderCredential) return;
+    const generation = this.generation;
+    const client = this.requireClient();
+    if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+    if (generation !== this.generation || client !== this.client) throw new Error('Fusion credential loading was interrupted.');
+    await Promise.all(resolveFusionCredentialProviderIds(this.credentialRoutingSettings, explicit)
+      .filter((providerId) => providerId !== 'openai-chatgpt')
+      .map((providerId) => this.ensureProviderCredentialCached(providerId)));
   }
 
   private async ensureModelProviderCredential(model: string): Promise<void> {
@@ -3143,8 +3272,17 @@ export class SessionRuntimeManager {
     const owner = this.oauthOwner ? this.runtimes.get(this.oauthOwner) : undefined;
     const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
       && (runtime.hasOpenAiOAuth || runtime === owner));
-    if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.pendingInteractions > 0
+    if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0
       || !['connected', 'idle', 'error', 'disconnected'].includes(runtime.connectionState.status))) {
+      throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
+    }
+    for (const runtime of candidates) {
+      if (runtime.connectionState.status === 'connected') await runtime.assertNoBackgroundTasks();
+      else if (runtime.hasOpenAiOAuth && runtime.connectionState.status !== 'idle') {
+        throw new Error('Reconnect or close the other Codex chat before changing Codex authentication; its background work cannot be checked.');
+      }
+    }
+    if (candidates.some(runtime => runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0)) {
       throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');
     }
     for (const runtime of candidates) await runtime.stop();

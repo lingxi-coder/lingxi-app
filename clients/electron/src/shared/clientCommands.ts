@@ -166,6 +166,7 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   task_row: 'exposed',
   task_output_chunk: 'exposed',
   task_status_changed: 'exposed',
+  task_list_complete: 'exposed',
   workflow_resumed: 'degraded',
   commands_changed: 'exposed',
   apps_changed: 'not_applicable',

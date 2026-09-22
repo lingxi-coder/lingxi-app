@@ -911,20 +911,15 @@ fn encode_message(
                 );
             }
         } else {
-            if preserve_reasoning_content && message.role == "assistant" {
-                tracing::warn!(
-                    target = "llm_client::openai",
-                    role = %message.role,
-                    reasoning_chars = reason_len,
-                    reason = "no_assistant_message_emitted_for_reasoning",
-                    event = "openai_encode_message_reasoning_synced_assistant_fallback",
-                );
-            }
-            messages.push(serde_json::json!({
-                "role": "assistant",
-                "content": null,
-                "reasoning_content": reasoning_content,
-            }));
+            // A budget-truncated turn may contain only reasoning. Chat requires
+            // assistant content or tool_calls; reasoning_content alone is not
+            // a valid message. Keep that turn in the transcript, but omit its
+            // wire representation so a continuation can actually reach the model.
+            tracing::debug!(
+                target = "llm_client::openai",
+                reasoning_chars = reason_len,
+                event = "openai_encode_message_reasoning_only_omitted",
+            );
         }
         if preserve_reasoning_content && message.role == "assistant" {
             tracing::debug!(
@@ -1238,6 +1233,85 @@ mod tests {
 
     fn body_of(request: &ProviderRequest) -> &Value {
         &request.body_json
+    }
+
+    #[test]
+    fn structured_output_retry_omits_reasoning_only_turn_without_losing_tool_history() {
+        for (url, profile, model) in [
+            ("https://api.deepseek.com", "deepseek", "deepseek-flash"),
+            ("https://proxy.example/v1", "kimi-code", "kimi-k2.7"),
+            ("https://api.openai.com/v1", "openai", "gpt-4o"),
+        ] {
+            let mut request = LlmRequest::new(model);
+            request.messages = vec![
+                Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::Text {
+                        text: "Build the app".into(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: "assistant".into(),
+                    content: vec![
+                        ContentBlock::Reasoning {
+                            text: "tool reasoning".into(),
+                            signature: None,
+                        },
+                        ContentBlock::ToolCall {
+                            id: "build_1".into(),
+                            name: "Build".into(),
+                            input: serde_json::json!({}),
+                        },
+                    ],
+                },
+                Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::ToolResult {
+                        tool_call_id: "build_1".into(),
+                        output: serde_json::json!({"success": true}),
+                        is_error: false,
+                        cache_control: None,
+                        cache_reference: None,
+                    }],
+                },
+                Message {
+                    role: "assistant".into(),
+                    content: vec![ContentBlock::Reasoning {
+                        text: "unfinished turn".into(),
+                        signature: None,
+                    }],
+                },
+                Message {
+                    role: "user".into(),
+                    content: vec![ContentBlock::Text {
+                        text: "You did not call StructuredOutput. Call it now.".into(),
+                        cache_control: None,
+                    }],
+                },
+            ];
+            let encoded = OpenAiChatCodec::new(url)
+                .with_profile_name(profile)
+                .encode_request(&request)
+                .expect("encode recovery request");
+            let messages = encoded.body_json["messages"].as_array().unwrap();
+            assert_eq!(
+                messages.len(),
+                4,
+                "{profile}: incomplete assistant turn must not reach the API"
+            );
+            assert_eq!(messages[1]["tool_calls"][0]["id"], "build_1");
+            assert_eq!(messages[2]["tool_call_id"], "build_1");
+            assert_eq!(messages[3]["role"], "user");
+            if profile != "openai" {
+                assert_eq!(messages[1]["reasoning_content"], "tool reasoning");
+            }
+            assert_eq!(
+                request.messages.len(),
+                5,
+                "encoding must not mutate stored history"
+            );
+        }
     }
 
     #[test]

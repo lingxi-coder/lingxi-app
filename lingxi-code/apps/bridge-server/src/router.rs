@@ -3935,6 +3935,7 @@ impl CommandRouter for EngineCommandRouter {
                     .unwrap_or_else(|| "default".to_string());
                 let previous_plan_mode = self.handle.plan_mode().await;
                 let runtime_snapshot = replayed.handle_runtime_snapshot();
+                let restored_usage = runtime_snapshot.current_usage;
                 if resume_plan_mode {
                     if let Err(error) = self.handle.set_permission_mode("plan").await {
                         sink.emit(ClientEvent::Error {
@@ -4004,6 +4005,10 @@ impl CommandRouter for EngineCommandRouter {
                     messages,
                 })
                 .await;
+                if let Some(usage) = restored_usage {
+                    sink.emit(client_adapter::lowering::lower_current_usage(usage))
+                        .await;
+                }
                 if let Some(message) = presence_warning {
                     sink.emit(ClientEvent::SystemNotice {
                         message,
@@ -4016,6 +4021,10 @@ impl CommandRouter for EngineCommandRouter {
                 // activation so clients do not keep showing the model selected
                 // in whichever session happened to be open previously.
                 let status = self.handle.get_status_snapshot().await;
+                sink.emit(ClientEvent::StatusSnapshot {
+                    snapshot: lower_status_snapshot(&status),
+                })
+                .await;
                 if !status.model.is_empty() {
                     sink.emit(ClientEvent::ModelChanged {
                         model: platform_api::qualified_model_ref(

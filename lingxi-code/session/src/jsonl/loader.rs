@@ -24,14 +24,14 @@
 //! the post-pass then splices each group's off-chain siblings + `tool_results` in
 //! right after their on-chain anchor, never reordering the main chain.
 
+use crate::jsonl::SessionMode;
 use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::re_append::{find_last_typed_field, read_tail};
-use crate::jsonl::reader::{extract_json_string_field, JsonlReader, LoadedTranscript};
+use crate::jsonl::reader::{JsonlReader, LoadedTranscript, extract_json_string_field};
 use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::title::{
-    extract_title, has_autonomous_tick_prompt, truncate_title, EMPTY_TITLE_FALLBACK,
+    EMPTY_TITLE_FALLBACK, extract_title, has_autonomous_tick_prompt, truncate_title,
 };
-use crate::jsonl::SessionMode;
 use platform_api::{FileSystem, FileSystemCacheIdentity};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -318,11 +318,7 @@ fn git_worktree_paths(cwd: &str) -> Vec<String> {
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let paths = parse_worktree_list(&stdout);
-    if paths.len() <= 1 {
-        Vec::new()
-    } else {
-        paths
-    }
+    if paths.len() <= 1 { Vec::new() } else { paths }
 }
 
 /// claude-code's worktree dir-name match
@@ -851,7 +847,8 @@ fn persisted_model_ref(
     let mut profile = None;
     let mut profile_seen = false;
     let mut seen = HashSet::new();
-    let reparent = preserved_tail_reparents(loaded);
+    let preserved = preserved_tail_state(loaded);
+    let reparent = &preserved.parents;
     let mut current = tip;
     while let Some(message) = current {
         if !seen.insert(message.uuid.as_str()) {
@@ -1512,7 +1509,7 @@ async fn select_session_path_across_worktrees(
                 return Err(LoaderError::Io {
                     arg: candidate.display().to_string(),
                     source,
-                })
+                });
             }
         };
         if !metadata.is_file() {
@@ -1968,6 +1965,8 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
         return None;
     }
 
+    let preserved = preserved_tail_state(loaded);
+
     // (0) Gap #1 fix: explicit last-prompt override.
     // Binary: `V = L&&O&&n.has(O)&&!n.get(O)?.isSidechain`
     // where L = explicit and O = leafUuid. Mirror: if explicit is set AND the
@@ -1975,7 +1974,8 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     if loaded.last_prompt_explicit {
         if let Some(lp_uuid) = &loaded.last_prompt_leaf_uuid {
             if let Some(lp_msg) = by_uuid.get(lp_uuid.as_str()) {
-                if !lp_msg.is_sidechain
+                if !preserved.pruned.contains(lp_uuid)
+                    && !lp_msg.is_sidechain
                     && (lp_msg.message_type == "user" || lp_msg.message_type == "assistant")
                 {
                     tracing::debug!(
@@ -2001,12 +2001,15 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     // (randomized-`HashSet`-order) selection — truncating the resumed chain to
     // just the summary and dropping the preserved tail. Empty (zero-cost) on any
     // transcript without a preserved-tail compaction.
-    let reparent = preserved_tail_reparents(loaded);
+    let reparent = &preserved.parents;
 
     // (1) Every EFFECTIVE parentUuid that is actually referenced (overlay first,
     // else the on-disk parent).
     let mut parent_uuids: HashSet<&str> = HashSet::new();
-    for m in by_uuid.values() {
+    for m in by_uuid
+        .values()
+        .filter(|m| !preserved.pruned.contains(&m.uuid))
+    {
         if let Some(p) = reparent
             .get(m.uuid.as_str())
             .map(String::as_str)
@@ -2019,7 +2022,10 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     // (2) Terminals = messages no other message points at.
     // (3) From each terminal, walk up to the nearest user/assistant leaf.
     let mut leaf_uuids: HashSet<String> = HashSet::new();
-    for m in by_uuid.values() {
+    for m in by_uuid
+        .values()
+        .filter(|m| !preserved.pruned.contains(&m.uuid))
+    {
         if parent_uuids.contains(m.uuid.as_str()) {
             continue; // not a terminal
         }
@@ -2043,7 +2049,8 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
                 .get(node.uuid.as_str())
                 .map(String::as_str)
                 .or(node.parent_uuid.as_deref())
-                .and_then(|p| by_uuid.get(p));
+                .and_then(|p| by_uuid.get(p))
+                .filter(|m| !preserved.pruned.contains(&m.uuid));
         }
     }
 
@@ -2119,7 +2126,8 @@ pub fn build_conversation_chain(
     // summary ← preserved tail ← …] — instead of following the tail's on-disk
     // parents back into the FULL pre-compact history. Empty on transcripts
     // without preserved-tail compactions (zero-cost common path).
-    let reparent = preserved_tail_reparents(loaded);
+    let preserved = preserved_tail_state(loaded);
+    let reparent = &preserved.parents;
 
     // (5) Walk tip → root, cycle-guarded, stop on missing parent; reverse.
     // Boundary lines carry `parentUuid: null` (the claude chain reset), so the
@@ -2146,8 +2154,10 @@ pub fn build_conversation_chain(
         let parent = entry.parent_uuid.clone();
         chain.push(entry);
         current = match parent.as_deref() {
-            Some(p) => by_uuid.get(p), // None here ⇒ missing parent ⇒ loop ends
-            None => None,              // reached the root
+            Some(p) => by_uuid
+                .get(p)
+                .filter(|m| !preserved.pruned.contains(&m.uuid)), // None here ⇒ missing parent ⇒ loop ends
+            None => None, // reached the root
         };
     }
     chain.reverse();
@@ -2156,7 +2166,46 @@ pub fn build_conversation_chain(
     // orphaned (parallel-tool-call DAG). Additive post-pass; never reorders the
     // main chain. `seen` is exactly the set of on-chain uuids (the cycle guard
     // breaks BEFORE pushing, so no extra entries).
-    let mut chain = recover_orphaned_parallel_tool_results(by_uuid, chain, &mut seen, arg);
+    let filtered;
+    let recovery_messages = if preserved.pruned.is_empty() {
+        by_uuid
+    } else {
+        filtered = by_uuid
+            .iter()
+            .filter(|(uuid, _)| !preserved.pruned.contains(*uuid))
+            .map(|(uuid, message)| (uuid.clone(), message.clone()))
+            .collect();
+        &filtered
+    };
+    let mut chain =
+        recover_orphaned_parallel_tool_results(recovery_messages, chain, &mut seen, arg);
+
+    // Preserved assistant records still carry pre-compaction usage on disk.
+    // Claude's applyPreservedSegmentRelinks clears these counters on resume,
+    // otherwise restoring the context meter can immediately trigger another
+    // compaction. Apply after sibling recovery so every preserved block is
+    // treated alike; leave fresh post-boundary usage and billing metadata intact.
+    for entry in &mut chain {
+        if entry.message_type == "assistant" && preserved.usage_to_clear.contains(&entry.uuid) {
+            let Some(message) = entry.message.as_object_mut() else {
+                continue;
+            };
+            let usage = message
+                .entry("usage")
+                .or_insert_with(|| serde_json::json!({}));
+            if !usage.is_object() {
+                *usage = serde_json::json!({});
+            }
+            for field in [
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+            ] {
+                usage[field] = Value::from(0);
+            }
+        }
+    }
 
     // A recovery marker can be the final persisted row when the retry was
     // interrupted. find_tip deliberately chooses user/assistant messages, so
@@ -2168,7 +2217,8 @@ pub fn build_conversation_chain(
         .map(|(index, message)| (message.uuid.as_str(), index))
         .collect();
     for (position, marker) in loaded.messages_in_order.iter().enumerate() {
-        if marker.message_type != "attachment"
+        if preserved.pruned.contains(&marker.uuid)
+            || marker.message_type != "attachment"
             || marker
                 .extra
                 .get("attachment")
@@ -2224,7 +2274,125 @@ fn message_id(m: &JsonlMessage) -> Option<&str> {
 /// resolved to every assistant line sharing that inner `message.id`, in file
 /// order (the write-side split invariant). Unresolvable ids are skipped
 /// (best-effort, like the tolerant walk).
-fn preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String, String> {
+#[derive(Default)]
+struct PreservedTailState {
+    parents: HashMap<String, String>,
+    usage_to_clear: HashSet<String>,
+    pruned: HashSet<String>,
+}
+
+/// Claude's applyPreservedSegmentRelinks: only the latest boundary can keep
+/// a segment live. Validate the original tail-to-head chain before applying
+/// any relinks or pruning, so malformed transcripts remain recoverable.
+fn preserved_tail_state(loaded: &LoadedTranscript) -> PreservedTailState {
+    let boundaries: Vec<_> = loaded
+        .messages_in_order
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.message_type == "system"
+                && line.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        })
+        .collect();
+    let latest_segment = boundaries.iter().rev().find(|(_, line)| {
+        line.extra
+            .get("compactMetadata")
+            .and_then(|m| m.get("preservedSegment"))
+            .is_some()
+    });
+    let Some((segment_index, boundary)) = latest_segment else {
+        let parents = legacy_preserved_tail_reparents(loaded);
+        return PreservedTailState {
+            usage_to_clear: parents.keys().cloned().collect(),
+            parents,
+            pruned: HashSet::new(),
+        };
+    };
+    let mut state = PreservedTailState::default();
+    let latest_index = boundaries.last().expect("segment is a boundary").0;
+    if *segment_index == latest_index {
+        let segment = &boundary.extra["compactMetadata"]["preservedSegment"];
+        let (Some(head), Some(tail), Some(anchor)) = (
+            segment.get("headUuid").and_then(Value::as_str),
+            segment.get("tailUuid").and_then(Value::as_str),
+            segment.get("anchorUuid").and_then(Value::as_str),
+        ) else {
+            return state;
+        };
+        // Compaction stores in-memory response IDs; persistence splits each
+        // assistant into block rows. Head is the first block, tail/anchor last.
+        let head = preserved_endpoint_uuid(loaded, head, false);
+        let tail = preserved_endpoint_uuid(loaded, tail, true);
+        let anchor = preserved_endpoint_uuid(loaded, anchor, true);
+        let mut current = loaded.by_uuid.get(tail);
+        let mut reached_head = false;
+        while let Some(message) = current {
+            if !state.usage_to_clear.insert(message.uuid.clone()) {
+                break;
+            }
+            if message.uuid == head {
+                reached_head = true;
+                break;
+            }
+            current = message
+                .parent_uuid
+                .as_ref()
+                .and_then(|p| loaded.by_uuid.get(p));
+        }
+        if !reached_head {
+            return PreservedTailState::default();
+        }
+        // LingXi persists parallel results against their source assistant,
+        // creating branches outside the validated tail-to-head parent path.
+        // Keep the latest boundary's complete membership before pruning so
+        // sibling recovery can still see those branches. Resolve in-memory
+        // assistant IDs to every split row, as with preserved endpoints.
+        if let Some(messages) = boundary.extra["compactMetadata"].get("preservedMessages") {
+            let ids: HashSet<&str> = ["uuids", "allUuids"]
+                .into_iter()
+                .filter_map(|key| messages.get(key).and_then(Value::as_array))
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            for message in &loaded.messages_in_order[..latest_index] {
+                if ids.contains(message.uuid.as_str())
+                    || (message.message_type == "assistant"
+                        && message_id(message)
+                            .is_some_and(|id| ids.contains(id) && !loaded.by_uuid.contains_key(id)))
+                {
+                    state.usage_to_clear.insert(message.uuid.clone());
+                }
+            }
+        }
+        state.parents.insert(head.to_string(), anchor.to_string());
+        // Children appended against the summary before the tail was re-linked
+        // must follow the tail, while the original segment internals stay intact.
+        for message in loaded.by_uuid.values() {
+            if message.parent_uuid.as_deref() == Some(anchor) && message.uuid != head {
+                state.parents.insert(message.uuid.clone(), tail.to_string());
+            }
+        }
+    }
+    state.pruned = loaded.messages_in_order[..latest_index]
+        .iter()
+        .filter(|message| !state.usage_to_clear.contains(&message.uuid))
+        .map(|message| message.uuid.clone())
+        .collect();
+    state
+}
+
+fn preserved_endpoint_uuid<'a>(loaded: &'a LoadedTranscript, id: &'a str, last: bool) -> &'a str {
+    if loaded.by_uuid.contains_key(id) {
+        return id;
+    }
+    let mut rows = loaded
+        .messages_in_order
+        .iter()
+        .filter(|message| message.message_type == "assistant" && message_id(message) == Some(id));
+    if last { rows.next_back() } else { rows.next() }.map_or(id, |message| message.uuid.as_str())
+}
+
+fn legacy_preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String, String> {
     let mut reparent: HashMap<String, String> = HashMap::new();
     for line in &loaded.messages_in_order {
         if line.message_type != "system"
@@ -2883,7 +3051,7 @@ mod tests {
         // `dirName === prefix` and `dirName.startsWith(prefix + '-')` match…
         assert!(worktree_dir_matches("-x-repo", "-x-repo")); // exact
         assert!(worktree_dir_matches("-x-repo-sub", "-x-repo")); // subdir (prefix + '-')
-                                                                 // …but a bare prefix-extension (no `-` boundary) must NOT match.
+        // …but a bare prefix-extension (no `-` boundary) must NOT match.
         assert!(!worktree_dir_matches("-x-repository", "-x-repo"));
         assert!(!worktree_dir_matches("-y-other", "-x-repo"));
     }
@@ -3278,9 +3446,11 @@ mod tests {
         let writer = crate::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone());
 
         // Absent transcript → None.
-        assert!(read_worktree_state(&path, fs.clone(), session_id)
-            .await
-            .is_none());
+        assert!(
+            read_worktree_state(&path, fs.clone(), session_id)
+                .await
+                .is_none()
+        );
 
         // After EnterWorktree persists an active session → Some(payload).
         let payload = serde_json::json!({

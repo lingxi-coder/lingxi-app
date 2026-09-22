@@ -62,6 +62,9 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 
+#[path = "router_test/resume_usage.rs"]
+mod resume_usage;
+
 #[path = "router_test/compact_shutdown.rs"]
 mod compact_shutdown;
 
@@ -618,7 +621,8 @@ fn seed_replay_session(root: &std::path::Path) -> String {
         "message": {
             "role": "assistant",
             "content": [{"type": "text", "text": "restored"}],
-            "model": "claude-opus-4-1"
+            "model": "claude-opus-4-1",
+            "usage": {"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":3000,"cache_creation_input_tokens":500}
         },
         "effort": "high"
     });
@@ -2418,7 +2422,13 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
         session_id: emitted_id,
         mode,
         messages,
-    }, ClientEvent::ModelChanged { model }] = events.as_slice()
+    }, ClientEvent::UsageUpdate {
+        is_snapshot: Some(true),
+        input_tokens: 1200,
+        output_tokens: 80,
+        cache_read_tokens: 3000,
+        cache_creation_tokens: 500,
+    }, ClientEvent::StatusSnapshot { .. }, ClientEvent::ModelChanged { model }] = events.as_slice()
     else {
         panic!("expected SessionResumed followed by its model, got {events:?}");
     };
@@ -2504,6 +2514,7 @@ async fn resume_session_sets_plan_state_before_replay() {
         sink.events().await.as_slice(),
         [
             ClientEvent::SessionResumed { .. },
+            ClientEvent::StatusSnapshot { .. },
             ClientEvent::ModelChanged { .. }
         ]
     ));

@@ -193,9 +193,12 @@ impl ForkedAgentRunner {
     /// 2. Reuse the parent's already-rendered `system_prompt` verbatim and set
     ///    `skip_system_prompt_prefix` so the client does not prepend its own
     ///    engine prefix (which would break the cache hit).
-    /// 3. Compaction preserves the parent's tool schemas for the cache prefix.
-    ///    It still issues only one request and never executes tool calls.
-    ///    Other single-turn forks expose no tools.
+    /// 3. Preserve the parent's tool schemas for the cache prefix on every
+    ///    fork. Claude Code's `runForkedAgent` reuses the parent
+    ///    `toolUseContext` regardless of purpose, because tools are part of
+    ///    the cache key. Whether a fork may *execute* a tool is a separate
+    ///    policy concern: callers such as `/btw` deny every tool and this
+    ///    runner never starts a follow-up tool loop.
     /// 4. Issue exactly one [`SideQueryClient::query`] and map its response.
     ///
     /// When no backend is wired the runner returns the legacy
@@ -253,14 +256,13 @@ impl ForkedAgentRunner {
             // break the byte-identical layout the cache relies on).
             system_prompt: Some(cp.system_prompt.to_string()),
             messages,
-            // cc 2.1.261 preserves the parent's tools on compact requests.
-            // The text-only prompt and lack of a tool loop prevent execution;
-            // removing the schemas would invalidate the shared cache prefix.
-            tools: if req.query_source == QuerySource::Compaction {
-                cp.tools.clone()
-            } else {
-                Vec::new()
-            },
+            // Claude Code's `runForkedAgent` invokes `query` with an isolated
+            // copy of the parent ToolUseContext. That context retains the
+            // parent's tools for every fork purpose, including `/btw` and
+            // `/recap`; tools are part of the prompt-cache key. Execution is
+            // controlled independently by the caller's tool policy and, here,
+            // by the absence of a follow-up tool loop.
+            tools: cp.tools.clone(),
             tool_choice: None,
             output_format: None,
             max_tokens,
@@ -270,7 +272,9 @@ impl ForkedAgentRunner {
             // cc 2.1.198: the forked (compaction) call inherits the session
             // thinking config wired at the composition root; `None` = legacy.
             thinking: self.session_thinking,
-            effort: if req.query_source == QuerySource::Compaction {
+            effort: if req.query_source == QuerySource::Compaction
+                || matches!(&req.query_source, QuerySource::Custom(source) if source == "side_question")
+            {
                 cp.effort.clone()
             } else {
                 None
@@ -320,7 +324,6 @@ mod tests {
             Ok(SideQueryResponse {
                 text: Some(self.canned_text.clone()),
                 structured: None,
-                tool_calls: Vec::new(),
                 usage: self.canned_usage,
                 stop_reason: Some("end_turn".into()),
                 retry_count: 0,
@@ -631,7 +634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_compaction_fork_defaults_max_tokens_when_unset() {
+    async fn non_compaction_fork_preserves_parent_tools_and_defaults_max_tokens() {
         let client = Arc::new(MockClient {
             seen: Mutex::new(None),
             canned_text: String::new(),
@@ -640,13 +643,16 @@ mod tests {
         let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "m".into());
 
         let mut req = request_with(vec![], vec![user_msg("only-prompt")], None);
-        req.query_source = QuerySource::SessionMemoryExtraction;
+        // `/btw` is a tool-denied, one-turn fork, but it still needs the
+        // parent schemas in the API request to preserve the shared cache key.
+        req.query_source = QuerySource::Custom("side_question".into());
         req.cache_safe_params.tools = vec![serde_json::json!({
             "name": "Read",
             "description": "Read a file.",
             "input_schema": {"type": "object"}
         })];
         req.cache_safe_params.effort = Some(serde_json::json!("high"));
+        let parent_tools = req.cache_safe_params.tools.clone();
         let result = runner.run(req).await.expect("run succeeds");
 
         // Empty text maps to an empty String, not a panic.
@@ -654,13 +660,14 @@ mod tests {
 
         let sent = client.seen.lock().unwrap().clone().unwrap();
         assert_eq!(sent.max_tokens, DEFAULT_FORK_MAX_TOKENS);
-        assert!(
-            sent.effort.is_none(),
-            "non-compaction forks retain their effort policy"
+        assert_eq!(
+            sent.effort,
+            Some(serde_json::json!("high")),
+            "side questions inherit effort to preserve the parent cache key"
         );
-        assert!(
-            sent.tools.is_empty(),
-            "non-compaction forks retain their tool policy"
+        assert_eq!(
+            sent.tools, parent_tools,
+            "every fork preserves the parent's tool schemas for the shared cache prefix"
         );
         // No prefix => messages are exactly the fork's prompt.
         let order: Vec<String> = sent
@@ -670,4 +677,5 @@ mod tests {
             .collect();
         assert_eq!(order, vec!["only-prompt"]);
     }
+
 }

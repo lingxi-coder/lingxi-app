@@ -465,6 +465,9 @@ pub enum ClientEvent {
     },
 
     UsageUpdate {
+        /// Complete restored counters, including valid zero values; absent for live deltas.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_snapshot: Option<bool>,
         input_tokens: u64,
         output_tokens: u64,
         cache_read_tokens: u64,

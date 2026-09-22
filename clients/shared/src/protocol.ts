@@ -2288,6 +2288,8 @@ export type ClientEvent =
   | { type: 'thinking_delta'; thinking: string; signature?: string }
   | {
       type: 'usage_update';
+      /** Complete restored counters, including zeros; absent for live deltas. */
+      is_snapshot?: boolean;
       input_tokens: number;
       output_tokens: number;
       cache_read_tokens: number;

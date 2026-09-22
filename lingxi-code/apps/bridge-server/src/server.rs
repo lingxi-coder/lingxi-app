@@ -1573,7 +1573,11 @@ impl BridgeConnection {
                 // queued wakeups must be torn down unconditionally.
                 self.stop_loop_for_session_transition().await;
                 if let Some(router) = &self.router {
-                    router.route(command, self.event_sink()).await;
+                    // Session transitions have no active turn. Their restored
+                    // usage and notices are connection snapshots, not live
+                    // model output. Keep the normal event sink owner-scoped so
+                    // late output from an old turn is still dropped.
+                    router.route(command, self.unscoped_event_sink()).await;
                 }
             }
             // The FULL command surface (model, listings, slash, tasks, session

@@ -110,6 +110,7 @@ impl ReplayedSession {
                     .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
         platform_api::ResumeRuntimeSnapshot {
+            current_usage: self.runtime_metadata.current_usage,
             model: if model_recovered {
                 self.state.model.clone()
             } else {
@@ -162,6 +163,8 @@ impl ReplayedSession {
 /// Runtime state recoverable from a persisted JSONL transcript.
 #[derive(Debug, Clone)]
 pub struct ResumeRuntimeMetadata {
+    /// Latest real assistant usage, never cumulative session billing.
+    pub current_usage: Option<platform_api::CurrentUsageSnapshot>,
     /// Last real assistant response's top-level `effort` value.
     pub effort: Option<String>,
     /// Structured reasoning selection persisted by newer runtimes.
@@ -324,6 +327,7 @@ struct PendingAssistant {
     /// UUID (the common case); falls back to the first row's own uuid.
     message_id: Uuid,
     content: Vec<ContentBlock>,
+    stop_reason: Option<String>,
     model_context_excluded: bool,
 }
 
@@ -355,7 +359,7 @@ fn flush_pending_assistant(state: &mut SessionState, pending: Option<PendingAssi
         state.history.push(ConversationMessage::Assistant {
             id: message_id,
             content: pending.content,
-            stop_reason: None,
+            stop_reason: pending.stop_reason,
         });
     }
 }
@@ -496,6 +500,9 @@ fn build_state_from_jsonl(
                 match &mut pending_assistant {
                     Some(pending) if pending.inner_key == inner_key => {
                         pending.content.extend(content_blocks);
+                        if let Some(reason) = m.message.get("stop_reason").and_then(Value::as_str) {
+                            pending.stop_reason = Some(reason.to_string());
+                        }
                         pending.model_context_excluded |= m
                             .extra
                             .get("isModelContextExcluded")
@@ -519,6 +526,11 @@ fn build_state_from_jsonl(
                             inner_key,
                             message_id,
                             content: content_blocks,
+                            stop_reason: m
+                                .message
+                                .get("stop_reason")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
                             model_context_excluded: m
                                 .extra
                                 .get("isModelContextExcluded")
@@ -1161,6 +1173,53 @@ fn is_compact_boundary(message: &JsonlMessage) -> bool {
             == Some("compact_boundary")
 }
 
+/// Claude `getCurrentUsage` / `getTokenUsage`: scan the effective chain in
+/// reverse, skip synthetic responses, and default missing cache counts to zero.
+/// Never cross a compact boundary; preserved pre-compact usage is zeroed by
+/// the session loader before this projection.
+fn current_usage_from_messages(
+    messages: &[JsonlMessage],
+) -> Option<platform_api::CurrentUsageSnapshot> {
+    for message in messages.iter().rev() {
+        if is_compact_boundary(message) {
+            break;
+        }
+        if message.is_sidechain
+            || message.message_type != "assistant"
+            || message.message.get("model").and_then(Value::as_str) == Some("<synthetic>")
+        {
+            continue;
+        }
+        let first_text = message
+            .message
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|blocks| blocks.first())
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .and_then(|block| block.get("text"))
+            .and_then(Value::as_str);
+        if matches!(first_text, Some(
+            "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
+            | "No response requested."
+            | "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed."
+            | "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+        )) { continue; }
+        if let Some(usage) = message.message.get("usage").filter(|v| v.is_object()) {
+            let mut usage = usage.clone();
+            // Claude uses `?? 0`, including providers that explicitly send null.
+            for field in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
+                if usage.get(field).is_none_or(Value::is_null) {
+                    usage[field] = Value::from(0);
+                }
+            }
+            if let Ok(usage) = serde_json::from_value(usage) {
+                return Some(usage);
+            }
+        }
+    }
+    None
+}
+
 /// Reconstruct state Claude keeps adjacent to the message array. Boundaries
 /// persist the cumulative counter directly; the rapid-refill window is derived
 /// from the number of completed assistant iterations between adjacent
@@ -1253,6 +1312,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
     }
 
     ResumeRuntimeMetadata {
+        current_usage: current_usage_from_messages(messages),
         effort,
         reasoning_selection,
         main_thread_agent_type: None,
@@ -1446,11 +1506,26 @@ fn extract_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
 }
 
 impl ConversationOrchestrator {
+    pub(crate) fn restore_response_usage(&self, usage: Option<platform_api::CurrentUsageSnapshot>) {
+        let usage = usage.unwrap_or_default();
+        self.compaction_runtime.last_response_input_tokens.store(
+            usage
+                .input_tokens
+                .saturating_add(usage.cache_read_input_tokens)
+                .saturating_add(usage.cache_creation_input_tokens),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.compaction_runtime
+            .last_response_output_tokens
+            .store(usage.output_tokens, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Restore transcript-derived compaction state on an already-built runtime.
     /// Used by the CLI's remount path, which intentionally constructs the
     /// writer for the target session before adopting its history.
     pub async fn restore_resume_runtime_metadata(&self, messages: &[JsonlMessage]) {
         let metadata = resume_runtime_metadata(messages);
+        self.restore_response_usage(metadata.current_usage);
         // A resumed transcript is never allowed to manufacture a missing
         // prompt snapshot on its first subsequent request. Adopt the last
         // valid attachment (if any), otherwise leave prompt assembly live.
@@ -1534,6 +1609,7 @@ impl ConversationOrchestrator {
         // replayed values. Both fields are `pub(crate)` so this is allowed
         // from a sibling module in the same crate.
         orch.session = Arc::new(Mutex::new(replayed.state));
+        orch.restore_response_usage(replayed.runtime_metadata.current_usage);
         orch.sync_thinking_signature_strip_flag_to_api().await;
         orch.transcript.last_jsonl_uuid = Arc::new(Mutex::new(
             replayed.last_message_uuid.map(|u| u.to_string()),

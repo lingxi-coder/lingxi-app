@@ -508,6 +508,7 @@ impl OutputStream for AdapterOutputStream {
     ) {
         self.sink
             .emit(ClientEvent::UsageUpdate {
+                is_snapshot: None,
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,
@@ -1014,6 +1015,7 @@ mod tests {
         assert_eq!(
             events[0],
             ClientEvent::UsageUpdate {
+                is_snapshot: None,
                 input_tokens: 120,
                 output_tokens: 48,
                 cache_read_tokens: 30,

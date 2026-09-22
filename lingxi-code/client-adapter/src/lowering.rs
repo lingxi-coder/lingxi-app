@@ -32,6 +32,20 @@
 //! that stays CLIENT-SIDE; the adapter emits the raw `ToolUseStarted` /
 //! `ToolUseResult` per the events catalog (plan F1-11).
 
+/// Restore the exact API counters after SessionResumed resets client state.
+#[must_use]
+pub fn lower_current_usage(
+    usage: platform_api::CurrentUsageSnapshot,
+) -> client_protocol::events::ClientEvent {
+    client_protocol::events::ClientEvent::UsageUpdate {
+        is_snapshot: Some(true),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_input_tokens,
+        cache_creation_tokens: usage.cache_creation_input_tokens,
+    }
+}
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use client_protocol::events::CostDto;
@@ -1787,4 +1801,21 @@ fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
         1,
         "the model companion is rendered once through fire metadata"
     );
+}
+
+#[cfg(test)]
+mod current_usage_tests {
+    #[test]
+    fn restored_zero_counters_are_explicit_snapshots() {
+        assert!(matches!(
+            super::lower_current_usage(platform_api::CurrentUsageSnapshot::default()),
+            client_protocol::events::ClientEvent::UsageUpdate {
+                is_snapshot: Some(true),
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }
+        ));
+    }
 }

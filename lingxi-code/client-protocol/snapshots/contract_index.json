@@ -713,6 +713,7 @@
   "ClientEvent::UsageUpdate.cache_creation_tokens": "u64",
   "ClientEvent::UsageUpdate.cache_read_tokens": "u64",
   "ClientEvent::UsageUpdate.input_tokens": "u64",
+  "ClientEvent::UsageUpdate.is_snapshot": "Option<bool>",
   "ClientEvent::UsageUpdate.output_tokens": "u64",
   "CodeSegmentDto.bold": "bool",
   "CodeSegmentDto.class": "SyntaxClassDto",

@@ -617,6 +617,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ThinkingDelta.signature", "Option<String>");
 
     put("ClientEvent::UsageUpdate", "usage_update");
+    put("ClientEvent::UsageUpdate.is_snapshot", "Option<bool>");
     put("ClientEvent::UsageUpdate.input_tokens", "u64");
     put("ClientEvent::UsageUpdate.output_tokens", "u64");
     put("ClientEvent::UsageUpdate.cache_read_tokens", "u64");

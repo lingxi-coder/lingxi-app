@@ -605,6 +605,8 @@ pub struct PromptSnapshot {
 /// the JSONL loader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeRuntimeSnapshot {
+    /// Latest real assistant usage in the restored, post-compaction chain.
+    pub current_usage: Option<CurrentUsageSnapshot>,
     /// Resolved session model to adopt on in-place resume. Empty means "leave
     /// the current live model unchanged" for legacy/default callers.
     pub model: String,

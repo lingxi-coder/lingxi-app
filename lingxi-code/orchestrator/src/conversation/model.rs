@@ -969,18 +969,13 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
     /// isolated side query.
     pub(crate) const SIDE_QUESTION_SYSTEM_REMINDER: &str = "<system-reminder>This is a side question from the user. You must answer this question directly in a single response.\n\nIMPORTANT CONTEXT:\n- You are a separate, lightweight agent spawned to answer this one question\n- The main agent is NOT interrupted - it continues working independently in the background\n- You share the conversation context but are a completely separate instance\n- Do NOT reference being interrupted or what you were \"previously doing\" - that framing is incorrect\n\nCRITICAL CONSTRAINTS:\n- You have NO tools available - you cannot read files, run commands, search, or take any actions\n- Do NOT write tool calls or tool output as text (for example invoke or function_calls XML blocks) - nothing you write here is executed; if answering would need reading files, running commands, or searching, say that can't be checked from a side question and suggest asking in the main conversation\n- This is a one-off response - there will be no follow-up turns\n- You can ONLY provide information based on what you already know from the conversation context\n- NEVER say things like \"Let me try...\", \"I'll now...\", \"Let me check...\", or promise to take any action\n- If you don't know the answer, say so - do not offer to look it up or investigate\n\nSimply answer the question with the information you have.</system-reminder>";
 
-    /// Real `/btw` body — the SAME read-only, tool-denied, single-turn,
-    /// HISTORY-INERT side query as [`Self::generate_recap_query`], differing
-    /// ONLY in the prompt (the wrapped side question instead of `RECAP_PROMPT`).
-    /// Reuses the SAME `recap_runner` (the single-turn `ForkedAgentRunner`) and
-    /// `cache_safe_slot`, so it needs no new composition-root wiring. NEVER
-    /// touches `session.history`, cache writes, or the pre/post-compact hooks;
-    /// tool-denial is structural (the single-turn runner exposes no tools).
+    /// Read-only, single-turn `/btw` query using the same fork runner as recap.
+    /// Never changes history, the main cache-safe slot, or compaction hooks.
+    /// Tool schemas preserve the prefix, but the runner executes no tool calls.
     ///
-    /// Empty cache-safe slot (no successful turn yet) maps to `Err(ActionFailed)`
-    /// (the TUI renders "Couldn't answer side question: …") rather than a panic —
-    /// the same limitation as `/recap` (the LingXi single-turn runner requires a
-    /// captured prefix; cc's from-scratch rebuild fallback is not modeled).
+    /// Prefer the captured prefix. Before the first live turn after resume,
+    /// rebuild from current session state like cc's
+    /// `buildSideQuestionFallbackParams`, without writing to the main slot.
     pub(crate) async fn answer_side_question_query(
         &self,
         question: &str,
@@ -989,23 +984,37 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             platform_api::HandleError::ActionFailed("side question unavailable".into())
         })?;
-        let params = self
-            .model_runtime
-            .cache_safe_slot
-            .as_ref()
-            .ok_or_else(|| {
-                platform_api::HandleError::ActionFailed("side question: no cache-safe slot".into())
-            })?
-            .get_last()
-            .await
-            .ok_or_else(|| {
-                platform_api::HandleError::ActionFailed(
-                    "side question: no context yet — send a message first".into(),
-                )
-            })?;
-
         if cancel.is_cancelled() {
             return Ok(platform_api::RecapOutcome::Cancelled);
+        }
+        let saved = match self.model_runtime.cache_safe_slot.as_ref() {
+            Some(slot) => slot.get_last().await,
+            None => None,
+        };
+        // Match the interactive `/btw` builder: frozen system/context bytes,
+        // but current tools, model options, and post-compaction messages.
+        let system = match saved.as_ref() {
+            Some(params) => params.system_prompt.to_string(),
+            None => self.effective_system_prompt().await,
+        };
+        let model = self.session.lock().await.model.clone();
+        let tools = self.build_wire_tools().await;
+        let mut params = self
+            .build_cache_safe_params(Some(&system), &model, &tools)
+            .await;
+        if let Some(saved) = saved {
+            params.user_context = saved.user_context;
+            params.system_context = saved.system_context;
+        }
+        // A partial streamed assistant reply is not a complete prefix.
+        if matches!(
+            params.fork_context_messages.last(),
+            Some(ConversationMessage::Assistant {
+                stop_reason: None,
+                ..
+            })
+        ) {
+            params.fork_context_messages.pop();
         }
 
         let wrapped = format!("{}\n\n{}", Self::SIDE_QUESTION_SYSTEM_REMINDER, question);
@@ -1051,6 +1060,17 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
             return;
         };
+        slot.save(self.build_cache_safe_params(system, model, tools).await)
+            .await;
+    }
+
+    /// Assemble a prefix without publishing it as a main-thread request.
+    async fn build_cache_safe_params(
+        &self,
+        system: Option<&str>,
+        model: &str,
+        tools: &[serde_json::Value],
+    ) -> sidequery::CacheSafeParams {
         let (fork_context_messages, session_id, model_profile) = {
             let s = self.session.lock().await;
             (
@@ -1072,7 +1092,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .map(serde_json::Value::String);
-        slot.save(sidequery::CacheSafeParams {
+        sidequery::CacheSafeParams {
             system_prompt: system.unwrap_or("").into(),
             tools: tools.to_vec(),
             effort,
@@ -1093,8 +1113,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             transcript_path: (!transcript_path.as_os_str().is_empty()).then_some(transcript_path),
             // Overwritten by the slot on save; the value here is irrelevant.
             generation: 0,
-        })
-        .await;
+        }
     }
 
     /// Seed a resumed session before its first proactive summary can run.

@@ -6,7 +6,8 @@ import { useT } from '../theme/ThemeContext';
 
 export function contextWindowUsage(usage: UsageSnapshot | null, capacity?: number) {
   if (!usage || !capacity || !Number.isFinite(capacity) || capacity <= 0) return null;
-  const counters = [usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheCreationTokens];
+  // Claude calculateContextPercentages counts the input window, not generated output.
+  const counters = [usage.inputTokens, usage.cacheReadTokens, usage.cacheCreationTokens];
   if (counters.some(value => !Number.isFinite(value) || value < 0)) return null;
   const used = counters.reduce((sum, value) => sum + value, 0);
   if (!Number.isFinite(used)) return null;
@@ -23,14 +24,7 @@ export function ContextWindow({ usage, capacity }: { usage: UsageSnapshot | null
   const [dismissed, setDismissed] = useState(false);
   const open = (hovered || focused) && !dismissed;
   const [position, setPosition] = useState({ left: 0, bottom: 0 });
-  // `usage` drops to null between requests — the provider's all-zero start
-  // placeholder clears it, and session loading hands over null — which flipped
-  // this readout to "Usage unavailable" on every round-trip of a running turn.
-  // Hold the last real snapshot instead; the parent remounts per session, so a
-  // session that has not answered yet still reads as unknown.
-  const [lastUsage, setLastUsage] = useState<UsageSnapshot | null>(null);
-  useEffect(() => { if (usage) setLastUsage(usage); }, [usage]);
-  const snapshot = contextWindowUsage(usage ?? lastUsage, capacity);
+  const snapshot = contextWindowUsage(usage, capacity);
   const summary = snapshot ? `${snapshot.percent}% used (${100 - snapshot.percent}% left)` : 'Usage unavailable';
   const tokens = snapshot ? `${formatTokens(snapshot.used)} / ${formatTokens(snapshot.capacity)} tokens used`
     : capacity && Number.isFinite(capacity) && capacity > 0 ? `${formatTokens(capacity)} token capacity` : 'Context size unavailable';

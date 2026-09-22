@@ -246,6 +246,7 @@ class ClientEventMapperTest {
     fun usageUpdate_mapsToLiveUsage() {
         val r = clientEventToReply(
             ClientEvent.UsageUpdate(
+                isSnapshot = null,
                 inputTokens = 1u, outputTokens = 2u, cacheReadTokens = 0u, cacheCreationTokens = 0u,
             ),
         )

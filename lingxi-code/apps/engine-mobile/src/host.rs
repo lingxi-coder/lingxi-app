@@ -7742,6 +7742,16 @@ impl MobileEngineHandle {
                         messages,
                     })
                     .await;
+                if let Some(usage) = replayed.runtime_metadata.current_usage {
+                    self.event_sink
+                        .emit(client_adapter::lowering::lower_current_usage(usage))
+                        .await;
+                }
+                self.event_sink
+                    .emit(ClientEvent::StatusSnapshot {
+                        snapshot: lower_status_snapshot(&handle.get_status_snapshot().await),
+                    })
+                    .await;
                 self.emit_controls_snapshot().await;
                 let _ = self.session_lifecycle_tx.send(uuid.to_string());
                 Ok(())

@@ -50,6 +50,7 @@ async fn make_orch_with_n_responses(
 ) -> (
     Arc<ConversationOrchestrator>,
     mpsc::Receiver<cost::CostState>,
+    Arc<CostTracker>,
 ) {
     let responses: Vec<_> = (0..n)
         .map(|_| end_turn_response_with_usage(1_000, 500))
@@ -57,8 +58,9 @@ async fn make_orch_with_n_responses(
     let api = Arc::new(MockApiClient::new(responses));
 
     let (tx, rx) = mpsc::channel(64);
+    let session_id = SessionId::new();
     let tracker = Arc::new(CostTracker::new(
-        SessionId::new(),
+        session_id,
         Arc::new(PricingCatalog::builtin_reference()),
         tx,
     ));
@@ -83,14 +85,15 @@ async fn make_orch_with_n_responses(
             memory,
             std::env::temp_dir(),
         )
-        .with_cost_tracker(tracker),
+        .with_session_id(session_id)
+        .with_cost_tracker(tracker.clone()),
     );
-    (orch, rx)
+    (orch, rx, tracker)
 }
 
 #[tokio::test]
 async fn zero_turn_snapshot_is_zeros() {
-    let (orch, _rx) = make_orch_with_n_responses(0).await;
+    let (orch, _rx, _tracker) = make_orch_with_n_responses(0).await;
     let snap = orch.snapshot_cost().await;
     assert_eq!(snap.total_usd, 0.0);
     assert_eq!(snap.input_tokens, 0);
@@ -100,7 +103,7 @@ async fn zero_turn_snapshot_is_zeros() {
 
 #[tokio::test]
 async fn one_turn_snapshot_is_non_zero() {
-    let (orch, _rx) = make_orch_with_n_responses(1).await;
+    let (orch, _rx, _tracker) = make_orch_with_n_responses(1).await;
     orch.run_turn("hi").await.unwrap();
     let snap = orch.snapshot_cost().await;
 
@@ -118,7 +121,7 @@ async fn one_turn_snapshot_is_non_zero() {
 
 #[tokio::test]
 async fn two_turns_accumulate() {
-    let (orch, _rx) = make_orch_with_n_responses(2).await;
+    let (orch, _rx, _tracker) = make_orch_with_n_responses(2).await;
     orch.run_turn("hi").await.unwrap();
     orch.run_turn("hi again").await.unwrap();
     let snap = orch.snapshot_cost().await;
@@ -134,7 +137,7 @@ async fn clear_session_resets_cost_snapshot() {
     // parity 2.1.212: claude-code's clearConversation calls resetCostState, so
     // `/clear` must zero the session cost counter instead of carrying the prior
     // conversation's accumulated total into the fresh session.
-    let (orch, _rx) = make_orch_with_n_responses(1).await;
+    let (orch, _rx, _tracker) = make_orch_with_n_responses(1).await;
     orch.run_turn("hi").await.unwrap();
     let before = orch.snapshot_cost().await;
     assert!(before.total_nano_usd > 0, "turn accrued cost");
@@ -215,7 +218,7 @@ async fn restore_session_cost_seeds_the_snapshot_total() {
     // Resume parity: restoring a prior session's cost makes it visible in the
     // very next snapshot, before any new turn runs (the footer shows the
     // running total instead of $0 after `--resume`).
-    let (orch, _rx) = make_orch_with_n_responses(0).await;
+    let (orch, _rx, _tracker) = make_orch_with_n_responses(0).await;
     orch.restore_session_cost(17_500_000).await; // $0.0175 from the prior run
     let snap = orch.snapshot_cost().await;
     assert!(
@@ -229,7 +232,7 @@ async fn restore_session_cost_seeds_the_snapshot_total() {
 async fn restore_then_run_turn_accumulates_on_top() {
     // A restored session keeps accumulating: the next turn adds to the restored
     // base, not to zero.
-    let (orch, _rx) = make_orch_with_n_responses(1).await;
+    let (orch, _rx, _tracker) = make_orch_with_n_responses(1).await;
     orch.restore_session_cost(17_500_000).await; // prior $0.0175
     orch.run_turn("hi").await.unwrap(); // + this turn's $0.0175
     let snap = orch.snapshot_cost().await;
@@ -289,4 +292,77 @@ async fn no_tracker_returns_zeroed_snapshot() {
     assert_eq!(snap.input_tokens, 0);
     assert_eq!(snap.api_calls, 0);
     assert_eq!(snap.session_id, orch.current_session_id().await);
+}
+
+struct SavedCostState(cost::CostState);
+
+#[async_trait::async_trait]
+impl cost::CostHydrator for SavedCostState {
+    async fn hydrate(
+        &self,
+        session_id: SessionId,
+    ) -> Result<cost::CostHydration, cost::CostPersistError> {
+        assert_eq!(session_id, self.0.session_id);
+        Ok(cost::CostHydration {
+            state: self.0.clone(),
+            journal_revision: self.0.cost_revision,
+            attempt_outputs: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn status_restores_hydrated_totals_before_a_turn_and_keeps_sessions_isolated() {
+    let (original, _original_rx, original_tracker) = make_orch_with_n_responses(2).await;
+    original.run_turn("first turn").await.unwrap();
+    original.run_turn("second turn").await.unwrap();
+    let saved = SavedCostState(original_tracker.snapshot().await);
+    let saved_id = saved.0.session_id;
+    let history = original.conversation_transcript().await;
+    drop(original);
+    drop(original_tracker);
+
+    // Fresh objects model a restart: hydrate the persisted ledger, then resume
+    // the transcript without making any new provider request.
+    let (restarted, _restarted_rx, tracker) = make_orch_with_n_responses(0).await;
+    tracker
+        .switch_session_hydrated(saved_id, &saved)
+        .await
+        .unwrap();
+    restarted
+        .resume_session(saved_id, history.clone(), None, None, Default::default())
+        .await
+        .unwrap();
+    let status = restarted.get_status_snapshot().await;
+    assert_eq!(status.session_id, saved_id.to_string());
+    assert_eq!(status.input_tokens, 2_000);
+    assert_eq!(status.output_tokens, 1_000);
+    assert!((status.total_cost_usd - 0.0350).abs() < 1e-9);
+
+    let other_id = SessionId::new();
+    restarted
+        .resume_session(other_id, Vec::new(), None, None, Default::default())
+        .await
+        .unwrap();
+    let other = restarted.get_status_snapshot().await;
+    assert_eq!(other.session_id, other_id.to_string());
+    assert_eq!(
+        other.input_tokens, 0,
+        "another session must not inherit paid input"
+    );
+    assert_eq!(
+        other.output_tokens, 0,
+        "another session must not inherit output"
+    );
+    assert_eq!(other.total_cost_usd, 0.0);
+
+    restarted
+        .resume_session(saved_id, history, None, None, Default::default())
+        .await
+        .unwrap();
+    let restored = restarted.get_status_snapshot().await;
+    assert_eq!(restored.session_id, status.session_id);
+    assert_eq!(restored.input_tokens, status.input_tokens);
+    assert_eq!(restored.output_tokens, status.output_tokens);
+    assert_eq!(restored.total_cost_usd, status.total_cost_usd);
 }

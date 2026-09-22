@@ -583,14 +583,15 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
 
     case 'usage_update': {
       // OpenAI emits an all-zero placeholder at request start, before usage is
-      // known. Clear the old request seed so later partial events cannot reuse it.
-      if (event.input_tokens === 0 && event.output_tokens === 0
+      // known. Preserve the last measured context, as Claude does while awaiting
+      // the next real response. Compaction/session reset explicitly invalidates it.
+      if (!event.is_snapshot && event.input_tokens === 0 && event.output_tokens === 0
         && event.cache_read_tokens === 0 && event.cache_creation_tokens === 0) {
-        return state.usage === null ? state : { ...state, usage: null };
+        return state;
       }
       // Anthropic's terminal event can contain output only. Input/cache buckets
       // were seeded at message_start; a new nonempty input snapshot replaces them.
-      const outputOnly = event.input_tokens === 0 && event.cache_read_tokens === 0
+      const outputOnly = !event.is_snapshot && event.input_tokens === 0 && event.cache_read_tokens === 0
         && event.cache_creation_tokens === 0 && event.output_tokens > 0;
       const previous = outputOnly ? state.usage : null;
       return {

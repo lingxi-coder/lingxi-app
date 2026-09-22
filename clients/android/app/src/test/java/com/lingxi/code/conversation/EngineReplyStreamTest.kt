@@ -159,7 +159,7 @@ class EngineReplyStreamTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
         val stream = mapReplyStream(
             events.onSubscription {
-                emit(ClientEvent.UsageUpdate(inputTokens = 1u, outputTokens = 2u, cacheReadTokens = 0u, cacheCreationTokens = 0u))
+                emit(ClientEvent.UsageUpdate(isSnapshot = null, inputTokens = 1u, outputTokens = 2u, cacheReadTokens = 0u, cacheCreationTokens = 0u))
                 emit(ClientEvent.TextDelta("hi"))
                 emit(ClientEvent.ModelChanged(model = "opus"))
                 emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))

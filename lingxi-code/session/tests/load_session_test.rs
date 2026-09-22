@@ -16,7 +16,7 @@
 use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::json;
-use session::jsonl::{load_session, project_dir_name, LoaderError};
+use session::jsonl::{LoaderError, load_session, project_dir_name};
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -781,94 +781,298 @@ async fn compact_boundary_preserved_tail_resplices_after_summary() {
 /// split), in file order.
 #[tokio::test]
 async fn preserved_tail_assistant_blocks_resolved_by_inner_message_id() {
-    let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
-    let sid = Uuid::new_v4().to_string();
-    let inner_id = Uuid::new_v4().to_string(); // in-memory assistant id
-    let (u1, a2, u3, a4a, a4b, b5, s6, a7) = (
-        Uuid::new_v4().to_string(),
-        Uuid::new_v4().to_string(),
-        Uuid::new_v4().to_string(),
-        Uuid::new_v4().to_string(),
-        Uuid::new_v4().to_string(),
-        Uuid::new_v4().to_string(),
-        Uuid::new_v4().to_string(),
-        Uuid::new_v4().to_string(),
-    );
-    let mut body = msg_line("user", &u1, None, &sid, "2026-07-13T10:00:00.000Z");
-    body.push_str(&msg_line(
-        "assistant",
-        &a2,
-        Some(&u1),
-        &sid,
-        "2026-07-13T10:00:01.000Z",
-    ));
-    body.push_str(&msg_line(
-        "user",
-        &u3,
-        Some(&a2),
-        &sid,
-        "2026-07-13T10:00:02.000Z",
-    ));
-    // The preserved assistant turn was persisted per-block: two lines with
-    // fresh outer uuids sharing the inner `message.id`.
-    body.push_str(&assistant_line_with_inner_id(
-        &a4a,
-        Some(&u3),
-        &sid,
-        "2026-07-13T10:00:03.000Z",
-        &inner_id,
-    ));
-    body.push_str(&assistant_line_with_inner_id(
-        &a4b,
-        Some(&a4a),
-        &sid,
-        "2026-07-13T10:00:04.000Z",
-        &inner_id,
-    ));
-    body.push_str(&boundary_line(
-        &b5,
-        &a4b,
-        &sid,
-        "2026-07-13T10:00:05.000Z",
-        json!({
-            "trigger": "auto",
-            "preTokens": 100,
+    for segment_head in ["legacy", "user", "assistant"] {
+        let (_temp, lingxi_home, cwd, subdir, fs) = setup_cwd().await;
+        let sid = Uuid::new_v4().to_string();
+        let inner_id = Uuid::new_v4().to_string(); // in-memory assistant id
+        let (u1, a2, u3, a4a, a4b, b5, s6, a7) = (
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+        );
+        let mut body = msg_line("user", &u1, None, &sid, "2026-07-13T10:00:00.000Z");
+        body.push_str(&msg_line(
+            "assistant",
+            &a2,
+            Some(&u1),
+            &sid,
+            "2026-07-13T10:00:01.000Z",
+        ));
+        body.push_str(&msg_line(
+            "user",
+            &u3,
+            Some(&a2),
+            &sid,
+            "2026-07-13T10:00:02.000Z",
+        ));
+        // The preserved assistant turn was persisted per-block: two lines with
+        // fresh outer uuids sharing the inner `message.id`.
+        body.push_str(&assistant_line_with_inner_id(
+            &a4a,
+            Some(&u3),
+            &sid,
+            "2026-07-13T10:00:03.000Z",
+            &inner_id,
+        ));
+        body.push_str(&assistant_line_with_inner_id(
+            &a4b,
+            Some(&a4a),
+            &sid,
+            "2026-07-13T10:00:04.000Z",
+            &inner_id,
+        ));
+        let mut metadata = json!({
+            "trigger": "auto", "preTokens": 100,
             "preservedMessages": {"anchorUuid": s6, "uuids": [u3, inner_id], "allUuids": [u3, inner_id]},
-        }),
-    ));
-    body.push_str(&msg_line(
-        "user",
-        &s6,
-        Some(&b5),
-        &sid,
-        "2026-07-13T10:00:06.000Z",
-    ));
-    body.push_str(&msg_line(
-        "assistant",
-        &a7,
-        Some(&a4b),
-        &sid,
-        "2026-07-13T10:00:07.000Z",
-    ));
-    let sid_uuid = Uuid::parse_str(&sid).unwrap();
-    tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
-        .await
-        .unwrap();
+        });
+        if segment_head != "legacy" {
+            metadata["preservedSegment"] = json!({
+                "headUuid": if segment_head == "assistant" { &inner_id } else { &u3 },
+                "anchorUuid": s6, "tailUuid": inner_id,
+            });
+        }
+        body.push_str(&boundary_line(
+            &b5,
+            &a4b,
+            &sid,
+            "2026-07-13T10:00:05.000Z",
+            metadata,
+        ));
+        body.push_str(&msg_line(
+            "user",
+            &s6,
+            Some(&b5),
+            &sid,
+            "2026-07-13T10:00:06.000Z",
+        ));
+        body.push_str(&msg_line(
+            "assistant",
+            &a7,
+            Some(&a4b),
+            &sid,
+            "2026-07-13T10:00:07.000Z",
+        ));
+        // On-disk usage predates compaction for both preserved response blocks.
+        // A fresh response after the boundary must retain its own usage.
+        let stale_usage = json!({
+            "input_tokens": 120_000, "output_tokens": 300,
+            "cache_creation_input_tokens": 20_000, "cache_read_input_tokens": 50_000,
+            "server_tool_use": {"web_search_requests": 1}
+        });
+        let fresh_usage = json!({"input_tokens": 2_000, "output_tokens": 20});
+        body = body
+            .lines()
+            .map(|line| {
+                let mut row: serde_json::Value = serde_json::from_str(line).unwrap();
+                if row["uuid"] == a4a || row["uuid"] == a4b {
+                    row["message"]["usage"] = stale_usage.clone();
+                } else if row["uuid"] == a7 {
+                    row["message"]["usage"] = fresh_usage.clone();
+                }
+                format!("{row}\n")
+            })
+            .collect();
+        let sid_uuid = Uuid::parse_str(&sid).unwrap();
+        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+            .await
+            .unwrap();
 
-    let messages = load_session(&lingxi_home, &cwd, sid_uuid, fs)
-        .await
-        .expect("ok");
-    let uuids: Vec<&str> = messages.iter().map(|m| m.uuid.as_str()).collect();
-    assert_eq!(
-        uuids,
-        vec![
-            b5.as_str(),
-            s6.as_str(),
-            u3.as_str(),
-            a4a.as_str(),
-            a4b.as_str(),
-            a7.as_str()
-        ],
-        "per-block assistant tail lines must resolve via inner message.id"
-    );
+        let messages = load_session(&lingxi_home, &cwd, sid_uuid, fs)
+            .await
+            .expect("ok");
+        let uuids: Vec<&str> = messages.iter().map(|m| m.uuid.as_str()).collect();
+        let mut expected = vec![b5.as_str(), s6.as_str()];
+        if segment_head != "assistant" {
+            expected.push(u3.as_str());
+        }
+        expected.extend([a4a.as_str(), a4b.as_str(), a7.as_str()]);
+        assert_eq!(
+            uuids, expected,
+            "per-block assistant tail lines must resolve via inner message.id"
+        );
+        for uuid in [&a4a, &a4b] {
+            let usage = &messages.iter().find(|m| &m.uuid == uuid).unwrap().message["usage"];
+            assert_eq!(
+                usage,
+                &json!({
+                    "input_tokens": 0, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                    "server_tool_use": {"web_search_requests": 1}
+                }),
+                "preserved assistant usage must not revive the precompact context"
+            );
+        }
+        assert_eq!(messages.last().unwrap().message["usage"], fresh_usage);
+    }
+}
+
+#[tokio::test]
+async fn preserved_segment_resume_usage_and_boundary_validation() {
+    for variant in ["live", "fresh", "stale", "broken"] {
+        let (_temp, home, cwd, subdir, fs) = setup_cwd().await;
+        let sid = Uuid::new_v4().to_string();
+        let mut rows = vec![
+            json!({"type":"user", "uuid":"old", "parentUuid":null}),
+            json!({"type":"user", "uuid":"head", "parentUuid":"old"}),
+            json!({"type":"assistant", "uuid":"tail", "parentUuid":"head",
+                "message":{"role":"assistant", "content":"kept", "usage":{
+                    "input_tokens":120000, "output_tokens":300,
+                    "cache_creation_input_tokens":20000, "cache_read_input_tokens":50000}}}),
+            json!({"type":"system", "uuid":"boundary", "parentUuid":null,
+                "subtype":"compact_boundary", "compactMetadata":{"preservedSegment":{
+                    "headUuid":if variant == "broken" {"missing"} else {"head"},
+                    "tailUuid":"tail", "anchorUuid":"summary"}}}),
+            json!({"type":"user", "uuid":"summary", "parentUuid":"boundary"}),
+        ];
+        if variant == "fresh" {
+            rows.push(json!({"type":"assistant", "uuid":"fresh", "parentUuid":"summary",
+                "message":{"role":"assistant", "content":"new", "usage":{"input_tokens":2000,"output_tokens":20}}}));
+        } else if variant == "stale" {
+            rows.push(
+                json!({"type":"system", "uuid":"boundary2", "parentUuid":null,
+                "subtype":"compact_boundary", "compactMetadata":{}}),
+            );
+            rows.push(json!({"type":"user", "uuid":"summary2", "parentUuid":"boundary2"}));
+        } else if variant == "broken" {
+            rows.push(json!({"type":"user", "uuid":"continuation", "parentUuid":"tail"}));
+        }
+        let body: String = rows
+            .iter_mut()
+            .enumerate()
+            .map(|(i, row)| {
+                row["sessionId"] = json!(sid);
+                row["timestamp"] = json!(format!("2026-09-20T10:00:{i:02}.000Z"));
+                row["cwd"] = json!(cwd);
+                row["version"] = json!("2.1.270");
+                if row.get("message").is_none() {
+                    row["message"] = json!({"role":"user", "content":"text"});
+                }
+                format!("{row}\n")
+            })
+            .collect();
+        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+            .await
+            .unwrap();
+        let messages = load_session(&home, &cwd, Uuid::parse_str(&sid).unwrap(), fs)
+            .await
+            .unwrap();
+        let ids: Vec<_> = messages.iter().map(|m| m.uuid.as_str()).collect();
+        let expected = match variant {
+            "live" => vec!["boundary", "summary", "head", "tail"],
+            "fresh" => vec!["boundary", "summary", "head", "tail", "fresh"],
+            "stale" => vec!["boundary2", "summary2"],
+            _ => vec!["old", "head", "tail", "continuation"],
+        };
+        assert_eq!(ids, expected, "{variant}");
+        if let Some(tail) = messages.iter().find(|m| m.uuid == "tail") {
+            for (field, old) in [
+                ("input_tokens", 120000),
+                ("output_tokens", 300),
+                ("cache_creation_input_tokens", 20000),
+                ("cache_read_input_tokens", 50000),
+            ] {
+                assert_eq!(
+                    tail.message["usage"][field],
+                    if variant == "broken" { old } else { 0 },
+                    "{variant} {field}"
+                );
+            }
+        }
+        if variant == "fresh" {
+            assert_eq!(
+                messages.last().unwrap().parent_uuid.as_deref(),
+                Some("tail")
+            );
+            assert_eq!(
+                messages.last().unwrap().message["usage"]["input_tokens"],
+                2000
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn preserved_segment_keeps_parallel_results_and_split_blocks_only_from_latest_boundary() {
+    for superseded in [false, true] {
+        let (_temp, home, cwd, subdir, fs) = setup_cwd().await;
+        let sid = Uuid::new_v4().to_string();
+        let mut rows = vec![
+            json!({"type":"user", "uuid":"old", "parentUuid":null}),
+            json!({"type":"system", "uuid":"old-boundary", "parentUuid":null,
+                "subtype":"compact_boundary", "compactMetadata":{"preservedMessages":{
+                    "anchorUuid":"old-summary", "uuids":["discarded-result"], "allUuids":["discarded-result"]}}}),
+            json!({"type":"user", "uuid":"old-summary", "parentUuid":"old-boundary"}),
+            json!({"type":"user", "uuid":"head", "parentUuid":"old-summary"}),
+            json!({"type":"assistant", "uuid":"block-a", "parentUuid":"head",
+                "message":{"id":"response", "role":"assistant", "content":[{"type":"tool_use", "id":"tool-a", "name":"Bash", "input":{}}], "usage":{"input_tokens":120000}}}),
+            json!({"type":"assistant", "uuid":"block-b", "parentUuid":"block-a",
+                "message":{"id":"response", "role":"assistant", "content":[{"type":"tool_use", "id":"tool-b", "name":"Bash", "input":{}}], "usage":{"input_tokens":120000}}}),
+            // Each result points to its source assistant, so result-a is not
+            // on the result-b -> head parent chain.
+            json!({"type":"user", "uuid":"result-a", "parentUuid":"block-a",
+                "message":{"role":"user", "content":[{"type":"tool_result", "tool_use_id":"tool-a", "content":"a"}]}}),
+            json!({"type":"user", "uuid":"discarded-result", "parentUuid":"block-a",
+                "message":{"role":"user", "content":[{"type":"tool_result", "tool_use_id":"discarded", "content":"old"}]}}),
+            json!({"type":"user", "uuid":"result-b", "parentUuid":"block-b",
+                "message":{"role":"user", "content":[{"type":"tool_result", "tool_use_id":"tool-b", "content":"b"}]}}),
+            json!({"type":"system", "uuid":"boundary", "parentUuid":null,
+                "subtype":"compact_boundary", "compactMetadata":{
+                    "preservedSegment":{"headUuid":"head", "tailUuid":"result-b", "anchorUuid":"summary"},
+                    "preservedMessages":{"anchorUuid":"summary", "uuids":["head", "response", "result-a", "result-b"], "allUuids":["head", "response", "result-a", "result-b"]}}}),
+            json!({"type":"user", "uuid":"summary", "parentUuid":"boundary"}),
+        ];
+        if superseded {
+            rows.push(
+                json!({"type":"system", "uuid":"new-boundary", "parentUuid":null,
+                "subtype":"compact_boundary", "compactMetadata":{}}),
+            );
+            rows.push(json!({"type":"user", "uuid":"new-summary", "parentUuid":"new-boundary"}));
+        }
+        let body: String = rows
+            .iter_mut()
+            .enumerate()
+            .map(|(i, row)| {
+                row["sessionId"] = json!(sid);
+                row["timestamp"] = json!(format!("2026-09-20T10:00:{i:02}.000Z"));
+                row["cwd"] = json!(cwd);
+                row["version"] = json!("2.1.270");
+                if row.get("message").is_none() {
+                    row["message"] = json!({"role":"user", "content":"text"});
+                }
+                format!("{row}\n")
+            })
+            .collect();
+        tokio::fs::write(subdir.join(format!("{sid}.jsonl")), body)
+            .await
+            .unwrap();
+        let messages = load_session(&home, &cwd, Uuid::parse_str(&sid).unwrap(), fs)
+            .await
+            .unwrap();
+        let ids: Vec<_> = messages.iter().map(|m| m.uuid.as_str()).collect();
+        if superseded {
+            assert_eq!(ids, ["new-boundary", "new-summary"]);
+        } else {
+            assert_eq!(
+                ids,
+                [
+                    "boundary", "summary", "head", "block-a", "block-b", "result-a", "result-b"
+                ]
+            );
+            for message in messages.iter().filter(|m| m.message_type == "assistant") {
+                for field in [
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                ] {
+                    assert_eq!(message.message["usage"][field], 0);
+                }
+            }
+        }
+    }
 }

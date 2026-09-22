@@ -462,6 +462,7 @@ fn thinking_delta_round_trips() {
 #[test]
 fn usage_update_round_trips() {
     let ev = ClientEvent::UsageUpdate {
+        is_snapshot: None,
         input_tokens: 11,
         output_tokens: 22,
         cache_read_tokens: 3,
@@ -469,6 +470,7 @@ fn usage_update_round_trips() {
     };
     let json = serde_json::to_value(&ev).expect("serialize UsageUpdate");
     assert_eq!(json["type"], "usage_update");
+    assert!(json.get("is_snapshot").is_none());
     assert_eq!(json["input_tokens"], 11);
     assert_eq!(json["output_tokens"], 22);
     assert_eq!(json["cache_read_tokens"], 3);
@@ -1094,4 +1096,18 @@ fn compaction_status_round_trips_with_optional_error() {
         let decoded: ClientEvent = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, event);
     }
+}
+
+#[test]
+fn restored_zero_usage_snapshot_round_trips() {
+    let ev = ClientEvent::UsageUpdate {
+        is_snapshot: Some(true),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+    };
+    let json = serde_json::to_value(&ev).unwrap();
+    assert_eq!(json["is_snapshot"], true);
+    assert_eq!(serde_json::from_value::<ClientEvent>(json).unwrap(), ev);
 }

@@ -1279,6 +1279,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
         (
             "event/usage_update.json",
             ClientEvent::UsageUpdate {
+                is_snapshot: None,
                 input_tokens: 1200,
                 output_tokens: 340,
                 cache_read_tokens: 800,

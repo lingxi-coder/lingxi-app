@@ -437,6 +437,7 @@ impl ConversationOrchestrator {
         let prepared_transcript = self.prepare_transcript_switch(session_id, durable_lock)?;
         prepared_transcript.prepare_legacy().await;
         self.reset_session_scoped_runtime().await;
+        self.restore_response_usage(runtime.current_usage);
         self.prompt_runtime
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1788,10 +1789,17 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn get_status_snapshot(&self) -> StatusSnapshot {
+        // Read the durable session ledger rather than manufacturing zero totals
+        // on every status request (including the first request after resume).
+        let cost = self.snapshot_cost_real().await;
         let s = self.session.lock().await;
-        let cost = CostSnapshot {
-            session_id: s.session_id,
-            ..CostSnapshot::default()
+        let cost = if cost.session_id == s.session_id {
+            cost
+        } else {
+            CostSnapshot {
+                session_id: s.session_id,
+                ..CostSnapshot::default()
+            }
         };
         StatusSnapshot {
             session_id: s.session_id.to_string(),
@@ -2859,6 +2867,12 @@ mod tests {
             None,
             None,
             platform_api::ResumeRuntimeSnapshot {
+                current_usage: Some(platform_api::CurrentUsageSnapshot {
+                    input_tokens: 100,
+                    output_tokens: 40,
+                    cache_read_input_tokens: 200,
+                    cache_creation_input_tokens: 300,
+                }),
                 model: "claude-opus-4-8".to_string(),
                 model_profile: Some("anthropic".to_string()),
                 effort: Some("high".to_string()),
@@ -2912,13 +2926,13 @@ mod tests {
             orch.compaction_runtime
                 .last_response_input_tokens
                 .load(std::sync::atomic::Ordering::Relaxed),
-            0
+            600
         );
         assert_eq!(
             orch.compaction_runtime
                 .last_response_output_tokens
                 .load(std::sync::atomic::Ordering::Relaxed),
-            0
+            40
         );
         assert_eq!(
             orch.transcript

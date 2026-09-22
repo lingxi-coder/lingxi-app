@@ -631,6 +631,8 @@ const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'plan_updated',
   'message_complete',
   'usage_update',
+  'status_snapshot',
+  'compaction_status',
   'error',
   'message_identity',
   'message_retracted',
@@ -1798,8 +1800,11 @@ export class SessionRuntime {
   }
 
   private wireClient(client: BridgeClient, generation: number): void {
+    // Restored usage is explicitly marked by the engine and may be separated
+    // from SessionResumed by other connection events. Live deltas still need a turn.
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation) return;
+      const resumedUsage = event.type === 'usage_update' && event.is_snapshot === true;
       this.gitActivity.accept(event);
       if (event.type === 'openai_oauth_updated') {
         this.oauthPersistence = this.oauthPersistence.then(async () => {
@@ -1863,7 +1868,7 @@ export class SessionRuntime {
         })().finally(() => { this.activeCronExecutions--; this.notifyActivityChanged(); });
         return;
       }
-      if (isTurnOwnedEvent(event) && !this.activeTurn) {
+      if (isTurnOwnedEvent(event) && !this.activeTurn && !resumedUsage) {
         this.diagnostics.add('warn', 'bridge', `dropped unowned turn event: ${event.type}`);
         return;
       }

@@ -1888,3 +1888,89 @@ fn client_state_recovery_skips_other_tools_and_multi_block_lines() {
         "only single-block lines answering a client-state tool are recovered",
     );
 }
+
+#[tokio::test]
+async fn resume_restores_latest_api_usage_from_disk_without_summing_split_rows() {
+    let (_temp, home, cwd, sid, _last, fs) = setup_two_turn_jsonl().await;
+    let path = home
+        .join("projects")
+        .join(project_dir_name(&cwd))
+        .join(format!("{sid}.jsonl"));
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let mut rows: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows[1]["message"]["model"] = json!("claude-sonnet-4-5");
+    rows[1]["message"]["usage"] = json!({"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":3000,"cache_creation_input_tokens":500});
+    std::fs::write(
+        &path,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let replayed = replay_session_state(&home, &cwd, sid, fs).await.unwrap();
+    let usage = replayed.handle_runtime_snapshot().current_usage.unwrap();
+    assert_eq!(
+        usage,
+        platform_api::CurrentUsageSnapshot {
+            input_tokens: 1200,
+            output_tokens: 80,
+            cache_read_input_tokens: 3000,
+            cache_creation_input_tokens: 500,
+        }
+    );
+    let mut messages = replayed.messages;
+    messages.push(messages.last().unwrap().clone());
+    assert_eq!(
+        runtime_metadata_from_messages(&messages).current_usage,
+        Some(usage)
+    );
+    let mut synthetic = messages.last().unwrap().clone();
+    synthetic.message["model"] = json!("<synthetic>");
+    synthetic.message["usage"] = json!({"input_tokens":0,"output_tokens":0});
+    messages.push(synthetic);
+    assert_eq!(
+        runtime_metadata_from_messages(&messages).current_usage,
+        Some(usage)
+    );
+    let mut sentinel = messages.last().unwrap().clone();
+    sentinel.message["model"] = json!("claude-sonnet-4-5");
+    sentinel.message["content"] = json!([{"type":"text","text":"[Request interrupted by user]"}]);
+    messages.push(sentinel);
+    assert_eq!(
+        runtime_metadata_from_messages(&messages).current_usage,
+        Some(usage)
+    );
+    let mut boundary = messages.last().unwrap().clone();
+    boundary.message_type = "system".into();
+    boundary
+        .extra
+        .insert("subtype".into(), json!("compact_boundary"));
+    messages.push(boundary);
+    assert_eq!(
+        runtime_metadata_from_messages(&messages).current_usage,
+        None
+    );
+    let mut fresh = messages[1].clone();
+    fresh.message["usage"] = json!({"input_tokens":0,"output_tokens":0});
+    messages.push(fresh);
+    assert_eq!(
+        runtime_metadata_from_messages(&messages).current_usage,
+        Some(Default::default())
+    );
+    messages.last_mut().unwrap().message["usage"] = json!({"input_tokens":50,"output_tokens":2});
+    messages.last_mut().unwrap().message["usage"]["cache_read_input_tokens"] =
+        serde_json::Value::Null;
+    messages.last_mut().unwrap().message["usage"]["cache_creation_input_tokens"] =
+        serde_json::Value::Null;
+    assert_eq!(
+        runtime_metadata_from_messages(&messages).current_usage,
+        Some(platform_api::CurrentUsageSnapshot {
+            input_tokens: 50,
+            output_tokens: 2,
+            ..Default::default()
+        })
+    );
+}

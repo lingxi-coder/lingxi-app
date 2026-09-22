@@ -5095,7 +5095,7 @@ final class MockConversationSource: ConversationSource {
                     refreshBackgroundTasks()
                 }
 
-            case let .usageUpdate(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
+            case let .usageUpdate(_, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens):
                 guard acceptTurnEvent(event) else { return }
                 updateActiveRun {
                     $0.usage = ConversationUsageSnapshot(

@@ -18,6 +18,7 @@ import {
   stopLegacyOrphanBridges,
 } from '../src/main/bridge';
 import { DiagnosticBuffer } from '../src/main/host-utils';
+import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 
 function temporaryDirectory(): string {
   return mkdtempSync(join(tmpdir(), 'lingxi-electron-bridge-test-'));
@@ -395,6 +396,74 @@ test('session runtime replay resets at resume and reconstructs later transcript 
   assert.deepEqual(first.map((entry) => entry.sequence), [3, 4, 5]);
   (first[2]!.event as { text: string }).text = 'mutated';
   assert.equal((runtime.replaySnapshot()[2]!.event as { text: string }).text, 'hello');
+});
+
+test('resumed usage and cumulative status reach the renderer and survive replay without an active turn', () => {
+  const sessionId = '12121212-3434-4567-8899-aaaaaaaaaaaa';
+  const client = new EventEmitter();
+  const runtime = new SessionRuntime({
+    sessionId,
+    projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+  });
+  const delivered: Array<{ channel: string; payload: any }> = [];
+  (runtime as any).broadcast = (channel: string, payload: unknown) => delivered.push({ channel, payload });
+  (runtime as any).wireClient(client, 0);
+  const usage = { type: 'usage_update', is_snapshot: true, input_tokens: 9000, output_tokens: 1000, cache_read_tokens: 65000, cache_creation_tokens: 4000 };
+  const status = { type: 'status_snapshot', snapshot: { session_id: sessionId, input_tokens: 120000, output_tokens: 10000, total_cost_usd: 0.5 } };
+
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  client.emit('event', usage);
+  client.emit('event', status);
+  client.emit('event', { type: 'model_changed', model: 'claude-opus-4-6' });
+  assert.equal(runtime.turnActive, false);
+  assert.ok(delivered.some(({ payload }) => payload.type === 'usage_update'));
+  assert.ok(delivered.some(({ payload }) => payload.type === 'status_snapshot'));
+  assert.deepEqual(runtime.replaySnapshot().map(({ event }) => event), [
+    { type: 'session_resumed', session_id: sessionId, messages: [] }, usage, status,
+  ]);
+
+  client.emit('event', { ...status, snapshot: { ...status.snapshot, input_tokens: 130000 } });
+  assert.equal(
+    runtime.replaySnapshot().filter(({ event }) => event.type === 'status_snapshot').length,
+    1,
+    'status snapshots are coalesced instead of accumulating in replay',
+  );
+  assert.equal(
+    (runtime.replaySnapshot().at(-1)?.event as { snapshot: { input_tokens: number } }).snapshot.input_tokens,
+    130000,
+  );
+
+  client.emit('event', { ...usage, is_snapshot: undefined, input_tokens: 999999 });
+  assert.equal(runtime.replaySnapshot().filter(({ event }) => event.type === 'usage_update').length, 1,
+    'late unowned usage cannot overwrite restored context');
+
+  client.emit('event', { type: 'compaction_status', phase: 'complete' });
+  const reloaded = runtime.replaySnapshot().reduce((state, { event }) => reduceEvent(state, event), emptyConversation());
+  assert.equal(reloaded.usage, null, 'renderer reload replays compaction invalidation after recovered usage');
+  assert.ok(runtime.replaySnapshot().some(({ event }) => event.type === 'compaction_status'));
+});
+
+test('restored snapshots survive interleaved events but late live usage is rejected', () => {
+  const sessionId = '12121212-3434-4567-8899-aaaaaaaaaaaa';
+  const client = new EventEmitter();
+  const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }) });
+  (runtime as any).wireClient(client, 0);
+  const usage = { type: 'usage_update', input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 };
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  client.emit('event', usage);
+  client.emit('event', { type: 'model_changed', model: 'claude-opus-4-6' });
+  client.emit('event', { ...usage, is_snapshot: true });
+  client.emit('event', { ...usage, is_snapshot: undefined, input_tokens: 999999 });
+  const events = runtime.replaySnapshot().map(({ event }) => event);
+  assert.deepEqual(events.filter((event) => event.type === 'usage_update'), [{ ...usage, is_snapshot: true }]);
+  const recovered = events.reduce((state, event) => reduceEvent(state, event), emptyConversation());
+  assert.deepEqual(recovered.usage, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
+  (runtime as any).generation = 1;
+  client.emit('event', { ...usage, is_snapshot: true, input_tokens: 999999 });
+  assert.equal(runtime.replaySnapshot().filter(({ event }) => event.type === 'usage_update').length, 1,
+    'obsolete connections cannot send snapshots');
 });
 
 test('failed historical resume removes only the newly-created runtime', async () => {

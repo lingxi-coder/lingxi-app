@@ -112,10 +112,12 @@ async function main() {
     result.copyPoints = await run(`(() => [...document.querySelectorAll('.user-message-copy')].map((button) => { const r = button.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; }))()`);
     const copyState = `(() => {
       const buttons = [...document.querySelectorAll('.user-message-copy')];
+      const status = (button) => button.parentElement.querySelector('.user-message-actions-status')?.textContent ?? '';
       return {
         copied: window.copiedMessage ?? null,
-        state: buttons[1].dataset.state, label: buttons[1].getAttribute('aria-label'),
-        neighbourState: buttons[0].dataset.state, neighbourLabel: buttons[0].getAttribute('aria-label'),
+        state: buttons[1].dataset.state,
+        name: buttons[1].getAttribute('aria-label'), status: status(buttons[1]),
+        neighbourState: buttons[0].dataset.state, neighbourStatus: status(buttons[0]),
       };
     })()`;
     const clickSecondCopy = async () => {

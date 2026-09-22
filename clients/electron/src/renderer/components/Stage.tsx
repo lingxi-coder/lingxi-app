@@ -162,7 +162,11 @@ const UserMessageActions = memo(function UserMessageActions({ text, sentAt }: { 
     }
   };
   const clock = formatClockTime(sentAt);
-  const label = state === 'copied' ? 'Copied' : state === 'error' ? 'Copy failed' : 'Copy message';
+  // The control keeps ONE name — a name that changes is announced twice over
+  // the live region below, and reverting it announced "Copy message" a second
+  // time a beat after every copy. Only the outcome is spoken, and only while
+  // there is one; the empty region says nothing when the state resets.
+  const status = state === 'copied' ? 'Copied' : state === 'error' ? 'Copy failed' : '';
   return (
     // The resting and hover tones reach the stylesheet as custom properties: an
     // inline `color` would out-rank `:hover` and freeze the icon at one shade.
@@ -175,15 +179,15 @@ const UserMessageActions = memo(function UserMessageActions({ text, sentAt }: { 
         type="button"
         className="user-message-copy"
         data-state={state}
-        aria-label={label}
-        title={label}
+        aria-label="Copy message"
+        title="Copy message"
         onClick={() => { void copy(); }}
         // Only a terminal state paints the icon; otherwise the stylesheet owns it.
         style={state === 'idle' ? undefined : { color: state === 'error' ? t.danger : t.ok }}
       >
         <Icon name={state === 'copied' ? 'check' : state === 'error' ? 'x' : 'copy'} size={13} stroke={state === 'idle' ? 1.7 : 2.2} />
       </button>
-      <span className="user-message-actions-status" aria-live="polite">{label}</span>
+      <span className="user-message-actions-status" aria-live="polite">{status}</span>
     </div>
   );
 });

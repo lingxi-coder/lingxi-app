@@ -103,19 +103,28 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     assert.equal(result.copyPoints.length, 2, 'both prompts expose their own control');
     assert.equal(result.copyBeforeClick.state, 'idle', 'the control starts idle');
     assert.equal(result.copyBeforeClick.copied, null, 'nothing is copied before the click');
+    assert.equal(result.copyBeforeClick.status, '', 'and it says nothing while idle');
+    assert.equal(result.copyBeforeClick.name, 'Copy message', 'the control carries one name');
     assert.equal(result.copyClick.copied, 'ship the release notes', 'the click copies the row it was on');
     assert.equal(result.copyClick.state, 'copied', 'the control reports the copy');
-    assert.equal(result.copyClick.label, 'Copied', 'and says so to assistive tech');
+    assert.equal(result.copyClick.status, 'Copied', 'the outcome is announced');
+    // A name that changed to "Copied" was announced twice over the live region
+    // and re-announced when it reverted; the outcome lives in the region alone.
+    assert.equal(result.copyClick.name, 'Copy message', 'the name does not change with the outcome');
     assert.equal(result.copyClick.neighbourState, 'idle', 'the other message is left alone');
+    assert.equal(result.copyClick.neighbourStatus, '', 'and stays silent');
     assert.equal(result.copyClickReset.state, 'idle', 'the copied state is transient');
+    assert.equal(result.copyClickReset.status, '', 'and the announcement is retracted');
 
     // A failing clipboard: the control must report the failure and must not
     // claim a copy happened.
     assert.equal(result.copyFailure.copied, null, 'a failed copy records nothing');
     assert.equal(result.copyFailure.state, 'error', 'the control reports the failure');
-    assert.equal(result.copyFailure.label, 'Copy failed', 'and says so to assistive tech');
+    assert.equal(result.copyFailure.status, 'Copy failed', 'and announces it');
+    assert.equal(result.copyFailure.name, 'Copy message', 'the name still does not change');
     assert.equal(result.copyFailure.neighbourState, 'idle', 'the other message is still left alone');
     assert.equal(result.copyFailureReset.state, 'idle', 'the failed state is transient too');
+    assert.equal(result.copyFailureReset.status, '', 'and its announcement is retracted');
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

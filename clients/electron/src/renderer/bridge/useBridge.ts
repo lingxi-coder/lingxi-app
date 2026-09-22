@@ -1497,6 +1497,12 @@ export function useBridge(): UseBridge {
       if (event.type === 'turn_ended' && host) {
         void host.command(sessionId, { type: 'refresh_listings', which: [{ type: 'status' }] }).catch(() => undefined);
       }
+      // A background subagent can settle after the parent turn has already
+      // ended. Its usage is written to the session cost ledger at the same
+      // lifecycle edge, so refresh the toolbar totals when that edge arrives.
+      if (event.type === 'session_agent_updated' && event.agent.status !== 'running' && host) {
+        void host.command(sessionId, { type: 'refresh_listings', which: [{ type: 'status' }] }).catch(() => undefined);
+      }
       if (event.type === 'session_started' || event.type === 'turn_ended') scheduleProjectCatalogRefresh(sessionId);
       if (event.type === 'settings_snapshot' && activeSessionIdRef.current === sessionId) setSettingsSnapshotEvent(event);
       if (event.type === 'mcp_servers' && activeSessionIdRef.current === sessionId) setMcpServersEvent(event);

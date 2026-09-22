@@ -2120,12 +2120,12 @@ async fn run_subagent_loop(
                 &out_tx,
                 agent_id,
                 total_tool_use_count,
-                last_usage
+                cumulative_usage
                     .billable_tokens
                     .input
-                    .saturating_add(last_usage.billable_tokens.cache_write)
-                    .saturating_add(last_usage.billable_tokens.cache_read)
-                    .saturating_add(last_usage.billable_tokens.output),
+                    .saturating_add(cumulative_usage.billable_tokens.cache_write)
+                    .saturating_add(cumulative_usage.billable_tokens.cache_read)
+                    .saturating_add(cumulative_usage.billable_tokens.output),
             )
             .await;
             // Track the assistant-message count (claude `agentMessages.length`) and

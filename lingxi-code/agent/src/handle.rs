@@ -26,11 +26,12 @@ use platform_api::coordinator_mode::CoordinatorModeHandle;
 use platform_api::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentObservation, SubagentResult,
     SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
-    SubagentUsage,
+    SubagentUsage, SubagentUsageRecorder,
 };
 use protocol::{AgentId, ConversationMessage, MessageId};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
 
@@ -194,6 +195,37 @@ pub(crate) fn subagent_usage_from_llm_usage(usage: &llm_client::Usage) -> Subage
         // panel's) reasoning tokens were dropped at this seam — the caller
         // never saw them, no matter how the provider billed them.
         reasoning_output_tokens: bt.reasoning_output,
+    }
+}
+
+const FUSION_PANEL_QUERY_SOURCE: &str = "fusion_panel";
+
+async fn record_subagent_usage(
+    recorder: Option<&Arc<dyn SubagentUsageRecorder>>,
+    query_source_label: Option<&str>,
+    session_id: Option<protocol::SessionId>,
+    model: &str,
+    model_profile: Option<&str>,
+    usage: SubagentUsage,
+    duration: Duration,
+    usage_complete: bool,
+) {
+    // Fusion owns its own attempt reservation and settlement. Recording its
+    // panel response here as a normal API response would charge it twice.
+    if query_source_label == Some(FUSION_PANEL_QUERY_SOURCE) || usage.is_zero() {
+        return;
+    }
+    if let Some(recorder) = recorder {
+        recorder
+            .record_subagent_usage(
+                session_id,
+                model,
+                model_profile,
+                usage,
+                duration,
+                usage_complete,
+            )
+            .await;
     }
 }
 
@@ -516,6 +548,7 @@ pub struct PoolSubagentSpawner {
     mobile_workspace_cwd_provider: Option<MobileWorkspaceCwdProvider>,
     session_interactive: Option<bool>,
     spawn_observer: Option<Arc<dyn SubagentSpawnObserver>>,
+    usage_recorder: Option<Arc<dyn SubagentUsageRecorder>>,
 }
 
 /// Resolves an optional child cwd into a safe model-visible mobile guest path.
@@ -732,6 +765,7 @@ impl PoolSubagentSpawner {
             mobile_workspace_cwd_provider: None,
             session_interactive: None,
             spawn_observer: None,
+            usage_recorder: None,
         }
     }
 
@@ -1178,6 +1212,16 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_api_client(mut self, api_client: Arc<dyn SubagentApiClient>) -> Self {
         self.api_client = Some(api_client);
+        self
+    }
+
+    /// Builder: attach the host's session cost sink for real child usage.
+    ///
+    /// The recorder is intentionally optional so the agent crate remains
+    /// usable by mobile, CLI, and test hosts that do not own a cost ledger.
+    #[must_use]
+    pub fn with_usage_recorder(mut self, recorder: Arc<dyn SubagentUsageRecorder>) -> Self {
+        self.usage_recorder = Some(recorder);
         self
     }
 
@@ -3465,6 +3509,37 @@ impl SubagentSpawner for PoolSubagentSpawner {
         crate::agent_mcp_tools::run_agent_mcp_cleanups(mcp_guard.take(), &resolved_agent_type)
             .await;
 
+        let (usage, duration, usage_complete) = match &result {
+            SubagentResult::Completed {
+                usage,
+                cumulative_usage,
+                total_duration_ms,
+                usage_complete,
+                ..
+            } => (
+                if cumulative_usage.is_zero() {
+                    usage.clone()
+                } else {
+                    cumulative_usage.clone()
+                },
+                Duration::from_millis(*total_duration_ms),
+                *usage_complete,
+            ),
+            SubagentResult::Failed { usage, .. } => (usage.clone(), Duration::ZERO, false),
+            SubagentResult::Killed { .. } => (SubagentUsage::default(), Duration::ZERO, false),
+        };
+        record_subagent_usage(
+            self.usage_recorder.as_ref(),
+            request.query_source_label.as_deref(),
+            origin_session_id,
+            &resolved_model,
+            resolved_model_profile.as_deref(),
+            usage,
+            duration,
+            usage_complete,
+        )
+        .await;
+
         Ok(result)
     }
 
@@ -3908,26 +3983,40 @@ impl PoolSubagentSpawner {
         // contract as one-shot agents. The forwarded receiver retains the
         // original event shape for the task handler while this side reports
         // real messages and terminal lifecycle transitions to Desktop.
-        if observers.is_empty() {
+        let usage_recorder = self.usage_recorder.clone();
+        let query_source_label = request.query_source_label.clone();
+        let should_record_usage = usage_recorder.is_some()
+            && query_source_label.as_deref() != Some(FUSION_PANEL_QUERY_SOURCE);
+        if observers.is_empty() && !should_record_usage {
             return Ok((agent_id, rx));
         }
-        let observer_events = crate::api::ObserverEventSink::new(observers);
+        let observer_events =
+            (!observers.is_empty()).then(|| crate::api::ObserverEventSink::new(observers));
         let forward_agent_id = agent_id;
+        let recorder_model = resolved_model.clone();
+        let recorder_profile = resolved_model_profile.clone();
+        let recorder_session_id = origin_session_id;
         let (tx, forwarded_rx) = tokio::sync::mpsc::channel(100);
-        observer_events.try_emit(allocation_event);
+        if let Some(observer_events) = observer_events.as_ref() {
+            observer_events.try_emit(allocation_event);
+        }
         tokio::spawn(async move {
             let mut forwarding = true;
             let mut terminal_death_seen = false;
+            let mut recorded_cumulative = SubagentUsage::default();
+            let mut recorded_duration_ms = 0_u64;
             while let Some(event) = rx.recv().await {
                 match &event {
                     SubagentEvent::Message { message, .. } => {
                         if let Ok(conversation) =
                             serde_json::from_value::<ConversationMessage>(message.clone())
                         {
-                            observer_events.try_emit(SubagentObservation::Message {
-                                agent_id: forward_agent_id,
-                                message: conversation,
-                            });
+                            if let Some(observer_events) = observer_events.as_ref() {
+                                observer_events.try_emit(SubagentObservation::Message {
+                                    agent_id: forward_agent_id,
+                                    message: conversation,
+                                });
+                            }
                         }
                     }
                     SubagentEvent::Completed {
@@ -3937,38 +4026,92 @@ impl PoolSubagentSpawner {
                         total_duration_ms,
                         assistant_message_count,
                         last_request_id,
+                        cumulative_usage,
+                        usage_complete,
                         ..
-                    } => observer_events.emit_terminal(SubagentObservation::Completed {
-                        agent_id: forward_agent_id,
-                        content: result.clone(),
-                        usage: subagent_usage_from_llm_usage(usage),
-                        total_tool_use_count: *total_tool_use_count,
-                        total_duration_ms: *total_duration_ms,
-                        assistant_message_count: *assistant_message_count,
-                        last_request_id: last_request_id.clone(),
-                    }),
-                    SubagentEvent::Failed { error, .. } => {
+                    } => {
+                        let final_usage = subagent_usage_from_llm_usage(usage);
+                        let current_usage = subagent_usage_from_llm_usage(cumulative_usage);
+                        let current_usage = if current_usage.is_zero() {
+                            final_usage.clone()
+                        } else {
+                            current_usage
+                        };
+                        let delta = current_usage.saturating_sub(&recorded_cumulative);
+                        recorded_cumulative = current_usage;
+                        let duration_delta = total_duration_ms.saturating_sub(recorded_duration_ms);
+                        recorded_duration_ms = *total_duration_ms;
+                        record_subagent_usage(
+                            usage_recorder.as_ref(),
+                            query_source_label.as_deref(),
+                            recorder_session_id,
+                            &recorder_model,
+                            recorder_profile.as_deref(),
+                            delta,
+                            Duration::from_millis(duration_delta),
+                            *usage_complete,
+                        )
+                        .await;
+                        if let Some(observer_events) = observer_events.as_ref() {
+                            observer_events.emit_terminal(SubagentObservation::Completed {
+                                agent_id: forward_agent_id,
+                                content: result.clone(),
+                                usage: final_usage,
+                                total_tool_use_count: *total_tool_use_count,
+                                total_duration_ms: *total_duration_ms,
+                                assistant_message_count: *assistant_message_count,
+                                last_request_id: last_request_id.clone(),
+                            });
+                        }
+                    }
+                    SubagentEvent::Failed {
+                        error,
+                        cumulative_usage,
+                        ..
+                    } => {
                         terminal_death_seen = true;
-                        observer_events.emit_terminal(SubagentObservation::Failed {
-                            agent_id: forward_agent_id,
-                            error: error.clone(),
-                        });
+                        let current_usage = subagent_usage_from_llm_usage(cumulative_usage);
+                        let delta = current_usage.saturating_sub(&recorded_cumulative);
+                        recorded_cumulative = current_usage;
+                        record_subagent_usage(
+                            usage_recorder.as_ref(),
+                            query_source_label.as_deref(),
+                            recorder_session_id,
+                            &recorder_model,
+                            recorder_profile.as_deref(),
+                            delta,
+                            Duration::ZERO,
+                            false,
+                        )
+                        .await;
+                        if let Some(observer_events) = observer_events.as_ref() {
+                            observer_events.emit_terminal(SubagentObservation::Failed {
+                                agent_id: forward_agent_id,
+                                error: error.clone(),
+                            });
+                        }
                     }
                     SubagentEvent::Killed { .. } => {
                         terminal_death_seen = true;
-                        observer_events.emit_terminal(SubagentObservation::Killed {
-                            agent_id: forward_agent_id,
-                        })
+                        if let Some(observer_events) = observer_events.as_ref() {
+                            observer_events.emit_terminal(SubagentObservation::Killed {
+                                agent_id: forward_agent_id,
+                            });
+                        }
                     }
                     SubagentEvent::Progress {
                         tool_use_count,
                         token_count,
                         ..
-                    } => observer_events.try_emit(SubagentObservation::Progress {
-                        agent_id: forward_agent_id,
-                        tool_use_count: *tool_use_count,
-                        token_count: *token_count,
-                    }),
+                    } => {
+                        if let Some(observer_events) = observer_events.as_ref() {
+                            observer_events.try_emit(SubagentObservation::Progress {
+                                agent_id: forward_agent_id,
+                                tool_use_count: *tool_use_count,
+                                token_count: *token_count,
+                            });
+                        }
+                    }
                 }
                 if forwarding && tx.send(event).await.is_err() {
                     // The task-side consumer disappeared, but this wrapper is
@@ -3979,10 +4122,12 @@ impl PoolSubagentSpawner {
                 }
             }
             if !terminal_death_seen {
-                observer_events.emit_terminal(SubagentObservation::Failed {
-                    agent_id: forward_agent_id,
-                    error: "persistent subagent channel closed unexpectedly".to_string(),
-                });
+                if let Some(observer_events) = observer_events.as_ref() {
+                    observer_events.emit_terminal(SubagentObservation::Failed {
+                        agent_id: forward_agent_id,
+                        error: "persistent subagent channel closed unexpectedly".to_string(),
+                    });
+                }
             }
         });
         Ok((agent_id, forwarded_rx))

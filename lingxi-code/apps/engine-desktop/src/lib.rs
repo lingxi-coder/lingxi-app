@@ -12447,6 +12447,9 @@ pub async fn build_with_credential_stack(
             .map_err(|error| BuildError::DurableSession(error.to_string()))?,
         )
     };
+    let subagent_usage_recorder = Arc::new(session_agents::DesktopSubagentUsageRecorder::new(
+        cost_tracker.clone(),
+    ));
     // Phase 2a T7: the CostTracker uses the SAME assembled pricing catalog the
     // estimator was built from (built-in reference tiers + non-Anthropic preset
     // rows + settings overrides), not a fresh `builtin_reference()`, so session
@@ -12497,6 +12500,7 @@ pub async fn build_with_credential_stack(
         .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_session_interactive(interactive_session)
         .with_api_client(subagent_api)
+        .with_usage_recorder(subagent_usage_recorder)
         // #15: the parent model handed to the spawner must be the RESOLVED
         // main-loop wire id (claude `getMainLoopModel()`), NOT the raw alias —
         // `orch_cfg.model` is `cfg.default_model` with only a `profile/` prefix

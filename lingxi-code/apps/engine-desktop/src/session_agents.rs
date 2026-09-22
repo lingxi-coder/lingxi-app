@@ -9,11 +9,11 @@ use async_trait::async_trait;
 use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::listings::SessionAgentSummaryDto;
-use protocol::ConversationMessage;
+use protocol::{ConversationMessage, SessionId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn complete_transcript_lines(raw: &[u8]) -> impl Iterator<Item = &[u8]> {
     raw.split_inclusive(|byte| *byte == b'\n')
@@ -221,6 +221,66 @@ struct BoundAgent {
     model: String,
     model_profile: Option<String>,
     persistent: bool,
+}
+
+/// Bridges provider-neutral subagent usage into the desktop session's durable
+/// cost ledger. The agent crate deliberately exposes this as a host seam so it
+/// does not depend on the cost implementation.
+pub struct DesktopSubagentUsageRecorder {
+    tracker: Arc<cost::CostTracker>,
+}
+
+impl DesktopSubagentUsageRecorder {
+    #[must_use]
+    pub fn new(tracker: Arc<cost::CostTracker>) -> Self {
+        Self { tracker }
+    }
+}
+
+#[async_trait]
+impl platform_api::SubagentUsageRecorder for DesktopSubagentUsageRecorder {
+    async fn record_subagent_usage(
+        &self,
+        session_id: Option<SessionId>,
+        model: &str,
+        model_profile: Option<&str>,
+        usage: platform_api::SubagentUsage,
+        duration: Duration,
+        _usage_complete: bool,
+    ) {
+        if usage.is_zero() {
+            return;
+        }
+        let tracker = session_id.map_or_else(
+            || self.tracker.clone(),
+            |session_id| self.tracker.scoped(session_id),
+        );
+        let cache_read = usage.cache_read_input_tokens;
+        let cache_write = usage.cache_creation_input_tokens;
+        let cost_usage = cost::Usage {
+            tokens: cost::TokenUsage {
+                input: usage.input_tokens,
+                output: usage.output_tokens,
+                cache_write,
+                cache_read,
+                reasoning_output: usage.reasoning_output_tokens,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let _ = tracker
+            .record_api_response_v2(
+                orchestrator::cost_wiring::model_ref_from_string(model, model_profile),
+                cost_usage,
+                duration,
+                0,
+                cache_read,
+                cache_write,
+                false,
+                None,
+            )
+            .await;
+    }
 }
 
 /// Desktop observer installed by the bridge composition root.  The observer
@@ -670,7 +730,9 @@ pub fn lower_transcript(raw: &[u8]) -> Vec<client_protocol::message::MessageDto>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver, SubagentUsage};
+    use platform_api::subagent_spawn::{
+        SubagentObservation, SubagentSpawnObserver, SubagentUsage, SubagentUsageRecorder,
+    };
 
     async fn allocate(
         observer: &DesktopSessionAgentObserver,
@@ -1207,5 +1269,48 @@ mod tests {
             .await;
         assert!(observer.bound_agents.lock().await.is_empty());
         assert!(observer.message_indexes.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn desktop_usage_recorder_adds_subagent_tokens_to_session_ledger() {
+        let session_id = protocol::SessionId::new();
+        let tracker = Arc::new(cost::CostTracker::new(
+            session_id,
+            Arc::new(cost::PricingCatalog::builtin_reference()),
+            tokio::sync::mpsc::channel(1).0,
+        ));
+        let recorder = DesktopSubagentUsageRecorder::new(tracker.clone());
+
+        recorder
+            .record_subagent_usage(
+                Some(session_id),
+                "claude-opus-4-8",
+                None,
+                SubagentUsage {
+                    total_tokens: 26,
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    cache_creation_input_tokens: 5,
+                    cache_read_input_tokens: 3,
+                    reasoning_output_tokens: 55,
+                },
+                Duration::from_millis(12),
+                true,
+            )
+            .await;
+
+        let snapshot = tracker.scoped(session_id).snapshot().await;
+        let usage = snapshot
+            .per_model_usage
+            .values()
+            .next()
+            .expect("subagent response should create a model usage row")
+            .usage
+            .tokens;
+        assert_eq!(usage.input, 11);
+        assert_eq!(usage.output, 7);
+        assert_eq!(usage.cache_write, 5);
+        assert_eq!(usage.cache_read, 3);
+        assert_eq!(usage.reasoning_output, 55);
     }
 }

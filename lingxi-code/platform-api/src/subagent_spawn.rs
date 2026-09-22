@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Current persisted observer schema version.
@@ -439,6 +440,57 @@ pub struct SubagentUsage {
     pub reasoning_output_tokens: u64,
 }
 
+impl SubagentUsage {
+    /// Whether this rollup contains any provider-reported token bucket.
+    #[must_use]
+    pub fn is_zero(&self) -> bool {
+        self.total_tokens == 0
+            && self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cache_creation_input_tokens == 0
+            && self.cache_read_input_tokens == 0
+            && self.reasoning_output_tokens == 0
+    }
+
+    /// Return the newly observed portion of a monotonic cumulative rollup.
+    #[must_use]
+    pub fn saturating_sub(&self, previous: &Self) -> Self {
+        Self {
+            total_tokens: self.total_tokens.saturating_sub(previous.total_tokens),
+            input_tokens: self.input_tokens.saturating_sub(previous.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(previous.output_tokens),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .saturating_sub(previous.cache_creation_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .saturating_sub(previous.cache_read_input_tokens),
+            reasoning_output_tokens: self
+                .reasoning_output_tokens
+                .saturating_sub(previous.reasoning_output_tokens),
+        }
+    }
+}
+
+/// Host-owned sink for attributing a subagent's provider usage to its session.
+///
+/// The agent crate emits provider-neutral usage and never depends on the cost
+/// implementation. Hosts that own a cost ledger can install a recorder on the
+/// production spawner; test and legacy hosts can leave it unset.
+#[async_trait]
+pub trait SubagentUsageRecorder: Send + Sync {
+    /// Record the supplied usage against the child origin session.
+    async fn record_subagent_usage(
+        &self,
+        session_id: Option<SessionId>,
+        model: &str,
+        model_profile: Option<&str>,
+        usage: SubagentUsage,
+        duration: Duration,
+        usage_complete: bool,
+    );
+}
+
 /// Typed lifecycle/event stream for a spawned subagent.
 ///
 /// This is additive over the legacy `spawn_with_progress` string channel: hosts
@@ -477,7 +529,7 @@ pub enum SubagentObservation {
         agent_id: AgentId,
         /// Tool calls completed so far.
         tool_use_count: u32,
-        /// Tokens reported by the latest completed model round-trip.
+        /// Cumulative billable tokens reported by completed model round-trips.
         token_count: u64,
     },
     /// A workflow-scoped model query stalled and will be retried.
@@ -1363,5 +1415,39 @@ mod tests {
         );
 
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+    }
+
+    #[test]
+    fn subagent_usage_delta_is_saturating_and_zero_is_detected() {
+        let previous = SubagentUsage {
+            total_tokens: 20,
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: 3,
+            cache_read_input_tokens: 2,
+            reasoning_output_tokens: 7,
+        };
+        let current = SubagentUsage {
+            total_tokens: 31,
+            input_tokens: 15,
+            output_tokens: 8,
+            cache_creation_input_tokens: 4,
+            cache_read_input_tokens: 4,
+            reasoning_output_tokens: 9,
+        };
+        assert_eq!(
+            current.saturating_sub(&previous),
+            SubagentUsage {
+                total_tokens: 11,
+                input_tokens: 5,
+                output_tokens: 3,
+                cache_creation_input_tokens: 1,
+                cache_read_input_tokens: 2,
+                reasoning_output_tokens: 2,
+            }
+        );
+        assert!(SubagentUsage::default().is_zero());
+        assert!(!current.is_zero());
+        assert!(previous.saturating_sub(&current).is_zero());
     }
 }

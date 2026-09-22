@@ -323,7 +323,7 @@ pub use stt::{SpeechToText, SttError, SttOpts, SttTranscript};
 pub use subagent_spawn::{
     StructuredOutputMode, SubagentInheritance, SubagentObservation, SubagentResult,
     SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
-    SubagentUsage, WorkflowQueryWatchdog,
+    SubagentUsage, SubagentUsageRecorder, WorkflowQueryWatchdog,
 };
 pub use swarm::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 pub use task_registry::{

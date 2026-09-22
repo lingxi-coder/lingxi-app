@@ -2418,6 +2418,18 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
         cumulative.billable_tokens.output, 90,
         "real 40 + real 50, uncapped by max_output_tokens_per_turn"
     );
+    let progress_tokens: Vec<u64> = evs
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Progress { token_count, .. } => Some(*token_count),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        progress_tokens.last().copied(),
+        Some(1105),
+        "progress must expose the cross-turn cumulative token count"
+    );
     let last = api.last_messages();
     let joined = format!("{last:?}");
     assert!(

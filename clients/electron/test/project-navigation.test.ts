@@ -465,6 +465,58 @@ test('sidebar renders activity metadata for normal and pinned sessions', () => {
   assert.match(readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8'), /formatSessionMetadata/);
 });
 
+test('sidebar sorting keeps new sessions first for every policy', () => {
+  const bridge = bridgeFixture();
+  const sessions = bridge.bootstrap.projectCatalogs[projectPath]!.sessions;
+  const savedOrder = [sessions[1]!.uuid, sessions[0]!.uuid, sessions[2]!.uuid];
+  const newSession = { ...sessions[4]!, path: '', modified_rfc3339: '2026-08-01T00:00:00Z' };
+  const renderIds = (testBridge: typeof bridge) => {
+    const markup = renderToStaticMarkup(React.createElement(
+      Theme.Provider, { value: tokens(true) },
+      React.createElement(BetaSidebar, { bridge: testBridge as any, onOpenSettings: () => undefined }),
+    ));
+    return [...markup.matchAll(/data-session-id="([^"]+)"/g)].map((match) => match[1]);
+  };
+  const makeBridge = (
+    chatSort: 'priority' | 'updated' | 'manual',
+    rows: typeof sessions,
+    organization: 'project' | 'list' = 'project',
+  ) => {
+    const testBridge = bridgeFixture();
+    Object.assign(testBridge.bootstrap.settings, {
+      pinnedSessions: [],
+      sidebar: { organization, chatSort, manualSessionOrder: { [projectPath]: savedOrder } },
+    });
+    testBridge.bootstrap.projectCatalogs[projectPath]!.sessions = rows;
+    return testBridge;
+  };
+  for (const chatSort of ['priority', 'updated', 'manual'] as const) {
+    const testBridge = makeBridge(chatSort, [newSession, ...sessions.slice(0, 3)]);
+    assert.equal(renderIds(testBridge)[0], newSession.uuid, `${chatSort} should put a new session first`);
+  }
+  assert.equal(
+    renderIds(makeBridge('updated', [newSession, ...sessions.slice(0, 3)], 'list'))[0],
+    newSession.uuid,
+    'the all-projects view should also put a new session first',
+  );
+
+  const manualBridge = makeBridge('manual', sessions.slice(0, 3));
+  assert.deepEqual(renderIds(manualBridge), savedOrder);
+
+  // Catalog refreshes need not arrive in activity order; both additions precede
+  // the saved rows, newest first, even though an older saved row is active.
+  manualBridge.bootstrap.projectCatalogs[projectPath]!.sessions.push(sessions[3]!, sessions[4]!);
+  const refreshedMarkup = renderToStaticMarkup(React.createElement(
+    Theme.Provider, { value: tokens(true) },
+    React.createElement(BetaSidebar, { bridge: manualBridge as any, onOpenSettings: () => undefined }),
+  ));
+  assert.deepEqual(
+    [...refreshedMarkup.matchAll(/data-session-id="([^"]+)"/g)].map((match) => match[1]),
+    [sessions[4]!.uuid, sessions[3]!.uuid, ...savedOrder],
+  );
+  assert.deepEqual(savedOrder, [sessions[1]!.uuid, sessions[0]!.uuid, sessions[2]!.uuid]);
+});
+
 test('pinned metadata distinguishes loading from an unavailable catalog row', () => {
   const bridge = bridgeFixture();
   delete (bridge.bootstrap.projectCatalogs as Record<string, unknown>)[pinnedProjectPath];

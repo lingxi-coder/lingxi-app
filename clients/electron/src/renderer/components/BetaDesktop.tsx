@@ -94,6 +94,14 @@ function sidebarSessionTimestamp(session: SessionRowDto): number {
   return Number.isNaN(value) ? 0 : value;
 }
 
+/** Renderer-created or first-message rows have not received a durable path yet. */
+function compareNewSidebarSessions(left: SessionRowDto, right: SessionRowDto): number {
+  const leftIsNew = left.path === '';
+  const rightIsNew = right.path === '';
+  if (leftIsNew === rightIsNew) return 0;
+  return leftIsNew ? -1 : 1;
+}
+
 export function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
 }
@@ -594,9 +602,21 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
   const sortedSessions = useCallback((projectPath: string, sessions: readonly SessionRowDto[]) => {
     if (chatSort === 'manual') {
       const order = new Map((manualSessionOrder[projectPath] ?? []).map((sessionId, index) => [sessionId, index]));
-      return [...sessions].sort((left, right) => (order.get(left.uuid) ?? Number.MAX_SAFE_INTEGER) - (order.get(right.uuid) ?? Number.MAX_SAFE_INTEGER));
+      return [...sessions].sort((left, right) => {
+        const newSessionOrder = compareNewSidebarSessions(left, right);
+        if (newSessionOrder !== 0) return newSessionOrder;
+        const leftIndex = order.get(left.uuid);
+        const rightIndex = order.get(right.uuid);
+        // New sessions precede the saved drag order, newest first.
+        if (leftIndex === undefined && rightIndex === undefined) {
+          return sidebarSessionTimestamp(right) - sidebarSessionTimestamp(left);
+        }
+        return (leftIndex ?? -1) - (rightIndex ?? -1);
+      });
     }
     return [...sessions].sort((left, right) => {
+      const newSessionOrder = compareNewSidebarSessions(left, right);
+      if (newSessionOrder !== 0) return newSessionOrder;
       if (chatSort === 'priority') {
         const leftActive = visibleSession?.projectPath === projectPath && visibleSession.sessionId === left.uuid;
         const rightActive = visibleSession?.projectPath === projectPath && visibleSession.sessionId === right.uuid;
@@ -609,6 +629,8 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
     sortedSessions(projectPath, bridge.bootstrap?.projectCatalogs?.[projectPath]?.sessions ?? [])
       .map((session) => ({ projectPath, session }))
   )).sort((left, right) => {
+    const newSessionOrder = compareNewSidebarSessions(left.session, right.session);
+    if (newSessionOrder !== 0) return newSessionOrder;
     if (chatSort === 'manual') return 0;
     if (chatSort === 'priority') {
       const leftActive = visibleSession?.projectPath === left.projectPath && visibleSession.sessionId === left.session.uuid;

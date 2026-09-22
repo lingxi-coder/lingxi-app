@@ -875,7 +875,7 @@ export function SummaryContextActions({ bridge }: { bridge: UseBridge }) {
       onClick={() => { invoke(() => bridge.forceCompact()); }}>
       <Icon name="summary-list" size={16} /><span>{compacting ? 'Compacting…' : 'Compact'}</span>
     </button>
-    {summaryOpen && createPortal(<div ref={panelRef} className="runtime-context-detail"
+    {summaryOpen && createPortal(<div ref={panelRef} className="runtime-context-detail" data-runtime-summary-owned="true"
       onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } }}>
       <ContextSummaryPanel summaries={summaries} selectedId={selectedId} onSelect={setSelectedId} onClose={close} />
     </div>, document.body)}

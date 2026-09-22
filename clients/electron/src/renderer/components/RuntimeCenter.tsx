@@ -44,6 +44,12 @@ const statusRank: Record<string, number> = {
 };
 
 const IN_FLIGHT_TASK_STATUSES: ReadonlySet<string> = new Set(['pending', 'running', 'paused']);
+const SUMMARY_SIDEBAR_MIN_WIDTH = 1_040;
+
+/** The point at which Summary stops reserving message-list width and floats above it. */
+export function usesSummaryOverlayLayout(messageRegionWidth: number): boolean {
+  return messageRegionWidth < SUMMARY_SIDEBAR_MIN_WIDTH;
+}
 
 /**
  * [Finding 5] True when any listed task is still in flight. The desktop
@@ -248,6 +254,7 @@ function planHeading(content: string): string {
 export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
+  const [isOverlayLayout, setIsOverlayLayout] = useState(false);
   const center = bridge.runtimeCenter;
   const tasks = orderedTasks(bridge.desktop);
   const agents = useMemo(() => standaloneAgents(center.agents, tasks)
@@ -282,6 +289,32 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
     openerRef.current = document.querySelector<HTMLElement>('[data-runtime-center-trigger="true"]');
   }, [center.overviewOpen]);
 
+  // The summary owns no page-level width itself: its parent is the available
+  // message region after sidebars and the inspector have taken their space.
+  // Keep this JS threshold aligned with RuntimeCenter.css's container query so
+  // the point-outside-to-dismiss behaviour only applies to the floating form.
+  useEffect(() => {
+    if (!center.overviewOpen) return undefined;
+    const layout = ref.current?.parentElement;
+    if (!layout || typeof ResizeObserver === 'undefined') return undefined;
+    const update = () => setIsOverlayLayout(usesSummaryOverlayLayout(layout.clientWidth));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(layout);
+    return () => observer.disconnect();
+  }, [center.overviewOpen]);
+
+  useEffect(() => {
+    if (!center.overviewOpen || !isOverlayLayout) return undefined;
+    const closeOnOutsidePointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node) || ref.current?.contains(event.target)) return;
+      if (event.target instanceof Element && event.target.closest('[data-runtime-summary-owned="true"]')) return;
+      closeOverview(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointerDown, true);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointerDown, true);
+  }, [center.overviewOpen, closeOverview, isOverlayLayout]);
+
   // [Finding 5] The desktop client has no server-pushed `TaskRow` update --
   // `bridge.desktop.tasks` (and therefore the `task.stage`/`status`
   // subtitle rendered above) is only as fresh as the last `task_list`
@@ -314,7 +347,7 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
     });
   };
   return (
-    <div ref={ref} id="runtime-center-overview" className="runtime-summary" role="region" aria-label="Pinned summary"
+    <div ref={ref} id="runtime-center-overview" className="runtime-summary" data-inspector-open={center.inspectorOpen ? 'true' : undefined} role="region" aria-label="Pinned summary"
       onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOverview(true); } }}
       style={{ '--runtime-border': t.border, '--runtime-muted': t.dark ? t.text2 : t.text3, background: t.surface, color: t.text } as CSSProperties}>
       <GitEnvironment onNavigate={() => bridge.setRuntimeCenterOverviewOpen(false)} />

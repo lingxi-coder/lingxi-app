@@ -61,7 +61,7 @@ test('TaskDetail renders nothing extra when a task has no stage', () => {
   assert.ok(!html.includes('Running panels'), `expected no stage text, got: ${html}`);
 });
 
-import { RuntimeCenterOverview, RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
+import { RuntimeCenterOverview, RuntimeCenterInspector, usesSummaryOverlayLayout } from '../src/renderer/components/RuntimeCenter';
 import { emptyRuntimeCenterState } from '../src/renderer/bridge/runtimeCenterState';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
 
@@ -87,6 +87,15 @@ test('closed overview and inspector do not render stale session content', () => 
   bridge.runtimeCenter = { ...bridge.runtimeCenter, overviewOpen: false, inspectorOpen: false };
   assert.equal(render(React.createElement(RuntimeCenterOverview, { bridge })), '');
   assert.equal(render(React.createElement(RuntimeCenterInspector, { bridge })), '');
+});
+
+test('summary reserves a side rail only while the message region is wide enough', () => {
+  assert.equal(usesSummaryOverlayLayout(1_039), true);
+  assert.equal(usesSummaryOverlayLayout(1_040), false);
+
+  const bridge = runtimeBridge();
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true };
+  assert.match(render(React.createElement(RuntimeCenterOverview, { bridge })), /data-inspector-open="true"/);
 });
 
 test('pinned summary is a nonmodal region with context actions and four ordered empty categories', () => {

@@ -118,43 +118,47 @@ export function App() {
             runtimeCenterOpen={bridge.runtimeCenter.overviewOpen}
             onToggleRuntimeCenter={() => bridge.setRuntimeCenterOverviewOpen(!bridge.runtimeCenter.overviewOpen)}
           />
-          {!bridge.sessionLoading && <RuntimeCenterOverview bridge={planBridge} />}
           <ErrorBanner bridge={bridge} />
-              {/* The transcript keeps all remaining height; Todos live in Summary. */}
-              <Stage
-                onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files, path })}
-                submittedPlans={bridge.sessionLoading ? [] : planCalls}
-                onOpenPlan={(id) => bridge.openRuntimeItem({ kind: 'plan-document', id })}
-                liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
-                running={!bridge.sessionLoading && bridge.running}
-                apiRetry={bridge.sessionLoading ? null : bridge.desktop.apiRetry}
-                agents={stageAgents}
-                activeAgentId={bridge.runtimeCenter.inspectorOpen && bridge.runtimeCenter.activeItem?.kind === 'agent'
-                  ? bridge.runtimeCenter.activeItem.id : undefined}
-                onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
-                collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
-                emptyMessage={emptyMessage}
-                welcomeProject={(bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
-                // Item ids restart at `i1` in every session; the Stage's
-                // collapse map is scoped by this and dropped when it changes.
-                sessionKey={bridge.conversation.sessionKey}
-                foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
-              />
-              <BetaComposer
-                bridge={bridge}
-                ready={ready}
-                onOpenSettings={() => {
-                  // `/config` from the composer opens the same full-page
-                  // surface the gear does, so it owes the same focus contract:
-                  // capture the opener HERE, before `SettingsBackground`'s
-                  // layout effect marks the tree `inert` and the browser has
-                  // already moved focus to <body>. See the sidebar handler.
-                  openSettings();
-                }}
-                onOpenSettingsPage={(pageId) => openSettings({ pageId })}
-                onSetTheme={changeTheme}
-                onOpenProviderSettings={(providerId, modelReference, restoreFocus) => setSettingsRoute({ pageId: 'provider-credentials', providerId, pendingModelReference: modelReference, restoreFocus })}
-              />
+          <div className="desktop-chat-layout" data-runtime-inspector-open={bridge.runtimeCenter.inspectorOpen ? 'true' : undefined}>
+            <div className="desktop-message-list-view">
+                {/* The transcript keeps all remaining height; Todos live in Summary. */}
+                <Stage
+                  onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files, path })}
+                  submittedPlans={bridge.sessionLoading ? [] : planCalls}
+                  onOpenPlan={(id) => bridge.openRuntimeItem({ kind: 'plan-document', id })}
+                  liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
+                  running={!bridge.sessionLoading && bridge.running}
+                  apiRetry={bridge.sessionLoading ? null : bridge.desktop.apiRetry}
+                  agents={stageAgents}
+                  activeAgentId={bridge.runtimeCenter.inspectorOpen && bridge.runtimeCenter.activeItem?.kind === 'agent'
+                    ? bridge.runtimeCenter.activeItem.id : undefined}
+                  onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
+                  collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
+                  emptyMessage={emptyMessage}
+                  welcomeProject={(bridge.activeSession?.projectPath ?? bridge.bootstrap?.settings.activeProject ?? workspace?.path)?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
+                  // Item ids restart at `i1` in every session; the Stage's
+                  // collapse map is scoped by this and dropped when it changes.
+                  sessionKey={bridge.conversation.sessionKey}
+                  foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
+                />
+                <BetaComposer
+                  bridge={bridge}
+                  ready={ready}
+                  onOpenSettings={() => {
+                    // `/config` from the composer opens the same full-page
+                    // surface the gear does, so it owes the same focus contract:
+                    // capture the opener HERE, before `SettingsBackground`'s
+                    // layout effect marks the tree `inert` and the browser has
+                    // already moved focus to <body>. See the sidebar handler.
+                    openSettings();
+                  }}
+                  onOpenSettingsPage={(pageId) => openSettings({ pageId })}
+                  onSetTheme={changeTheme}
+                  onOpenProviderSettings={(providerId, modelReference, restoreFocus) => setSettingsRoute({ pageId: 'provider-credentials', providerId, pendingModelReference: modelReference, restoreFocus })}
+                />
+            </div>
+            {!bridge.sessionLoading && <RuntimeCenterOverview bridge={planBridge} />}
+          </div>
 
           </div>
 

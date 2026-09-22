@@ -3177,21 +3177,25 @@ final class LocalAppsStoreTests: XCTestCase {
                 "a pin arriving after the stop-loss fired must not resurrect a spent landing")
         }
 
-        /// A pending (or queued) create-confirmation/MCP-proposal sheet is a
-        /// promise to resolve ITS request against the source that raised it.
-        /// That source is torn down by a rebind, so answering a SURVIVING
-        /// sheet would submit a stale request id into the new engine.
+        /// A pending (or queued) approval sheet is a promise to resolve ITS
+        /// request against the source that raised it. That source is torn down
+        /// by a rebind, so answering a SURVIVING sheet would submit a stale
+        /// request id into the new engine.
         /// Mirrors `LocalAppsViewModel.kt`'s `abandonedSheet` capture.
         func testEngineRebindClearsPendingApprovalSheetsAndTheirQueuesAndReportsUnknownResult() async throws {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
 
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-1", appId: "alpha", name: "Alpha"))))
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-2", appId: "beta", name: "Beta"))))
-            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
+            store.handle(event: .appEvent(event: .mcpProposalApprovalRequested(
+                request: mcpProposalRequest(
+                    requestId: "proposal-1", appId: "alpha", diffs: [],
+                    requiredFlowChanges: ["Add audit step"]))))
+            store.handle(event: .appEvent(event: .mcpProposalApprovalRequested(
+                request: mcpProposalRequest(
+                    requestId: "proposal-2", appId: "beta", diffs: [],
+                    requiredFlowChanges: ["Add audit step"]))))
+            XCTAssertEqual(store.pendingMcpProposalApproval?.requestID, "proposal-1")
 
             store.handle(event: .appEvent(event: .appProfileProposal(
                 proposal: AppAgentProfileProposalDto(
@@ -3208,29 +3212,31 @@ final class LocalAppsStoreTests: XCTestCase {
             await store.refreshAfterEngineRebind()
 
             XCTAssertNil(
-                store.pendingCreateConfirmation,
-                "a create-confirmation sheet answered into a torn-down source must not survive a rebind")
+                store.pendingMcpProposalApproval,
+                "an approval sheet answered into a torn-down source must not survive a rebind")
             XCTAssertNil(store.pendingProfileProposal)
             XCTAssertEqual(
                 store.errorMessage,
                 String(localized: "local_apps_creation_result_unknown"))
 
-            // The queued "beta" confirmation must be gone too, not just the
-            // visible sheet: if it survived, a third confirmation for the
+            // The queued "beta" proposal must be gone too, not just the
+            // visible sheet: if it survived, a third proposal for the
             // SAME app would supersede it in place (and reject its stale
             // request id) instead of becoming the new pending sheet directly.
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-3", appId: "beta", name: "Beta"))))
+            store.handle(event: .appEvent(event: .mcpProposalApprovalRequested(
+                request: mcpProposalRequest(
+                    requestId: "proposal-3", appId: "beta", diffs: [],
+                    requiredFlowChanges: ["Add audit step"]))))
             XCTAssertEqual(
-                store.pendingCreateConfirmation?.requestID, "create-3",
+                store.pendingMcpProposalApproval?.requestID, "proposal-3",
                 "the queue must have been emptied by the rebind, not just the visible sheet")
             XCTAssertFalse(
                 submitted.contains { command in
-                    guard case let .pluginCommand(command: .resolveCreateConfirmation(requestId, approved)) = command
+                    guard case let .pluginCommand(command: .resolveMcpProposalApproval(requestId, approved)) = command
                     else { return false }
-                    return requestId == "create-2" && approved == false
+                    return requestId == "proposal-2" && approved == false
                 },
-                "a queued confirmation that survived the rebind must not be superseded/rejected later")
+                "a queued proposal that survived the rebind must not be superseded/rejected later")
         }
 
         /// The app's very first bootstrap has no prior engine session to
@@ -3499,188 +3505,6 @@ final class LocalAppsStoreTests: XCTestCase {
                     return appId == "tracker" && approvalToken == "token-1" && approved == false
                 }
             }
-        }
-
-        func testCreateConfirmationSupersedesSameAppAndRejectsOldToken() async throws {
-            let store = LocalAppsStore()
-            var submitted: [ClientCommand] = []
-            store.configure { command in submitted.append(command) }
-
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
-            )))
-            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
-
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-2", appId: "tracker", name: "Tracker v2")
-            )))
-
-            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-2")
-            try await waitUntil {
-                submitted.contains { command in
-                    guard case let .pluginCommand(command: .resolveCreateConfirmation(requestId, approved)) = command
-                    else { return false }
-                    return requestId == "create-1" && approved == false
-                }
-            }
-        }
-
-        func testResolvingCreateConfirmationApprovesCurrentAndAdvancesQueue() async throws {
-            let store = LocalAppsStore()
-            var submitted: [ClientCommand] = []
-            store.configure { command in submitted.append(command) }
-
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
-            )))
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-2", appId: "notes", name: "Notes")
-            )))
-
-            await store.resolvePendingCreateConfirmation(true)
-
-            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-2")
-            XCTAssertTrue(submitted.contains { command in
-                guard case let .pluginCommand(command: .resolveCreateConfirmation(requestId, approved)) = command
-                else { return false }
-                return requestId == "create-1" && approved
-            })
-        }
-
-        /// A failed send must not strand the engine holding an approval token
-        /// with nothing left to re-answer it: the sheet the user just
-        /// answered has to come back, not silently vanish.
-        func testAFailedResolveSendRestoresTheCreateConfirmationSheet() async throws {
-            enum SendFailure: Error { case offline }
-            let store = LocalAppsStore()
-            store.configure { _ in throw SendFailure.offline }
-
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
-            )))
-            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
-
-            await store.resolvePendingCreateConfirmation(true)
-
-            XCTAssertEqual(
-                store.pendingCreateConfirmation?.requestID, "create-1",
-                "a failed send must restore the sheet the user just answered, "
-                    + "not discard it and advance the queue as if it had succeeded")
-        }
-
-        /// The immediate drain in `resolvePendingCreateConfirmation` is only
-        /// safe because a FAILED send puts whatever it already pulled up back
-        /// at the FRONT of the queue before restoring the prompt the user
-        /// answered. Without that reinsertion the drained prompt is silently
-        /// overwritten and the engine is left holding its approval token
-        /// forever. The single-prompt test above cannot see this: with an
-        /// empty queue nothing is ever displaced.
-        func testAFailedResolveSendPutsTheAlreadyDrainedConfirmationBackOnTheQueue() async throws {
-            enum SendFailure: Error { case offline }
-            let store = LocalAppsStore()
-            var sendAttempts = 0
-            store.configure { _ in
-                sendAttempts += 1
-                if sendAttempts == 1 { throw SendFailure.offline }
-            }
-
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
-            )))
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-2", appId: "notes", name: "Notes")
-            )))
-            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
-
-            await store.resolvePendingCreateConfirmation(true)
-
-            XCTAssertEqual(sendAttempts, 1)
-            XCTAssertEqual(
-                store.pendingCreateConfirmation?.requestID, "create-1",
-                "a failed send must restore the prompt the user answered")
-
-            // The load-bearing half: `create-2` was drained onto the sheet
-            // before the send failed, so it only survives if it was pushed
-            // back to the FRONT of the queue. Answering `create-1` again —
-            // this time successfully — must surface it.
-            await store.resolvePendingCreateConfirmation(true)
-
-            XCTAssertEqual(sendAttempts, 2)
-            XCTAssertEqual(
-                store.pendingCreateConfirmation?.requestID, "create-2",
-                "the confirmation drained by the failed resolve must be back on "
-                    + "the queue, not dropped — the engine still holds its token")
-        }
-
-        /// A `Rejected` is NOT a failed send, and must NOT restore the sheet.
-        ///
-        /// The restore above exists because a transport failure leaves the
-        /// engine still holding the approval token. A `Rejected` is the
-        /// opposite state: `host.rs`'s two resolve arms throw it on exactly
-        /// one condition — the engine no longer holds this request ("unknown
-        /// or expired"). Restoring there re-presents a sheet whose every
-        /// button takes the identical path again, next to an alert saying the
-        /// interaction is no longer pending.
-        func testAnExpiredCreateConfirmationIsDroppedRatherThanRePresented() async throws {
-            let store = LocalAppsStore()
-            var sendAttempts = 0
-            store.configure { _ in
-                sendAttempts += 1
-                throw ClientError.Rejected(
-                    message: "unknown or expired Local App create confirmation")
-            }
-
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
-            )))
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-2", appId: "notes", name: "Notes")
-            )))
-            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
-
-            await store.resolvePendingCreateConfirmation(true)
-
-            XCTAssertEqual(sendAttempts, 1)
-            XCTAssertEqual(
-                store.pendingCreateConfirmation?.requestID, "create-2",
-                "an expired confirmation must be dropped and the queue left "
-                    + "advanced — restoring it hands the user a sheet that can "
-                    + "never be answered successfully")
-            XCTAssertEqual(
-                store.errorMessage,
-                String(localized: "local_apps_error_operation_interaction_invalid"))
-        }
-
-        /// The next queued confirmation must not be withheld for the whole
-        /// duration of THIS resolve's engine round-trip — it is very likely a
-        /// DIFFERENT app's create, unrelated to whatever is slow about this
-        /// one's `resolveCreateConfirmation` send.
-        func testResolvingCreateConfirmationAdvancesTheQueueBeforeItsSendResolves() async throws {
-            let store = LocalAppsStore()
-            var sendContinuation: CheckedContinuation<Void, Never>?
-            store.configure { _ in
-                await withCheckedContinuation { continuation in
-                    sendContinuation = continuation
-                }
-            }
-
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
-            )))
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(requestId: "create-2", appId: "notes", name: "Notes")
-            )))
-
-            let resolve = Task { await store.resolvePendingCreateConfirmation(true) }
-            try await waitUntil("the first resolve's send to start") { sendContinuation != nil }
-
-            XCTAssertEqual(
-                store.pendingCreateConfirmation?.requestID, "create-2",
-                "the next queued confirmation must be presented immediately, "
-                    + "not held behind this resolve's own engine round-trip")
-
-            sendContinuation?.resume()
-            await resolve.value
         }
 
         func testMcpProposalShowsAllDiffKindsRejectsExplicitlyAndFailsClosedWhenUnchanged() async throws {
@@ -4268,24 +4092,33 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertFalse(fresh.isDraftStalled, "a shell created seconds ago is still creating")
         }
 
-        // ── r1-backlog-native-confirmation-15: the expired rejection ───────
+        // ── the expired rejection ──────────────────────────────────────────
 
         /// The engine's "unknown or expired" rejection must not reach the user
         /// as raw English.
         ///
         /// `ClientError` is flat by design, so there is no code to switch on;
         /// what makes this localizable is the CALL SITE — `host.rs`'s
-        /// `ResolveCreateConfirmation` arm has exactly one `Err` path.
-        func testAnExpiredCreateConfirmationRejectionIsLocalized() async throws {
+        /// `ResolveMcpProposalApproval` arm has exactly one `Err` path.
+        func testAnExpiredMcpProposalRejectionIsLocalized() async throws {
             let store = LocalAppsStore()
-            let engineEnglish = "unknown or expired Local App create confirmation"
+            let engineEnglish = "unknown or expired Local App MCP proposal approval"
             store.configure { _ in throw ClientError.Rejected(message: engineEnglish) }
 
-            store.handle(event: .appEvent(event: .createConfirmationRequested(
-                request: createConfirmationRequest(
-                    requestId: "create-1", appId: "tracker", name: "Tracker")
+            store.handle(event: .appEvent(event: .mcpProposalApprovalRequested(
+                request: mcpProposalRequest(
+                    requestId: "mcp-1", appId: "tracker",
+                    diffs: [
+                        .init(
+                            kind: .added,
+                            name: "added_tool",
+                            before: nil,
+                            after: toolSurface(name: "added_tool", title: "Added"),
+                            changedFields: []
+                        )
+                    ])
             )))
-            await store.resolvePendingCreateConfirmation(true)
+            await store.resolvePendingMcpProposalApproval(true)
 
             XCTAssertEqual(
                 store.errorMessage,
@@ -4423,29 +4256,6 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertTrue(condition(), "condition not satisfied before timeout")
         }
 
-        private func createConfirmationRequest(
-            requestId: String,
-            appId: String,
-            name: String
-        ) -> LocalAppCreateConfirmationRequestDto {
-            LocalAppCreateConfirmationRequestDto(
-                requestId: requestId,
-                appId: appId,
-                name: name,
-                brief: "Summarize local data",
-                selectedTemplate: .init(
-                    templateId: "template.dom",
-                    surface: .dom,
-                    summary: "DOM template"
-                ),
-                runtimeProfile: runtimeProfileOption(),
-                reason: "Best match for the requested workflow",
-                rejected: [.init(templateId: "template.canvas", reason: "Needs multiple panes")],
-                initialTools: [toolSurface(name: "read_value", title: "Read Value")],
-                requiredGates: [gateStatus(id: "runner", status: .pending, available: false)]
-            )
-        }
-
         private func mcpProposalRequest(
             requestId: String,
             appId: String,
@@ -4466,20 +4276,6 @@ final class LocalAppsStoreTests: XCTestCase {
                 requiredFlowChanges: requiredFlowChanges,
                 excludedCapabilities: excludedCapabilities,
                 pendingGates: pendingGates
-            )
-        }
-
-        private func runtimeProfileOption() -> AppRuntimeProfileOptionDto {
-            AppRuntimeProfileOptionDto(
-                family: .reactDom,
-                revision: 3,
-                contractSha256: String(repeating: "r", count: 64),
-                surface: .dom,
-                corePackages: [.init(name: "next", version: "15.0.0")],
-                cacheStatus: "cached",
-                downloadStatus: "ready",
-                available: true,
-                reason: nil
             )
         }
 
@@ -5163,9 +4959,8 @@ final class LocalAppsStoreTests: XCTestCase {
 
     /// Every `drawer.*` identifier the UI tests drive must have a producer.
     ///
-    /// The drawer's create entry points — `drawer.apps.create` and
-    /// `drawer.apps.library` — are the only end-to-end coverage the local-app
-    /// create flow has, and the whole family of drawer identifiers had rotted
+    /// The drawer's Apps tab exposes creation and the focused app-session
+    /// return action. The whole family of drawer identifiers had rotted
     /// out from under it: `drawer.tab.chats`/`drawer.tab.projects`/
     /// `drawer.tab.crons` (the rawValues are `chat`/`code`/`cron` and there is
     /// no projects tab), `drawer.scope.global`/`drawer.scope.project.<name>`
@@ -5208,10 +5003,10 @@ final class LocalAppsStoreTests: XCTestCase {
         prefixes.remove("drawer.tab.")
 
         XCTAssertTrue(
-            exact.contains("drawer.apps.create") && exact.contains("drawer.apps.library"),
+            exact.contains("drawer.apps.create") && exact.contains("drawer.apps.all"),
             """
             vacuity guard: the producer scan must have found the drawer's local-app \
-            create entry points, or it is reading the wrong file
+            workspace entry points, or it is reading the wrong file
             """)
         XCTAssertTrue(
             prefixes.contains("drawer.workspace."),
@@ -5430,26 +5225,6 @@ final class LocalAppsStoreTests: XCTestCase {
                 """)
         }
         XCTAssertGreaterThanOrEqual(totalContainers, 3, "vacuity guard: three container cases are known across these two files")
-    }
-
-    /// The create confirmation sheet decoded `corePackages`, `cacheStatus`,
-    /// `downloadStatus`, `available` and profile `reason` and rendered none
-    /// of them — the sheet showed only family/revision/surface/digest.
-    func testCreateConfirmationSheetRendersRuntimeProfileDependencyFields() throws {
-        let source = try clientSource("Sources/LocalApps/LocalAppApprovalSheets.swift")
-        guard let start = source.range(of: "struct LocalAppCreateConfirmationSheet"),
-              let end = source.range(
-                  of: "private func resolve(_ approved: Bool)",
-                  range: start.upperBound ..< source.endIndex)
-        else {
-            return XCTFail("read the wrong file: LocalAppCreateConfirmationSheet not found")
-        }
-        let body = String(source[start.lowerBound ..< end.lowerBound])
-        for symbol in ["corePackages", "cacheStatus", "downloadStatus", "prompt.runtimeProfile.available"] {
-            XCTAssertTrue(
-                body.contains(symbol),
-                "the create confirmation sheet must render runtime profile's \(symbol)")
-        }
     }
 
     /// A drawer tap that both entered an app scope AND changed section mode

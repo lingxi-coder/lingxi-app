@@ -181,43 +181,63 @@ final class LingxiCodeUITests: XCTestCase {
     }
 
     func testComposerConfigurationIsVisibleAndFastModeCanChange() {
+        app.buttons["composer.controls"].tap()
+        XCTAssertTrue(app.buttons["composer.permission.auto"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["composer.reasoning.slider"].exists)
+        XCTAssertFalse(app.switches["composer.model.fast-mode"].exists)
+        let permissionShot = XCTAttachment(screenshot: app.screenshot())
+        permissionShot.name = "Permission-only sheet"
+        permissionShot.lifetime = .keepAlways
+        add(permissionShot)
+        app.buttons["composer.permission.close"].tap()
         openModelPicker()
+        XCTAssertFalse(app.switches["composer.model.fast-mode"].exists)
         let opus = providerRow("anthropic/claude-opus-4-8")
         XCTAssertTrue(opus.waitForExistence(timeout: 5), app.debugDescription)
         opus.tap()
+        let toggle = app.switches["composer.model.fast-mode"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), app.debugDescription)
+        let effort = app.descendants(matching: .any)["composer.reasoning.slider"].firstMatch
+        XCTAssertTrue(effort.waitForExistence(timeout: 3), app.debugDescription)
+        effort.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+        XCTAssertTrue(String(describing: effort.value).contains("High"), app.debugDescription)
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        let modelShot = XCTAttachment(screenshot: app.screenshot())
+        modelShot.name = "Model effort and Fast sheet"
+        modelShot.lifetime = .keepAlways
+        add(modelShot)
+        app.buttons["composer.model.close"].tap()
         let model = app.buttons["composer.model"]
-        for identifier in ["composer.model", "composer.controls"] {
-            XCTAssertTrue(app.buttons[identifier].isHittable, app.debugDescription)
-        }
+        XCTAssertTrue(String(describing: model.value).contains("High"), app.debugDescription)
+        XCTAssertTrue(String(describing: model.value).contains("Fast Mode On"), app.debugDescription)
+        openModelPicker()
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        providerRow("anthropic/claude-sonnet-5").tap()
+        XCTAssertFalse(app.switches["composer.model.fast-mode"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["composer.reasoning.slider"].exists)
+        app.buttons["composer.model.close"].tap()
         XCTAssertFalse(String(describing: model.value).contains("Fast Mode"))
-        XCTAssertFalse(app.staticTexts["Fast Off"].exists)
-        XCTAssertFalse(app.staticTexts["Fast N/A"].exists)
-        model.tap()
-        let toggle = app.buttons["Fast Mode"]
-        XCTAssertTrue(toggle.waitForExistence(timeout: 3), app.debugDescription)
-        toggle.tap()
-        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value CONTAINS %@", "Fast Mode On"), object: model
-        )], timeout: 5), .completed, app.debugDescription)
-        let enabled = XCTAttachment(screenshot: app.screenshot())
-        enabled.name = "Composer Fast enabled"
-        enabled.lifetime = .keepAlways
-        add(enabled)
-        app.textFields["composer.input"].tap()
-        for identifier in ["composer.model", "composer.controls"] {
-            XCTAssertTrue(app.buttons[identifier].isHittable, app.debugDescription)
+    }
+
+    func testKeyboardPreservesComposerLayout() {
+        let input = app.textFields["composer.input"]
+        let ids = ["composer.model", "composer.controls", "composer.voice", "composer.flow"]
+        let inputFrame = input.frame
+        let frames = ids.map { app.buttons[$0].frame }
+        input.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        for (id, frame) in zip(ids, frames) {
+            let control = app.buttons[id]
+            XCTAssertTrue(control.isHittable, id)
+            XCTAssertEqual(control.frame.minX, frame.minX, accuracy: 1, id)
+            XCTAssertEqual(control.frame.width, frame.width, accuracy: 1, id)
+            XCTAssertEqual(control.frame.midY - input.frame.minY,
+                           frame.midY - inputFrame.minY, accuracy: 1, id)
         }
         app.buttons["composer.keyboard.dismiss"].tap()
-        model.tap()
-        XCTAssertTrue(toggle.waitForExistence(timeout: 3), app.debugDescription)
-        toggle.tap()
-        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "NOT (value CONTAINS %@)", "Fast Mode"), object: model
-        )], timeout: 5), .completed, app.debugDescription)
-        let disabled = XCTAttachment(screenshot: app.screenshot())
-        disabled.name = "Composer Fast hidden"
-        disabled.lifetime = .keepAlways
-        add(disabled)
+        for (id, frame) in zip(ids, frames) {
+            XCTAssertEqual(app.buttons[id].frame.minX, frame.minX, accuracy: 1, id)
+        }
     }
 
     func testComposerSendTransitionsToMatchingStopControl() {
@@ -661,6 +681,7 @@ final class LingxiCodeUITests: XCTestCase {
         // `drawer.apps.create` lives in `conversationActions`, rendered on the
         // default (chat) section like every other route above.
         openDrawer()
+        app.buttons["drawer.tab.apps"].tap()
         let createApp = app.buttons["drawer.apps.create"]
         XCTAssertTrue(createApp.waitForExistence(timeout: 8), app.debugDescription)
         createApp.tap()
@@ -713,64 +734,23 @@ final class LingxiCodeUITests: XCTestCase {
     /// import the app module, so the constant is duplicated on purpose — and
     /// renaming it on the app side makes this test go red at the row probe
     /// rather than silently stop proving anything.
-    func testTheDrawersViewAllMountsTheLocalAppsCover() {
+    func testAppsTabShowsTheSeededLocalAppLibrary() {
         app.terminate()
         app.launchEnvironment["LINGXI_UI_TEST_LOCAL_APPS"] = "1"
         app.launch()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
 
         openDrawer()
-        let library = app.buttons["drawer.apps.library"]
-        XCTAssertTrue(library.waitForExistence(timeout: 8), app.debugDescription)
-        library.tap()
+        let appsTab = app.buttons["drawer.tab.apps"]
+        XCTAssertTrue(appsTab.waitForExistence(timeout: 8), app.debugDescription)
+        appsTab.tap()
 
-        // The cover arrives. `navigationBars["应用"]` is `local_apps_title` —
-        // the same probe this suite used against this cover before the drawer's
-        // create affordance stopped opening it.
+        let appRow = app.buttons["drawer.apps.row.ui-test-seeded-app"]
+        XCTAssertTrue(appRow.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(
-            app.navigationBars["应用"].waitForExistence(timeout: 15),
+            app.buttons["drawer.apps.create"].exists,
             app.debugDescription
         )
-        // …and it is the LIST that is on screen, not the ContentUnavailableView:
-        // the seeded row is rendered and the empty state's action is not.
-        XCTAssertTrue(
-            app.descendants(matching: .any)["local-apps.row.ui-test-seeded-app"]
-                .waitForExistence(timeout: 10),
-            app.debugDescription
-        )
-        XCTAssertFalse(
-            app.buttons["local-apps.create.empty-state"].exists,
-            app.debugDescription
-        )
-        XCTAssertTrue(
-            app.descendants(matching: .any)["local-apps.create"].exists,
-            app.debugDescription
-        )
-
-        // The row just tapped is gone. On its own this is weak — a full-screen
-        // cover takes everything under it out of the hierarchy — so it is the
-        // cheap half of the sidebar contract; the load-bearing half is asserted
-        // after the dismissal below.
-        XCTAssertTrue(waitUntilGone(library, timeout: 10), app.debugDescription)
-
-        // Dismissing returns to the chat. "关闭" is `common_close`, the cover's
-        // `.cancellationAction` toolbar item.
-        let close = app.buttons["关闭"]
-        XCTAssertTrue(close.waitForExistence(timeout: 5), app.debugDescription)
-        close.tap()
-        XCTAssertTrue(
-            waitUntilGone(app.navigationBars["应用"], timeout: 10),
-            app.debugDescription
-        )
-        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
-
-        // The sidebar was LEFT BEHIND, not merely occluded — the same contract
-        // the sheet and the push legs are held to. With the cover down there is
-        // nothing covering the sidebar any more, so if `openLocalApps`'s
-        // `closeSidebar()` had not run the drawer would be back on screen here.
-        // `drawer.tab.chat` is the probe `openDrawer()` itself trusts to mean
-        // "the drawer is open", so it is known to be true whenever it is.
-        XCTAssertFalse(app.buttons["drawer.tab.chat"].exists, app.debugDescription)
     }
 
     /// The name is now WIDER than what the test asserts, and the name is kept
@@ -1127,6 +1107,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(flash.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(flash, timeout: 3), app.debugDescription)
         flash.tap()
+        app.buttons["composer.model.close"].tap()
         XCTAssertTrue(waitUntilGone(sheet, timeout: 5), app.debugDescription)
         let options = app.buttons["composer.model"]
         XCTAssertTrue(options.waitForExistence(timeout: 5), app.debugDescription)
@@ -1181,9 +1162,6 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(model.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(model, timeout: 3), app.debugDescription)
         model.tap()
-        let choose = app.buttons["composer.model.choose"]
-        XCTAssertTrue(choose.waitForExistence(timeout: 3), app.debugDescription)
-        choose.tap()
     }
 
     private func providerRow(_ reference: String) -> XCUIElement {

@@ -21,6 +21,7 @@ struct Composer: View {
     var activeModelId: String = ""
     var providerConfigured: Bool
     var onSelectModel: (String) -> Void = { _ in }
+    var reasoningModelId: String? = nil
     var reasoningSelection: String = "automatic"
     var reasoningOptions: [String] = []
     var reasoningOptionDetails: [ConversationReasoningOption] = []
@@ -103,6 +104,7 @@ struct Composer: View {
         activeModelId: String = "",
         providerConfigured: Bool,
         onSelectModel: @escaping (String) -> Void = { _ in },
+        reasoningModelId: String? = nil,
         reasoningSelection: String = "automatic",
         reasoningOptions: [String] = [],
         reasoningOptionDetails: [ConversationReasoningOption] = [],
@@ -150,6 +152,7 @@ struct Composer: View {
         self.activeModelId = activeModelId
         self.providerConfigured = providerConfigured
         self.onSelectModel = onSelectModel
+        self.reasoningModelId = reasoningModelId
         self.reasoningSelection = reasoningSelection
         self.reasoningOptions = reasoningOptions
         self.reasoningOptionDetails = reasoningOptionDetails
@@ -251,14 +254,12 @@ struct Composer: View {
                         permissionChip
                         Spacer(minLength: 8)
                         modelChip
-                        keyboardDismissButton
                         turnActions
                     }
                     VStack(spacing: 0) {
                         configurationSummary
                         HStack(spacing: 0) {
                             attachmentButton
-                            keyboardDismissButton
                             Spacer(minLength: 0)
                             turnActions
                         }
@@ -286,7 +287,7 @@ struct Composer: View {
         // raises the keyboard over exactly the space a popover above the
         // composer would occupy, and the system sizes a sheet against the
         // keyboard for us.
-        .fullScreenCover(isPresented: $modelOpen) {
+        .sheet(isPresented: $modelOpen) {
             ModelPickerSheet(
                 availableModels: availableModels,
                 detailsByReference: availableModelDetails,
@@ -294,28 +295,49 @@ struct Composer: View {
                 recentModels: recentModels,
                 onSelect: { reference in
                     onSelectModel(reference)
-                    modelOpen = false
                 },
-                onDismiss: { modelOpen = false })
-        }
-        .fullScreenCover(isPresented: $controlsOpen) {
-            ConversationControlsSheet(
+                onDismiss: { modelOpen = false },
+                reasoningModelId: reasoningModelId,
                 reasoningSelection: reasoningSelection,
-                reasoningOptions: reasoningOptions,
-                reasoningOptionDetails: reasoningOptionDetails,
+                reasoningOptions: reasoningOptionDetails.isEmpty ? reasoningOptions.map {
+                    ConversationReasoningOption(id: $0, title: $0 == "automatic" ? "Auto" : $0.capitalized,
+                                                isBudget: $0.hasPrefix("budget:"), persistable: true)
+                } : reasoningOptionDetails,
                 reasoningBudgetRange: reasoningBudgetRange,
                 reasoningDisabledReason: reasoningDisabledReason,
+                controlsPending: controlsPending,
+                controlsError: controlsError,
+                onSelectReasoning: onSelectReasoning,
+                fastModeEnabled: fastModeEnabled,
+                fastModePending: fastModePending,
+                fastModeError: fastModeError,
+                onSetFastMode: onSetFastMode)
+
+        }
+        .sheet(isPresented: $controlsOpen) {
+            ConversationControlsSheet(
                 permissionMode: permissionMode,
                 effectivePermissionMode: effectivePermissionMode,
                 permissionOptions: permissionOptions,
                 controlsPending: controlsPending,
                 controlsError: controlsError,
                 bypassWarningSuppressed: bypassWarningSuppressed,
-                onSelectReasoning: { value in onSelectReasoning(value) },
                 onSelectPermission: { value in onSelectPermission(value) },
                 onConfirmBypassPermissions: onConfirmBypassPermissions,
                 onDismiss: { controlsOpen = false }
             )
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button {
+                    inputFocused = false
+                } label: {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                }
+                .accessibilityLabel("composer_done")
+                .accessibilityIdentifier("composer.keyboard.dismiss")
+            }
         }
         #if canImport(engine_mobileFFI)
             .onChange(of: modelOpen) { _, _ in
@@ -486,23 +508,6 @@ struct Composer: View {
     }
 
     @ViewBuilder
-    private var keyboardDismissButton: some View {
-        if inputFocused {
-            Button {
-                inputFocused = false
-            } label: {
-                Image(systemName: "keyboard.chevron.compact.down")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(t.text2)
-                    .frame(width: 40, height: 40)
-            }
-            .buttonStyle(ComposerActionButtonStyle())
-            .accessibilityLabel("composer_done")
-            .accessibilityIdentifier("composer.keyboard.dismiss")
-        }
-    }
-
-    @ViewBuilder
     private var turnActions: some View {
         let hasDraft = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         HStack(spacing: 0) {
@@ -548,24 +553,14 @@ struct Composer: View {
     }
 
     private var modelChip: some View {
-        Menu {
-            Button("Choose model") { modelOpen = true }
-                .accessibilityIdentifier("composer.model.choose")
-            Button("Effort: \(reasoningLabel)") { controlsOpen = true }
-                .accessibilityIdentifier("composer.reasoning.choose")
-            Toggle("Fast Mode", isOn: Binding(
-                get: { fastModeEnabled },
-                set: onSetFastMode
-            ))
-            .disabled(fastModePending || (!supportsFastMode && !fastModeEnabled))
-            if !supportsFastMode {
-                Text("Fast Mode is unavailable for this model")
-            }
+        Button {
+            inputFocused = false
+            modelOpen = true
         } label: {
             HStack(spacing: 5) {
                 if fastModePending {
                     ProgressView().controlSize(.mini)
-                } else if fastModeEnabled {
+                } else if fastModeEnabled && supportsFastMode {
                     Image(systemName: "bolt.fill")
                         .accessibilityLabel("Fast Mode On")
                         .accessibilityIdentifier("composer.fast-mode")
@@ -582,12 +577,12 @@ struct Composer: View {
         }
         .buttonStyle(ComposerActionButtonStyle())
         .accessibilityLabel("Model and effort")
-        .accessibilityValue("\(chipLabel), \(reasoningLabel)" + (fastModeEnabled ? ", Fast Mode On" : ""))
+        .accessibilityValue("\(chipLabel), \(reasoningLabel)" + (fastModeEnabled && supportsFastMode ? ", Fast Mode On" : ""))
         .accessibilityIdentifier("composer.model")
     }
 
     private var permissionChip: some View {
-        Button { controlsOpen = true } label: {
+        Button { inputFocused = false; controlsOpen = true } label: {
             Label(permissionLabel, systemImage: effectivePermissionMode == "bypassPermissions"
                   ? "exclamationmark.shield" : "checkmark.shield")
                 .font(.scaledSystem(12, weight: .medium, relativeTo: .caption))

@@ -5,23 +5,16 @@ import SwiftUI
 /// back, so unsupported provider/model combinations cannot be invented here.
 struct ConversationControlsSheet: View {
     @Environment(\.dismiss) private var dismiss
-    let reasoningSelection: String
-    let reasoningOptions: [String]
-    let reasoningOptionDetails: [ConversationReasoningOption]
-    let reasoningBudgetRange: ClosedRange<UInt64>?
-    let reasoningDisabledReason: String?
     let permissionMode: String
     let effectivePermissionMode: String
     let permissionOptions: [ConversationPermissionOption]
     let controlsPending: Bool
     let controlsError: String?
     let bypassWarningSuppressed: Bool
-    let onSelectReasoning: (String) -> Void
     let onSelectPermission: (String) -> Void
     let onConfirmBypassPermissions: (Bool) -> Void
     let onDismiss: () -> Void
 
-    @State private var budgetText = ""
     @State private var pendingRiskMode: String?
 
     var body: some View {
@@ -32,34 +25,6 @@ struct ConversationControlsSheet: View {
                         .font(.footnote)
                         .foregroundStyle(.red)
                         .accessibilityIdentifier("composer.controls.error")
-                }
-                Section("Reasoning") {
-                    if reasoningOptionDetails.isEmpty && reasoningOptions.isEmpty && reasoningBudgetRange == nil {
-                        Text("Automatic (provider default)").foregroundStyle(.secondary)
-                    } else {
-                        if let reasoningDisabledReason {
-                            Label(reasoningDisabledReason, systemImage: "info.circle")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("composer.reasoning.disabled-reason")
-                        }
-                        ForEach(nonBudgetOptions) { option in
-                            Button {
-                                onSelectReasoning(option.id)
-                            } label: {
-                                HStack {
-                                    Text(option.title)
-                                    Spacer()
-                                    if option.id == reasoningSelection { Image(systemName: "checkmark") }
-                                }
-                            }
-                            .accessibilityIdentifier("composer.reasoning.\(option.id)")
-                            .disabled(controlsPending)
-                        }
-                        if let reasoningBudgetRange {
-                            budgetEditor(range: reasoningBudgetRange)
-                        }
-                    }
                 }
                 Section("Permission") {
                     ForEach(permissionOptions) { option in
@@ -94,14 +59,16 @@ struct ConversationControlsSheet: View {
                     }
                 }
             }
-            .navigationTitle("Model · Effort & Permission")
+            .navigationTitle("Permission Mode")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("common_close") { onDismiss(); dismiss() }
+                        .accessibilityIdentifier("composer.permission.close")
                 }
             }
         }
+        .accessibilityIdentifier("composer.permission.sheet")
         .presentationDetents([.medium, .large])
         .alert("Confirm permission mode", isPresented: Binding(
             get: { pendingRiskMode != nil },
@@ -146,50 +113,189 @@ struct ConversationControlsSheet: View {
         }
     }
 
-    private var nonBudgetOptions: [ConversationReasoningOption] {
-        let options = reasoningOptionDetails.isEmpty
-            ? reasoningOptions.map {
-                ConversationReasoningOption(
-                    id: $0,
-                    title: $0.capitalized,
-                    isBudget: $0.hasPrefix("budget:"),
-                    persistable: true
-                )
-            }
-            : reasoningOptionDetails
-        return options.filter { !$0.isBudget }
+}
+
+/// A discrete, provider-owned effort scale. Dragging previews locally; releasing
+/// commits one supported identifier to the engine.
+struct ConversationEffortControl: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let selection: String
+    let options: [ConversationReasoningOption]
+    let budgetRange: ClosedRange<UInt64>?
+    let disabledReason: String?
+    let pending: Bool
+    let onSelect: (String) -> Void
+
+    @State private var previewPosition: CGFloat?
+    @State private var thumbGrabOffset: CGFloat?
+    @State private var budgetText = ""
+
+    private var discreteOptions: [ConversationReasoningOption] {
+        var seen = Set<String>()
+        return options.filter {
+            !$0.isBudget && !$0.id.isEmpty && !$0.id.hasPrefix("budget:")
+                && seen.insert($0.id).inserted
+        }
     }
 
-    @ViewBuilder
-    private func budgetEditor(range: ClosedRange<UInt64>) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Token budget")
-                Text("\(range.lowerBound)–\(range.upperBound) tokens")
-                    .font(.caption)
+    private var selectedIndex: Int? {
+        discreteOptions.firstIndex { $0.id == selection }
+    }
+
+    private var previewIndex: Int? {
+        guard let previewPosition, !discreteOptions.isEmpty else { return selectedIndex }
+        return min(discreteOptions.count - 1, max(0, Int(previewPosition.rounded())))
+    }
+
+    private var currentTitle: String {
+        if let previewIndex { return discreteOptions[previewIndex].title }
+        if selection.hasPrefix("budget:") { return "\(selection.dropFirst("budget:".count)) tokens" }
+        return selection.isEmpty || selection == "auto" ? "Automatic" : selection.capitalized
+    }
+
+    private var isDisabled: Bool { pending || disabledReason != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Effort")
+                Spacer(minLength: 12)
+                Text(currentTitle)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .accessibilityIdentifier("composer.reasoning.current")
+            }
+            if !discreteOptions.isEmpty {
+                effortTrack
+            } else if budgetRange == nil {
+                Text("Automatic (provider default)")
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
-            TextField("tokens", text: $budgetText)
-                .keyboardType(.numberPad)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 96)
-            Button {
-                guard let tokens = UInt64(budgetText), range.contains(tokens) else { return }
-                onSelectReasoning("budget:\(tokens)")
-            } label: {
-                Image(systemName: "checkmark.circle")
+            if let disabledReason {
+                Label(disabledReason, systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("composer.reasoning.disabled-reason")
             }
-            .disabled(controlsPending || !validBudget)
+            if let budgetRange { budgetEditor(range: budgetRange) }
         }
-        .accessibilityIdentifier("composer.reasoning.token-budget")
-        .disabled(controlsPending)
+        .onAppear { resetPreview() }
+        .onChange(of: selection) { resetPreview() }
+        .onChange(of: options) { resetPreview() }
+        .onChange(of: budgetRange) { resetPreview() }
+        .onChange(of: pending) {
+            if pending {
+                previewPosition = nil
+                thumbGrabOffset = nil
+            }
+        }
     }
 
-    private var validBudget: Bool {
-        guard let range = reasoningBudgetRange,
-              let tokens = UInt64(budgetText)
-        else { return false }
-        return range.contains(tokens)
+    private var effortTrack: some View {
+        GeometryReader { geometry in
+            let radius: CGFloat = 22
+            let width = max(0, geometry.size.width - radius * 2)
+            let steps = max(1, discreteOptions.count - 1)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color(uiColor: .systemGray5))
+                    .overlay { Capsule().strokeBorder(.primary.opacity(0.08), lineWidth: 1) }
+                ForEach(Array(discreteOptions.enumerated()), id: \.element.id) { index, _ in
+                    Circle()
+                        .fill(.secondary.opacity(0.5))
+                        .frame(width: 6, height: 6)
+                        .position(x: radius + width * CGFloat(index) / CGFloat(steps), y: radius)
+                }
+                if let position = previewPosition ?? selectedIndex.map({ CGFloat($0) }) {
+                    Circle()
+                        .fill(.white)
+                        .overlay { Circle().strokeBorder(.black.opacity(0.08), lineWidth: 1) }
+                        .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
+                        .frame(width: 44, height: 44)
+                        .offset(x: width * position / CGFloat(steps))
+                }
+            }
+            .contentShape(Capsule())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    guard !isDisabled, discreteOptions.count > 1, width > 0 else { return }
+                    if thumbGrabOffset == nil {
+                        if let position = previewPosition ?? selectedIndex.map({ CGFloat($0) }) {
+                            let center = radius + width * position / CGFloat(steps)
+                            let offset = value.startLocation.x - center
+                            let verticalOffset = value.startLocation.y - radius
+                            let grabbedThumb = offset * offset + verticalOffset * verticalOffset <= radius * radius
+                            thumbGrabOffset = grabbedThumb ? offset : 0
+                        } else {
+                            thumbGrabOffset = 0
+                        }
+                    }
+                    let location = value.location.x - (thumbGrabOffset ?? 0)
+                    previewPosition = min(CGFloat(steps), max(0, (location - radius) / width * CGFloat(steps)))
+                }
+                .onEnded { _ in
+                    thumbGrabOffset = nil
+                    guard !isDisabled, let index = previewIndex else {
+                        previewPosition = nil
+                        return
+                    }
+                    let identifier = discreteOptions[index].id
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1)) {
+                        previewPosition = CGFloat(index)
+                    }
+                    if identifier != selection { onSelect(identifier) }
+                })
+        }
+        .frame(height: 44)
+        .opacity(isDisabled ? 0.5 : 1)
+        .disabled(isDisabled)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Effort")
+        .accessibilityValue(currentTitle)
+        .accessibilityHint(disabledReason ?? "Adjust the reasoning effort for the selected model")
+        .accessibilityIdentifier("composer.reasoning.slider")
+        .accessibilityAdjustableAction { direction in
+            guard !isDisabled, !discreteOptions.isEmpty else { return }
+            let current = previewIndex ?? 0
+            let index: Int
+            switch direction {
+            case .increment: index = min(discreteOptions.count - 1, current + 1)
+            case .decrement: index = max(0, current - 1)
+            @unknown default: return
+            }
+            let identifier = discreteOptions[index].id
+            if identifier != selection { onSelect(identifier) }
+        }
+    }
+
+    private func resetPreview() {
+        previewPosition = nil
+        thumbGrabOffset = nil
+        budgetText = selection.hasPrefix("budget:") ? String(selection.dropFirst("budget:".count)) : ""
+    }
+
+    private func budgetEditor(range: ClosedRange<UInt64>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Token budget")
+            Text("\(range.lowerBound)–\(range.upperBound) tokens")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                TextField("tokens", text: $budgetText)
+                    .keyboardType(.numberPad)
+                    .accessibilityLabel("Token budget")
+                Button {
+                    guard let tokens = UInt64(budgetText), range.contains(tokens) else { return }
+                    onSelect("budget:\(tokens)")
+                } label: {
+                    Image(systemName: "checkmark.circle")
+                }
+                .accessibilityLabel("Apply token budget")
+                .disabled(UInt64(budgetText).map { !range.contains($0) } ?? true)
+            }
+        }
+        .accessibilityIdentifier("composer.reasoning.token-budget")
+        .disabled(isDisabled)
     }
 }

@@ -31,6 +31,150 @@ private enum LocalAppDetailSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// Advanced Local App controls deliberately live behind the workspace's
+/// overflow menu. The runtime and repair conversation are the everyday flow;
+/// source, MCP, data and recovery tools remain available without competing for
+/// the same first screen.
+private enum LocalAppManagementRoute: Hashable {
+    case overview
+    case mcp
+    case data
+    case code
+    case history
+    case permissions
+}
+
+struct LocalAppManagementSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var store: LocalAppsStore
+    let appID: String
+    let activeConversationID: String
+    let onDeleted: (String) -> Void
+
+    @State private var route: [LocalAppManagementRoute] = []
+    @State private var confirmDelete = false
+
+    private var app: LocalAppSummary? { store.app(id: appID) }
+    private var runtime: LocalAppRuntimeStatus { store.runtimes[appID] ?? .stopped }
+
+    var body: some View {
+        NavigationStack(path: $route) {
+            List {
+                if let app {
+                    Section("local_apps_section_overview") {
+                        NavigationLink(value: LocalAppManagementRoute.overview) {
+                            Label(app.displayName, systemImage: localAppIconSystemName)
+                        }
+                        LabeledContent("local_apps_runtime_mode", value: runtime.label)
+                    }
+                    Section {
+                        NavigationLink(value: LocalAppManagementRoute.mcp) {
+                            Label("MCP", systemImage: "slider.horizontal.3")
+                        }
+                        NavigationLink(value: LocalAppManagementRoute.data) {
+                            Label("local_apps_section_data", systemImage: "cylinder.split.1x2")
+                        }
+                        NavigationLink(value: LocalAppManagementRoute.code) {
+                            Label("local_apps_section_code", systemImage: "chevron.left.forwardslash.chevron.right")
+                        }
+                        NavigationLink(value: LocalAppManagementRoute.history) {
+                            Label("local_apps_section_history", systemImage: "clock.arrow.circlepath")
+                        }
+                        NavigationLink(value: LocalAppManagementRoute.permissions) {
+                            Label("local_apps_section_permissions", systemImage: "hand.raised")
+                        }
+                    }
+                    if app.scaffolded {
+                        Section {
+                            Button("local_apps_widget_add", systemImage: "rectangle.on.rectangle") {
+                                store.requestWidgetSetup(appID: appID)
+                            }
+                            .accessibilityIdentifier("local-apps.management.add-widget")
+                        }
+                    }
+                    Section {
+                        Button("local_apps_delete", role: .destructive) { confirmDelete = true }
+                    }
+                } else {
+                    ContentUnavailableView("local_apps_not_found", systemImage: "questionmark.app")
+                }
+            }
+            .navigationTitle("local_apps_more")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("common_done") { dismiss() }
+                }
+            }
+            .navigationDestination(for: LocalAppManagementRoute.self) { managementDestination($0) }
+            .confirmationDialog(
+                "local_apps_delete_confirm \(app?.displayName ?? String(localized: "local_apps_title"))",
+                isPresented: $confirmDelete,
+                titleVisibility: .visible
+            ) {
+                Button("local_apps_delete", role: .destructive) { deleteApp() }
+                Button("common_cancel", role: .cancel) {}
+            } message: {
+                Text("local_apps_delete_detail")
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .sheet(
+            item: Binding(
+                get: { store.pendingWidgetSetup },
+                set: { _ in }
+            )
+        ) { setup in
+            LocalAppWidgetSetupSheet(appName: setup.appName) {
+                store.completeWidgetSetup()
+            }
+        }
+        .task(id: appID) { await store.getDetails(appID: appID) }
+    }
+
+    @ViewBuilder
+    private func managementDestination(_ destination: LocalAppManagementRoute) -> some View {
+        switch destination {
+        case .overview:
+            if let app {
+                LocalAppOverviewSection(
+                    app: app,
+                    runtime: runtime,
+                    distribution: store.distributionMode,
+                    onOpenPreview: {}
+                )
+                .navigationTitle("local_apps_section_overview")
+            }
+        case .mcp:
+            LocalAppMcpSection(store: store, appID: appID, activeConversationID: activeConversationID)
+                .navigationTitle("MCP")
+        case .data:
+            LocalAppDataSection(collections: store.collections[appID] ?? [])
+                .navigationTitle("local_apps_section_data")
+        case .code:
+            if let app {
+                LocalAppCodeSection(app: app)
+                    .navigationTitle("local_apps_section_code")
+            }
+        case .history:
+            LocalAppHistorySection(store: store, appID: appID)
+                .navigationTitle("local_apps_section_history")
+        case .permissions:
+            LocalAppPermissionsSection(store: store, appID: appID)
+                .navigationTitle("local_apps_section_permissions")
+        }
+    }
+
+    private func deleteApp() {
+        Task {
+            guard await store.delete(appID: appID) else { return }
+            dismiss()
+            onDeleted(appID)
+        }
+    }
+}
+
 struct LocalAppDetailView: View {
     @Environment(\.theme) private var theme
     @Bindable var store: LocalAppsStore

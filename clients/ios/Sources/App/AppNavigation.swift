@@ -62,6 +62,10 @@ extension AppRoute: Identifiable {
 final class AppNavigationModel {
     var path: [AppRoute] = []
     var presentedRoute: AppRoute?
+    /// The root owns the sidebar selection so an app launch, widget, or deep
+    /// link can deliberately return people to the one Local Apps entry point.
+    var drawerSection: DrawerSection = .chat
+    var localAppsShowsLibrary = true
     /// Sidebar visibility in a regular-width (iPad) split layout. Ignored while
     /// the split view is collapsed.
     var columnVisibility: NavigationSplitViewVisibility = .all
@@ -82,6 +86,26 @@ final class AppNavigationModel {
     }
 
     func closeSidebar() { compactColumn = .detail }
+
+    /// Focus the main surface on every size class. `closeSidebar()` only
+    /// changes compact navigation, which is correct for ordinary conversation
+    /// selection but not for launching an app: on iPad the running app should
+    /// receive the full canvas too.
+    func focusDetail() {
+        columnVisibility = .detailOnly
+        compactColumn = .detail
+    }
+
+    func showLocalApps() {
+        drawerSection = .apps
+        localAppsShowsLibrary = true
+        showSidebar()
+    }
+
+    func showActiveAppSessions() {
+        drawerSection = .apps
+        localAppsShowsLibrary = false
+    }
 
     func showSettings(_ page: SettingsPage = .main) {
         closeSidebar()
@@ -155,10 +179,9 @@ final class AppNavigationModel {
         presentedRoute = .cronRun(runID: runID)
     }
 
-    func openLocalApps(appID: String? = nil) {
-        closeSidebar()
+    func openLocalApps(appID _: String? = nil) {
         settingsOpen = false
-        presentedRoute = .localApps(appID: appID)
+        showLocalApps()
     }
 
     func openSessionDetails(sessionID: String) {

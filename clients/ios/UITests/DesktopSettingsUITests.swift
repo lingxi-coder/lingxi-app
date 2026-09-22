@@ -95,9 +95,6 @@ final class DesktopSettingsUITests: XCTestCase {
         }
         attach("Phone-LargeText-Composer")
         app.buttons["composer.model"].tap()
-        let chooseModel = app.buttons["composer.model.choose"]
-        XCTAssertTrue(chooseModel.waitForExistence(timeout: 3), app.debugDescription)
-        chooseModel.tap()
         XCTAssertTrue(app.descendants(matching: .any)["composer.model.menu"].waitForExistence(timeout: 5), app.debugDescription)
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.isHittable, app.debugDescription)
@@ -108,6 +105,7 @@ final class DesktopSettingsUITests: XCTestCase {
         XCTAssertTrue(result.isHittable, app.debugDescription)
         attach("Phone-LargeText-ModelSearch")
         result.tap()
+        app.buttons["composer.model.close"].tap()
         XCTAssertTrue(app.textFields["composer.input"].waitForExistence(timeout: 5), app.debugDescription)
     }
 

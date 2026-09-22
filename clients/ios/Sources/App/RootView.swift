@@ -139,6 +139,7 @@ struct RootView: View {
     @State private var workspaceWidth: CGFloat = 0
     @State private var sessionInspectorOpen = false
     @State private var sessionDetailsSheetOpen = false
+    @State private var localAppConversationSheet: LocalAppConversationPresentation?
     @State private var openTerminalAfterSessionDetails = false
     @State private var selectedPlanDocument: PlanDocument?
     @State private var providerCatalogBootstrapped = false
@@ -565,7 +566,7 @@ struct RootView: View {
             }
             .onChange(of: localAppsStore.requestedPresentationAppID) { _, appID in
                 guard let requestedAppID = appID else { return }
-                navigation.openLocalApps(appID: requestedAppID)
+                openLocalAppFromSidebar(requestedAppID)
                 _ = localAppsStore.consumeRequestedPresentationAppID()
             }
             // A landing held back by `landCreatedAppIfReady`'s Settings gate
@@ -762,6 +763,16 @@ struct RootView: View {
             ) { route in
                 modalDestination(route)
             }
+            .sheet(
+                item: Binding(
+                    get: { navigation.presentedRoute == nil ? localAppsStore.pendingWidgetSetup : nil },
+                    set: { _ in }
+                )
+            ) { setup in
+                LocalAppWidgetSetupSheet(appName: setup.appName) {
+                    localAppsStore.completeWidgetSetup()
+                }
+            }
             // One controller presents one modal. While the local-apps cover is up it
             // owns the prompt (LocalAppsRootView); this presenter only covers requests
             // raised with the cover down — e.g. a destructive data migration approved
@@ -785,9 +796,6 @@ struct RootView: View {
             } message: {
                 Text(localAppsStore.errorMessage ?? String(localized: "common_unknown_error"))
             }
-            .sheet(item: localAppCreateConfirmationItem) { prompt in
-                LocalAppCreateConfirmationSheet(store: localAppsStore, prompt: prompt)
-            }
             .sheet(item: localAppMcpProposalApprovalItem) { prompt in
                 LocalAppMcpProposalApprovalSheet(store: localAppsStore, prompt: prompt)
             }
@@ -810,21 +818,19 @@ struct RootView: View {
     /// own alert owns the message (`LocalAppsLibraryView`), and UIKit refuses
     /// to raise an alert from a controller that is already presenting — so
     /// this one also yields to the settings sheet and to the permission sheet
-    /// and picks the message up once they are down. It also yields to BOTH
-    /// root-owned approval sheets: `errorMessage` can be set by an
-    /// unrelated app's workflow while the user is mid-create — or mid-MCP
-    /// review — on a DIFFERENT app, and that in-progress approval must not be
-    /// yanked off screen by a notice about something else. Both terms are
-    /// required, not just the create one: `localAppApprovalPresenterIsFree`
-    /// deliberately no longer yields to `errorMessage`, so this gate is the
-    /// only thing keeping the alert and the two approval sheets exclusive on
-    /// a single controller. `errorMessage` is not cleared by yielding, so
-    /// nothing is lost in the meantime.
+    /// and picks the message up once they are down. It also yields to the
+    /// root-owned MCP-proposal approval sheet: `errorMessage` can be set by an
+    /// unrelated app's workflow while the user is mid-MCP review on a
+    /// DIFFERENT app, and that in-progress approval must not be yanked off
+    /// screen by a notice about something else.
+    /// `localAppApprovalPresenterIsFree` deliberately no longer yields to
+    /// `errorMessage`, so this gate is the only thing keeping the alert and
+    /// the approval sheet exclusive on a single controller. `errorMessage` is
+    /// not cleared by yielding, so nothing is lost in the meantime.
     private var localAppErrorPresenterIsFree: Bool {
         navigation.presentedRoute == nil
             && !navigation.settingsOpen
             && localAppsStore.pendingPermission == nil
-            && localAppsStore.pendingCreateConfirmation == nil
             && localAppsStore.pendingMcpProposalApproval == nil
     }
 
@@ -857,7 +863,6 @@ struct RootView: View {
     private var localAppProfileProposalPresenterIsFree: Bool {
         localAppErrorPresenterIsFree
             && localAppsStore.errorMessage == nil
-            && localAppsStore.pendingCreateConfirmation == nil
             && localAppsStore.pendingMcpProposalApproval == nil
     }
 
@@ -865,46 +870,28 @@ struct RootView: View {
     /// lifetimes, so unlike the error alert / permission presenter they do not
     /// yield to `presentedRoute`. They also do not yield to `errorMessage`:
     /// that field is a single shared channel for every Local App, so an
-    /// error raised by app B's workflow must not pull down the create
-    /// confirmation the user is actively answering for app A. Priority is
+    /// error raised by app B's workflow must not pull down the MCP-proposal
+    /// approval the user is actively answering for app A. Priority is
     /// the mirror image of `localAppErrorPresenterIsFree` above, which yields
-    /// to `pendingCreateConfirmation` AND to `pendingMcpProposalApproval` for
-    /// the same reason. Both of those terms are load-bearing: dropping
-    /// `errorMessage` from THIS gate means the alert/sheet exclusivity that
-    /// UIKit requires (one controller, one modal) is now asserted only over
-    /// there, so removing either term lets the alert and a sheet be raised
-    /// from the same controller at once.
+    /// to `pendingMcpProposalApproval` for the same reason. That term is
+    /// load-bearing: dropping `errorMessage` from THIS gate means the
+    /// alert/sheet exclusivity that UIKit requires (one controller, one modal)
+    /// is now asserted only over there, so removing it lets the alert and a
+    /// sheet be raised from the same controller at once.
     private var localAppApprovalPresenterIsFree: Bool {
         !navigation.settingsOpen
             && localAppsStore.pendingPermission == nil
     }
 
-    private var localAppCreateConfirmationItem: Binding<LocalAppCreateConfirmationPrompt?> {
-        Binding(
-            get: {
-                localAppApprovalPresenterIsFree
-                    ? localAppsStore.pendingCreateConfirmation
-                    : nil
-            },
-            set: { prompt in
-                guard prompt == nil, localAppApprovalPresenterIsFree else { return }
-                Task { await localAppsStore.resolvePendingCreateConfirmation(false) }
-            }
-        )
-    }
-
     private var localAppMcpProposalApprovalItem: Binding<LocalAppMcpProposalApprovalPrompt?> {
         Binding(
             get: {
-                guard localAppApprovalPresenterIsFree,
-                      localAppsStore.pendingCreateConfirmation == nil
-                else { return nil }
+                guard localAppApprovalPresenterIsFree else { return nil }
                 return localAppsStore.pendingMcpProposalApproval
             },
             set: { prompt in
                 guard prompt == nil,
-                      localAppApprovalPresenterIsFree,
-                      localAppsStore.pendingCreateConfirmation == nil
+                      localAppApprovalPresenterIsFree
                 else { return }
                 Task { await localAppsStore.resolvePendingMcpProposalApproval(false) }
             }
@@ -965,8 +952,40 @@ struct RootView: View {
         Task { _ = await localAppsStore.createShellApp(armLibraryFallback: false) }
     }
 
+    /// The Apps sidebar is the sole user-facing catalog. A formed app gives
+    /// immediate visual ownership to its workspace, then starts in the
+    /// background; a draft has no runtime and correctly continues its intake
+    /// conversation instead.
+    private func openLocalAppFromSidebar(_ appID: String?) {
+        guard let appID else {
+            navigation.showLocalApps()
+            return
+        }
+        guard let app = localAppsStore.app(id: appID) else {
+            navigation.showLocalApps()
+            localAppsStore.presentUnavailableAppError()
+            return
+        }
+        if app.isDraftShell || !app.workflow.isPublished {
+            if let sessionID = app.initSessionId {
+                openAppSession(appID: appID, sessionID: sessionID, mode: .code)
+            } else {
+                startDraftAppInterview(appID: appID)
+            }
+            return
+        }
+        guard switchScope(to: .localApp(appID), mode: .code) else {
+            localAppsStore.reportScopeSwitchRefused(scopeSwitchRefusalMessage)
+            return
+        }
+        navigation.showActiveAppSessions()
+        navigation.focusDetail()
+        Task { await localAppsStore.start(appID: appID) }
+    }
+
     private var sidebar: some View {
-        Drawer(
+        @Bindable var navigation = navigation
+        return Drawer(
             projectStore: projectStore,
             localAppsStore: localAppsStore,
             activeScope: activeScope,
@@ -974,11 +993,13 @@ struct RootView: View {
             source: source,
             cronState: cronRepository.state,
             activeMode: activeMode,
+            section: $navigation.drawerSection,
+            showsAppLibrary: $navigation.localAppsShowsLibrary,
             workspacePinnedAt: workspacePinnedAt,
             collapsedWorkspaceKeys: collapsedWorkspaceKeys,
             openSettings: { navigation.showSettings() },
             openTerminal: openCurrentWorkspaceTerminal,
-            openApps: { appID in navigation.openLocalApps(appID: appID) },
+            openApps: openLocalAppFromSidebar,
             openCron: { scopeID, taskID in navigation.openCron(scopeID: scopeID, taskID: taskID) },
             closeSidebar: { navigation.closeSidebar() },
             createApp: createLocalAppFromDrawer,
@@ -991,10 +1012,10 @@ struct RootView: View {
                 // switches raced the in-flight `projectSwitching` guard, so a
                 // tap that both entered the app scope and changed mode was
                 // silently refused.
-                switchScope(to: .localApp(appID), mode: mode ?? activeMode, resumeSessionID: sessionID)
+                openAppSession(appID: appID, sessionID: sessionID, mode: mode ?? activeMode)
             },
             onNewAppChat: { appID in
-                switchScope(to: .localApp(appID), mode: activeMode, startNew: true)
+                startNewAppSession(appID: appID)
             },
             onModeChanged: { _ = switchMode(to: $0) },
             onToggleWorkspacePinned: toggleWorkspacePinned,
@@ -1007,26 +1028,37 @@ struct RootView: View {
     private var detailSurface: some View {
         ZStack {
             theme.windowBg.ignoresSafeArea()
-            ChatView(
-                session: session,
-                draft: $draft,
-                voiceInteraction: voiceInteraction,
-                source: source,
-                projectName: projectStore.activeProject?.record.name,
-                projectPath: currentWorkspaceGuestPath,
-                onOpenVoiceSettings: { navigation.showSettings(.voice) },
-                onOpenSessionDetails: {
-                    sessionDetailsSheetOpen = true
-                },
-                onOpenShellTask: { request in
-                    navigation.openTerminal(
-                        shellRequest: request,
-                        projectID: projectStore.activeProjectId,
-                        sessionID: request.taskId
-                    )
-                }
-            )
-            .id(sourceGeneration)
+            if let appID = activeScope.appID {
+                LocalAppWorkspaceView(
+                    store: localAppsStore,
+                    appID: appID,
+                    activeConversationID: activeSession,
+                    onShowSessions: { navigation.showSidebar() },
+                    onDeleted: leaveDeletedLocalApp
+                )
+                .id(appID)
+            } else {
+                ChatView(
+                    session: session,
+                    draft: $draft,
+                    voiceInteraction: voiceInteraction,
+                    source: source,
+                    projectName: projectStore.activeProject?.record.name,
+                    projectPath: currentWorkspaceGuestPath,
+                    onOpenVoiceSettings: { navigation.showSettings(.voice) },
+                    onOpenSessionDetails: {
+                        sessionDetailsSheetOpen = true
+                    },
+                    onOpenShellTask: { request in
+                        navigation.openTerminal(
+                            shellRequest: request,
+                            projectID: projectStore.activeProjectId,
+                            sessionID: request.taskId
+                        )
+                    }
+                )
+                .id(sourceGeneration)
+            }
 
             ConversationProjectBridge(
                 model: source.model,
@@ -1078,10 +1110,59 @@ struct RootView: View {
             .presentationDragIndicator(.visible)
             .accessibilityIdentifier("conversation.session-details-sheet")
         }
+        .sheet(item: localAppConversationSheetBinding) { _ in
+            NavigationStack {
+                ChatView(
+                    session: session,
+                    draft: $draft,
+                    voiceInteraction: voiceInteraction,
+                    source: source,
+                    projectName: projectStore.activeProject?.record.name,
+                    projectPath: currentWorkspaceGuestPath,
+                    onOpenVoiceSettings: { navigation.showSettings(.voice) },
+                    onOpenSessionDetails: { sessionDetailsSheetOpen = true },
+                    onOpenShellTask: { request in
+                        navigation.openTerminal(
+                            shellRequest: request,
+                            projectID: projectStore.activeProjectId,
+                            sessionID: request.taskId
+                        )
+                    }
+                )
+                .id(sourceGeneration)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("common_done") { localAppConversationSheet = nil }
+                            .accessibilityIdentifier("local-apps.conversation.close")
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .interactiveDismissDisabled(false)
+            .accessibilityIdentifier("local-apps.conversation-sheet")
+        }
         .onChange(of: session.id) { _, _ in
             openTerminalAfterSessionDetails = false
             sessionDetailsSheetOpen = false
         }
+    }
+
+    /// A scope switch rebuilds the conversation source asynchronously. Keep the
+    /// sheet intent while that happens, but only present it once the target app
+    /// scope owns the live source so a repair transcript never flashes the
+    /// previous project's messages.
+    private var localAppConversationSheetBinding: Binding<LocalAppConversationPresentation?> {
+        Binding(
+            get: {
+                guard !projectSwitching,
+                      let presentation = localAppConversationSheet,
+                      activeScope.appID == presentation.appID
+                else { return nil }
+                return presentation
+            },
+            set: { localAppConversationSheet = $0 }
+        )
     }
 
     private func handleSettingsDismissed() {
@@ -1210,7 +1291,9 @@ struct RootView: View {
             localAppsStore.reportScopeSwitchRefused(scopeSwitchRefusalMessage)
             return
         }
-        navigation.closePresentedRoute()
+        navigation.showActiveAppSessions()
+        navigation.focusDetail()
+        localAppConversationSheet = LocalAppConversationPresentation(appID: appID, sessionID: sessionID)
     }
 
     /// Open the intake conversation the create sheet armed.
@@ -1249,7 +1332,7 @@ struct RootView: View {
               // both already gate on `navigation.settingsOpen` for the same
               // reason — a create landing must not switch scope underneath a
               // sheet the user still has open, only to have the resulting
-              // create-confirmation sheet then refuse to present because
+              // root-owned approval sheet then refuse to present because
               // Settings is still up. The `.onChange(of: navigation.settingsOpen)`
               // sink below re-checks this the moment Settings closes.
               !navigation.settingsOpen,
@@ -1314,6 +1397,7 @@ struct RootView: View {
                         startNew: sessionID == nil,
                         initialPrompt: kickoff
                     ) {
+                        presentCreatedAppConversation(appID: appID, sessionID: sessionID)
                         return
                     }
                 }
@@ -1346,6 +1430,13 @@ struct RootView: View {
             }
             return
         }
+        presentCreatedAppConversation(appID: appID, sessionID: sessionID)
+    }
+
+    private func presentCreatedAppConversation(appID: String, sessionID: String?) {
+        navigation.showActiveAppSessions()
+        navigation.focusDetail()
+        localAppConversationSheet = LocalAppConversationPresentation(appID: appID, sessionID: sessionID)
     }
 
     /// 「新会话」in an app's session catalog: start a fresh conversation in the
@@ -1356,7 +1447,9 @@ struct RootView: View {
             localAppsStore.reportScopeSwitchRefused(scopeSwitchRefusalMessage)
             return
         }
-        navigation.closePresentedRoute()
+        navigation.showActiveAppSessions()
+        navigation.focusDetail()
+        localAppConversationSheet = LocalAppConversationPresentation(appID: appID, sessionID: nil)
     }
 
     /// Tapping a DRAFT card whose init-session pin is missing — the engine's
@@ -1380,7 +1473,19 @@ struct RootView: View {
             localAppsStore.reportScopeSwitchRefused(scopeSwitchRefusalMessage)
             return
         }
-        navigation.closePresentedRoute()
+        navigation.showActiveAppSessions()
+        navigation.focusDetail()
+        localAppConversationSheet = LocalAppConversationPresentation(appID: appID, sessionID: nil)
+    }
+
+    private func leaveDeletedLocalApp(_ appID: String) {
+        localAppConversationSheet = nil
+        guard activeScope.appID == appID else {
+            navigation.showLocalApps()
+            return
+        }
+        _ = switchScope(to: ConversationScope(projectID: projectStore.activeProjectId), mode: .code)
+        navigation.showLocalApps()
     }
 
     private var currentWorkspaceGuestPath: String {
@@ -2493,20 +2598,15 @@ struct RootView: View {
     private func openLocalAppFromDeepLink(
         appID: String,
         destination _: String,
-        autostart: Bool
+        autostart _: Bool
     ) async {
         await localAppsStore.refresh()
-        guard let app = localAppsStore.app(id: appID) else {
-            navigation.openLocalApps()
+        guard localAppsStore.app(id: appID) != nil else {
+            navigation.showLocalApps()
             localAppsStore.presentUnavailableAppError()
             return
         }
-        let launchDestination: LocalAppLaunchDestination =
-            app.workflow.isPublished ? .preview : .details
-        localAppsStore.requestLaunch(appID: appID, destination: launchDestination)
-        navigation.openLocalApps(appID: appID)
-        guard app.workflow.isPublished, autostart else { return }
-        await localAppsStore.start(appID: appID)
+        openLocalAppFromSidebar(appID)
     }
 
     private func syncConversationBackgroundSurfaces() {
@@ -2572,6 +2672,13 @@ struct RootView: View {
             }
         }
     }
+}
+
+private struct LocalAppConversationPresentation: Identifiable {
+    let appID: String
+    let sessionID: String?
+
+    var id: String { "\(appID):\(sessionID ?? "new")" }
 }
 
 enum ConversationModeRestorePolicy {

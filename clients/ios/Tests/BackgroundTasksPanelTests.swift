@@ -34,14 +34,15 @@ visionDelegationEnabled: true
             id: String,
             status: TaskStatusDto,
             description: String = "local-app-build workflow",
-            error: String? = nil
+            error: String? = nil,
+            canResume: Bool = false
         ) -> TaskRowDto {
             TaskRowDto(
                 taskId: id,
-                taskType: "workflow",
+                taskType: "local_workflow",
                 status: status,
                 description: description,
-                canResume: false,
+                canResume: canResume,
                 startedAtMs: nil,
                 error: error,
                 stage: nil
@@ -128,6 +129,200 @@ visionDelegationEnabled: true
             XCTAssertEqual(source.model.backgroundTasks.map(\.id), ["wmo6xnbac"])
             XCTAssertEqual(source.model.backgroundTasks.first?.status, .paused)
             XCTAssertFalse(source.model.backgroundTasks.first?.status.isTerminal ?? true)
+        }
+
+        func testTaskRowOnlyRunningAndFailedTasksRemainVisible() throws {
+            let source = makeSource()
+            source.applyForTesting(.taskRow(task: row(id: "workflow", status: .running)))
+            var task = try XCTUnwrap(source.model.backgroundTasks.first)
+            XCTAssertNil(task.workflow)
+            XCTAssertTrue(TasksStatusPanel.shouldShowWorkflow([task]))
+            XCTAssertEqual(TasksStatusPanel.workflowSteps(for: task).map(\.state), [.running])
+
+            source.applyForTesting(.taskRow(task: row(
+                id: "workflow", status: .failed, error: "invalid design JSON"
+            )))
+            task = try XCTUnwrap(source.model.backgroundTasks.first)
+            XCTAssertEqual(TasksStatusPanel.visibleWorkflowTasks([task]).map(\.id), ["workflow"])
+            XCTAssertEqual(TasksStatusPanel.workflowSteps(for: task).map(\.state), [.failed])
+            XCTAssertEqual(task.errorText, "invalid design JSON")
+            XCTAssertEqual(ExecutionStatusPanel.visibleGroups(agents: [.main], tasks: [task], todos: []), [.workflow])
+        }
+
+        func testTaskRowOnlySuccessAndCancellationAreHidden() {
+            for status: BackgroundTaskSnapshot.Status in [.completed, .cancelled] {
+                let task = BackgroundTaskSnapshot(id: "workflow", descriptionText: "Build", status: status)
+                XCTAssertFalse(TasksStatusPanel.shouldShowWorkflow([task]))
+                XCTAssertTrue(TasksStatusPanel.visibleWorkflowTasks([task]).isEmpty)
+            }
+        }
+
+        func testFailedResumableTaskRestoresResumeActionWithoutLiveProgress() throws {
+            let source = makeSource()
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac", status: .failed, canResume: true
+            )))
+
+            let task = try XCTUnwrap(source.model.backgroundTasks.first)
+            XCTAssertNil(task.workflow, "cold TaskList restore has no live progress")
+            XCTAssertTrue(TasksStatusPanel.shouldShowWorkflow([task]))
+            XCTAssertEqual(TasksStatusPanel.visibleWorkflowTasks([task]).map(\.id), [task.id])
+            XCTAssertEqual(TasksStatusPanel.workflowSteps(for: task).map(\.canResume), [true])
+        }
+
+        func testResumeIsRejectedDuringSessionTransition() {
+            let source = makeSource()
+            source.setCommandSubmitterForTesting { _ in XCTFail("must not resume in another session") }
+            source.applyForTesting(.taskRow(task: row(id: "workflow", status: .failed, canResume: true)))
+            source.model.sessionTransitionPending = true
+            source.resumeWorkflow("workflow")
+            XCTAssertEqual(source.model.workflowResumeState, .idle)
+        }
+
+        func testQueuedResumeIsDroppedAfterSessionChanges() async {
+            let source = makeSource()
+            source.setCommandSubmitterForTesting { _ in XCTFail("must not submit stale workflow ID") }
+            source.applyForTesting(.taskRow(task: row(id: "workflow", status: .failed, canResume: true)))
+            source.resumeWorkflow("workflow")
+            source.model.activeSessionId = "different-session"
+            // Drain the MainActor task queued by resumeWorkflow.
+            await Task { @MainActor in }.value
+            XCTAssertEqual(source.model.workflowResumeState, .idle)
+        }
+
+        func testFailedCreateResumesDirectlyAndSuppressesDuplicateTaps() async {
+            let source = makeSource()
+            let submitted = expectation(description: "one direct ResumeWorkflow")
+            var commands: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in
+                commands.append(command)
+                submitted.fulfill()
+            }
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac", status: .failed, canResume: true
+            )))
+
+            source.resumeWorkflow("wmo6xnbac")
+            source.resumeWorkflow("wmo6xnbac")
+            await fulfillment(of: [submitted], timeout: 1)
+
+            XCTAssertEqual(commands.count, 1)
+            guard let command = commands.first, case let .resumeWorkflow(taskID) = command else {
+                return XCTFail("Create recovery must submit ResumeWorkflow, never SendPrompt")
+            }
+            XCTAssertEqual(taskID, "wmo6xnbac")
+            XCTAssertEqual(source.model.workflowResumeState, .resuming(taskID: "wmo6xnbac"))
+            XCTAssertTrue(source.model.messages.isEmpty)
+        }
+
+        func testOrdinaryFailureDoesNotOfferOrSubmitResume() throws {
+            let source = makeSource()
+            source.setCommandSubmitterForTesting { _ in
+                XCTFail("ordinary failed workflows must not be resumed")
+            }
+            source.applyForTesting(.taskRow(task: row(id: "wmo6xnbac", status: .failed)))
+
+            let task = try XCTUnwrap(source.model.backgroundTasks.first)
+            XCTAssertFalse(task.canResumeWorkflow)
+            XCTAssertTrue(TasksStatusPanel.shouldShowWorkflow([task]), "failure remains visible without resume capability")
+            XCTAssertEqual(TasksStatusPanel.workflowSteps(for: task).map(\.state), [.failed])
+            XCTAssertEqual(TasksStatusPanel.workflowSteps(for: task).map(\.canResume), [false])
+            source.resumeWorkflow(task.id)
+            XCTAssertEqual(source.model.workflowResumeState, .idle)
+        }
+
+        func testResumingOneWorkflowDoesNotBlockAnotherTask() async {
+            let source = makeSource()
+            let submitted = expectation(description: "both distinct workflows resume")
+            submitted.expectedFulfillmentCount = 2
+            var resumedTaskIDs: [String] = []
+            source.setCommandSubmitterForTesting { command in
+                guard case let .resumeWorkflow(taskID) = command else {
+                    return XCTFail("workflow recovery must retain its direct command")
+                }
+                resumedTaskIDs.append(taskID)
+                submitted.fulfill()
+            }
+            for taskID in ["wmo6xnbac", "wmo6xnbad"] {
+                source.applyForTesting(.taskRow(task: row(
+                    id: taskID, status: .paused, canResume: true
+                )))
+                source.resumeWorkflow(taskID)
+            }
+
+            await fulfillment(of: [submitted], timeout: 1)
+            XCTAssertEqual(resumedTaskIDs.sorted(), ["wmo6xnbac", "wmo6xnbad"])
+        }
+
+        func testPausedWorkflowRetainsDirectResumeCommand() async throws {
+            let source = makeSource()
+            let submitted = expectation(description: "paused workflow resume")
+            source.setCommandSubmitterForTesting { command in
+                guard case let .resumeWorkflow(taskID) = command else {
+                    return XCTFail("paused workflows keep their existing command")
+                }
+                XCTAssertEqual(taskID, "wmo6xnbac")
+                submitted.fulfill()
+            }
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac", status: .paused, canResume: true
+            )))
+            let task = try XCTUnwrap(source.model.backgroundTasks.first)
+            XCTAssertTrue(task.canResumeWorkflow)
+
+            source.resumeWorkflow(task.id)
+            await fulfillment(of: [submitted], timeout: 1)
+        }
+
+        func testFullTaskRowRevokesResumeCapabilityWhileStatusPushPreservesIt() throws {
+            let source = makeSource()
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac", status: .failed, canResume: true
+            )))
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "wmo6xnbac", status: .failed, originSessionId: nil, error: nil
+            ))
+            XCTAssertTrue(try XCTUnwrap(source.model.backgroundTasks.first).canResumeWorkflow)
+
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac", status: .failed, canResume: false
+            )))
+            XCTAssertFalse(try XCTUnwrap(source.model.backgroundTasks.first).canResumeWorkflow)
+        }
+
+        func testKnownTaskFailureRefreshesHostResumeCapability() async {
+            let source = makeSource()
+            let refreshed = expectation(description: "failed task capability refreshed")
+            source.setCommandSubmitterForTesting { command in
+                if case .taskList = command { refreshed.fulfill() }
+            }
+            source.applyForTesting(.taskRow(task: row(id: "wmo6xnbac", status: .running)))
+
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "wmo6xnbac", status: .failed, originSessionId: nil, error: "invalid JSON"
+            ))
+
+            await fulfillment(of: [refreshed], timeout: 1)
+        }
+
+        func testPausedCapabilityCannotAuthorizeFailureWithoutHostRefresh() throws {
+            let source = makeSource()
+            source.setCommandSubmitterForTesting { _ in }
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac", status: .paused, canResume: true
+            )))
+            source.applyForTesting(.taskStatusChanged(
+                taskId: "wmo6xnbac", status: .failed, originSessionId: nil, error: nil
+            ))
+            XCTAssertFalse(try XCTUnwrap(source.model.backgroundTasks.first).canResumeWorkflow)
+
+            // The terminal state remains failed when a stale paused snapshot
+            // arrives; its old resume right must not be attached to that state.
+            source.applyForTesting(.taskRow(task: row(
+                id: "wmo6xnbac", status: .paused, canResume: true
+            )))
+            XCTAssertEqual(source.model.backgroundTasks.first?.status, .failed)
+            XCTAssertFalse(try XCTUnwrap(source.model.backgroundTasks.first).canResumeWorkflow)
         }
 
         /// A status push for an id the panel has never seen inserts a
@@ -878,6 +1073,13 @@ visionDelegationEnabled: true
             XCTAssertEqual(
                 TasksStatusPanel.workflowSteps(for: failed).map(\.state),
                 [.completed, .failed, .pending]
+            )
+            var resumableCreate = failed
+            resumableCreate.canResume = true
+            XCTAssertEqual(
+                TasksStatusPanel.workflowSteps(for: resumableCreate).map(\.canResume),
+                [false, true, false],
+                "only the failed Create phase offers continuation"
             )
 
             let cancelled = BackgroundTaskSnapshot(

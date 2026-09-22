@@ -187,26 +187,6 @@ enum LocalAppsProtocolAdapter {
         }
     }
 
-    static func runtimeProfileFamily(_ dto: AppRuntimeProfileDto) -> LocalAppRuntimeProfileFamily {
-        switch dto {
-        case .reactDom: .reactDom
-        case .canvas2d: .canvas2d
-        case .three3d: .three3d
-        case .phaser2d: .phaser2d
-        case .babylon3d: .babylon3d
-        }
-    }
-
-    static func runtimeProfileFamilyDto(_ family: LocalAppRuntimeProfileFamily) -> AppRuntimeProfileDto {
-        switch family {
-        case .reactDom: .reactDom
-        case .canvas2d: .canvas2d
-        case .three3d: .three3d
-        case .phaser2d: .phaser2d
-        case .babylon3d: .babylon3d
-        }
-    }
-
     static func runtimeProfileStatus(_ dto: AppRuntimeProfileStatusDto) -> LocalAppRuntimeProfileStatus {
         switch dto {
         case .verified: .verified
@@ -250,15 +230,6 @@ enum LocalAppsProtocolAdapter {
         case .add: .add
         case .update: .update
         case .remove: .remove
-        }
-    }
-
-    static func runtimeProfileSurface(_ dto: AppSurfaceDto) -> LocalAppRuntimeProfileSurface {
-        switch dto {
-        case .dom:
-            .dom
-        case .canvas:
-            .canvas
         }
     }
 
@@ -311,21 +282,6 @@ enum LocalAppsProtocolAdapter {
         )
     }
 
-    static func templateSummary(_ dto: LocalAppTemplateSummaryDto) -> LocalAppTemplateSummary {
-        LocalAppTemplateSummary(
-            templateID: dto.templateId,
-            surface: runtimeProfileSurface(dto.surface),
-            summary: dto.summary
-        )
-    }
-
-    static func rejectedCandidate(_ dto: LocalAppRejectedCandidateDto) -> LocalAppRejectedCandidate {
-        LocalAppRejectedCandidate(
-            templateID: dto.templateId,
-            reason: dto.reason
-        )
-    }
-
     static func mcpToolSurface(_ dto: LocalAppMcpToolSurfaceDto) -> LocalAppMcpToolSurface {
         LocalAppMcpToolSurface(
             name: dto.name,
@@ -338,33 +294,6 @@ enum LocalAppsProtocolAdapter {
             visibleMetaSummary: dto.visibleMetaJson,
             semanticFlowSummary: dto.semanticFlowJson,
             ceilingSummary: dto.permissionCeiling
-        )
-    }
-
-    static func createConfirmation(_ dto: LocalAppCreateConfirmationRequestDto) -> LocalAppCreateConfirmationPrompt {
-        LocalAppCreateConfirmationPrompt(
-            requestID: dto.requestId,
-            appID: dto.appId,
-            name: dto.name,
-            brief: dto.brief,
-            selectedTemplate: templateSummary(dto.selectedTemplate),
-            runtimeProfile: LocalAppRuntimeProfileOption(
-                family: runtimeProfileFamily(dto.runtimeProfile.family),
-                revision: dto.runtimeProfile.revision,
-                contractSHA256: dto.runtimeProfile.contractSha256,
-                surface: runtimeProfileSurface(dto.runtimeProfile.surface),
-                corePackages: dto.runtimeProfile.corePackages.map {
-                    LocalAppRuntimeProfilePackage(name: $0.name, version: $0.version)
-                },
-                cacheStatus: dto.runtimeProfile.cacheStatus,
-                downloadStatus: dto.runtimeProfile.downloadStatus,
-                available: dto.runtimeProfile.available,
-                reason: dto.runtimeProfile.reason
-            ),
-            reason: dto.reason,
-            rejected: dto.rejected.map(rejectedCandidate),
-            initialTools: dto.initialTools.map(mcpToolSurface),
-            requiredGates: dto.requiredGates.map(gateStatus)
         )
     }
 

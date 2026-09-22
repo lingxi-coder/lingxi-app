@@ -185,10 +185,15 @@ struct ConversationSummarySheet: View {
                                 .font(.system(size: 13.5, weight: .medium))
                                 .foregroundStyle(t.text)
                                 .lineLimit(1)
-                            Text(agent.latestActivity?.nilIfBlank ?? AgentStatusPresentation(rawValue: agent.status).label)
+                            Text(AgentStatusPresentation(rawValue: agent.status).label)
                                 .font(.system(size: 11))
-                                .foregroundStyle(t.text3)
-                                .lineLimit(1)
+                                .foregroundStyle(AgentStatusPresentation(rawValue: agent.status).color(using: t))
+                            if let activity = agent.latestActivity?.nilIfBlank {
+                                Text(activity)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(t.text3)
+                                    .lineLimit(1)
+                            }
                         }
                         Spacer(minLength: 4)
                         if selectedAgentID == agent.id {
@@ -235,15 +240,19 @@ struct ConversationSummarySheet: View {
                 resumeFailure(for: task.id)
             }
             Spacer(minLength: 0)
-            if task.canResume {
+            if task.canResumeWorkflow {
                 Button {
                     onResumeWorkflow(task.id)
                 } label: {
                     if isResuming(task.id) {
                         ProgressView().controlSize(.small)
                     } else {
-                        Label("Resume", systemImage: "play.fill")
-                            .font(.system(size: 11.5, weight: .medium))
+                        Label {
+                            Text("Resume")
+                        } icon: {
+                            Image(systemName: "play.fill")
+                        }
+                        .font(.system(size: 11.5, weight: .medium))
                     }
                 }
                 .buttonStyle(.borderedProminent)

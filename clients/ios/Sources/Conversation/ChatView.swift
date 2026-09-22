@@ -128,6 +128,7 @@ struct ChatView: View {
                              modelRecents.record(reference)
                              recentModels = modelRecents.resolved(against: visibleAvailableModels)
                          },
+                         reasoningModelId: convo.controls?.qualifiedModel,
                          reasoningSelection: convo.reasoningSelection,
                          reasoningOptions: convo.reasoningOptions,
                          reasoningOptionDetails: convo.reasoningOptionDetails,

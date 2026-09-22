@@ -1593,8 +1593,11 @@ final class MockConversationSource: ConversationSource {
                     reasoning: true, structuredOutput: false
                 ),
                 reasoning: ReasoningControlSpecDto(
-                    options: [], budgetRange: nil, providerDefault: .automatic,
-                    forcedReasoning: false, editable: false, disabledReason: nil
+                    options: [ReasoningOptionDto(selection: .automatic, persistable: true)]
+                        + ["low", "medium", "high"].map {
+                            ReasoningOptionDto(selection: .level(id: $0), persistable: true)
+                        }, budgetRange: nil, providerDefault: .automatic,
+                    forcedReasoning: false, editable: true, disabledReason: nil
                 ),
                 supportsFastMode: true
             )
@@ -1807,6 +1810,20 @@ final class MockConversationSource: ConversationSource {
         }
         if !model.availableModels.isEmpty {
             model.activeModelId = id
+            model.reasoningSelection = "automatic"
+            model.reasoningOptionDetails = model.availableModelDetails[id]?.reasoning.options.map { option in
+                let id: String
+                switch option.selection {
+                case .automatic: id = "automatic"
+                case .disabled: id = "disabled"
+                case .enabled: id = "enabled"
+                case let .level(value): id = value
+                case let .tokenBudget(tokens): id = "budget:\(tokens)"
+                }
+                return ConversationReasoningOption(id: id, title: id == "automatic" ? "Auto" : id.capitalized,
+                                                   isBudget: id.hasPrefix("budget:"), persistable: option.persistable)
+            } ?? []
+            model.reasoningOptions = model.reasoningOptionDetails.map(\.id)
         }
     }
 
@@ -3217,12 +3234,24 @@ final class MockConversationSource: ConversationSource {
         }
 
         func resumeWorkflow(_ taskID: String) {
-            guard !taskID.isEmpty,
-                  model.backgroundTasks.contains(where: { $0.id == taskID && $0.canResume })
+            guard !taskID.isEmpty, !model.sessionTransitionPending,
+                  model.backgroundTasks.contains(where: { $0.id == taskID && $0.canResumeWorkflow })
             else { return }
+            if case let .resuming(activeTaskID) = model.workflowResumeState,
+               activeTaskID == taskID { return }
+            let originSessionID = model.activeSessionId
             model.workflowResumeState = .resuming(taskID: taskID)
             Task { [weak self] in
                 guard let self else { return }
+                guard !self.model.sessionTransitionPending,
+                      self.model.activeSessionId == originSessionID,
+                      self.model.backgroundTasks.contains(where: { $0.id == taskID && $0.canResumeWorkflow })
+                else {
+                    if self.model.workflowResumeState == .resuming(taskID: taskID) {
+                        self.model.workflowResumeState = .idle
+                    }
+                    return
+                }
                 do {
                     try await self.submitCommand(.resumeWorkflow(taskId: taskID))
                 } catch {
@@ -3626,19 +3655,30 @@ final class MockConversationSource: ConversationSource {
             id: String,
             description: String?,
             status: BackgroundTaskSnapshot.Status,
-            canResume: Bool = false,
+            canResume: Bool? = nil,
             startedAtMs: UInt64? = nil,
-            errorText: String? = nil
+            errorText: String? = nil,
+            taskType: String? = nil
         ) {
             let reason = errorText.flatMap { $0.isEmpty ? nil : $0 }
             if let index = model.backgroundTasks.firstIndex(where: { $0.id == id }) {
+                if let taskType { model.backgroundTasks[index].taskType = taskType }
+                let previousStatus = model.backgroundTasks[index].status
                 if !(model.backgroundTasks[index].status.isTerminal && !status.isTerminal) {
                     model.backgroundTasks[index].status = status
                 }
                 if let description, !description.isEmpty {
                     model.backgroundTasks[index].descriptionText = description
                 }
-                model.backgroundTasks[index].canResume = canResume || model.backgroundTasks[index].canResume
+                // A capability belongs to its snapshot's status. A paused
+                // workflow's old capability cannot authorize a later failure;
+                // only the Host can grant Create recovery on a failed row.
+                if previousStatus != model.backgroundTasks[index].status {
+                    model.backgroundTasks[index].canResume = false
+                }
+                if let canResume, status == model.backgroundTasks[index].status {
+                    model.backgroundTasks[index].canResume = canResume
+                }
                 model.backgroundTasks[index].startedAtMs = startedAtMs ?? model.backgroundTasks[index].startedAtMs
                 // Never clear a reason already learned from the other source
                 // (`TaskRow` backfill vs. the `TaskStatusChanged` push) — only
@@ -3651,10 +3691,11 @@ final class MockConversationSource: ConversationSource {
                     id: id,
                     descriptionText: description ?? "",
                     status: status,
-                    canResume: canResume,
+                    canResume: canResume ?? false,
                     startedAtMs: startedAtMs,
                     errorText: reason,
-                    workflow: nil
+                    workflow: nil,
+                    taskType: taskType
                 ))
             }
         }
@@ -4809,7 +4850,8 @@ final class MockConversationSource: ConversationSource {
                         status: mapped,
                         canResume: task.canResume,
                         startedAtMs: task.startedAtMs,
-                        errorText: task.error
+                        errorText: task.error,
+                        taskType: task.taskType
                     )
                 }
 
@@ -4826,7 +4868,8 @@ final class MockConversationSource: ConversationSource {
                         description: task.description,
                         status: mapped,
                         canResume: task.canResume,
-                        startedAtMs: task.startedAtMs
+                        startedAtMs: task.startedAtMs,
+                        taskType: task.taskType
                     )
                 }
                 model.workflowResumeState = .succeeded(taskID: task.taskId)
@@ -4853,16 +4896,19 @@ final class MockConversationSource: ConversationSource {
                 }
                 if let mapped = Self.backgroundTaskStatus(status) {
                     let known = model.backgroundTasks.contains { $0.id == taskId }
+                    let becameFailed = mapped == .failed
+                        && model.backgroundTasks.first(where: { $0.id == taskId })?.status != .failed
                     upsertBackgroundTask(
                         id: taskId,
                         description: nil,
                         status: mapped,
                         errorText: taskError
                     )
-                    if !known {
+                    if !known || becameFailed {
                         // First sighting via a push — pull the row list so
-                        // the panel can show the human description instead
-                        // of the bare id.
+                        // the panel can show the human description. A failed
+                        // Create run also needs the Host's recovery capability,
+                        // which is carried only by full TaskRow snapshots.
                         refreshBackgroundTasks()
                     }
                 }

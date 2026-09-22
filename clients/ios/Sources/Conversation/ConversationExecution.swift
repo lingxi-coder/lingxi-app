@@ -485,8 +485,8 @@ struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
     /// Human-readable description; empty until a `TaskRow` supplies it.
     var descriptionText: String
     var status: Status
-    /// Explicit resume affordance supplied by the engine for adopted paused
-    /// workflows. This is a hint only; the engine remains authoritative.
+    /// Host capability for paused workflows or a failed, persisted Create
+    /// Local App run. Ordinary failed workflows never receive this capability.
     var canResume: Bool = false
     var startedAtMs: UInt64? = nil
     /// Terminal failure reason reported by the engine (`TaskRowDto.error` /
@@ -499,6 +499,11 @@ struct BackgroundTaskSnapshot: Identifiable, Equatable, Hashable {
     /// Structured Claude-style workflow progress for this task when the
     /// engine exposes it as connection-scoped events.
     var workflow: ConversationWorkflowRunSnapshot? = nil
+    var taskType: String? = nil
+
+    var canResumeWorkflow: Bool {
+        canResume && (status == .paused || status == .failed)
+    }
 }
 
 enum WorkflowResumeState: Equatable {

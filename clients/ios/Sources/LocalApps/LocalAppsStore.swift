@@ -80,7 +80,6 @@ final class LocalAppsStore {
     private(set) var pendingWidgetSetup: PendingWidgetSetup?
     private(set) var pendingPermission: LocalAppPermissionPrompt?
     private(set) var pendingDependencyChangeConfirmation: LocalAppDependencyChangeConfirmationPrompt?
-    private(set) var pendingCreateConfirmation: LocalAppCreateConfirmationPrompt?
     private(set) var pendingMcpProposalApproval: LocalAppMcpProposalApprovalPrompt?
     private(set) var pendingProfileProposal: LocalAppProfileProposal?
     private(set) var requestedPresentationAppID: String?
@@ -194,7 +193,6 @@ final class LocalAppsStore {
             source: PendingPermissionSource
         )] = []
         @ObservationIgnored private var dependencyChangeConfirmationQueue: [LocalAppDependencyChangeConfirmationPrompt] = []
-        @ObservationIgnored private var createConfirmationQueue: [LocalAppCreateConfirmationPrompt] = []
         @ObservationIgnored private var mcpProposalApprovalQueue: [LocalAppMcpProposalApprovalPrompt] = []
     #endif
     @ObservationIgnored private var approvedUIAutomation: [String: LocalAppCapabilityDecision] = [:]
@@ -220,11 +218,6 @@ final class LocalAppsStore {
         @ObservationIgnored private var submitManagedMcpCommand:
             ((LocalAppManagedMcpCommand) async -> Bool)?
         @ObservationIgnored private var pendingBackgroundMutationRequests: Set<String> = []
-
-        private enum PendingApprovalKind {
-            case createConfirmation
-            case mcpProposal
-        }
     #endif
 
     init(websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry? = nil) {
@@ -376,52 +369,15 @@ final class LocalAppsStore {
             }
         }
 
-        func resolvePendingCreateConfirmation(_ approved: Bool) async {
-            guard let prompt = pendingCreateConfirmation else { return }
-            pendingCreateConfirmation = nil
-            // Drained IMMEDIATELY, not after the `await send` below: the next
-            // queued confirmation is very likely a DIFFERENT app's create,
-            // and withholding it for the whole duration of THIS resolve's
-            // engine round-trip left it stuck behind an unrelated prompt for
-            // no reason.
-            presentNextCreateConfirmation()
-            let outcome = await sendApprovalResolution(
-                .pluginCommand(
-                    command: .resolveCreateConfirmation(
-                        requestId: prompt.requestID,
-                        approved: approved
-                    )
-                )
-            )
-            if case .notDelivered = outcome {
-                // The result was discarded here before: a failed send left
-                // the engine holding the approval token with no answer, and
-                // the sheet already gone with nothing to re-answer it.
-                // Restore the SAME prompt (not the queue's next one) so the
-                // user can retry, mirroring `setBuiltinPluginEnabled` above.
-                // Whatever `presentNextCreateConfirmation()` already pulled
-                // up in the meantime goes back to the FRONT of the queue
-                // rather than being dropped.
-                //
-                // `refusedAsStale` deliberately does NOT restore. The engine
-                // has already dropped this request; bringing the sheet back
-                // would put an unanswerable prompt in front of the user
-                // alongside the alert that says it is no longer pending, and
-                // every retry would take the same path forever.
-                if let displaced = pendingCreateConfirmation {
-                    createConfirmationQueue.insert(displaced, at: 0)
-                }
-                pendingCreateConfirmation = prompt
-            }
-        }
-
         func resolvePendingMcpProposalApproval(_ approved: Bool) async {
             guard let prompt = pendingMcpProposalApproval else { return }
             pendingMcpProposalApproval = nil
-            // Drained immediately for the same reason as the create
-            // confirmation above — see its comment.
+            // Drained immediately: the next queued proposal is very likely a
+            // DIFFERENT app's proposal, and withholding it for the whole
+            // duration of THIS resolve's engine round-trip left it stuck
+            // behind an unrelated prompt for no reason.
             presentNextMcpProposalApproval()
-            _ = await sendApprovalResolution(
+            await sendApprovalResolution(
                 .pluginCommand(
                     command: .resolveMcpProposalApproval(
                         requestId: prompt.requestID,
@@ -886,15 +842,11 @@ final class LocalAppsStore {
                 // the NEW source using a request id the old one issued — the
                 // same class of bug this avoids. Mirrors the `abandonedSheet`
                 // capture in `LocalAppsViewModel.kt`'s rebind handling.
-                let abandonedApprovalSheet = pendingCreateConfirmation != nil
-                    || pendingMcpProposalApproval != nil
+                let abandonedApprovalSheet = pendingMcpProposalApproval != nil
                     || pendingProfileProposal != nil
-                    || !createConfirmationQueue.isEmpty
                     || !mcpProposalApprovalQueue.isEmpty
-                pendingCreateConfirmation = nil
                 pendingMcpProposalApproval = nil
                 pendingProfileProposal = nil
-                createConfirmationQueue.removeAll()
                 mcpProposalApprovalQueue.removeAll()
                 if abandonedApprovalSheet {
                     reportCreationResultUnknown = true
@@ -1638,7 +1590,7 @@ final class LocalAppsStore {
                 // that one still holds an approval token the engine is
                 // waiting on. Decline it explicitly before overwriting,
                 // mirroring the same-app supersession in
-                // `enqueueCreateConfirmation`/`enqueueMcpProposalApproval`
+                // `enqueueMcpProposalApproval`
                 // above: an overwrite with no queue and no decline just
                 // strands the engine holding a token nothing will ever
                 // answer.
@@ -1763,15 +1715,19 @@ final class LocalAppsStore {
                     validationError: inventory.validationError ?? builtinPluginCommandError
                 )
 
-            case let .createConfirmationRequested(request):
-                enqueueCreateConfirmation(
-                    LocalAppsProtocolAdapter.createConfirmation(request)
-                )
+            // The variant stays in the protocol — its ordinals are locked
+            // against already-installed clients — but nothing on this client
+            // answers it any more: a new Local App is approved by approving
+            // its PLAN, so there is no sheet to raise. Named rather than
+            // swept into a `default:` so a future variant still fails to
+            // compile here.
+            case .createConfirmationRequested:
+                break
 
             case let .mcpProposalApprovalRequested(request):
                 let prompt = LocalAppsProtocolAdapter.mcpProposalApproval(request)
                 guard prompt.hasVisibleChanges else {
-                    Task { await self.resolve(promptID: prompt.requestID, as: .mcpProposal, approved: false) }
+                    Task { await self.resolveMcpProposal(promptID: prompt.requestID, approved: false) }
                     break
                 }
                 enqueueMcpProposalApproval(prompt)
@@ -1879,37 +1835,6 @@ final class LocalAppsStore {
             pendingDependencyChangeConfirmation = dependencyChangeConfirmationQueue.removeFirst()
         }
 
-        private func enqueueCreateConfirmation(
-            _ prompt: LocalAppCreateConfirmationPrompt
-        ) {
-            if pendingCreateConfirmation?.requestID == prompt.requestID
-                || createConfirmationQueue.contains(where: { $0.requestID == prompt.requestID })
-            {
-                return
-            }
-            if let pendingCreateConfirmation, pendingCreateConfirmation.appID == prompt.appID {
-                self.pendingCreateConfirmation = prompt
-                Task { await self.resolve(promptID: pendingCreateConfirmation.requestID, as: .createConfirmation, approved: false) }
-                return
-            }
-            if let index = createConfirmationQueue.firstIndex(where: { $0.appID == prompt.appID }) {
-                let superseded = createConfirmationQueue[index]
-                createConfirmationQueue[index] = prompt
-                Task { await self.resolve(promptID: superseded.requestID, as: .createConfirmation, approved: false) }
-                return
-            }
-            guard pendingCreateConfirmation != nil else {
-                pendingCreateConfirmation = prompt
-                return
-            }
-            createConfirmationQueue.append(prompt)
-        }
-
-        private func presentNextCreateConfirmation() {
-            guard pendingCreateConfirmation == nil, !createConfirmationQueue.isEmpty else { return }
-            pendingCreateConfirmation = createConfirmationQueue.removeFirst()
-        }
-
         private func enqueueMcpProposalApproval(
             _ prompt: LocalAppMcpProposalApprovalPrompt
         ) {
@@ -1920,13 +1845,13 @@ final class LocalAppsStore {
             }
             if let pendingMcpProposalApproval, pendingMcpProposalApproval.appID == prompt.appID {
                 self.pendingMcpProposalApproval = prompt
-                Task { await self.resolve(promptID: pendingMcpProposalApproval.requestID, as: .mcpProposal, approved: false) }
+                Task { await self.resolveMcpProposal(promptID: pendingMcpProposalApproval.requestID, approved: false) }
                 return
             }
             if let index = mcpProposalApprovalQueue.firstIndex(where: { $0.appID == prompt.appID }) {
                 let superseded = mcpProposalApprovalQueue[index]
                 mcpProposalApprovalQueue[index] = prompt
-                Task { await self.resolve(promptID: superseded.requestID, as: .mcpProposal, approved: false) }
+                Task { await self.resolveMcpProposal(promptID: superseded.requestID, approved: false) }
                 return
             }
             guard pendingMcpProposalApproval != nil else {
@@ -1942,15 +1867,6 @@ final class LocalAppsStore {
         }
 
         private func discardPendingApproval(requestID: String) {
-            if pendingCreateConfirmation?.requestID == requestID {
-                pendingCreateConfirmation = nil
-                presentNextCreateConfirmation()
-                return
-            }
-            if let index = createConfirmationQueue.firstIndex(where: { $0.requestID == requestID }) {
-                createConfirmationQueue.remove(at: index)
-                return
-            }
             if pendingMcpProposalApproval?.requestID == requestID {
                 pendingMcpProposalApproval = nil
                 presentNextMcpProposalApproval()
@@ -1961,19 +1877,12 @@ final class LocalAppsStore {
             }
         }
 
-        private func resolve(
-            promptID: String,
-            as kind: PendingApprovalKind,
-            approved: Bool
-        ) async {
-            let command: PluginCommandDto
-            switch kind {
-            case .createConfirmation:
-                command = .resolveCreateConfirmation(requestId: promptID, approved: approved)
-            case .mcpProposal:
-                command = .resolveMcpProposalApproval(requestId: promptID, approved: approved)
-            }
-            _ = await sendApprovalResolution(.pluginCommand(command: command))
+        private func resolveMcpProposal(promptID: String, approved: Bool) async {
+            let command = PluginCommandDto.resolveMcpProposalApproval(
+                requestId: promptID,
+                approved: approved
+            )
+            await sendApprovalResolution(.pluginCommand(command: command))
         }
 
         private func updateManagedInventoryFailure(appID: String, message: String) {
@@ -2201,17 +2110,16 @@ final class LocalAppsStore {
             }
         }
 
-        /// `send`, for the two approval-sheet answers only.
+        /// `send`, for the approval-sheet answer only.
         ///
         /// `ClientError` is flat by design — a rejection carries an English
         /// `message` and no code — so a client normally cannot localize one.
-        /// These two commands are the exception, because the CALL SITE
-        /// supplies what the payload does not: `host.rs`'s
-        /// `ResolveCreateConfirmation` and `ResolveMcpProposalApproval` arms
-        /// each have exactly one `Err` path, "unknown or expired Local App
-        /// create confirmation" / "… MCP proposal approval", and `submit`
-        /// dispatches straight into that match with no earlier guard. So a
-        /// `Rejected` arriving HERE has exactly one meaning, and
+        /// This command is the exception, because the CALL SITE supplies what
+        /// the payload does not: `host.rs`'s `ResolveMcpProposalApproval` arm
+        /// has exactly one `Err` path, "unknown or expired Local App MCP
+        /// proposal approval", and `submit` dispatches straight into that
+        /// match with no earlier guard. So a `Rejected` arriving HERE has
+        /// exactly one meaning, and
         /// `local_apps_error_operation_interaction_invalid`
         /// ("That interaction is no longer pending.") already says it in every
         /// locale — the same sentence `AppErrorCodeDto.interactionInvalid`
@@ -2222,44 +2130,24 @@ final class LocalAppsStore {
         /// `String(reflecting: self)`, so a transport failure reaches the
         /// alert as a Swift debug dump — but fixing that belongs to whoever
         /// owns the whole error-presentation path, not to this call site.
-        /// What became of an approval answer.
-        ///
-        /// Three cases and not a `Bool`, because the two failures need
-        /// OPPOSITE recovery. `notDelivered` (no engine handle, or any
-        /// non-`Rejected` throw) leaves the engine still holding the approval
-        /// token with nobody answering it, so the prompt has to come back.
-        /// `refusedAsStale` is the engine saying it has already forgotten this
-        /// request — `host.rs`'s two resolve arms throw `ClientError.Rejected`
-        /// on exactly that, "unknown or expired" — so re-presenting the sheet
-        /// hands the user a button that can never succeed, next to an alert
-        /// telling them so.
-        private enum ApprovalResolutionOutcome {
-            case delivered
-            case refusedAsStale
-            case notDelivered
-        }
-
         private func sendApprovalResolution(
             _ command: ClientCommand
-        ) async -> ApprovalResolutionOutcome {
+        ) async {
             guard let submitCommand else {
                 errorMessage = String(localized: "local_apps_error_engine_not_connected")
-                return .notDelivered
+                return
             }
             do {
                 try await submitCommand(command)
-                return .delivered
             } catch let error as ClientError {
                 if case .Rejected = error {
                     errorMessage = String(
                         localized: "local_apps_error_operation_interaction_invalid")
-                    return .refusedAsStale
+                    return
                 }
                 errorMessage = error.localizedDescription
-                return .notDelivered
             } catch {
                 errorMessage = error.localizedDescription
-                return .notDelivered
             }
         }
     #endif

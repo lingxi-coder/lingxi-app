@@ -385,19 +385,6 @@ struct LocalAppGateStatus: Identifiable, Hashable, Sendable {
     var badge: LocalAppStatusBadge { status.badge }
 }
 
-struct LocalAppTemplateSummary: Hashable, Sendable {
-    let templateID: String
-    let surface: LocalAppRuntimeProfileSurface
-    let summary: String
-}
-
-struct LocalAppRejectedCandidate: Identifiable, Hashable, Sendable {
-    let templateID: String
-    let reason: String
-
-    var id: String { templateID }
-}
-
 struct LocalAppMcpToolSurface: Identifiable, Hashable, Sendable {
     let name: String
     let title: String?
@@ -478,21 +465,6 @@ struct LocalAppMcpToolDiff: Identifiable, Hashable, Sendable {
     let changedFields: [LocalAppMcpToolField]
 
     var id: String { "\(kind.rawValue)-\(name)" }
-}
-
-struct LocalAppCreateConfirmationPrompt: Identifiable, Hashable, Sendable {
-    let requestID: String
-    let appID: String
-    let name: String
-    let brief: String
-    let selectedTemplate: LocalAppTemplateSummary
-    let runtimeProfile: LocalAppRuntimeProfileOption
-    let reason: String
-    let rejected: [LocalAppRejectedCandidate]
-    let initialTools: [LocalAppMcpToolSurface]
-    let requiredGates: [LocalAppGateStatus]
-
-    var id: String { requestID }
 }
 
 struct LocalAppMcpProposalApprovalPrompt: Identifiable, Hashable, Sendable {
@@ -1040,38 +1012,6 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
     }
 }
 
-enum LocalAppRuntimeProfileFamily: String, CaseIterable, Identifiable, Hashable, Sendable {
-    case reactDom
-    case canvas2d
-    case three3d
-    case phaser2d
-    case babylon3d
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .reactDom: String(localized: "local_apps_runtime_profile_family_react_dom")
-        case .canvas2d: String(localized: "local_apps_runtime_profile_family_canvas_2d")
-        case .three3d: String(localized: "local_apps_runtime_profile_family_three_3d")
-        case .phaser2d: String(localized: "local_apps_runtime_profile_family_phaser_2d")
-        case .babylon3d: String(localized: "local_apps_runtime_profile_family_babylon_3d")
-        }
-    }
-}
-
-enum LocalAppRuntimeProfileSurface: Hashable, Sendable {
-    case dom
-    case canvas
-
-    var title: String {
-        switch self {
-        case .dom: String(localized: "local_apps_runtime_profile_surface_dom")
-        case .canvas: String(localized: "local_apps_runtime_profile_surface_canvas")
-        }
-    }
-}
-
 /// Host-derived health of one app's pinned runtime profile. The raw values
 /// are the protocol wire values; keeping them stable lets cache-only cards and
 /// detail views share the same finite status vocabulary without parsing host
@@ -1106,25 +1046,6 @@ enum LocalAppRuntimeProfileStatus: String, CaseIterable, Hashable, Sendable {
         case .runtimeBundleMissing: "shippingbox.fill"
         }
     }
-}
-
-struct LocalAppRuntimeProfilePackage: Hashable, Sendable {
-    let name: String
-    let version: String
-}
-
-struct LocalAppRuntimeProfileOption: Identifiable, Hashable, Sendable {
-    let family: LocalAppRuntimeProfileFamily
-    let revision: UInt32
-    let contractSHA256: String
-    let surface: LocalAppRuntimeProfileSurface
-    let corePackages: [LocalAppRuntimeProfilePackage]
-    let cacheStatus: String
-    let downloadStatus: String
-    let available: Bool
-    let reason: String?
-
-    var id: String { family.rawValue }
 }
 
 enum LocalAppDependencyChangeKind: String, Hashable, Sendable {

@@ -25,12 +25,59 @@ struct ModelPickerSheet: View {
     let onSelect: (String) -> Void
     let onDismiss: () -> Void
 
+    var reasoningModelId: String? = nil
+    var reasoningSelection: String = "automatic"
+    var reasoningOptions: [ConversationReasoningOption] = []
+    var reasoningBudgetRange: ClosedRange<UInt64>? = nil
+    var reasoningDisabledReason: String? = nil
+    var controlsPending = false
+    var controlsError: String? = nil
+    var onSelectReasoning: (String) -> Void = { _ in }
+    var fastModeEnabled = false
+    var fastModePending = false
+    var fastModeError: String? = nil
+    var onSetFastMode: (Bool) -> Void = { _ in }
+
+    @State private var requestedModel: String?
+    @State private var detent: PresentationDetent = .large
+    @State private var searchPresented = false
     @State private var query = ""
     @State private var selectedDetails: ModelRuntimeDetails?
 
     var body: some View {
         NavigationStack {
             List {
+                if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Section {
+                        Text(ModelDisplay.shortName(for: activeModelId))
+                            .font(.headline)
+                        if modelSwitchPending {
+                            ProgressView("Updating model settings…")
+                        }
+                        ConversationEffortControl(
+                            selection: reasoningSelection,
+                            options: reasoningOptions,
+                            budgetRange: reasoningBudgetRange,
+                            disabledReason: reasoningDisabledReason,
+                            pending: controlsPending || modelSwitchPending,
+                            onSelect: onSelectReasoning
+                        )
+                        .id(activeModelId)
+                        if detailsByReference[activeModelId]?.supportsFastMode == true {
+                            Toggle("Fast Mode", isOn: Binding(get: { fastModeEnabled }, set: onSetFastMode))
+                                .disabled(fastModePending || modelSwitchPending)
+                                .accessibilityIdentifier("composer.model.fast-mode")
+                        }
+                        if let error = controlsError ?? fastModeError {
+                            Label(error, systemImage: "exclamationmark.triangle")
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
+                    } header: {
+                        Text("Model settings")
+                    }
+                }
+
                 if let emptyStateKey = Self.emptyStateKey(
                     query: query,
                     visibleModels: visibleModels,
@@ -63,6 +110,7 @@ struct ModelPickerSheet: View {
             // discover the search box by scrolling up.
             .searchable(
                 text: $query,
+                isPresented: $searchPresented,
                 placement: .navigationBarDrawer(displayMode: .always),
                 prompt: "composer_search_models_placeholder")
             .navigationTitle("composer_select_model")
@@ -70,11 +118,18 @@ struct ModelPickerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("common_close", action: onDismiss)
+                        .accessibilityIdentifier("composer.model.close")
                 }
             }
             .accessibilityIdentifier("composer.model.menu")
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.medium, .large], selection: $detent)
+        .onChange(of: activeModelId) { _, value in
+            if requestedModel == value { requestedModel = nil }
+        }
+        .onChange(of: controlsError) { _, error in
+            if error != nil { requestedModel = nil }
+        }
         .presentationDragIndicator(.visible)
         .fullScreenCover(item: $selectedDetails) { details in
             ModelDetailsSheet(
@@ -82,6 +137,11 @@ struct ModelPickerSheet: View {
                 accent: ModelDisplay.color(for: details.reference)
             )
         }
+    }
+
+    private var modelSwitchPending: Bool {
+        (requestedModel != nil && requestedModel != activeModelId)
+            || (reasoningModelId != nil && reasoningModelId != activeModelId)
     }
 
     /// The references surviving the search box, in engine order.
@@ -136,6 +196,9 @@ struct ModelPickerSheet: View {
         let item = ModelDisplay.item(for: reference, detailsByReference: detailsByReference)
         HStack(spacing: 10) {
             Button {
+                searchPresented = false
+                query = ""
+                requestedModel = reference == activeModelId ? nil : reference
                 onSelect(reference)
             } label: {
                 HStack(spacing: 10) {
@@ -163,6 +226,7 @@ struct ModelPickerSheet: View {
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
+            .disabled(modelSwitchPending || controlsPending)
             .accessibilityIdentifier("composer.model.\(slot).row.\(reference)")
 
             if item.details != nil {

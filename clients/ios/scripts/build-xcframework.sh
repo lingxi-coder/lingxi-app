@@ -97,6 +97,8 @@ done
 # device slice. The helper is idempotent and sources everything from the pinned
 # OpenMinis submodule; no generated binary or rootfs is committed.
 LINUX_RUNTIME_BUILD="${SCRIPT_DIR}/build-linux-runtime.sh"
+# Device development needs the complete Local App toolchain by default.
+# Set LINGXI_LOCAL_APP_RUNTIME=0 explicitly for a bare-runtime distribution.
 # The staged runtime is linked only under `LIBRARY_SEARCH_PATHS[sdk=iphoneos*]`
 # and project.yml's "Stage Alpine rootfs" phase exits 0 when PLATFORM_NAME is
 # not iphoneos, so a simulator build consumes none of it.
@@ -116,6 +118,11 @@ elif [[ -x "${LINUX_RUNTIME_BUILD}" ]]; then
         exit 1
       }
     done
+    if [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
+      "${SCRIPT_DIR}/validate-local-app-build-assets.sh" \
+        --configuration FullDebug --platform iphoneos --rootfs-only \
+        --rootfs-manifest "${STAGED_LINUX_RUNTIME}/manifest.json"
+    fi
     log "Reusing complete staged iSH ARM64 + Alpine Linux runtime…"
   else
     log "Building iSH ARM64 + Alpine Linux runtime…"
@@ -123,7 +130,7 @@ elif [[ -x "${LINUX_RUNTIME_BUILD}" ]]; then
     # bare minirootfs and overwrites whatever is staged, so an xcframework build
     # run after a local-app rootfs build silently reverted the app to a rootfs
     # with no Node in it.
-    if [[ "${LINGXI_LOCAL_APP_RUNTIME:-0}" == "1" ]]; then
+    if [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
       "${LINUX_RUNTIME_BUILD}" --local-app-runtime
     else
       "${LINUX_RUNTIME_BUILD}"

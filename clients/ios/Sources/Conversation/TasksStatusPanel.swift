@@ -61,21 +61,14 @@ struct TasksStatusPanel: View {
     }
 
     static func workflowTaskIsSuccessfullyComplete(_ task: BackgroundTaskSnapshot) -> Bool {
-        task.workflow != nil && task.status == .completed
+        task.status == .completed
     }
 
     static func shouldShowWorkflow(
         _ tasks: [BackgroundTaskSnapshot],
         resumeState: WorkflowResumeState = .idle
     ) -> Bool {
-        let hasVisibleTask = tasks.contains {
-            $0.workflow != nil && !workflowTaskIsSuccessfullyComplete($0)
-        }
-        if hasVisibleTask { return true }
-        if case let .failed(taskID, _) = resumeState {
-            return tasks.contains { $0.id == taskID && $0.workflow != nil }
-        }
-        return false
+        !visibleWorkflowTasks(tasks, resumeState: resumeState).isEmpty
     }
 
     static func visibleWorkflowTasks(
@@ -83,8 +76,11 @@ struct TasksStatusPanel: View {
         resumeState: WorkflowResumeState = .idle
     ) -> [BackgroundTaskSnapshot] {
         tasks.filter { task in
-            guard task.workflow != nil else { return false }
-            if !workflowTaskIsSuccessfullyComplete(task) { return true }
+            // TaskRow snapshots survive reconnects; live workflow progress is
+            // optional and must never gate failure visibility.
+            if task.status == .failed { return true }
+            let isWorkflow = task.workflow != nil || ["local_workflow", "workflow"].contains(task.taskType ?? "") || task.canResumeWorkflow
+            if isWorkflow && task.status != .completed && task.status != .cancelled { return true }
             if case let .failed(taskID, _) = resumeState, taskID == task.id { return true }
             return false
         }
@@ -95,7 +91,22 @@ struct TasksStatusPanel: View {
         resumeState _: WorkflowResumeState = .idle,
         nowMs: UInt64 = currentWallClockMs()
     ) -> [WorkflowStep] {
-        guard let workflow = task.workflow else { return [] }
+        guard let workflow = task.workflow else {
+            let state: WorkflowStepState = switch task.status {
+            case .pending: .pending
+            case .running: .running
+            case .paused: .paused
+            case .completed: .completed
+            case .failed: .failed
+            case .cancelled: .cancelled
+            }
+            return [WorkflowStep(
+                id: "workflow-\(task.id)-fallback",
+                title: task.descriptionText.isEmpty ? task.id : task.descriptionText,
+                state: state,
+                canResume: task.canResumeWorkflow
+            )]
+        }
         let phases = workflow.sortedPhases
         let activeAgent = workflow.sortedAgents.first { !$0.state.isTerminal }
         let activePosition = activeAgent.flatMap { agent in
@@ -113,7 +124,7 @@ struct TasksStatusPanel: View {
                 id: "workflow-\(task.id)-fallback",
                 title: title,
                 state: fallbackState(for: task, workflow: workflow),
-                canResume: task.canResume && task.status == .paused
+                canResume: task.canResumeWorkflow
             )]
         }
 
@@ -133,16 +144,17 @@ struct TasksStatusPanel: View {
             )
         }
 
-        guard task.canResume, task.status == .paused else {
+        guard task.canResumeWorkflow else {
             _ = nowMs
             return result
         }
-        guard let pausedIndex = result.lastIndex(where: { $0.state == .paused }) else {
+        let resumableState: WorkflowStepState = task.status == .failed ? .failed : .paused
+        guard let resumeIndex = result.lastIndex(where: { $0.state == resumableState }) else {
             _ = nowMs
             return result
         }
         return result.enumerated().map { index, step in
-            guard index == pausedIndex else { return step }
+            guard index == resumeIndex else { return step }
             return WorkflowStep(id: step.id, title: step.title, state: step.state, canResume: true)
         }
     }

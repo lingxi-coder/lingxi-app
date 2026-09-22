@@ -608,7 +608,7 @@ private struct LocalAppsLibraryScreen: View {
     }
 }
 
-private struct LocalAppWidgetSetupSheet: View {
+struct LocalAppWidgetSetupSheet: View {
     let appName: String
     let onContinue: () -> Void
     @Environment(\.dismiss) private var dismiss

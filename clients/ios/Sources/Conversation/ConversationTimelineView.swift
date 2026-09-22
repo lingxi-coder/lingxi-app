@@ -81,6 +81,11 @@ struct ConversationTimelineView: View {
             ConversationThoughtRow(
                 isRunning: isRunning
             )
+        case let .thinkingSlot(isVisible):
+            ConversationThoughtRow(isRunning: isVisible)
+                .opacity(isVisible ? 1 : 0)
+                .accessibilityHidden(!isVisible)
+                .allowsHitTesting(false)
         case let .toolBatch(id, tools):
             ConversationToolBatchRow(
                 id: id,
@@ -219,7 +224,7 @@ struct ConversationTimelineView: View {
                 }
             }
         }
-        if showThinking && streaming && hasLiveOwner {
+        if !groups.isEmpty || !result.isEmpty || (streaming && hasLiveOwner) {
             let hasRunningTool = result.contains { segment in
                 if case let .toolBatch(_, tools) = segment { return tools.contains { $0.status == .running } }
                 return false
@@ -228,9 +233,14 @@ struct ConversationTimelineView: View {
                 if case let .reasoning(_, _, isRunning) = segment { return isRunning }
                 return false
             }
-            if !hasRunningTool && !hasRunningThought {
-                result.append(.reasoning(id: "thought:live-fallback", text: "", isRunning: true))
+            // Keep one intrinsic-height slot at the end, including while tools
+            // run and after completion. Toggling Thinking must not resize the
+            // transcript or leave gaps where historical reasoning used to be.
+            result.removeAll { segment in
+                if case .reasoning = segment { return true }
+                return false
             }
+            result.append(.thinkingSlot(isVisible: showThinking && hasLiveOwner && !hasRunningTool && (streaming || hasRunningThought)))
         }
         return result
     }
@@ -239,12 +249,15 @@ struct ConversationTimelineView: View {
         case message(id: String, message: Message)
         case commandOutput(id: String, output: ConversationCommandOutput)
         case reasoning(id: String, text: String, isRunning: Bool)
+        case thinkingSlot(isVisible: Bool)
         case toolBatch(id: String, tools: [ConversationToolTrace])
         case notice(id: String, notice: ConversationExecutionNotice)
         case agents(id: String, agents: [ConversationAgentSummary])
 
         var id: String {
             switch self {
+            case .thinkingSlot:
+                return "thought:bottom-slot"
             case let .message(id, _), let .commandOutput(id, _), let .reasoning(id, _, _),
                  let .toolBatch(id, _), let .notice(id, _), let .agents(id, _):
                 return id

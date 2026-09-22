@@ -6,13 +6,14 @@ typealias WorkspaceSessionMode = SessionMode
 enum DrawerSection: String, CaseIterable, Hashable, Sendable {
     case chat
     case code
+    case apps
     case cron
 
     var sessionMode: WorkspaceSessionMode? {
         switch self {
         case .chat: .chat
         case .code: .code
-        case .cron: nil
+        case .apps, .cron: nil
         }
     }
 }
@@ -366,7 +367,8 @@ struct Drawer: View {
     let onContinueInMode: (ConversationScope, String, WorkspaceSessionMode, WorkspaceSessionMode) -> Void
 
     @ObservedObject private var convo: ConversationModel
-    @State private var section: DrawerSection
+    @Binding private var section: DrawerSection
+    @Binding private var showsAppLibrary: Bool
     @State private var query = ""
     @State private var createProjectName = ""
     @State private var showCreateAlert = false
@@ -384,6 +386,8 @@ struct Drawer: View {
         source: any ConversationSource,
         cronState: CronRepositoryState = .init(),
         activeMode: WorkspaceSessionMode = .code,
+        section: Binding<DrawerSection>,
+        showsAppLibrary: Binding<Bool>,
         workspacePinnedAt: [String: Date] = [:],
         collapsedWorkspaceKeys: Set<String> = [],
         openSettings: @escaping () -> Void,
@@ -409,6 +413,8 @@ struct Drawer: View {
         self.source = source
         self.cronState = cronState
         self.activeMode = activeMode
+        _section = section
+        _showsAppLibrary = showsAppLibrary
         self.workspacePinnedAt = workspacePinnedAt
         self.collapsedWorkspaceKeys = collapsedWorkspaceKeys
         self.openSettings = openSettings
@@ -426,7 +432,6 @@ struct Drawer: View {
         self.onToggleWorkspacePinned = onToggleWorkspacePinned
         self.onSetWorkspaceCollapsed = onSetWorkspaceCollapsed
         self.onContinueInMode = onContinueInMode
-        _section = State(initialValue: activeMode == .chat ? .chat : .code)
         convo = source.model
     }
 
@@ -439,7 +444,7 @@ struct Drawer: View {
     }
 
     private var conversationGroups: [WorkspaceGroup] {
-        WorkspaceGroupBuilder.conversationGroups(
+        return WorkspaceGroupBuilder.conversationGroups(
             section: section,
             query: query,
             activeScope: activeScope,
@@ -480,13 +485,19 @@ struct Drawer: View {
             source.listSessions()
             Task {
                 await localAppsStore.refresh()
-                for app in localAppsStore.apps {
-                    await localAppsStore.listSessions(appID: app.id)
+                if let appID = activeScope.appID {
+                    await localAppsStore.listSessions(appID: appID)
                 }
             }
         }
         .onChange(of: activeMode) { _, mode in
-            section = mode == .chat ? .chat : .code
+            if section.sessionMode != nil {
+                section = mode == .chat ? .chat : .code
+            }
+        }
+        .onChange(of: activeScope.appID) { _, appID in
+            guard let appID else { return }
+            Task { await localAppsStore.listSessions(appID: appID) }
         }
         .navigationTitle(String(localized: "app_name"))
         .navigationBarTitleDisplayMode(.inline)
@@ -583,6 +594,7 @@ struct Drawer: View {
         HStack(spacing: 4) {
             tab(.chat, .message, String(localized: "drawer_tab_chat"), count: count(for: .chat))
             tab(.code, .terminal, String(localized: "drawer_tab_code"), count: count(for: .code))
+            tab(.apps, .workflow, String(localized: "local_apps_title"), count: count(for: .apps))
             tab(.cron, .clock, String(localized: "drawer_tab_crons"), count: cronGroups.count)
         }
         .padding(.horizontal, 14)
@@ -614,7 +626,8 @@ struct Drawer: View {
     }
 
     private func count(for section: DrawerSection) -> Int {
-        WorkspaceGroupBuilder.conversationGroups(
+        if section == .apps { return localAppsStore.apps.count }
+        return WorkspaceGroupBuilder.conversationGroups(
             section: section,
             query: query,
             activeScope: activeScope,
@@ -630,8 +643,10 @@ struct Drawer: View {
     private var bodyContent: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 10) {
-                if section != .cron {
-                    conversationActions
+                if section == .apps {
+                    appsContent
+                } else if section != .cron {
+                    projectActions
                     ForEach(conversationGroups) { group in
                         conversationGroupCard(group)
                     }
@@ -640,7 +655,7 @@ struct Drawer: View {
                         cronGroupCard(group)
                     }
                 }
-                if visibleGroupCount == 0 {
+                if section != .apps, visibleGroupCount == 0 {
                     emptyState
                 }
             }
@@ -652,28 +667,166 @@ struct Drawer: View {
     }
 
     private var visibleGroupCount: Int {
-        section == .cron ? cronGroups.count : conversationGroups.count
+        if section == .apps { return localAppsStore.apps.count }
+        return section == .cron ? cronGroups.count : conversationGroups.count
     }
 
-    private var conversationActions: some View {
+    private var projectActions: some View {
+        HStack(spacing: 8) {
+            projectCreationMenu
+        }
+    }
+
+    @ViewBuilder
+    private var appsContent: some View {
+        if !showsAppLibrary,
+           let appID = activeScope.appID,
+           let app = localAppsStore.app(id: appID) {
+            activeAppSessions(app)
+        } else {
+            appLibrary
+        }
+    }
+
+    private var appLibrary: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                projectCreationMenu
-                dashedButton(String(localized: "drawer_create_app"), action: createApp)
-                    .accessibilityIdentifier("drawer.apps.create")
+            Button(action: createApp) {
+                Label(String(localized: "local_apps_create"), systemImage: "plus")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
             }
-            Button {
-                openApps(nil)
-            } label: {
-                Label(String(localized: "drawer_apps_library"), systemImage: localAppIconSystemName)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(t.text3)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(t.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("drawer.apps.create")
+
+            if filteredApps.isEmpty {
+                ContentUnavailableView(
+                    "local_apps_empty",
+                    systemImage: localAppIconSystemName,
+                    description: Text("local_apps_empty_hint")
+                )
+                .padding(.vertical, 32)
+            } else {
+                ForEach(filteredApps) { app in
+                    Button {
+                        showsAppLibrary = false
+                        openApps(app.id)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: localAppIconSystemName)
+                                .font(.title3)
+                                .foregroundStyle(t.accent)
+                                .frame(width: 40, height: 40)
+                                .background(t.accent.opacity(0.14), in: .rect(cornerRadius: 11))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(app.displayName)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(t.text)
+                                    .lineLimit(1)
+                                Text(app.draftStatusLine ?? app.workflow.label)
+                                    .font(.caption)
+                                    .foregroundStyle(t.text4)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(t.text4)
+                        }
+                        .padding(10)
+                        .background(t.surface, in: .rect(cornerRadius: 14))
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("drawer.apps.row.\(app.id)")
+                }
+            }
+        }
+    }
+
+    private func activeAppSessions(_ app: LocalAppSummary) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { showsAppLibrary = true } label: {
+                Label("drawer_apps_library", systemImage: "chevron.left")
+                    .font(.subheadline.weight(.semibold))
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("drawer.apps.library")
+            .foregroundStyle(t.accent)
+            .accessibilityIdentifier("drawer.apps.all")
+
+            HStack(spacing: 10) {
+                Image(systemName: localAppIconSystemName)
+                    .foregroundStyle(t.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(app.displayName)
+                        .font(.headline)
+                        .foregroundStyle(t.text)
+                        .lineLimit(1)
+                    Text("local_apps_section_sessions")
+                        .font(.caption)
+                        .foregroundStyle(t.text4)
+                }
+                Spacer()
+                Button {
+                    onNewAppChat(app.id)
+                } label: {
+                    Label("local_apps_session_new", systemImage: "square.and.pencil")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("drawer.apps.session.new.\(app.id)")
+            }
+            .padding(10)
+            .background(t.surface, in: .rect(cornerRadius: 14))
+
+            let rows = localAppsStore.sessionPages[app.id]?.rows ?? []
+            if rows.isEmpty {
+                ContentUnavailableView(
+                    "local_apps_sessions_empty",
+                    systemImage: "bubble.left.and.bubble.right"
+                )
+                .padding(.vertical, 28)
+            } else {
+                ForEach(rows) { row in
+                    Button {
+                        onSelectAppSession(app.id, row.uuid, row.mode)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(row.title)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(t.text)
+                                .lineLimit(1)
+                            Text("drawer_session_subtitle \(row.relativeTime) \(row.messageCount)")
+                                .font(.caption)
+                                .foregroundStyle(t.text4)
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(t.surface, in: .rect(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("drawer.apps.session.\(app.id).\(row.uuid)")
+                }
+            }
+
+            if localAppsStore.sessionPages[app.id]?.nextOffset != nil {
+                Button("local_apps_sessions_load_more") {
+                    Task { await localAppsStore.loadMoreSessions(appID: app.id) }
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .task { await localAppsStore.listSessions(appID: app.id) }
+    }
+
+    private var filteredApps: [LocalAppSummary] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return localAppsStore.apps }
+        return localAppsStore.apps.filter {
+            $0.displayName.localizedStandardContains(needle)
+                || ($0.displayBrief?.localizedStandardContains(needle) ?? false)
         }
     }
 

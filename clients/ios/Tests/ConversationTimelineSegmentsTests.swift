@@ -66,6 +66,46 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         XCTAssertTrue(ConversationDesktopTimeline.groups([completed]).isEmpty)
     }
 
+    func testThinkingSlotKeepsIdentityAcrossRepeatedToolAndThinkingTransitions() {
+        for status: ConversationToolStatus in [.completed, .running, .completed, .running, .completed] {
+            let tools = toolGroup([ConversationToolTrace(id: "tool", tool: "Read", status: status)])
+            let thought = ConversationTimelineGroup(
+                id: "thought", runID: "R1",
+                rows: [.reasoning(runID: "R1", activityID: "reasoning", text: "thinking")],
+                status: .running
+            )
+            for streaming in [true, false] {
+                XCTAssertEqual(ConversationTimelineView.projectedSegmentIDs(
+                    groups: [tools, thought], transcriptAgents: [], transcriptAgentAnchors: [:],
+                    streaming: streaming
+                ), ["timeline-tools:tool", "thought:bottom-slot"])
+            }
+        }
+    }
+
+    func testThinkingSlotDoesNotAddSpaceToAnEmptyIdleConversation() {
+        XCTAssertTrue(ConversationTimelineView.projectedSegmentIDs(
+            groups: [], transcriptAgents: [], transcriptAgentAnchors: [:]
+        ).isEmpty)
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentIDs(
+            groups: [], transcriptAgents: [], transcriptAgentAnchors: [:], streaming: true
+        ), ["thought:bottom-slot"])
+    }
+
+    func testThinkingSlotRemainsAfterCompletionAndWhileThinkingIsSuppressed() {
+        let historical = ConversationTimelineGroup(
+            id: "thought", runID: "R1",
+            rows: [.reasoning(runID: "R1", activityID: "reasoning", text: "private reasoning")],
+            status: .completed
+        )
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentIDs(
+            groups: [historical], transcriptAgents: [], transcriptAgentAnchors: [:], hasLiveOwner: false
+        ), ["thought:bottom-slot"])
+        XCTAssertEqual(ConversationTimelineView.projectedSegmentIDs(
+            groups: [historical], transcriptAgents: [], transcriptAgentAnchors: [:], showThinking: false
+        ), ["thought:bottom-slot"])
+    }
+
     func testDesktopToolSummaryUsesLastToolAndShowsOnlyActiveWork() {
         let tools = [trace("done"), ConversationToolTrace(id: "live", tool: "Read", status: .running)]
         XCTAssertEqual(ConversationDesktopTimeline.activeTools(tools).map(\.id), ["live"])
@@ -159,7 +199,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
                 transcriptAgents: model.orderedAgentSummaries,
                 transcriptAgentAnchors: model.transcriptAgentAnchors
             ),
-            ["timeline-tools:spawn-tool", "agents:after:spawn-tool", "timeline-tools:later-tool"]
+            ["timeline-tools:spawn-tool", "agents:after:spawn-tool", "timeline-tools:later-tool", "thought:bottom-slot"]
         )
         XCTAssertEqual(model.transcriptAgentAnchors["child"], "spawn-tool")
     }
@@ -198,6 +238,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
             "agents:after:first-tool",
             "timeline-tools:new-tool",
             "agents:after:new-tool",
+            "thought:bottom-slot",
         ])
     }
 

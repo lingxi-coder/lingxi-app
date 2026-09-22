@@ -116,6 +116,10 @@ mod local_apps_profile;
 mod mcp_transport;
 #[cfg(feature = "uniffi")]
 mod mobile_lsp;
+// The Host-owned record of a USER-approved plan. `LocalAppPrepare` reads it so
+// a model cannot land a template on a self-reported "the user approved".
+#[cfg(feature = "uniffi")]
+mod plan_approval;
 
 #[cfg(feature = "uniffi")]
 pub use client_protocol::listings::{

@@ -34,10 +34,12 @@ check it broke.
 
 ## Running it
 
-Invoke the use-test workflow through the `Workflow` tool, the same way
-`$create-local-app`'s build orchestration invokes the unified
-`lingxi-local-app:local-app-build` workflow — `{"name": "lingxi-local-app:local-app-use-test", "args": {"app_id":
-"<id>", ...}}`. The workflow (per the plugin's frozen design, §11.3) takes
+Invoke the use-test workflow through the `Workflow` tool —
+`{"name": "lingxi-local-app:local-app-use-test", "args": {"app_id": "<id>", ...}}`.
+Testing is the only remaining host workflow for a Local App: `$create-local-app`
+plans with the user, prepares the workspace from the approved plan, implements it
+and stops at a successful build, so an app is tested here on request rather than
+by a build-time stage. The workflow (per the plugin's frozen design, §11.3) takes
 the app id, a scope, and a scenario/quality policy; the host injects the
 app's own build and runtime-profile identity rather than trusting a
 model-supplied one. Internally it drives the running app for
@@ -47,8 +49,8 @@ the acceptance checks and profile policy — the same two-step split as the
 either.
 
 Do not pass `fast` for a canvas/WebGL app's quality level; the canvas family
-rejects it the same way the build workflow does, because a drawn surface
-still needs a real design and motion check even at the lowest tier.
+rejects it, because a drawn surface still needs a real design and motion check
+even at the lowest tier.
 
 ## Reading the report
 

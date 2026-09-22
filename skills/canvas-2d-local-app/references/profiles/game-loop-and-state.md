@@ -21,5 +21,5 @@
 Reviewed: 2026-08-27
 
 - MDN Canvas optimization: https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API/Tutorial/Optimizing_canvas
-- LingXi frame loop template: `lingxi-code/plugins/lingxi-local-app/assets/templates/canvas-2d/r1/lib/frame-loop.js`
-- LingXi game store template: `lingxi-code/plugins/lingxi-local-app/assets/templates/canvas-2d/r1/src/stores/game-store.js`
+- LingXi frame loop template: `lingxi-code/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/lib/frame-loop.js`
+- LingXi game store template: `lingxi-code/plugins/lingxi-local-app/assets/templates/canvas-2d/r4/src/stores/game-store.js`

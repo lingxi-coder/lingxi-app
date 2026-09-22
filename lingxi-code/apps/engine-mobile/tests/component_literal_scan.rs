@@ -193,7 +193,15 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// workflow moved out of an allowlisted `.js` script and into the description
 /// text, and it showed up here as a LEAK. See the allowlist file's comments on
 /// all five for why none of them can be reworded away.
-const ALLOWLIST_BASELINE_COUNT: usize = 11;
+///
+/// 11 → 13: the retired CREATE launch does NOT retire the `local-app-build`
+/// identity — the same id still gates the named/scriptPath UPDATE and VERIFY
+/// resumes through `apply_materialized_local_app_collections_with_identity`,
+/// so `local_app_plugin_binding.rs`'s entry is RESTORED — and the on-demand
+/// testing hand-off prose in `local_apps_host.rs` names the `frontend-qa` /
+/// `local-app-test` plugin skills, which is the only way the model can reach
+/// the app's use-test path (testing is never host-initiated).
+const ALLOWLIST_BASELINE_COUNT: usize = 13;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is
@@ -342,7 +350,6 @@ fn is_local_app_component_skill(name: &str) -> bool {
                 | "frontend-design"
                 | "frontend-qa"
                 | "react-best-practices"
-                | "template-selection"
                 | "expose-as-mcp"
         )
 }

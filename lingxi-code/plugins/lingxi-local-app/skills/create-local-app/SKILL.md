@@ -1,374 +1,192 @@
 ---
 name: create-local-app
-description: Orchestrate confirmed local-capability-first app design, React generation, offline build, and native WebView verification (Browser if available) in the host-scaffolded workspace.
+description: Plan a confirmed local app with the user, prepare its workspace from the approved plan, implement it, and deliver it after a successful offline build.
 ---
 
-# Create a local app
+# Create or modify a local app
 
-This skill is the coordinator. Keep the product brief and confirmation short;
-delegate specialist work to `$frontend-design`, `$accessibility`,
-`$react-best-practices`, and `$frontend-qa` instead of duplicating their rules.
-The build workflow routes DOM implementation through `$ionic-react-local-app`
-and routes a drawn surface through the persisted runtime-profile-matched
-specialist: `$canvas-2d-local-app`, `$threejs-local-app`,
-`$phaser-2d-local-app`, or `$babylon-3d-local-app`.
+The MAIN session does all of this work. There is no build workflow, no mandatory
+template-selection agent, no five-part design panel, no quality tier, and **no
+automatic verification**. You converge the requirements and a complete UI
+recommendation with the user, the Host prepares the workspace from the plan the
+user approved, you implement that plan, and you deliver once the build succeeds.
 
-## Entry and confirmation
+Specialist skills stay available as **reference for the source you write**:
+`$frontend-design`, `$accessibility`, `$react-best-practices`,
+`$ionic-react-local-app`, and the drawn-surface specialists
+`$canvas-2d-local-app`, `$threejs-local-app`, `$phaser-2d-local-app`,
+`$babylon-3d-local-app`. Load them while implementing; none of them is a
+mandatory stage and none of them holds a gate.
 
-When `LINGXI.md` identifies a local app and its ID, that app record and its
-app-scoped session already exist. Treat that ID as authoritative.
-Do not call `LocalAppList` or `LocalAppGet` to rediscover or confirm the current
-app, and do not call `LocalAppCreate` again. Use `LocalAppList` only from a
-global conversation when no app ID is already known.
+## Entry
 
-The library's "+" does NOT resolve a name or a shape, and it does not scaffold
-anything. It creates an EMPTY SHELL — a record with no name, no brief and no
-surface, an empty workspace, and an app-scoped conversation — and hands that
-conversation to you. Its `LINGXI.md` names the app id and says the app has no
-shape yet. Settling what the app IS is your work in that conversation:
+When `LINGXI.md` identifies a local app and its ID, that record and its
+app-scoped session already exist. Treat that ID as authoritative. Do not call
+`LocalAppList` or `LocalAppGet` to rediscover it, and never call
+`LocalAppCreate` again inside it. Use `LocalAppList` only from a global
+conversation when no app id is known.
 
-If a shell workspace contract handed off to this skill, carry forward only the
-answers explicitly present in the current conversation. Do not assume that
-name, targets, runtime family, MCP intent, or visual decisions were already
-confirmed, and never re-ask a decision the user has actually answered. Fill
-only the remaining material gaps before the final AuthoringSpec confirmation.
-
-1. If no product request or usable brief is present, open in ORDINARY ASSISTANT
-   TEXT with one short open question asking what they want to build, then wait
-   for the answer. Do NOT use `AskUserQuestion` for that opening: a picker
-   would guess the user's idea. If the current conversation or Host handoff
-   already contains a product request, skip the question and use that brief
-   verbatim; never re-ask an answered decision.
-2. Read what they wrote and settle whatever it already settles. Infer every
-   point the description and host context determine, state the inference, and
-   move on. Ask only material unresolved questions; there is no question-count
-   quota and no re-asking of an answered decision. Continue until the confirmed
-   AuthoringSpec is complete, then use the answers in step 3.
-2a. After targets have been inferred, normalize each target OS for routing with
-   `String(target.os ?? "").trim().toLowerCase()` (so `ios` and `ipados` are
-   matched case-insensitively). For create or UI-impacting design/generate/update
-   work, if any confirmed target is iOS or iPadOS, load the
-   `lingxi-local-app:apple-design` skill exactly once before proposing the UI or
-   presenting the final AuthoringSpec, including for `fast`. Route from the
-   confirmed `targets[]`; never substitute the launching device or ask another
-   platform questionnaire. Apple Design is the default for those targets only,
-   and an explicit brand or reference remains authoritative. This conditional
-   load is workflow work, not an extra confirmation. Do not load it for
-   verify-only or code-only work.
-3. Call `LocalAppRuntimeProfiles` to make a technical recommendation, then
-   propose a display **name**, one-line **brief**, targets, and the complete
-   AuthoringSpec. Include a user-facing one-line UI summary naming the
-   structure/navigation, light/dark/system theme and accent, style/density, and
-   phone/tablet or Canvas treatment. Show the profile's derived surface, core
-   engine, revision, and recommendation reason in the same final confirmation.
-   Do not turn a technical profile recommendation into a separate mandatory
-   questionnaire; the Host-verified selector commits it only after the
-   confirmed spec.
-4. Keep MCP authoring separate from creation, but preserve an explicit
-   create-time MCP intent when the user names business capabilities they want
-   the LLM to expose later. Explain the distinction between app-exposure
-   capabilities and external integrations, read the verified catalog's
-   `mcpSuggestions`, and ask only if that intent is materially unresolved. If
-   asked, record `{"status":"declined"}` or
-   `{"status":"requested","capabilities":[...]}`; if not asked, omit
-   `mcp_intent` so Host records `never_asked`. This does not configure or
-   publish MCP during creation.
-5. After the conversational confirmation, call the unified
-   `lingxi-local-app:local-app-build` create branch through the `Workflow`
-   tool for this shell app. That
-   Host-owned path re-reads the template catalog, stages the create candidate,
-   shows one trusted native create confirmation, and only then calls
-   `LocalAppScaffold`. Pass the complete Host-bound AuthoringSpec, including
-   product, targets, UI structure/theme/style, design, and acceptance checks.
-   Pass the display **name** and **brief** the user just
-   confirmed in step 3 verbatim: they are staged with the create candidate, they
-   are what the native create confirmation sheet renders, and they are what the
-   Host commits onto the record — the shell app created in step 1 is still the
-   empty `untitled` placeholder, so a create launched without them cannot show
-   or commit the confirmed wording. App creation itself never runs MCP
-   authoring: the app-owned MCP remains unconfigured and disabled until the
-   user explicitly starts MCP setup from that app's settings. Pass the exact
-   `mcp_intent` outcome when one was collected; never call a
-   standalone runtime-profile selector or pass a model-authored
-   surface/profile override. Do not supply `args.runtime_profile` as an authority; on a create launch the host strips any caller-supplied `runtime_profile` at the launch boundary and injects no profile at all — the profile is fixed later in the run by the Host-verified template selection:
-
-```
-Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"app_123","name":"Errand List","brief":"Track errands with a quick add flow","authoring_spec":{"product":{"goal":"Track errands","tasks":["add an errand"],"external_integrations":[]},"targets":[{"id":"phone","os":"ios","form_factor":"iphone"}],"ui":{"structure":["list","editor"],"theme":{"mode":"system","accent":"blue"},"style":{"direction":"clear","density":"comfortable"},"references":[]},"design":{"presentations":[{"target_id":"phone","presentation":"single-column list","navigation":"push editor; back returns to list"}],"tokens":{"spacing":"8px"},"states":{"loading":"skeleton","empty":"prompt to add","error":"retry","success":"show list","permission":"explain if needed"},"inputs":{"pointer_touch":["tap"],"keyboard_mouse":["tab"],"back":"pop editor","reduced_motion":"respect device"},"canvas":null},"acceptance_checks":[{"id":"add-item","target_ids":["phone"],"required":true,"preconditions":[],"steps":["open editor","save errand"],"expected":"errand appears in list","evidence":["inspect","ui_action"]}]},"quality_level":"balanced","mcp_intent":{"status":"requested","capabilities":["search saved errands"]}}})
-```
-
-6. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
-   app's formal workspace contract — editable roots, host-managed files, the
-   entry points that now exist, and which build workflow the persisted profile takes —
-   and that contract, not this step list, governs everything after it.
-
-### Ambiguity routing
-
-After the opening description, classify only unresolved decisions that could
-materially change the result. Group related decisions into focused
-`AskUserQuestion` rounds; ask as many rounds as material decisions require,
-without padding a quota, and never repeat an answered question:
-
-- **Product / process** — resolve the primary job, audience, success condition,
-  or the required flow when the brief leaves more than one plausible product.
-- **Target platform** — resolve OS or form factor only when the host context and
-  brief do not determine it; otherwise state the inferred target for the final
-  confirmation.
-- **Data / capabilities** — resolve writable collections, permissions, host
-  capabilities or an explicitly requested external integration when alternatives
-  would change the implementation or privacy boundary. Keep Host app-exposure
-  capabilities, product external integrations, and optional post-create MCP
-  exposure intent as separate decisions.
-- **UI / visual style** — ask only when the visual choice would significantly
-  change the result and cannot be inferred from the brief. Otherwise propose a
-  concrete design direction, tokens, and platform treatment in the final
-  confirmation so the user can edit that proposal.
-- **Interaction / accessibility** — resolve a material input, navigation,
-  assistive-technology, reduced-motion, or non-pointer requirement that is not
-  already implied by the product and target.
-- **Canvas mechanics / runtime profile** — first choose `canvas` when the whole
-  app is a drawn surface. Prefer `canvas-2d-local-app` for an ordinary 2D app
-  or game, and `threejs-local-app` for an explicitly described Three.js scene.
-  Use `phaser-2d-local-app` or `babylon-3d-local-app` only when the product
-  clearly calls for those runtimes and the host/runtime contract already offers
-  them; do not infer availability from package wishes. Ask which runtime family
-  only when the brief is genuinely ambiguous among valid options. The later
-  canvas design and build steps must preserve the persisted runtime profile.
-
-The final confirmation always includes the inferred or proposed answers,
-whether or not a clarification round was needed. Visual platform presentation
-remains separate from this technical runtime profile.
-
-Two things hold for as long as the app is a shell:
-
-- **Do not write source before the scaffold lands.** The first scaffold WIPES
-  the editable surface. Source written beforehand is deleted, not merged, so
-  the turn that wrote it is lost work rather than a head start.
-- **Most local-app tools refuse an app that has no shape.** The shell may list
-  and inspect records, read `LocalAppRuntimeProfiles` and
-  `LocalAppTemplateCatalog`, and then hand the confirmed spec to
-  `lingxi-local-app:local-app-build`. Every other one — direct build,
-  dependency install, runtime, logs,
-  manifest, UI inspection/capture/action, data, checkpoints, app events,
-  background flows — returns a refusal that names `LocalAppScaffold` as the way
-  out. `LocalAppManifest` included: collections and capabilities are declared
-  after the scaffold, not before it. That refusal is the contract, not a
-  transient failure, so settle the name, brief and profile instead of retrying
-  or routing around it.
-
-Do not call `LocalAppCreate` from inside a shell conversation. The shell app
-already exists and is the one the user is looking at; creating a second app
-leaves that one empty forever.
+The library's "+" creates an EMPTY SHELL: no name, no brief, no surface, an
+empty workspace, and an app-scoped conversation. Its `LINGXI.md` names the app
+id and says the app has no shape yet. Settling what the app IS happens in that
+conversation — that is the planning step below.
 
 `LocalAppCreate` is for a conversation that is NOT an app's: a global or project
-chat where the user asks for an app. It creates the same EMPTY SHELL and app
-session as the library entry; it does not persist a runtime profile. Continue
-the interview and confirmation in that app session, where `LINGXI.md` is
-auto-loaded. Do not write app source or launch a build from the global/project
-working directory.
+chat where the user asks for an app. It creates the same empty shell and app
+session; do the planning in that app session, where `LINGXI.md` is auto-loaded.
 
-The build orchestration below applies only inside an app's OWN conversation,
-the one whose `LINGXI.md` names the app id you are building. Its create branch
-accepts that app while it is still an empty shell; update and verify require the
-Host-persisted shape. A shell has no source or dependencies until the approved
-scaffold lands.
+Until the plan is approved and prepared, the app has no shape: there is nowhere
+to write source and every build, dependency, runtime, log, manifest, UI, data,
+checkpoint and background tool refuses it. That refusal is the contract, not a
+transient failure.
 
-Inside a shell, preserve any usable brief already present in the conversation
-or Host handoff and ask for one only when it is absent. Inside an app that
-already has a shape, read `LINGXI.md` and its persisted
-AuthoringSpec, then sharpen only the requested change. In a global chat, gather the product, screens, data,
-capabilities, and visual intent before creating the app. When a material decision is unresolved, call `AskUserQuestion` for that decision; do not impose a question quota and never re-ask an answered decision. Never ask unresolved questions in ordinary assistant text.
-An existing shaped app retains its persisted design and explicit brand or
-reference choices. Apply the conditional Apple guidance only to a confirmed
-UI-impacting change and only within its affected iOS/iPadOS targets; do not
-migrate an existing design during verify-only or code-only work.
-The one exception is the opening turn of a shell conversation (step 1 above),
-where you have no options to offer and need the user's own description; that
-exception covers that turn only, and does not extend to any later question in
-the same conversation.
-If the brief and host device context already determine the answer, infer it,
-state the inference, and continue instead of blocking. Then show one confirmable
-specification containing:
+## 1. Plan
 
-- target OS and form factor; if omitted, infer from the host device context
-  described by the fixed Mobile Runtime Environment reminder (`Host OS`,
-  `Device class`, `Execution target`, and `Launch mode`) and show that
-  inference for confirmation;
-- dynamic viewport, safe area, color scheme, reduced motion, and input mode
-  are runtime inputs only; do not treat them as prompt facts. The generated app
-  must read them from `window.lingxi.v2.deviceContext`;
-- the host draws no title or navigation chrome while the app is running, so
-  the app owns every visible title/back affordance; reserve the bottom-leading
-  80-by-80 CSS-pixel safe-area corner for the host's floating run control;
-- pages, navigation/back semantics, complete states, data/permissions;
-- for a `canvas` surface, the confirmed runtime profile (`canvas_2d`,
-  `three_3d`, `phaser_2d`, or `babylon_3d`) and the mechanics, phase model,
-  and input paths that make that choice appropriate;
-- design direction, platform tokens, responsive/adaptive behavior, and any
-  source-only implementation constraints required by the locked host scaffold;
-- which Host app-exposure capabilities (data, LLM, device, and agent) satisfy
-  each product requirement, separately from any user-requested external
-  integration. Host capabilities are manifest permissions. An external
-  integration may be required to build the app and must be confirmed as a
-  product dependency; it is not an MCP exposure intent by implication.
-- whether original raster imagery is required.
-- for each acceptance check, set `motion_required: true` only when dynamic
-  motion across frames is part of the expected behavior; such a check must
-  request `capture` evidence and use a Canvas profile. Omit it or keep it false
-  for static UI and reduced-motion checks; identical captured frames remain
-  valid when motion is not required.
+Call `EnterPlanMode` for the app you are creating or modifying. Plan mode is a
+READ-only mode: you may read the runtime catalog (`LocalAppRuntimeProfiles`), the
+template catalog (`LocalAppTemplateCatalog`) and the existing workspace, and you
+must NOT write source, land a template, or build. Mutation tools are denied for
+the whole of plan mode; do not try to route around that.
 
-Before this final confirmation, the coordinator must prepare any required
-iOS/iPadOS checks in `acceptance_checks` from the confirmed targets and scope.
-For DOM targets these include the existing safe-area reservation, 44 CSS-pixel
-control targets, system-font/Ionic navigation, Dynamic Type tolerance, and reduced
-motion behavior as applicable; keep them as the existing flat check schema and
-do not invent `motion_required` for DOM. The frontend designer reads this
-active contract and cannot add acceptance checks after confirmation.
+Converge the following, asking only materially unresolved questions with
+`AskUserQuestion` — never a question quota, never re-asking an answered
+decision, and never leaving an unresolved question in ordinary assistant text:
 
-Before the final confirmation, classify the confirmed specification without
-starting another agent. Score screens/routes, data complexity, host or external
-capability groups, target count, multi-step/error-state complexity, and original
-raster assets. For a `dom` surface, use this rubric: screens 0/1/2 points for
-1/2-3/4+ or nested routes; data 0/1/2 for none or read-only/one simple writable
-collection/multiple or concurrency-sensitive collections; capabilities +1 per
-distinct group up to 3; targets +1 for multiple form factors and +1 for
-multiple operating systems; interaction/state +1 for multi-step, offline, or
-complex permission/error flows; raster assets +1. Scores 0-2 suggest `fast`,
-3-5 suggest `balanced`, and 6+ suggest `thorough`. Multi-OS, background
-scheduling, or two or more sensitive capability groups should recommend
-`thorough`; confidence below 0.75 should recommend `balanced`.
+- **Product** — the goal, the main features, and the success condition.
+- **Target devices** — OS and form factor for each. Infer them from the brief
+  and the fixed Mobile Runtime Environment reminder (`Host OS`, `Device class`,
+  `Execution target`, `Launch mode`) when the brief does not say, and show the
+  inference for confirmation.
+- **Data and permissions** — which collections the app writes, and which Host
+  capabilities (manifest permissions) or external integrations it needs.
+- **UI** — a COMPLETE recommendation, presented in full: page structure and
+  navigation, layout, light/dark/system theme and accent, style and density, the
+  complete states, and how it adapts across the confirmed targets. State it
+  concretely (screens, back/navigation semantics, tokens, adaptive behavior)
+  rather than gesturing at a direction. This is what the user approves, so it is
+  not an afterthought.
 
-The screen axis measures the wrong thing for an app whose interface is a single
-drawn surface — a game or any canvas/WebGL app scores 0 on screens and usually
-0-1 on data, which would put it in the DOM-only `fast` band that skips the
-design stage. That is backwards: such an app has almost no navigation and
-almost all of its difficulty in mechanics, state machine and frame loop, which
-is exactly what the design stage exists to settle. For a `canvas` surface,
-replace the screen axis with its simulation instead: +1 for real-time animation
-or a frame loop, +1 for collision, physics or pathfinding, +1 for persistent
-progression, and +1 for input beyond a single tap (drag, hold, multi-key).
-Clamp any base recommendation to the canvas strategies: a `fast` band becomes
-`balanced`, while `balanced` and `thorough` remain as scored (subject to the
-stronger multi-target/capability overrides above). Never advertise or pass
-`fast` for a canvas surface.
+Read `LocalAppRuntimeProfiles` to choose the runtime profile and
+`LocalAppTemplateCatalog` to choose a `template_id`. Both are technical choices
+you make and then SHOW in the plan; the user corrects them if wrong. The profile
+picks the surface: `canvas` when the whole interface is one drawn surface that
+owns a frame loop (a game, a simulation, a 3D scene, a live visualization), `dom`
+for everything assembled from screens, lists and forms. Profile family CANNOT be
+changed after the workspace lands — an app that needs another family is created
+again.
 
-Include the score, reasons, confidence, estimated agent stages, and the
-recommended strategy in the same confirmation round. For a `dom` surface, let
-the user select `fast`, `balanced`, or `thorough`; for a `canvas` surface, offer
-only `balanced` or `thorough` because the drawn-surface workflow requires its
-simulation Design stage and never accepts `fast`. Put the recommendation first
-and describe the speed/coverage trade-off in each option shown. This is a
-task-local workflow choice, not an app persistence field. On a revision, rescore
-the revised confirmed specification instead of inheriting a stale strategy.
-Never launch a separate classifier agent just to make this recommendation.
+If a confirmed target is iOS or iPadOS and this change affects the UI, load
+`lingxi-local-app:apple-design` exactly once before proposing the UI and apply it
+to the iOS/iPadOS output only, never to Android or desktop. Skip it for verify-
+or code-only work.
 
-Do not silently add a package, capability, domain, platform, or image asset.
-The same business logic may serve multiple targets, but each target must use a
-platform adapter/tokens layer rather than a width-only conditional.
+### The plan file and the authoring block
 
-For a non-core npm-registry package, propose an add/update/remove with a
-reason, then apply it yourself through the two Host operations that exist for
-exactly this. Call `LocalAppConfirmDependencyChange` with `app_id` and the
-`changes` array: it validates the request against the app's current dependency
-baseline and mints a short-lived one-shot receipt. Then call
-`LocalAppUpdateDependencies` with `app_id` and that `receipt_id`. Both are
-model-callable under their builtin `LocalApp*` names only — each has a row in
-the builtin tool table. The `mcp__local_apps__*` spelling of these two was
-deliberately retired and returns `ToolNotFound`, so never reach for it. Any
-add or update raises the native dependency-review confirmation to the user
-before resolution and fails with `user denied dependency changes` if they
-decline; a pure remove needs no prompt. The receipt is consumed on use and
-goes stale if the baseline moves underneath it, so a `dependencies_dirty`
-error means reconfirm and call again — never route
-around it. `LocalAppUpdateDependencies` resolves the lockfile in staging,
-publishes a dependency snapshot, runs the offline production build and the
-profile launch smoke, then commits package/lock, `node_modules` and the build
-together, restoring the previous dependency and build state on any failure.
-Never edit package/lock or run npm, npx, Yarn, or pnpm directly to work around
-this path — that is exactly the drift the Host's dependency checks exist to
-catch. React, Ionic, Vite, renderer engines, and other Catalog core packages
-are refused by `LocalAppConfirmDependencyChange` itself and can change only
-through a same-family Runtime Profile migration, which is a separate,
-unrelated path.
+Write the plan to the plan file, then call `ExitPlanMode` to request the user's
+approval. **That approval — the Allow on the plan — IS the create confirmation.**
+There is no second native create sheet afterwards; asking again is the duplicate
+confirmation this flow exists to remove.
 
-From a global or project chat, create a new shell with:
+The plan must carry exactly ONE machine-readable block, fenced with the info
+string `authoring-spec`, holding the inputs the Host will land:
 
-```json
-{"brief":"<initial user brief>","name":"<optional provisional name>"}
+````
+```authoring-spec
+{"name":"Errand List","brief":"Track errands with a quick add flow","template_id":"react-dom-r4","spec":{"product":{"goal":"Track errands","tasks":["add an errand"],"external_integrations":[]},"targets":[{"id":"phone","os":"ios","form_factor":"iphone"}],"ui":{"structure":["list","editor"],"theme":{"mode":"system","accent":"blue"},"style":{"direction":"clear","density":"comfortable"},"references":[]},"design":{"presentations":[{"target_id":"phone","presentation":"single-column list","navigation":"push editor; back returns to list"}],"tokens":{"spacing":"8px"},"states":{"loading":"skeleton","empty":"prompt to add","error":"retry","success":"show list","permission":"explain if needed"},"inputs":{"pointer_touch":["tap"],"keyboard_mouse":["tab"],"back":"pop editor","reduced_motion":"respect device"}},"acceptance_checks":[{"id":"add-item","target_ids":["phone"],"required":true,"preconditions":[],"steps":["open editor","save errand"],"expected":"errand appears in list","evidence":["inspect","ui_action"]}]}}
+```
+````
+
+- `name` and `brief` are the user-facing wording. They are read from the PLAN,
+  never from the `LocalAppPrepare` call, so what the user reads IS what lands on
+  the record.
+- `template_id` is required to CREATE. Omit it to MODIFY an app that is already
+  built: its runtime profile is already fixed and a modify plan may not swap it.
+- `spec` is the existing `AppAuthoringSpec` — `product`, `targets`, `ui`,
+  `design`, `acceptance_checks`. `acceptance_checks` is the user's TRIAL
+  CHECKLIST; nothing scores it and nothing collects its evidence automatically.
+- The block is CLOSED: no keys beyond these, and `AppAuthoringSpec` is itself
+  closed. A malformed block is refused by name, so fix it and plan again rather
+  than trying to land it.
+- Exactly one such block. Every other fence in the plan is ignored; a second
+  `authoring-spec` block or an unterminated fence fails closed.
+
+Keep the prose around the block readable: it is what the user reviews. Put the
+product goal, the features, the target devices, the data and permissions, and
+the full UI recommendation in the plan, with the authoring block carrying the
+same decisions in machine-readable form.
+
+## 2. Prepare
+
+After the user approves the plan, call:
+
+```
+LocalAppPrepare({"app_id":"app_123","plan_path":"<the plan file path the engine reported when the user approved it>"})
 ```
 
-using `LocalAppCreate`, then continue in the app-scoped session it hands you:
-the create flow above (step 1 onward) governs from there, including the
-unified `lingxi-local-app:local-app-build` create branch that stages the
-candidate, raises the native create confirmation, and only then calls
-`LocalAppScaffold` — do not call `LocalAppScaffold` directly from this app
-session, and do not call `LocalAppCreate` again once inside it. Then declare
-collections, domains, and capabilities with `LocalAppManifest`
-before generated source
-relies on them. Derive `expected_writable_collections` from the confirmed core
-UI paths that write those manifest collections. On mobile, the host reads the
-materialized manifest and overwrites the workflow's list with every declared
-collection id, so the caller's list is advisory only; every declared collection
-must have a real UI write path, or be removed from the manifest before building.
-Inside an app that already has a shape, do not create another shell or repeat
-the opening interview; use its persisted Host contract as the starting point.
+The Host re-reads its OWN approval record for that plan file, re-checks that the
+plan text has not changed since it was approved, re-validates the approved
+`template_id` against the LIVE catalog, and then:
 
-The persisted Runtime Profile picks the scaffold and derives its surface.
-Profile family CANNOT be changed afterwards — the workspace on disk is that
-profile's scaffold, so an app that needs another family must be created again.
-Choose it from the confirmed specification and the host catalog:
+- **CREATE** — lands the template through the existing scaffold transaction. This
+  is the one-time workspace preparation. You never scaffold yourself and the user
+  is never asked to confirm the create a second time.
+- **MODIFY** — stages the new authoring contract and nothing else. No template is
+  landed, and the last successful build and its valid contract stay exactly as
+  they were until a new build succeeds.
 
-- `canvas` when the whole interface is one drawn surface that owns a frame
-  loop: a game, a simulation, a 3D scene, a live visualization. The workspace
-  comes with a canvas screen, a frame-loop helper and a phase machine, and no
-  router.
-- `dom` for everything assembled from screens, lists and forms. This is the
-  default and the common case.
+`name`, `brief`, `spec` and `template_id` are read from the approved plan, never
+from your call. Pass only `app_id` and `plan_path`; a forged name, brief, spec or
+template in the call changes nothing.
 
-A drawn surface with a settings page is still a Canvas-family profile; a
-dashboard that embeds one chart is still `react_dom`. The runtime profile
-always appears in the final confirmation because committing it is irreversible.
-Read the brief, put your recommendation forward, and let the user correct it;
-only ask an earlier clarification when valid catalog profiles remain materially
-ambiguous.
+It returns an execution id and the authoring-contract handle you build with. If
+it refuses — the approved template moved, the plan names no `template_id` for a
+create, or the plan changed after approval — take the user back through planning
+rather than swapping a template silently or editing the plan to force it through.
 
-`name` is yours to write, not the user's brief truncated. Take the brief's
-subject and give it a short, specific display name — two to four words, no
-trailing punctuation, in the language the user wrote their brief in. From a
-shell conversation, show that name in the confirmation round with the runtime profile,
-so the user can accept or replace it. From a global chat, reserve
-`AskUserQuestion` for a name only when the brief names no subject at all.
+A repeated call REUSES the prepared result and never overwrites written source,
+so retrying after a failure is safe. If the plan is rejected or edited, plan
+again and re-approve: an old spec is never executed.
 
-Every collection requires `id`, `name`, and `fields`; every field requires
-`id`, `label`, and `kind`. Collection and field IDs use lower snake_case and
-must match `^[a-z][a-z0-9_]{0,63}$`. Optional field keys are `required` and
-`enumOptions`, and supported kinds are `text`, `long_text`, `integer`,
-`decimal`, `boolean`, `date_time`, `enum`, and `image_ref`:
+## 3. Implement per the plan
+
+Write the source the approved plan describes, inside the workspace the prepare
+step landed. Re-read `LINGXI.md`: it now carries the app's formal workspace
+contract — the editable roots, the host-managed files, the entry points that
+exist, and the surface the persisted profile takes. That contract governs
+everything after it.
+
+You may read the environment's specialist skills for the source you are writing,
+but they are guidance: follow the plan's UI recommendation, and if a material
+detail is unresolved, ask with `AskUserQuestion` rather than inventing it.
+
+Declare collections, domains and capabilities with `LocalAppManifest` BEFORE
+generated source relies on them. Every collection needs `id`, `name` and
+`fields`; every field needs `id`, `label` and `kind`. IDs use lower snake_case
+and match `^[a-z][a-z0-9_]{0,63}$`. Optional field keys are `required` and
+`enumOptions`; supported kinds are `text`, `long_text`, `integer`, `decimal`,
+`boolean`, `date_time`, `enum` and `image_ref`:
 
 ```json
 {"app_id":"<id>","collections":[{"id":"recognition_results","name":"识别结果","fields":[{"id":"source_image","label":"图片","kind":"image_ref","required":true},{"id":"recognized_text","label":"识别结果","kind":"long_text","required":true}]}]}
 ```
 
-Never declare host-owned record metadata (`recordId`, `revision`,
-`createdAtMs`, or `updatedAtMs`) as collection fields. If manifest validation
-fails, repair the payload and retry before building; do not treat a failed
-manifest update as a completed generation step.
+Never declare host-owned record metadata (`recordId`, `revision`, `createdAtMs`,
+`updatedAtMs`) as fields. If manifest validation fails, repair the payload and
+retry before building; a failed manifest update is not a completed step.
 
-Capabilities are a closed enum. Use only `data_mutation`, `ui_control`,
-`camera`, `photo_library`, `microphone`, `location`, `notifications`,
-`clipboard`, `share`, `text_to_speech`, `files_read`, `files_write`, `device_status`, `haptics`, `deep_link`, `calendar`, `contacts`, `media`, `llm`, `agent_notify`, or
-`background_schedule`; there is no `data` capability.
-`background_schedule` is required when the app registers a system background
-flow. WebAssembly and Web Workers need no capability at all — the served policy
-already allows wasm compilation and `blob:` workers for every local app — so
-never invent one to ask for them. `data_mutation` authorizes
-the conversation agent to call `LocalAppMutateData`. Do not declare
-it solely because the page writes its own collection through
-`window.lingxi.v2.data.mutate`; that foreground page path is already scoped to
-its app.
+Capabilities are a closed enum: `data_mutation`, `ui_control`, `camera`,
+`photo_library`, `microphone`, `location`, `notifications`, `clipboard`, `share`,
+`text_to_speech`, `files_read`, `files_write`, `device_status`, `haptics`,
+`deep_link`, `calendar`, `contacts`, `media`, `llm`, `agent_notify`,
+`background_schedule`. There is no `data` capability. `background_schedule` is
+required when the app registers a system background flow. WebAssembly and Web
+Workers need no capability — the served policy already allows wasm compilation
+and `blob:` workers — so never invent one. `data_mutation` authorizes the
+conversation agent to call `LocalAppMutateData`; do not declare it merely because
+the page writes its own collection through `window.lingxi.v2.data.mutate`.
 
-The host data wire contract is tagged and camel-cased. Generated source should
-import the locked helpers instead of constructing mutation payloads:
+Use only `window.lingxi.v2` for host data, network, device and agent events, and
+prefer the locked bridge helpers over hand-built payloads:
 
 ```js
 import {
@@ -386,241 +204,141 @@ const scores = page.records.map((record) => record.document.score);
 await deleteRecord("high_scores", "best", page.records[0].revision);
 ```
 
-For direct `LocalAppMutateData` calls, each operation must be exactly
-`{"kind":"upsert","recordId":"...","document":{...},"expectedRevision":1}`
-or `{"kind":"delete","recordId":"...","expectedRevision":1}`; omit
-`expectedRevision` when optimistic concurrency is not needed. Never use
-`action`, `create`, `record`, or top-level field values as substitutes.
-Collection query results expose app fields only under `records[].document`.
-`localStorage`, IndexedDB, or React state may be a cache, but must never be the
+Collection results expose app fields only under `records[].document`.
+`localStorage`, IndexedDB or React state may be a cache but must never be the
 authority for a declared collection. Surface native bridge failures as a
 retryable error; never swallow them and report a successful save.
 
-## Prefer local and host-provided capabilities
+Prefer what the host already provides before proposing an external API or a new
+package: `requestLlmChat`/`streamLlmChat` plus `onLlmStreamFrame` for the user's
+own configured model (never embed provider keys or a direct SDK call), and
+`window.lingxi.v2.data`, `device`, `clipboard`, `files`, `network`, `runtime`,
+`agent` through the checked-in helpers (`getClipboardText`, `setClipboardText`,
+`shareContent`, `synthesizeSpeech`, `readFile`, `writeFile`, `getDeviceStatus`,
+`triggerHaptics`, `openDeepLink`, `listCalendarEvents`, `searchContacts`,
+`getMedia`). Prefer platform APIs, CSS and the pinned packages; prefer an app
+collection over a remote database unless sharing/sync is an explicit
+requirement. Use an external service only when the user asked for it, record it
+in the manifest before source relies on it, and never switch silently.
 
-Keep separate lists in the confirmed AuthoringSpec. `manifest capabilities`
-are closed Host app-exposure permissions used by the generated app itself.
-`product.external_integrations` names remote services the app may need to
-fulfil its product goal; confirm them, their domain/capability, and privacy or
-quota impact before creation. MCP intent names business actions the user may
-later expose to an LLM. Never silently turn one list into the other.
+### Image assets (conditional)
 
-Resolve every requirement against the capabilities already supplied by the
-host before proposing an external API, hosted AI service, or custom
-replacement. In particular:
+Only when the brief needs an original bitmap (photo, illustration, texture, hero,
+background), detect whether an ImageGen skill/tool is available. If available and
+configured, generate into `public/` and record prompt, source and use. If not,
+ask ONCE whether to guide setup or skip; on skip use CSS, gradients, user assets
+or an honest placeholder and do not ask again in this task. Use inline SVG or CSS
+for ordinary icons.
 
-1. Use the checked-in bridge helpers (`requestLlmChat` for complete responses or
-   `streamLlmChat` plus `onLlmStreamFrame` for ordered streaming frames) so the
-   app uses the user's locally configured model/provider, quota, privacy
-   controls, and permission prompt. Do not embed provider keys or add a direct
-   LLM SDK/API call.
-2. Use `window.lingxi.v2.data`, `device`, `clipboard`, `files`, `network`, `runtime`,
-   and `agent` for structured storage, native device operations, mediated HTTPS,
-   device context, and conversation events. The checked-in helpers
-   `getClipboardText`, `setClipboardText`, `shareContent`, and
-   `synthesizeSpeech`, `readFile`, `writeFile`, `getDeviceStatus`,
-   `triggerHaptics`, `openDeepLink`, `listCalendarEvents`, `searchContacts`,
-   and `getMedia` keep these calls on the host
-   permission path. Reuse an
-   available built-in skill/tool
-   during generation and QA before proposing a substitute.
-3. Prefer platform APIs, CSS, and the existing pinned project packages over a
-   new package;
-   prefer an app collection over a remote database unless sharing/sync is an
-   explicit requirement.
+### Dependencies
 
-Use an external service or alternative implementation only when the user
-explicitly requests it. Record that exception in the confirmed specification,
-show its package/domain/capability and privacy or quota impact, and declare it
-in the manifest before source relies on it. If a required host capability is
-unavailable, report the limitation and ask the user to choose setup, a reduced
-local implementation, or a specific external service; never switch silently.
+Dependencies are locked. Do not add, update or remove packages to implement the
+plan; if an idea would need one, redesign it as a source-only implementation. The
+only sanctioned dependency path is `LocalAppConfirmDependencyChange` followed by
+`LocalAppUpdateDependencies` with the returned one-shot receipt, and only for a
+non-core npm-registry package the user explicitly asked for. React, Ionic, Vite,
+renderer engines and other catalog core packages are refused there; they change
+only through a same-family runtime-profile migration, which is a separate path.
+Any add or update raises the native dependency-review confirmation and fails with
+`user denied dependency changes` if declined; a pure remove needs no prompt. The
+receipt is consumed on use and goes stale if the baseline moves, so a
+`dependencies_dirty` error means reconfirm and call again — never route around
+it, and never edit package/lock or run npm, npx, Yarn or pnpm directly.
 
-## Image assets (conditional)
+## 4. Build
 
-Only when the brief needs an original photo, illustration, texture, hero,
-background, or other bitmap, detect whether an ImageGen skill/tool is
-available. If available and configured, generate the asset into `public/` and
-record prompt, source, and use in the spec. If unavailable, ask once whether
-to guide installation/configuration or skip it; on skip, use CSS, gradients,
-user assets, or an honest placeholder and do not ask again in this task. A
-built-in path does not need an API key; a CLI/API fallback may require
-`OPENAI_API_KEY`. After the user chooses setup, follow the environment's
-install path, reload skills (`/reload-skills` or its equivalent), re-detect,
-and enable immediately if ready. Use inline SVG or CSS for ordinary icons.
+When the source is ready, call `LocalAppBuild`. It runs the offline production
+Vite build from the workspace-backed writable mount, using the fixed runtime and
+the app's materialized dependency snapshot, and fails closed on fresh blocking
+LSP diagnostics in App-managed JS before Vite starts — so repair LSP errors
+first. Keep the necessary compilation and dependency-integrity checks; they are
+not optional.
 
-## Build orchestration
+**A successful `LocalAppBuild` is the completion condition.** There is no
+automatic verification stage after it, no QA scoring, and no verification-driven
+repair loop. When the build fails:
 
-Call one namespaced build workflow through the `Workflow` tool, with the confirmed spec. Host enriches the
-launch with the verified catalog (Create) or persisted profile/snapshot
-(Update/Verify); caller input never selects a renderer or profile:
+1. Read the failure with `LocalAppLogs {"app_id":"<id>","log":"build"}`.
+2. A `not yet available` build means dependencies are not ready: call
+   `LocalAppInstallDeps {"app_id":"<id>","wait":true}` and read its `lastError`.
+3. If the cause is your source, fix it and build again.
+4. If the cause is the HOST — a missing toolchain, a failed dependency install,
+   an unavailable runtime — report it to the user and stop. Those cannot be
+   worked around from inside the workspace, and retrying will not clear them.
 
-```
-Workflow({"name":"lingxi-local-app:local-app-build","args":{"operation":"create","app_id":"app_123","name":"Errand List","brief":"Track errands with a quick add flow","authoring_spec":{"product":{"goal":"Track errands","tasks":["add an errand"],"external_integrations":[]},"targets":[{"id":"phone","os":"ios","form_factor":"iphone"}],"ui":{"structure":["list","editor"],"theme":{"mode":"system","accent":"blue"},"style":{"direction":"clear","density":"comfortable"},"references":[]},"design":{"presentations":[{"target_id":"phone","presentation":"single-column list","navigation":"push editor; back returns to list"}],"tokens":{"spacing":"8px"},"states":{"loading":"skeleton","empty":"prompt to add","error":"retry","success":"show list","permission":"explain if needed"},"inputs":{"pointer_touch":["tap"],"keyboard_mouse":["tab"],"back":"pop editor","reduced_motion":"respect device"},"canvas":null},"acceptance_checks":[{"id":"add-item","target_ids":["phone"],"required":true,"preconditions":[],"steps":["open editor","save errand"],"expected":"errand appears in list","evidence":["inspect","ui_action"]}]},"quality_level":"balanced"}})
-```
+Repair a build failure as many times as the failure is genuinely a source defect
+you can identify; do not loop blindly and do not treat a build failure as a
+quality-verification finding.
 
-`name` and `brief` carry the user-confirmed create wording; every
-identity field stays Host-derived. External integrations are recorded in the
-AuthoringSpec as product requirements. They are not MCP exposure intent and
-creation does not configure or expose them.
-For update use `operation: "update"` and pass the user-confirmed change as
-`revision_prompt` (a plain string carrying what the user asked to change —
-`authoring_spec` is the full confirmed object for create/update (verify uses the
-Host effective contract); for a verification-only run use
-`operation: "verify"`. Both fail closed unless Host can read the persisted
-Runtime Profile and dependency snapshot. `quality_level` is the only quality
-selector. `fast` is rejected by Host staging for any non-`react_dom` family
-after the Host resolves the selection; the workflow never treats a
-template-id spelling as a runtime-family contract. Repair
-budgets are fast=1, balanced=1, thorough=2. Host derives writable collection
-ids and all template/profile identity; do not pass `renderer`,
-`runtime_profile`, template paths, or expected collections.
+## 5. Deliver
 
-A create run can come back in several ways that are not source defects. If the
-workflow returns `{"ok":false,"status":"create_declined",...}`, the user
-declined the native create confirmation — that is their answer, not a host
-failure: re-confirm the name/brief/AuthoringSpec (offering to change them) and relaunch
-`operation: "create"` once the user is ready to try again. A structured
-`verification_failed` result preserves the existing app, preview, Host receipt,
-and findings. An infrastructure failure is reported without source repair.
-If Host contract staging or QA is unavailable, report the exact failed operation
-and preserve the confirmed requirements. Do not suggest removing notifications,
-switching renderers, or other product changes as a workaround for missing Host
-infrastructure. Offer a capability fallback only when Host evidence specifically
-identifies that capability as unsupported. A chosen fallback must be reflected
-in the AuthoringSpec and acceptance checks before a new run; selecting a generic
-“adjust the plan” option is not proof that a fallback has been applied.
-If the workflow throws after scaffold succeeded because build tooling failed, the
-app record and workspace still exist under `app_id`; continue from that same
-app only after the failure is understood.
+On a successful build, start the preview and hand the app to the user:
 
-The directory contract is fixed across every phase. The persistent source
-project lives at the current app workspace and is already scaffolded by the
-host with pinned root infra and dependencies before generation begins. The
-workspace `dist/` directory is disposable and must never be treated as source.
-The host mounts this workspace as the sole writable build root (the guest may
-see it at the `project/` path), excludes prior
-`.lingxi-build-state/build-output/dist/`, forces
-`vite build --outDir .lingxi-build-state/build-output/dist --emptyOutDir`
-with `--config vite.config.mjs` pinned — the private staging path, never the
-workspace's own `dist/` — then atomically promotes the validated snapshot and
-serves only `build/store/dist/`. Never configure another `build.outDir`,
-inspect host staging paths, or copy generated output back into editable
-source.
+- `LocalAppRuntime {"app_id":"<id>","action":"start"}` — serve the built output
+  and return the preview url. Restart it if it was already running.
 
-1. **Design** — for `dom`, the designer uses the frontend-design platform/output
-   router and accessibility guidance for `balanced` and `thorough`, while `fast`
-   folds compact decisions into Generate & Build. When the coordinator loaded
-   Apple Design, apply it to iOS/iPadOS output only, adapting to the Host/Ionic
-   shell; do not copy it into Android or desktop targets. For `canvas`, Apple
-   guidance applies to the HUD/menu overlay and its safe-area treatment, never
-   to the drawn scene. Use the designer for both accepted strategies; its
-   confirmation never includes `fast`. Produce/confirm platform and form
-   factor, page structure, tokens, adapters, interactions, and asset decision.
-   Keep the existing string token/state schema and do not add APIs. On Create,
-   this is a structured design return before scaffold; do not write files. Do
-   not propose npm operations, fallback scaffold modes, or root-file edits.
-2. **Generate** — after the preparer receipt and scaffold, the builder consumes
-   its generic device/React guidance and invokes exactly one Host-profile
-   renderer guide. Consume the host-provided LingXi bridge, `deviceContext`,
-   source policy/manifest
-   integration, and platform adapter while writing complete React source and
-   all required states under the editable roots. Use `queryCollection`, `upsertRecord`, and
-   `deleteRecord` from the locked bridge for declared collection data; read
-   fields from `records[].document` and do not swallow rejected native writes.
-   Stay within the shipped dependency set; if an idea would require package or
-   root-infra changes, redesign it as a source-only implementation. For a
-   whole-surface `surface: canvas` app, hand off to the matched runtime
-   specialist. For `canvas_2d` or `three_3d`, use the profile-managed
-   `createFrameLoop` helper from `lib/frame-loop.js`; never call
-   `requestAnimationFrame` directly or hand-write a replacement loop. Phaser
-   and Babylon use their profile-managed engine lifecycle adapter instead of a
-   second frame loop. For a routed `surface: dom` app that only
-   embeds a canvas or WebGL region, own exactly one
-   `requestAnimationFrame` loop for that region, cancel it in the effect
-   cleanup, make that loop's lifecycle responsible for DPR-aware buffer
-   sizing, viewport or layout resize, and clamping or resetting the first
-   delta after resume, and keep per-frame state out of React state and Zustand
-   stores. `canvas_2d` uses no extra engine and `three_3d` uses
-   `three@0.185.1`, which is in the locked set. `phaser_2d` and `babylon_3d`
-   are valid only when the persisted runtime profile already names those
-   host-managed stacks. No other engine, physics or WebGL wrapper can be
-   installed.
-3. **Build** — call `LocalAppBuild`; the host runs the production
-   `vite build --outDir .lingxi-build-state/build-output/dist --emptyOutDir
-   --config vite.config.mjs` equivalent offline from the workspace-backed
-   writable mount with the fixed runtime and the app's materialized dependency
-   snapshot. The output therefore lands under private
-   `.lingxi-build-state/build-output/` — not in the workspace `dist/` — before
-   atomic promotion to `build/store/dist/`. The build also fails closed on
-   fresh blocking LSP diagnostics in App-managed JS before Vite ever starts,
-   so repair LSP errors first.
-4. **Verify** — invoke `$frontend-qa`. For `dom`, `fast` checks the confirmed
-   primary target, root render, fatal console errors, primary interaction, and
-   native WebView path; `balanced` expands to the confirmed targets and app
-   states that the Host authorizes; `thorough` expands the same active contract
-   with the broader checks the Host verification scope authorizes. For `canvas`,
-   `balanced` covers the confirmed simulation, captured render, motion, and
-   input paths; `thorough` adds declared states and any additional targets the
-   Host scope authorizes. A quality level never expands the Host's current-device
-   `verification_scope`: preserve declared targets and report unverified ones,
-   and never call a partial run a full-matrix pass. Use Browser when available
-   for the selected breadth, then use native WebView inspect/act/log tools for
-   bridge, data, system back, and device context. Use only actual Host in-scope
-   evidence for Apple checks; screenshots or synthetic pointers cannot establish
-   physical smoothness. For
-   every declared collection listed in `expected_writable_collections`, perform
-   the real UI write and then call `LocalAppQueryData`; the returned
-   `records[].document` must contain the value. On mobile, the host derives the
-   list from every collection in the materialized manifest and overwrites any
-   caller-provided list before Verify, so a non-empty list cannot be reported as
-   `not_applicable`. A declared collection without a UI write path must be
-   removed from the manifest and rebuilt. A local-only value or swallowed bridge
-   failure is not persistence.
+If the build succeeded but the preview FAILED to launch, say so separately and
+plainly: the app IS built, the preview did not start, and the launch is
+retryable. Never report a successful build as a failed build, and never describe
+a preview-launch failure as a quality or verification failure.
 
-On a completed Host QA candidate with a source finding, repair, rebuild, and
-re-verify according to the selected surface strategy: for `dom`, at most once
-for `fast`/`balanced` and twice for `thorough`; for `canvas`, at most once for
-`balanced` and twice for `thorough`. One bounded evidence resample is separate
-from those budgets. Never send an evidence-resample request or infrastructure
-failure to source repair.
-If issues remain, return them with evidence and the reduced verification level;
-never claim full Browser or native QA that was not run.
+Then tell the user, in their language:
+
+- the app entry point (the name they will see and the preview url);
+- a SHORT trial checklist — the confirmed `acceptance_checks`, rendered as steps
+  the user can perform themselves;
+- the status line exactly: `已构建，待你试用`.
+
+Do not run UI operations, take acceptance screenshots, or score the app on your
+own. The user tries it. If they report a problem, treat it as a change request:
+plan the fix (step 1), prepare, implement, rebuild, and deliver again.
+
+## On-demand testing
+
+Automatic verification is gone from create and modify, but the independent
+testing capability is not: when the USER actively asks to test the app, use it.
+`$local-app-test` / `$frontend-qa` and the `lingxi-local-app:local-app-use-test`
+workflow drive the running preview through the native inspect/act/log tools and
+an on-device use test, and `LocalAppCaptureUi` gives a still image when the DOM
+cannot describe what is on screen (a canvas or WebGL surface has no inspectable
+elements). Run it on request, report what it found, and do not make delivery
+depend on it.
 
 ## Workspace and dependency boundary
 
 Edit generated source only under `app/`, `src/`, `components/`, `lib/`,
-`styles/`, and `public/`. `package.json`, lockfiles, `node_modules`,
-`index.html`, `vite.config.*`, host metadata under `.lingxi/`,
-`lib/device-context.js`, `lib/lingxi-bridge.js`, and
-`lib/platform-adapter.js` are host-controlled for this workflow. Do not run `npm`, `npx`, `node`, package
-install/uninstall/reconcile commands, or alternate scaffold tools. Nothing in
-the host denies these for you: the workspace permission lease is a filesystem
-boundary only and deliberately declines to lease-authorize package managers,
-interpreters and network commands, routing them to the ordinary Shell approval
-path instead — so a plain approval prompt appearing for `npm install` is not
-the host permitting it, and this ban is yours to keep. Never set
-`build.outDir` yourself either: the host passes `--outDir` on the command line
-and pins `--config vite.config.mjs`, so a config-level output path is both
-host-managed and overridden.
-`src/main.*` may be minimally adapted to import the checked-in
-bridge/deviceContext/platform adapter. The build is offline and reads a
-host-materialized dependency snapshot.
-Use only `window.lingxi.v2` for host data, network, device, and agent events.
-The build is offline and the bridge/device context is untrusted input: validate
-it at the adapter boundary.
+`styles/` and `public/`. `package.json`, lockfiles, `node_modules`, `index.html`,
+`vite.config.*`, host metadata under `.lingxi/`, `lib/device-context.js`,
+`lib/lingxi-bridge.js` and `lib/platform-adapter.js` are host-controlled for this
+workspace. Do not run `npm`, `npx`, `node`, package install/uninstall/reconcile
+commands, or alternate scaffold tools — the workspace permission lease is a
+filesystem boundary only and deliberately does not lease-authorize package
+managers, interpreters or network commands, routing them to the ordinary Shell
+approval path instead. A plain approval prompt appearing for `npm install` is not
+permission; this ban is yours to keep. Never set `build.outDir` yourself either:
+the host passes `--outDir` on the command line and pins `--config
+vite.config.mjs`. `src/main.*` may be minimally adapted to import the checked-in
+bridge/deviceContext/platform adapter.
 
 Source versioning uses ordinary workspace Git history and the existing Git or
-checkpoint capability. Do not introduce a second version store or a
-checkpoint-specific command surface.
+checkpoint capability. Do not introduce a second version store. Create a
+checkpoint only after the user approves the working preview, and restore one only
+after their explicit choice.
 
 ## Existing app operations
 
-Use `LocalAppBuild`, `LocalAppRuntime`,
-`LocalAppLogs`, structured `LocalAppInspectUi` /
-`LocalAppActOnUi`, `LocalAppQueryData` /
-`LocalAppMutateData`, `LocalAppCheckpointRestore`, and
-app-event tools as needed. Restore
-checkpoints only after the user's explicit choice; a restore
-must not trigger package-manager repair from this workflow.
-Create a checkpoint only after the user approves the working preview.
+Use `LocalAppBuild`, `LocalAppRuntime`, `LocalAppLogs`, structured
+`LocalAppInspectUi` / `LocalAppActOnUi`, `LocalAppQueryData` /
+`LocalAppMutateData`, `LocalAppCheckpointRestore`, and app-event tools as needed.
+
+For direct `LocalAppMutateData` calls, each operation is exactly
+`{"kind":"upsert","recordId":"...","document":{...},"expectedRevision":1}` or
+`{"kind":"delete","recordId":"...","expectedRevision":1}`; omit
+`expectedRevision` when optimistic concurrency is not needed. Never use `action`,
+`create`, `record`, or top-level field values as substitutes.
+
+When the app is ALREADY built and the user asks for a change, do not create
+another shell and do not repeat the opening interview: treat it as a MODIFY —
+plan the change, approve (the plan omits `template_id`), `LocalAppPrepare` stages
+the new contract, implement, `LocalAppBuild`, deliver again. A failed modify
+keeps the last successful build and its valid contract.

@@ -15,10 +15,6 @@ fn local_app_role_schemas_declare_object_tool_parameters() {
     // These definitions become StructuredOutput tool input schemas. Providers
     // require an explicit root object type even when all anyOf branches are objects.
     for role in [
-        "template_selection",
-        "design_subtree",
-        "create_preparer",
-        "build_result",
         "operator_result",
         "qa_review",
         "qa_finalize",
@@ -30,31 +26,7 @@ fn local_app_role_schemas_declare_object_tool_parameters() {
 
 #[test]
 fn local_app_union_schemas_preserve_success_and_failure_constraints() {
-    let approved = json!({
-        "ok": true, "approved": true, "status": "approved",
-        "contract_handle": "contract_00000000000000000000000000000000",
-        "contract_sha256": "0".repeat(64), "receipt_id": "receipt-1"
-    });
     for (role, valid, invalid) in [
-        (
-            "create_preparer",
-            vec![
-                approved.clone(),
-                json!({"ok": false, "approved": false, "status": "create_declined"}),
-                json!({"ok": false, "approved": false, "status": "create_failed", "error": "Host unavailable"}),
-            ],
-            vec![
-                json!({"ok": true, "approved": true, "status": "approved"}),
-                json!({"ok": false, "approved": false, "status": "create_failed"}),
-                json!({"ok": false, "approved": false, "status": "create_failed", "error": ""}),
-                json!({"ok": false, "approved": true, "status": "create_failed", "error": "Host unavailable"}),
-                {
-                    let mut contradictory = approved;
-                    contradictory["approved"] = json!(false);
-                    contradictory
-                },
-            ],
-        ),
         (
             "operator_result",
             vec![json!({"ok": false, "error": "Host unavailable"})],
@@ -93,39 +65,5 @@ fn local_app_union_schemas_preserve_success_and_failure_constraints() {
         {
             assert!(schemas.validate(&value, schema).is_err(), "{role}: {value}");
         }
-    }
-}
-
-#[test]
-fn canonical_designer_schema_rejects_report_envelopes_and_nested_tokens() {
-    let document: Value = serde_json::from_str(include_str!(
-        "../../plugins/lingxi-local-app/schemas/design-spec.schema.json"
-    ))
-    .unwrap();
-    let authoring: Value = serde_json::from_str(include_str!(
-        "../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
-    ))
-    .unwrap();
-    let valid = json!({"design": authoring["design"]});
-    let mut schemas = boon::Schemas::new();
-    let mut compiler = boon::Compiler::new();
-    let url = "mem://designer-contract";
-    compiler.add_resource(url, document).unwrap();
-    let schema = compiler.compile(url, &mut schemas).unwrap();
-    assert!(schemas.validate(&valid, schema).is_ok());
-    for invalid in [
-        json!({"design": {"identity": {"app_id": "1234"}, "confirmed_passthrough": {}, "information_architecture": {}}}),
-        {
-            let mut value = valid.clone();
-            value["design"]["identity"] = json!({"app_id": "1234"});
-            value
-        },
-        {
-            let mut value = valid;
-            value["design"]["tokens"] = json!({"spacing": {"small": "8px"}});
-            value
-        },
-    ] {
-        assert!(schemas.validate(&invalid, schema).is_err(), "{invalid}");
     }
 }

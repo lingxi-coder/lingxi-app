@@ -2304,3 +2304,59 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
     assert_eq!(*sink.awaiting_plan.lock().unwrap(), vec![true, false]);
     handler.kill(&handle.task_id, context).await.unwrap();
 }
+
+#[tokio::test]
+async fn teammate_plan_file_comes_from_the_published_identity() {
+    // `ay(agentId)`: with an identity published, the teammate's plan file sits
+    // in the SESSION's plans directory — the one the write carve-out matches —
+    // not under the config home.
+    let api = GatedApiClient::new();
+    let (dir, fs, rt, handler) = make_handler(api.clone());
+    let transport = Arc::new(PlanReviewTransport {
+        requests: StdMutex::new(vec![]),
+        modes: StdMutex::new(vec![]),
+    });
+    let plans_dir = dir.path().join(".lingxi/plans");
+    let handler = handler
+        .with_tool_invoker(transport.clone())
+        .with_plan_approval_mailbox(transport)
+        .with_plan_files(Arc::new(
+            platform_api::plan_files::PlanFileMatcher::with_identity(
+                platform_api::plan_files::PlanFileIdentity {
+                    plans_dir: plans_dir.clone(),
+                    slug: "brave-quiet-otter".into(),
+                    workshop_enabled: false,
+                },
+            ),
+        ));
+    let agent_id = protocol::AgentId::new();
+    let context = ctx(fs.clone(), rt);
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                agent_id,
+                name: "planner".into(),
+                team_name: "team".into(),
+                description: "make a plan".into(),
+                inheritance: None,
+                spawn_request: Some(platform_api::SubagentSpawnRequest {
+                    mode: Some("plan".into()),
+                    ..Default::default()
+                }),
+            },
+            context.clone(),
+        )
+        .await
+        .unwrap();
+    api.first_started.acquire().await.unwrap().forget();
+    let requester = platform_api::teammate_plan::requester(&agent_id).unwrap();
+    let expected = plans_dir.join(format!(
+        "brave-quiet-otter-agent-{}.md",
+        agent_id.as_uuid()
+    ));
+    assert_eq!(
+        requester.writable_plan_path(),
+        Some(expected.to_str().unwrap())
+    );
+    handler.kill(&handle.task_id, context).await.unwrap();
+}

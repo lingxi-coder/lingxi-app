@@ -81,6 +81,16 @@ impl ObserverEventSink {
             | SubagentObservation::Completed { .. }
             | SubagentObservation::Failed { .. }
             | SubagentObservation::Killed { .. } => true,
+            // Foreground owners park without Completed, which would tear down
+            // their pump. Their rest marker is lifecycle, not lossy telemetry.
+            SubagentObservation::Message {
+                message:
+                    protocol::ConversationMessage::System {
+                        subtype: Some(subtype),
+                        ..
+                    },
+                ..
+            } if subtype == "agent_idle" => true,
             SubagentObservation::Message {
                 message: protocol::ConversationMessage::User { content, .. },
                 ..
@@ -639,6 +649,16 @@ mod tests {
         sink.emit_terminal(completed());
         sink.try_emit(SubagentObservation::Message {
             agent_id,
+            message: protocol::ConversationMessage::System {
+                id: protocol::MessageId::new(),
+                content: "idle".into(),
+                subtype: Some("agent_idle".into()),
+                compact_metadata: None,
+                refusal_fallback: None,
+            },
+        });
+        sink.try_emit(SubagentObservation::Message {
+            agent_id,
             message: protocol::ConversationMessage::user(
                 protocol::MessageId::new(),
                 "resume".into(),
@@ -682,6 +702,14 @@ mod tests {
                 SubagentObservation::Allocated { .. } => Some("allocated"),
                 SubagentObservation::Completed { .. } => Some("completed"),
                 SubagentObservation::Message {
+                    message:
+                        protocol::ConversationMessage::System {
+                            subtype: Some(subtype),
+                            ..
+                        },
+                    ..
+                } if subtype == "agent_idle" => Some("idle"),
+                SubagentObservation::Message {
                     message: protocol::ConversationMessage::User { is_meta, .. },
                     ..
                 } => Some(if *is_meta { "wake" } else { "resume" }),
@@ -695,6 +723,7 @@ mod tests {
             [
                 "allocated",
                 "completed",
+                "idle",
                 "resume",
                 "wake",
                 "completed",

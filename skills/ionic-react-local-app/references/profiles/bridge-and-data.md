@@ -21,5 +21,5 @@
 Reviewed: 2026-08-27
 
 - LingXi runtime contract: `docs/local-apps/RUNTIME-OS-V2.md`
-- LingXi bridge helpers: `lingxi-code/plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/lingxi-bridge.js`
-- Platform adapter: `lingxi-code/plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/platform-adapter.js`
+- LingXi bridge helpers: `lingxi-code/plugins/lingxi-local-app/assets/templates/react-dom/r4/lib/lingxi-bridge.js`
+- Platform adapter: `lingxi-code/plugins/lingxi-local-app/assets/templates/react-dom/r4/lib/platform-adapter.js`

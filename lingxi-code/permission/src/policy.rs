@@ -1325,8 +1325,9 @@ impl PermissionPolicy {
         //     is load-bearing — upstream places both allows after the edit
         //     deny/ask rule walks but BEFORE the write safety check and the
         //     plan-mode mutation ask, so the plan file stays writable even
-        //     though LingXi's default plans directory (`<config-home>/plans`)
-        //     sits under `~/.claude`. Without this the plan-mode reminder tells
+        //     though LingXi's default plans directory
+        //     (`<project-root>/.lingxi/plans`) sits under `.lingxi`, one of the
+        //     protected components. Without this the plan-mode reminder tells
         //     the model to write a file the gate then prompts on every time.
         //     `includeWorkshopDoc` is `permissionMode === "plan"` for writes and
         //     always true for reads, exactly as the two call sites pass it.

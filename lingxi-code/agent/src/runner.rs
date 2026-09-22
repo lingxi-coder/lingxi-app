@@ -1017,6 +1017,24 @@ async fn emit_message(
         .await;
 }
 
+/// Publish a rest transition without ending the foreground event pump. A
+/// Completed event would deallocate its runner, which still owns background
+/// notifications. This marker stays out of model history and the transcript.
+async fn emit_parked(out_tx: &mpsc::Sender<SubagentEvent>, agent_id: AgentId) {
+    emit_message(
+        out_tx,
+        agent_id,
+        &protocol::ConversationMessage::System {
+            id: protocol::MessageId::new(),
+            content: "idle".to_string(),
+            subtype: Some("agent_idle".to_string()),
+            compact_metadata: None,
+            refusal_fallback: None,
+        },
+    )
+    .await;
+}
+
 async fn emit_progress(
     out_tx: &mpsc::Sender<SubagentEvent>,
     agent_id: AgentId,
@@ -1290,6 +1308,7 @@ async fn run_subagent_loop(
     // retry cap (`MAX_STRUCTURED_OUTPUT_RETRIES ?? 5`).
     let mut structured_failed_count: u32 = 0;
     let mut structured_nudge_count: u32 = 0;
+    let mut structured_truncation_retries: u32 = 0;
     // Separate run-scoped cap: parsing failures never reach schema validation.
     let mut structured_parse_retries: u32 = 0;
     let structured_parse_retry_cap = ctx.structured_output_parse_retries.min(2);
@@ -1616,7 +1635,13 @@ async fn run_subagent_loop(
                     return;
                 }
             };
-            let response = loop {
+            let retry_response_body = watchdog.is_some_and(|policy| policy.retry_response_body);
+            let (response, local_only_response) = loop {
+                // Only the opened body is retried here; ApiService already owns
+                // connect-phase retries. Any server-side content revokes replay
+                // even when its block never closes and cannot be salvaged.
+                let stream_opened = std::sync::atomic::AtomicBool::new(false);
+                let retryable_body = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
                 // (M9) A wake message injected below rides into the next
                 // round-trip as a user turn. The runner is already active here.
                 if let Some(content) = wake_message.take() {
@@ -1722,6 +1747,7 @@ async fn run_subagent_loop(
                     )
                     .await
                     .map_err(|e| (Vec::new(), e))?;
+                    stream_opened.store(true, std::sync::atomic::Ordering::Relaxed);
                     tracing::debug!(
                         agent_id = %agent_id,
                         model = %current_model,
@@ -1732,7 +1758,33 @@ async fn run_subagent_loop(
                     let stream = stream.inspect({
                         let out_tx = out_tx.clone();
                         let current_agent_id = agent_id;
+                        let retryable_body = retryable_body.clone();
                         move |event| {
+                            if retry_response_body {
+                                let local_content = |block: &llm_client::ContentBlock| {
+                                    matches!(
+                                        block,
+                                        llm_client::ContentBlock::Text { .. }
+                                            | llm_client::ContentBlock::Reasoning { .. }
+                                            | llm_client::ContentBlock::RedactedThinking { .. }
+                                            | llm_client::ContentBlock::ToolCall { .. }
+                                    )
+                                };
+                                let has_server_content = match event {
+                                    Ok(LlmEvent::ContentBlockStart { content_block, .. }) => {
+                                        !local_content(content_block)
+                                    }
+                                    Ok(
+                                        LlmEvent::MessageStart { response }
+                                        | LlmEvent::Completed { response },
+                                    ) => response.content.iter().any(|block| !local_content(block)),
+                                    _ => false,
+                                };
+                                if has_server_content {
+                                    retryable_body
+                                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
                             if first_event_seen || event.is_err() {
                                 return;
                             }
@@ -1827,10 +1879,23 @@ async fn run_subagent_loop(
                 };
 
                 if let Err((_partial_blocks, error)) = &attempt_result {
-                    if is_workflow_watchdog_timeout(error)
+                    let interrupted_body = retry_response_body
+                        && matches!(error, LlmError::Transport { .. })
+                        && stream_opened.load(std::sync::atomic::Ordering::Relaxed);
+                    if (is_workflow_watchdog_timeout(error) || interrupted_body)
+                        && (!retry_response_body
+                            || retryable_body.load(std::sync::atomic::Ordering::Relaxed))
                         && model_attempt.is_none()
                         && watchdog.is_some_and(|policy| watchdog_retry_count < policy.max_retries)
                     {
+                        // No local tool from this attempt has dispatched: the
+                        // runner executes tools only after full accumulation.
+                        // Keep earlier turns/results, discard this body, and
+                        // mark its unavailable usage rather than claiming a
+                        // complete total if the replacement call succeeds.
+                        if retry_response_body {
+                            usage_complete = false;
+                        }
                         watchdog_retry_count = watchdog_retry_count.saturating_add(1);
                         let model_attempt = watchdog_retry_count.saturating_add(1);
                         let reason = error.to_string();
@@ -1846,7 +1911,10 @@ async fn run_subagent_loop(
                         continue;
                     }
                 }
-                break attempt_result;
+                break (
+                    attempt_result,
+                    retryable_body.load(std::sync::atomic::Ordering::Relaxed),
+                );
             };
 
             let response = match response {
@@ -1858,7 +1926,21 @@ async fn run_subagent_loop(
                         ..
                     } = &e
                     {
-                        let can_recover = force_structured_tool == Some(tool_name.as_str())
+                        // The Host enables this policy only for Create Local App.
+                        // Ordinary agents keep the existing StructuredOutput-only
+                        // recovery policy, even when parse retries are configured.
+                        let create_local_tool = retry_response_body
+                            && ctx.tool_invoker.is_some()
+                            && (allowed_tools.is_empty() || allowed_tools.contains(tool_name))
+                            && tool_schemas.iter().any(|tool| {
+                                tool.get("name").and_then(serde_json::Value::as_str)
+                                    == Some(tool_name.as_str())
+                                    && tool.get("input_schema").is_some()
+                                    && tool.get("type").is_none()
+                            });
+                        let can_recover = (force_structured_tool == Some(tool_name.as_str())
+                            || create_local_tool)
+                            && (!retry_response_body || local_only_response)
                             && !has_other_tool_calls
                             && structured_parse_retry_cap > 0
                             && model_attempt.is_none();
@@ -1871,7 +1953,7 @@ async fn run_subagent_loop(
                             // a later success must not imply all calls were counted.
                             usage_complete = false;
                             let reason = format!(
-                                "StructuredOutput JSON correction {structured_parse_retries}/{structured_parse_retry_cap}: {e}"
+                                "{tool_name} JSON correction {structured_parse_retries}/{structured_parse_retry_cap}: {e}"
                             );
                             api_client
                                 .observe_workflow_query_retry(
@@ -1885,7 +1967,7 @@ async fn run_subagent_loop(
                             let correction = ConversationMessage::user_meta(
                                 MessageId::new(),
                                 format!(
-                                    "{reason}. The malformed response was discarded. Reuse the completed tool results above. Call StructuredOutput again with one complete, concise JSON object matching its schema; omit unrelated fields and do not repeat completed tools."
+                                    "{reason}. The malformed response was discarded. Reuse the completed tool results above. Call {tool_name} again with one complete, concise JSON object matching its schema; omit unrelated fields and do not repeat completed tools."
                                 ),
                             );
                             history.push(correction.clone());
@@ -1898,7 +1980,7 @@ async fn run_subagent_loop(
                         }
                         let error = if can_recover && structured_parse_retries > 0 {
                             format!(
-                                "StructuredOutput JSON recovery stopped after {structured_parse_retries} retries (limit {structured_parse_retry_cap}, turn {}/{max_turns}): {e}",
+                                "{tool_name} JSON recovery stopped after {structured_parse_retries} retries (limit {structured_parse_retry_cap}, turn {}/{max_turns}): {e}",
                                 turn_idx + 1
                             )
                         } else {
@@ -2095,9 +2177,12 @@ async fn run_subagent_loop(
             // failed validation still means the model tried); otherwise count
             // this as one more consecutive no-tool turn. No-op under `Forced`
             // (every turn is already forced, so `whendone_idle_turns` is unread).
-            if tool_uses.is_empty() {
+            let recoverable_structured_truncation = retry_response_body
+                && force_structured_tool.is_some()
+                && stop_reason.as_deref() == Some("max_tokens");
+            if tool_uses.is_empty() && !recoverable_structured_truncation {
                 whendone_idle_turns = whendone_idle_turns.saturating_add(1);
-            } else {
+            } else if !tool_uses.is_empty() {
                 whendone_idle_turns = 0;
             }
 
@@ -2446,6 +2531,35 @@ async fn run_subagent_loop(
                 && !tool_uses.is_empty()
                 && structured_result.is_none();
             if !should_continue {
+                // Host-verified Create flows may exhaust the output budget before
+                // doing any work. This is not completion: let the model continue
+                // with the existing tool results instead of demanding a final
+                // StructuredOutput immediately. Both this run-scoped budget and
+                // max_turns bound recovery; never replay an already dispatched tool.
+                if recoverable_structured_truncation && structured_result.is_none() {
+                    if structured_truncation_retries < 2 && turn_idx + 1 < max_turns {
+                        structured_truncation_retries += 1;
+                        let continuation = ConversationMessage::user(
+                            MessageId::new(),
+                            "Your response reached the output token limit before completing. Continue the unfinished work with the available tools, keeping reasoning concise. Preserve completed work and do not repeat successful tool calls. Call StructuredOutput only when the requested work is complete.".to_string(),
+                        );
+                        history.push(continuation.clone());
+                        emit_message(&out_tx, agent_id, &continuation).await;
+                        continue;
+                    }
+                    publish_prompt_hook_transcript(&ctx, history, &last_usage);
+                    emit_failed(
+                        &out_tx,
+                        transcript.as_ref(),
+                        history,
+                        &mut transcript_written,
+                        agent_id,
+                        "agent({schema}): output token limit reached before completion; continuation budget exhausted".to_string(),
+                        cumulative_usage.clone(),
+                    )
+                    .await;
+                    return;
+                }
                 // claude `agent({schema})` SubagentStop nudge: when the model ends a
                 // turn without a captured (valid) StructuredOutput, inject an
                 // in-conversation nudge and run another turn — up to 2 nudges (`ft`).
@@ -2552,6 +2666,7 @@ async fn run_subagent_loop(
                     if let Some(writer) = transcript.as_ref() {
                         let _ = writer.record_terminal("idle", None).await;
                     }
+                    emit_parked(&out_tx, agent_id).await;
                     terminated_cleanly = true;
                     break;
                 }
@@ -2660,6 +2775,7 @@ async fn run_subagent_loop(
                 if let Some(writer) = transcript.as_ref() {
                     let _ = writer.record_terminal("idle", None).await;
                 }
+                emit_parked(&out_tx, agent_id).await;
             } else {
                 let _ = out_tx
                     .send(SubagentEvent::Completed {

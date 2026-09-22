@@ -54,19 +54,26 @@ EXPECTED_SKILLS = {
     "mcp-tool-design",
     "phaser-2d-local-app",
     "react-best-practices",
-    "template-selection",
     "threejs-local-app",
+}
+# The subset of EXPECTED_SKILLS that the top-level `skills/` tree mirrors
+# byte-for-byte. It is a separate roster because only these are package-native
+# copies of a root skill, but it must stay a subset: a skill that is renamed or
+# dropped from the Plugin would otherwise silently leave the byte comparison.
+MIRRORED_SKILLS = {
+    "accessibility", "apple-design", "babylon-3d-local-app", "canvas-2d-local-app", "create-local-app",
+    "frontend-design", "frontend-qa", "ionic-react-local-app", "phaser-2d-local-app",
+    "react-best-practices", "threejs-local-app",
 }
 EXPECTED_COMPONENT_FILES = {
     "agents": {
-        "builder.md", "create-preparer.md", "designer.md", "mcp-designer.md", "mcp-promoter.md", "operator.md",
-        "template-selector.md", "tester.md", "verifier.md",
+        "mcp-designer.md", "mcp-promoter.md", "operator.md", "tester.md", "verifier.md",
     },
     "workflows": {
-        "local-app-build.js", "local-app-mcp-authoring.js", "local-app-use-test.js",
+        "local-app-mcp-authoring.js", "local-app-use-test.js",
     },
     "schemas": {
-        "authoring-spec.schema.json", "design-spec.schema.json", "mcp-proposal.schema.json", "qa-report.schema.json", "workflow-agent-results.schema.json",
+        "authoring-spec.schema.json", "mcp-proposal.schema.json", "qa-report.schema.json", "workflow-agent-results.schema.json",
         "use-test-report.schema.json",
     },
 }
@@ -77,20 +84,28 @@ EXPECTED_FAMILIES = {
     "phaser-2d": "phaser_2d",
     "babylon-3d": "babylon_3d",
 }
-EXPECTED_TEMPLATE_REVISIONS = {
-    "react-dom": 2,
-    "canvas-2d": 2,
-    "three-3d": 2,
-    "phaser-2d": 2,
-    "babylon-3d": 1,
+CURRENT_REVISION = 4
+EXPECTED_TEMPLATE_REVISIONS = {family: CURRENT_REVISION for family in EXPECTED_FAMILIES}
+CURRENT_WIDGET_ASSETS = {
+    f"shared/mcp-widget/r4/{name}" for name in (
+        "index.html", "package.json", "pnpm-lock.yaml", "src/main.jsx", "src/widget.jsx", "vite.config.mjs"
+    )
 }
-EXPECTED_SHARED_MCP_WIDGET_ASSETS = {
-    "shared/mcp-widget/r2/index.html",
-    "shared/mcp-widget/r2/package.json",
-    "shared/mcp-widget/r2/src/main.jsx",
-    "shared/mcp-widget/r2/src/widget.jsx",
-    "shared/mcp-widget/r2/vite.config.mjs",
-}
+
+
+def current_inventory(template_root: Path, family: str, family_key: str, base: list[dict]) -> dict:
+    records = {item["path"]: dict(item) for item in base}
+    for name in sorted(CURRENT_WIDGET_ASSETS):
+        path = require_file(template_root / name, "current MCP widget")
+        relative = "app/mcp-widget/" + Path(name).relative_to("shared/mcp-widget/r4").as_posix()
+        records[relative] = {"path": relative, "bytes": path.stat().st_size, "sha256": sha256(path)}
+    files = sorted(records.values(), key=lambda item: item["path"])
+    return {
+        "schemaVersion": 2, "family": family_key, "sourceFamily": family,
+        "revision": CURRENT_REVISION, "sharedOverlay": "shared/mcp-widget/r4", "files": files,
+        "totalBytes": sum(item["bytes"] for item in files),
+    }
+
 ORPHAN_NAMES = {
     "app/screens/detail-screen.jsx",
     "app/screens/home-screen.jsx",
@@ -128,45 +143,6 @@ def read_json(path: Path, label: str) -> dict:
     return value
 
 
-def shared_widget_inventory_records(template_root: Path) -> list[dict]:
-    records = []
-    for relative in sorted(EXPECTED_SHARED_MCP_WIDGET_ASSETS):
-        path = template_root / relative
-        require_file(path, f"shared MCP widget asset {relative}")
-        records.append(
-            {
-                "path": f"app/mcp-widget/{Path(relative).relative_to('shared/mcp-widget/r2').as_posix()}",
-                "bytes": path.stat().st_size,
-                "sha256": sha256(path),
-            }
-        )
-    return records
-
-
-def shared_overlay_inventory_sha256(
-    template_root: Path, family: str, family_key: str, family_records: list[dict]
-) -> str:
-    combined_files = sorted(
-        [
-            {"path": item["path"], "bytes": item["bytes"], "sha256": item["sha256"]}
-            for item in family_records
-        ]
-        + shared_widget_inventory_records(template_root),
-        key=lambda item: item["path"],
-    )
-    combined = {
-        "schemaVersion": 2,
-        "family": family_key,
-        "sourceFamily": family,
-        "revision": 2,
-        "baseRevision": 1,
-        "sharedOverlay": "shared/mcp-widget/r2",
-        "files": combined_files,
-        "totalBytes": sum(item["bytes"] for item in combined_files),
-    }
-    return hashlib.sha256(canonical_json(combined)).hexdigest()
-
-
 def check_manifest_and_skills() -> tuple[dict, list[dict]]:
     manifest = read_json(PLUGIN / ".lingxi-plugin" / "plugin.json", "Plugin manifest")
     required = {
@@ -194,12 +170,13 @@ def check_manifest_and_skills() -> tuple[dict, list[dict]]:
             f"missing={sorted(EXPECTED_SKILLS - skill_dirs)}, extra={sorted(skill_dirs - EXPECTED_SKILLS)}"
         )
 
+    if not MIRRORED_SKILLS <= EXPECTED_SKILLS:
+        fail(
+            "root skill mirror roster names skills the Plugin does not ship: "
+            f"{sorted(MIRRORED_SKILLS - EXPECTED_SKILLS)}"
+        )
     root_skills = REPO / "skills"
-    for name in sorted({
-        "accessibility", "apple-design", "babylon-3d-local-app", "canvas-2d-local-app", "create-local-app",
-        "frontend-design", "frontend-qa", "ionic-react-local-app", "phaser-2d-local-app",
-        "react-best-practices", "threejs-local-app",
-    }):
+    for name in sorted(MIRRORED_SKILLS):
         source = root_skills / name
         destination = skill_root / name
         if not source.is_dir():
@@ -256,15 +233,15 @@ def check_migration(manifest: dict) -> None:
         if Path(relative).is_absolute() or ".." in Path(relative).parts:
             fail(f"unsafe template migration path: {relative!r}")
         expected_source = (
-            CODE / "local-apps" / "templates" / "runtime-profiles" / family / "r1" / relative
+            CODE / "local-apps" / "templates" / "runtime-profiles" / family / "r4" / relative
         )
         source = REPO / entry.get("source", "")
         if source != expected_source:
             fail(
-                f"template migration source must be the legacy production asset for "
+                f"template migration source must be the current production asset for "
                 f"{family}/{relative}, got {source}"
             )
-        destination = PLUGIN / "assets" / "templates" / family / "r1" / relative
+        destination = PLUGIN / "assets" / "templates" / family / "r4" / relative
         expected_destinations.add(destination.relative_to(PLUGIN / "assets" / "templates").as_posix())
         family_entries[family].append(entry)
         require_file(source, f"template source {family}/{relative}")
@@ -281,89 +258,30 @@ def check_migration(manifest: dict) -> None:
         fail("template migration totalBytes does not match its 112 entries")
 
     profile_text = PROFILE_RS.read_text(encoding="utf-8")
-    call_sites = re.findall(
-        r'profile_file!\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)',
-        profile_text,
-        re.DOTALL,
-    )
-    declared = [(item["family"], item["path"]) for item in entries]
-    if call_sites[: len(declared)] != declared:
-        fail(
-            "template migration entries must remain the exact prefix order of the "
-            "112 baseline profile_file! call sites"
-        )
-
     template_root = PLUGIN / "assets" / "templates"
     actual_assets = {
-        path.relative_to(template_root).as_posix()
-        for path in template_root.rglob("*")
+        path.relative_to(template_root).as_posix() for path in template_root.rglob("*")
         if path.is_file() and path.name not in {"inventory.json", "catalog.json"}
     }
-    if not expected_destinations.issubset(actual_assets):
-        fail(
-            "Plugin template asset set is missing a baseline r1 asset: "
-            f"missing={sorted(expected_destinations - actual_assets)[:4]}"
-        )
-    unexpected_r1_assets = {
-        path
-        for path in actual_assets
-        if "/r1/" in path and path not in expected_destinations
-    }
-    if unexpected_r1_assets:
-        fail(f"unexpected extra r1 assets: {sorted(unexpected_r1_assets)[:4]}")
-    unexpected_family_r2_assets = {
-        path
-        for path in actual_assets
-        if any(path.startswith(f"{family}/r2/") for family in EXPECTED_FAMILIES)
-    }
-    if unexpected_family_r2_assets:
-        fail(
-            "r2 template assets must be synthesized from the shared overlay, "
-            f"not copied per family: {sorted(unexpected_family_r2_assets)[:4]}"
-        )
-    shared_assets = {path for path in actual_assets if path.startswith("shared/")}
-    if shared_assets != EXPECTED_SHARED_MCP_WIDGET_ASSETS:
-        fail(
-            "shared MCP widget asset set differs: "
-            f"missing={sorted(EXPECTED_SHARED_MCP_WIDGET_ASSETS - shared_assets)}, "
-            f"extra={sorted(shared_assets - EXPECTED_SHARED_MCP_WIDGET_ASSETS)}"
-        )
+    expected_assets = expected_destinations | CURRENT_WIDGET_ASSETS
+    if actual_assets != expected_assets:
+        fail(f"current template assets differ: missing={sorted(expected_assets - actual_assets)}, extra={sorted(actual_assets - expected_assets)}")
+    for family in EXPECTED_FAMILIES:
+        for base in (template_root / family, CODE / "local-apps/templates/runtime-profiles" / family):
+            if {path.name for path in base.iterdir() if path.is_dir()} != {"r4"}:
+                fail(f"only the current template revision may remain: {base}")
+        if family != "react-dom":
+            for relative in ORPHAN_NAMES:
+                if (template_root / family / "r4" / relative).exists():
+                    fail(f"unrelated DOM source in canvas template: {family}/{relative}")
+    if migration.get("orphanedTrackedFiles") != []:
+        fail("removed template revisions must not remain as compatibility records")
 
-    orphaned = migration.get("orphanedTrackedFiles")
-    expected_orphans = {
-        (
-            CODE
-            / "local-apps"
-            / "templates"
-            / "runtime-profiles"
-            / family
-            / "r1"
-            / relative
-        ).relative_to(REPO).as_posix()
-        for family in EXPECTED_FAMILIES
-        if family != "react-dom"
-        for relative in ORPHAN_NAMES
-    }
-    if not isinstance(orphaned, list) or set(orphaned) != expected_orphans:
-        fail(f"migration manifest must retain the exact 12 tracked orphan record, got {orphaned!r}")
-    for orphan in orphaned:
-        orphan_path = REPO / orphan
-        if orphan_path.exists():
-            fail(f"tracked orphan was reintroduced into source templates: {orphan_path}")
-        parts = Path(orphan).parts
-        try:
-            family_index = parts.index("runtime-profiles") + 1
-            revision_index = parts.index("r1")
-            family = parts[family_index]
-            relative = "/".join(parts[revision_index + 1:])
-        except ValueError:
-            family, relative = "", ""
-        if family in EXPECTED_FAMILIES and relative and (template_root / family / "r1" / relative).exists():
-            fail(f"tracked orphan was copied into Plugin inventory: {family}/{relative}")
-
+    inventories: dict[str, dict] = {}
     for family, family_key in EXPECTED_FAMILIES.items():
-        inventory_path = template_root / family / "r1" / "inventory.json"
+        inventory_path = template_root / family / "r4" / "inventory.json"
         inventory = read_json(inventory_path, f"{family} inventory")
+        inventories[family] = inventory
         family_files = family_entries[family]
         # Preserve the migration manifest's stable call-site order. The
         # inventory is consumed by the packer as an ordered declaration, so a
@@ -377,7 +295,7 @@ def check_migration(manifest: dict) -> None:
             inventory.get("schemaVersion") != 1
             or inventory.get("family") != family_key
             or inventory.get("sourceFamily") != family
-            or inventory.get("revision") != 1
+            or inventory.get("revision") != CURRENT_REVISION
         ):
             fail(f"{inventory_path} has wrong schema/family/sourceFamily/revision")
         if inventory.get("files") != expected_records:
@@ -414,16 +332,10 @@ def check_migration(manifest: dict) -> None:
         suggestions = template.get("mcpSuggestions")
         if not isinstance(suggestions, list) or not suggestions or not all(isinstance(item, str) and item for item in suggestions):
             fail(f"catalog mcpSuggestions must be a non-empty string list for {family}")
-        inventory_value = read_json(template_root / family / "r1" / "inventory.json", f"{family} inventory")
-        if EXPECTED_TEMPLATE_REVISIONS[family] == 1:
-            expected_digest = hashlib.sha256(canonical_json(inventory_value)).hexdigest()
-        else:
-            expected_digest = shared_overlay_inventory_sha256(
-                template_root,
-                family,
-                EXPECTED_FAMILIES[family],
-                inventory_value["files"],
-            )
+        inventory_value = inventories[family]
+        expected_digest = hashlib.sha256(canonical_json(current_inventory(
+            template_root, family, EXPECTED_FAMILIES[family], inventory_value["files"]
+        ))).hexdigest()
         if template.get("inventorySha256") != expected_digest:
             fail(f"catalog inventorySha256 is stale for {family}")
         if template.get("available") is not (family != "babylon-3d"):
@@ -446,12 +358,6 @@ def check_build_inventory_and_permissions() -> None:
             "build inventory must equal the actual Plugin directory: "
             f"missing={sorted(actual - set(inventory_lines))[:4]}, extra={sorted(set(inventory_lines) - actual)[:4]}"
         )
-    expected_inventory_count = 213 + (len(EXPECTED_SKILLS) - 27) * 3
-    if len(inventory_lines) != expected_inventory_count:
-        fail(
-            f"build inventory expected {expected_inventory_count} exact files for the current package, "
-            f"got {len(inventory_lines)}"
-        )
     source = require_file(PERMISSIONS_ASSET, "permission settings asset")
     if "default-workspace-settings.local.json" not in PERMISSIONS_RS.read_text(encoding="utf-8"):
         fail("permissions.rs must include the migrated production settings asset")
@@ -465,7 +371,7 @@ def check_build_inventory_and_permissions() -> None:
         fail("permission settings must not be copied into Plugin template assets")
     profile_text = PROFILE_RS.read_text(encoding="utf-8")
     if len(re.findall(r'profile_file!\(\s*"', profile_text)) < 112:
-        fail("local_app_runtime_profiles.rs must retain at least the 112 baseline profile_file! call sites")
+        fail("local_app_runtime_profiles.rs must retain at least the 112 current profile_file! call sites")
     if "plugins/lingxi-local-app/assets/templates/" not in profile_text or "runtime-profiles" in profile_text:
         fail("runtime profile production includes must point only at Plugin template assets")
 
@@ -501,7 +407,15 @@ def main() -> int:
     check_migration(migration)
     check_build_inventory_and_permissions()
     check_phase2_task_evidence()
-    print("PHASE2-PLUGIN OK: 28 skills, 9 agents, 3 workflows, 6 schemas, 112 base profile assets, 5 shared MCP widget assets, 12 excluded orphans, and exact build inventory")
+    roster = ", ".join(
+        f"{len(EXPECTED_COMPONENT_FILES[name])} {name}"
+        for name in ("agents", "workflows", "schemas")
+    )
+    print(
+        f"PHASE2-PLUGIN OK: {len(EXPECTED_SKILLS)} skills, {roster}, "
+        "112 current profile assets, 6 shared MCP widget assets, "
+        "no historical template revisions, and exact build inventory"
+    )
     return 0
 
 

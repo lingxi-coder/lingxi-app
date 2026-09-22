@@ -1214,6 +1214,7 @@ impl platform_api::worktree::WorktreeManager for RecordingWorktreeManager {
 // ---- Inert ToolInvoker / BudgetEnforcerHandle ---------------------------
 
 struct MockInvoker;
+
 #[async_trait]
 impl ToolInvoker for MockInvoker {
     async fn invoke(
@@ -4176,6 +4177,7 @@ async fn workflow_isolation_spawner_forwards_live_observer_and_watchdog() {
     let watchdog = platform_api::subagent_spawn::WorkflowQueryWatchdog {
         stall_timeout_ms: 1_234,
         max_retries: 2,
+        retry_response_body: false,
     };
     let request = make_request(
         DEFAULT_WORKFLOW_SUBAGENT,

@@ -86,6 +86,18 @@ pub trait LocalAppsMcpHost: Send + Sync {
         let _ = input;
         Err("Local App create staging is unavailable in this host build".into())
     }
+    /// Turn a plan the user approved into a prepared workspace: for an empty
+    /// app it lands the template through the existing scaffold transaction, for
+    /// a formed one it stages the authoring contract and nothing else.
+    ///
+    /// The approving authority is NOT this input — the transport resolves the
+    /// plan approval and rebuilds the request from it (see
+    /// [`LocalAppsMcpTransport::call_prepare`]). A caller that reaches this
+    /// directly with made-up values changes nothing it can observe.
+    async fn prepare(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App preparation is unavailable in this host build".into())
+    }
     /// Read or stage the Host-owned authoring contract.  `operation=get` only
     /// returns the committed contract; `operation=stage` validates and
     /// journals a run-scoped candidate without changing the active contract.
@@ -352,6 +364,11 @@ const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
     "contract",
     "validate_mcp_proposal",
     "approve_mcp_proposal",
+    // The plan-driven create replaces `stage_create` + `approve_mcp_proposal`
+    // + `scaffold` with one call that drives all three, so it must be
+    // reachable while the app is still an empty shell — that is the whole
+    // point of the operation.
+    "prepare",
 ];
 
 /// Stable machine-readable prefix on the shell gate's refusal.
@@ -513,6 +530,13 @@ pub struct LocalAppsMcpTransport {
     init_session_minter: OnceLock<Arc<InitSessionMinter>>,
     /// See [`PluginAvailabilityProbe`]: absent means "refuse `create`".
     plugin_available: OnceLock<Arc<PluginAvailabilityProbe>>,
+    /// The Host's record of plan approvals the USER granted in this process
+    /// (see [`crate::plan_approval`]). `prepare` reads it so a plan cannot be
+    /// landed on a model-authored claim of approval. Deliberately NOT copied
+    /// into app-scoped transports: an app's own Agent session never plans a
+    /// Local App, so a scoped transport has no approval source and `prepare`
+    /// fails closed there.
+    plan_approval: OnceLock<Arc<crate::plan_approval::PlanApprovalLog>>,
     agent_session_id: Option<String>,
     call_budget: Option<Arc<AgentCallBudget>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
@@ -662,6 +686,7 @@ impl LocalAppsMcpTransport {
             origin_cwd: OnceLock::new(),
             init_session_minter: OnceLock::new(),
             plugin_available: OnceLock::new(),
+            plan_approval: OnceLock::new(),
             agent_session_id: None,
             call_budget: None,
             connections: StdMutex::new(HashSet::new()),
@@ -839,6 +864,16 @@ impl LocalAppsMcpTransport {
             Some(probe) => probe().await,
             None => false,
         }
+    }
+
+    /// Attach the Host's plan-approval record (engine host boot). Fail-closed:
+    /// with no record attached, `prepare` cannot prove the user approved a plan
+    /// and refuses.
+    pub(crate) fn attach_plan_approval_log(
+        &self,
+        log: Arc<crate::plan_approval::PlanApprovalLog>,
+    ) -> Result<(), Arc<crate::plan_approval::PlanApprovalLog>> {
+        self.plan_approval.set(log)
     }
 
     pub fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
@@ -1604,13 +1639,21 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "approve_mcp_proposal",
-                "Approve one prepared Local App MCP candidate and mint its one-shot receipt. For initial app creation, create_without_mcp=true prepares an empty Host-owned create review surface and does not author, publish, or enable MCP. The create branch then BLOCKS for up to 5 minutes on a native user approval sheet before this call returns. It can fail with `user denied the Local App create proposal` (stop; the user said no), `approval_pending: this Local App already has a pending approval` (do not retry; a sheet is already outstanding), `native Local App approval was cancelled`, or `native Local App approval timed out` (safe to retry once, after re-confirming with the user).",
+                "Approve one prepared Local App MCP candidate and mint its one-shot receipt. For initial app creation, create_without_mcp=true prepares an empty Host-owned create review surface and does not author, publish, or enable MCP. When the user's plan approval is the create authority this returns without raising a second sheet; the MCP-proposal branch BLOCKS for up to 5 minutes on a native approval sheet before this call returns. It can fail with `user denied the Local App MCP proposal` (stop; the user said no), `approval_pending: this Local App already has a pending approval` (do not retry; a sheet is already outstanding), `native Local App approval was cancelled`, or `native Local App approval timed out` (safe to retry once, after re-confirming with the user).",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
                     "approval_contract_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
                     "create_without_mcp":{"type":"boolean","description":"Initial-create-only path. The Host creates an empty approval candidate; MCP remains unconfigured and disabled."}
                 },"required":["app_id","workflow_run_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "prepare",
+                "Turn a plan the USER has approved into a prepared workspace. For an app that is still an empty shell this lands the approved template through the existing scaffold transaction and returns the execution id and authoring contract handle to build with; for an app that is already built it stages a new authoring contract and changes nothing else. The plan is named by the plan file path the engine reported when the user approved it; the Host re-reads its own approval record, re-checks the plan text has not changed since, and re-validates the approved template against the LIVE catalog, so a plan whose template moved is refused by name instead of silently swapped. `name`, `brief`, `spec` and `template_id` are never read from this call — they come from the approved plan. May fail with `plan_approval_missing` (nothing approved in this conversation names that plan file: plan again), `plan_approval_spent` (that plan already prepared a different app), `plan_approval_invalid` (the plan's authoring block could not be honoured), `template_stale` (the approved template is gone or unavailable: plan again), or `prepare_rejected` (the approved plan does not name a template).",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "plan_path":{"type":"string","minLength":1,"description":"Absolute path of the plan file the user approved, exactly as the engine reported it to you in the plan-mode approval."}
+                },"required":["app_id","plan_path"],"additionalProperties":false}),
             ),
             Self::tool(
                 "qa_mcp_candidate",
@@ -1631,7 +1674,7 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "create",
-                "Create a local app record, an empty workspace, and the guided `LINGXI.md` contract that drives the follow-up interview inside the app's own session. This call does not scaffold source, install dependencies, or bind a runtime profile; those happen later through one unified native create confirmation plus `LocalAppScaffold`.",
+                "Create a local app record, an empty workspace, and the guided `LINGXI.md` contract that drives the follow-up interview inside the app's own session. This call does not scaffold source, install dependencies, or bind a runtime profile; those happen later, once the user approves a plan, through `LocalAppPrepare`.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
                     "name":{"type":"string","minLength":1,"maxLength":200}
@@ -1639,13 +1682,13 @@ impl LocalAppsMcpTransport {
             ),
             Self::tool(
                 "scaffold",
-                "Commit the Host-approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. The display name, one-line brief and MCP intent the Host commits are the ones staged through `LocalAppStageCreate`; the `name` and `brief` sent here are re-confirmation only and never override the staged values. Call this ONLY after the unified native create confirmation has produced its one-shot `receipt_id`, together with the same `workflow_run_id` used to validate the prepared create candidate. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
+                "Commit the approved create candidate onto an app the user created as an empty workspace, then atomically lay down its draft source tree. The display name, one-line brief and MCP intent the Host commits are the ones carried by the create candidate the user approved; the `name` and `brief` sent here are re-confirmation only and never override the staged values. Call this ONLY with the one-shot `receipt_id` from that approved create candidate and the same `workflow_run_id` it was prepared under. The Host derives the immutable runtime binding, staged scaffold snapshot, dependency inputs, and MCP approval contract from that approved create candidate and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
-                    "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"Re-confirmation of the display name staged through `LocalAppStageCreate`; the Host commits the staged value."},
-                    "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"Re-confirmation of the one-line brief staged through `LocalAppStageCreate`; the Host commits the staged value."},
+                    "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"Re-confirmation of the display name carried by the approved create candidate; the Host commits the approved value."},
+                    "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"Re-confirmation of the one-line brief carried by the approved create candidate; the Host commits the approved value."},
                     "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$","description":"Required with receipt_id so the Host can re-bind the scaffold to the exact prepared create candidate."},
-                    "receipt_id":{"type":"string","minLength":1,"description":"One-shot receipt from the unified native create confirmation. The Host binds it to the exact app, workflow run and approved create candidate before scaffolding."},
+                    "receipt_id":{"type":"string","minLength":1,"description":"One-shot receipt minted when the create approval was sealed. The Host binds it to the exact app, workflow run and approved create candidate before scaffolding."},
                     "workflow_model":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_WORKFLOW_MODEL_BYTES,"description":"Optional model id to record for this app's own generation runs; omit to keep the device default."}
                 },"required":["app_id","name","brief","workflow_run_id","receipt_id"],"additionalProperties":false}),
             ),
@@ -2469,6 +2512,76 @@ impl LocalAppsMcpTransport {
         Self::tool_catalog()
     }
 
+    /// `LocalAppPrepare`: resolve the plan the USER approved and hand the Host
+    /// a request built ONLY from it.
+    ///
+    /// The caller supplies `plan_path` — the one thing the model can know and
+    /// the Host cannot guess. Everything that decides what lands (`name`,
+    /// `brief`, `spec`, `template_id`) and everything that decides who is
+    /// allowed to land it (`session_uuid`, `plan_sha256`) is read here from the
+    /// Host's own record, so a caller cannot substitute any of it. `app_id` is
+    /// the caller's, and the claim binds it: one approval prepares ONE app.
+    pub(crate) async fn call_prepare(&self, input: Value) -> Result<McpToolResultDto, McpError> {
+        Self::validate_input(&input)?;
+        self.prepare_tool_result(input).await
+    }
+
+    /// The shared body of `call_prepare` and the `prepare` dispatch arm, so
+    /// the approval resolution cannot be bypassed by reaching the operation
+    /// through the ordinary provider dispatch instead of the builtin.
+    async fn prepare_tool_result(&self, input: Value) -> Result<McpToolResultDto, McpError> {
+        let app_id = input
+            .get("app_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| McpError::Internal("app_id is required".into()))?
+            .to_string();
+        let plan_path = input
+            .get("plan_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| McpError::Internal("plan_path is required".into()))?
+            .to_string();
+        let Some(log) = self.plan_approval.get() else {
+            return Ok(Self::tool_error(
+                "plan_approval_unavailable: this host build keeps no plan-approval record, so a \
+                 plan cannot be prepared here",
+            ));
+        };
+        let session_uuid = self
+            .session_id
+            .get()
+            .and_then(|provider| provider())
+            .ok_or_else(|| {
+                McpError::Internal("this host has no bound conversation to read a plan from".into())
+            })?;
+        let approval = match log.claim(&plan_path, &session_uuid, &app_id) {
+            Ok(approval) => approval,
+            Err(message) => return Ok(Self::tool_error(message)),
+        };
+        let mut request = serde_json::Map::new();
+        request.insert("app_id".into(), Value::String(app_id));
+        request.insert("plan_path".into(), Value::String(approval.plan_path));
+        request.insert("plan_sha256".into(), Value::String(approval.plan_sha256));
+        request.insert("session_uuid".into(), Value::String(approval.session_uuid));
+        request.insert("name".into(), Value::String(approval.name));
+        request.insert("brief".into(), Value::String(approval.brief));
+        if let Some(template_id) = approval.template_id {
+            request.insert("template_id".into(), Value::String(template_id));
+        }
+        request.insert(
+            "spec".into(),
+            serde_json::to_value(&approval.spec)
+                .map_err(|error| McpError::Internal(format!("encode authoring spec: {error}")))?,
+        );
+        Ok(match self.host()?.prepare(Value::Object(request)).await {
+            Ok(value) => Self::result(value),
+            Err(message) => Self::tool_error(message),
+        })
+    }
+
     /// Dispatch ONE host operation by its provider-side name (`build`,
     /// `read_logs`, …).
     ///
@@ -2952,6 +3065,7 @@ impl LocalAppsMcpTransport {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
+            "prepare" => self.prepare_tool_result(input).await?,
             "qa_mcp_candidate" => match self.host()?.qa_mcp_candidate(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -4418,154 +4532,6 @@ mod tests {
         );
     }
 
-    /// WP5: the `local-app-build.js` create prompts must pass the values
-    /// staged through `LocalAppStageCreate` into `LocalAppScaffold`, not
-    /// re-fetch `LocalAppGet`'s still-empty shell record (which is where the
-    /// `untitled`/empty-brief placeholder that reached the native confirmation
-    /// sheet and the committed record used to come from). Source-level rather
-    /// than a JS-runtime assertion because the QuickJS harness that actually
-    /// executes this script lives in the `workflow` crate, not here.
-    #[test]
-    fn build_workflow_scaffold_prompt_passes_staged_values_not_local_app_get() {
-        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
-        assert!(
-            !source.contains("Read LocalAppGet"),
-            "the create scaffold prompt must not tell the model to rediscover \
-             name/brief from LocalAppGet's empty shell record: {source}"
-        );
-        for call_needle in ["LocalAppStageCreate with", "Call LocalAppScaffold first"] {
-            let call = source
-                .lines()
-                .find(|line| line.contains(call_needle))
-                .unwrap_or_else(|| panic!("local-app-build.js must prompt `{call_needle}`"));
-            assert!(
-                call.contains("name=${JSON.stringify(confirmedName)}")
-                    && call.contains("brief=${JSON.stringify(confirmedBrief)}"),
-                "the `{call_needle}` prompt must pass the launch-confirmed name and brief \
-                 to the Host operation whose schema requires them, got: {call}"
-            );
-        }
-        assert!(
-            source.contains("const confirmedName = input.name ||")
-                && source.contains("const confirmedBrief = input.brief ||")
-                && source.contains(
-                    "if (input.operation === 'create' && (!confirmedName || !confirmedBrief))"
-                ),
-            "create must derive name/brief from the workflow launch contract and fail closed when either is absent"
-        );
-    }
-
-    /// The other half of the same chain: the Host launch boundary and the
-    /// script both accept `name`/`brief` now (see
-    /// `build_workflow_script_external_contract_is_accepted_by_the_host` in
-    /// `workflow_support.rs`), but nothing carries the user-confirmed wording
-    /// into the launch unless the skill that writes the launch JSON says so.
-    /// Without this the whole WP5 chain is plumbed and inert, and the create
-    /// confirmation sheet keeps showing the `untitled` placeholder.
-    #[test]
-    fn create_local_app_skill_launches_the_build_workflow_with_confirmed_name_and_brief() {
-        let skill =
-            include_str!("../../../plugins/lingxi-local-app/skills/create-local-app/SKILL.md");
-        let launches: Vec<&str> = skill
-            .lines()
-            .filter(|line| line.contains(r#""operation":"create""#))
-            .collect();
-        assert!(
-            !launches.is_empty(),
-            "create-local-app/SKILL.md must show at least one create launch for \
-             lingxi-local-app:local-app-build, or this gate passes vacuously"
-        );
-        for launch in launches {
-            assert!(
-                launch.contains(r#""name":"#) && launch.contains(r#""brief":"#),
-                "every create launch in create-local-app/SKILL.md must pass the \
-                 user-confirmed name and brief, or LocalAppStageCreate stages nothing \
-                 and the confirmation sheet renders the `untitled` placeholder: {launch}"
-            );
-        }
-    }
-
-    /// WP6: the formal workspace contract (`local_apps_host.rs`'s
-    /// `formal_workspace_contract`) and `create-local-app/SKILL.md` both
-    /// require declaring a data collection through `LocalAppManifest` before
-    /// source relies on it, but `builder` — the ONLY agent with `Write`/`Edit`
-    /// during Create — was not granted the tool at all, so following that
-    /// contract was impossible from inside the role that has to follow it.
-    #[test]
-    fn builder_agent_grants_local_app_manifest() {
-        let builder = include_str!("../../../plugins/lingxi-local-app/agents/builder.md");
-        let tools_block = builder
-            .split_once("tools:\n")
-            .and_then(|(_, rest)| rest.split_once("skills:\n"))
-            .map(|(tools, _)| tools)
-            .expect("builder.md must have a `tools:` list followed by `skills:`");
-        assert!(
-            tools_block
-                .lines()
-                .any(|line| line.trim() == "- LocalAppManifest"),
-            "builder.md's tools: list must grant LocalAppManifest, or the data-collection \
-             declaration the formal contract and create-local-app/SKILL.md both require is \
-             impossible for the one agent that writes App-managed source: {tools_block}"
-        );
-    }
-
-    /// The other half of the same chain: granting the tool is inert unless the
-    /// create branch's own prompt tells `builder` to use it BEFORE writing
-    /// source, and to use it for what the confirmed design actually needs —
-    /// otherwise the workflow's own `data_roundtrip` verification gate
-    /// (`local-app-build.js`'s `blockingFindings`) has nothing to check
-    /// because no collection was ever declared.
-    #[test]
-    fn build_workflow_create_branch_requires_manifest_declaration_before_source() {
-        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
-        let build_call = source
-            .lines()
-            .find(|line| line.contains("Call LocalAppScaffold first"))
-            .expect("local-app-build.js must prompt the create-branch scaffold+build call");
-        assert!(
-            build_call.contains("LocalAppManifest"),
-            "the create branch's builder-build prompt must require declaring data \
-             collections through LocalAppManifest before writing source that depends on \
-             them: {build_call}"
-        );
-        let manifest = build_call
-            .find("LocalAppManifest")
-            .expect("builder prompt names LocalAppManifest");
-        let source_use = build_call
-            .find("source uses them")
-            .expect("builder prompt names the source-use boundary");
-        assert!(
-            manifest < source_use,
-            "the manifest declaration must be ordered BEFORE writing source, not left as an \
-             unordered mention the model can defer past the write it is meant to gate: \
-             {build_call}"
-        );
-    }
-
-    /// WP8 item 6: every other create-branch stage prompt carries the
-    /// user-confirmed specification (`template-selector`, `builder-stage`,
-    /// `builder-build` all interpolate the full Host-sanitized AuthoringSpec); the DESIGNER stage — the
-    /// one that decides what the app actually looks like and produces the
-    /// structured design spec every later stage consumes — did not, so the
-    /// designer worked from the resolved template profile alone and never saw
-    /// what the user asked for. Source-level like its siblings above, because
-    /// the QuickJS harness that executes this script lives in the `workflow`
-    /// crate, not here.
-    #[test]
-    fn build_workflow_designer_prompt_carries_the_confirmed_spec() {
-        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
-        let designer_call = source
-            .lines()
-            .find(|line| line.contains("agentType: 'designer'"))
-            .expect("local-app-build.js must prompt the create-branch designer stage");
-        assert!(
-            designer_call.contains("${JSON.stringify(confirmedSpec)}"),
-            "the designer stage prompt must interpolate the confirmed specification the way \
-             its sibling create-branch stages do, or the designer never sees what the user \
-             asked for: {designer_call}"
-        );
-    }
-
     /// The static host operations moved to BUILTIN tools (`LocalApp*`). The
     /// MCP surface must stop advertising and stop serving them, or the same
     /// operation is reachable under two names with DIFFERENT permission
@@ -4671,6 +4637,7 @@ mod tests {
                 "contract",
                 "validate_mcp_proposal",
                 "approve_mcp_proposal",
+                "prepare",
                 "qa_mcp_candidate",
                 "promote_mcp_candidate",
                 "create",
@@ -4737,7 +4704,7 @@ mod tests {
             create.description().contains("does not scaffold source")
                 && create
                     .description()
-                    .contains("unified native create confirmation plus `LocalAppScaffold`"),
+                    .contains("once the user approves a plan, through `LocalAppPrepare`"),
             "create must describe the deferred scaffold contract: {}",
             create.description()
         );
@@ -6158,7 +6125,7 @@ mod tests {
         let workspace = root.join(layout.workspace_rel());
         crate::local_apps_build::scaffold_workspace_initialized(
             &layout,
-            crate::local_apps_build::LocalAppBuildTarget::ReactDomR2,
+            crate::local_apps_build::LocalAppBuildTarget::ReactDomR4,
             true,
         )
         .expect("scaffold workspace");
@@ -6210,7 +6177,7 @@ mod tests {
         manifest.template_origin = Some(local_apps::AppTemplateOrigin {
             plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
             plugin_version: "builtin".into(),
-            template_id: "react-dom-r2".into(),
+            template_id: "react-dom-r4".into(),
             template_sha256: binding.contract_sha256.clone(),
         });
         manifest.runtime_profile = Some(binding);

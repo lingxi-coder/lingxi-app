@@ -5,7 +5,6 @@
   "description": "Checked-in role-output contracts. QA completion is represented by Host-issued candidate identities and receipts, never model-authored pass flags.",
   "$defs": {
     "token": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "contract_handle": { "type": "string", "pattern": "^contract_[A-Za-z0-9]{32}$" },
     "qa_handle": { "type": "string", "pattern": "^qa_[A-Za-z0-9]{32}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "finding": {
@@ -109,55 +108,6 @@
         "result_sha256": { "$ref": "#/$defs/sha256" }
       },
       "required": ["schema_version", "status", "identity", "scenario_judgements", "findings", "evidence", "verification_scope", "previous_result_id", "finalized_at_ms", "result_sha256"]
-    },
-    "template_selection": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "catalog_digest": { "$ref": "#/$defs/token" },
-        "template_id": { "$ref": "#/$defs/token" },
-        "reason": { "type": "string", "minLength": 1 },
-        "rejected": { "type": "array" },
-        "validated_selection_handle": { "type": "string", "pattern": "^vsel_[A-Za-z0-9]{32}$" }
-      },
-      "required": ["catalog_digest", "template_id", "reason", "rejected", "validated_selection_handle"]
-    },
-    "design_subtree": { "type": "object", "additionalProperties": false, "properties": { "design": { "type": "object" } }, "required": ["design"] },
-    "create_preparer": {
-      "type": "object",
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "ok": { "const": true }, "approved": { "const": true }, "status": { "type": "string", "minLength": 1 },
-            "contract_handle": { "$ref": "#/$defs/contract_handle" }, "contract_sha256": { "$ref": "#/$defs/sha256" },
-            "receipt_id": { "$ref": "#/$defs/token" }, "summary": { "type": "string" }
-          },
-          "required": ["ok", "approved", "status", "contract_handle", "contract_sha256", "receipt_id"]
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": { "ok": { "const": false }, "approved": { "const": false }, "status": { "const": "create_declined" }, "summary": { "type": "string" } },
-          "required": ["ok", "approved", "status"]
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "ok": { "const": false }, "approved": { "const": false }, "status": { "const": "create_failed" },
-            "error": { "type": "string", "minLength": 1 }, "summary": { "type": "string" }
-          },
-          "required": ["ok", "approved", "status", "error"]
-        }
-      ]
-    },
-    "build_result": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": { "ok": { "type": "boolean" }, "preview_url": { "type": "string" }, "contract_handle": { "$ref": "#/$defs/contract_handle" }, "summary": { "type": "string" } },
-      "required": ["ok", "summary"]
     },
     "operator_result": {
       "type": "object",

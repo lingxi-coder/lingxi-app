@@ -388,16 +388,13 @@ pub async fn resolve_subagent_tools(
 
     let parent_tools = registry.available_tools(&ToolStaticContext::default());
     if let AgentToolPolicy::Explicit(names) = &agent_def.tools {
-        let known: HashSet<String> = parent_tools
-            .iter()
-            .flat_map(|t| {
-                std::iter::once(t.name().to_string())
-                    .chain(t.aliases().iter().map(|alias| (*alias).to_string()))
-            })
-            .collect();
+        // Validate names against the registered, policy-visible catalog. A
+        // registered tool may be temporarily disabled (for example LSP when
+        // its transport is unavailable). Availability still controls schemas
+        // and dispatch below; it must not make a valid definition unknown.
         let unknown: Vec<String> = names
             .iter()
-            .filter(|name| !known.contains(*name))
+            .filter(|name| registry.find_by_name(name).is_none())
             .cloned()
             .collect();
         if !unknown.is_empty() {
@@ -507,6 +504,7 @@ mod tests {
     struct StubTool {
         name: &'static str,
         role: Option<&'static str>,
+        enabled: bool,
     }
 
     #[async_trait]
@@ -519,7 +517,7 @@ mod tests {
             SCHEMA.get_or_init(|| serde_json::json!({"type": "object"}))
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
-            true
+            self.enabled
         }
         fn mcp_role(&self) -> Option<&str> {
             self.role
@@ -564,14 +562,65 @@ mod tests {
     }
 
     fn tool(name: &'static str) -> Arc<dyn Tool> {
-        Arc::new(StubTool { name, role: None })
+        Arc::new(StubTool {
+            name,
+            role: None,
+            enabled: true,
+        })
     }
 
     fn comms_tool(name: &'static str) -> Arc<dyn Tool> {
         Arc::new(StubTool {
             name,
             role: Some("comms"),
+            enabled: true,
         })
+    }
+
+    #[tokio::test]
+    async fn registered_disabled_tool_does_not_prevent_other_explicit_tools() {
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool("Read"));
+        registry.register_builtin(Arc::new(StubTool {
+            name: "LSP",
+            role: None,
+            enabled: false,
+        }));
+        let definition = agent_def(AgentToolPolicy::Explicit(vec!["Read".into(), "LSP".into()]));
+        let (schemas, allowed) =
+            resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+                .await
+                .expect("disabled LSP must not block the builder");
+        assert_eq!(allowed, vec!["Read"]);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["name"], "Read");
+        let only_disabled = agent_def(AgentToolPolicy::Explicit(vec!["LSP".into()]));
+        assert!(matches!(
+            resolve_subagent_tools(&registry, &only_disabled, &[], None, 0, false, &[],).await,
+            Err(ToolResolutionError::EmptyExplicitToolSet(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn explicit_tool_catalog_validation_preserves_policy_filters() {
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool("Read"));
+        registry.register_builtin(tool("LSP"));
+        let definition = agent_def(AgentToolPolicy::Explicit(vec!["Read".into(), "LSP".into()]));
+        let (_, allowed) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+            .await
+            .unwrap();
+        assert_eq!(allowed, vec!["LSP", "Read"]);
+        let (_, allowed) =
+            resolve_subagent_tools(&registry, &definition, &["LSP".into()], None, 0, false, &[])
+                .await
+                .unwrap();
+        assert_eq!(allowed, vec!["Read"]);
+        registry.set_session_tool_allowlist(&["Read".into()]);
+        assert!(matches!(
+            resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[],).await,
+            Err(ToolResolutionError::UnknownExplicitTools(_))
+        ));
     }
 
     fn pool(names: &[&'static str]) -> Vec<Arc<dyn Tool>> {

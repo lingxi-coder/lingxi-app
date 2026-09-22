@@ -2568,11 +2568,11 @@ mod tests {
             device_skill.contains(&real_skill_marker),
             "the materialized skill file must be the real repository content, got: {device_skill}"
         );
-        let builder_agent = fs::read_to_string(root.join("agents/builder.md"))
-            .expect("agents/builder.md must be materialized on disk at the verified root");
+        let verifier_agent = fs::read_to_string(root.join("agents/verifier.md"))
+            .expect("agents/verifier.md must be materialized on disk at the verified root");
         assert!(
-            builder_agent.contains("name: builder"),
-            "the materialized agent file must be the real repository content, got: {builder_agent}"
+            verifier_agent.contains("name: verifier"),
+            "the materialized agent file must be the real repository content, got: {verifier_agent}"
         );
     }
 

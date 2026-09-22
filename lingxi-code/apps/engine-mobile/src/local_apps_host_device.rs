@@ -1506,7 +1506,7 @@ mod tests {
         let workspace = layout.root().join(layout.workspace_rel());
         crate::local_apps_build::scaffold_workspace_initialized(
             layout,
-            crate::local_apps_build::LocalAppBuildTarget::ReactDomR2,
+            crate::local_apps_build::LocalAppBuildTarget::ReactDomR4,
             true,
         )
         .expect("scaffold workspace");

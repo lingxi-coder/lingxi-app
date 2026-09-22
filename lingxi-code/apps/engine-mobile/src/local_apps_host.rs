@@ -5,7 +5,9 @@
 //! operations and is also used by the native client command surface.
 
 use crate::host::LocalAppBackgroundRunDto;
+use crate::local_app_runtime_profiles::{toolchain_for_binding, RuntimeToolchain};
 use crate::local_apps_mcp::LocalAppsMcpHost;
+use crate::plan_approval::CreateApprovalAuthority;
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
@@ -13,11 +15,11 @@ use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
     AppCapabilityKindDto, AppCapabilityRequestDto, AppDependencyChangeConfirmationRequestDto,
     AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto,
-    AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppSurfaceDto, AppUiActionKindDto,
-    AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
+    AppSurfaceDto, AppUiActionKindDto,
+    AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto,
     LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
     LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
-    LocalAppPluginErrorCodeDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
+    LocalAppPluginErrorCodeDto,
     LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
     ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
 };
@@ -70,6 +72,7 @@ const STATIC_ACCEPT_RETRY: Duration = Duration::from_millis(50);
 const RUNTIME_SEED_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+#[cfg(test)]
 const PNPM_TOOLCHAIN_KEY: &str = crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY;
 const DEPENDENCY_SNAPSHOT_VERSION: u8 = 2;
 const DEPENDENCY_SNAPSHOT_READY_FILE: &str = ".lingxi-dependency-ready";
@@ -112,6 +115,10 @@ const MCP_FLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 #[path = "local_apps_host/authoring.rs"]
 mod authoring;
 pub(crate) use authoring::PreparedWorkflowQaPublication;
+
+/// The plan-driven create/modify preparation. See [`prepare`].
+#[path = "local_apps_prepare.rs"]
+pub(crate) mod prepare;
 
 /// Availability of the exact profile dependency lock on this host. The
 /// selector distinguishes a reusable shared snapshot from a device-bundled
@@ -2997,149 +3004,61 @@ impl LocalAppsHostBroker {
         })
     }
 
-    fn create_runtime_option(
-        &self,
-        binding: &local_apps::AppRuntimeProfileBinding,
-    ) -> Result<AppRuntimeProfileOptionDto, String> {
-        let entry = crate::local_app_runtime_profiles::list_runtime_profiles()
-            .into_iter()
-            .find(|entry| {
-                entry.family == binding.family
-                    && entry.revision == binding.revision
-                    && entry.contract_sha256 == binding.contract_sha256
-            })
-            .ok_or_else(|| "selected runtime profile is no longer available".to_string())?;
-        // r1-never-wired-09: cache/download describe different provenance
-        // (a shared snapshot is `cached`, a matching seed is `bundled`,
-        // download is only `download_required`) — mirror the sibling JSON
-        // emission in `runtime_profiles_value` below, which already gives the
-        // unavailable case two DIFFERENT tokens (`unavailable` / `gated`)
-        // rather than repeating one value into both DTO fields.
-        let dependency_status = entry.available.then(|| {
-            self.runtime_profile_dependency_availability(entry.family, entry.revision)
-                .as_str()
-        });
-        Ok(AppRuntimeProfileOptionDto {
-            family: lower_runtime_profile_family(entry.family),
-            revision: entry.revision,
-            contract_sha256: entry.contract_sha256,
-            surface: lower_surface(entry.surface),
-            core_packages: entry
-                .core_packages
-                .into_iter()
-                .map(|(name, version)| AppRuntimeProfilePackageDto {
-                    name: name.into(),
-                    version: version.into(),
-                })
-                .collect(),
-            cache_status: dependency_status.unwrap_or("unavailable").into(),
-            download_status: dependency_status.unwrap_or("gated").into(),
-            available: entry.available,
-            reason: entry.availability_reason.map(str::to_string),
-        })
-    }
-
+    /// Raise the native MCP-proposal approval sheet for a prepared candidate.
+    ///
+    /// Only an ALREADY-SCAFFOLDED app reaches here: the create-time
+    /// confirmation is the user's plan approval (see
+    /// [`crate::local_apps_prepare`]), so there is no second sheet to answer
+    /// for an app whose shape is not yet fixed.
     async fn request_mcp_candidate_approval(
         &self,
-        record: &local_apps::AppRecord,
+        app_id: &str,
         workflow_run_id: &str,
         manifest: &local_apps::AppManifest,
         candidate: &PersistedMcpCandidate,
     ) -> Result<bool, String> {
         let proposed = mcp_tool_surfaces_from_candidate(candidate)?;
-        // Read before `proposed` is moved into either request DTO below.
+        // Read before `proposed` is moved into the request DTO below.
         let proposed_tool_count = proposed.len();
-        if !record.scaffolded {
-            // WP5: render the name/brief the user confirmed through
-            // `LocalAppStageCreate`, never `record.name`/`record.brief` — the
-            // shell record is still the empty `untitled` placeholder at this
-            // point in the flow (it is only overwritten once `commit_scaffold`
-            // lands, long after this confirmation is answered).
-            let create_context = self.load_create_proposal_context(&record.id, workflow_run_id)?;
-            let layout = self.layout(&record.id)?;
-            let confirmed_ui = self.authoring_ui_confirmation_summary(&layout, workflow_run_id)?;
-            let selection = create_context.selection;
-            let template = crate::local_app_template_catalog::catalog_view()?
-                .templates
-                .into_iter()
-                .find(|template| template.template_id == selection.template_id)
-                .ok_or_else(|| {
-                    "template_unavailable: selected template is unavailable".to_string()
-                })?;
-            let request_id = self.request_id("app-create-confirmation");
-            let event = AppEventDto::CreateConfirmationRequested {
-                request: LocalAppCreateConfirmationRequestDto {
-                    request_id: request_id.clone(),
-                    app_id: record.id.clone(),
-                    name: create_context.name,
-                    brief: create_context.brief,
-                    selected_template: LocalAppTemplateSummaryDto {
-                        template_id: selection.template_id,
-                        surface: lower_surface(selection.surface),
-                        summary: template.summary,
-                    },
-                    runtime_profile: self.create_runtime_option(&selection.runtime_profile)?,
-                    reason: format!("{confirmed_ui} Template: {}", selection.reason),
-                    rejected: selection
-                        .rejected
-                        .into_iter()
-                        .map(|candidate| LocalAppRejectedCandidateDto {
-                            template_id: candidate.template_id,
-                            reason: candidate.reason,
-                        })
-                        .collect(),
-                    initial_tools: proposed,
-                    required_gates: Self::pending_verification_gates(proposed_tool_count),
-                },
-            };
-            self.wait_for_native_approval(
-                &self.pending_create_confirmations,
-                request_id,
-                &record.id,
-                event,
-            )
-            .await
+        let current = if let Some(active) = manifest.active_mcp_catalog.as_ref() {
+            let layout = self.layout(app_id)?;
+            let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+                .map_err(|error| error.to_string())?;
+            mcp_tool_surfaces_from_catalog(&catalog)?
         } else {
-            let current = if let Some(active) = manifest.active_mcp_catalog.as_ref() {
-                let layout = self.layout(&record.id)?;
-                let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
-                    .map_err(|error| error.to_string())?;
-                mcp_tool_surfaces_from_catalog(&catalog)?
-            } else {
-                Vec::new()
-            };
-            let request_id = self.request_id("app-mcp-proposal-approval");
-            let event = AppEventDto::McpProposalApprovalRequested {
-                request: LocalAppMcpProposalApprovalRequestDto {
-                    request_id: request_id.clone(),
-                    app_id: record.id.clone(),
-                    workflow_run_id: workflow_run_id.to_string(),
-                    summary: candidate.validated.proposal.summary.clone(),
-                    proposal_sha256: candidate.validated.proposal_sha256.clone(),
-                    approval_contract_sha256: candidate.approval_contract_sha256.clone(),
-                    tool_surface_sha256: candidate.validated.tool_surface_sha256.clone(),
-                    tool_diffs: mcp_tool_diffs(current, proposed),
-                    required_flow_changes: candidate
-                        .validated
-                        .proposal
-                        .required_flow_changes
-                        .clone(),
-                    excluded_capabilities: candidate
-                        .validated
-                        .proposal
-                        .excluded_capabilities
-                        .clone(),
-                    pending_gates: Self::pending_verification_gates(proposed_tool_count),
-                },
-            };
-            self.wait_for_native_approval(
-                &self.pending_mcp_proposal_approvals,
-                request_id,
-                &record.id,
-                event,
-            )
-            .await
-        }
+            Vec::new()
+        };
+        let request_id = self.request_id("app-mcp-proposal-approval");
+        let event = AppEventDto::McpProposalApprovalRequested {
+            request: LocalAppMcpProposalApprovalRequestDto {
+                request_id: request_id.clone(),
+                app_id: app_id.to_string(),
+                workflow_run_id: workflow_run_id.to_string(),
+                summary: candidate.validated.proposal.summary.clone(),
+                proposal_sha256: candidate.validated.proposal_sha256.clone(),
+                approval_contract_sha256: candidate.approval_contract_sha256.clone(),
+                tool_surface_sha256: candidate.validated.tool_surface_sha256.clone(),
+                tool_diffs: mcp_tool_diffs(current, proposed),
+                required_flow_changes: candidate
+                    .validated
+                    .proposal
+                    .required_flow_changes
+                    .clone(),
+                excluded_capabilities: candidate
+                    .validated
+                    .proposal
+                    .excluded_capabilities
+                    .clone(),
+                pending_gates: Self::pending_verification_gates(proposed_tool_count),
+            },
+        };
+        self.wait_for_native_approval(
+            &self.pending_mcp_proposal_approvals,
+            request_id,
+            app_id,
+            event,
+        )
+        .await
     }
 
     async fn issue_dependency_change_receipt(
@@ -3236,8 +3155,16 @@ impl LocalAppsHostBroker {
             .join("node_modules/vite/bin/vite.js")
     }
 
-    fn dependency_store_root(&self) -> PathBuf {
-        let toolchain_key_dir = PNPM_TOOLCHAIN_KEY
+    pub(crate) fn toolchain_for_layout(layout: &AppLayout) -> Result<RuntimeToolchain, String> {
+        let manifest = load_manifest(layout).map_err(|error| error.to_string())?;
+        let binding = manifest.runtime_profile.as_ref().ok_or_else(|| {
+            "runtime profile binding is required to select a toolchain".to_string()
+        })?;
+        toolchain_for_binding(binding).map_err(|error| error.to_string())
+    }
+
+    fn dependency_store_root(&self, toolchain_key: &str) -> PathBuf {
+        let toolchain_key_dir = toolchain_key
             .chars()
             .map(|ch| match ch {
                 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' => ch,
@@ -3250,8 +3177,8 @@ impl LocalAppsHostBroker {
             .join(toolchain_key_dir)
     }
 
-    fn dependency_snapshot_root(&self, lock_digest: &str) -> PathBuf {
-        self.dependency_store_root()
+    fn dependency_snapshot_root(&self, lock_digest: &str, toolchain_key: &str) -> PathBuf {
+        self.dependency_store_root(toolchain_key)
             .join("snapshots")
             .join(lock_digest)
     }
@@ -3287,11 +3214,20 @@ impl LocalAppsHostBroker {
                 contract
                     .managed_files
                     .iter()
+                    .chain(
+                        contract
+                            .editable_files
+                            .iter()
+                            .filter(|(relative, _)| *relative == "app/mcp-widget/package.json"),
+                    )
                     .copied()
                     .filter(|(relative, _)| {
                         matches!(
                             *relative,
-                            "package.json" | "pnpm-lock.yaml" | "pnpm-workspace.yaml"
+                            "package.json"
+                                | "pnpm-lock.yaml"
+                                | "pnpm-workspace.yaml"
+                                | "app/mcp-widget/package.json"
                         )
                     })
                     .map(|(relative, bytes)| {
@@ -3728,6 +3664,25 @@ impl LocalAppsHostBroker {
             std::fs::copy(&source, staging.join(file))
                 .map_err(|error| format!("stage dependency input {}: {error}", source.display()))?;
         }
+        let manifest = load_manifest(layout).map_err(|error| error.to_string())?;
+        if let Some(binding) = manifest.runtime_profile.as_ref() {
+            let contract = crate::local_app_runtime_profiles::contract_for_binding(binding)
+                .map_err(|error| error.to_string())?;
+            if let Some((relative, bytes)) = contract
+                .editable_files
+                .iter()
+                .find(|(relative, _)| *relative == "app/mcp-widget/package.json")
+            {
+                // Workspace dependency resolution must see the same widget importer
+                // as the frozen lock. Use the pinned profile manifest, never arbitrary
+                // editable package metadata as an unapproved dependency request.
+                let target = staging.join(relative);
+                std::fs::create_dir_all(target.parent().expect("widget manifest parent"))
+                    .map_err(|error| format!("create staged widget importer: {error}"))?;
+                std::fs::write(target, bytes)
+                    .map_err(|error| format!("stage widget importer: {error}"))?;
+            }
+        }
         Ok(staging)
     }
 
@@ -3752,8 +3707,10 @@ impl LocalAppsHostBroker {
         frozen_lockfile: bool,
         lockfile_only: bool,
         no_runtime: bool,
+        toolchain: RuntimeToolchain,
     ) -> LinuxCommandRequest {
         let mut env = BTreeMap::new();
+        env.insert("PATH".into(), toolchain.path().into());
         env.insert("CI".into(), "1".into());
         env.insert("HOME".into(), format!("{build_state_root}/home"));
         env.insert("TMPDIR".into(), format!("{build_state_root}/tmp"));
@@ -3798,7 +3755,7 @@ impl LocalAppsHostBroker {
         ]);
 
         LinuxCommandRequest {
-            command: "/usr/bin/pnpm".into(),
+            command: toolchain.pnpm_command().into(),
             args,
             cwd: Some(dependency_staging_guest_path),
             env,
@@ -3875,6 +3832,7 @@ impl LocalAppsHostBroker {
     fn dependency_snapshot_is_ready(
         snapshot_root: &Path,
         lock_digest: &str,
+        toolchain_key: &str,
     ) -> Result<bool, String> {
         let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_verify");
         let root_metadata = match std::fs::symlink_metadata(snapshot_root) {
@@ -3915,7 +3873,7 @@ impl LocalAppsHostBroker {
         let expected_version = DEPENDENCY_SNAPSHOT_VERSION.to_string();
         if marker_lines.next() != Some(expected_version.as_str())
             || marker_lines.next() != Some(lock_digest)
-            || marker_lines.next() != Some(PNPM_TOOLCHAIN_KEY)
+            || marker_lines.next() != Some(toolchain_key)
         {
             return Ok(false);
         }
@@ -3948,8 +3906,13 @@ impl LocalAppsHostBroker {
         if actual_tree_digest != expected_tree_digest {
             return Ok(false);
         }
-        if read_verified_dependency_inventory(snapshot_root, lock_digest, expected_tree_digest)?
-            .is_none()
+        if read_verified_dependency_inventory(
+            snapshot_root,
+            lock_digest,
+            expected_tree_digest,
+            toolchain_key,
+        )?
+        .is_none()
         {
             return Ok(false);
         }
@@ -3970,9 +3933,10 @@ impl LocalAppsHostBroker {
         workspace: &Path,
         snapshot_root: &Path,
         lock_digest: &str,
+        toolchain_key: &str,
     ) -> Result<bool, String> {
         if !Self::workspace_dependencies_ready_path(workspace)?
-            || !Self::dependency_snapshot_is_ready(snapshot_root, lock_digest)?
+            || !Self::dependency_snapshot_is_ready(snapshot_root, lock_digest, toolchain_key)?
         {
             return Ok(false);
         }
@@ -3981,7 +3945,8 @@ impl LocalAppsHostBroker {
         let Some(expected_tree_digest) = expected_tree_digest else {
             return Ok(false);
         };
-        let expected_attestation = dependency_attestation(lock_digest, &expected_tree_digest);
+        let expected_attestation =
+            dependency_attestation(lock_digest, &expected_tree_digest, toolchain_key);
         let attestation = workspace.join(WORKSPACE_DEPENDENCY_ATTESTATION_FILE);
         if std::fs::read_to_string(&attestation).ok().as_deref()
             == Some(expected_attestation.as_str())
@@ -4024,8 +3989,9 @@ impl LocalAppsHostBroker {
         source_node_modules: &Path,
         snapshot_root: &Path,
         lock_digest: &str,
+        toolchain_key: &str,
     ) -> Result<(), String> {
-        if Self::dependency_snapshot_is_ready(snapshot_root, lock_digest)? {
+        if Self::dependency_snapshot_is_ready(snapshot_root, lock_digest, toolchain_key)? {
             return Ok(());
         }
         match std::fs::symlink_metadata(snapshot_root) {
@@ -4076,11 +4042,12 @@ impl LocalAppsHostBroker {
                     lock_digest,
                     &tree_digest,
                     &packages,
+                    toolchain_key,
                 )?;
             }
             std::fs::write(
                 staging_root.join(DEPENDENCY_SNAPSHOT_READY_FILE),
-                dependency_attestation(lock_digest, &tree_digest),
+                dependency_attestation(lock_digest, &tree_digest, toolchain_key),
             )
             .map_err(|error| format!("write dependency snapshot marker: {error}"))?;
             make_dependency_files_read_only(&staged_node_modules)
@@ -4093,7 +4060,7 @@ impl LocalAppsHostBroker {
         if let Err(error) = std::fs::rename(&staging_root, snapshot_root) {
             let _ = Self::remove_owned_path(&staging_root);
             if snapshot_root.exists()
-                && Self::dependency_snapshot_is_ready(snapshot_root, lock_digest)?
+                && Self::dependency_snapshot_is_ready(snapshot_root, lock_digest, toolchain_key)?
             {
                 return Ok(());
             }
@@ -4129,7 +4096,11 @@ impl LocalAppsHostBroker {
         runtime_root: &Path,
         lock_digest: &str,
         snapshot_root: &Path,
+        toolchain_key: &str,
     ) -> Result<bool, String> {
+        if toolchain_key != RuntimeToolchain::Current.key() {
+            return Ok(false);
+        }
         let manifest_path = runtime_root.join(BUNDLED_SEED_MANIFEST_FILE);
         let manifest = match std::fs::read(&manifest_path) {
             Ok(bytes) => bytes,
@@ -4178,7 +4149,12 @@ impl LocalAppsHostBroker {
                 ))
             }
         }
-        Self::publish_dependency_snapshot(&seed_node_modules, snapshot_root, lock_digest)?;
+        Self::publish_dependency_snapshot(
+            &seed_node_modules,
+            snapshot_root,
+            lock_digest,
+            toolchain_key,
+        )?;
         Ok(true)
     }
 
@@ -4265,6 +4241,8 @@ impl LocalAppsHostBroker {
             .await
             .map_err(|error| error.to_string())?;
         let layout = self.layout(app_id)?;
+        let toolchain = Self::toolchain_for_layout(&layout)?;
+        let toolchain_key = toolchain.key();
         let workspace = layout.root().join(layout.workspace_rel());
         if !Self::dependency_inputs_match(&layout)? {
             if load_manifest(&layout)
@@ -4305,11 +4283,12 @@ impl LocalAppsHostBroker {
         let lock_digest = Self::dependency_lock_digest(&layout)?;
         if dependency.state == AppDependencyState::Ready
             && dependency.lockfile_sha256.as_deref() == Some(lock_digest.as_str())
-            && dependency.toolchain_key.as_deref() == Some(PNPM_TOOLCHAIN_KEY)
+            && dependency.toolchain_key.as_deref() == Some(toolchain_key)
             && Self::workspace_dependencies_match_snapshot(
                 &workspace,
-                &self.dependency_snapshot_root(&lock_digest),
+                &self.dependency_snapshot_root(&lock_digest, toolchain_key),
                 &lock_digest,
+                toolchain_key,
             )?
         {
             return Ok(dependency);
@@ -4376,6 +4355,8 @@ impl LocalAppsHostBroker {
         dependency_staging: &Path,
         expected_lock_digest: &str,
     ) -> Result<DependencyInstallCompletion, String> {
+        let toolchain = Self::toolchain_for_layout(layout)?;
+        let toolchain_key = toolchain.key();
         let workspace = layout.root().join(layout.workspace_rel());
         // The lockfile is host-managed, but re-check it immediately before
         // promotion so a concurrent restore/edit cannot publish a tree built
@@ -4395,11 +4376,11 @@ impl LocalAppsHostBroker {
         if actual_lock_digest != expected_lock_digest {
             return Err("dependency lock changed while installation was running".into());
         }
-        let snapshot_root = self.dependency_snapshot_root(expected_lock_digest);
+        let snapshot_root = self.dependency_snapshot_root(expected_lock_digest, toolchain_key);
         let snapshot_marker = snapshot_root.join(DEPENDENCY_SNAPSHOT_READY_FILE);
         let tree_digest = dependency_tree_digest_from_marker(&snapshot_marker)?
             .ok_or_else(|| "dependency snapshot marker is malformed".to_string())?;
-        let attestation = dependency_attestation(expected_lock_digest, &tree_digest);
+        let attestation = dependency_attestation(expected_lock_digest, &tree_digest, toolchain_key);
         crate::local_apps_build::write_file(
             &workspace,
             WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
@@ -4414,7 +4395,7 @@ impl LocalAppsHostBroker {
         )?;
         Ok(DependencyInstallCompletion {
             lockfile_sha256: actual_lock_digest,
-            toolchain_key: PNPM_TOOLCHAIN_KEY.to_string(),
+            toolchain_key: toolchain_key.to_string(),
         })
     }
 
@@ -5118,12 +5099,14 @@ impl LocalAppsHostBroker {
         layout: &AppLayout,
         app_id: &str,
     ) -> Result<DependencyInstallCompletion, String> {
+        let toolchain = Self::toolchain_for_layout(layout)?;
+        let toolchain_key = toolchain.key();
         let workspace = layout.root().join(layout.workspace_rel());
         let lock_digest = match Self::dependency_lock_digest(layout) {
             Ok(digest) => digest,
             Err(error) => return Err(error),
         };
-        let snapshot_root = self.dependency_snapshot_root(&lock_digest);
+        let snapshot_root = self.dependency_snapshot_root(&lock_digest, toolchain_key);
         let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
         let lock_wait_span = tracing::debug_span!(
             "local_app_dependency_snapshot_lock_wait",
@@ -5139,7 +5122,7 @@ impl LocalAppsHostBroker {
             Err(error) => return Err(error),
         };
         let mut snapshot_ready =
-            match Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest) {
+            match Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest, toolchain_key) {
                 Ok(ready) => ready,
                 Err(error) => {
                     let _ = Self::remove_owned_path(&dependency_staging);
@@ -5162,6 +5145,7 @@ impl LocalAppsHostBroker {
                     &runtime_root,
                     &lock_digest,
                     &snapshot_root,
+                    toolchain_key,
                 ) {
                     Ok(adopted) => snapshot_ready = adopted,
                     Err(error) => {
@@ -5203,7 +5187,7 @@ impl LocalAppsHostBroker {
             read_only: false,
             purpose: MountPurpose::LocalAppBuild,
         };
-        let dependency_store = self.dependency_store_root();
+        let dependency_store = self.dependency_store_root(toolchain_key);
         if let Err(error) = std::fs::create_dir_all(&dependency_store) {
             let message = format!("create pnpm dependency store: {error}");
             let _ = Self::remove_owned_path(&dependency_staging);
@@ -5231,6 +5215,7 @@ impl LocalAppsHostBroker {
             true,
             false,
             true,
+            toolchain,
         );
         let outcome = Self::run_dependency_install_command(runtime.as_ref(), request).await;
         match outcome {
@@ -5248,6 +5233,7 @@ impl LocalAppsHostBroker {
                             &dependency_staging.join("node_modules"),
                             &snapshot_root,
                             &lock_digest,
+                            toolchain_key,
                         )
                     })
                 };
@@ -5985,11 +5971,13 @@ impl LocalAppsHostBroker {
         let Ok(contract) = crate::local_app_runtime_profiles::contract_for_binding(&binding) else {
             return RuntimeProfileDependencyAvailability::DownloadRequired;
         };
+        let toolchain_key = contract.toolchain_key;
         let lock_digest = crate::local_app_runtime_profiles::lockfile_sha256(contract);
         if let Some(availability) = availability_by_lock.get(&lock_digest) {
             return *availability;
         }
-        let availability = self.runtime_profile_dependency_availability_for_lock(&lock_digest);
+        let availability =
+            self.runtime_profile_dependency_availability_for_lock(&lock_digest, toolchain_key);
         availability_by_lock.insert(lock_digest, availability);
         availability
     }
@@ -5997,9 +5985,12 @@ impl LocalAppsHostBroker {
     fn runtime_profile_dependency_availability_for_lock(
         &self,
         lock_digest: &str,
+        toolchain_key: &str,
     ) -> RuntimeProfileDependencyAvailability {
-        let snapshot_root = self.dependency_snapshot_root(lock_digest);
-        if Self::dependency_snapshot_is_ready(&snapshot_root, lock_digest).unwrap_or(false) {
+        let snapshot_root = self.dependency_snapshot_root(lock_digest, toolchain_key);
+        if Self::dependency_snapshot_is_ready(&snapshot_root, lock_digest, toolchain_key)
+            .unwrap_or(false)
+        {
             return RuntimeProfileDependencyAvailability::Cached;
         }
         let Ok(runtime_root) = self.configured_runtime_root() else {
@@ -7490,6 +7481,10 @@ impl LocalAppsHostBroker {
             let result: Result<local_apps::AppRecord, String> = async {
                 self.install_scaffold_dependencies(&service, &app_id, &layout)
                     .await?;
+                // The plan-driven path journals its own commit proof under the
+                // run id the approval bound. A run that never went through
+                // `prepare` has no state document, so this is a no-op.
+                self.record_prepare_scaffold_commit(&app_id, &workflow_run_id, &receipt_binding)?;
                 service
                     .commit_scaffold(
                         &app_id,
@@ -7990,12 +7985,63 @@ fn dependency_yaml_scalar(value: &str) -> Result<String, String> {
 fn pnpm_root_dependency_specifiers(lockfile: &[u8]) -> Result<BTreeMap<String, String>, String> {
     let lockfile = std::str::from_utf8(lockfile)
         .map_err(|error| format!("resolved dependency lockfile is not UTF-8: {error}"))?;
+    let mut documents = Vec::new();
+    let mut document = String::new();
+    for line in lockfile.lines() {
+        if line == "---" || line.starts_with("--- #") {
+            if !document.trim().is_empty() {
+                documents.push(std::mem::take(&mut document));
+            }
+        } else {
+            document.push_str(line);
+            document.push('\n');
+        }
+    }
+    if !document.trim().is_empty() {
+        documents.push(document);
+    }
+    let mut dependencies = None;
+    let mut found_config = false;
+    for document in documents {
+        match pnpm_document_dependency_specifiers(&document)? {
+            Some(specifiers) => {
+                if dependencies.replace(specifiers).is_some() {
+                    return Err(
+                        "resolved dependency lockfile contains multiple dependency documents"
+                            .into(),
+                    );
+                }
+            }
+            None => {
+                if found_config || dependencies.is_some() {
+                    return Err(
+                        "resolved dependency lockfile has ambiguous configuration documents".into(),
+                    );
+                }
+                found_config = true;
+            }
+        }
+    }
+    dependencies.ok_or_else(|| {
+        "resolved dependency lockfile is missing the root dependency importer".into()
+    })
+}
+
+// pnpm 12 puts package-manager/configuration dependencies in a separate YAML
+// document. Parse each document independently so its importer map cannot hide
+// duplicate keys or a second application dependency graph.
+fn pnpm_document_dependency_specifiers(
+    lockfile: &str,
+) -> Result<Option<BTreeMap<String, String>>, String> {
     let mut in_importers = false;
     let mut in_root_importer = false;
     let mut in_dependencies = false;
     let mut found_importers = false;
     let mut found_root_importer = false;
+    let mut found_other_importer = false;
     let mut found_dependencies = false;
+    let mut config_sections = HashSet::new();
+    let mut unexpected_config_section = false;
     let mut current_package: Option<String> = None;
     let mut dependency_keys = HashSet::new();
     let mut specifiers = BTreeMap::new();
@@ -8037,6 +8083,7 @@ fn pnpm_root_dependency_specifiers(lockfile: &[u8]) -> Result<BTreeMap<String, S
                 return Err("resolved dependency lockfile repeats the root importer".into());
             }
             found_root_importer |= in_root_importer;
+            found_other_importer |= !in_root_importer;
             in_dependencies = false;
             current_package = None;
             continue;
@@ -8045,6 +8092,21 @@ fn pnpm_root_dependency_specifiers(lockfile: &[u8]) -> Result<BTreeMap<String, S
             continue;
         }
         if indent == 4 {
+            unexpected_config_section |= !matches!(
+                trimmed.split(':').next(),
+                Some("configDependencies" | "packageManagerDependencies")
+            );
+            if let Some(key) = trimmed
+                .split(':')
+                .next()
+                .filter(|key| matches!(*key, "configDependencies" | "packageManagerDependencies"))
+            {
+                if !config_sections.insert(key) {
+                    return Err(
+                        "resolved dependency lockfile repeats a root configuration map".into(),
+                    );
+                }
+            }
             in_dependencies = trimmed == "dependencies:";
             if in_dependencies && found_dependencies {
                 return Err(
@@ -8091,8 +8153,19 @@ fn pnpm_root_dependency_specifiers(lockfile: &[u8]) -> Result<BTreeMap<String, S
         }
     }
 
+    if found_root_importer && !found_dependencies && !config_sections.is_empty() {
+        if found_other_importer || unexpected_config_section {
+            return Err("resolved dependency lockfile configuration document has unexpected importer fields".into());
+        }
+        return Ok(None);
+    }
     if !found_root_importer || !found_dependencies {
         return Err("resolved dependency lockfile is missing the root dependency importer".into());
+    }
+    if !config_sections.is_empty() {
+        return Err(
+            "resolved dependency lockfile mixes configuration and application dependencies".into(),
+        );
     }
     if dependency_keys.len() != specifiers.len() {
         let missing = dependency_keys
@@ -8104,7 +8177,7 @@ fn pnpm_root_dependency_specifiers(lockfile: &[u8]) -> Result<BTreeMap<String, S
             "resolved dependency lockfile is missing the root specifier for {missing}"
         ));
     }
-    Ok(specifiers)
+    Ok(Some(specifiers))
 }
 
 fn effective_package_dependency_specifiers(
@@ -8266,10 +8339,11 @@ fn write_verified_dependency_inventory(
     lock_digest: &str,
     tree_digest: &str,
     packages: &BTreeMap<(String, String), Option<String>>,
+    toolchain_key: &str,
 ) -> Result<(), String> {
     let mut inventory = VerifiedDependencyInventory {
         schema_version: DEPENDENCY_SNAPSHOT_INVENTORY_SCHEMA_VERSION,
-        toolchain_key: PNPM_TOOLCHAIN_KEY.to_string(),
+        toolchain_key: toolchain_key.to_string(),
         lock_digest: lock_digest.to_string(),
         tree_digest: tree_digest.to_string(),
         inventory_digest: String::new(),
@@ -8312,6 +8386,7 @@ fn read_verified_dependency_inventory(
     snapshot_root: &Path,
     lock_digest: &str,
     tree_digest: &str,
+    toolchain_key: &str,
 ) -> Result<Option<BTreeMap<(String, String), Option<String>>>, String> {
     let path = dependency_snapshot_inventory_path(snapshot_root);
     let metadata = match std::fs::symlink_metadata(&path) {
@@ -8334,7 +8409,7 @@ fn read_verified_dependency_inventory(
         Err(_) => return Ok(None),
     };
     if inventory.schema_version != DEPENDENCY_SNAPSHOT_INVENTORY_SCHEMA_VERSION
-        || inventory.toolchain_key != PNPM_TOOLCHAIN_KEY
+        || inventory.toolchain_key != toolchain_key
         || inventory.lock_digest != lock_digest
         || inventory.tree_digest != tree_digest
         || inventory.inventory_digest.is_empty()
@@ -8396,12 +8471,20 @@ fn installed_dependency_sbom_with_inventory(
     tree_sha256: &str,
     snapshot_inventory: Option<(&Path, &str)>,
 ) -> Result<Vec<u8>, String> {
+    let toolchain_key = toolchain_for_binding(binding)
+        .map_err(|error| error.to_string())?
+        .key();
     let mut packages = BTreeMap::<(String, String), Option<String>>::new();
     let used_inventory = snapshot_inventory
         .and_then(|(snapshot_root, lock_digest)| {
-            read_verified_dependency_inventory(snapshot_root, lock_digest, tree_sha256)
-                .ok()
-                .flatten()
+            read_verified_dependency_inventory(
+                snapshot_root,
+                lock_digest,
+                tree_sha256,
+                toolchain_key,
+            )
+            .ok()
+            .flatten()
         })
         .filter(|cached| !cached.is_empty())
         .map(|cached| {
@@ -8612,12 +8695,11 @@ fn scaffold_next_step_guidance() -> String {
     "The app now has its shape and its source tree. Re-read this workspace's LINGXI.md before \
      doing anything else: it has been REPLACED by the formal contract for the surface you just \
      committed, and it names the editable entry points, the host-managed files you must not \
-     touch, and the rules this surface must be written to. It names no build workflow, and you \
-     do not need one: the host authorizes exactly one build workflow for this surface and \
-     refuses any other, so ask for a build without naming one. Anything written into the \
-     workspace before this call is gone, as the guided contract said it would be. Do not create \
-     a second scaffold, do not run a package manager, and do not call LocalAppScaffold again — \
-     the shape and the name are now fixed."
+     touch, and the rules this surface must be written to. Anything written into the workspace \
+     before this call is gone, as the guided contract said it would be. Implement the plan the \
+     user approved, then build it with LocalAppBuild and start the preview once the build \
+     succeeds. Do not create a second scaffold, do not run a package manager, and do not call \
+     LocalAppScaffold again — the shape and the name are now fixed."
         .into()
 }
 
@@ -8667,7 +8749,7 @@ fn formal_workspace_contract(
     let setup_path = match binding.family {
         local_apps::AppRuntimeProfile::ReactDom => format!(
             "{profile_identity}\
-             - This app's surface is `dom`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. The surface and runtime profile are fixed at creation; do not infer them from source.\n\
+             - This app's surface is `dom`. The workspace is already prepared from the plan the user approved; implement that plan and build it with `LocalAppBuild`. The surface and runtime profile are fixed at creation; do not infer them from source.\n\
              - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
              - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `LINGXI.md`, the whole `.lingxi/` directory, `node_modules/`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
              - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
@@ -8715,7 +8797,7 @@ fn formal_workspace_contract(
             };
             format!(
                 "{profile_identity}\
-                 - This app's surface is `canvas`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. It is one drawn surface plus overlays; do not infer a screen hierarchy or the surface from source.\n\
+                 - This app's surface is `canvas`. The workspace is already prepared from the plan the user approved; implement that plan and build it with `LocalAppBuild`. It is one drawn surface plus overlays; do not infer a screen hierarchy or the surface from source.\n\
                  - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
                  - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `LINGXI.md`, the whole `.lingxi/` directory, `node_modules/`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, {managed_extra}`{helper}`, and `styles/foundation.css`. Do not edit them; `{helper}` is the profile's checked-in runtime adapter.\n\
                  - Default editable entry points are `app/screens/game-screen.jsx`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `components/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`, but never edit the managed adapter `{helper}`.\n\
@@ -8753,7 +8835,7 @@ fn formal_workspace_contract(
          - Declare data collections / network domains / capabilities through \
          `LocalAppManifest` BEFORE the page relies on them; runtime \
          authorization still prompts the user. Every collection is `{{id,name,fields}}`; every field is `{{id,label,kind,required?,enumOptions?}}`; IDs use lower snake_case. Never declare host-owned `recordId`, `revision`, `createdAtMs`, or `updatedAtMs` as fields. Repair and retry any rejected manifest before building.\n\
-         - If a material requirement is unresolved, the app's conversation agent calls `AskUserQuestion` so the native client presents its sheet; a build-workflow subagent has no such tool and must infer from the confirmed spec and device context and continue. Never leave unresolved questions in ordinary assistant text.\n\n\
+         - If a material requirement is unresolved, call `AskUserQuestion` so the native client presents its sheet; never leave an unresolved question in ordinary assistant text. Everything else is settled by the approved plan.\n\n\
          ## Build & preview\n\
          {build_preview}\
          - `LocalAppRuntime {{\"app_id\":\"{id}\",\"action\":\"start\"}}` \
@@ -8773,17 +8855,28 @@ fn formal_workspace_contract(
          4. If the cause is the HOST — a missing toolchain, a failed dependency install, \
          an unavailable runtime — report it to the user and stop. Those cannot be worked \
          around from inside this workspace, and retrying will not clear them.\n\n\
-         ## Verify\n\
-         - `LocalAppInspectUi` / `LocalAppActOnUi` — read and drive \
-         the running preview.\n\
-         - `LocalAppCaptureUi {{\"app_id\":\"{id}\"}}` — a still image of the preview. \
-         Use it when the DOM cannot describe what the app is showing: a canvas or WebGL \
-         surface has no inspectable elements, so `LocalAppInspectUi` returns an empty \
-         list whether the app is drawing correctly, drawing nothing, or has crashed.\n\
-         - `LocalAppQueryData {{\"app_id\":\"{id}\",\"collection\":\"<collection_id>\"}}` \
-         — after a UI write, confirm the value reached native storage: it must appear in \
-         `records[].document`. A value that exists only in page state is NOT persistence.\n\
-         - `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"runtime\"}}` — runtime log.\n\
+         ## Deliver\n\
+         A successful `LocalAppBuild` is the completion condition. Start the preview with \
+         `LocalAppRuntime {{\"app_id\":\"{id}\",\"action\":\"start\"}}`, then hand the user the \
+         app entry point and a SHORT trial checklist drawn from the approved plan's acceptance \
+         checks. Do NOT run UI operations, capture acceptance screenshots, or score the app \
+         yourself — the user tries it. If the build succeeded but the preview failed to launch, \
+         say so separately and plainly: the build IS done and the launch is retryable; never \
+         report a preview-launch failure as a build or verification failure.\n\n\
+         ## On-demand testing\n\
+         Testing is NOT automatic. When the USER asks to test the app, use the independent \
+         testing capability: the `$local-app-test` / `$frontend-qa` skill drives the running \
+         preview through the app's on-device use-test path. \
+         `LocalAppInspectUi` / `LocalAppActOnUi` read and drive it; \
+         `LocalAppCaptureUi {{\"app_id\":\"{id}\"}}` gives a still image when the DOM cannot \
+         describe what the app is showing — a canvas or WebGL surface has no inspectable \
+         elements, so `LocalAppInspectUi` returns an empty list whether the app is drawing \
+         correctly, drawing nothing, or has crashed; \
+         `LocalAppQueryData {{\"app_id\":\"{id}\",\"collection\":\"<collection_id>\"}}` confirms \
+         a UI write reached native storage under `records[].document`, since a value that exists \
+         only in page state is NOT persistence; \
+         `LocalAppLogs {{\"app_id\":\"{id}\",\"log\":\"runtime\"}}` reads the runtime log. \
+         Report what a test found, but never make delivery depend on it.\n\
          - After the user confirms a working state, record it with \
          `LocalAppCheckpointCreate`.\n",
         name = record.name,
@@ -8798,9 +8891,9 @@ fn formal_workspace_contract(
 /// Thin bootstrap contract for an unformed `CreateMode::Shell` workspace.
 ///
 /// The Host supplies only immutable app identity, the recorded brief, and the
-/// no-write boundary. The create skill is the single coordinator for adaptive
-/// requirements, technical profile recommendation, concise native UI
-/// confirmation, staging, build, and verification.
+/// no-write boundary. The create skill is the single coordinator: it plans the
+/// app with the user, has the Host prepare the workspace from the approved plan,
+/// implements it, and delivers it once the build succeeds.
 fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
     format!(
         "# Local App (new, not yet shaped)\n\n\
@@ -8811,14 +8904,14 @@ fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
          Recorded brief: \"{brief}\". Carry it forward exactly; it may already contain the \
          user's product intent.\n\n\
          **Do not write source, build, install dependencies, or operate the runtime in this \
-         shell. Any source written before the scaffold lands will be deleted.**\n\n\
+         shell.** There is nowhere for source to go, and every build, dependency, runtime, log, \
+         manifest, UI, data and background tool refuses an app with no shape — that refusal is \
+         the contract, not a transient failure.\n\n\
          Immediately use the `Skill` tool to start \
          `lingxi-local-app:create-local-app` (the plugin-qualified name is required). That skill \
-         owns the adaptive interview and complete create flow. Do not run a separate questionnaire \
-         here, and do not call `LocalAppScaffold` directly.\n\n\
-         Let the coordinator recommend the technical renderer and runtime profile from confirmed \
-         product and UI requirements. The user confirms the concise structure, theme, and style \
-         in the single native create confirmation; do not force a technical surface picker.\n\n\
+         owns the whole flow: it plans the app with the user, and the Host prepares this \
+         workspace from the plan the user approves. Do not run a separate questionnaire here, \
+         and do not call `LocalAppScaffold` directly.\n\n\
          MCP exposure is not a prerequisite for creating the app. After creation, the user may \
          optionally expose named business capabilities through app settings. Integrations the app \
          needs for its own product behavior are separate from MCP exposure.\n\n\
@@ -9477,6 +9570,312 @@ fn validate_create_stage_quality(
     Ok(())
 }
 
+/// Inherent half of the approval path.
+///
+/// Kept out of the trait impl below so the authority parameter cannot be
+/// reached through the MCP surface at all: the trait only ever spells
+/// `NativeSheet`, and `ApprovedPlan` is passed by Host code that already holds
+/// a user decision.
+impl LocalAppsHostBroker {
+    /// Approve a proposal whose authority the CALLER names.
+    ///
+    /// The tool path always reaches this through [`Self::approve_mcp_proposal`]
+    /// (`NativeSheet`); only Host code that already holds a user decision —
+    /// today, an approved plan — passes anything else, so the authority can
+    /// never be selected by model input. A create needs that plan authority, so
+    /// the model-reachable path is refused by name rather than answered on the
+    /// user's behalf; every authority that does create lands through this one
+    /// sealed candidate, receipt and scaffold transaction.
+    async fn approve_mcp_proposal_with(
+        &self,
+        input: Value,
+        authority: CreateApprovalAuthority,
+    ) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        Self::validate_workflow_run_id(&workflow_run_id)?;
+        if input
+            .get("create_without_mcp")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            let service = self.service()?;
+            let record = service
+                .record(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if record.scaffolded {
+                return Err(
+                    "invalid_argument: create_without_mcp is only valid before scaffolding".into(),
+                );
+            }
+            let layout = self.layout(&app_id)?;
+            // Already-approved reuse arm. Without it, a repeated
+            // `create_without_mcp` call for a `workflow_run_id` whose
+            // candidate journal is already sealed at `Approved` rewrites that
+            // journal back to `Prepared`, asks for the create confirmation a
+            // second time, and then — if the FIRST receipt is still claimed by
+            // an in-flight scaffold — throws the user's fresh answer away when
+            // `issue()` returns `receipt_in_use`.
+            //
+            // The user has already answered the sheet for exactly this
+            // contract digest, so reuse asks nothing again and never touches
+            // the sealed journal. It does NOT mirror the MCP-revise branch's
+            // `receipt_id: null` / `approved_reusable` answer: that shape is
+            // only safe there because its consumer (the MCP-authoring
+            // workflow script) declares `receipt_id` nullable and is told to
+            // consume the existing receipt. THIS branch's only consumer,
+            // `LocalAppPrepare`, requires a non-empty `receipt_id` whenever
+            // `approved` is true (`prepare_state_invalid: the sealed create
+            // approval has no receipt`), so a null here would swap one dead end
+            // for another. Mint a usable receipt against the sealed journal
+            // instead.
+            //
+            // `issue()` still refuses while a live, unexpired claim is
+            // outstanding. Post-WP-B that is a scaffold genuinely in flight,
+            // and starting a second one is exactly what must not happen, so
+            // this surfaces a named error WITHOUT raising a sheet — no user
+            // answer can be discarded because none was solicited.
+            if let Ok(existing_journal) = local_apps::load_candidate_journal(&layout) {
+                if existing_journal.workflow_run_id == workflow_run_id
+                    && existing_journal.stage >= local_apps::McpAuthoringStage::Approved
+                {
+                    let receipt = local_apps::McpConfirmationReceipt::new(
+                        &app_id,
+                        &workflow_run_id,
+                        existing_journal.approval_contract_sha256.clone(),
+                        existing_journal.proposal_sha256.clone(),
+                        now_ms(),
+                    );
+                    let receipt_id = receipt.receipt_id.clone();
+                    self.pending_mcp_receipts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .issue(receipt)
+                        .map_err(|issue| {
+                            format!(
+                                "create_approval_in_flight: the sealed create approval for this \
+                                 app is already claimed by an in-flight scaffold; retry after it \
+                                 finishes ({})",
+                                issue.message
+                            )
+                        })?;
+                    return Ok(json!({
+                        "approved": true,
+                        "receipt_id": receipt_id,
+                        "status": "create_approved_no_mcp",
+                    }));
+                }
+            }
+            let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+            let create_context = self.load_create_proposal_context(&app_id, &workflow_run_id)?;
+            let proposal = local_apps::AppMcpProposal {
+                app_id: app_id.clone(),
+                manifest_revision: manifest.revision,
+                user_goal_sha256: format!("{:x}", Sha256::digest(b"local-app-create-without-mcp")),
+                summary: "Create this Local App without publishing or enabling an MCP surface."
+                    .into(),
+                tools: Vec::new(),
+                required_flow_changes: Vec::new(),
+                excluded_capabilities: Vec::new(),
+            };
+            let validated = local_apps::validate_app_mcp_proposal(
+                proposal,
+                &app_id,
+                manifest.revision,
+                &create_context.contexts,
+                &local_apps::CapabilityRegistry::default(),
+            )
+            .map_err(|issues| {
+                format!(
+                    "create_approval_invalid: {}",
+                    issues
+                        .into_iter()
+                        .map(|issue| format!("{}: {}", issue.code, issue.message))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            })?;
+            let review_surface =
+                Self::build_mcp_review_surface(&manifest, &validated, None, Some(&create_context));
+            let approval_contract_sha256 =
+                local_apps::approval_contract_sha256(review_surface.clone())
+                    .map_err(|issue| issue.message)?;
+            let mut journal = local_apps::McpCandidateJournal {
+                schema_version: local_apps::APPS_SCHEMA_VERSION,
+                app_id: app_id.clone(),
+                workflow_run_id: workflow_run_id.clone(),
+                stage: local_apps::McpAuthoringStage::Prepared,
+                previous_build_id: None,
+                previous_catalog_sha256: None,
+                proposal_sha256: validated.proposal_sha256.clone(),
+                approval_contract_sha256: approval_contract_sha256.clone(),
+                tool_surface_sha256: validated.tool_surface_sha256.clone(),
+                catalog_sha256: None,
+                integrity_sha256: String::new(),
+            }
+            .seal()
+            .map_err(|issue| issue.message)?;
+            let candidate = PersistedMcpCandidate {
+                validated,
+                approval_contract_sha256: approval_contract_sha256.clone(),
+                review_surface,
+                verification_sha256: None,
+                catalog_sha256: None,
+                qa_context_sha256: None,
+            };
+            self.save_mcp_candidate(&app_id, &workflow_run_id, &candidate)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+            // r4-failure-paths-06: this guard owns the candidate written just
+            // above, so every return before `keep()` below — the
+            // `create_requires_approved_plan` refusal included — tears the
+            // candidate journal/file down instead of leaking a durable
+            // `Prepared` candidate for the life of the process.
+            let candidate_guard = McpCreateCandidateGuard {
+                broker: self,
+                layout: layout.clone(),
+                app_id: app_id.clone(),
+                workflow_run_id: workflow_run_id.clone(),
+                keep: false,
+            };
+            // The user's approval of the PLAN this create was derived from IS
+            // the create confirmation. Nothing else can stand in for it: a
+            // model-driven `approve_mcp_proposal` call carries only
+            // `NativeSheet`, and there is no sheet left to raise, so it is
+            // refused by name rather than answered on the user's behalf.
+            if authority != CreateApprovalAuthority::ApprovedPlan {
+                return Err(
+                    "create_requires_approved_plan: creating a Local App lands the template \
+                     the user approved in a plan; plan the app, let the user approve it, then \
+                     call LocalAppPrepare instead of answering the create confirmation here"
+                        .into(),
+                );
+            }
+            candidate_guard.keep();
+            // r3-engine-core-2: `DeleteApp` may have landed while the record
+            // lookup above was awaited. `save_candidate_journal`
+            // below unconditionally calls `layout.initialize()`, which would
+            // RESURRECT this app's on-disk skeleton (workspace dir, state
+            // dir, …) if it no longer exists. Re-resolve the record here —
+            // still holding the (kept) candidate guard, so nothing is torn
+            // down twice — and fail closed instead of writing a journal back
+            // into a directory tree that a delete already committed.
+            self.service()?
+                .record(&app_id)
+                .await
+                .map_err(|error| format!("app_deleted_during_approval: {error}"))?;
+            let receipt = local_apps::McpConfirmationReceipt::new(
+                &app_id,
+                &workflow_run_id,
+                approval_contract_sha256,
+                journal.proposal_sha256.clone(),
+                now_ms(),
+            );
+            let receipt_id = receipt.receipt_id.clone();
+            self.pending_mcp_receipts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .issue(receipt)
+                .map_err(|issue| issue.message)?;
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Approved)
+                .map_err(|issue| issue.message)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+            return Ok(json!({
+                "approved": true,
+                "receipt_id": receipt_id,
+                "status": "create_approved_no_mcp",
+            }));
+        }
+        let approval_contract_sha256 =
+            required_string(&input, "approval_contract_sha256")?.to_string();
+        let layout = self.layout(&app_id)?;
+        let mut journal =
+            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+        if journal.workflow_run_id != workflow_run_id {
+            return Err(
+                "receipt_invalid: workflow run does not match the prepared candidate".into(),
+            );
+        }
+        if journal.approval_contract_sha256 != approval_contract_sha256 {
+            return Err(
+                "receipt_invalid: approval contract digest does not match the prepared candidate"
+                    .into(),
+            );
+        }
+        if journal.stage == local_apps::McpAuthoringStage::Prepared {
+            let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+            let candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+            if candidate.approval_contract_sha256 != approval_contract_sha256
+                || candidate.validated.proposal_sha256 != journal.proposal_sha256
+                || candidate.validated.tool_surface_sha256 != journal.tool_surface_sha256
+                || local_apps::approval_contract_sha256(candidate.review_surface.clone())
+                    .map_err(|issue| issue.message)?
+                    != approval_contract_sha256
+            {
+                return Err("receipt_invalid: persisted MCP review surface changed".into());
+            }
+            if !self
+                .request_mcp_candidate_approval(&app_id, &workflow_run_id, &manifest, &candidate)
+                .await?
+            {
+                return Err("user denied the Local App MCP proposal".into());
+            }
+            // The native sheet may remain open for minutes. Re-read the sealed
+            // journal and candidate before minting a receipt so approval cannot
+            // be applied to a superseding/tampered proposal.
+            journal =
+                local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+            let current_candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+            if journal.stage != local_apps::McpAuthoringStage::Prepared
+                || journal.workflow_run_id != workflow_run_id
+                || journal.approval_contract_sha256 != approval_contract_sha256
+                || journal.proposal_sha256 != candidate.validated.proposal_sha256
+                || journal.tool_surface_sha256 != candidate.validated.tool_surface_sha256
+                || current_candidate.approval_contract_sha256 != candidate.approval_contract_sha256
+                || current_candidate.validated.proposal_sha256
+                    != candidate.validated.proposal_sha256
+                || current_candidate.validated.tool_surface_sha256
+                    != candidate.validated.tool_surface_sha256
+            {
+                return Err(
+                    "receipt_invalid: MCP candidate changed while awaiting approval".into(),
+                );
+            }
+            let receipt = local_apps::McpConfirmationReceipt::new(
+                &app_id,
+                &workflow_run_id,
+                approval_contract_sha256.clone(),
+                journal.proposal_sha256.clone(),
+                now_ms(),
+            );
+            let receipt_id = receipt.receipt_id.clone();
+            self.pending_mcp_receipts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .issue(receipt)
+                .map_err(|issue| issue.message)?;
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Approved)
+                .map_err(|issue| issue.message)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+            return Ok(json!({
+                "approved": true,
+                "receipt_id": receipt_id,
+                "status": "approved",
+            }));
+        }
+        Ok(json!({
+            "approved": true,
+            "receipt_id": Value::Null,
+            "status": "approved_reusable",
+        }))
+    }
+}
+
 #[async_trait]
 impl LocalAppsMcpHost for LocalAppsHostBroker {
     fn create_next_step(&self) -> String {
@@ -9530,6 +9929,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn local_app_contract(&self, input: Value) -> Result<Value, String> {
         LocalAppsHostBroker::local_app_contract(self, input).await
+    }
+
+    async fn prepare(&self, input: Value) -> Result<Value, String> {
+        self.prepare_value(input).await
     }
 
     async fn qa_begin(&self, input: Value) -> Result<Value, String> {
@@ -9900,318 +10303,11 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         }))
     }
 
+    /// Approve a Local App MCP/create proposal through the native sheet.
     async fn approve_mcp_proposal(&self, input: Value) -> Result<Value, String> {
-        let app_id = required_string(&input, "app_id")?.to_string();
-        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
-        Self::validate_workflow_run_id(&workflow_run_id)?;
-        if input
-            .get("create_without_mcp")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            let service = self.service()?;
-            let record = service
-                .record(&app_id)
-                .await
-                .map_err(|error| error.to_string())?;
-            if record.scaffolded {
-                return Err(
-                    "invalid_argument: create_without_mcp is only valid before scaffolding".into(),
-                );
-            }
-            let layout = self.layout(&app_id)?;
-            // Already-approved reuse arm. Without it, a repeated
-            // `create_without_mcp` call for a `workflow_run_id` whose
-            // candidate journal is already sealed at `Approved` rewrites that
-            // journal back to `Prepared`, re-raises the native
-            // create-confirmation sheet a second time, and then — if the
-            // FIRST receipt is still claimed by an in-flight scaffold —
-            // throws the user's fresh answer away when `issue()` returns
-            // `receipt_in_use`.
-            //
-            // The user has already answered the sheet for exactly this
-            // contract digest, so reuse asks nothing again and never touches
-            // the sealed journal. It does NOT mirror the MCP-revise branch's
-            // `receipt_id: null` / `approved_reusable` answer: that shape is
-            // only safe there because its consumer (the MCP-authoring
-            // workflow script) declares `receipt_id` nullable and is told to
-            // consume the existing receipt. THIS branch's only consumer, the
-            // unified build workflow script, requires a non-empty
-            // `receipt_id` whenever `approved` is true — both in the
-            // `createApprovalSchema` the agent must satisfy and in the
-            // imperative check before `LocalAppScaffold` — so a null here
-            // would swap one dead end for another. Mint a usable receipt
-            // against the sealed journal instead.
-            //
-            // `issue()` still refuses while a live, unexpired claim is
-            // outstanding. Post-WP-B that is a scaffold genuinely in flight,
-            // and starting a second one is exactly what must not happen, so
-            // this surfaces a named error WITHOUT raising a sheet — no user
-            // answer can be discarded because none was solicited.
-            if let Ok(existing_journal) = local_apps::load_candidate_journal(&layout) {
-                if existing_journal.workflow_run_id == workflow_run_id
-                    && existing_journal.stage >= local_apps::McpAuthoringStage::Approved
-                {
-                    let receipt = local_apps::McpConfirmationReceipt::new(
-                        &app_id,
-                        &workflow_run_id,
-                        existing_journal.approval_contract_sha256.clone(),
-                        existing_journal.proposal_sha256.clone(),
-                        now_ms(),
-                    );
-                    let receipt_id = receipt.receipt_id.clone();
-                    self.pending_mcp_receipts
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .issue(receipt)
-                        .map_err(|issue| {
-                            format!(
-                                "create_approval_in_flight: the sealed create approval for this \
-                                 app is already claimed by an in-flight scaffold; retry after it \
-                                 finishes ({})",
-                                issue.message
-                            )
-                        })?;
-                    return Ok(json!({
-                        "approved": true,
-                        "receipt_id": receipt_id,
-                        "status": "create_approved_no_mcp",
-                    }));
-                }
-            }
-            let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
-            let create_context = self.load_create_proposal_context(&app_id, &workflow_run_id)?;
-            let proposal = local_apps::AppMcpProposal {
-                app_id: app_id.clone(),
-                manifest_revision: manifest.revision,
-                user_goal_sha256: format!("{:x}", Sha256::digest(b"local-app-create-without-mcp")),
-                summary: "Create this Local App without publishing or enabling an MCP surface."
-                    .into(),
-                tools: Vec::new(),
-                required_flow_changes: Vec::new(),
-                excluded_capabilities: Vec::new(),
-            };
-            let validated = local_apps::validate_app_mcp_proposal(
-                proposal,
-                &app_id,
-                manifest.revision,
-                &create_context.contexts,
-                &local_apps::CapabilityRegistry::default(),
-            )
-            .map_err(|issues| {
-                format!(
-                    "create_approval_invalid: {}",
-                    issues
-                        .into_iter()
-                        .map(|issue| format!("{}: {}", issue.code, issue.message))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
-            })?;
-            let review_surface =
-                Self::build_mcp_review_surface(&manifest, &validated, None, Some(&create_context));
-            let approval_contract_sha256 =
-                local_apps::approval_contract_sha256(review_surface.clone())
-                    .map_err(|issue| issue.message)?;
-            let mut journal = local_apps::McpCandidateJournal {
-                schema_version: local_apps::APPS_SCHEMA_VERSION,
-                app_id: app_id.clone(),
-                workflow_run_id: workflow_run_id.clone(),
-                stage: local_apps::McpAuthoringStage::Prepared,
-                previous_build_id: None,
-                previous_catalog_sha256: None,
-                proposal_sha256: validated.proposal_sha256.clone(),
-                approval_contract_sha256: approval_contract_sha256.clone(),
-                tool_surface_sha256: validated.tool_surface_sha256.clone(),
-                catalog_sha256: None,
-                integrity_sha256: String::new(),
-            }
-            .seal()
-            .map_err(|issue| issue.message)?;
-            let candidate = PersistedMcpCandidate {
-                validated,
-                approval_contract_sha256: approval_contract_sha256.clone(),
-                review_surface,
-                verification_sha256: None,
-                catalog_sha256: None,
-                qa_context_sha256: None,
-            };
-            self.save_mcp_candidate(&app_id, &workflow_run_id, &candidate)?;
-            local_apps::save_candidate_journal(&layout, &journal)
-                .map_err(|error| error.to_string())?;
-            // r4-failure-paths-06: armed before the (up to five-minute) native
-            // approval await, so a Stop/interrupt that drops this future
-            // mid-wait still cleans up the candidate journal/file instead of
-            // leaking a durable `Prepared` candidate for the life of the
-            // process.
-            let candidate_guard = McpCreateCandidateGuard {
-                broker: self,
-                layout: layout.clone(),
-                app_id: app_id.clone(),
-                workflow_run_id: workflow_run_id.clone(),
-                keep: false,
-            };
-            let approval = self
-                .request_mcp_candidate_approval(&record, &workflow_run_id, &manifest, &candidate)
-                .await;
-            match approval {
-                Ok(true) => {
-                    candidate_guard.keep();
-                }
-                Ok(false) => {
-                    // r2-failure-paths-07 / r2-engine-core-09: `?` here would
-                    // let a cleanup I/O failure REPLACE "user denied" with a
-                    // bare storage error, losing the one signal that says the
-                    // user made a choice at all — compose both, matching the
-                    // `Err(error)` arm just below.
-                    let denied = "user denied the Local App create proposal";
-                    if let Err(cleanup_error) =
-                        self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)
-                    {
-                        return Err(format!(
-                            "{denied}; create-only candidate cleanup failed: {cleanup_error}"
-                        ));
-                    }
-                    return Err(denied.into());
-                }
-                Err(error) => {
-                    if let Err(cleanup_error) =
-                        self.delete_mcp_candidate_state(&layout, &app_id, &workflow_run_id)
-                    {
-                        return Err(format!(
-                            "{error}; create-only candidate cleanup failed: {cleanup_error}"
-                        ));
-                    }
-                    return Err(error);
-                }
-            }
-            // r3-engine-core-2: `DeleteApp` may have landed while the native
-            // confirmation sheet above was awaited. `save_candidate_journal`
-            // below unconditionally calls `layout.initialize()`, which would
-            // RESURRECT this app's on-disk skeleton (workspace dir, state
-            // dir, …) if it no longer exists. Re-resolve the record here —
-            // still holding the (kept) candidate guard, so nothing is torn
-            // down twice — and fail closed instead of writing a journal back
-            // into a directory tree that a delete already committed.
-            self.service()?
-                .record(&app_id)
-                .await
-                .map_err(|error| format!("app_deleted_during_approval: {error}"))?;
-            let receipt = local_apps::McpConfirmationReceipt::new(
-                &app_id,
-                &workflow_run_id,
-                approval_contract_sha256,
-                journal.proposal_sha256.clone(),
-                now_ms(),
-            );
-            let receipt_id = receipt.receipt_id.clone();
-            self.pending_mcp_receipts
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .issue(receipt)
-                .map_err(|issue| issue.message)?;
-            journal = journal
-                .advance(local_apps::McpAuthoringStage::Approved)
-                .map_err(|issue| issue.message)?;
-            local_apps::save_candidate_journal(&layout, &journal)
-                .map_err(|error| error.to_string())?;
-            return Ok(json!({
-                "approved": true,
-                "receipt_id": receipt_id,
-                "status": "create_approved_no_mcp",
-            }));
-        }
-        let approval_contract_sha256 =
-            required_string(&input, "approval_contract_sha256")?.to_string();
-        let layout = self.layout(&app_id)?;
-        let mut journal =
-            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
-        if journal.workflow_run_id != workflow_run_id {
-            return Err(
-                "receipt_invalid: workflow run does not match the prepared candidate".into(),
-            );
-        }
-        if journal.approval_contract_sha256 != approval_contract_sha256 {
-            return Err(
-                "receipt_invalid: approval contract digest does not match the prepared candidate"
-                    .into(),
-            );
-        }
-        if journal.stage == local_apps::McpAuthoringStage::Prepared {
-            let service = self.service()?;
-            let record = service
-                .record(&app_id)
-                .await
-                .map_err(|error| error.to_string())?;
-            let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
-            let candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
-            if candidate.approval_contract_sha256 != approval_contract_sha256
-                || candidate.validated.proposal_sha256 != journal.proposal_sha256
-                || candidate.validated.tool_surface_sha256 != journal.tool_surface_sha256
-                || local_apps::approval_contract_sha256(candidate.review_surface.clone())
-                    .map_err(|issue| issue.message)?
-                    != approval_contract_sha256
-            {
-                return Err("receipt_invalid: persisted MCP review surface changed".into());
-            }
-            if !self
-                .request_mcp_candidate_approval(&record, &workflow_run_id, &manifest, &candidate)
-                .await?
-            {
-                return Err("user denied the Local App MCP proposal".into());
-            }
-            // The native sheet may remain open for minutes. Re-read the sealed
-            // journal and candidate before minting a receipt so approval cannot
-            // be applied to a superseding/tampered proposal.
-            journal =
-                local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
-            let current_candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
-            if journal.stage != local_apps::McpAuthoringStage::Prepared
-                || journal.workflow_run_id != workflow_run_id
-                || journal.approval_contract_sha256 != approval_contract_sha256
-                || journal.proposal_sha256 != candidate.validated.proposal_sha256
-                || journal.tool_surface_sha256 != candidate.validated.tool_surface_sha256
-                || current_candidate.approval_contract_sha256 != candidate.approval_contract_sha256
-                || current_candidate.validated.proposal_sha256
-                    != candidate.validated.proposal_sha256
-                || current_candidate.validated.tool_surface_sha256
-                    != candidate.validated.tool_surface_sha256
-            {
-                return Err(
-                    "receipt_invalid: MCP candidate changed while awaiting approval".into(),
-                );
-            }
-            let receipt = local_apps::McpConfirmationReceipt::new(
-                &app_id,
-                &workflow_run_id,
-                approval_contract_sha256.clone(),
-                journal.proposal_sha256.clone(),
-                now_ms(),
-            );
-            let receipt_id = receipt.receipt_id.clone();
-            self.pending_mcp_receipts
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .issue(receipt)
-                .map_err(|issue| issue.message)?;
-            journal = journal
-                .advance(local_apps::McpAuthoringStage::Approved)
-                .map_err(|issue| issue.message)?;
-            local_apps::save_candidate_journal(&layout, &journal)
-                .map_err(|error| error.to_string())?;
-            return Ok(json!({
-                "approved": true,
-                "receipt_id": receipt_id,
-                "status": "approved",
-            }));
-        }
-        Ok(json!({
-            "approved": true,
-            "receipt_id": Value::Null,
-            "status": "approved_reusable",
-        }))
+        self.approve_mcp_proposal_with(input, CreateApprovalAuthority::NativeSheet)
+            .await
     }
-
     async fn qa_mcp_candidate(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
@@ -10854,6 +10950,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         let receipt_id = required_string(&input, "receipt_id")?.to_string();
         let service = self.service()?;
         let layout = self.layout(&app_id)?;
+        let toolchain = Self::toolchain_for_layout(&layout)?;
+        let toolchain_key = toolchain.key();
         // Keep the same lock order as LocalAppBuilder: broker-wide async
         // mutex first, then the per-app cross-process lock. The dependency
         // snapshot, production build and any rollback therefore form one
@@ -10958,7 +11056,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .start_dependency_install(&app_id)
                 .await
                 .map_err(|error| error.to_string())?;
-            let dependency_store = self.dependency_store_root();
+            let dependency_store = self.dependency_store_root(toolchain_key);
             std::fs::create_dir_all(&dependency_store)
                 .map_err(|error| format!("create pnpm dependency store: {error}"))?;
             let build_mount = MountSpec {
@@ -11005,6 +11103,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 false,
                 false,
                 true,
+                toolchain,
             );
             let resolution_span = tracing::debug_span!(
                 "local_app_dependency_resolve",
@@ -11033,7 +11132,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 return Err(error);
             }
             let lock_digest = format!("{:x}", Sha256::digest(&lock_bytes));
-            let snapshot_root = self.dependency_snapshot_root(&lock_digest);
+            let snapshot_root = self.dependency_snapshot_root(&lock_digest, toolchain_key);
             let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
             let lock_wait_span = tracing::debug_span!(
                 "local_app_dependency_snapshot_lock_wait",
@@ -11044,7 +11143,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 let _perf = LocalAppPerfDiagnosticTimer::start("dependency_snapshot_lock_wait");
                 snapshot_lock.lock().instrument(lock_wait_span).await
             };
-            let snapshot_ready = Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest)?;
+            let snapshot_ready =
+                Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest, toolchain_key)?;
             if snapshot_ready {
                 let snapshot_span = tracing::debug_span!(
                     "local_app_dependency_snapshot_materialize",
@@ -11079,6 +11179,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                     true,
                     false,
                     true,
+                    toolchain,
                 );
                 let install_span = tracing::debug_span!(
                     "local_app_dependency_frozen_install",
@@ -11113,6 +11214,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                             &dependency_staging.join("node_modules"),
                             &snapshot_root,
                             &lock_digest,
+                            toolchain_key,
                         )
                     })?;
                 }
@@ -11172,7 +11274,7 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .complete_dependency_install_with_metadata(
                     &app_id,
                     Some(lock_digest),
-                    Some(PNPM_TOOLCHAIN_KEY.to_string()),
+                    Some(toolchain_key.to_string()),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -13111,6 +13213,16 @@ const TRUSTED_TOOLCHAIN_NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
         "rolldown-binding.linux-x64-musl.node",
     ),
     (
+        "@rolldown/binding-linux-arm64-musl",
+        "1.2.9",
+        "rolldown-binding.linux-arm64-musl.node",
+    ),
+    (
+        "@rolldown/binding-linux-x64-musl",
+        "1.2.9",
+        "rolldown-binding.linux-x64-musl.node",
+    ),
+    (
         "@rollup/rollup-linux-arm64-musl",
         "4.44.0",
         "rollup.linux-arm64-musl.node",
@@ -13133,13 +13245,16 @@ const TRUSTED_TOOLCHAIN_NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
 ];
 
 const TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS: &[(&str, &str, &[&str])] = &[
+    ("@modelcontextprotocol/ext-apps", "2.0.0", &["prepare"]),
     ("balanced-match", "4.0.4", &["prepare"]),
     ("brace-expansion", "5.0.9", &["prepare"]),
+    ("brace-expansion", "5.0.12", &["prepare"]),
     ("dom-serializer", "2.0.0", &["prepare"]),
     ("domelementtype", "2.3.0", &["prepare"]),
     ("domhandler", "5.0.3", &["prepare"]),
     ("domutils", "3.2.2", &["prepare"]),
     ("entities", "4.5.0", &["prepare"]),
+    ("eventsource", "3.0.7", &["prepare"]),
     ("html-dom-parser", "5.1.8", &["prepare"]),
     ("html-react-parser", "5.2.17", &["prepare"]),
     ("htmlparser2", "10.1.0", &["prepare"]),
@@ -13148,6 +13263,7 @@ const TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS: &[(&str, &str, &[&str])] = &[
     ("minimatch", "10.2.6", &["prepare"]),
     ("style-to-js", "1.1.21", &["prepare"]),
     ("style-to-object", "1.0.14", &["prepare"]),
+    ("vite-plugin-singlefile", "2.3.3", &["prepare"]),
 ];
 
 fn trusted_toolchain_lifecycle_scripts(
@@ -13262,14 +13378,20 @@ fn trusted_dependency_native_binding_path(
             dependency_root.display()
         )
     })?;
+    let mut rejected_manifest = None;
     for (package, version, file_name) in TRUSTED_TOOLCHAIN_NATIVE_BINDINGS {
         let expected = dependency_package_path(package).join(file_name);
         if relative == expected {
-            validate_trusted_dependency_manifest(dependency_root, package, version)?;
-            return Ok(true);
+            match validate_trusted_dependency_manifest(dependency_root, package, version) {
+                Ok(()) => return Ok(true),
+                Err(error) => rejected_manifest = Some(error),
+            }
         }
     }
-    Ok(false)
+    match rejected_manifest {
+        Some(error) => Err(error),
+        None => Ok(false),
+    }
 }
 
 /// Reject package lifecycle hooks from a resolved dependency tree. The
@@ -13407,8 +13529,8 @@ fn validate_dependency_entry(path: &Path, canonical_root: &Path) -> Result<(), S
     Ok(())
 }
 
-fn dependency_attestation(lock_digest: &str, tree_digest: &str) -> String {
-    format!("{DEPENDENCY_SNAPSHOT_VERSION}\n{lock_digest}\n{PNPM_TOOLCHAIN_KEY}\n{tree_digest}\n")
+fn dependency_attestation(lock_digest: &str, tree_digest: &str, toolchain_key: &str) -> String {
+    format!("{DEPENDENCY_SNAPSHOT_VERSION}\n{lock_digest}\n{toolchain_key}\n{tree_digest}\n")
 }
 
 fn dependency_tree_digest_from_marker(marker: &Path) -> Result<Option<String>, String> {
@@ -13737,6 +13859,7 @@ mod tests {
     /// and skills are allowed to name.
     #[cfg(test)]
     const KNOWN_PLUGIN_QUALIFIED_IDS: &[&str] = &[
+        "lingxi-local-app:apple-design",
         "lingxi-local-app:create-local-app",
         "lingxi-local-app:local-app-build",
         "lingxi-local-app:local-app-mcp-authoring",
@@ -13847,10 +13970,10 @@ mod tests {
 
     /// r1-prompt-layer-20: the backtick scanner above is the right shape for a
     /// workspace contract, where a tool name is always a backticked span — and the
-    /// WRONG shape for the shipped prompt FILES. In `local-app-build.js` the
-    /// backticks delimit whole JavaScript template literals, so a tool name sits
-    /// in the MIDDLE of a span and the leading-run tokeniser never sees it; in
-    /// `SKILL.md` a tool name may appear in a fenced block or in bare prose.
+    /// WRONG shape for the shipped prompt FILES. The next-step guidance strings
+    /// name a tool mid-sentence with no backticks at all, so the leading-run
+    /// tokeniser never sees it; in `SKILL.md` a tool name may appear in a fenced
+    /// block or in bare prose.
     ///
     /// So scan those files for the `LocalApp…` TOKEN wherever it appears and
     /// require each one to be a real entry in `LOCAL_APP_TOOLS`. The token count
@@ -14160,7 +14283,7 @@ mod tests {
             } else {
                 build_mount.host_path.join(relative)
             };
-            if request.command == "/usr/bin/pnpm" {
+            if matches!(request.command.as_str(), "/usr/bin/pnpm") {
                 let mut entries = fs::read_dir(host_cwd.join("node_modules"))
                     .into_iter()
                     .flatten()
@@ -14170,7 +14293,7 @@ mod tests {
                 entries.sort();
                 self.pnpm_node_modules_entries.lock().await.push(entries);
             }
-            if request.command == "/usr/bin/pnpm"
+            if matches!(request.command.as_str(), "/usr/bin/pnpm")
                 && request.args.iter().any(|arg| arg == "--frozen-lockfile")
                 && self.fail_frozen_install.load(Ordering::SeqCst)
             {
@@ -14186,7 +14309,7 @@ mod tests {
                     },
                 });
             }
-            if request.command == "/usr/bin/pnpm"
+            if matches!(request.command.as_str(), "/usr/bin/pnpm")
                 && request.args.iter().any(|arg| arg == "--no-frozen-lockfile")
             {
                 let lockfile = match self.resolved_pnpm_lockfile.lock().await.clone() {
@@ -14204,7 +14327,7 @@ mod tests {
                     MobileLinuxError::Io(format!("write fake resolved lockfile: {error}"))
                 })?;
             }
-            if request.command == "/usr/bin/pnpm"
+            if matches!(request.command.as_str(), "/usr/bin/pnpm")
                 && request.args.iter().any(|arg| arg == "--lockfile-only")
             {
                 return Ok(platform_api::LinuxCommandResult {
@@ -14219,7 +14342,7 @@ mod tests {
                     },
                 });
             }
-            if request.command == "/usr/bin/node" {
+            if matches!(request.command.as_str(), "/usr/bin/node") {
                 if self.fail_build.load(Ordering::SeqCst) {
                     return Ok(platform_api::LinuxCommandResult {
                         stdout: String::new(),
@@ -15329,11 +15452,12 @@ mod tests {
         );
         let lock_digest = LocalAppsHostBroker::dependency_lock_digest(layout)
             .expect("fixture dependency lock digest");
-        let snapshot_root = broker.dependency_snapshot_root(&lock_digest);
+        let snapshot_root = broker.dependency_snapshot_root(&lock_digest, PNPM_TOOLCHAIN_KEY);
         LocalAppsHostBroker::publish_dependency_snapshot(
             &workspace.join("node_modules"),
             &snapshot_root,
             &lock_digest,
+            PNPM_TOOLCHAIN_KEY,
         )
         .expect("publish fixture dependency snapshot");
         assert!(
@@ -15341,6 +15465,7 @@ mod tests {
                 &workspace,
                 &snapshot_root,
                 &lock_digest,
+                PNPM_TOOLCHAIN_KEY
             )
             .expect("validate fixture dependency snapshot"),
             "the synthetic QA fixture must not reinstall dependencies during the build"
@@ -17102,11 +17227,11 @@ mod tests {
         let catalog = crate::local_apps_mcp::LocalAppsMcpTransport::host_tool_catalog();
         let described = catalog
             .iter()
-            .find(|tool| tool.description.contains("LocalAppStageCreate"))
-            .expect("a host tool description names LocalAppStageCreate");
+            .find(|tool| tool.description.contains("LocalAppPrepare"))
+            .expect("a host tool description names LocalAppPrepare");
         let planted_description = described
             .description
-            .replace("LocalAppStageCreate", "LocalAppConfirmRuntime");
+            .replace("LocalAppPrepare", "LocalAppConfirmRuntime");
         assert_ne!(
             planted_description, described.description,
             "the plant did not apply to the description"
@@ -17457,6 +17582,12 @@ mod tests {
 
         let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
             .expect("react-dom runtime contract");
+        for &(relative, bytes) in contract.editable_files {
+            if relative == "app/mcp-widget/package.json" {
+                crate::local_apps_build::write_file(&workspace, relative, bytes, true)
+                    .expect("seed fixture widget importer");
+            }
+        }
         let node_modules = workspace.join("node_modules");
         for &(package, version) in contract.core_packages {
             write_fixture_package_manifest(&node_modules, package, version);
@@ -17766,8 +17897,8 @@ mod tests {
 
     fn template_id_for_scaffold_surface(surface: &str) -> &'static str {
         match surface {
-            "dom" => "react-dom-r2",
-            "canvas" => "canvas-2d-r2",
+            "dom" => "react-dom-r4",
+            "canvas" => "canvas-2d-r4",
             other => panic!("unsupported test scaffold surface {other}"),
         }
     }
@@ -17908,6 +18039,12 @@ mod tests {
         write_initial_staging_flow_contexts(broker, app_id, &workflow_run_id, handle);
         let approval_contract_sha256 =
             persist_initial_mcp_candidate_fixture(broker, app_id, &workflow_run_id);
+        // The native CREATE confirmation sheet is retired: today the user
+        // answers a PLAN, and `LocalAppPrepare` seals the create approval
+        // itself with `CreateApprovalAuthority::ApprovedPlan`. A bare
+        // `approve_mcp_proposal` now raises the LIVE MCP-proposal sheet
+        // (`McpProposalApprovalRequested`) instead, so this fixture parks on
+        // `pending_mcp_proposal_approvals` and answers that one.
         let approval = tokio::spawn({
             let broker = broker.clone();
             let app_id = app_id.to_string();
@@ -17928,7 +18065,7 @@ mod tests {
             found = timeout(Duration::from_secs(2), async {
                 loop {
                     if let Some(request_id) = broker
-                        .pending_create_confirmations
+                        .pending_mcp_proposal_approvals
                         .lock()
                         .await
                         .keys()
@@ -17939,15 +18076,15 @@ mod tests {
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-            }) => found.expect("create confirmation request"),
+            }) => found.expect("mcp proposal approval request"),
             result = &mut approval => panic!(
-                "approval returned before raising create confirmation: {:?}",
+                "approval returned before raising the MCP-proposal approval: {:?}",
                 result.expect("approval task did not panic")
             ),
         };
         assert!(
-            broker.resolve_create_confirmation(&request_id, true).await,
-            "approval resolver must consume the pending create confirmation"
+            broker.resolve_mcp_proposal_approval(&request_id, true).await,
+            "approval resolver must consume the pending MCP-proposal approval"
         );
         let approved = approval
             .await
@@ -18269,10 +18406,12 @@ mod tests {
         fs::write(index, original).expect("restore index after injected failure");
     }
 
-    /// The shell is only an identity/no-write guard. Product discovery,
-    /// technical recommendations, and the one native confirmation belong to
-    /// the create coordinator, while MCP exposure is an optional post-create
-    /// capability rather than a prerequisite questionnaire.
+    /// The shell is only an identity/no-write guard. Product discovery and the
+    /// technical recommendations belong to the create coordinator, which plans
+    /// the app with the user and has the Host prepare the workspace from the
+    /// plan the user approves; that plan approval IS the create confirmation,
+    /// so there is no second native sheet. MCP exposure is an optional
+    /// post-create capability rather than a prerequisite questionnaire.
     #[tokio::test]
     async fn guided_shell_delegates_without_technical_or_mcp_prerequisites() {
         let (root, service, broker) = create_broker(false, None).await;
@@ -18286,10 +18425,10 @@ mod tests {
             "the shell must immediately enter the plugin-qualified create coordinator: {guided}"
         );
         assert!(
-            guided.contains("recommend the technical renderer and runtime profile")
-                && guided.contains("single native create confirmation"),
-            "the coordinator must recommend technical choices for the concise native \
-             confirmation: {guided}"
+            guided.contains("plans the app with the user")
+                && guided.contains("prepares this workspace from the plan the user approves"),
+            "the shell must delegate planning and prepare-from-the-approved-plan to the create \
+             coordinator, whose plan approval is the create confirmation: {guided}"
         );
         assert!(
             guided.contains("optionally expose named business capabilities"),
@@ -18386,7 +18525,7 @@ mod tests {
                 "app_id": shell.id.clone(),
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "plain create without MCP",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -18433,42 +18572,23 @@ mod tests {
             .expect("stage create");
         write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
 
-        let approval = tokio::spawn({
-            let broker = broker.clone();
-            let app_id = shell.id.clone();
-            let workflow_run_id = workflow_run_id.clone();
-            async move {
-                broker
-                    .approve_mcp_proposal(json!({
-                        "app_id": app_id,
-                        "workflow_run_id": workflow_run_id,
-                        "create_without_mcp": true,
-                    }))
-                    .await
-            }
-        });
-        let request_id = timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(request_id) = broker
-                    .pending_create_confirmations
-                    .lock()
-                    .await
-                    .keys()
-                    .next()
-                    .cloned()
-                {
-                    break request_id;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("create confirmation request");
-        assert!(broker.resolve_create_confirmation(&request_id, true).await);
-        let approved = approval
+        // The native create-confirmation sheet is retired. The plan approval is
+        // the only producer of `CreateApprovalAuthority::ApprovedPlan` in
+        // production (`local_apps_prepare::finish_create_scaffold`), so this
+        // fixture takes exactly the authority the Host takes once the user has
+        // approved a plan; a bare `approve_mcp_proposal` (NativeSheet) is now
+        // refused with `create_requires_approved_plan`.
+        let approved = broker
+            .approve_mcp_proposal_with(
+                json!({
+                    "app_id": shell.id,
+                    "workflow_run_id": workflow_run_id,
+                    "create_without_mcp": true,
+                }),
+                CreateApprovalAuthority::ApprovedPlan,
+            )
             .await
-            .expect("approval task")
-            .expect("approve plain create");
+            .expect("approve plain create under the approved-plan authority");
         assert_eq!(approved["status"], "create_approved_no_mcp");
         let receipt_id = approved["receipt_id"]
             .as_str()
@@ -18667,7 +18787,7 @@ mod tests {
                     "app_id": app_id,
                     "workflow_run_id": workflow_run_id,
                     "catalog_digest": catalog.catalog_digest,
-                    "template_id": "react-dom-r2",
+                    "template_id": "react-dom-r4",
                     "reason": "evidence gap test",
                     "rejected": [],
                     "selector_capability": selector_capability,
@@ -18762,7 +18882,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "partial staging reclaim test",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -18831,7 +18951,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "committed staging survival test",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -18904,7 +19024,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "design digest test",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -18978,22 +19098,25 @@ mod tests {
 
     /// WP-C gate (`r4-engine-core-01`): a SECOND `create_without_mcp` call for
     /// a `workflow_run_id` whose candidate journal is already sealed at
-    /// `Approved` must reuse that approval — no second native
-    /// `CreateConfirmationRequested` sheet, the sealed journal stays
+    /// `Approved` must reuse that approval, the sealed journal stays
     /// `Approved` rather than being rewritten back to `Prepared`, and the
-    /// answer must be one the create workflow can actually spend: a non-empty
+    /// answer must be one the create flow can actually spend: a non-empty
     /// `receipt_id` that `LocalAppScaffold` can claim. Before the reuse arm
     /// existed, the second call rebuilt a fresh `Prepared` journal and
-    /// re-raised the native sheet unconditionally. A reuse arm that answers
-    /// with `receipt_id: null` fixes only the sheet — `local-app-build.js`
-    /// rejects that payload in `createApprovalSchema` and again before
-    /// `LocalAppScaffold`, so the retry still dies, which is why the receipt
-    /// is asserted here too.
+    /// solicited a fresh answer unconditionally. A reuse arm that answers
+    /// with `receipt_id: null` would still die — the scaffold step requires a
+    /// non-empty receipt whenever `approved` is true — which is why the
+    /// receipt is asserted here too.
+    ///
+    /// The retired native create-confirmation sheet is deliberately NOT
+    /// exercised: the fixture approves under
+    /// [`CreateApprovalAuthority::ApprovedPlan`], the authority the
+    /// plan-driven `LocalAppPrepare` path passes in production.
     ///
     /// The tail covers the one case where reuse legitimately cannot hand out a
     /// receipt: a scaffold already holds a live claim. That must fail fast
-    /// with a named `create_approval_in_flight:` error and still raise no
-    /// sheet, so no user answer can be solicited and then discarded.
+    /// with a named `create_approval_in_flight:` error, so no answer is
+    /// solicited and then discarded.
     #[tokio::test]
     async fn approve_mcp_proposal_reuses_an_already_approved_create_journal_without_a_second_native_sheet(
     ) {
@@ -19013,7 +19136,7 @@ mod tests {
                 "app_id": shell.id.clone(),
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "reuse arm coverage",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -19039,45 +19162,22 @@ mod tests {
             .expect("stage create");
         write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
 
-        let first_approval = tokio::spawn({
-            let broker = broker.clone();
-            let app_id = shell.id.clone();
-            let workflow_run_id = workflow_run_id.clone();
-            async move {
-                broker
-                    .approve_mcp_proposal(json!({
-                        "app_id": app_id,
-                        "workflow_run_id": workflow_run_id,
-                        "create_without_mcp": true,
-                    }))
-                    .await
-            }
-        });
-        let first_request_id = timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(request_id) = broker
-                    .pending_create_confirmations
-                    .lock()
-                    .await
-                    .keys()
-                    .next()
-                    .cloned()
-                {
-                    break request_id;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("first create confirmation request");
-        assert!(
-            broker
-                .resolve_create_confirmation(&first_request_id, true)
-                .await
-        );
-        let first_approved = first_approval
+        // The native create-confirmation sheet is retired; the Host seals a
+        // create approval itself once the user has approved a plan
+        // (`CreateApprovalAuthority::ApprovedPlan`, the only production
+        // producer). A bare `approve_mcp_proposal` is refused with
+        // `create_requires_approved_plan`, so this fixture approves under the
+        // same authority the prepare path uses.
+        let first_approved = broker
+            .approve_mcp_proposal_with(
+                json!({
+                    "app_id": shell.id,
+                    "workflow_run_id": workflow_run_id,
+                    "create_without_mcp": true,
+                }),
+                CreateApprovalAuthority::ApprovedPlan,
+            )
             .await
-            .expect("first approval task")
             .expect("approve plain create");
         assert_eq!(first_approved["status"], "create_approved_no_mcp");
         let first_receipt_id = first_approved["receipt_id"]
@@ -19093,38 +19193,20 @@ mod tests {
             local_apps::McpAuthoringStage::Approved
         );
 
-        // A SECOND identical call must reuse the sealed approval promptly —
-        // it must NOT raise a second native confirmation sheet and hang
-        // waiting for an answer nothing in this test will ever give it.
-        let second_approval = tokio::spawn({
-            let broker = broker.clone();
-            let app_id = shell.id.clone();
-            let workflow_run_id = workflow_run_id.clone();
-            async move {
-                broker
-                    .approve_mcp_proposal(json!({
-                        "app_id": app_id,
-                        "workflow_run_id": workflow_run_id,
-                        "create_without_mcp": true,
-                    }))
-                    .await
-            }
-        });
-        tokio::pin!(second_approval);
-        let second_approved = tokio::select! {
-            result = &mut second_approval => result
-                .expect("second approval task did not panic")
-                .expect("reuse arm must return the existing approval, not an error"),
-            _ = tokio::time::sleep(Duration::from_millis(300)) => {
-                let pending = broker.pending_create_confirmations.lock().await.len();
-                panic!(
-                    "the create approval branch has no already-approved reuse arm: a second \
-                     create_without_mcp call for an already-Approved journal is still pending \
-                     after 300ms (pending_create_confirmations={pending}), meaning it re-raised \
-                     the native create-confirmation sheet instead of reusing the sealed approval"
-                );
-            }
-        };
+        // A SECOND identical call must reuse the sealed approval and return
+        // promptly — it must NOT rebuild a `Prepared` journal or solicit a
+        // fresh answer.
+        let second_approved = broker
+            .approve_mcp_proposal_with(
+                json!({
+                    "app_id": shell.id,
+                    "workflow_run_id": workflow_run_id,
+                    "create_without_mcp": true,
+                }),
+                CreateApprovalAuthority::ApprovedPlan,
+            )
+            .await
+            .expect("reuse arm must return the existing approval, not an error");
         assert_eq!(second_approved["status"], "create_approved_no_mcp");
         assert_eq!(second_approved["approved"], true);
         assert!(
@@ -19132,25 +19214,22 @@ mod tests {
             "the reuse arm must leave no native create-confirmation sheet outstanding"
         );
 
-        // The reuse answer must be USABLE, not merely prompt. `local-app-build.js`
-        // rejects `approved: true` without a non-empty `receipt_id` twice over —
-        // `createApprovalSchema` (the shape the mcp-designer agent must satisfy)
-        // and the imperative check before `LocalAppScaffold` — so a `null`
-        // receipt here would replace the duplicate-sheet dead end with an
-        // unnamed workflow failure and leave `create_declined` as the agent's
-        // only schema-valid answer for a creation the user actually approved.
+        // The reuse answer must be USABLE, not merely prompt. `LocalAppPrepare`
+        // rejects `approved: true` without a non-empty `receipt_id`
+        // (`prepare_state_invalid: the sealed create approval has no receipt`),
+        // so a `null` receipt here would replace the re-asked-approval dead end
+        // with an unnamed failure on a creation the user actually approved.
         let second_receipt_id = second_approved["receipt_id"].as_str().unwrap_or_else(|| {
             panic!(
                 "the reuse arm returned receipt_id={:?}, which is not a string: \
-                 local-app-build.js requires a non-empty receipt_id whenever approved is true \
-                 (createApprovalSchema + the LocalAppScaffold precondition), so this retry can \
-                 never complete",
+                 LocalAppPrepare requires a non-empty receipt_id whenever approved is true, \
+                 so this retry can never complete",
                 second_approved["receipt_id"]
             )
         });
         assert!(
             !second_receipt_id.is_empty(),
-            "the reuse arm returned an empty receipt_id; LocalAppScaffold cannot consume it"
+            "the reuse arm returned an empty receipt_id; LocalAppPrepare cannot consume it"
         );
         let second_receipt_id = second_receipt_id.to_string();
 
@@ -19187,38 +19266,19 @@ mod tests {
             );
 
         // With that claim now live (an in-flight scaffold), a THIRD call must
-        // still refuse to raise a native sheet: it fails fast with a named
-        // in-flight error instead of asking the user again only to throw the
-        // answer away on `receipt_in_use`.
-        let third_approval = tokio::spawn({
-            let broker = broker.clone();
-            let app_id = shell.id.clone();
-            let workflow_run_id = workflow_run_id.clone();
-            async move {
-                broker
-                    .approve_mcp_proposal(json!({
-                        "app_id": app_id,
-                        "workflow_run_id": workflow_run_id,
-                        "create_without_mcp": true,
-                    }))
-                    .await
-            }
-        });
-        tokio::pin!(third_approval);
-        let third_error = tokio::select! {
-            result = &mut third_approval => result
-                .expect("third approval task did not panic")
-                .expect_err("a third call while the receipt is claimed must not hand out a second live receipt"),
-            _ = tokio::time::sleep(Duration::from_millis(300)) => {
-                let pending = broker.pending_create_confirmations.lock().await.len();
-                panic!(
-                    "a create_without_mcp call for an already-Approved journal whose receipt is \
-                     claimed by an in-flight scaffold is still pending after 300ms \
-                     (pending_create_confirmations={pending}): it re-raised the native \
-                     create-confirmation sheet instead of failing fast"
-                );
-            }
-        };
+        // still fail fast with a named in-flight error rather than minting a
+        // second live receipt.
+        let third_error = broker
+            .approve_mcp_proposal_with(
+                json!({
+                    "app_id": shell.id,
+                    "workflow_run_id": workflow_run_id,
+                    "create_without_mcp": true,
+                }),
+                CreateApprovalAuthority::ApprovedPlan,
+            )
+            .await
+            .expect_err("a third call while the receipt is claimed must not hand out a second live receipt");
         assert!(
             third_error.starts_with("create_approval_in_flight:"),
             "the in-flight refusal must be named, got {third_error:?}"
@@ -19232,763 +19292,6 @@ mod tests {
             "the reuse arm must mint its own receipt: handing back the first one would collide \
              with a scaffold that already claimed it"
         );
-    }
-
-    /// WP-C gate (`r3-failure-paths-03`): a declined native create
-    /// confirmation must be TERMINAL in `local-app-build.js`. Before the
-    /// decline shape existed, `createApprovalSchema` demanded an approved
-    /// receipt, so the mcp-designer agent had no way to report the decline;
-    /// the script fell through to the unnamed
-    /// "create approval did not yield a unified scaffold receipt" throw, and
-    /// the agent's only remaining move was to call
-    /// `LocalAppApproveMcpProposal` again — re-raising the very sheet the user
-    /// had just dismissed.
-    ///
-    /// This runs the REAL plugin script through the REAL QuickJS workflow
-    /// runtime with a hermetic mcp-designer that declines, and asserts the run
-    /// ends in a declined terminal result having asked exactly ONCE. It does
-    /// not prove the schema admits the decline shape — the workflow runtime
-    /// only `JSON.parse`s a schema agent's answer (`workflow/src/lib.rs`);
-    /// validation is host-side in `agent::runner`.
-    #[test]
-    fn declined_create_confirmation_is_terminal_in_the_build_workflow() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
-        let authoring_spec = json!({
-            "product": {"goal": "Small form", "tasks": ["submit"], "external_integrations": []},
-            "targets": [{"id": "primary", "os": "ios", "form_factor": "iphone"}],
-            "ui": {
-                "structure": ["form"],
-                "theme": {"mode": "system", "accent": "blue"},
-                "style": {"direction": "clear", "density": "comfortable"},
-                "references": []
-            },
-            "design": {
-                "presentations": [{"target_id": "primary", "presentation": "form", "navigation": "none"}],
-                "tokens": {},
-                "states": {"loading": "loading", "empty": "empty", "error": "error", "success": "done", "permission": "explain"},
-                "inputs": {"pointer_touch": ["tap"], "keyboard_mouse": ["tab"], "back": "close", "reduced_motion": "respect system"},
-                "canvas": null
-            },
-            "acceptance_checks": [{"id": "submit", "target_ids": ["primary"], "required": true, "preconditions": [], "steps": ["submit"], "expected": "done", "evidence": ["inspect", "ui_action"]}]
-        });
-        let args = json!({
-            "operation": "create",
-            "app_id": "aaaa1111",
-            "authoring_spec": authoring_spec,
-            "name": "Small form",
-            "brief": "A small form app",
-            "quality_level": "balanced",
-            "host_context": {
-                "source": "verified_host",
-                "operation": "create",
-                "app_id": "aaaa1111",
-                "workflow_run_id": "wf_decline1",
-                "selector_capability": "sel_00000000000000000000000000000000",
-                "invocation_capability": "mcpv_00000000000000000000000000000000",
-                "template_catalog": {
-                    "catalog_digest": "digest",
-                    "available_template_ids": ["react-dom-r2"],
-                },
-                "schemas": {
-                    "template_selection": {}, "design_subtree": {}, "create_preparer": {},
-                    "build_result": {}, "operator_result": {}, "qa_review": {}, "qa_finalize": {}
-                },
-                "staging": {"isolated": true, "final_publish": false},
-            },
-        });
-        let approval_calls = Arc::new(AtomicUsize::new(0));
-        let post_decline_calls = Arc::new(AtomicUsize::new(0));
-        let approval_counter = approval_calls.clone();
-        let post_decline_counter = post_decline_calls.clone();
-        let outcome = workflow::run_with_progress(
-            source,
-            move |prompts, options| {
-                prompts
-                    .iter()
-                    .zip(options.iter())
-                    .map(|(_prompt, options)| {
-                        if options.contains("template-selector") {
-                            return json!({
-                                "catalog_digest": "digest",
-                                "template_id": "react-dom-r2",
-                                "reason": "ordinary form",
-                                "rejected": [],
-                                "validated_selection_handle":
-                                    "vsel_0123456789abcdef0123456789abcdef",
-                            })
-                            .to_string();
-                        }
-                        if options.contains("create-preparer") {
-                            approval_counter.fetch_add(1, Ordering::SeqCst);
-                            return json!({
-                                "ok": false,
-                                "approved": false,
-                                "status": "create_declined",
-                            })
-                            .to_string();
-                        }
-                        if options.contains("designer") {
-                            return json!({
-                                "design": {
-                                    "presentations": [], "tokens": {}, "states": {},
-                                    "inputs": {}, "canvas": null
-                                }
-                            })
-                            .to_string();
-                        }
-                        // Any stage after the decline means the run kept going.
-                        post_decline_counter.fetch_add(1, Ordering::SeqCst);
-                        json!({"ok": false, "summary": "unreachable after a decline"}).to_string()
-                    })
-                    .collect()
-            },
-            |_progress| {},
-            None,
-            true,
-            Some(args.to_string()),
-            None,
-        );
-        let after_decline = post_decline_calls.load(Ordering::SeqCst);
-        assert_eq!(
-            after_decline, 0,
-            "a declined create confirmation must be terminal, but the workflow ran \
-             {after_decline} further agent stage(s) after the decline"
-        );
-        let asked = approval_calls.load(Ordering::SeqCst);
-        assert_eq!(
-            asked, 1,
-            "a declined create confirmation must not be re-asked, but the workflow called the \
-             create-preparer {asked} time(s)"
-        );
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => panic!(
-                "a declined create confirmation has no terminal contract in local-app-build.js: \
-                 the workflow threw instead of returning a declined result ({error})"
-            ),
-        };
-        let result = outcome
-            .result
-            .expect("the declined create run must produce a workflow result");
-        assert!(
-            result.contains("\"status\":\"create_declined\""),
-            "the declined create run must report status create_declined, got {result}"
-        );
-        assert!(
-            result.contains("\"ok\":false"),
-            "the declined create run must report ok=false, got {result}"
-        );
-    }
-
-    /// WP-C gate (`r3-failure-paths-03`, contradictory-shape half): widening
-    /// the create-approval contract must not let an APPROVED creation be
-    /// reported to the user as a decline. `createApprovalSchema` now makes the
-    /// contradictory shape unrepresentable (`anyOf` of the two whole shapes),
-    /// and `local-app-build.js` also checks `approved === false` before taking
-    /// the declined exit — keying the exit on `status` alone would turn
-    /// `{approved: true, status: 'create_declined'}` into
-    /// "The user declined the create confirmation."
-    #[test]
-    fn contradictory_create_approval_is_never_reported_as_a_user_decline() {
-        let source = include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
-        let authoring_spec = json!({
-            "product": {"goal": "Small form", "tasks": ["submit"], "external_integrations": []},
-            "targets": [{"id": "primary", "os": "ios", "form_factor": "iphone"}],
-            "ui": {"structure": ["form"], "theme": {"mode": "system", "accent": "blue"}, "style": {"direction": "clear", "density": "comfortable"}, "references": []},
-            "design": {"presentations": [{"target_id": "primary", "presentation": "form", "navigation": "none"}], "tokens": {}, "states": {"loading": "loading", "empty": "empty", "error": "error", "success": "done", "permission": "explain"}, "inputs": {"pointer_touch": ["tap"], "keyboard_mouse": ["tab"], "back": "close", "reduced_motion": "respect system"}, "canvas": null},
-            "acceptance_checks": [{"id": "submit", "target_ids": ["primary"], "required": true, "preconditions": [], "steps": ["submit"], "expected": "done", "evidence": ["inspect", "ui_action"]}]
-        });
-        let args = json!({
-            "operation": "create",
-            "app_id": "aaaa1111",
-            "authoring_spec": authoring_spec,
-            "name": "Small form",
-            "brief": "A small form app",
-            "quality_level": "balanced",
-            "host_context": {
-                "source": "verified_host",
-                "operation": "create",
-                "app_id": "aaaa1111",
-                "workflow_run_id": "wf_contradiction1",
-                "selector_capability": "sel_00000000000000000000000000000000",
-                "invocation_capability": "mcpv_00000000000000000000000000000000",
-                "template_catalog": {
-                    "catalog_digest": "digest",
-                    "available_template_ids": ["react-dom-r2"],
-                },
-                "schemas": {
-                    "template_selection": {}, "design_subtree": {}, "create_preparer": {},
-                    "build_result": {}, "operator_result": {}, "qa_review": {}, "qa_finalize": {}
-                },
-                "staging": {"isolated": true, "final_publish": false},
-            },
-        });
-        let outcome = workflow::run_with_progress(
-            source,
-            move |prompts, options| {
-                prompts
-                    .iter()
-                    .zip(options.iter())
-                    .map(|(_prompt, options)| {
-                        if options.contains("template-selector") {
-                            return json!({
-                                "catalog_digest": "digest",
-                                "template_id": "react-dom-r2",
-                                "reason": "ordinary form",
-                                "rejected": [],
-                                "validated_selection_handle":
-                                    "vsel_0123456789abcdef0123456789abcdef",
-                            })
-                            .to_string();
-                        }
-                        if options.contains("create-preparer") {
-                            return json!({
-                                "ok": true,
-                                "approved": true,
-                                "contract_handle": "contract-create",
-                                "contract_sha256": "c".repeat(64),
-                                "receipt_id": "mcp-create-receipt",
-                                "status": "create_declined",
-                            })
-                            .to_string();
-                        }
-                        if options.contains("designer") {
-                            return json!({
-                                "design": {
-                                    "presentations": [], "tokens": {}, "states": {},
-                                    "inputs": {}, "canvas": null
-                                }
-                            })
-                            .to_string();
-                        }
-                        json!({"ok": false, "summary": "unreachable"}).to_string()
-                    })
-                    .collect()
-            },
-            |_progress| {},
-            None,
-            true,
-            Some(args.to_string()),
-            None,
-        );
-        // Refusing the contradictory answer outright is fine; silently
-        // relabelling an approval as a user decline is not.
-        if let Ok(outcome) = outcome {
-            let result = outcome.result.unwrap_or_default();
-            assert!(
-                !result.contains("create_declined"),
-                "an approval that also claims `create_declined` must never be reported to the \
-                 user as a decline, got {result}"
-            );
-        }
-    }
-
-    /// WP4 gate: `stage_create` alone — never the `#[cfg(test)]`
-    /// `write_initial_staging_flow_contexts` helper — must leave enough on
-    /// disk for `approve_mcp_proposal(create_without_mcp=true)` to reach the
-    /// native create confirmation. Before the fix, `load_create_proposal_context`
-    /// fails closed with `mcp_flow_contexts_missing` before the confirmation
-    /// is ever raised.
-    #[tokio::test]
-    async fn create_without_mcp_reaches_confirmation_from_staged_context_alone() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let root = TempDir::new().expect("tempdir");
-        let service = test_service(&root).await;
-        let sink = MockSink::arc();
-        let broker = LocalAppsHostBroker::new(
-            root.path().to_path_buf(),
-            sink.clone(),
-            Some(runtime),
-            false,
-            None,
-        );
-        assert!(broker.attach_service(service.clone()).is_ok());
-        let shell = shell_app_fixture(&broker, &service).await;
-        let workflow_run_id = format!("wf_stage_only_{}", uuid::Uuid::new_v4().simple());
-        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
-        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
-        let selection = broker
-            .validate_template_selection(json!({
-                "app_id": shell.id.clone(),
-                "workflow_run_id": workflow_run_id,
-                "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
-                "reason": "stage-only create without MCP",
-                "rejected": [],
-                "selector_capability": selector_capability,
-            }))
-            .await
-            .expect("validated selection");
-        let handle = selection["validated_selection_handle"]
-            .as_str()
-            .expect("selection handle");
-        let contract_handle =
-            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
-        broker
-            .stage_create(json!({
-                "app_id": shell.id,
-                "workflow_run_id": workflow_run_id,
-                "validated_selection_handle": handle,
-                "contract_handle": contract_handle,
-                "quality_level": "fast",
-                "name": "Staged context only",
-                "brief": "create without MCP lands an empty active context set",
-            }))
-            .await
-            .expect("stage create");
-        // Deliberately no `write_initial_staging_flow_contexts` call here:
-        // this test exercises exactly what production `stage_create` leaves
-        // on disk, nothing more.
-
-        let approval = tokio::spawn({
-            let broker = broker.clone();
-            let app_id = shell.id.clone();
-            let workflow_run_id = workflow_run_id.clone();
-            async move {
-                broker
-                    .approve_mcp_proposal(json!({
-                        "app_id": app_id,
-                        "workflow_run_id": workflow_run_id,
-                        "create_without_mcp": true,
-                    }))
-                    .await
-            }
-        });
-        tokio::pin!(approval);
-        // r4-tests-honesty-06: read the actual emitted `AppEventDto` from the
-        // sink, not just the internal `pending_create_confirmations` map's
-        // key — the map proves a confirmation was raised, but says nothing
-        // about what the DTO the native side actually received contained.
-        let request = tokio::select! {
-            found = timeout(Duration::from_secs(2), async {
-                loop {
-                    if let Some(request) = sink.events().await.into_iter().find_map(|event| {
-                        if let ClientEvent::AppEvent {
-                            event: AppEventDto::CreateConfirmationRequested { request },
-                        } = event
-                        {
-                            Some(request)
-                        } else {
-                            None
-                        }
-                    }) {
-                        break request;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            }) => found.expect(
-                "approve_mcp_proposal(create_without_mcp) must raise a native \
-                 CreateConfirmationRequested within 2s using only what production \
-                 stage_create wrote, but none was observed on the sink",
-            ),
-            result = &mut approval => {
-                panic!(
-                    "approve_mcp_proposal(create_without_mcp) must raise a native \
-                     CreateConfirmationRequested using only what production stage_create \
-                     wrote, but it returned before any confirmation was requested: {:?}",
-                    result.expect("approval task did not panic")
-                );
-            }
-        };
-        // The whole point of `create_without_mcp`: no MCP candidate was ever
-        // proposed for this run, so the sheet must not claim any initial
-        // tools — a value the shipped create branch cannot otherwise produce.
-        assert!(
-            request.initial_tools.is_empty(),
-            "create_without_mcp must not surface any initial_tools: {:?}",
-            request.initial_tools
-        );
-        assert!(
-            request
-                .reason
-                .contains("structure Chore list → Add chore form")
-                && request.reason.contains("theme system with blue")
-                && request.reason.contains("style calm, comfortable"),
-            "native confirmation must show the concise confirmed UI intent: {}",
-            request.reason
-        );
-        // r1-never-wired-06, at the PRODUCTION call site: the sheet for a
-        // create that grants no MCP tools must not promise an MCP QA gate.
-        // The unit test above pins the function; this pins that the real
-        // create branch passes it the real count.
-        assert!(
-            request
-                .required_gates
-                .iter()
-                .all(|gate| gate.gate_id != "mcp_qa"),
-            "a create_without_mcp sheet must not promise an MCP QA gate: {:?}",
-            request.required_gates
-        );
-        assert!(
-            request
-                .required_gates
-                .iter()
-                .any(|gate| gate.gate_id == "ui_runner"),
-            "the ui_runner gate is unconditional: {:?}",
-            request.required_gates
-        );
-
-        // r3-failure-paths-02, on the real event: a client that lost this
-        // sheet (Android Activity destroyed while the engine stayed alive)
-        // gets it back, byte-for-byte, with the same request_id.
-        let confirmations_named = |events: Vec<ClientEvent>, request_id: &str| {
-            events
-                .into_iter()
-                .filter(|emitted| {
-                    matches!(
-                        emitted,
-                        ClientEvent::AppEvent {
-                            event: AppEventDto::CreateConfirmationRequested { request },
-                        } if request.request_id == request_id
-                    )
-                })
-                .count()
-        };
-        assert_eq!(
-            confirmations_named(sink.events().await, &request.request_id),
-            1,
-            "the original announcement"
-        );
-        broker.reemit_pending_native_approvals().await;
-        let reannounced = sink
-            .events()
-            .await
-            .into_iter()
-            .rev()
-            .find_map(|event| match event {
-                ClientEvent::AppEvent {
-                    event: AppEventDto::CreateConfirmationRequested { request },
-                } => Some(request),
-                _ => None,
-            })
-            .expect("a re-announced create confirmation");
-        assert_eq!(
-            confirmations_named(sink.events().await, &request.request_id),
-            2,
-            "a reattaching client must be handed the pending create sheet again"
-        );
-        assert_eq!(
-            reannounced, request,
-            "the re-announced sheet must be the SAME request, unchanged"
-        );
-
-        assert!(
-            broker
-                .resolve_create_confirmation(&request.request_id, true)
-                .await
-        );
-        let approved = approval
-            .await
-            .expect("approval task")
-            .expect("approve plain create from staged context alone");
-        assert_eq!(approved["status"], "create_approved_no_mcp");
-        let receipt_id = approved["receipt_id"]
-            .as_str()
-            .expect("create receipt")
-            .to_string();
-        assert!(
-            !receipt_id.is_empty(),
-            "expected a non-empty receipt_id, got: {approved}"
-        );
-
-        // The empty staged context set must also survive landing: the seed
-        // carries `contexts` into `land_scaffold`, which calls
-        // `persist_active_mcp_flow_contexts`. Assert the landed file exists
-        // and round-trips to an empty map rather than trusting inspection.
-        broker
-            .scaffold_shell_app_value(json!({
-                "app_id": shell.id,
-                "name": "Staged context only",
-                "brief": "create without MCP lands an empty active context set",
-                "workflow_run_id": workflow_run_id,
-                "receipt_id": receipt_id,
-            }))
-            .await
-            .expect("scaffold from staged context alone");
-        assert!(service.record(&shell.id).await.expect("record").scaffolded);
-        let landed_contexts: BTreeMap<String, local_apps::AppMcpFlowContext> =
-            serde_json::from_slice(
-                &fs::read(workspace_of(&root, &shell.id).join(".lingxi/mcp-flow-contexts.json"))
-                    .expect("landed active MCP flow contexts"),
-            )
-            .expect("parse landed active MCP flow contexts");
-        assert!(
-            landed_contexts.is_empty(),
-            "landing an empty staged context set must persist an empty active \
-             context map, got: {landed_contexts:?}"
-        );
-    }
-
-    /// r3-engine-core-2: `DeleteApp` landing while the native create
-    /// confirmation sheet is still open must not let the eventual approval
-    /// resurrect the app's on-disk skeleton. `save_candidate_journal`
-    /// unconditionally calls `layout.initialize()`, so before the fix this
-    /// scenario silently recreated `apps/<id>/workspace/…` for an app the
-    /// user had just deleted.
-    #[tokio::test]
-    async fn approving_a_create_confirmation_after_delete_app_fails_closed_instead_of_resurrecting_it(
-    ) {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (root, service, broker) = create_broker(false, Some(runtime)).await;
-        let shell = shell_app_fixture(&broker, &service).await;
-        let workflow_run_id = format!("wf_resurrect_{}", uuid::Uuid::new_v4().simple());
-        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
-        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
-        let selection = broker
-            .validate_template_selection(json!({
-                "app_id": shell.id.clone(),
-                "workflow_run_id": workflow_run_id,
-                "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
-                "reason": "r3-engine-core-2 regression",
-                "rejected": [],
-                "selector_capability": selector_capability,
-            }))
-            .await
-            .expect("validated selection");
-        let handle = selection["validated_selection_handle"]
-            .as_str()
-            .expect("selection handle");
-        let contract_handle =
-            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
-        broker
-            .stage_create(json!({
-                "app_id": shell.id,
-                "workflow_run_id": workflow_run_id,
-                "validated_selection_handle": handle,
-                "contract_handle": contract_handle,
-                "quality_level": "fast",
-                "name": "Resurrection regression",
-                "brief": "app is deleted mid-approval and must not come back",
-            }))
-            .await
-            .expect("stage create");
-
-        let approval = tokio::spawn({
-            let broker = broker.clone();
-            let app_id = shell.id.clone();
-            let workflow_run_id = workflow_run_id.clone();
-            async move {
-                broker
-                    .approve_mcp_proposal(json!({
-                        "app_id": app_id,
-                        "workflow_run_id": workflow_run_id,
-                        "create_without_mcp": true,
-                    }))
-                    .await
-            }
-        });
-        tokio::pin!(approval);
-        let request_id = tokio::select! {
-            id = timeout(Duration::from_secs(2), async {
-                loop {
-                    if let Some(request_id) = broker
-                        .pending_create_confirmations
-                        .lock()
-                        .await
-                        .keys()
-                        .next()
-                        .cloned()
-                    {
-                        break request_id;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            }) => id.expect(
-                "approve_mcp_proposal(create_without_mcp) must raise a native \
-                 confirmation within 2s",
-            ),
-            result = &mut approval => {
-                panic!(
-                    "returned before any confirmation was requested: {:?}",
-                    result.expect("approval task did not panic")
-                );
-            }
-        };
-
-        // The app is deleted OUT FROM UNDER the still-open native sheet.
-        service
-            .delete_app(&shell.id)
-            .await
-            .expect("delete the app while its create approval is pending");
-        let workspace_dir = workspace_of(&root, &shell.id);
-        assert!(
-            !workspace_dir.exists(),
-            "the app must actually be gone before the sheet resolves"
-        );
-
-        assert!(broker.resolve_create_confirmation(&request_id, true).await);
-        let outcome = approval.await.expect("approval task did not panic");
-        let error = outcome
-            .expect_err("approving a create for a since-deleted app must fail, not resurrect it");
-        assert!(
-            error.contains("app_deleted_during_approval"),
-            "expected the fail-closed app_deleted_during_approval error, got: {error}"
-        );
-        assert!(
-            !workspace_dir.exists(),
-            "save_candidate_journal's layout.initialize() must not have resurrected \
-             the deleted app's workspace directory: {}",
-            workspace_dir.display()
-        );
-    }
-
-    /// r4-tests-honesty-03: every existing test resolves a create confirmation
-    /// with `approved=true`; the deny arm (cleanup + "user denied the Local
-    /// App create proposal") had zero test references anywhere. Deny it here
-    /// and assert both the error copy AND that the candidate journal/file are
-    /// actually gone -- not just that the call returned an error.
-    #[tokio::test]
-    async fn resolving_a_create_confirmation_with_denial_cleans_up_and_reports_the_denial() {
-        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
-        let (root, service, broker) = create_broker(false, Some(runtime)).await;
-        let shell = shell_app_fixture(&broker, &service).await;
-        let workflow_run_id = format!("wf_deny_create_{}", uuid::Uuid::new_v4().simple());
-        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
-        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
-            &broker.root,
-            &shell.id,
-            &workflow_run_id,
-        )
-        .expect("selector capability");
-        let selection = broker
-            .validate_template_selection(json!({
-                "app_id": shell.id.clone(),
-                "workflow_run_id": workflow_run_id,
-                "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
-                "reason": "deny the create confirmation",
-                "rejected": [],
-                "selector_capability": selector_capability,
-            }))
-            .await
-            .expect("validated selection");
-        let handle = selection["validated_selection_handle"]
-            .as_str()
-            .expect("selection handle");
-        let contract_handle =
-            stage_react_dom_authoring_contract(&broker, &shell.id, &workflow_run_id, handle).await;
-        broker
-            .stage_create(json!({
-                "app_id": shell.id,
-                "workflow_run_id": workflow_run_id,
-                "validated_selection_handle": handle,
-                "contract_handle": contract_handle,
-                "quality_level": "fast",
-                "name": "Denied create",
-                "brief": "r4-tests-honesty-03 regression",
-            }))
-            .await
-            .expect("stage create");
-
-        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
-
-        let approval = tokio::spawn({
-            let broker = broker.clone();
-            let app_id = shell.id.clone();
-            let workflow_run_id = workflow_run_id.clone();
-            async move {
-                broker
-                    .approve_mcp_proposal(json!({
-                        "app_id": app_id,
-                        "workflow_run_id": workflow_run_id,
-                        "create_without_mcp": true,
-                    }))
-                    .await
-            }
-        });
-        tokio::pin!(approval);
-        let request_id = tokio::select! {
-            id = timeout(Duration::from_secs(2), async {
-                loop {
-                    if let Some(request_id) = broker
-                        .pending_create_confirmations
-                        .lock()
-                        .await
-                        .keys()
-                        .next()
-                        .cloned()
-                    {
-                        break request_id;
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            }) => id.expect("a native CreateConfirmationRequested must be pending"),
-            result = &mut approval => {
-                panic!(
-                    "approve_mcp_proposal must raise a native confirmation before \
-                     returning, got: {:?}",
-                    result.expect("approval task did not panic")
-                );
-            }
-        };
-
-        assert!(broker.resolve_create_confirmation(&request_id, false).await);
-        let error = approval
-            .await
-            .expect("approval task did not panic")
-            .expect_err("a denied create confirmation must surface an error, not a value");
-        assert_eq!(error, "user denied the Local App create proposal");
-
-        assert!(
-            local_apps::load_candidate_journal(&layout).is_err(),
-            "r4-tests-honesty-03: a denied create confirmation must not leave a \
-             durable Prepared candidate journal on disk"
-        );
-        assert!(
-            broker
-                .load_mcp_candidate(&shell.id, &workflow_run_id)
-                .is_err(),
-            "r4-tests-honesty-03: a denied create confirmation must not leave a \
-             durable candidate file on disk"
-        );
-        assert!(
-            !service.record(&shell.id).await.expect("record").scaffolded,
-            "a denied create confirmation must not scaffold the app"
-        );
-
-        // The reclaim must be scoped to `<run>/staging/`. `<run>/` itself is
-        // also home to `validated-selection.json` and the selector
-        // capability, and this arm is NOT terminal for the workflow run: the
-        // user can simply confirm again. Wiping the whole run directory here
-        // turned that retry into `validated_selection_missing`.
-        let run_dir = broker
-            .root
-            .join(".lingxi-build-state/template-candidates")
-            .join(&shell.id)
-            .join(&workflow_run_id);
-        assert!(
-            !run_dir.join("staging").exists(),
-            "the denied run's create staging must be reclaimed: {}",
-            run_dir.join("staging").display()
-        );
-        assert!(
-            run_dir.join("validated-selection.json").exists(),
-            "the run's validated selection must SURVIVE a denial so the user can              retry the same create run: {}",
-            run_dir.join("validated-selection.json").display()
-        );
-        broker
-            .stage_create(json!({
-                "app_id": shell.id,
-                "workflow_run_id": workflow_run_id,
-                "validated_selection_handle": handle,
-                "quality_level": "fast",
-                "name": "Denied create",
-                "brief": "retry after the user denied the first confirmation",
-            }))
-            .await
-            .expect("re-staging the same run after a denial must still resolve the handle");
     }
 
     #[tokio::test]
@@ -20042,7 +19345,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "bind design review surface",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -20096,7 +19399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unscaffolded_create_uses_single_confirmation_then_scaffolds_builds_and_promotes() {
+    async fn unscaffolded_create_scaffolds_builds_and_promotes_from_a_staged_candidate() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let root = TempDir::new().expect("tempdir");
         let service = test_service(&root).await;
@@ -20124,7 +19427,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "full create e2e",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -20190,47 +19493,28 @@ mod tests {
             }
         });
 
-        let request = timeout(Duration::from_secs(2), async {
+        // The retired native create-confirmation sheet is replaced by the LIVE
+        // MCP-proposal approval (`McpProposalApprovalRequested`); this fixture
+        // answers that one. The staged name/brief no longer render on a sheet,
+        // but they must still reach the COMMITTED record (asserted below).
+        let request_id = timeout(Duration::from_secs(2), async {
             loop {
-                if let Some(request) = sink.events().await.into_iter().find_map(|event| {
-                    if let ClientEvent::AppEvent {
-                        event: AppEventDto::CreateConfirmationRequested { request },
-                    } = event
-                    {
-                        Some(request)
-                    } else {
-                        None
-                    }
-                }) {
-                    break request;
+                if let Some(request_id) = broker
+                    .pending_mcp_proposal_approvals
+                    .lock()
+                    .await
+                    .keys()
+                    .next()
+                    .cloned()
+                {
+                    break request_id;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("create confirmation event");
-        assert_eq!(request.app_id, shell.id);
-        assert_eq!(request.selected_template.template_id, "react-dom-r2");
-        assert_eq!(request.initial_tools.len(), 1);
-        // WP5 gate (a): the sheet must carry the staged name/brief, never the
-        // empty shell record's `untitled` placeholder.
-        assert_eq!(request.name, STAGED_NAME, "got: {request:?}");
-        assert_eq!(request.brief, STAGED_BRIEF, "got: {request:?}");
-        assert_ne!(request.name, local_apps::service::PLACEHOLDER_APP_NAME);
-        assert!(
-            !sink.events().await.iter().any(|event| matches!(
-                event,
-                ClientEvent::AppEvent {
-                    event: AppEventDto::McpProposalApprovalRequested { .. }
-                }
-            )),
-            "initial create must use a single native confirmation sheet"
-        );
-        assert!(
-            broker
-                .resolve_create_confirmation(&request.request_id, true)
-                .await
-        );
+        .expect("mcp proposal approval request");
+        assert!(broker.resolve_mcp_proposal_approval(&request_id, true).await);
         let approval = approval_task
             .await
             .expect("approval task")
@@ -20268,7 +19552,7 @@ mod tests {
                 .as_ref()
                 .expect("template origin")
                 .template_id,
-            "react-dom-r2"
+            "react-dom-r4"
         );
         assert!(
             workspace_of(&root, &shell.id).join("app/app.jsx").is_file(),
@@ -20402,7 +19686,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "mcp intent staging e2e",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -20460,29 +19744,28 @@ mod tests {
                     .await
             }
         });
-        let request = timeout(Duration::from_secs(2), async {
+        // The retired create-confirmation sheet was replaced by the LIVE
+        // MCP-proposal approval (`McpProposalApprovalRequested`); a bare
+        // `approve_mcp_proposal` without `create_without_mcp` takes that path.
+        let request_id = timeout(Duration::from_secs(2), async {
             loop {
-                if let Some(request) = sink.events().await.into_iter().find_map(|event| {
-                    if let ClientEvent::AppEvent {
-                        event: AppEventDto::CreateConfirmationRequested { request },
-                    } = event
-                    {
-                        Some(request)
-                    } else {
-                        None
-                    }
-                }) {
-                    break request;
+                if let Some(request_id) = broker
+                    .pending_mcp_proposal_approvals
+                    .lock()
+                    .await
+                    .keys()
+                    .next()
+                    .cloned()
+                {
+                    break request_id;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("create confirmation event");
+        .expect("mcp proposal approval request");
         assert!(
-            broker
-                .resolve_create_confirmation(&request.request_id, true)
-                .await
+            broker.resolve_mcp_proposal_approval(&request_id, true).await
         );
         let approval = approval_task
             .await
@@ -20597,7 +19880,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "declined mcp intent staging",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -20665,7 +19948,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "staged template tamper test",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -20868,11 +20151,12 @@ mod tests {
         // Once the exact lock is represented by a verified shared snapshot,
         // the provenance changes to cached. The selector must not keep
         // claiming that it will use the device bundle.
-        let snapshot = broker.dependency_snapshot_root(&lock_digest);
+        let snapshot = broker.dependency_snapshot_root(&lock_digest, PNPM_TOOLCHAIN_KEY);
         assert!(LocalAppsHostBroker::adopt_bundled_dependency_seed(
             &runtime_root,
             &lock_digest,
             &snapshot,
+            PNPM_TOOLCHAIN_KEY
         )
         .expect("adopt matching seed"));
         assert_eq!(
@@ -21332,16 +20616,15 @@ mod tests {
         drop(contender);
     }
 
-    /// r4-failure-paths-06: a Stop/interrupt during the (up to five-minute)
-    /// native create confirmation must not leave a durable `Prepared`
-    /// candidate journal or candidate file on disk. Before
-    /// `McpCreateCandidateGuard` existed, both cleanup calls lived only in
-    /// the `Ok(false)`/`Err` match arms on the approval result, which a
-    /// dropped future never reaches: the create branch's real future is
-    /// dropped here, mid-await on the native confirmation, and nothing
-    /// further in its body -- `Err` arm included -- ever runs.
+    /// r4-failure-paths-06: a create approval that does NOT complete must not
+    /// leave a durable `Prepared` candidate journal or candidate file on disk.
+    /// The native create-confirmation sheet is retired — a model-driven
+    /// `approve_mcp_proposal` (NativeSheet) is now refused with
+    /// `create_requires_approved_plan` — and by the time that refusal is
+    /// reached `McpCreateCandidateGuard` has already written the `Prepared`
+    /// journal/candidate, so its drop is exactly the cleanup under test.
     #[tokio::test]
-    async fn dropping_the_create_approval_future_cleans_up_the_candidate_state() {
+    async fn a_refused_native_create_approval_cleans_up_the_candidate_state() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
@@ -21358,7 +20641,7 @@ mod tests {
                 "app_id": shell.id.clone(),
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "drop mid create-approval",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -21385,35 +20668,35 @@ mod tests {
 
         let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
 
-        {
-            let mut approving = Box::pin(broker.approve_mcp_proposal(json!({
+        // A model-driven (NativeSheet) create approval is refused by name: the
+        // create authority now comes only from the user's approved plan.
+        let error = broker
+            .approve_mcp_proposal(json!({
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "create_without_mcp": true,
-            })));
-            assert!(
-                timeout(Duration::from_millis(400), &mut approving)
-                    .await
-                    .is_err(),
-                "the transaction must still be IN FLIGHT -- parked on the native \
-                 create-confirmation await, past `save_candidate_journal` -- for its \
-                 drop to be the thing under test"
+            }))
+            .await
+            .expect_err(
+                "a model-driven create approval must be refused: the approved plan is the only \
+                 authority that can seal a create",
             );
-            // ...and here it is dropped, never polled again: nothing further in
-            // its body ever runs, `Err` arm included.
-        }
+        assert!(
+            error.starts_with("create_requires_approved_plan:"),
+            "the refusal must be named, got {error:?}"
+        );
 
         assert!(
             local_apps::load_candidate_journal(&layout).is_err(),
-            "r4-failure-paths-06: a Stop/interrupt during the native create \
-             confirmation must not leave a durable Prepared candidate journal on disk"
+            "r4-failure-paths-06: a create approval that never completes must not leave a \
+             durable Prepared candidate journal on disk"
         );
         assert!(
             broker
                 .load_mcp_candidate(&shell.id, &workflow_run_id)
                 .is_err(),
-            "r4-failure-paths-06: a Stop/interrupt during the native create \
-             confirmation must not leave a durable candidate file on disk"
+            "r4-failure-paths-06: a create approval that never completes must not leave a \
+             durable candidate file on disk"
         );
     }
 
@@ -22359,13 +21642,20 @@ mod tests {
             r#"{"name":"dayjs","version":"1.11.13","license":"MIT"}"#,
         )
         .expect("dayjs package manifest");
-        let snapshot = broker.dependency_snapshot_root(&lock_digest);
-        LocalAppsHostBroker::publish_dependency_snapshot(&snapshot_source, &snapshot, &lock_digest)
-            .expect("preseed exact verified dependency snapshot");
-        assert!(
-            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, &lock_digest)
-                .expect("preseeded snapshot readiness")
-        );
+        let snapshot = broker.dependency_snapshot_root(&lock_digest, PNPM_TOOLCHAIN_KEY);
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &snapshot_source,
+            &snapshot,
+            &lock_digest,
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("preseed exact verified dependency snapshot");
+        assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            &lock_digest,
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("preseeded snapshot readiness"));
 
         let dependency_record = service
             .dependency_record(&shell.id)
@@ -23223,7 +22513,7 @@ mod tests {
             );
         }
         assert!(
-            contract.contains("runtime profile `canvas_2d` revision `2`"),
+            contract.contains("runtime profile `canvas_2d` revision `4`"),
             "the formal contract must mirror the persisted profile identity: {contract}"
         );
         assert!(
@@ -23529,9 +22819,10 @@ mod tests {
     /// r1-prompt-layer-20: the scanner used to run on the two workspace
     /// contracts and nothing else, so the OTHER model-facing text the Host
     /// ships could name a tool that does not exist and stay green forever.
-    /// The `create-local-app` skill and the create workflow script are both
-    /// `include_str!`-able from here and both spell local-app tool names, so
-    /// put them through the same gate.
+    /// The `create-local-app` skill is `include_str!`-able from here and
+    /// spells local-app tool names, so put it through the same gate. (The
+    /// build workflow script it used to scan alongside is retired with that
+    /// workflow.)
     ///
     /// The skill file is the plugin mirror — the copy a plugin-loaded skill
     /// actually reads. `verify-local-app-supply-chain.py`'s
@@ -23541,25 +22832,14 @@ mod tests {
     fn shipped_prompt_files_name_no_tool_outside_local_app_tools() {
         let skill =
             include_str!("../../../plugins/lingxi-local-app/skills/create-local-app/SKILL.md");
-        let workflow =
-            include_str!("../../../plugins/lingxi-local-app/workflows/local-app-build.js");
-        // Vacuity guards: a gate that scans the wrong file, or a file that
+        // Vacuity guard: a gate that scans the wrong file, or a file that
         // stopped naming tools at all, must not read as "all clear".
         assert!(
             skill.contains("name: create-local-app"),
             "read the wrong file for the create skill"
         );
-        assert!(
-            workflow.contains("LocalAppStageCreate"),
-            "read the wrong file for the create workflow, or it stopped naming local-app tools"
-        );
         assert_only_real_tool_names(skill, "create-local-app/SKILL.md");
         assert_only_real_local_app_tool_tokens(skill, "create-local-app/SKILL.md");
-        // NOT the backtick scanner for the workflow: its backticks delimit
-        // whole JS template literals, so every tool name it spells sits mid-
-        // span where the leading-run tokeniser cannot reach it. The token
-        // scanner is what actually covers this file.
-        assert_only_real_local_app_tool_tokens(workflow, "local-app-build.js");
     }
 
     /// r1-prompt-layer-20, re-opened: the other Host-authored, model-facing
@@ -23705,7 +22985,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("the token scanner's panic carried no message"))
         }
         assert_only_real_local_app_tool_tokens(
-            "then call LocalAppStageCreate and LocalAppScaffold.",
+            "then call LocalAppScaffold and LocalAppBuild.",
             "the token positive control",
         );
         for (sample, needle) in [
@@ -24080,7 +23360,7 @@ mod tests {
                 "app_id": shell.id,
                 "workflow_run_id": workflow_run_id,
                 "catalog_digest": catalog.catalog_digest,
-                "template_id": "react-dom-r2",
+                "template_id": "react-dom-r4",
                 "reason": "attempt to resurface a formed app",
                 "rejected": [],
                 "selector_capability": selector_capability,
@@ -24186,7 +23466,7 @@ mod tests {
                     "app_id": app_id,
                     "workflow_run_id": workflow_run_id,
                     "catalog_digest": catalog.catalog_digest,
-                    "template_id": "react-dom-r2",
+                    "template_id": "react-dom-r4",
                     "reason": "stage_create bound test",
                     "rejected": [],
                     "selector_capability": selector_capability,
@@ -24459,36 +23739,61 @@ mod tests {
         fs::write(source.join("vite/bin/vite.js"), b"vite").expect("vite marker");
         fs::write(source.join("react.js"), b"react").expect("dependency");
         let snapshot = root.path().join("cache/snapshot");
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("publish snapshot");
-        assert!(
-            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("validate snapshot")
-        );
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("publish snapshot");
+        assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("validate snapshot"));
         let marker = snapshot.join(DEPENDENCY_SNAPSHOT_READY_FILE);
         fs::remove_file(&marker).expect("remove marker for malformed-cache probe");
         fs::write(&marker, [0xff]).expect("write malformed snapshot marker");
-        assert!(
-            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("malformed marker is a safe miss")
-        );
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("rebuild snapshot with malformed marker");
+        assert!(!LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("malformed marker is a safe miss"));
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("rebuild snapshot with malformed marker");
         fs::remove_file(snapshot.join("node_modules/react.js"))
             .expect("remove read-only file for corruption probe");
         fs::write(snapshot.join("node_modules/react.js"), b"tampered")
             .expect("replace snapshot dependency bytes");
         assert!(
-            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("revalidate modified snapshot"),
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                "lock-digest",
+                PNPM_TOOLCHAIN_KEY
+            )
+            .expect("revalidate modified snapshot"),
             "an earlier successful lookup must not memoize trust after tree bytes change"
         );
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("rebuild modified snapshot");
-        assert!(
-            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("validate rebuilt snapshot")
-        );
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("rebuild modified snapshot");
+        assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("validate rebuilt snapshot"));
         let invalid_package = snapshot.join("node_modules/untrusted");
         fs::create_dir_all(&invalid_package).expect("invalid cached package directory");
         fs::write(
@@ -24497,20 +23802,36 @@ mod tests {
         )
         .expect("invalid cached package manifest");
         assert!(
-            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("invalid cached tree is a safe miss"),
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                "lock-digest",
+                PNPM_TOOLCHAIN_KEY
+            )
+            .expect("invalid cached tree is a safe miss"),
             "a cached tree that fails dependency validation must be rebuilt, not trusted"
         );
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("rebuild invalid cached tree");
-        assert!(
-            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("validate tree after invalid-cache rebuild")
-        );
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("rebuild invalid cached tree");
+        assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("validate tree after invalid-cache rebuild"));
         fs::write(source.join("react.js"), b"replacement source")
             .expect("change later source tree");
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("a valid snapshot is already published");
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("a valid snapshot is already published");
         assert_eq!(
             fs::read(snapshot.join("node_modules/react.js")).expect("published dependency"),
             b"react",
@@ -24536,13 +23857,14 @@ mod tests {
             .expect("attestation directory");
         fs::write(
             &attestation_path,
-            dependency_attestation("lock-digest", &tree_digest),
+            dependency_attestation("lock-digest", &tree_digest, PNPM_TOOLCHAIN_KEY),
         )
         .expect("workspace attestation");
         assert!(LocalAppsHostBroker::workspace_dependencies_match_snapshot(
             &workspace,
             &snapshot,
             "lock-digest",
+            PNPM_TOOLCHAIN_KEY
         )
         .expect("match attested workspace dependencies"));
     }
@@ -24556,8 +23878,13 @@ mod tests {
         write_fixture_package_manifest(&source, "vite", "6.0.0");
         write_fixture_package_manifest(&source, "react", "19.2.8");
         let snapshot = root.path().join("cache/snapshot");
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("publish snapshot");
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("publish snapshot");
         assert!(
             dependency_snapshot_inventory_path(&snapshot).is_file(),
             "verified snapshots carry their package inventory beside the immutable tree"
@@ -24617,12 +23944,21 @@ mod tests {
         )
         .expect("write inventory with unknown field");
         assert!(
-            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("unknown inventory fields are a cache miss"),
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                "lock-digest",
+                PNPM_TOOLCHAIN_KEY
+            )
+            .expect("unknown inventory fields are a cache miss"),
             "unbound sidecar fields must not sit outside the inventory digest"
         );
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("an inventory with unknown fields must be rebuilt");
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("an inventory with unknown fields must be rebuilt");
 
         let mut noncanonical: VerifiedDependencyInventory =
             serde_json::from_slice(&fs::read(&inventory_path).expect("inventory"))
@@ -24637,12 +23973,21 @@ mod tests {
         )
         .expect("write reordered inventory");
         assert!(
-            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("noncanonical inventory is a cache miss"),
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                "lock-digest",
+                PNPM_TOOLCHAIN_KEY
+            )
+            .expect("noncanonical inventory is a cache miss"),
             "an inventory with a valid self-digest must still use canonical package ordering"
         );
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("a noncanonical sidecar must rebuild from the verified source tree");
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("a noncanonical sidecar must rebuild from the verified source tree");
 
         let mut inventory: Value =
             serde_json::from_slice(&fs::read(&inventory_path).expect("inventory"))
@@ -24655,15 +24000,28 @@ mod tests {
         )
         .expect("tamper inventory");
         assert!(
-            !LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("tampered inventory is a cache miss"),
+            !LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                "lock-digest",
+                PNPM_TOOLCHAIN_KEY
+            )
+            .expect("tampered inventory is a cache miss"),
             "a sidecar with mismatched provenance must not create ready trust"
         );
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("a malformed sidecar must rebuild from the verified source tree");
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("a malformed sidecar must rebuild from the verified source tree");
         assert!(
-            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("rebuilt snapshot"),
+            LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                "lock-digest",
+                PNPM_TOOLCHAIN_KEY
+            )
+            .expect("rebuilt snapshot"),
             "rebuilding a bad cache must restore a verified snapshot"
         );
     }
@@ -24741,6 +24099,33 @@ mod tests {
         let error = validate_dependency_tree(root.path().join("node_modules").as_path())
             .expect_err("symlink target native addon must be rejected");
         assert!(error.contains("native Node addon"), "{error}");
+    }
+
+    #[test]
+    fn dependency_native_bindings_accept_each_pinned_version_only() {
+        for (package, version, binary) in TRUSTED_TOOLCHAIN_NATIVE_BINDINGS {
+            let root = TempDir::new().unwrap();
+            let node_modules = root.path().join("node_modules");
+            let package_dir = node_modules.join(package);
+            fs::create_dir_all(&package_dir).unwrap();
+            fs::write(package_dir.join(binary), b"\x7fELFfixture").unwrap();
+            fs::write(
+                package_dir.join("package.json"),
+                serde_json::to_vec(&json!({"name": package, "version": version})).unwrap(),
+            )
+            .unwrap();
+            validate_dependency_tree(&node_modules)
+                .unwrap_or_else(|error| panic!("{package}@{version}: {error}"));
+            fs::write(
+                package_dir.join("package.json"),
+                serde_json::to_vec(&json!({"name": package, "version": "99.0.0"})).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                validate_dependency_tree(&node_modules).is_err(),
+                "unreviewed {package} version must fail"
+            );
+        }
     }
 
     #[test]
@@ -24863,6 +24248,208 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn dependency_install_preserves_current_toolchain_and_cache_identity() {
+        use crate::local_apps_build::{scaffold_workspace, LocalAppBuildTarget};
+        for target in [
+            LocalAppBuildTarget::ReactDomR4,
+            LocalAppBuildTarget::Canvas2dR4,
+        ] {
+            let toolchain = RuntimeToolchain::Current;
+            let root = TempDir::new().unwrap();
+            let service = test_service(&root).await;
+            let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+            let broker = LocalAppsHostBroker::new(
+                root.path().to_path_buf(),
+                MockSink::arc(),
+                Some(runtime.clone()),
+                false,
+                None,
+            );
+            assert!(broker.attach_service(service.clone()).is_ok());
+            let shell = shell_app_fixture(&broker, &service).await;
+            let layout = broker.layout(&shell.id).unwrap();
+            scaffold_workspace(&layout, target).unwrap();
+            let workspace = layout.root().join(layout.workspace_rel());
+            let widget_path = "app/mcp-widget/package.json";
+            let staged = LocalAppsHostBroker::prepare_dependency_staging(&layout).unwrap();
+            assert_eq!(
+                staged.join(widget_path).exists(),
+                toolchain == RuntimeToolchain::Current,
+                "the current workspace stages the widget importer"
+            );
+            let before = fs::read(workspace.join("pnpm-workspace.yaml")).unwrap();
+            let completion = broker
+                .dependency_install_once(&layout, &shell.id)
+                .await
+                .expect("install with exact pinned toolchain");
+            assert_eq!(completion.toolchain_key, toolchain.key());
+            let requests = runtime.isolated_requests().await;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].command, toolchain.pnpm_command());
+            assert_eq!(
+                requests[0].env.get("PATH").map(String::as_str),
+                Some(toolchain.path())
+            );
+            assert_eq!(
+                fs::read(workspace.join("pnpm-workspace.yaml")).unwrap(),
+                before,
+                "dependency installation must not rewrite the pinned workspace contract"
+            );
+            let snapshot =
+                broker.dependency_snapshot_root(&completion.lockfile_sha256, toolchain.key());
+            assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                &completion.lockfile_sha256,
+                toolchain.key()
+            )
+            .unwrap());
+            let other = "unrecognized-toolchain";
+            assert_ne!(
+                snapshot,
+                broker.dependency_snapshot_root(&completion.lockfile_sha256, other)
+            );
+            assert!(
+                !LocalAppsHostBroker::dependency_snapshot_is_ready(
+                    &snapshot,
+                    &completion.lockfile_sha256,
+                    other
+                )
+                .unwrap(),
+                "another toolchain cannot trust this marker/inventory"
+            );
+            let manifest = load_manifest(&layout).unwrap();
+            assert_eq!(
+                manifest.dependency_snapshot.unwrap().toolchain_key,
+                toolchain.key()
+            );
+            assert!(
+                fs::read_to_string(workspace.join(WORKSPACE_DEPENDENCY_ATTESTATION_FILE))
+                    .unwrap()
+                    .contains(toolchain.key())
+            );
+            let warm = broker
+                .dependency_install_once(&layout, &shell.id)
+                .await
+                .expect("same-toolchain warm cache");
+            assert_eq!(warm.toolchain_key, toolchain.key());
+            assert_eq!(
+                runtime.isolated_requests().await.len(),
+                1,
+                "warm snapshot must not reinstall"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dependency_staging_preserves_the_pinned_widget_importer() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            Some(MockMobileLinuxRuntime::new(Duration::ZERO)),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(
+                    &broker,
+                    &shell.id,
+                    "Widget staging",
+                    "widget test",
+                    "dom",
+                )
+                .await,
+            )
+            .await
+            .expect("scaffold");
+        let layout = broker.layout(&shell.id).expect("layout");
+        let workspace = layout.root().join(layout.workspace_rel());
+        let path = "app/mcp-widget/package.json";
+        let expected = fs::read(workspace.join(path)).expect("seeded widget manifest");
+        let staging =
+            LocalAppsHostBroker::prepare_dependency_staging(&layout).expect("stage dependencies");
+        assert_eq!(fs::read(staging.join(path)).unwrap(), expected);
+        fs::write(
+            workspace.join(path),
+            b"{\"dependencies\":{\"unapproved\":\"1.0.0\"}}",
+        )
+        .unwrap();
+        assert!(!LocalAppsHostBroker::dependency_inputs_match(&layout).unwrap());
+        let staging = LocalAppsHostBroker::prepare_dependency_staging(&layout)
+            .expect("stage pinned dependencies");
+        assert_eq!(
+            fs::read(staging.join(path)).unwrap(),
+            expected,
+            "editable metadata cannot introduce unapproved dependencies"
+        );
+    }
+
+    #[test]
+    fn pnpm_lock_documents_preserve_legacy_and_reject_ambiguous_graphs() {
+        let legacy = include_bytes!(
+            "../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/pnpm-lock.yaml"
+        );
+        let legacy_package = include_bytes!(
+            "../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/package.json"
+        );
+        validate_resolved_dependency_lock(legacy_package, legacy)
+            .expect("pnpm 11 single-document lock");
+        let current = include_str!(
+            "../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/pnpm-lock.yaml"
+        );
+        let package = include_bytes!(
+            "../../../plugins/lingxi-local-app/assets/templates/react-dom/r4/package.json"
+        );
+        validate_resolved_dependency_lock(package, current.as_bytes())
+            .expect("pnpm 12 configuration plus dependency documents");
+        let docs: Vec<_> = current
+            .split("---\n")
+            .filter(|doc| !doc.trim().is_empty())
+            .collect();
+        assert_eq!(docs.len(), 2);
+        for (input, reason) in [
+            (
+                format!("{current}\n---\n{}", docs[1]),
+                "multiple dependency documents",
+            ),
+            (
+                format!("---\n{}---\n{}---\n{}", docs[0], docs[0], docs[1]),
+                "ambiguous configuration documents",
+            ),
+            (
+                format!("---\n{}---\n{}", docs[1], docs[0]),
+                "ambiguous configuration documents",
+            ),
+            (
+                format!("{current}\nimporters:\n  .:\n    dependencies:\n"),
+                "repeats the importers map",
+            ),
+            (
+                format!(
+                    "---\n{}\nimporters:\n  .:\n    configDependencies: {{}}\n---\n{}",
+                    docs[0], docs[1]
+                ),
+                "repeats the importers map",
+            ),
+            (
+                current.replace(
+                    "specifier: 19.3.0",
+                    "specifier: 19.3.0\n        specifier: 19.3.0",
+                ),
+                "repeats the specifier",
+            ),
+        ] {
+            let error = validate_resolved_dependency_lock(package, input.as_bytes())
+                .expect_err("ambiguous or malformed locks fail closed");
+            assert!(error.contains(reason), "{error}");
+        }
+    }
+
     #[test]
     fn resolved_dependency_lock_must_match_effective_root_specifiers() {
         let binding = crate::local_app_runtime_profiles::current_binding_for_family(
@@ -24926,12 +24513,19 @@ mod tests {
             .expect("bin shim");
 
         let snapshot = root.path().join("cache/snapshot");
-        LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-            .expect("a pnpm tree with internal bin shims must publish");
-        assert!(
-            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("validate snapshot")
-        );
+        LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("a pnpm tree with internal bin shims must publish");
+        assert!(LocalAppsHostBroker::dependency_snapshot_is_ready(
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY
+        )
+        .expect("validate snapshot"));
 
         let staging = root.path().join("staging");
         fs::create_dir_all(&staging).expect("staging");
@@ -24969,9 +24563,13 @@ mod tests {
             .expect("escaping shim");
 
         let snapshot = root.path().join("cache/snapshot");
-        let error =
-            LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-                .expect_err("an escaping shim must not publish");
+        let error = LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect_err("an escaping shim must not publish");
         assert!(error.contains("escapes the tree"), "{error}");
         assert!(
             !snapshot.join("node_modules/.bin/exfil").exists(),
@@ -24994,9 +24592,13 @@ mod tests {
             .expect("absolute shim");
 
         let snapshot = root.path().join("cache/snapshot");
-        let error =
-            LocalAppsHostBroker::publish_dependency_snapshot(&source, &snapshot, "lock-digest")
-                .expect_err("an absolute shim must not publish");
+        let error = LocalAppsHostBroker::publish_dependency_snapshot(
+            &source,
+            &snapshot,
+            "lock-digest",
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect_err("an absolute shim must not publish");
         assert!(error.contains("must be relative"), "{error}");
     }
 
@@ -25102,14 +24704,22 @@ mod tests {
         let seed = create_bundled_seed(root.path(), "lock-digest");
         let snapshot = root.path().join("cache/snapshot");
 
-        let adopted =
-            LocalAppsHostBroker::adopt_bundled_dependency_seed(&seed, "lock-digest", &snapshot)
-                .expect("adopt bundled seed");
+        let adopted = LocalAppsHostBroker::adopt_bundled_dependency_seed(
+            &seed,
+            "lock-digest",
+            &snapshot,
+            PNPM_TOOLCHAIN_KEY,
+        )
+        .expect("adopt bundled seed");
 
         assert!(adopted, "a matching seed must be adopted");
         assert!(
-            LocalAppsHostBroker::dependency_snapshot_is_ready(&snapshot, "lock-digest")
-                .expect("validate adopted snapshot"),
+            LocalAppsHostBroker::dependency_snapshot_is_ready(
+                &snapshot,
+                "lock-digest",
+                PNPM_TOOLCHAIN_KEY
+            )
+            .expect("validate adopted snapshot"),
             "the adopted snapshot must satisfy the same readiness check a real install produces"
         );
         assert!(
@@ -25134,6 +24744,7 @@ mod tests {
             &seed,
             "the-apps-own-digest",
             &snapshot,
+            PNPM_TOOLCHAIN_KEY,
         )
         .expect("evaluate bundled seed");
 
@@ -25153,6 +24764,7 @@ mod tests {
             &root.path().join("no-such-bundle"),
             "lock-digest",
             &root.path().join("cache/snapshot"),
+            PNPM_TOOLCHAIN_KEY,
         )
         .expect("absent seed must not be an error");
         assert!(!adopted);

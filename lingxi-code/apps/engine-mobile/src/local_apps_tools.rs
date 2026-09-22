@@ -52,27 +52,21 @@ use crate::local_apps_mcp::LocalAppsMcpTransport;
 /// table for every tool in the product, rather than a second policy here.
 pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
     // Read-only unless noted; the state-journaling entries below are `false`.
-    // `LocalAppValidateTemplateSelection`, `LocalAppStageCreate`,
     // `LocalAppValidateMcpProposal`, `LocalAppApproveMcpProposal`,
     // `LocalAppQaMcpCandidate` and `LocalAppPromoteMcpCandidate` journal Host
-    // state in the create/MCP-authoring pipeline; `LocalAppEvents` drains a
+    // state in the MCP-authoring pipeline; `LocalAppEvents` drains a
     // queue (its own note below). The header groups by PIPELINE STAGE, not by
     // the `is_read_only` flag each row carries; read the third column.
     ("LocalAppList", "list", true),
     ("LocalAppGet", "get", true),
     ("LocalAppRuntimeProfiles", "runtime_profiles", true),
     ("LocalAppTemplateCatalog", "template_catalog", true),
-    (
-        "LocalAppValidateTemplateSelection",
-        "validate_template_selection",
-        false,
-    ),
-    (
-        "LocalAppResolveTemplateSelection",
-        "resolve_template_selection",
-        true,
-    ),
-    ("LocalAppStageCreate", "stage_create", false),
+    // The plan-driven create/modify step. It is the operation that LANDS a
+    // template (create) or stages a new authoring contract (modify), so it is
+    // emphatically not read-only — but the bytes it lands are the ones the user
+    // approved in the plan, not the ones this call names: `name`, `brief`,
+    // `spec` and `template_id` are read from the Host's own approval record.
+    ("LocalAppPrepare", "prepare", false),
     ("LocalAppContract", "contract", false),
     (
         "LocalAppValidateMcpProposal",
@@ -210,7 +204,7 @@ pub fn local_app_builtin_tools(
     // host-owned LINGXI.md binding and the tool permission refinement can
     // scope calls to that app. Chat's existing session allowlist remains the
     // policy boundary; this function is used by the Code/mobile host path.
-    const GLOBAL_LOCAL_APP_TOOLS: &[&str] = &["LocalAppCreate", "LocalAppList", "LocalAppGet"];
+    const GLOBAL_LOCAL_APP_TOOLS: &[&str] = &["LocalAppCreate", "LocalAppList", "LocalAppGet", "LocalAppPrepare"];
     let global_session = session_app_id.is_none();
     let catalog = LocalAppsMcpTransport::host_tool_catalog();
     LOCAL_APP_TOOLS
@@ -257,8 +251,6 @@ impl LocalAppTool {
                 | "LocalAppCheckpointList"
                 | "LocalAppBackgroundList"
                 | "LocalAppBackgroundStatus"
-                | "LocalAppResolveTemplateSelection"
-                | "LocalAppStageCreate"
                 | "LocalAppBuild"
                 | "LocalAppRuntime"
                 // Allow-by-default so the shell conversation's ONE way out
@@ -268,6 +260,16 @@ impl LocalAppTool {
                 // it could commit a name, a brief and an IMMUTABLE surface onto
                 // a stranger's app with no prompt at all.
                 | "LocalAppScaffold"
+                // The plan-driven create/modify step, and the same hazard as
+                // `LocalAppScaffold`: its default row is `AllowByDefault`
+                // because the approval of the PLAN is the create confirmation,
+                // and `defaults_per_tool`'s comment promises this refinement
+                // ("In a session NOT bound to an app workspace
+                // `LocalAppTool::check_permissions` still refines this to Ask,
+                // which is the create case — a global chat naming an app id").
+                // Without this row a global chat can name ANY app id and land
+                // the approved plan's template on it with no prompt at all.
+                | "LocalAppPrepare"
         )
     }
 }
@@ -346,8 +348,7 @@ impl Tool for LocalAppTool {
     /// (ten minutes), not an open-ended build — and buys the guarantee
     /// that the model always learns the outcome of the mutation it just
     /// caused, instead of leaving durable state an engine restart must repair.
-    fn interrupt_behavior(&self, input: &Value) -> InterruptBehavior {
-        let _ = input;
+    fn interrupt_behavior(&self, _input: &Value) -> InterruptBehavior {
         if self.operation == "create" || self.operation == "scaffold" {
             InterruptBehavior::Block
         } else {
@@ -1033,9 +1034,14 @@ mod tests {
         let names: std::collections::BTreeSet<&str> = built.iter().map(|t| t.name()).collect();
         assert_eq!(
             names,
-            ["LocalAppCreate", "LocalAppGet", "LocalAppList"]
-                .into_iter()
-                .collect()
+            [
+                "LocalAppCreate",
+                "LocalAppGet",
+                "LocalAppList",
+                "LocalAppPrepare"
+            ]
+            .into_iter()
+            .collect()
         );
     }
 
@@ -1083,8 +1089,7 @@ mod tests {
                     | "LocalAppGet"
                     | "LocalAppRuntimeProfiles"
                     | "LocalAppTemplateCatalog"
-                    | "LocalAppResolveTemplateSelection"
-                    | "LocalAppStageCreate"
+                    | "LocalAppPrepare"
                     | "LocalAppContract"
                     | "LocalAppLogs"
                     | "LocalAppCheckpointList"

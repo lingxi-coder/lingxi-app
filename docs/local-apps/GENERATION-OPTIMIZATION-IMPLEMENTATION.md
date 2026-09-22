@@ -253,8 +253,8 @@ There is no legacy free-form specification fallback in this unpublished flow.
 Canvas design additionally names scene, phases, controls and HUD. Renderer/profile
 identity is never accepted inside the authoring spec. Host wraps the spec in
 `AppAuthoringContract { version, revision, app_id, runtime_profile, spec }` and hashes
-canonical bytes. Designer returns only the `design` subtree; confirmed product,
-targets, UI intent, and acceptance requirements cannot be silently rewritten.
+canonical bytes. The approved plan is the only source of the product, targets, UI
+intent and acceptance requirements, so those cannot be silently rewritten.
 
 `LocalAppContract` accepts `operation=get|stage`, `app_id`, and for staging
 `workflow_run_id`, `spec`, optional `base_contract_sha256`, and the existing
@@ -445,16 +445,15 @@ Additional checks from the repository root:
 python3 lingxi-code/scripts/check-phase2-plugin.py
 python3 lingxi-code/scripts/check-phase6-plugin.py
 python3 lingxi-code/scripts/check-phase7-plugin.py
-python3 lingxi-code/scripts/check-local-app-optimization.py
 bash lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh
 python3 clients/translations/generate.py --check
 git diff --check
 ```
 
 The translation command is deliberately still a failing baseline gate, as
-explained above. The optional optimization source-proxy script needs the baseline
-Git object available; the authoritative Rust loader regression instead stores
-its measured baseline fixture and does not need to fetch repository history.
+explained above. The optimization source-proxy script was retired with the build
+workflow it measured; the authoritative Rust loader regression remains and does
+not need to fetch repository history.
 
 ## Narrow shared-task integration
 

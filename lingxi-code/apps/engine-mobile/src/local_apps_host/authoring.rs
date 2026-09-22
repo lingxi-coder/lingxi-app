@@ -684,36 +684,6 @@ fn concise_text(value: &str, max_chars: usize) -> String {
 }
 
 impl LocalAppsHostBroker {
-    pub(crate) fn authoring_ui_confirmation_summary(
-        &self,
-        layout: &local_apps::AppLayout,
-        workflow_run_id: &str,
-    ) -> Result<String, String> {
-        let candidate = local_apps::load_authoring_candidate(layout)
-            .map_err(|error| format!("authoring_candidate_invalid: {error}"))?;
-        if candidate.workflow_run_id != workflow_run_id {
-            return Err("authoring_candidate_invalid: workflow binding mismatch".into());
-        }
-        let ui = &candidate.contract.spec.ui;
-        let mut structure = ui
-            .structure
-            .iter()
-            .take(3)
-            .map(|item| concise_text(item, 48))
-            .collect::<Vec<_>>()
-            .join(" → ");
-        if ui.structure.len() > 3 {
-            structure.push_str(" → …");
-        }
-        Ok(format!(
-            "Confirmed UI: structure {structure}; theme {} with {}; style {}, {}.",
-            concise_text(&ui.theme.mode, 32),
-            concise_text(&ui.theme.accent, 32),
-            concise_text(&ui.style.direction, 48),
-            concise_text(&ui.style.density, 32),
-        ))
-    }
-
     pub(crate) async fn begin_qa_action(&self, input: &Value) -> Result<Option<String>, String> {
         let Some((event_id, guard)) = self.begin_qa_action_with_guard(input).await? else {
             return Ok(None);

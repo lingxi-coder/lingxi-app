@@ -28,5 +28,5 @@ Reviewed: 2026-08-27
 
 - Ionic React docs: https://ionicframework.com/docs/react
 - LingXi Local Apps handoff: `docs/local-apps/HANDOFF.md`
-- Local App runtime package: `lingxi-code/plugins/lingxi-local-app/assets/templates/react-dom/r1/package.json`
-- LingXi provider: `lingxi-code/plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/lingxi-provider.jsx`
+- Local App runtime package: `lingxi-code/plugins/lingxi-local-app/assets/templates/react-dom/r4/package.json`
+- LingXi provider: `lingxi-code/plugins/lingxi-local-app/assets/templates/react-dom/r4/lib/lingxi-provider.jsx`

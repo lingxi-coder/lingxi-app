@@ -22,4 +22,4 @@ Reviewed: 2026-08-27
 
 - Three.js docs: https://threejs.org/docs/
 - Three.js disposal guide: https://threejs.org/manual/en/how-to-dispose-of-objects.html
-- Local App runtime package: `lingxi-code/plugins/lingxi-local-app/assets/templates/three-3d/r1/package.json`
+- Local App runtime package: `lingxi-code/plugins/lingxi-local-app/assets/templates/three-3d/r4/package.json`

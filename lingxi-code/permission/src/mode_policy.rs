@@ -69,6 +69,15 @@ const PLAN_SAFE_TOOLS: &[&str] = &[
     "LocalAppCheckpointList",
     "LocalAppBackgroundList",
     "LocalAppBackgroundStatus",
+    // The plan-driven create has to NAME a template while planning, and these
+    // two are how a planner sees the catalog and the runtime profiles without
+    // guessing. Both only read: `template_catalog` returns the redacted
+    // Host-verified view and `runtime_profiles` the published catalog. The
+    // operation that ACTS on a choice (`LocalAppPrepare`) stays absent on
+    // purpose, so Plan mode can still only look — approving the plan is what
+    // authorizes the landing.
+    "LocalAppTemplateCatalog",
+    "LocalAppRuntimeProfiles",
     // Plan mode / UI.
     "AskUserQuestion",
     "EnterPlanMode",

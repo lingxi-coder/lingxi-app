@@ -726,6 +726,7 @@ async fn subagent_near_limit_wrap_up_is_exact_and_dispatches_once_through_wrappe
         platform_api::WorkflowQueryWatchdog {
             stall_timeout_ms: 1_000,
             max_retries: 0,
+            retry_response_body: false,
         },
         Vec::new(),
     ));
@@ -868,6 +869,7 @@ async fn workflow_watchdog_times_out_stream_open() {
     let policy = platform_api::WorkflowQueryWatchdog {
         stall_timeout_ms: 10,
         max_retries: 0,
+        retry_response_body: false,
     };
     let result = await_workflow_query_phase::<(), _>(
         async {
@@ -891,6 +893,7 @@ async fn workflow_watchdog_times_out_before_first_event() {
         Some(platform_api::WorkflowQueryWatchdog {
             stall_timeout_ms: 10,
             max_retries: 0,
+            retry_response_body: false,
         }),
     );
     let event = watched.next().await.expect("watchdog error event");
@@ -917,6 +920,7 @@ async fn workflow_watchdog_resets_between_events_and_has_no_total_deadline() {
         Some(platform_api::WorkflowQueryWatchdog {
             stall_timeout_ms: 20,
             max_retries: 0,
+            retry_response_body: false,
         }),
     );
     let events = watched.collect::<Vec<_>>().await;
@@ -960,6 +964,7 @@ async fn workflow_watchdog_does_not_cover_tool_execution() {
             platform_api::WorkflowQueryWatchdog {
                 stall_timeout_ms: 10,
                 max_retries: 0,
+                retry_response_body: false,
             },
             Vec::new(),
         ));
@@ -1034,6 +1039,7 @@ async fn workflow_watchdog_retries_five_times_then_fails_without_partial_salvage
             platform_api::WorkflowQueryWatchdog {
                 stall_timeout_ms: 10,
                 max_retries: 5,
+                retry_response_body: false,
             },
             vec![observer_dyn],
         ));
@@ -2574,6 +2580,7 @@ async fn workflow_watchdog_wrapper_threads_opts_to_the_inner_client() {
             platform_api::WorkflowQueryWatchdog {
                 stall_timeout_ms: 60_000,
                 max_retries: 0,
+                retry_response_body: false,
             },
             Vec::new(),
         ));
@@ -4764,6 +4771,7 @@ struct ResultStreamMockApiClient {
     calls: AtomicUsize,
     histories: Mutex<Vec<Vec<ConversationMessage>>>,
     retry_stop: Mutex<Option<Arc<ParseRetryStop>>>,
+    workflow_watchdog: Option<platform_api::WorkflowQueryWatchdog>,
 }
 impl ResultStreamMockApiClient {
     fn new(turns: Vec<Vec<Result<llm_client::LlmEvent, llm_client::LlmError>>>) -> Arc<Self> {
@@ -4772,6 +4780,7 @@ impl ResultStreamMockApiClient {
             calls: AtomicUsize::new(0),
             histories: Mutex::new(Vec::new()),
             retry_stop: Mutex::new(None),
+            workflow_watchdog: None,
         })
     }
     fn call_count(&self) -> usize {
@@ -4780,6 +4789,29 @@ impl ResultStreamMockApiClient {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
+    fn workflow_query_watchdog(&self) -> Option<platform_api::WorkflowQueryWatchdog> {
+        self.workflow_watchdog
+    }
+
+    // Accept registered contexts so the scripted malformed response reaches
+    // the runner's ownership guard instead of the trait's adapter guard.
+    async fn messages_create_stream_in_opts(
+        &self,
+        model: &str,
+        _profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+        _opts: crate::api::SubagentApiCallOpts,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+        llm_client::LlmError,
+    > {
+        self.messages_create_stream(model, system, messages, tools, effort)
+            .await
+    }
+
     async fn observe_workflow_query_retry(&self, agent_id: AgentId, attempt: u32, reason: String) {
         let stop = self.retry_stop.lock().unwrap().clone();
         if let Some(stop) = stop {
@@ -4845,6 +4877,307 @@ fn partial_text_then_err(
         Ok(LlmEvent::ContentBlockStop { index: 0 }),
         Err(err),
     ]
+}
+
+fn response_body_transport_error() -> llm_client::LlmError {
+    llm_client::LlmError::Transport {
+        message: "connection failed: error decoding response body".into(),
+    }
+}
+
+#[tokio::test]
+async fn generic_workflow_does_not_retry_response_body_transport_errors() {
+    let api = ResultStreamMockApiClient::new(vec![
+        vec![Err(response_body_transport_error())],
+        valid_design_turn(),
+    ]);
+    let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+        api.clone(),
+        platform_api::WorkflowQueryWatchdog::default(),
+        Vec::new(),
+    ));
+    let ctx = loop_ctx(wrapped, None, 6);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(api.call_count(), 1);
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Failed { error, .. } if error.contains("error decoding response body")
+    )));
+}
+
+#[tokio::test]
+async fn generic_workflow_watchdog_preserves_server_content_retry_and_usage_behavior() {
+    let api = ResultStreamMockApiClient::new(vec![
+        vec![
+            Ok(ev_message_start()),
+            Ok(LlmEvent::ContentBlockStart {
+                index: 0,
+                content_block: llm_client::ContentBlock::ServerToolUse {
+                    id: "server-1".into(),
+                    name: "remote_action".into(),
+                    input: serde_json::json!({}),
+                },
+            }),
+            Err(workflow_watchdog_timeout_error(
+                "waiting for the next response event",
+                Duration::from_secs(1),
+            )),
+        ],
+        streamed_text_turn("done", "end_turn")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+    ]);
+    let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+        api.clone(),
+        platform_api::WorkflowQueryWatchdog::default(),
+        Vec::new(),
+    ));
+    let ctx = loop_ctx(wrapped, None, 6);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(
+        api.call_count(),
+        2,
+        "default watchdog behavior is unchanged"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SubagentEvent::Completed {
+                usage_complete: true,
+                ..
+            }
+        )),
+        "events: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn local_app_create_transport_retry_preserves_completed_scaffold_and_read() {
+    let api = ResultStreamMockApiClient::new(vec![
+        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        streamed_tool_use_turn("Read", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        partial_text_then_err("Preparing source", response_body_transport_error()),
+        valid_design_turn(),
+    ]);
+    let observer = Arc::new(RetryObserver::default());
+    let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+        api.clone(),
+        platform_api::WorkflowQueryWatchdog {
+            stall_timeout_ms: 60_000,
+            max_retries: 1,
+            retry_response_body: true,
+        },
+        vec![observer.clone()],
+    ));
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(wrapped, Some(invoker.clone()), 6);
+    enable_design_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+
+    assert_eq!(api.call_count(), 4, "retry the interrupted model request");
+    assert_eq!(invoker.call_count(), 2, "never replay scaffold or read");
+    let histories = api.histories.lock().unwrap();
+    assert_eq!(histories[2], histories[3]);
+    drop(histories);
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Completed { result, usage_complete: false, .. }
+            if result == &serde_json::json!({"design": {}})
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while observer.attempts.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry observer delivered");
+    assert_eq!(*observer.attempts.lock().unwrap(), vec![2]);
+}
+
+#[tokio::test]
+async fn local_app_create_transport_retry_shares_watchdog_limit_and_fails_closed() {
+    let api = ResultStreamMockApiClient::new(vec![
+        vec![Err(response_body_transport_error())],
+        vec![Err(workflow_watchdog_timeout_error(
+            "waiting for the next response event",
+            Duration::from_secs(1),
+        ))],
+        vec![Err(response_body_transport_error())],
+        valid_design_turn(),
+    ]);
+    let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+        api.clone(),
+        platform_api::WorkflowQueryWatchdog {
+            stall_timeout_ms: 60_000,
+            max_retries: 2,
+            retry_response_body: true,
+        },
+        Vec::new(),
+    ));
+    let mut ctx = loop_ctx(wrapped, None, 6);
+    enable_design_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(api.call_count(), 3);
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Failed { error, .. } if error.contains("error decoding response body")
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+}
+
+#[tokio::test]
+async fn local_app_create_transport_retry_discards_tools_from_interrupted_response() {
+    let mut interrupted: Vec<_> = streamed_tool_use_turn("Write", "tool_use")
+        .into_iter()
+        .take_while(|event| !matches!(event, LlmEvent::MessageDelta { .. } | LlmEvent::MessageStop))
+        .map(Ok)
+        .collect();
+    interrupted.push(Err(response_body_transport_error()));
+    let api = ResultStreamMockApiClient::new(vec![interrupted, valid_design_turn()]);
+    let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+        api.clone(),
+        platform_api::WorkflowQueryWatchdog {
+            stall_timeout_ms: 60_000,
+            max_retries: 1,
+            retry_response_body: true,
+        },
+        Vec::new(),
+    ));
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(wrapped, Some(invoker.clone()), 4);
+    enable_design_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(api.call_count(), 2);
+    assert_eq!(
+        invoker.call_count(),
+        0,
+        "discard even a completed local tool block when its response is interrupted"
+    );
+    let histories = api.histories.lock().unwrap();
+    assert_eq!(histories[0], histories[1]);
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Completed { result, usage_complete: false, .. }
+            if result == &serde_json::json!({"design": {}})
+    )));
+}
+
+#[tokio::test]
+async fn local_app_create_transport_retry_never_replays_an_unclosed_server_tool() {
+    for error in [
+        response_body_transport_error(),
+        workflow_watchdog_timeout_error(
+            "waiting for the next response event",
+            Duration::from_secs(1),
+        ),
+    ] {
+        let api = ResultStreamMockApiClient::new(vec![
+            vec![
+                Ok(ev_message_start()),
+                Ok(LlmEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: llm_client::ContentBlock::ServerToolUse {
+                        id: "server-1".into(),
+                        name: "remote_action".into(),
+                        input: serde_json::json!({}),
+                    },
+                }),
+                Err(error),
+            ],
+            valid_design_turn(),
+        ]);
+        let wrapped = Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+            api.clone(),
+            platform_api::WorkflowQueryWatchdog {
+                stall_timeout_ms: 60_000,
+                max_retries: 2,
+                retry_response_body: true,
+            },
+            Vec::new(),
+        ));
+        let mut ctx = loop_ctx(wrapped, None, 6);
+        enable_design_parse_recovery(&mut ctx);
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(
+            api.call_count(),
+            1,
+            "a server tool may already have executed"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    }
+}
+
+#[tokio::test]
+async fn local_app_create_transport_retry_is_not_a_generic_error_retry() {
+    for (workflow, failure) in [
+        (false, vec![Err(response_body_transport_error())]),
+        (
+            true,
+            vec![Err(llm_client::LlmError::InvalidRequest {
+                message: "invalid request".into(),
+            })],
+        ),
+        (
+            true,
+            vec![Err(llm_client::LlmError::Authentication {
+                message: "expired credential".into(),
+            })],
+        ),
+        (true, malformed_structured_turn("Write")),
+    ] {
+        let api = ResultStreamMockApiClient::new(vec![failure, valid_design_turn()]);
+        let client: Arc<dyn crate::api::SubagentApiClient> = if workflow {
+            Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+                api.clone(),
+                platform_api::WorkflowQueryWatchdog {
+                    stall_timeout_ms: 60_000,
+                    max_retries: 2,
+                    retry_response_body: true,
+                },
+                Vec::new(),
+            ))
+        } else {
+            api.clone()
+        };
+        let mut ctx = loop_ctx(client, None, 6);
+        enable_design_parse_recovery(&mut ctx);
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), 1);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    }
 }
 
 /// The exact `cutoffNote` for a server-error-class termination: the
@@ -4923,6 +5256,363 @@ fn enable_design_parse_recovery(ctx: &mut SubagentContext) {
     ctx.structured_output_parse_retries = 2;
 }
 
+fn create_parse_recovery_api(
+    turns: Vec<Vec<Result<llm_client::LlmEvent, llm_client::LlmError>>>,
+) -> Arc<ResultStreamMockApiClient> {
+    let mut api = ResultStreamMockApiClient::new(turns);
+    Arc::get_mut(&mut api).unwrap().workflow_watchdog = Some(platform_api::WorkflowQueryWatchdog {
+        stall_timeout_ms: 60_000,
+        max_retries: 0,
+        retry_response_body: true,
+    });
+    api
+}
+
+fn enable_create_parse_recovery(ctx: &mut SubagentContext) {
+    enable_design_parse_recovery(ctx);
+    ctx.tool_schemas = ["Write", "Read", "LocalAppScaffold"]
+        .into_iter()
+        .map(|name| serde_json::json!({"name": name, "input_schema": {"type": "object"}}))
+        .collect();
+    ctx.allowed_tools = vec!["Write".into(), "Read".into(), "LocalAppScaffold".into()];
+}
+
+fn reasoning_only_truncated_turn() -> Vec<Result<llm_client::LlmEvent, llm_client::LlmError>> {
+    crate::accumulator::response_to_stream_events(llm_client::LlmResponse {
+        content: vec![llm_client::ContentBlock::Reasoning {
+            text: "unfinished reasoning".into(),
+            signature: None,
+        }],
+        ..text_response("", Some("max_tokens"))
+    })
+    .into_iter()
+    .map(Ok)
+    .collect()
+}
+
+#[tokio::test]
+async fn local_app_create_truncation_continues_without_replaying_completed_tools() {
+    let api = create_parse_recovery_api(vec![
+        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        reasoning_only_truncated_turn(),
+        streamed_tool_use_turn("Write", "max_tokens")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        valid_design_turn(),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 6);
+    enable_create_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(one_completed(&events), serde_json::json!({"design": {}}));
+    assert_eq!(api.call_count(), 4);
+    assert_eq!(
+        invoker.call_count(),
+        2,
+        "scaffold and write must each execute once"
+    );
+    let histories = api.histories.lock().unwrap();
+    for history in &histories[2..] {
+        let serialized = serde_json::to_string(history).unwrap();
+        assert!(serialized.contains("Continue the unfinished work"));
+        assert!(!serialized.contains("You MUST call StructuredOutput"));
+        assert!(
+            serialized.contains("unfinished reasoning"),
+            "retain the transcript"
+        );
+        assert!(
+            serialized.contains("tool_result"),
+            "retain completed tool results"
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_app_create_truncation_recovery_is_bounded_by_retries_and_turns() {
+    for (max_turns, expected_calls) in [(8, 3), (1, 1)] {
+        let api =
+            create_parse_recovery_api((0..3).map(|_| reasoning_only_truncated_turn()).collect());
+        let mut ctx = loop_ctx(api.clone(), None, max_turns);
+        enable_create_parse_recovery(&mut ctx);
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), expected_calls);
+        assert!(events.iter().any(|event| matches!(event,
+            SubagentEvent::Failed { error, .. } if error.contains("output token limit reached before completion")
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    }
+}
+
+#[tokio::test]
+async fn generic_schema_truncation_keeps_existing_structured_output_nudge() {
+    let api =
+        ResultStreamMockApiClient::new(vec![reasoning_only_truncated_turn(), valid_design_turn()]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 4);
+    enable_create_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    assert_eq!(
+        one_completed(&drain(events).await),
+        serde_json::json!({"design": {}})
+    );
+    let histories = api.histories.lock().unwrap();
+    let serialized = serde_json::to_string(&histories[1]).unwrap();
+    assert!(serialized.contains("You MUST call StructuredOutput"));
+    assert!(!serialized.contains("Continue the unfinished work"));
+}
+
+#[tokio::test]
+async fn local_app_create_json_correction_preserves_completed_scaffold_and_read() {
+    let api = create_parse_recovery_api(vec![
+        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        streamed_tool_use_turn("Read", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        malformed_structured_turn("Write"),
+        streamed_tool_use_turn("Write", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        valid_design_turn(),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 8);
+    enable_create_parse_recovery(&mut ctx);
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(64);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+
+    assert_eq!(api.call_count(), 5);
+    assert_eq!(
+        invoker.call_count(),
+        3,
+        "scaffold, read, corrected write only"
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        SubagentEvent::Completed { result, usage_complete: false, .. }
+            if result == &serde_json::json!({"design": {}})
+    )));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    let histories = api.histories.lock().unwrap();
+    assert!(histories[3].starts_with(&histories[2]));
+    assert_eq!(histories[3].len(), histories[2].len() + 1);
+    let correction = user_text(histories[3].last().unwrap()).unwrap();
+    assert!(correction.contains("Write JSON correction 1/2"));
+    assert!(correction.contains("EOF while parsing an object"));
+    assert!(correction.contains("Call Write again with one complete, concise JSON object"));
+    assert!(correction.contains("do not repeat completed tools"));
+    assert!(
+        !correction.contains(r#"{"design":{}"#),
+        "discard malformed arguments"
+    );
+}
+
+#[tokio::test]
+async fn local_app_create_json_correction_shares_hard_run_cap_with_structured_output() {
+    for configured in [2, 99] {
+        let api = create_parse_recovery_api(vec![
+            malformed_structured_turn("Write"),
+            streamed_tool_use_turn("Read", "tool_use")
+                .into_iter()
+                .map(Ok)
+                .collect(),
+            malformed_structured_turn("StructuredOutput"),
+            malformed_structured_turn("Write"),
+            valid_design_turn(),
+        ]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 10);
+        enable_create_parse_recovery(&mut ctx);
+        ctx.structured_output_parse_retries = configured;
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), 4);
+        assert_eq!(invoker.call_count(), 1);
+        assert!(events.iter().any(|event| matches!(event,
+            SubagentEvent::Failed { error, .. }
+                if error.contains("Write JSON recovery stopped after 2 retries")
+        )));
+    }
+}
+
+#[tokio::test]
+async fn local_app_create_json_correction_requires_host_policy_and_advertised_local_tool() {
+    for case in [
+        "ordinary agent",
+        "default workflow",
+        "no parse retries",
+        "unadvertised tool",
+        "disallowed tool",
+        "server tool definition",
+        "no tool invoker",
+        "registered model attempt",
+        "last turn",
+    ] {
+        let mut api = create_parse_recovery_api(vec![
+            malformed_structured_turn("Write"),
+            valid_design_turn(),
+        ]);
+        if case == "ordinary agent" {
+            Arc::get_mut(&mut api).unwrap().workflow_watchdog = None;
+        } else if case == "default workflow" {
+            Arc::get_mut(&mut api).unwrap().workflow_watchdog =
+                Some(platform_api::WorkflowQueryWatchdog::default());
+        }
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 5);
+        enable_create_parse_recovery(&mut ctx);
+        let registration = platform_api::ModelAttemptRun::new(Arc::new(()));
+        match case {
+            "no parse retries" => ctx.structured_output_parse_retries = 0,
+            "unadvertised tool" => ctx.tool_schemas.clear(),
+            "disallowed tool" => ctx.allowed_tools = vec!["Read".into()],
+            "server tool definition" => ctx.tool_schemas[0]["type"] = "server_tool".into(),
+            "no tool invoker" => ctx.tool_invoker = None,
+            "registered model attempt" => {
+                ctx.model_attempt = Some(
+                    registration
+                        .context(platform_api::ModelAttemptStage::Panel, Some(0))
+                        .unwrap(),
+                );
+            }
+            "last turn" => ctx.agent_definition.max_turns = 1,
+            _ => {}
+        }
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), 1, "{case}");
+        assert_eq!(invoker.call_count(), 0, "{case}");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Failed { .. })),
+            "{case}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_app_create_json_correction_rejects_mixed_server_or_incomplete_response() {
+    for (other_tool, other_first) in [
+        ("local", true),
+        ("local", false),
+        ("server", true),
+        ("server", false),
+        ("server result", true),
+        ("server result", false),
+        ("incomplete", false),
+        ("interrupted", false),
+    ] {
+        let mut malformed = malformed_structured_turn("Write");
+        if matches!(other_tool, "incomplete" | "interrupted") {
+            malformed.pop(); // No MessageStop: absence of later server work is unknown.
+            if other_tool == "interrupted" {
+                malformed.push(Err(response_body_transport_error()));
+            }
+        } else {
+            let content_block = if other_tool == "server result" {
+                llm_client::ContentBlock::AdvisorToolResult {
+                    tool_use_id: "server-other".into(),
+                    content: serde_json::json!({"result": "executed"}),
+                    is_error: false,
+                }
+            } else if other_tool == "server" {
+                llm_client::ContentBlock::ServerToolUse {
+                    id: "other".into(),
+                    name: "remote_action".into(),
+                    input: serde_json::json!({}),
+                }
+            } else {
+                llm_client::ContentBlock::ToolCall {
+                    id: "other".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({}),
+                }
+            };
+            let other = [
+                Ok(llm_client::LlmEvent::ContentBlockStart {
+                    index: 1,
+                    content_block,
+                }),
+                Ok(llm_client::LlmEvent::ContentBlockStop { index: 1 }),
+            ];
+            let index = if other_first { 1 } else { malformed.len() - 2 };
+            malformed.splice(index..index, other);
+        }
+        let api = create_parse_recovery_api(vec![malformed, valid_design_turn()]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 5);
+        enable_create_parse_recovery(&mut ctx);
+        let (_tx, rx) = mpsc::channel(8);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), 1, "{other_tool}, first={other_first}");
+        assert_eq!(invoker.call_count(), 0);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    }
+}
+
+#[tokio::test]
+async fn local_app_create_json_correction_rechecks_cancellation_and_budget() {
+    for cancel in [true, false] {
+        let api = create_parse_recovery_api(vec![
+            malformed_structured_turn("Write"),
+            valid_design_turn(),
+        ]);
+        let (tx, rx) = mpsc::channel(8);
+        let stop = Arc::new(ParseRetryStop {
+            cancel: cancel.then_some(tx),
+            exhausted: AtomicBool::new(false),
+        });
+        *api.retry_stop.lock().unwrap() = Some(stop.clone());
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 5);
+        enable_create_parse_recovery(&mut ctx);
+        ctx.budget = Some(stop);
+        let (out, events) = mpsc::channel(64);
+        run_subagent(ctx, rx, out).await;
+        let events = drain(events).await;
+        assert_eq!(api.call_count(), 1);
+        assert_eq!(invoker.call_count(), 0);
+        if cancel {
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+        } else {
+            assert!(events.iter().any(|event| matches!(event,
+                SubagentEvent::Failed { error, .. } if error.contains("Budget")
+            )));
+        }
+    }
+}
+
 #[tokio::test]
 async fn design_parse_recovery_preserves_prior_tools_and_reports_retry() {
     let api = ResultStreamMockApiClient::new(vec![
@@ -4939,6 +5629,7 @@ async fn design_parse_recovery_preserves_prior_tools_and_reports_retry() {
         platform_api::WorkflowQueryWatchdog {
             stall_timeout_ms: 60_000,
             max_retries: 0,
+            retry_response_body: false,
         },
         vec![observer.clone()],
     ));
@@ -6018,6 +6709,7 @@ fn cap_input_bytes_measurement_work_is_linear_for_many_pairs() {
 }
 
 struct OwnerNotificationRegistry {
+    park_foreground: bool,
     rest_acknowledged: AtomicBool,
     wake_checked: tokio::sync::Notify,
     drains: AtomicUsize,
@@ -6110,6 +6802,14 @@ impl platform_api::task_registry::TaskRegistryHandle for OwnerNotificationRegist
     > {
         unreachable!()
     }
+    async fn park_foreground_agent(
+        &self,
+        agent_id: protocol::AgentId,
+        _: platform_api::task_registry::AgentTerminalOutcome,
+    ) -> bool {
+        assert_eq!(agent_id, self.owner);
+        self.park_foreground
+    }
     async fn can_wake_agent_for_task_notification(&self, _: protocol::AgentId) -> bool {
         let acknowledged = self.rest_acknowledged.load(Ordering::SeqCst);
         self.wake_checked.notify_one();
@@ -6143,6 +6843,7 @@ async fn owner_notification_wakes_parked_runner_without_user_message() {
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.persistent = true;
     let registry = Arc::new(OwnerNotificationRegistry {
+        park_foreground: false,
         rest_acknowledged: AtomicBool::new(true),
         wake_checked: tokio::sync::Notify::new(),
         drains: AtomicUsize::new(0),
@@ -6224,6 +6925,7 @@ impl crate::api::SubagentApiClient for NotificationDuringRequestApi {
 async fn owner_notification_folds_after_inflight_request_without_cancelling_it() {
     let mut ctx = fresh_subagent_ctx();
     let registry = Arc::new(OwnerNotificationRegistry {
+        park_foreground: false,
         rest_acknowledged: AtomicBool::new(true),
         wake_checked: tokio::sync::Notify::new(),
         drains: AtomicUsize::new(0),
@@ -6270,6 +6972,7 @@ async fn owner_notification_waits_for_handler_rest_acknowledgement() {
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.persistent = true;
     let registry = Arc::new(OwnerNotificationRegistry {
+        park_foreground: false,
         rest_acknowledged: AtomicBool::new(false),
         wake_checked: tokio::sync::Notify::new(),
         drains: AtomicUsize::new(0),
@@ -6654,4 +7357,74 @@ async fn tool_reported_error_reaches_model_history_and_message_events() {
     assert!(events.iter().any(|event| {
         matches!(event, SubagentEvent::Message { message, .. } if message["content"].as_array().is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result" && block["is_error"] == true && block["content"] == "Contract unavailable")))
     }));
+}
+
+#[tokio::test]
+async fn foreground_park_publishes_idle_and_preserves_notification_wake() {
+    for max_turn_exit in [false, true] {
+        let first = if max_turn_exit {
+            tool_use_response("Read", Some("tool_use"))
+        } else {
+            text_response("first", Some("end_turn"))
+        };
+        let api = MockSubagentApiClient::new(vec![
+            Ok(first),
+            Ok(text_response("second", Some("end_turn"))),
+        ]);
+        let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 1);
+        let registry = Arc::new(OwnerNotificationRegistry {
+            park_foreground: true,
+            rest_acknowledged: AtomicBool::new(true),
+            wake_checked: tokio::sync::Notify::new(),
+            drains: AtomicUsize::new(0),
+            parked_fold: tokio::sync::Notify::new(),
+            owner: ctx.agent_id,
+            pending: Mutex::new(vec![]),
+            revision: tokio::sync::watch::channel(0).0,
+        });
+        ctx.task_registry = Some(registry.clone());
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(32);
+        let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            for turn in 0..2 {
+                loop {
+                    match out_rx.recv().await.expect("parked runner remains live") {
+                        SubagentEvent::Message { message, .. }
+                            if message["subtype"] == "agent_idle" =>
+                        {
+                            break
+                        }
+                        SubagentEvent::Completed { .. } => {
+                            panic!("rest must not tear down the foreground pump")
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(!runner.is_finished());
+                if turn == 0 {
+                    registry.publish();
+                    let Some(SubagentEvent::Message { message, .. }) = out_rx.recv().await else {
+                        panic!("notification wake must precede the resumed turn")
+                    };
+                    let wake: ConversationMessage = serde_json::from_value(message).unwrap();
+                    assert!(matches!(
+                        wake,
+                        ConversationMessage::User { is_meta: true, .. }
+                    ));
+                }
+            }
+        })
+        .await
+        .expect("both parked turn-sets publish their idle lifecycle");
+        assert_eq!(api.call_count(), 2);
+        assert!(
+            !serde_json::to_string(&api.last_messages())
+                .unwrap()
+                .contains("agent_idle"),
+            "internal rest observation must not become model history"
+        );
+        drop(event_tx);
+        runner.await.unwrap();
+    }
 }

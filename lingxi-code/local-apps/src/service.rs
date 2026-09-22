@@ -845,8 +845,8 @@ impl AppService {
     /// `mcp_intent = None` likewise PRESERVES rather than clears — but unlike
     /// `workflow_model` there is no earlier writer, so in practice it is
     /// always `None` going in and this is the field's one production writer.
-    /// It carries the outcome of the create-time MCP interview staged through
-    /// `LocalAppStageCreate` (see [`crate::types::AppMcpIntent`]); passing
+    /// It carries the outcome of the create-time MCP interview the create
+    /// staging step holds (see [`crate::types::AppMcpIntent`]); passing
     /// `None` does NOT mean the user declined, it means this call was not
     /// given a staged answer to commit.
     ///

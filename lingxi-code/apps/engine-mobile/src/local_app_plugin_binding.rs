@@ -45,22 +45,17 @@ pub(crate) fn is_plugin_workflow_id(workflow_id: &str) -> bool {
 /// workflow, so this has no reason to disagree with any of them today — but
 /// it is written as a wildcard-free `match`, not `let _ = build_target;
 /// PLUGIN_BUILD_WORKFLOW_ID`, on purpose: the module doc and
-/// `build_targets!`'s doc comment both claim that adding a sixth (now tenth)
+/// `build_targets!`'s doc comment both claim that adding a new
 /// `LocalAppBuildTarget` variant forces this function to gain an arm
 /// (`error[E0004]` otherwise). A wildcard or an unconditional constant would
 /// make that claim false — a new variant would compile silently and inherit
 /// `PLUGIN_BUILD_WORKFLOW_ID` whether or not that is still correct.
 fn required_workflow_id_for(build_target: LocalAppBuildTarget) -> &'static str {
     match build_target {
-        LocalAppBuildTarget::ReactDomR1
-        | LocalAppBuildTarget::ReactDomR2
-        | LocalAppBuildTarget::Canvas2dR1
-        | LocalAppBuildTarget::Canvas2dR2
-        | LocalAppBuildTarget::Three3dR1
-        | LocalAppBuildTarget::Three3dR2
-        | LocalAppBuildTarget::Phaser2dR1
-        | LocalAppBuildTarget::Phaser2dR2
-        | LocalAppBuildTarget::Babylon3dR1 => PLUGIN_BUILD_WORKFLOW_ID,
+        LocalAppBuildTarget::ReactDomR4
+        | LocalAppBuildTarget::Canvas2dR4
+        | LocalAppBuildTarget::Three3dR4
+        | LocalAppBuildTarget::Phaser2dR4 => PLUGIN_BUILD_WORKFLOW_ID,
     }
 }
 
@@ -174,15 +169,10 @@ mod tests {
     }
 
     build_targets! {
-        ReactDomR1 => (local_apps::AppRuntimeProfile::ReactDom, PLUGIN_BUILD_WORKFLOW_ID),
-        ReactDomR2 => (local_apps::AppRuntimeProfile::ReactDom, PLUGIN_BUILD_WORKFLOW_ID),
-        Canvas2dR1 => (local_apps::AppRuntimeProfile::Canvas2d, PLUGIN_BUILD_WORKFLOW_ID),
-        Canvas2dR2 => (local_apps::AppRuntimeProfile::Canvas2d, PLUGIN_BUILD_WORKFLOW_ID),
-        Three3dR1 => (local_apps::AppRuntimeProfile::Three3d, PLUGIN_BUILD_WORKFLOW_ID),
-        Three3dR2 => (local_apps::AppRuntimeProfile::Three3d, PLUGIN_BUILD_WORKFLOW_ID),
-        Phaser2dR1 => (local_apps::AppRuntimeProfile::Phaser2d, PLUGIN_BUILD_WORKFLOW_ID),
-        Phaser2dR2 => (local_apps::AppRuntimeProfile::Phaser2d, PLUGIN_BUILD_WORKFLOW_ID),
-        Babylon3dR1 => (local_apps::AppRuntimeProfile::Babylon3d, PLUGIN_BUILD_WORKFLOW_ID),
+        ReactDomR4 => (local_apps::AppRuntimeProfile::ReactDom, PLUGIN_BUILD_WORKFLOW_ID),
+        Canvas2dR4 => (local_apps::AppRuntimeProfile::Canvas2d, PLUGIN_BUILD_WORKFLOW_ID),
+        Three3dR4 => (local_apps::AppRuntimeProfile::Three3d, PLUGIN_BUILD_WORKFLOW_ID),
+        Phaser2dR4 => (local_apps::AppRuntimeProfile::Phaser2d, PLUGIN_BUILD_WORKFLOW_ID),
     }
 
     #[test]
@@ -193,7 +183,7 @@ mod tests {
             // The `family` column, unlike `required`, was pinned by nothing.
             // It is only fed to `enforce` and then re-used to BUILD the
             // expected refusal message, so both assertions below predict the
-            // value they were handed: giving `Three3dR1` the flatly wrong
+            // value they were handed: giving `Three3dR4` the flatly wrong
             // family `Phaser2d` left the whole suite green. Nothing else in
             // the suite caught it either, because `Three3d`, `Phaser2d` and
             // `Babylon3d` all require the SAME workflow id — the `required`
@@ -262,7 +252,7 @@ mod tests {
 
     #[test]
     fn enforce_accepts_a_matching_launched_id() {
-        let binding = LocalAppPluginBinding::resolve(LocalAppBuildTarget::ReactDomR1);
+        let binding = LocalAppPluginBinding::resolve(LocalAppBuildTarget::ReactDomR4);
         binding
             .enforce(
                 "demo1234",
@@ -274,7 +264,7 @@ mod tests {
 
     #[test]
     fn enforce_refuses_a_mismatched_launched_id_and_names_the_specifics() {
-        let binding = LocalAppPluginBinding::resolve(LocalAppBuildTarget::ReactDomR1);
+        let binding = LocalAppPluginBinding::resolve(LocalAppBuildTarget::ReactDomR4);
         let error = binding
             .enforce(
                 "demo1234",

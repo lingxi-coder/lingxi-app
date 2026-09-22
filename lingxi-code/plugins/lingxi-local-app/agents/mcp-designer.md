@@ -85,7 +85,8 @@ yours to run — you propose, `mcp-qa`'s eventual workflow step evaluates.
 - Never promote a proposal into the active catalog. Approval calls are limited
   to the workflow's explicit Host-validation handoff; return the Host approval
   response without inventing a receipt or publication state.
-- "Validated selection read," listed for this role in the design's
-  tool-boundary table, is `LocalAppResolveTemplateSelection` — a real Host
-  tool, but one this role is NOT granted (see the frontmatter above). Cite
+- There is no "validated selection read" for this role, and no such tool exists
+  any more: `LocalAppResolveTemplateSelection` went away with the old create
+  chain, and template selection is now resolved inside `LocalAppPrepare` from
+  the plan the user approved — never through a callable read. Cite
   `LocalAppGet`'s record instead.

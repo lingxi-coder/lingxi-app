@@ -47,7 +47,7 @@
     {
       "id": "P2.1",
       "title": "Runtime profile migration manifest, inventories, and orphan exclusion",
-      "gate": "§6.1 / §7.2 / §19.1: the checked-in migration manifest and Plugin inventories agree byte-for-byte for exactly 112 profile_file! assets; exactly 12 tracked orphans remain excluded",
+      "gate": "§6.1 / §7.2 / §19.1: the checked-in migration manifest and Plugin inventories agree byte-for-byte for exactly 112 profile_file! assets; only the current r4 template files are packaged",
       "owns": [
         "docs/local-apps/harness/template-migration-manifest.json",
         "lingxi-code/plugins/lingxi-local-app/assets/templates",
@@ -79,7 +79,7 @@
       "deps": [
         "P2.0"
       ],
-      "notes": "The legacy source scaffold may remain during Host cutover, but only under the digest-equality gate; production profile includes point at Plugin assets. Because the Plugin had not shipped, the incorrect Phaser/Babylon r1 pins were explicitly corrected before release; compatibility starts at the corrected r1 values and the Phase2 gate now executes the real Rust contract tests."
+      "notes": "Only current r4 templates are supported. Production includes point at Plugin assets; mirrors and inventory digests are checked. Historical template directories and compatibility dispatch have been removed."
     },
     {
       "id": "P2.2",
@@ -142,7 +142,7 @@
       "exclusive": false,
       "repeatRuns": 1,
       "plantedFailure": {
-        "edit": "remove the namespaced agent orchestration from a Phase4 Plugin workflow",
+        "edit": "remove the namespaced agent orchestration from the local-app-use-test Plugin workflow",
         "mustNameInOutput": [
           "agent",
           "workflow"
@@ -150,13 +150,12 @@
       },
       "addedTests": [
         "new_workspace_gets_scoped_read_and_edit_rules",
-        "phase4_and_phase6_workflows_use_real_orchestration",
-        "unified_build_workflow_executes_create_identity_chain_with_hermetic_agents"
+        "phase4_and_phase6_workflows_use_real_orchestration"
       ],
       "deps": [
         "P2.2"
       ],
-      "notes": "Phase4 build and use-test workflows execute the verified agent identity chain; the Phase6 MCP authoring workflow remains explicitly typed fail-closed until its Host proposal/catalog machinery exists."
+      "notes": "The use-test workflow executes the verified agent identity chain (operator/tester/verifier) and declares its own namespaced WORKFLOW_ID; the Phase6 MCP authoring workflow remains explicitly typed fail-closed until its Host proposal/catalog machinery exists. The retired create-time `local-app-build` workflow and its `unified_build_workflow_executes_create_identity_chain_with_hermetic_agents` evidence went with it — creation stages its workspace through `LocalAppPrepare` and completes on `LocalAppBuild`, so there is no create workflow left for this task to own."
     }
   ]
 }

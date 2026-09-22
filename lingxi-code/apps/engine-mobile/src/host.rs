@@ -3203,7 +3203,8 @@ async fn build_mobile_inner_with_ask(
     // The plans directory derivation is shared with the orchestrator's plan-mode
     // reminder rather than re-derived here, so the path the model is told to
     // write, the path the permission carve-out allows, and the path
-    // `ExitPlanMode` reads back cannot diverge. Mobile sets no `plansDirectory`.
+    // `ExitPlanMode` reads back cannot diverge. Mobile sets no `plansDirectory`,
+    // so the directory is the project-local default (`<cwd>/.lingxi/plans/`).
     // 2.1.266 `getPlanSlug`: the plan file is named by a random three-word slug
     // (`brave-quiet-otter.md`), re-rolled on collision, NOT by the session id.
     // Upstream can seed it from the transcript (`planSlugSeed`); LingXi has no
@@ -3224,6 +3225,24 @@ async fn build_mobile_inner_with_ask(
         let _ = local_apps_mcp.attach_session_provider(Arc::new(move || {
             cell.lock().ok().map(|guard| guard.clone())
         }));
+    }
+    // ── Plan-approval record ───────────────────────────────────────────────
+    // `LocalAppPrepare` may only land a template for a plan the USER approved,
+    // and the engine's only writer of "approved" is `ExitPlanMode`'s success
+    // branch. That branch's structured result reaches this listener as a
+    // `ToolUseResult`, so the observation rides the same connection-scoped
+    // listener the adapter sinks already use — no permission-gate decorator, no
+    // second session read. See `crate::plan_approval`.
+    let plan_approval_log = Arc::new(crate::plan_approval::PlanApprovalLog::default());
+    let observed_listener: Arc<dyn ClientEventListener> =
+        Arc::new(crate::plan_approval::PlanApprovalWatcher::new(
+            listener.clone(),
+            plan_approval_log.clone(),
+            active_session_uuid.clone(),
+        ));
+    {
+        let log = plan_approval_log.clone();
+        let _ = local_apps_mcp.attach_plan_approval_log(log);
     }
     // v3 Phase 4: the connection-scoped init-session minter — forks the
     // origin chat (this connection's cwd catalog) into the new app's
@@ -3676,7 +3695,7 @@ async fn build_mobile_inner_with_ask(
     //     - the `permission_sink` receives the gate's outbound requests.
     //     Mobile binds the `AdapterPermissionGate` (no always-allow mode), then
     //     wraps it with a local `PolicyPermissionGate` so the core policy binds.
-    let event_sink = ListenerSink::arc(listener.clone());
+    let event_sink = ListenerSink::arc(observed_listener.clone());
     let message_output = AdapterOutputStream::new(event_sink.clone());
     let output: Arc<dyn OutputStream> = Arc::new(message_output.clone());
 
@@ -6363,6 +6382,40 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for MobileSessionAgentO
                     .await;
             }
             platform_api::subagent_spawn::SubagentObservation::Message { agent_id, message } => {
+                let parked = matches!(
+                    &message,
+                    protocol::ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "agent_idle"
+                );
+                let hidden_wake = matches!(
+                    &message,
+                    protocol::ConversationMessage::User { is_meta: true, .. }
+                );
+                if parked || hidden_wake {
+                    let agent_key = agent_id.to_string();
+                    let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned()
+                    else {
+                        return;
+                    };
+                    // Foreground agents park between turns and can wake again,
+                    // including agents that were allocated as nonpersistent.
+                    // Keep their binding and visible-message indexes intact.
+                    self.event_sink
+                        .emit(ClientEvent::SessionAgentUpdated {
+                            session_id: bound.session_id,
+                            agent: SessionAgentSummaryDto {
+                                agent_id: agent_key,
+                                name: bound.name,
+                                agent_type: bound.agent_type,
+                                model: Some(bound.model),
+                                model_profile: bound.model_profile,
+                                status: if parked { "completed" } else { "running" }.to_string(),
+                                latest_activity: None,
+                                updated_at_ms: Some(unix_time_ms()),
+                            },
+                        })
+                        .await;
+                    return;
+                }
                 if !session_agent_conversation_is_visible(&message) {
                     return;
                 }
@@ -10725,11 +10778,8 @@ impl MobileEngineHandle {
                         message: format!("task list failed: {e}"),
                     })?;
                 for record in &records {
-                    self.event_sink
-                        .emit(ClientEvent::TaskRow {
-                            task: client_adapter::lowering::lower_task_record(record),
-                        })
-                        .await;
+                    let task = client_adapter::lowering::lower_task_record(record);
+                    self.event_sink.emit(ClientEvent::TaskRow { task }).await;
                 }
                 Ok(())
             }
@@ -10809,17 +10859,38 @@ impl MobileEngineHandle {
                     .ok()
                     .map(|guard| guard.clone())
                     .unwrap_or_default();
-                let workflow = registry
+                let mut workflow = registry
                     .list_workflows()
                     .await
                     .map_err(|error| ClientError::Internal {
                         message: format!("workflow list failed: {error}"),
                     })?
                     .into_iter()
-                    .find(|workflow| workflow.task_id == task_id)
-                    .ok_or_else(|| ClientError::NotFound {
-                        message: format!("workflow task {task_id}"),
-                    })?;
+                    .find(|workflow| workflow.task_id == task_id);
+                if workflow.is_none() && self.active_session_id() == resume_session {
+                    // Terminal task GC can remove the live row while that
+                    // workflow's validated recovery checkpoint remains durable.
+                    self.inner
+                        .workflow_checkpoints
+                        .adopt_task(
+                            &resume_session,
+                            &task_id,
+                            self.inner.task_registry.as_ref(),
+                            &self.inner.workflow_launcher.app_data_root,
+                        )
+                        .await;
+                    workflow = registry
+                        .list_workflows()
+                        .await
+                        .map_err(|error| ClientError::Internal {
+                            message: format!("workflow list failed: {error}"),
+                        })?
+                        .into_iter()
+                        .find(|workflow| workflow.task_id == task_id);
+                }
+                let workflow = workflow.ok_or_else(|| ClientError::NotFound {
+                    message: format!("workflow task {task_id}"),
+                })?;
                 let still_active = self
                     .inner
                     .active_session_uuid
@@ -10844,13 +10915,11 @@ impl MobileEngineHandle {
                     .ok_or_else(|| ClientError::Rejected {
                         message: format!("workflow task {task_id} has no resumable run id"),
                     })?;
-                let script_path =
-                    workflow
-                        .script_path
-                        .clone()
-                        .ok_or_else(|| ClientError::Rejected {
-                            message: format!("workflow task {task_id} has no persisted script"),
-                        })?;
+                let script_path = workflow.script_path.clone().ok_or_else(|| {
+                    ClientError::Rejected {
+                        message: format!("workflow task {task_id} has no persisted script"),
+                    }
+                })?;
                 let args = workflow
                     .args
                     .as_deref()
@@ -10859,16 +10928,17 @@ impl MobileEngineHandle {
                     .map_err(|error| ClientError::Rejected {
                         message: format!("workflow task {task_id} has invalid args: {error}"),
                     })?;
+                let launch_spec = tool_workflow::WorkflowLaunchSpec {
+                    script_path: Some(script_path),
+                    args,
+                    resume_from_run_id: Some(run_id.clone()),
+                    session_uuid: Some(resume_session.clone()),
+                    ..Default::default()
+                };
                 let launched = self
                     .inner
                     .workflow_launcher
-                    .launch(tool_workflow::WorkflowLaunchSpec {
-                        script_path: Some(script_path),
-                        args,
-                        resume_from_run_id: Some(run_id.clone()),
-                        session_uuid: Some(resume_session.clone()),
-                        ..Default::default()
-                    })
+                    .launch(launch_spec)
                     .await
                     .map_err(|error| ClientError::Rejected {
                         message: error.to_string(),
@@ -15404,6 +15474,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_agent_observer_parking_preserves_binding_and_message_index() {
+        let listener = Arc::new(FakeListener::default());
+        let observer = MobileSessionAgentObserver::new(
+            ListenerSink::arc(listener.clone()),
+            Arc::new(std::sync::Mutex::new("session-a".to_string())),
+        );
+        let agent_id = protocol::AgentId::new();
+        observer
+            .on_event(SubagentObservation::Allocated {
+                agent_id,
+                agent_type: "researcher".to_string(),
+                name: Some("Research".to_string()),
+                model: "deepseek-flash".to_string(),
+                model_profile: None,
+                persistent: false,
+                initial_message_index: 3,
+                origin_session_id: None,
+            })
+            .await;
+        listener.received.lock().await.clear();
+
+        observer
+            .on_event(SubagentObservation::Message {
+                agent_id,
+                message: protocol::ConversationMessage::System {
+                    id: protocol::MessageId::new(),
+                    subtype: Some("agent_idle".to_string()),
+                    content: "idle".to_string(),
+                    compact_metadata: None,
+                    refusal_fallback: None,
+                },
+            })
+            .await;
+        {
+            let events = listener.received.lock().await;
+            assert_eq!(events.len(), 1, "parking emits no visible message");
+            assert!(matches!(
+                &events[0],
+                ClientEvent::SessionAgentUpdated { session_id, agent }
+                    if session_id == "session-a"
+                        && agent.agent_id == agent_id.to_string()
+                        && agent.status == "completed"
+            ));
+        }
+        assert!(observer
+            .bound_agents
+            .lock()
+            .await
+            .contains_key(&agent_id.to_string()));
+        assert_eq!(
+            observer.message_indexes.lock().await[&agent_id.to_string()],
+            3
+        );
+
+        observer
+            .on_event(SubagentObservation::Message {
+                agent_id,
+                message: protocol::ConversationMessage::User {
+                    id: protocol::MessageId::new(),
+                    content: vec![protocol::ContentBlock::Text {
+                        text: "follow-up".to_string(),
+                    }],
+                    is_meta: true,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                },
+            })
+            .await;
+        {
+            let events = listener.received.lock().await;
+            assert_eq!(events.len(), 2, "hidden wake emits only a status update");
+            assert!(matches!(
+                &events[1],
+                ClientEvent::SessionAgentUpdated { agent, .. }
+                    if agent.status == "running" && agent.latest_activity.is_none()
+            ));
+        }
+        assert_eq!(
+            observer.message_indexes.lock().await[&agent_id.to_string()],
+            3
+        );
+
+        observer
+            .on_event(SubagentObservation::Message {
+                agent_id,
+                message: protocol::ConversationMessage::Assistant {
+                    id: protocol::MessageId::new(),
+                    content: vec![protocol::ContentBlock::Text {
+                        text: "resumed".to_string(),
+                    }],
+                    stop_reason: None,
+                },
+            })
+            .await;
+        let events = listener.received.lock().await;
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[2],
+            ClientEvent::SessionAgentMessage {
+                message_index: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &events[3],
+            ClientEvent::SessionAgentUpdated { agent, .. } if agent.status == "running"
+        ));
+    }
+
+    #[tokio::test]
     async fn workflow_agent_observer_uses_pinned_origin_session() {
         let listener = Arc::new(FakeListener::default());
         let sink = ListenerSink::arc(listener.clone());
@@ -15798,11 +15978,12 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             local_app_tool_names,
-            ["LocalAppCreate", "LocalAppGet", "LocalAppList"]
+            ["LocalAppCreate", "LocalAppGet", "LocalAppList", "LocalAppPrepare"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-            "a global Code cold boot must register only the three Local App management tools"
+            "a global Code cold boot must register only the global Local App management \
+             tools: the four in `local_apps_tools::GLOBAL_LOCAL_APP_TOOLS`"
         );
         let registry = rt.slash_registry.read().await;
         for name in &expected_names {
@@ -15904,7 +16085,7 @@ mod tests {
                 .collect()
         }
 
-        let global_tools = ["LocalAppCreate", "LocalAppGet", "LocalAppList"]
+        let global_tools = ["LocalAppCreate", "LocalAppGet", "LocalAppList", "LocalAppPrepare"]
             .into_iter()
             .map(str::to_string)
             .collect::<std::collections::BTreeSet<_>>();
@@ -16600,10 +16781,25 @@ mod tests {
              for this plugin, got {plugin_agent_names:?}"
         );
         assert!(
-            plugin_agent_names.contains(&format!("{}:builder", crate::MOBILE_BUILTIN_PLUGIN_NAME)),
-            "the real `builder` agent must be present, named, in the live catalog: \
+            plugin_agent_names.contains(&format!(
+                "{}:mcp-designer",
+                crate::MOBILE_BUILTIN_PLUGIN_NAME
+            )),
+            "the real `mcp-designer` agent must be present, named, in the live catalog: \
              {plugin_agent_names:?}"
         );
+        // The create path no longer runs a build workflow, so that workflow's
+        // role agents went with it. Pin their ABSENCE: an agent file left
+        // behind re-advertises a stage the flow no longer has, and the count
+        // assertion above would not notice a swap of one agent for another.
+        for retired in ["builder", "designer", "template-selector", "create-preparer"] {
+            assert!(
+                !plugin_agent_names
+                    .contains(&format!("{}:{retired}", crate::MOBILE_BUILTIN_PLUGIN_NAME)),
+                "the retired create agent `{retired}` must not be in the live catalog: \
+                 {plugin_agent_names:?}"
+            );
+        }
 
         // Skills: the plugin's skills are registered as namespaced slash
         // commands (`plugin::manager::load_plugin`'s skill arm) into the SAME
@@ -16638,22 +16834,21 @@ mod tests {
 
         // The real subagent spawner must preload the bare skills declared by
         // Plugin agents through that same registry. The plugin prefix is
-        // derived from `lingxi-local-app:designer`, exactly like desktop.
+        // derived from `lingxi-local-app:verifier`, exactly like desktop.
         let agent_skill_loader = rt
             .wired_subagent_skill_loader_cell
             .get()
             .expect("mobile subagent skill-preload cell must be filled");
         let preloaded = agent_skill_loader
-            .resolve_and_load("frontend-design", "lingxi-local-app:designer", None)
+            .resolve_and_load("frontend-qa", "lingxi-local-app:verifier", None)
             .await
             .expect("checked skill preload")
             .expect("Plugin agent bare skill must resolve through its namespace");
         assert!(matches!(
             preloaded.content.as_slice(),
             [protocol::ContentBlock::Text { text }]
-                if text.contains("# Frontend design")
-                    && text.contains("Write one `presentation` per target")
-                    && text.contains("## Bundled resource: references/router.md")
+                if text.contains("# Frontend QA")
+                    && text.contains("Verify the running app, not only the build output.")
         ));
 
         let frontend_root = loaded_device_skill
@@ -21822,6 +22017,52 @@ mod tests {
         });
     }
 
+    /// WORKFLOWS: `submit(ResumeWorkflow)` adopts a workflow whose session
+    /// `adopt.json` checkpoint survives but whose registry row does not — the
+    /// evicted-row recovery path.
+    ///
+    /// The checkpoint must name a PLUGIN workflow and claim a verbatim builtin
+    /// script whose on-disk bytes still hash to the recorded digest, so the
+    /// fixture uses a live plugin workflow id. The retired create coordinator's
+    /// recovery sidecars (`create-input.json` / `create-terminal.json`) went
+    /// with it — a create whose template never landed is re-planned through the
+    /// plan approval instead of being resumed — so this fixture carries the
+    /// checkpoint alone.
+    #[test]
+    fn submit_resume_workflow_recovers_a_plugin_workflow_from_its_checkpoint() {
+        use sha2::{Digest, Sha256};
+        let tmp = tempfile::tempdir().unwrap();
+        let (handle, _) = build_submit_handle(tmp.path());
+        handle.runtime().block_on(async {
+            let session = handle.active_session_id();
+            let subagents = orchestrator::transcript_paths::subagents_dir(
+                &handle.lingxi_home, &handle.session_cwd, &session,
+            );
+            let directory = subagents.join("workflows/wf_recover1");
+            std::fs::create_dir_all(&directory).unwrap();
+            let script_path = directory.join("build.js");
+            let script = "export const meta = {name: 'local-app-use-test'}; return 1;";
+            std::fs::write(&script_path, script).unwrap();
+            std::fs::write(directory.join("journal.jsonl"), "").unwrap();
+            let hash = format!("{:x}", Sha256::digest(script.as_bytes()));
+            let workflow_id = crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID;
+            let args = serde_json::json!({"app_id": "missing1"});
+            let checkpoint = serde_json::json!({
+                "taskId": "wrecover1", "workflowRunId": "wf_recover1", "workflowId": workflow_id,
+                "scriptPath": script_path, "scriptSha256": hash, "scriptIsVerbatimBuiltin": true,
+                "argsJson": args.to_string(), "description": "Interrupted use test", "transcriptDir": directory,
+            });
+            std::fs::write(subagents.parent().unwrap().join("adopt.json"),
+                serde_json::json!({"workflows": [checkpoint]}).to_string()).unwrap();
+            assert!(handle.inner.task_registry.get("wrecover1").await.is_none());
+            let result = handle.submit(ClientCommand::ResumeWorkflow {task_id: "wrecover1".into()}).await;
+            // The fixture intentionally has no app record: business validation
+            // may reject launch, but task recovery must have completed first.
+            assert!(!matches!(result, Err(ClientError::NotFound { .. })), "{result:?}");
+            assert!(handle.inner.task_registry.get("wrecover1").await.is_some());
+        });
+    }
+
     /// SESSIONS/HISTORY: `submit(NewSession)` clears the session (minting a fresh
     /// id) and confirms with a `SessionStarted` carrying the new connection
     /// session id — proving the command drives the real orchestrator handle, not
@@ -23866,7 +24107,7 @@ mod tests {
             manifest.template_origin = Some(local_apps::AppTemplateOrigin {
                 plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
                 plugin_version: "builtin".into(),
-                template_id: "react-dom-r1".into(),
+                template_id: "react-dom-r4".into(),
                 template_sha256: profile_sha256,
             });
             manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
@@ -24300,8 +24541,13 @@ mod tests {
                 "the thin shell must immediately enter the create coordinator: {contract}"
             );
             assert!(
-                contract.contains("Any source written before the scaffold lands will be deleted"),
-                "the contract must warn that pre-confirmation source is wiped: {contract}"
+                contract.contains(
+                    "Do not write source, build, install dependencies, or operate the runtime in \
+                     this shell"
+                ) && contract.contains("that refusal is the contract, not a transient failure"),
+                "the contract must say a shapeless shell has nowhere for source to go, and that \
+                 every tool refusing it is the contract rather than a transient failure: \
+                 {contract}"
             );
             assert!(
                 contract.contains("do not call `LocalAppScaffold` directly"),
@@ -24309,9 +24555,11 @@ mod tests {
             );
             assert!(
                 contract.contains("Do not run a separate questionnaire")
-                    && contract.contains("do not force a technical surface picker"),
-                "the Host shell must leave adaptive and technical choices to the coordinator: \
-                 {contract}"
+                    && contract.contains(
+                        "the Host prepares this workspace from the plan the user approves"
+                    ),
+                "the Host shell must leave the planning to the create skill and name that skill \
+                 the owner of preparation: {contract}"
             );
             assert!(
                 contract.contains(&record.id),

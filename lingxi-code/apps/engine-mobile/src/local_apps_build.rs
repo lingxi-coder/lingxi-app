@@ -3,13 +3,11 @@
 //! scaffold/build no longer belongs to the LLM-generation executor.
 
 use crate::local_app_runtime_profiles::{
-    contract_for_binding as runtime_profile_contract_for_binding, BABYLON_3D_EDITABLE_FILES,
-    BABYLON_3D_MANAGED_FILES, CANVAS_2D_EDITABLE_FILES, CANVAS_2D_MANAGED_FILES,
-    CANVAS_2D_R2_EDITABLE_FILES, EFFECTIVE_PACKAGE_FILE_REL, LOCKFILE_FILE_REL,
-    PHASER_2D_EDITABLE_FILES, PHASER_2D_MANAGED_FILES, PHASER_2D_R2_EDITABLE_FILES,
-    REACT_DOM_EDITABLE_FILES, REACT_DOM_MANAGED_FILES, REACT_DOM_R2_EDITABLE_FILES,
-    REQUESTED_FILE_REL, SBOM_FILE_REL, SNAPSHOT_FILE_REL, THREE_3D_EDITABLE_FILES,
-    THREE_3D_MANAGED_FILES, THREE_3D_R2_EDITABLE_FILES, TREE_PROOF_FILE_REL,
+    contract_for_binding as runtime_profile_contract_for_binding, CANVAS_2D_R4_EDITABLE_FILES,
+    CANVAS_2D_R4_MANAGED_FILES, EFFECTIVE_PACKAGE_FILE_REL, LOCKFILE_FILE_REL,
+    PHASER_2D_R4_EDITABLE_FILES, PHASER_2D_R4_MANAGED_FILES, REACT_DOM_R4_EDITABLE_FILES,
+    REACT_DOM_R4_MANAGED_FILES, REQUESTED_FILE_REL, SBOM_FILE_REL, SNAPSHOT_FILE_REL,
+    THREE_3D_R4_EDITABLE_FILES, THREE_3D_R4_MANAGED_FILES, TREE_PROOF_FILE_REL,
 };
 use crate::local_apps_host::LocalAppsHostBroker;
 use local_apps::{
@@ -117,24 +115,10 @@ struct BuildProvenance {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalAppBuildTarget {
-    /// Profile-aware routed scaffold.
-    ReactDomR1,
-    /// Profile-aware routed scaffold plus MCP widget starter.
-    ReactDomR2,
-    /// Profile-aware Canvas 2D scaffold.
-    Canvas2dR1,
-    /// Profile-aware Canvas 2D scaffold plus MCP widget starter.
-    Canvas2dR2,
-    /// Profile-aware Three.js scaffold.
-    Three3dR1,
-    /// Profile-aware Three.js scaffold plus MCP widget starter.
-    Three3dR2,
-    /// Profile-aware Phaser scaffold.
-    Phaser2dR1,
-    /// Profile-aware Phaser scaffold plus MCP widget starter.
-    Phaser2dR2,
-    /// Profile-aware Babylon scaffold.
-    Babylon3dR1,
+    ReactDomR4,
+    Canvas2dR4,
+    Three3dR4,
+    Phaser2dR4,
 }
 
 impl LocalAppBuildTarget {
@@ -143,85 +127,55 @@ impl LocalAppBuildTarget {
     ) -> Result<Self, AppError> {
         let contract = runtime_profile_contract_for_binding(binding)?;
         match (contract.family, contract.revision) {
-            (AppRuntimeProfile::ReactDom, 1) => Ok(Self::ReactDomR1),
-            (AppRuntimeProfile::ReactDom, 2) => Ok(Self::ReactDomR2),
-            (AppRuntimeProfile::Canvas2d, 1) => Ok(Self::Canvas2dR1),
-            (AppRuntimeProfile::Canvas2d, 2) => Ok(Self::Canvas2dR2),
-            (AppRuntimeProfile::Three3d, 1) => Ok(Self::Three3dR1),
-            (AppRuntimeProfile::Three3d, 2) => Ok(Self::Three3dR2),
-            (AppRuntimeProfile::Phaser2d, 1) => Ok(Self::Phaser2dR1),
-            (AppRuntimeProfile::Phaser2d, 2) => Ok(Self::Phaser2dR2),
-            (AppRuntimeProfile::Babylon3d, 1) => Ok(Self::Babylon3dR1),
+            (AppRuntimeProfile::ReactDom, 4) => Ok(Self::ReactDomR4),
+            (AppRuntimeProfile::Canvas2d, 4) => Ok(Self::Canvas2dR4),
+            (AppRuntimeProfile::Three3d, 4) => Ok(Self::Three3dR4),
+            (AppRuntimeProfile::Phaser2d, 4) => Ok(Self::Phaser2dR4),
             (family, revision) => Err(AppError::NotYetAvailable(format!(
                 "runtime profile {family} r{revision} has no build bundle in this host build"
             ))),
         }
     }
 
-    /// The manifest value this target is recorded as.
-    ///
-    /// ⛔ TEST-ONLY, and the gate is the point. Production never derives a
-    /// surface FROM a target: the surface is the input the user confirmed and
-    /// `from_surface` is the only direction that runs. The inverse exists so
-    /// [`scaffold_workspace`] can stamp a test workspace with the same pair a
-    /// real create writes. Leaving it ungated would put a function in the
-    /// shipped binary that nothing on any production path calls — the exact
-    /// shape this plan has been bitten by five times — and would let a future
-    /// caller reach for it instead of carrying the confirmed surface through.
     #[cfg(test)]
     fn surface(self) -> local_apps::AppSurface {
         match self {
-            Self::ReactDomR1 | Self::ReactDomR2 => local_apps::AppSurface::Dom,
-            Self::Canvas2dR1
-            | Self::Canvas2dR2
-            | Self::Three3dR1
-            | Self::Three3dR2
-            | Self::Phaser2dR1
-            | Self::Phaser2dR2
-            | Self::Babylon3dR1 => local_apps::AppSurface::Canvas,
+            Self::ReactDomR4 => local_apps::AppSurface::Dom,
+            Self::Canvas2dR4 | Self::Three3dR4 | Self::Phaser2dR4 => local_apps::AppSurface::Canvas,
         }
     }
 
-    /// The scaffold id reported back to the model. Derived, never spelled at
-    /// the emission site: hardcoding the routed DOM scaffold id told a canvas
-    /// app it owned screens and a router its workspace does not contain.
     pub(crate) fn template_id(self) -> &'static str {
         match self {
-            Self::ReactDomR1 => "runtime-profile/react-dom/r1",
-            Self::ReactDomR2 => "runtime-profile/react-dom/r2",
-            Self::Canvas2dR1 => "runtime-profile/canvas-2d/r1",
-            Self::Canvas2dR2 => "runtime-profile/canvas-2d/r2",
-            Self::Three3dR1 => "runtime-profile/three-3d/r1",
-            Self::Three3dR2 => "runtime-profile/three-3d/r2",
-            Self::Phaser2dR1 => "runtime-profile/phaser-2d/r1",
-            Self::Phaser2dR2 => "runtime-profile/phaser-2d/r2",
-            Self::Babylon3dR1 => "runtime-profile/babylon-3d/r1",
+            Self::ReactDomR4 => "runtime-profile/react-dom/r4",
+            Self::Canvas2dR4 => "runtime-profile/canvas-2d/r4",
+            Self::Three3dR4 => "runtime-profile/three-3d/r4",
+            Self::Phaser2dR4 => "runtime-profile/phaser-2d/r4",
         }
+    }
+
+    #[cfg(test)]
+    fn revision(self) -> u32 {
+        4
     }
 
     #[cfg(test)]
     fn runtime_profile(self) -> AppRuntimeProfile {
         match self {
-            Self::ReactDomR1 | Self::ReactDomR2 => AppRuntimeProfile::ReactDom,
-            Self::Canvas2dR1 | Self::Canvas2dR2 => AppRuntimeProfile::Canvas2d,
-            Self::Three3dR1 | Self::Three3dR2 => AppRuntimeProfile::Three3d,
-            Self::Phaser2dR1 | Self::Phaser2dR2 => AppRuntimeProfile::Phaser2d,
-            Self::Babylon3dR1 => AppRuntimeProfile::Babylon3d,
+            Self::ReactDomR4 => AppRuntimeProfile::ReactDom,
+            Self::Canvas2dR4 => AppRuntimeProfile::Canvas2d,
+            Self::Three3dR4 => AppRuntimeProfile::Three3d,
+            Self::Phaser2dR4 => AppRuntimeProfile::Phaser2d,
         }
     }
 }
 
 fn source_files(target: LocalAppBuildTarget) -> &'static [(&'static str, &'static [u8])] {
     match target {
-        LocalAppBuildTarget::ReactDomR1 => REACT_DOM_EDITABLE_FILES,
-        LocalAppBuildTarget::ReactDomR2 => REACT_DOM_R2_EDITABLE_FILES,
-        LocalAppBuildTarget::Canvas2dR1 => CANVAS_2D_EDITABLE_FILES,
-        LocalAppBuildTarget::Canvas2dR2 => CANVAS_2D_R2_EDITABLE_FILES,
-        LocalAppBuildTarget::Three3dR1 => THREE_3D_EDITABLE_FILES,
-        LocalAppBuildTarget::Three3dR2 => THREE_3D_R2_EDITABLE_FILES,
-        LocalAppBuildTarget::Phaser2dR1 => PHASER_2D_EDITABLE_FILES,
-        LocalAppBuildTarget::Phaser2dR2 => PHASER_2D_R2_EDITABLE_FILES,
-        LocalAppBuildTarget::Babylon3dR1 => BABYLON_3D_EDITABLE_FILES,
+        LocalAppBuildTarget::ReactDomR4 => REACT_DOM_R4_EDITABLE_FILES,
+        LocalAppBuildTarget::Canvas2dR4 => CANVAS_2D_R4_EDITABLE_FILES,
+        LocalAppBuildTarget::Three3dR4 => THREE_3D_R4_EDITABLE_FILES,
+        LocalAppBuildTarget::Phaser2dR4 => PHASER_2D_R4_EDITABLE_FILES,
     }
 }
 
@@ -304,19 +258,10 @@ fn valid_sha256(value: &str) -> bool {
 
 fn locked_files(target: LocalAppBuildTarget) -> Vec<(&'static str, &'static [u8])> {
     match target {
-        LocalAppBuildTarget::ReactDomR1 | LocalAppBuildTarget::ReactDomR2 => {
-            REACT_DOM_MANAGED_FILES.to_vec()
-        }
-        LocalAppBuildTarget::Canvas2dR1 | LocalAppBuildTarget::Canvas2dR2 => {
-            CANVAS_2D_MANAGED_FILES.to_vec()
-        }
-        LocalAppBuildTarget::Three3dR1 | LocalAppBuildTarget::Three3dR2 => {
-            THREE_3D_MANAGED_FILES.to_vec()
-        }
-        LocalAppBuildTarget::Phaser2dR1 | LocalAppBuildTarget::Phaser2dR2 => {
-            PHASER_2D_MANAGED_FILES.to_vec()
-        }
-        LocalAppBuildTarget::Babylon3dR1 => BABYLON_3D_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::ReactDomR4 => REACT_DOM_R4_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::Canvas2dR4 => CANVAS_2D_R4_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::Three3dR4 => THREE_3D_R4_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::Phaser2dR4 => PHASER_2D_R4_MANAGED_FILES.to_vec(),
     }
 }
 
@@ -541,15 +486,10 @@ const HOST_MANAGED_FILES: &[&str] = &[
 /// silently inherited this list with nothing failing.
 fn repinned_host_managed_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
     match target {
-        LocalAppBuildTarget::ReactDomR1
-        | LocalAppBuildTarget::ReactDomR2
-        | LocalAppBuildTarget::Canvas2dR1
-        | LocalAppBuildTarget::Canvas2dR2
-        | LocalAppBuildTarget::Three3dR1
-        | LocalAppBuildTarget::Three3dR2
-        | LocalAppBuildTarget::Phaser2dR1
-        | LocalAppBuildTarget::Phaser2dR2
-        | LocalAppBuildTarget::Babylon3dR1 => HOST_MANAGED_FILES,
+        LocalAppBuildTarget::ReactDomR4
+        | LocalAppBuildTarget::Canvas2dR4
+        | LocalAppBuildTarget::Three3dR4
+        | LocalAppBuildTarget::Phaser2dR4 => HOST_MANAGED_FILES,
     }
 }
 
@@ -558,15 +498,10 @@ fn repinned_host_managed_files(target: LocalAppBuildTarget) -> &'static [&'stati
 #[cfg(test)]
 fn build_locked_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
     match target {
-        LocalAppBuildTarget::ReactDomR1
-        | LocalAppBuildTarget::ReactDomR2
-        | LocalAppBuildTarget::Canvas2dR1
-        | LocalAppBuildTarget::Canvas2dR2
-        | LocalAppBuildTarget::Three3dR1
-        | LocalAppBuildTarget::Three3dR2
-        | LocalAppBuildTarget::Phaser2dR1
-        | LocalAppBuildTarget::Phaser2dR2
-        | LocalAppBuildTarget::Babylon3dR1 => &[
+        LocalAppBuildTarget::ReactDomR4
+        | LocalAppBuildTarget::Canvas2dR4
+        | LocalAppBuildTarget::Three3dR4
+        | LocalAppBuildTarget::Phaser2dR4 => &[
             ".gitignore",
             "package.json",
             "pnpm-lock.yaml",
@@ -781,9 +716,10 @@ pub(crate) fn scaffold_workspace(
     // same thing on both sides.
     let mut manifest = local_apps::AppManifest::for_new_app(layout.app_id(), layout.app_id());
     manifest.surface = Some(target.surface());
-    manifest.runtime_profile =
-        crate::local_app_runtime_profiles::current_binding_for_family(target.runtime_profile())
-            .ok();
+    manifest.runtime_profile = crate::local_app_runtime_profiles::binding_for_family_revision(
+        target.runtime_profile(),
+        target.revision(),
+    );
     if let Some(binding) = manifest.runtime_profile.as_ref() {
         manifest.template_origin = Some(local_apps::AppTemplateOrigin {
             plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
@@ -833,7 +769,8 @@ pub(crate) fn scaffold_workspace(
             lockfile_sha256: hash_bytes(&lockfile),
             dependency_tree_sha256: tree_sha256.clone(),
             sbom_sha256: hash_bytes(&sbom),
-            toolchain_key: crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+            toolchain_key: runtime_profile_contract_for_binding(&binding)?
+                .toolchain_key
                 .to_string(),
             verified_profile_contract_sha256: binding.contract_sha256.clone(),
         };
@@ -1144,6 +1081,9 @@ impl LocalAppBuilder<'_> {
         let guest_xdg_cache_root = format!("{guest_build_state_root}/xdg-cache");
         let guest_xdg_config_root = format!("{guest_build_state_root}/xdg-config");
         let guest_xdg_data_root = format!("{guest_build_state_root}/xdg-data");
+        let toolchain =
+            LocalAppsHostBroker::toolchain_for_layout(layout).map_err(AppError::StorageCorrupt)?;
+        environment.insert("PATH".into(), toolchain.path().into());
         environment.insert("NODE_ENV".into(), "production".into());
         environment.insert("HOME".into(), guest_home_root);
         environment.insert("TMPDIR".into(), guest_temp_root.clone());
@@ -1159,7 +1099,7 @@ impl LocalAppBuilder<'_> {
         };
         let mounts = vec![build_mount];
         let request = LinuxCommandRequest {
-            command: "/usr/bin/node".into(),
+            command: toolchain.node_command().into(),
             args: fixed_vite_build_args(build_memory_mb, executable, output_rel.to_string()),
             cwd: Some(project_guest_path),
             env: environment,
@@ -2130,20 +2070,9 @@ fn derive_runtime_profile_status_with_edges(
     // an unknown family/revision, or a removed historical bundle all mean the
     // exact runtime cannot be materialized on this host. A published bundle
     // with a different digest is corruption, not an upgrade opportunity.
-    let Some(catalog_entry) = crate::local_app_runtime_profiles::list_runtime_profiles()
-        .into_iter()
-        .find(|entry| entry.family == binding.family && entry.revision == binding.revision)
-    else {
-        return Some(AppRuntimeProfileStatus::RuntimeBundleMissing);
-    };
-    if !catalog_entry.available {
-        return Some(AppRuntimeProfileStatus::RuntimeBundleMissing);
-    }
-    if catalog_entry.contract_sha256 != binding.contract_sha256 {
-        return corrupt();
-    }
     let contract = match runtime_profile_contract_for_binding(binding) {
         Ok(contract) => contract,
+        Err(AppError::StorageCorrupt(_)) => return corrupt(),
         Err(_) => return Some(AppRuntimeProfileStatus::RuntimeBundleMissing),
     };
     if snapshot.toolchain_key != contract.toolchain_key {
@@ -2939,6 +2868,36 @@ fn bounded_message(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn current_r4_bindings_route_to_their_exact_build_assets() {
+        for (family, expected) in [
+            (AppRuntimeProfile::ReactDom, LocalAppBuildTarget::ReactDomR4),
+            (AppRuntimeProfile::Canvas2d, LocalAppBuildTarget::Canvas2dR4),
+            (AppRuntimeProfile::Three3d, LocalAppBuildTarget::Three3dR4),
+            (AppRuntimeProfile::Phaser2d, LocalAppBuildTarget::Phaser2dR4),
+        ] {
+            let binding =
+                crate::local_app_runtime_profiles::current_binding_for_family(family).unwrap();
+            let contract = runtime_profile_contract_for_binding(&binding).unwrap();
+            let target = LocalAppBuildTarget::from_runtime_binding(&binding).unwrap();
+            assert_eq!(target, expected);
+            assert_eq!(source_files(target), contract.editable_files);
+            assert_eq!(locked_files(target), contract.managed_files);
+            let root = tempfile::tempdir().unwrap();
+            let layout = AppLayout::new(root.path().join("app"), "aabbccdd").unwrap();
+            scaffold_workspace(&layout, target).unwrap();
+            assert_eq!(detect_build_target(&layout).unwrap(), target);
+            let workspace = layout.root().join(layout.workspace_rel());
+            for (path, bytes) in contract.managed_files.iter().chain(contract.editable_files) {
+                assert_eq!(
+                    std::fs::read(workspace.join(path)).unwrap(),
+                    *bytes,
+                    "{family} {path}"
+                );
+            }
+        }
+    }
+
     fn pinned_locked_bytes(target: LocalAppBuildTarget, relative: &str) -> &'static [u8] {
         locked_files(target)
             .into_iter()
@@ -3311,7 +3270,7 @@ mod tests {
     /// receipt, which are the final inputs needed for `verified`.
     fn verified_status_fixture(root: &Path) -> (AppLayout, local_apps::AppRecord) {
         let layout = AppLayout::new(root, "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold");
         let record = load_record_mirror(&layout).expect("record mirror");
         let manifest = local_apps::load_manifest(&layout).expect("manifest");
         let build_root = layout.root().join(layout.build_rel(false));
@@ -3472,7 +3431,7 @@ mod tests {
     fn runtime_profile_status_reports_rebuild_when_output_receipt_is_missing_or_stale() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold");
         let record = load_record_mirror(&layout).expect("record mirror");
         assert_eq!(
             derive_runtime_profile_status(root.path(), &record),
@@ -3588,7 +3547,7 @@ mod tests {
                 Some(local_apps::AppSurface::Dom)
             ))
             .expect("dom surface"),
-            LocalAppBuildTarget::ReactDomR2
+            LocalAppBuildTarget::ReactDomR4
         );
 
         let canvas_root = tempfile::tempdir().expect("tempdir");
@@ -3599,7 +3558,7 @@ mod tests {
                 Some(local_apps::AppSurface::Canvas)
             ))
             .expect("canvas surface"),
-            LocalAppBuildTarget::Canvas2dR2
+            LocalAppBuildTarget::Canvas2dR4
         );
     }
 
@@ -3619,7 +3578,7 @@ mod tests {
         fs::write(workspace.join("vite.config.mjs"), "export default {};").expect("Vite marker");
         assert_eq!(
             detect_build_target(&layout).expect("canvas surface survives a Vite marker"),
-            LocalAppBuildTarget::Canvas2dR2
+            LocalAppBuildTarget::Canvas2dR4
         );
     }
 
@@ -3675,7 +3634,7 @@ mod tests {
     fn scaffold_workspace_stamps_both_halves_of_the_pair() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::Canvas2dR2).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::Canvas2dR4).expect("scaffold");
 
         assert!(
             load_record_mirror(&layout)
@@ -3685,7 +3644,7 @@ mod tests {
         );
         assert_eq!(
             detect_build_target(&layout).expect("a scaffolded workspace is buildable"),
-            LocalAppBuildTarget::Canvas2dR2
+            LocalAppBuildTarget::Canvas2dR4
         );
     }
 
@@ -3701,7 +3660,7 @@ mod tests {
         before.brief = "shows the local tide".to_string();
         save_record_mirror(&layout, &before).expect("named record");
 
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold");
 
         let after = load_record_mirror(&layout).expect("record mirror");
         assert_eq!(
@@ -3735,7 +3694,7 @@ mod tests {
         fs::write(workspace.join("package.json"), "{\"tampered\":true}").expect("package");
         fs::write(workspace.join("app/main.jsx"), "export default 'custom';").expect("source");
 
-        replace_build_source(&workspace, &output, LocalAppBuildTarget::ReactDomR1)
+        replace_build_source(&workspace, &output, LocalAppBuildTarget::ReactDomR4)
             .expect("copy source");
         assert_eq!(
             fs::read_to_string(output.join("app/main.jsx")).unwrap(),
@@ -3743,11 +3702,11 @@ mod tests {
         );
         assert_eq!(
             fs::read(output.join("package.json")).unwrap(),
-            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "package.json")
+            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR4, "package.json")
         );
         assert_eq!(
             fs::read(output.join("lib/lingxi-bridge.js")).unwrap(),
-            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "lib/lingxi-bridge.js")
+            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR4, "lib/lingxi-bridge.js")
         );
         assert!(!output.join("node_modules").exists());
         assert!(!output.join(".lingxi").exists());
@@ -3765,7 +3724,7 @@ mod tests {
         fs::create_dir_all(workspace.join("src")).expect("source");
         fs::write(workspace.join("src/main.jsx"), "export default null;").expect("source file");
 
-        replace_build_source(&workspace, &output, LocalAppBuildTarget::ReactDomR1)
+        replace_build_source(&workspace, &output, LocalAppBuildTarget::ReactDomR4)
             .expect("copy source");
 
         assert!(output.join("src/main.jsx").is_file());
@@ -4135,7 +4094,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
 
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold workspace");
 
         let workspace = layout.root().join(layout.workspace_rel());
         assert!(workspace.join(".gitignore").is_file());
@@ -4176,7 +4135,7 @@ mod tests {
     /// everything under `app/` and `src/` is the user's app from here on.
     fn formed_layout(root: &Path) -> AppLayout {
         let layout = shell_layout(root);
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("first scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("first scaffold");
         layout
     }
 
@@ -4214,7 +4173,7 @@ mod tests {
         write_workspace_file(&workspace, "app/screens/rogue.jsx", b"// not in the seed");
         write_workspace_file(&workspace, "node_modules/.keep", b"");
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR4, true)
             .expect("scaffold");
 
         assert!(
@@ -4261,7 +4220,7 @@ mod tests {
             b"// squatted by the agent",
         );
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR4, true)
             .expect("scaffold");
 
         let landed = fs::read(workspace.join("app/screens/home-screen.jsx")).expect("read");
@@ -4292,7 +4251,7 @@ mod tests {
         )
         .expect("edit a seed path");
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, false)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR4, false)
             .expect("repin");
 
         assert!(
@@ -4326,7 +4285,7 @@ mod tests {
             b"stale",
         );
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR4, true)
             .expect("scaffold");
 
         assert!(
@@ -4349,7 +4308,7 @@ mod tests {
         fs::create_dir_all(&workspace).expect("bare workspace");
         write_workspace_file(&workspace, "keep-me.txt", b"not ours to delete");
 
-        let error = scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
+        let error = scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR4, true)
             .expect_err("an uninitialized workspace must not be wiped");
 
         assert!(
@@ -4377,7 +4336,7 @@ mod tests {
         fs::create_dir_all(workspace.parent().expect("app dir")).expect("app dir");
         std::os::unix::fs::symlink(&outside, &workspace).expect("symlink workspace");
 
-        let error = scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
+        let error = scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR4, true)
             .expect_err("a symlinked workspace root must be refused");
 
         assert!(
@@ -4401,7 +4360,7 @@ mod tests {
         fs::write(outside.join("precious.txt"), "someone else's tree").expect("outside file");
         std::os::unix::fs::symlink(&outside, workspace.join("vendor")).expect("symlink vendor");
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR4, true)
             .expect("scaffold");
 
         assert!(
@@ -4425,7 +4384,7 @@ mod tests {
         fs::write(&outside, "{\"outside\":true}").expect("outside file");
         std::os::unix::fs::symlink(&outside, workspace.join("package.json"))
             .expect("symlink package.json");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold workspace");
 
         let metadata = fs::symlink_metadata(workspace.join("package.json")).expect("metadata");
         assert!(metadata.is_file());
@@ -4442,13 +4401,13 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let workspace = root.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace");
-        let pinned_package = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "package.json");
+        let pinned_package = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR4, "package.json");
         let outside = root.path().join("outside-package.json");
         fs::write(&outside, pinned_package).expect("outside file");
         std::os::unix::fs::symlink(&outside, workspace.join("package.json"))
             .expect("symlink package.json");
 
-        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR1)
+        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR4)
             .expect("restore host-managed files");
 
         let metadata = fs::symlink_metadata(workspace.join("package.json")).expect("metadata");
@@ -4490,7 +4449,7 @@ mod tests {
             lockfile_sha256: "3".repeat(64),
             dependency_tree_sha256: "4".repeat(64),
             sbom_sha256: "5".repeat(64),
-            toolchain_key: "pnpm@11.22.0/node@24.18.1".into(),
+            toolchain_key: "pnpm@12.5.1/node@26.9.0".into(),
             verified_profile_contract_sha256: binding.contract_sha256.clone(),
         });
         local_apps::save_manifest(&layout, &manifest).expect("manifest");
@@ -4511,7 +4470,7 @@ mod tests {
         fs::write(workspace.join("package.json"), br#"{"tampered":true}"#).expect("package");
         fs::write(workspace.join("pnpm-lock.yaml"), b"tampered\n").expect("lock");
 
-        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR1)
+        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR4)
             .expect("restore host-managed files");
 
         assert_eq!(
@@ -4533,12 +4492,12 @@ mod tests {
         fs::create_dir_all(&workspace).expect("workspace");
         fs::create_dir_all(&outside_lib).expect("outside lib");
         let pinned_bridge =
-            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "lib/lingxi-bridge.js");
+            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR4, "lib/lingxi-bridge.js");
         fs::write(outside_lib.join("lingxi-bridge.js"), pinned_bridge).expect("outside bridge");
         std::os::unix::fs::symlink(&outside_lib, workspace.join("lib"))
             .expect("symlink lib parent");
 
-        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR1)
+        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR4)
             .expect("restore host-managed files");
 
         let lib_metadata = fs::symlink_metadata(workspace.join("lib")).expect("lib metadata");
@@ -4603,13 +4562,13 @@ mod tests {
     async fn the_build_re_pins_host_managed_infrastructure_without_touching_app_owned_files() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         let pinned_bridge =
-            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "lib/lingxi-bridge.js");
-        let pinned_gitignore = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, ".gitignore");
-        let pinned_package = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "package.json");
-        let pinned_index = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "index.html");
+            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR4, "lib/lingxi-bridge.js");
+        let pinned_gitignore = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR4, ".gitignore");
+        let pinned_package = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR4, "package.json");
+        let pinned_index = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR4, "index.html");
 
         fs::write(
             workspace.join("lib/lingxi-bridge.js"),
@@ -4711,7 +4670,7 @@ mod tests {
     ) {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
 
         // A model editing the workspace's dependency-owning file directly,
@@ -4774,7 +4733,7 @@ mod tests {
     async fn a_failed_build_cleans_up_its_staging_directory() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -4816,76 +4775,81 @@ mod tests {
 
     #[tokio::test]
     async fn build_runs_from_the_workspace_mount_and_promotes_private_output() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
-        let workspace = layout.root().join(layout.workspace_rel());
-        fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
-        fs::write(
-            workspace.join("node_modules/vite/bin/vite.js"),
-            "#!/usr/bin/env node\n",
-        )
-        .expect("workspace vite");
+        for target in [LocalAppBuildTarget::ReactDomR4] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+            scaffold_workspace(&layout, target).expect("scaffold workspace");
+            let workspace = layout.root().join(layout.workspace_rel());
+            fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
+            fs::write(
+                workspace.join("node_modules/vite/bin/vite.js"),
+                "#!/usr/bin/env node\n",
+            )
+            .expect("workspace vite");
 
-        let build_root = layout.root().join(layout.build_rel(false));
-        fs::create_dir_all(build_root.join(VITE_OUTPUT_DIR)).expect("old dist");
-        fs::write(
-            build_root.join(VITE_OUTPUT_DIR).join("index.html"),
-            "<html>old</html>",
-        )
-        .expect("old output");
+            let build_root = layout.root().join(layout.build_rel(false));
+            fs::create_dir_all(build_root.join(VITE_OUTPUT_DIR)).expect("old dist");
+            fs::write(
+                build_root.join(VITE_OUTPUT_DIR).join("index.html"),
+                "<html>old</html>",
+            )
+            .expect("old output");
 
-        let runtime = RecordingIsolatedRuntime::new();
-        let broker = LocalAppsHostBroker::new(
-            root.path().to_path_buf(),
-            client_adapter::MockSink::arc(),
-            Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
-            false,
-            None,
-        );
-        let builder = LocalAppBuilder {
-            mobile_linux: Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
-            host: broker.as_ref(),
-        };
-        let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
-        dependency.state = local_apps::AppDependencyState::Ready;
+            let runtime = RecordingIsolatedRuntime::new();
+            let broker = LocalAppsHostBroker::new(
+                root.path().to_path_buf(),
+                client_adapter::MockSink::arc(),
+                Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
+                false,
+                None,
+            );
+            let builder = LocalAppBuilder {
+                mobile_linux: Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
+                host: broker.as_ref(),
+            };
+            let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
+            dependency.state = local_apps::AppDependencyState::Ready;
 
-        builder
-            .build_workspace_locked(&layout, &dependency)
-            .await
-            .expect("workspace build");
+            builder
+                .build_workspace_locked(&layout, &dependency)
+                .await
+                .expect("workspace build");
 
-        let request = runtime.recorded_request().await;
-        assert_eq!(runtime.isolated_runs.load(Ordering::SeqCst), 1);
-        assert_eq!(request.mounts.len(), 1);
-        assert_eq!(request.mounts[0].host_path, workspace);
-        assert_eq!(
-            request.mounts[0].guest_path,
-            guest_paths::local_app_build_project("aaaa1111", "store")
-        );
-        assert_eq!(
-            request.cwd.as_deref(),
-            Some(request.mounts[0].guest_path.as_str())
-        );
-        assert!(request.args.windows(2).any(|window| {
-            window[0] == "--outDir" && window[1] == ".lingxi-build-state/build-output/dist"
-        }));
-        assert!(
-            fs::read_to_string(build_root.join(VITE_OUTPUT_DIR).join("index.html"))
-                .expect("promoted index")
-                .contains("fresh")
-        );
-        assert!(
-            !workspace_build_artifact_root(&workspace).exists(),
-            "private build output should be consumed by promotion"
-        );
+            let request = runtime.recorded_request().await;
+            let toolchain = LocalAppsHostBroker::toolchain_for_layout(&layout).unwrap();
+            assert_eq!(request.command, toolchain.node_command());
+            assert_eq!(request.env["PATH"], toolchain.path());
+            assert_eq!(runtime.isolated_runs.load(Ordering::SeqCst), 1);
+            assert_eq!(request.mounts.len(), 1);
+            assert_eq!(request.mounts[0].host_path, workspace);
+            assert_eq!(
+                request.mounts[0].guest_path,
+                guest_paths::local_app_build_project("aaaa1111", "store")
+            );
+            assert_eq!(
+                request.cwd.as_deref(),
+                Some(request.mounts[0].guest_path.as_str())
+            );
+            assert!(request.args.windows(2).any(|window| {
+                window[0] == "--outDir" && window[1] == ".lingxi-build-state/build-output/dist"
+            }));
+            assert!(
+                fs::read_to_string(build_root.join(VITE_OUTPUT_DIR).join("index.html"))
+                    .expect("promoted index")
+                    .contains("fresh")
+            );
+            assert!(
+                !workspace_build_artifact_root(&workspace).exists(),
+                "private build output should be consumed by promotion"
+            );
+        }
     }
 
     #[tokio::test]
     async fn build_fails_fast_when_fresh_lsp_errors_exist_in_app_managed_js() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -4970,7 +4934,7 @@ mod tests {
     async fn stale_lsp_versions_only_degrade_and_do_not_block_build_start() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR2).expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR4).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -5052,7 +5016,7 @@ mod tests {
     fn the_locked_bridge_exposes_the_native_wire_contract() {
         let bridge = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/lingxi-bridge.js"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r4/lib/lingxi-bridge.js"
         ));
         for anchor in [
             "records[].document",
@@ -5105,15 +5069,15 @@ mod tests {
     fn platform_adapter_declares_distinct_phone_and_tablet_presentations() {
         let adapter = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/platform-adapter.js"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r4/lib/platform-adapter.js"
         ));
         let foundation = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/styles/foundation.css"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r4/styles/foundation.css"
         ));
         let vite_config = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/vite.config.mjs"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r4/vite.config.mjs"
         ));
         for marker in [
             "ios:iphone",

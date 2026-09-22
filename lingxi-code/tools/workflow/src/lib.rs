@@ -1608,6 +1608,33 @@ impl Tool for WorkflowTool {
         spec.creator_teammate_name = ctx.agent_name.clone();
         spec.creator_team_name = ctx.team_name.clone();
         spec.creator_agent_id = ctx.agent_id.map(|id| id.to_string());
+        // Plugin scripts are Host-owned; callers must resume through registry
+        // lookup rather than edit/read the persisted copy outside their workspace.
+        let plugin_resume = spec
+            .name
+            .as_deref()
+            .filter(|name| {
+                !spec
+                    .script
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && !spec
+                        .script_path
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                    && workflow_source_for_name(
+                        &self.current_cwd(),
+                        name,
+                        self.plugin_workflows.as_deref(),
+                    ) == Some("plugin")
+            })
+            .map(|name| {
+                let mut request = json!({ "name": name });
+                if let Some(args) = &spec.args {
+                    request["args"] = args.clone();
+                }
+                request
+            });
         let launch_result = launcher
             .launch(spec)
             .await
@@ -1649,14 +1676,23 @@ impl Tool for WorkflowTool {
 
         let n = summary.map_or_else(String::new, |s| format!("\nSummary: {s}"));
         let r = transcript.map_or_else(String::new, |t| format!("\nTranscript dir: {t}"));
-        let o = script_p.map_or_else(String::new, |p| {
-            format!(
+        let o = script_p
+            .filter(|_| plugin_resume.is_none())
+            .map_or_else(String::new, |p| {
+                format!(
                 "\nScript file: {p}\n(Edit this file with Write/Edit and re-invoke Workflow with \
                  {{scriptPath: \"{p}\"}} to iterate without resending the script.)"
             )
-        });
-        let s = match (script_p, run_id_str) {
-            (Some(p), Some(rid)) => format!(
+            });
+        let s = match (plugin_resume, script_p, run_id_str) {
+            (Some(mut request), _, Some(rid)) => {
+                request["resumeFromRunId"] = Value::String(rid.to_string());
+                format!(
+                    "\nRun ID: {rid}\nTo resume this Host-owned plugin workflow: Workflow({request}). \
+                     The Host resolves the registered script; completed unchanged agents return cached results."
+                )
+            }
+            (None, Some(p), Some(rid)) => format!(
                 "\nRun ID: {rid}\nTo resume after editing the script: \
                  Workflow({{scriptPath: \"{p}\", resumeFromRunId: \"{rid}\"}}) \
                  — completed agents return cached results (cached results may themselves be empty — inspect journal.jsonl before assuming there is something to recover)."
@@ -3698,6 +3734,62 @@ mod tests {
         ) -> Result<WorkflowLaunched, WorkflowLaunchError> {
             Ok(self.launched.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn plugin_resume_hint_uses_registry_name_and_preserves_args() {
+        let dir = unique_temp_path("plugin-resume-hint");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plugin.js");
+        std::fs::write(&path, VALID_SCRIPT).unwrap();
+        let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+        registry.register(vec![workflow::PluginWorkflowEntry {
+            name: "acme:create".into(),
+            script_path: path,
+        }]);
+        let t = tool(Some(Arc::new(RichMockLauncher {
+            launched: WorkflowLaunched {
+                task_id: "w_resume".into(),
+                run_id: Some("wf_abc123".into()),
+                script_path: Some("/host/private/workflows/wf_abc123.js".into()),
+                workflow_name: Some("acme:create".into()),
+                summary: None,
+                transcript_dir: None,
+                error: None,
+            },
+        })))
+        .with_plugin_workflows(registry);
+        let args = json!({ "requirement": "quoted \"name\"", "nested": { "enabled": true } });
+        let result = t
+            .call(
+                json!({ "name": "acme:create", "args": args }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let content = result.data["model_content"].as_str().unwrap();
+        let request = content
+            .split("Workflow(")
+            .nth(1)
+            .unwrap()
+            .split("). ")
+            .next()
+            .unwrap();
+        let request: Value = serde_json::from_str(request).unwrap();
+        assert_eq!(
+            request,
+            json!({ "name": "acme:create", "args": args, "resumeFromRunId": "wf_abc123" })
+        );
+        assert!(!content.contains("scriptPath"));
+        assert!(!content.contains("Write/Edit"));
+        assert!(!content.contains("/host/private"));
+        // Persisted path stays available as diagnostic metadata, not an editing instruction.
+        assert_eq!(
+            result.data["scriptPath"],
+            "/host/private/workflows/wf_abc123.js"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// call() with summary + transcriptDir → result JSON has both fields and the

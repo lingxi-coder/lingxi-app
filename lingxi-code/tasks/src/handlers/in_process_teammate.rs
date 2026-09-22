@@ -458,6 +458,15 @@ pub struct InProcessTeammateHandler {
     /// absent, teammate auto-claim preserves the legacy process-global
     /// `HOME`/`LINGXI_CONFIG_DIR` resolution.
     config_home: Option<std::path::PathBuf>,
+    /// The session's published plan-file identity. When present, a teammate's
+    /// plan file is `ay(agentId)` — `<plansDir>/<slug>-agent-<agentId>.md` —
+    /// the exact shape the permission policy's one write carve-out matches and
+    /// the directory the session's own reminders name, so the teammate can
+    /// actually write it. `None` keeps the legacy
+    /// `<config-home>/plans/<agentId>.md`, which only the call-local
+    /// `own_plan_file_root` allowance covers (and only once that directory
+    /// exists).
+    plan_files: Option<Arc<platform_api::plan_files::PlanFileMatcher>>,
     plan_approval_mailbox: Option<Arc<dyn platform_api::mailbox::MailboxRouterHandle>>,
     plan_approval_gate: Option<Arc<dyn platform_api::PermissionGate>>,
     transcript: Option<(Arc<dyn platform_api::FileSystem>, std::path::PathBuf)>,
@@ -556,6 +565,7 @@ impl InProcessTeammateHandler {
             pool,
             output,
             config_home: None,
+            plan_files: None,
             plan_approval_mailbox: None,
             plan_approval_gate: None,
             transcript: None,
@@ -663,6 +673,17 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_config_home(mut self, config_home: std::path::PathBuf) -> Self {
         self.config_home = Some(config_home);
+        self
+    }
+
+    /// Publish the session's plan-file identity, so teammate plan files land in
+    /// the session's plans directory (`ay(agentId)`) instead of the config home.
+    #[must_use]
+    pub fn with_plan_files(
+        mut self,
+        plan_files: Arc<platform_api::plan_files::PlanFileMatcher>,
+    ) -> Self {
+        self.plan_files = Some(plan_files);
         self
     }
 
@@ -1137,13 +1158,24 @@ impl Task for InProcessTeammateHandler {
             (Some(mailbox), Some(inner))
                 if subagent_ctx.permission_mode_override.as_deref() == Some("plan") =>
             {
-                let home = self
-                    .config_home
-                    .clone()
-                    .unwrap_or_else(|| std::path::PathBuf::from(branding::DOT_DIR));
-                let path = home
-                    .join("plans")
-                    .join(format!("{}.md", agent_id.as_uuid()))
+                // `ay(agentId)` when the host published an identity: the
+                // teammate's plan file belongs in the same plans directory the
+                // session's reminders name and the write carve-out matches.
+                // Without an identity, the legacy config-home path is kept —
+                // the teammate can still write it through the call-local
+                // allowance, provided that directory exists.
+                let agent_key = agent_id.as_uuid().to_string();
+                let path = self
+                    .plan_files
+                    .as_ref()
+                    .and_then(|plan_files| plan_files.plan_file(Some(agent_key.as_str())))
+                    .unwrap_or_else(|| {
+                        self.config_home
+                            .clone()
+                            .unwrap_or_else(|| std::path::PathBuf::from(branding::DOT_DIR))
+                            .join("plans")
+                            .join(format!("{agent_key}.md"))
+                    })
                     .display()
                     .to_string();
                 let controller = Arc::new(

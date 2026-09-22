@@ -34,12 +34,14 @@ verification unless the tested state was deliberately paused.
 
 ## Sources
 
-Reviewed: 2026-08-27
+Reviewed: 2026-09-21
 
 - LingXi Android WebView inspector: `clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppWebView.kt`
 - LingXi iOS WebView inspector: `clients/ios/Sources/LocalApps/LocalAppWebView.swift`
 - LingXi frontend QA canvas gate (what actually encodes this protocol today):
-  `lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js:107-108`
+  `lingxi-code/plugins/lingxi-local-app/schemas/use-test-report.schema.json`
   (`render_check` requires `canvas_surfaces`/`frames_captured`, `motion_check`
-  requires `frames_compared`). `local_app_canvas_workflow.js` does not exist
-  in this repo — an earlier draft cited it.
+  requires `frames_compared`), reported by the
+  `lingxi-local-app:local-app-use-test` workflow. `local_app_canvas_workflow.js`
+  does not exist in this repo — an earlier draft cited it, and the former
+  `workflows/local-app-build.js` that also carried the gate has been retired.

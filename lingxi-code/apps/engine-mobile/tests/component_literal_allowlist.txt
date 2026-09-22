@@ -95,6 +95,12 @@
 # preloading, NOT the tool). Host prose naming the bare form would send the
 # model to `Unknown skill: create-local-app`.
 apps/engine-mobile/src/local_apps_host.rs:lingxi-local-app:create-local-app:2
+#
+# The on-demand testing hand-off prose names the two plugin test SKILLS so the
+# model can invoke them: testing is never host-initiated, so the only way to
+# reach the app's on-device use-test path is by name.
+apps/engine-mobile/src/local_apps_host.rs:frontend-qa:1
+apps/engine-mobile/src/local_apps_host.rs:local-app-test:1
 
 # host.rs — the ONE place the three plugin-owned entry routers are kept visible
 # in a global/project conversation. Every other `lingxi-local-app:` skill is
@@ -109,10 +115,17 @@ apps/engine-mobile/src/host.rs:lingxi-local-app:create-local-app:1
 apps/engine-mobile/src/host.rs:lingxi-local-app:expose-as-mcp:1
 apps/engine-mobile/src/host.rs:lingxi-local-app:local-app-use:1
 
-# local_app_plugin_binding.rs — the one place a build target maps to the
-# plugin-owned build workflow id. The Host never reads these literals itself:
+# local_app_plugin_binding.rs — the one place a build target maps to a
+# plugin-owned workflow id. The Host never reads these literals itself:
 # it asks LocalAppPluginBinding::resolve/enforce, which is the composition
 # binding this scanner's own allowlist header describes.
+#
+# `local-app-build` is KEPT: the unified CREATE launch retired with the
+# plan-driven `LocalAppPrepare` flow, but the same identity still gates the
+# named/scriptPath UPDATE and VERIFY resumes
+# (`apply_materialized_local_app_collections_with_identity` +
+# `persisted_workflow_script_path`), so the const and its binding stay in
+# production.
 apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-build:1
 apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-mcp-authoring:1
 apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-test:1

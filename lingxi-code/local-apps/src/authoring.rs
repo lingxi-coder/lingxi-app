@@ -1230,6 +1230,32 @@ mod tests {
     }
 
     #[test]
+    fn presentations_cover_each_target_once_even_when_screens_differ() {
+        let mut spec = valid_spec();
+        spec.targets.push(AppTarget {
+            id: "desktop".into(),
+            os: "macos".into(),
+            form_factor: "desktop".into(),
+        });
+        assert!(spec
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one presentation per target"));
+        let mut second_screen = spec.design.presentations[0].clone();
+        second_screen.presentation = "another screen".into();
+        spec.design.presentations.push(second_screen);
+        assert!(spec
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate presentation"));
+        spec.design.presentations[1].target_id = "desktop".into();
+        spec.acceptance_checks[0].target_ids.push("desktop".into());
+        spec.validate().unwrap();
+    }
+
+    #[test]
     fn unknown_fields_and_unknown_targets_are_rejected() {
         let json =
             serde_json::json!({"goal":"x","tasks":[],"external_integrations":[],"extra":true});

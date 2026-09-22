@@ -471,36 +471,11 @@ mod tests {
 
     const LOCAL_APP_PLUGIN: &str = "lingxi-local-app";
 
-    /// Baseline fixture generated with `measure_plugin_agent_guide_bytes` from
-    /// optimization baseline `21771b43`; these are guide bytes after the same
-    /// loader path, not source-file or frontmatter sizes.
-    const LOCAL_APP_GUIDE_BASELINE: &[(&str, usize)] = &[("builder", 40_520), ("designer", 60_095)];
-
     fn local_app_plugin_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("plugins")
             .join(LOCAL_APP_PLUGIN)
-    }
-
-    fn declared_agent_skills(source: &str) -> Vec<String> {
-        let frontmatter = source.split("---").nth(1).unwrap_or_default();
-        let mut skills = Vec::new();
-        let mut in_skills = false;
-        for line in frontmatter.lines() {
-            if line.trim() == "skills:" {
-                in_skills = true;
-                continue;
-            }
-            if in_skills {
-                if let Some(skill) = line.trim().strip_prefix("- ") {
-                    skills.push(skill.trim().to_owned());
-                } else if !line.trim().is_empty() {
-                    break;
-                }
-            }
-        }
-        skills
     }
 
     async fn loaded_local_app_skill_registry() -> MobileDiskSkillLoader {
@@ -593,48 +568,6 @@ mod tests {
             ..SlashCommand::default()
         });
         assert_eq!(loader.list_names().await, vec!["later-skill"]);
-    }
-
-    async fn measure_plugin_agent_guide_bytes(agent: &str) -> usize {
-        let plugin_root = local_app_plugin_root();
-        let agent_source =
-            std::fs::read_to_string(plugin_root.join("agents").join(format!("{agent}.md")))
-                .expect("read Local App agent");
-        let agent_body = agent_source.split("---").nth(2).unwrap_or_default();
-        let loader = loaded_local_app_skill_registry().await;
-        let mut bytes = agent_body.len();
-        for skill in declared_agent_skills(&agent_source) {
-            let loaded = AgentSkillLoader::resolve_and_load(
-                &loader,
-                &skill,
-                &format!("{LOCAL_APP_PLUGIN}:{agent}"),
-                None,
-            )
-            .await
-            .expect("checked skill preload")
-            .unwrap_or_else(|| panic!("preloaded skill {skill} must resolve for {agent}"));
-            bytes += loaded
-                .content
-                .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => text.len(),
-                    _ => 0,
-                })
-                .sum::<usize>();
-        }
-        bytes
-    }
-
-    #[tokio::test]
-    async fn local_app_agent_guide_measurement_uses_live_loader_and_preserves_reduction() {
-        for (agent, baseline) in LOCAL_APP_GUIDE_BASELINE {
-            let measured = measure_plugin_agent_guide_bytes(agent).await;
-            assert!(
-                measured <= baseline.saturating_mul(60) / 100,
-                "{agent} guide is not reduced by at least 40%: {measured} of baseline {baseline} bytes"
-            );
-            println!("LOCAL_APP_GUIDE_BYTES agent={agent} baseline={baseline} after={measured}");
-        }
     }
 
     /// The deferred #14 test: a disk-authored `.lingxi/commands/*.md` under the

@@ -27,19 +27,39 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsBackgroundTest)');
     await webContents.executeJavaScript('window.__settingsBackgroundTest.setOpen(true)');
-    await waitFor(webContents, 'document.querySelector(\'[role="dialog"]\') && document.querySelector(\'[aria-hidden="true"]\')');
+    await waitFor(webContents, 'document.querySelector(\'.ask-user-dialog\') && document.querySelector(\'[aria-hidden="true"]\')');
     const open = await webContents.executeJavaScript(`(() => {
       const background = document.querySelector('[aria-hidden="true"]');
       const button = document.querySelector('#background-button');
       button.focus();
+      const input = document.querySelector('.ask-user-dialog input[type="radio"]');
+      const rect = input.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
       return {
         inert: background?.hasAttribute('inert') === true,
         ariaHidden: background?.getAttribute('aria-hidden') ?? null,
         backgroundFocusable: document.activeElement === button,
+        promptOutsideInert: !input.closest('[inert]'),
+        promptHit: hit === input,
       };
     })()`);
+    const inputPoint = await webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('.ask-user-dialog input[type="radio"]');
+      const rect = input.getBoundingClientRect();
+      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+    })()`);
+    window.show();
+    window.focus();
+    webContents.sendInputEvent({ type: 'mouseMove', ...inputPoint });
+    webContents.sendInputEvent({ type: 'mouseDown', ...inputPoint, button: 'left', clickCount: 1 });
+    webContents.sendInputEvent({ type: 'mouseUp', ...inputPoint, button: 'left', clickCount: 1 });
+    await waitFor(webContents, 'document.querySelector(\'.ask-user-dialog input[type="radio"]\')?.checked === true');
+    const promptClick = await webContents.executeJavaScript(`({
+      selected: document.querySelector('.ask-user-dialog input[type="radio"]')?.checked === true,
+      settingsViewStillVisible: document.querySelector('#settings-view') !== null,
+    })`);
     await webContents.executeJavaScript('window.__settingsBackgroundTest.setOpen(false)');
-    await waitFor(webContents, '!document.querySelector(\'[role="dialog"]\') && !document.querySelector(\'[inert]\')');
+    await waitFor(webContents, '!document.querySelector(\'.ask-user-dialog\') && !document.querySelector(\'[inert]\')');
     const closed = await webContents.executeJavaScript(`(() => {
       const background = document.querySelector('#background-button');
       background.focus();
@@ -49,7 +69,7 @@ async function main() {
         backgroundFocusable: document.activeElement === background,
       };
     })()`);
-    process.stdout.write(`${JSON.stringify({ open, closed })}\n`);
+    process.stdout.write(`${JSON.stringify({ open, promptClick, closed })}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();
     if (app.isReady()) await app.quit();

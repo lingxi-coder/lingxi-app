@@ -6,6 +6,7 @@ import {
   type KeyboardEventHandler,
   type ReactNode,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
@@ -76,7 +77,7 @@ export const DesktopDialog = forwardRef<HTMLDivElement, DesktopDialogProps>(func
     zIndex,
   } as CSSProperties;
 
-  return (
+  const dialog = (
     <div className="desktop-dialog-overlay" style={variables}>
       <div
         ref={ref}
@@ -115,6 +116,14 @@ export const DesktopDialog = forwardRef<HTMLDivElement, DesktopDialogProps>(func
       </div>
     </div>
   );
+
+  // Dialogs can be rendered from inside an inert background (for example,
+  // while SettingsScreen is open). Portaling to body keeps the visible modal
+  // in the active interaction tree instead of letting clicks pass through to
+  // the inert view underneath.
+  return typeof document === 'undefined' || !document.body
+    ? dialog
+    : createPortal(dialog, document.body);
 });
 
 export function DesktopDialogActions({ children }: { children: ReactNode }) {

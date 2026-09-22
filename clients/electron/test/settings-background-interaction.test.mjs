@@ -69,6 +69,12 @@ test('SettingsBackground makes the real background inert while open and restores
       inert: true,
       ariaHidden: 'true',
       backgroundFocusable: false,
+      promptOutsideInert: true,
+      promptHit: true,
+    });
+    assert.deepEqual(result.promptClick, {
+      selected: true,
+      settingsViewStillVisible: true,
     });
     assert.deepEqual(result.closed, {
       inert: false,

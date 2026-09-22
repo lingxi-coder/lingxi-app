@@ -41,9 +41,9 @@ class RootLocalAppPresenterSourceTest {
     // assertions above: the slice guards below are vacuity checks on
     // LocalAppsScreen.kt, and JUnit's assertTrue throws, so a renamed `when`
     // arm here would have silently stopped the SkillsPages.kt / canonical MCP editor
-    // assertions from ever running while naming only the create arm.
+    // assertions from ever running while naming only this sheet.
     @Test
-    fun `the approval sheet title block and create arm carry no raw copy`() {
+    fun `the approval sheet title block carries no raw copy`() {
         val localAppsScreen = File("src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt").readText()
 
         // Slice the approval dialog's own title lambda. A whole-file
@@ -61,70 +61,14 @@ class RootLocalAppPresenterSourceTest {
         assertTrue("the approval dialog must still declare a text block after its title", titleEnd > titleStart)
         val titleBlock = localAppsScreen.substring(titleStart, titleEnd)
 
-        // Slice the create-approval arm specifically: there are 18
-        // `LocalAppApprovalFact(` calls across three sheet branches, and the
-        // raw-literal negatives below are defeated by a named `label = "..."`
-        // argument on its own line, which never contains the literal substring
-        // `LocalAppApprovalFact("`.
-        val createArmStart = localAppsScreen.indexOf("is LocalAppCreateApprovalSheet -> {")
-        assertTrue("read the wrong file: create-approval sheet arm not found", createArmStart >= 0)
-        val createArmEnd = localAppsScreen.indexOf("is LocalAppMcpProposalApprovalSheet -> {", createArmStart)
-        assertTrue("read the wrong file: mcp-proposal arm not found after the create arm", createArmEnd > createArmStart)
-        val createArm = localAppsScreen.substring(createArmStart, createArmEnd)
-
-        assertTrue(
-            "the approval dialog's title block must resolve the create-confirm title from " +
-                "R.string, not a raw literal — asserted inside the title lambda, not whole-file",
-            "R.string.local_apps_create_confirm_title" in titleBlock,
-        )
         assertTrue(
             "the approval dialog's title block must resolve the MCP-proposal title from R.string",
             "R.string.local_apps_mcp_proposal_title" in titleBlock,
         )
         assertTrue(
-            "approval sheet must not keep a raw fact label in the create arm: this must hold " +
-                "whether the literal is the first positional argument or a named `label = ` " +
-                "argument reformatted onto its own line",
-            !Regex("LocalAppApprovalFact\\(\\s*\"").containsMatchIn(createArm) &&
-                !Regex("label\\s*=\\s*\"").containsMatchIn(createArm),
-        )
-        assertTrue(
             "approval sheet must not keep hardcoded CJK copy in any Text(...) call, including one " +
                 "reformatted so the literal sits on its own line after the opening paren",
             !Regex("Text\\(\\s*\"[^\"]*[\\u4e00-\\u9fff]").containsMatchIn(localAppsScreen),
-        )
-    }
-
-    @Test
-    fun `the create-confirmation dependency status is localized against the tokens it actually receives`() {
-        val source = File("src/main/java/com/lingxi/code/localapps/LocalAppsScreen.kt").readText()
-
-        assertTrue(
-            "the dependency-status call site (inside buildString, a non-@Composable context) must " +
-                "use the runtime-profile-token localizer, not the old `may_be_required` / " +
-                "`not_required` / `not_needed` one — nothing feeding it ever emits those tokens, so " +
-                "every one of that mapping's arms was unreachable and it silently returned the raw " +
-                "token instead",
-            "dependency.downloadStatus?.localizedRuntimeProfileStatus(context)" in source,
-        )
-        assertTrue(
-            "the now-dead may_be_required/not_required/not_needed, context-taking overload must be " +
-                "deleted, not left with zero callers",
-            "\"may_be_required\" -> context.getString(R.string.local_apps_dependency_change_download_may_be_required)" !in source,
-        )
-        assertEquals(
-            "there must be exactly ONE localizer for the runtime-profile token table. A " +
-                "@Composable twin with zero call sites used to sit beside the live one; two " +
-                "spellings of one table is how the next divergence gets introduced (an arm added " +
-                "to one, the sheet still rendering the raw token)",
-            1,
-            Regex("fun String\\.localizedRuntimeProfileStatus\\(").findAll(source).count(),
-        )
-        val viewModel = File("src/main/java/com/lingxi/code/localapps/LocalAppsViewModel.kt").readText()
-        assertTrue(
-            "the identity function that \"localized\" nothing (every arm returned its own input) " +
-                "must be deleted, not left as dead code that looks like it does something",
-            "private fun String.localizedTokenOrSelf" !in viewModel,
         )
     }
 

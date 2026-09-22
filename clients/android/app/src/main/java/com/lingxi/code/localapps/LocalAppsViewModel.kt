@@ -20,19 +20,15 @@ import com.lingxi.code.bindings.AppEventDto
 import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeModeDto
-import com.lingxi.code.bindings.AppRuntimeProfileOptionDto
-import com.lingxi.code.bindings.AppRuntimeProfileDto
 import com.lingxi.code.bindings.AppRuntimeProfileStatusDto
 import com.lingxi.code.bindings.AppRuntimeStateDto
 import com.lingxi.code.bindings.AppSessionKindDto
 import com.lingxi.code.bindings.AppSessionRowDto
-import com.lingxi.code.bindings.AppSurfaceDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppWorkflowStateDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.LocalAppCreateConfirmationRequestDto
 import com.lingxi.code.bindings.LocalAppGateStatusDto
 import com.lingxi.code.bindings.LocalAppMcpProposalApprovalRequestDto
 import com.lingxi.code.bindings.LocalAppMcpToolDiffDto
@@ -1593,9 +1589,7 @@ class LocalAppsViewModel(
             }
             is AppEventDto.PluginStatusChanged -> Unit
             is AppEventDto.PluginInventoryChanged -> Unit
-            is AppEventDto.CreateConfirmationRequested -> enqueueApprovalSheet(
-                event.request.toUiCreateApprovalSheet(),
-            )
+            is AppEventDto.CreateConfirmationRequested -> Unit
             is AppEventDto.McpProposalApprovalRequested -> {
                 clearManagedMcpPending(event.request.appId)
                 enqueueApprovalSheet(event.request.toUiMcpProposalApprovalSheet())
@@ -1665,14 +1659,6 @@ class LocalAppsViewModel(
                     approved = false,
                 ),
             )
-            is LocalAppCreateApprovalSheet -> submit(
-                ClientCommand.PluginCommand(
-                    PluginCommandDto.ResolveCreateConfirmation(
-                        requestId = sheet.requestId,
-                        approved = false,
-                    ),
-                ),
-            )
             is LocalAppMcpProposalApprovalSheet -> submit(
                 ClientCommand.PluginCommand(
                     PluginCommandDto.ResolveMcpProposalApproval(
@@ -1719,15 +1705,6 @@ class LocalAppsViewModel(
                     appId = sheet.appId,
                     approvalToken = sheet.receiptId,
                     approved = approved,
-                ),
-                onFailure = restoreOnFailure,
-            )
-            is LocalAppCreateApprovalSheet -> submit(
-                ClientCommand.PluginCommand(
-                    PluginCommandDto.ResolveCreateConfirmation(
-                        requestId = sheet.requestId,
-                        approved = approved,
-                    ),
                 ),
                 onFailure = restoreOnFailure,
             )
@@ -2292,41 +2269,6 @@ private fun LocalAppAuthorizationDecision.toBindingDecision(): AppAuthorizationD
     LocalAppAuthorizationDecision.AllowAlways -> AppAuthorizationDecisionDto.ALLOW_ALWAYS
 }
 
-private fun AppRuntimeProfileDto.toUiRuntimeProfileFamily(): LocalAppRuntimeProfileFamily = when (this) {
-    AppRuntimeProfileDto.REACT_DOM -> LocalAppRuntimeProfileFamily.ReactDom
-    AppRuntimeProfileDto.CANVAS2D -> LocalAppRuntimeProfileFamily.Canvas2d
-    AppRuntimeProfileDto.THREE3D -> LocalAppRuntimeProfileFamily.Three3d
-    AppRuntimeProfileDto.PHASER2D -> LocalAppRuntimeProfileFamily.Phaser2d
-    AppRuntimeProfileDto.BABYLON3D -> LocalAppRuntimeProfileFamily.Babylon3d
-}
-
-private fun AppRuntimeProfileOptionDto.toUiRuntimeProfileOption(): LocalAppRuntimeProfileOption =
-    LocalAppRuntimeProfileOption(
-        family = family.toUiRuntimeProfileFamily(),
-        revision = revision.toUInt(),
-        contractSha256 = contractSha256,
-        surface = if (surface == AppSurfaceDto.DOM) {
-            LocalAppRuntimeProfileSurface.Dom
-        } else {
-            LocalAppRuntimeProfileSurface.Canvas
-        },
-        corePackages = corePackages.map { pkg ->
-            LocalAppRuntimeProfilePackage(pkg.name, pkg.version)
-        },
-        cacheStatus = cacheStatus,
-        downloadStatus = downloadStatus,
-        available = available,
-        reason = reason,
-    )
-
-private fun LocalAppRuntimeProfileFamily.toBindingRuntimeProfileFamily(): AppRuntimeProfileDto = when (this) {
-    LocalAppRuntimeProfileFamily.ReactDom -> AppRuntimeProfileDto.REACT_DOM
-    LocalAppRuntimeProfileFamily.Canvas2d -> AppRuntimeProfileDto.CANVAS2D
-    LocalAppRuntimeProfileFamily.Three3d -> AppRuntimeProfileDto.THREE3D
-    LocalAppRuntimeProfileFamily.Phaser2d -> AppRuntimeProfileDto.PHASER2D
-    LocalAppRuntimeProfileFamily.Babylon3d -> AppRuntimeProfileDto.BABYLON3D
-}
-
 private fun LocalAppVerificationStatusDto.toUiVerificationStatus(): LocalAppVerificationStatus = when (this) {
     LocalAppVerificationStatusDto.PENDING -> LocalAppVerificationStatus.Pending
     LocalAppVerificationStatusDto.PASSED -> LocalAppVerificationStatus.Passed
@@ -2480,51 +2422,6 @@ private fun LocalAppMcpToolDiffDto.toUiApprovalToolDiff(): LocalAppApprovalToolD
         after = after?.toUiApprovalToolSurface(),
         changedFields = changedFields.map(LocalAppMcpToolFieldDto::toUiApprovalToolField),
     )
-
-private fun LocalAppCreateConfirmationRequestDto.toUiCreateApprovalSheet(): LocalAppCreateApprovalSheet {
-    val runtimeProfileOption = runtimeProfile.toUiRuntimeProfileOption()
-    val initialTools = initialTools.map { tool ->
-        LocalAppApprovalInitialTool(
-            name = tool.name,
-            summary = tool.title ?: tool.description ?: tool.name,
-            permissionCeiling = tool.permissionCeiling,
-        )
-    }
-    return LocalAppCreateApprovalSheet(
-        appId = appId,
-        requestId = requestId,
-        // r1-backlog-native-confirmation-13 removed the wire `receipt`: it never
-        // had a producer, so these three were ALWAYS the `?:` fallback arm.
-        // `receiptId` is a non-defaulted member of `LocalAppApprovalSheet` and is
-        // read live (sheet de-duplication, and `approvalToken = sheet.receiptId`),
-        // so it is replaced, not dropped.
-        receiptId = requestId,
-        state = LocalAppApprovalReceiptState.Pending,
-        expiresAtMs = null,
-        appName = name,
-        brief = brief,
-        templateName = selectedTemplate.summary,
-        runtimeProfile = runtimeProfileOption,
-        reason = reason,
-        rejectedCandidates = rejected.map { candidate -> "${candidate.templateId} · ${candidate.reason}" },
-        dependencies = runtimeProfileOption.corePackages.map { pkg ->
-            LocalAppApprovalDependency(
-                packageName = pkg.name,
-                version = pkg.version,
-                // A single raw token (`bundled` / `cached` / `download_required` /
-                // `unavailable` / `gated`) so the sheet can localize it. Joining
-                // cacheStatus + downloadStatus here used to defeat that: the
-                // combined "x · y" string could never match any one-token arm
-                // downstream, and `localizedTokenOrSelf` "localized" nothing
-                // anyway — every one of its arms returned its own input.
-                downloadStatus = runtimeProfileOption.downloadStatus,
-            )
-        },
-        initialTools = initialTools,
-        permissionCeilings = initialTools.mapNotNull(LocalAppApprovalInitialTool::permissionCeiling).distinct(),
-        gates = requiredGates.map(LocalAppGateStatusDto::toUiApprovalGate),
-    )
-}
 
 private fun LocalAppMcpProposalApprovalRequestDto.toUiMcpProposalApprovalSheet(): LocalAppMcpProposalApprovalSheet =
     LocalAppMcpProposalApprovalSheet(

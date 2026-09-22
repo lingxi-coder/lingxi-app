@@ -321,9 +321,9 @@ class LocalAppsScreenTest {
      *
      * `localAppVerificationSummaryRes` / `localAppGateLabelRes` are pure and
      * unit-tested next door, which proves they map correctly and proves
-     * nothing about whether any screen calls them. These three call sites are
-     * the whole point of the mapping: the verification row, and the two
-     * approval-sheet gate lists.
+     * nothing about whether any screen calls them. These two call sites are
+     * the whole point of the mapping: the verification row, and the MCP
+     * proposal approval sheet's gate list.
      */
     @Test
     fun `the screen renders localized verification summaries and gate labels`() {
@@ -349,13 +349,13 @@ class LocalAppsScreenTest {
         )
 
         assertEquals(
-            "both approval sheets' gate lists must render the localized label",
-            2,
+            "the approval sheet's gate list must render the localized label",
+            1,
             Regex("append\\(localAppGateLabel\\(gate, context\\)\\)").findAll(source).count(),
         )
         assertEquals(
             "and the localized detail",
-            2,
+            1,
             Regex("localAppGateDetail\\(gate, context\\)").findAll(source).count(),
         )
         assertTrue(

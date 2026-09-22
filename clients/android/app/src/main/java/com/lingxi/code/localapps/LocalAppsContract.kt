@@ -433,38 +433,6 @@ data class LocalAppAuthorizationRequest(
     val uiAction: LocalAppUiAutomationAction? = null,
 )
 
-enum class LocalAppRuntimeProfileFamily {
-    ReactDom,
-    Canvas2d,
-    Three3d,
-    Phaser2d,
-    Babylon3d,
-}
-
-enum class LocalAppRuntimeProfileSurface {
-    Dom,
-    Canvas,
-}
-
-@Immutable
-data class LocalAppRuntimeProfilePackage(
-    val name: String,
-    val version: String,
-)
-
-@Immutable
-data class LocalAppRuntimeProfileOption(
-    val family: LocalAppRuntimeProfileFamily,
-    val revision: UInt,
-    val contractSha256: String,
-    val surface: LocalAppRuntimeProfileSurface,
-    val corePackages: List<LocalAppRuntimeProfilePackage>,
-    val cacheStatus: String,
-    val downloadStatus: String,
-    val available: Boolean,
-    val reason: String? = null,
-)
-
 enum class LocalAppDependencyChangeKind {
     Add,
     Update,
@@ -524,20 +492,6 @@ enum class LocalAppApprovalReceiptState {
 }
 
 @Immutable
-data class LocalAppApprovalDependency(
-    val packageName: String,
-    val version: String? = null,
-    val downloadStatus: String? = null,
-)
-
-@Immutable
-data class LocalAppApprovalInitialTool(
-    val name: String,
-    val summary: String,
-    val permissionCeiling: String? = null,
-)
-
-@Immutable
 data class LocalAppApprovalGate(
     /**
      * The engine's stable identifier for the gate (`mcp_qa`, `ui_runner`) —
@@ -567,8 +521,8 @@ data class LocalAppApprovalGate(
  * nothing.
  */
 fun localAppGateLabelRes(gateId: String): Int? = when (gateId) {
-    "mcp_qa" -> R.string.local_apps_create_confirm_gate_mcp_qa_label
-    "ui_runner" -> R.string.local_apps_create_confirm_gate_ui_runner_label
+    "mcp_qa" -> R.string.local_apps_approval_gate_mcp_qa_label
+    "ui_runner" -> R.string.local_apps_approval_gate_ui_runner_label
     else -> null
 }
 
@@ -580,7 +534,7 @@ fun localAppGateLabelRes(gateId: String): Int? = when (gateId) {
  * has client copy — an available runner sends no detail worth translating.
  */
 fun localAppGateDetailRes(gateId: String, available: Boolean): Int? =
-    R.string.local_apps_create_confirm_gate_ui_runner_unavailable_detail
+    R.string.local_apps_approval_gate_ui_runner_unavailable_detail
         .takeIf { gateId == "ui_runner" && !available }
 
 /**
@@ -594,7 +548,7 @@ fun localAppGateDetailRes(gateId: String, available: Boolean): Int? =
  * the marker AND its own detail, which is what iOS shows.
  */
 fun localAppGateUnavailableRes(available: Boolean): Int? =
-    R.string.local_apps_create_confirm_gate_runner_unavailable.takeIf { !available }
+    R.string.local_apps_approval_gate_runner_unavailable.takeIf { !available }
 
 @Immutable
 data class LocalAppApprovalToolSurface(
@@ -638,25 +592,6 @@ data class LocalAppApprovalToolDiff(
     val after: LocalAppApprovalToolSurface? = null,
     val changedFields: List<LocalAppApprovalToolField> = emptyList(),
 )
-
-@Immutable
-data class LocalAppCreateApprovalSheet(
-    override val appId: String,
-    override val requestId: String,
-    override val receiptId: String,
-    override val state: LocalAppApprovalReceiptState = LocalAppApprovalReceiptState.Pending,
-    override val expiresAtMs: Long? = null,
-    val appName: String,
-    val brief: String,
-    val templateName: String,
-    val runtimeProfile: LocalAppRuntimeProfileOption,
-    val reason: String,
-    val rejectedCandidates: List<String> = emptyList(),
-    val dependencies: List<LocalAppApprovalDependency> = emptyList(),
-    val initialTools: List<LocalAppApprovalInitialTool> = emptyList(),
-    val permissionCeilings: List<String> = emptyList(),
-    val gates: List<LocalAppApprovalGate> = emptyList(),
-) : LocalAppApprovalSheet
 
 @Immutable
 data class LocalAppMcpProposalApprovalSheet(

@@ -13,15 +13,11 @@ import com.lingxi.code.bindings.AppDetailsDto
 import com.lingxi.code.bindings.AppErrorCodeDto
 import com.lingxi.code.bindings.AppCapabilityRequestDto
 import com.lingxi.code.bindings.AppRecordDto
-import com.lingxi.code.bindings.AppRuntimeProfileDto
-import com.lingxi.code.bindings.AppRuntimeProfileOptionDto
-import com.lingxi.code.bindings.AppRuntimeProfilePackageDto
 import com.lingxi.code.bindings.AppRuntimeProfileStatusDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeStateDto
 import com.lingxi.code.bindings.AppSessionKindDto
 import com.lingxi.code.bindings.AppSessionRowDto
-import com.lingxi.code.bindings.AppSurfaceDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppUiTargetDto
@@ -29,15 +25,12 @@ import com.lingxi.code.bindings.AppWorkflowStateDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.AppEventDto
-import com.lingxi.code.bindings.LocalAppCreateConfirmationRequestDto
 import com.lingxi.code.bindings.LocalAppGateStatusDto
 import com.lingxi.code.bindings.LocalAppMcpProposalApprovalRequestDto
 import com.lingxi.code.bindings.LocalAppMcpToolChangeKindDto
 import com.lingxi.code.bindings.LocalAppMcpToolDiffDto
 import com.lingxi.code.bindings.LocalAppMcpToolFieldDto
 import com.lingxi.code.bindings.LocalAppMcpToolSurfaceDto
-import com.lingxi.code.bindings.LocalAppRejectedCandidateDto
-import com.lingxi.code.bindings.LocalAppTemplateSummaryDto
 import com.lingxi.code.bindings.LocalAppVerificationStatusDto
 import com.lingxi.code.bindings.LocalAppVerificationSummaryDto
 import com.lingxi.code.bindings.ManagedLocalAppMcpStatusDto
@@ -1240,115 +1233,6 @@ class LocalAppsViewModelTest {
             assertEquals(APP_ID, reject.appId)
             assertEquals("token-1", reject.approvalToken)
             assertFalse(reject.approved)
-        } finally {
-            releaseMain()
-        }
-    }
-
-    @Test
-    fun `create confirmation events map to the approval sheet and approve emits PluginCommand`() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        try {
-            val source = RecordingSource()
-            val viewModel = LocalAppsViewModel(
-                sourceFlow = MutableStateFlow<ConversationSource>(source),
-                distributionChannel = "store",
-            )
-            runCurrent()
-
-            source.emit(
-                ClientEvent.AppEvent(
-                    AppEventDto.CreateConfirmationRequested(
-                        LocalAppCreateConfirmationRequestDto(
-                            requestId = "create-1",
-                            appId = APP_ID,
-                            name = "客户跟进",
-                            brief = "记录客户跟进情况",
-                            selectedTemplate = LocalAppTemplateSummaryDto(
-                                templateId = "template.crm",
-                                surface = AppSurfaceDto.DOM,
-                                summary = "CRM board",
-                            ),
-                            runtimeProfile = AppRuntimeProfileOptionDto(
-                                family = AppRuntimeProfileDto.REACT_DOM,
-                                revision = 2u,
-                                contractSha256 = "contract-1",
-                                surface = AppSurfaceDto.DOM,
-                                corePackages = listOf(AppRuntimeProfilePackageDto("react", "19.1.1")),
-                                // The tokens `dependency_status` actually
-                                // produces (local_apps_host.rs:2422-2443 assigns
-                                // BOTH fields the same value out of
-                                // bundled / cached / download_required /
-                                // unavailable). The old `not_needed` here came
-                                // from the OTHER DTO's vocabulary and could
-                                // never reach this sheet.
-                                cacheStatus = "download_required",
-                                downloadStatus = "download_required",
-                                available = true,
-                                reason = null,
-                            ),
-                            reason = "Best match for CRM workflows",
-                            rejected = listOf(
-                                LocalAppRejectedCandidateDto("template.simple", "Too little structure"),
-                            ),
-                            initialTools = listOf(
-                                LocalAppMcpToolSurfaceDto(
-                                    name = "crm.search",
-                                    title = "Search records",
-                                    description = "Find CRM rows",
-                                    inputSchemaJson = "{}",
-                                    outputSchemaJson = "{}",
-                                    annotationsJson = "{\"readOnly\":true}",
-                                    executionJson = "{\"runner\":\"local\"}",
-                                    visibleMetaJson = "{\"kind\":\"search\"}",
-                                    semanticFlowJson = "{\"flow\":\"search\"}",
-                                    permissionCeiling = "allow_session",
-                                ),
-                            ),
-                            requiredGates = listOf(
-                                LocalAppGateStatusDto(
-                                    gateId = "ui-smoke",
-                                    label = "UI smoke",
-                                    status = LocalAppVerificationStatusDto.PENDING,
-                                    available = true,
-                                    detail = "queued",
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            )
-            runCurrent()
-
-            val pending = viewModel.uiState.value.pendingApprovalSheet as? LocalAppCreateApprovalSheet
-                ?: throw AssertionError("create confirmation must surface as the pending approval sheet")
-            assertEquals("create-1", pending.requestId)
-            // r1-backlog-native-confirmation-13: the wire `receipt` is gone, so the
-            // sheet's receiptId is now the requestId rather than a minted receipt id.
-            assertEquals("create-1", pending.receiptId)
-            assertEquals("CRM board", pending.templateName)
-            assertEquals(LocalAppRuntimeProfileFamily.ReactDom, pending.runtimeProfile.family)
-            assertEquals(
-                "the dependency's downloadStatus must be the SINGLE raw token the engine sent, so " +
-                    "LocalAppsScreen.localizedRuntimeProfileStatus can match one of its arms. It " +
-                    "previously joined cacheStatus + downloadStatus into one " +
-                    "\"download_required · download_required\" string, which no single-token " +
-                    "localizer could ever match — and the localizer joined into it did nothing " +
-                    "anyway (every arm returned its own input verbatim)",
-                "download_required",
-                pending.dependencies.single().downloadStatus,
-            )
-
-            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(pending.requestId, true))
-            runCurrent()
-
-            val command = source.commands.last() as? ClientCommand.PluginCommand
-                ?: throw AssertionError("approving the create confirmation must emit PluginCommand")
-            val resolve = command.command as? PluginCommandDto.ResolveCreateConfirmation
-                ?: throw AssertionError("approval must resolve the create confirmation request")
-            assertEquals("create-1", resolve.requestId)
-            assertTrue(resolve.approved)
-            assertNull(viewModel.uiState.value.pendingApprovalSheet)
         } finally {
             releaseMain()
         }
@@ -3098,8 +2982,8 @@ class LocalAppsViewModelTest {
     /// `label` and `detail` arrive as fixed English from the host's
     /// `pending_verification_gates` — it has no notion of the client's locale —
     /// so the id is the ONLY thing the sheet can localize on. Dropping it in
-    /// the DTO mapping is what made the create sheet render English gate rows
-    /// while the translated copy sat unused in the catalog.
+    /// the DTO mapping is what made the sheet render English gate rows while
+    /// the translated copy sat unused in the catalog.
     @Test
     fun `approval gates carry the engine gate id`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -3113,9 +2997,9 @@ class LocalAppsViewModelTest {
 
             source.emit(
                 ClientEvent.AppEvent(
-                    AppEventDto.CreateConfirmationRequested(
-                        createConfirmation(
-                            requestId = "create-gates",
+                    AppEventDto.McpProposalApprovalRequested(
+                        mcpProposal(
+                            requestId = "mcp-gates",
                             gates = listOf(
                                 LocalAppGateStatusDto(
                                     gateId = "mcp_qa",
@@ -3138,16 +3022,16 @@ class LocalAppsViewModelTest {
             )
             runCurrent()
 
-            val sheet = viewModel.uiState.value.pendingApprovalSheet as? LocalAppCreateApprovalSheet
-                ?: throw AssertionError("create confirmation must surface as the pending sheet")
-            assertEquals(listOf("mcp_qa", "ui_runner"), sheet.gates.map { it.gateId })
+            val sheet = viewModel.uiState.value.pendingApprovalSheet as? LocalAppMcpProposalApprovalSheet
+                ?: throw AssertionError("the MCP proposal must surface as the pending sheet")
+            assertEquals(listOf("mcp_qa", "ui_runner"), sheet.pendingGates.map { it.gateId })
             assertEquals(
                 "the engine's English label must still be carried as the fallback for an id " +
                     "this client does not know",
                 listOf("MCP schema, Flow, call and isolation QA", "UI verification runner"),
-                sheet.gates.map { it.name },
+                sheet.pendingGates.map { it.name },
             )
-            assertFalse("the UI runner gate reports itself unavailable", sheet.gates[1].available)
+            assertFalse("the UI runner gate reports itself unavailable", sheet.pendingGates[1].available)
         } finally {
             releaseMain()
         }
@@ -3157,10 +3041,10 @@ class LocalAppsViewModelTest {
     ///
     /// This ViewModel is Activity-scoped (`RootScreen.kt` builds it with
     /// `viewModel(key = "local-apps")`), so an Activity destroyed while the
-    /// engine stays alive headlessly takes the pending create-confirmation
-    /// sheet with it. Nothing re-emitted it and nothing could query it, so the
-    /// engine blocked for its whole five-minute approval timeout and then
-    /// failed the workflow with the user never seeing a prompt.
+    /// engine stays alive headlessly takes the pending approval sheet with it.
+    /// Nothing re-emitted it and nothing could query it, so the engine blocked
+    /// for its whole five-minute approval timeout and then failed the workflow
+    /// with the user never seeing a prompt.
     ///
     /// The engine's half re-announces every approval it is still blocked on
     /// from `GetManagedMcpInventory` (`local_apps_host.rs`
@@ -3185,7 +3069,7 @@ class LocalAppsViewModelTest {
             assertTrue(
                 "binding must request the managed MCP inventory: it is the ONLY command the " +
                     "engine re-emits pending native approvals from, so an Activity that was " +
-                    "destroyed while the engine stayed alive gets its create-confirmation sheet " +
+                    "destroyed while the engine stayed alive gets its approval sheet " +
                     "back through this and nothing else",
                 plugins.any { it is PluginCommandDto.GetManagedMcpInventory },
             )
@@ -3218,15 +3102,15 @@ class LocalAppsViewModelTest {
 
             source.emit(
                 ClientEvent.AppEvent(
-                    AppEventDto.CreateConfirmationRequested(
-                        createConfirmation(requestId = "create-reattached", gates = emptyList()),
+                    AppEventDto.McpProposalApprovalRequested(
+                        mcpProposal(requestId = "mcp-reattached", gates = emptyList()),
                     ),
                 ),
             )
             runCurrent()
             val sheet = viewModel.uiState.value.pendingApprovalSheet
-                ?: throw AssertionError("a re-emitted create confirmation must be rendered")
-            assertEquals("create-reattached", sheet.requestId)
+                ?: throw AssertionError("a re-emitted MCP proposal must be rendered")
+            assertEquals("mcp-reattached", sheet.requestId)
         } finally {
             releaseMain()
         }
@@ -3237,7 +3121,7 @@ class LocalAppsViewModelTest {
     /// The engine re-announces with the ORIGINAL `request_id`, and a client
     /// that never lost the sheet sees the same request twice. Treating the
     /// second one as a supersession would reject the request the user is
-    /// looking at — declining their own create behind their back — so the
+    /// looking at — declining their own change behind their back — so the
     /// duplicate must be dropped and nothing resolved.
     @Test
     fun `a re-emitted approval sheet is not treated as a supersession`() = runTest {
@@ -3251,8 +3135,8 @@ class LocalAppsViewModelTest {
             runCurrent()
 
             val request = ClientEvent.AppEvent(
-                AppEventDto.CreateConfirmationRequested(
-                    createConfirmation(requestId = "create-dup", gates = emptyList()),
+                AppEventDto.McpProposalApprovalRequested(
+                    mcpProposal(requestId = "mcp-dup", gates = emptyList()),
                 ),
             )
             source.emit(request)
@@ -3262,13 +3146,13 @@ class LocalAppsViewModelTest {
 
             val sheet = viewModel.uiState.value.pendingApprovalSheet
                 ?: throw AssertionError("the sheet must survive its own re-emission")
-            assertEquals("create-dup", sheet.requestId)
+            assertEquals("mcp-dup", sheet.requestId)
             assertTrue(
                 "a re-emission carries the SAME request id and must resolve NOTHING: rejecting " +
-                    "it would decline the create the user is still being asked about",
+                    "it would decline the change the user is still being asked about",
                 source.commands.filterIsInstance<ClientCommand.PluginCommand>()
                     .map { it.command }
-                    .none { it is PluginCommandDto.ResolveCreateConfirmation },
+                    .none { it is PluginCommandDto.ResolveMcpProposalApproval },
             )
         } finally {
             releaseMain()
@@ -3276,38 +3160,24 @@ class LocalAppsViewModelTest {
     }
 
     /**
-     * A minimal create-confirmation request whose only interesting axis is its
-     * gate list — everything else is the same shape the fuller fixture above
-     * uses.
+     * A minimal MCP-proposal request whose only interesting axis is its gate
+     * list — everything else is the same shape as the fuller MCP fixture above.
      */
-    private fun createConfirmation(
+    private fun mcpProposal(
         requestId: String,
         gates: List<LocalAppGateStatusDto>,
-    ) = LocalAppCreateConfirmationRequestDto(
+    ) = LocalAppMcpProposalApprovalRequestDto(
         requestId = requestId,
         appId = APP_ID,
-        name = "客户跟进",
-        brief = "记录客户跟进情况",
-        selectedTemplate = LocalAppTemplateSummaryDto(
-            templateId = "template.crm",
-            surface = AppSurfaceDto.DOM,
-            summary = "CRM board",
-        ),
-        runtimeProfile = AppRuntimeProfileOptionDto(
-            family = AppRuntimeProfileDto.REACT_DOM,
-            revision = 2u,
-            contractSha256 = "contract-1",
-            surface = AppSurfaceDto.DOM,
-            corePackages = listOf(AppRuntimeProfilePackageDto("react", "19.1.1")),
-            cacheStatus = "bundled",
-            downloadStatus = "bundled",
-            available = true,
-            reason = null,
-        ),
-        reason = "Best match for CRM workflows",
-        rejected = emptyList(),
-        initialTools = emptyList(),
-        requiredGates = gates,
+        workflowRunId = "wf-1",
+        summary = "Add searchable CRM tools",
+        proposalSha256 = "proposal-1",
+        approvalContractSha256 = "approval-1",
+        toolSurfaceSha256 = "surface-1",
+        toolDiffs = emptyList(),
+        requiredFlowChanges = emptyList(),
+        excludedCapabilities = emptyList(),
+        pendingGates = gates,
     )
 
     private fun appRecord(

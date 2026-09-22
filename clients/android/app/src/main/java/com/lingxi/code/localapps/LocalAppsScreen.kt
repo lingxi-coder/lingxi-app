@@ -167,18 +167,17 @@ fun LocalAppApprovalSheetDialog(
     val context = LocalContext.current
     val canApprove = sheet.state == LocalAppApprovalReceiptState.Pending
     AlertDialog(
-        // An outside tap or back press must NOT reject the sheet: this is a
-        // create/MCP/profile approval, not a dismissible notice, and a stray
-        // dismiss (or a system back gesture) would silently decline an app
-        // creation the user never chose to reject. Rejection is only ever the
-        // explicit dismissButton below. iOS disables interactive dismissal on
-        // the same prompt with `.interactiveDismissDisabled()`.
+        // An outside tap or back press must NOT reject the sheet: this is an
+        // MCP/profile approval, not a dismissible notice, and a stray dismiss
+        // (or a system back gesture) would silently decline a change the user
+        // never chose to reject. Rejection is only ever the explicit
+        // dismissButton below. iOS disables interactive dismissal on the same
+        // prompt with `.interactiveDismissDisabled()`.
         onDismissRequest = {},
         properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
         title = {
             Text(
                 when (sheet) {
-                    is LocalAppCreateApprovalSheet -> stringResource(R.string.local_apps_create_confirm_title)
                     is LocalAppMcpProposalApprovalSheet -> stringResource(R.string.local_apps_mcp_proposal_title)
                     is LocalAppProfileApprovalSheet -> stringResource(R.string.local_apps_profile_proposal_title)
                 },
@@ -193,86 +192,6 @@ fun LocalAppApprovalSheetDialog(
                     .verticalScroll(rememberScrollState()),
             ) {
                 when (sheet) {
-                    is LocalAppCreateApprovalSheet -> {
-                        LocalAppApprovalFact(
-                            label = stringResource(R.string.local_apps_create_confirm_app_name),
-                            value = sheet.appName,
-                        )
-                        if (sheet.brief.isNotBlank()) {
-                            LocalAppApprovalFact(
-                                label = stringResource(R.string.local_apps_create_confirm_app_brief),
-                                value = sheet.brief,
-                            )
-                        }
-                        LocalAppApprovalFact(
-                            label = stringResource(R.string.local_apps_create_confirm_selected_template),
-                            value = sheet.templateName,
-                        )
-                        LocalAppApprovalFact(
-                            label = stringResource(R.string.local_apps_create_confirm_runtime_profile),
-                            value = buildString {
-                                append(sheet.runtimeProfile.family.label(context))
-                                append('\n')
-                                append("r${sheet.runtimeProfile.revision} · ${sheet.runtimeProfile.surface.label(context)}")
-                                if (sheet.dependencies.isNotEmpty()) {
-                                    append('\n')
-                                    append(
-                                        sheet.dependencies.joinToString("\n") { dependency ->
-                                            listOfNotNull(
-                                                dependency.packageName,
-                                                dependency.version?.let { "@$it" },
-                                                dependency.downloadStatus?.localizedRuntimeProfileStatus(context),
-                                            ).joinToString(" ")
-                                        },
-                                    )
-                                }
-                            },
-                        )
-                        LocalAppApprovalFact(
-                            label = stringResource(R.string.local_apps_create_confirm_agent_reason),
-                            value = sheet.reason,
-                        )
-                        if (sheet.rejectedCandidates.isNotEmpty()) {
-                            LocalAppApprovalFact(
-                                label = stringResource(R.string.local_apps_create_confirm_rejected_candidates),
-                                value = sheet.rejectedCandidates.joinToString("\n"),
-                            )
-                        }
-                        if (sheet.initialTools.isNotEmpty()) {
-                            LocalAppApprovalFact(
-                                label = stringResource(R.string.local_apps_create_confirm_initial_tools),
-                                value = sheet.initialTools.joinToString("\n") { tool ->
-                                    listOfNotNull(tool.name, tool.summary.takeUnless { it == tool.name }).joinToString(" · ")
-                                },
-                            )
-                        }
-                        if (sheet.permissionCeilings.isNotEmpty()) {
-                            LocalAppApprovalFact(
-                                label = stringResource(R.string.local_apps_create_confirm_permission_ceiling),
-                                value = sheet.permissionCeilings.joinToString("\n"),
-                            )
-                        }
-                        if (sheet.gates.isNotEmpty()) {
-                            LocalAppApprovalFact(
-                                label = stringResource(R.string.local_apps_create_confirm_required_gates),
-                                value = sheet.gates.joinToString("\n") { gate ->
-                                    buildString {
-                                        append(localAppGateLabel(gate, context))
-                                        append(" · ")
-                                        append(gate.status.label(context))
-                                        localAppGateUnavailable(gate, context)?.let {
-                                            append(" · ")
-                                            append(it)
-                                        }
-                                        localAppGateDetail(gate, context)?.takeIf { it.isNotBlank() }?.let {
-                                            append(" · ")
-                                            append(it)
-                                        }
-                                    }
-                                },
-                            )
-                        }
-                    }
                     is LocalAppMcpProposalApprovalSheet -> {
                         if (sheet.summary.isNotBlank()) {
                             Text(sheet.summary, style = MaterialTheme.typography.bodyMedium)
@@ -315,7 +234,7 @@ fun LocalAppApprovalSheetDialog(
                         }
                         if (sheet.pendingGates.isNotEmpty()) {
                             LocalAppApprovalFact(
-                                label = stringResource(R.string.local_apps_create_confirm_required_gates),
+                                label = stringResource(R.string.local_apps_approval_required_gates),
                                 value = sheet.pendingGates.joinToString("\n") { gate ->
                                     buildString {
                                         append(localAppGateLabel(gate, context))
@@ -343,7 +262,7 @@ fun LocalAppApprovalSheetDialog(
                     }
                     is LocalAppProfileApprovalSheet -> {
                         LocalAppApprovalFact(
-                            label = stringResource(R.string.local_apps_create_confirm_agent_reason),
+                            label = stringResource(R.string.local_apps_profile_proposal_reason),
                             value = sheet.reason,
                         )
                         LocalAppApprovalFact(
@@ -355,10 +274,6 @@ fun LocalAppApprovalSheetDialog(
                 sheet.expiresAtMs?.let { expiresAtMs ->
                     Text(
                         text = when (sheet) {
-                            is LocalAppCreateApprovalSheet -> stringResource(
-                                R.string.local_apps_create_confirm_receipt_expires_fmt,
-                                DateFormat.getDateTimeInstance().format(Date(expiresAtMs)),
-                            )
                             is LocalAppMcpProposalApprovalSheet -> stringResource(
                                 R.string.local_apps_mcp_proposal_receipt_expires_fmt,
                                 DateFormat.getDateTimeInstance().format(Date(expiresAtMs)),
@@ -378,7 +293,6 @@ fun LocalAppApprovalSheetDialog(
             ) {
                 Text(
                     when (sheet) {
-                        is LocalAppCreateApprovalSheet -> stringResource(R.string.local_apps_create_confirm_approve)
                         is LocalAppMcpProposalApprovalSheet -> stringResource(R.string.local_apps_mcp_proposal_approve)
                         is LocalAppProfileApprovalSheet -> stringResource(R.string.local_apps_profile_proposal_apply)
                     },
@@ -389,7 +303,6 @@ fun LocalAppApprovalSheetDialog(
             TextButton(onClick = { onAction(LocalAppsAction.ResolveApprovalSheet(sheet.requestId, false)) }) {
                 Text(
                     when (sheet) {
-                        is LocalAppCreateApprovalSheet -> stringResource(R.string.local_apps_create_confirm_reject)
                         is LocalAppMcpProposalApprovalSheet -> stringResource(R.string.local_apps_mcp_proposal_reject)
                         is LocalAppProfileApprovalSheet -> stringResource(R.string.common_cancel)
                     },
@@ -2004,34 +1917,6 @@ private fun LocalAppDataFieldType.label(): String = when (this) {
 }
 
 @Composable
-private fun LocalAppRuntimeProfileFamily.label(): String = when (this) {
-    LocalAppRuntimeProfileFamily.ReactDom -> stringResource(R.string.local_apps_runtime_profile_family_react_dom)
-    LocalAppRuntimeProfileFamily.Canvas2d -> stringResource(R.string.local_apps_runtime_profile_family_canvas_2d)
-    LocalAppRuntimeProfileFamily.Three3d -> stringResource(R.string.local_apps_runtime_profile_family_three_3d)
-    LocalAppRuntimeProfileFamily.Phaser2d -> stringResource(R.string.local_apps_runtime_profile_family_phaser_2d)
-    LocalAppRuntimeProfileFamily.Babylon3d -> stringResource(R.string.local_apps_runtime_profile_family_babylon_3d)
-}
-
-@Composable
-private fun LocalAppRuntimeProfileSurface.label(): String = when (this) {
-    LocalAppRuntimeProfileSurface.Dom -> stringResource(R.string.local_apps_runtime_profile_surface_dom)
-    LocalAppRuntimeProfileSurface.Canvas -> stringResource(R.string.local_apps_runtime_profile_surface_canvas)
-}
-
-private fun LocalAppRuntimeProfileFamily.label(context: android.content.Context): String = when (this) {
-    LocalAppRuntimeProfileFamily.ReactDom -> context.getString(R.string.local_apps_runtime_profile_family_react_dom)
-    LocalAppRuntimeProfileFamily.Canvas2d -> context.getString(R.string.local_apps_runtime_profile_family_canvas_2d)
-    LocalAppRuntimeProfileFamily.Three3d -> context.getString(R.string.local_apps_runtime_profile_family_three_3d)
-    LocalAppRuntimeProfileFamily.Phaser2d -> context.getString(R.string.local_apps_runtime_profile_family_phaser_2d)
-    LocalAppRuntimeProfileFamily.Babylon3d -> context.getString(R.string.local_apps_runtime_profile_family_babylon_3d)
-}
-
-private fun LocalAppRuntimeProfileSurface.label(context: android.content.Context): String = when (this) {
-    LocalAppRuntimeProfileSurface.Dom -> context.getString(R.string.local_apps_runtime_profile_surface_dom)
-    LocalAppRuntimeProfileSurface.Canvas -> context.getString(R.string.local_apps_runtime_profile_surface_canvas)
-}
-
-@Composable
 private fun LocalAppVerificationStatus.label(): String = when (this) {
     LocalAppVerificationStatus.Pending -> stringResource(R.string.local_apps_verification_status_pending)
     LocalAppVerificationStatus.Passed -> stringResource(R.string.local_apps_verification_status_passed)
@@ -2118,32 +2003,6 @@ private fun LocalAppApprovalToolSurface.valueFor(field: LocalAppApprovalToolFiel
     LocalAppApprovalToolField.VisibleMeta -> visibleMetaJson.orEmpty()
     LocalAppApprovalToolField.SemanticFlow -> semanticFlowJson
     LocalAppApprovalToolField.PermissionCeiling -> permissionCeiling
-}
-
-// The ONE localizer for runtime-profile dependency tokens. Deliberately
-// non-composable and context-taking: its only call site (the
-// create-confirmation sheet's dependency list) builds its text inside
-// `buildString { ... }`, a plain lambda rather than a @Composable context, so
-// `stringResource` cannot be called there. A @Composable twin of this mapping
-// used to sit here with ZERO call sites; keeping two spellings of one token
-// table is how the next divergence gets introduced (an arm added to one, the
-// sheet still rendering the raw token), so only this one survives.
-//
-// A `may_be_required` / `not_required` / `not_needed` vocabulary lived here
-// before, but nothing feeding this call site ever emits those tokens — the
-// runtime profile option's status comes from `dependency_status`
-// (local_apps_host.rs:2422-2443), whose vocabulary is
-// bundled / cached / download_required / unavailable — so every arm of the old
-// mapping was unreachable. Those three tokens belong to the OTHER DTO
-// (`AppDependencyChangeDto`) and are still localized by
-// `localizedDependencyStatus` above.
-private fun String.localizedRuntimeProfileStatus(context: android.content.Context): String = when (this) {
-    "bundled" -> context.getString(R.string.local_apps_runtime_profile_status_bundled)
-    "cached" -> context.getString(R.string.local_apps_runtime_profile_status_cached)
-    "download_required" -> context.getString(R.string.local_apps_runtime_profile_status_download_required)
-    "unavailable" -> context.getString(R.string.local_apps_runtime_profile_status_unavailable)
-    "gated" -> context.getString(R.string.local_apps_runtime_profile_status_gated)
-    else -> this
 }
 
 @Composable

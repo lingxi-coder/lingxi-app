@@ -236,23 +236,23 @@ class LocalAppsContractTest {
             "vacuity guard: the two gate labels must be distinct ids",
             2,
             setOf(
-                R.string.local_apps_create_confirm_gate_mcp_qa_label,
-                R.string.local_apps_create_confirm_gate_ui_runner_label,
+                R.string.local_apps_approval_gate_mcp_qa_label,
+                R.string.local_apps_approval_gate_ui_runner_label,
             ).size,
         )
         assertEquals(
-            R.string.local_apps_create_confirm_gate_mcp_qa_label,
+            R.string.local_apps_approval_gate_mcp_qa_label,
             localAppGateLabelRes("mcp_qa"),
         )
         assertEquals(
-            R.string.local_apps_create_confirm_gate_ui_runner_label,
+            R.string.local_apps_approval_gate_ui_runner_label,
             localAppGateLabelRes("ui_runner"),
         )
         assertNull("an unknown id renders the engine's own label", localAppGateLabelRes("ui-smoke"))
         assertNull("an unidentified gate renders the engine's own label", localAppGateLabelRes(""))
 
         assertEquals(
-            R.string.local_apps_create_confirm_gate_ui_runner_unavailable_detail,
+            R.string.local_apps_approval_gate_ui_runner_unavailable_detail,
             localAppGateDetailRes("ui_runner", available = false),
         )
         assertNull(
@@ -273,7 +273,7 @@ class LocalAppsContractTest {
     @Test
     fun `an unavailable gate is marked whatever its id`() {
         assertEquals(
-            R.string.local_apps_create_confirm_gate_runner_unavailable,
+            R.string.local_apps_approval_gate_runner_unavailable,
             localAppGateUnavailableRes(available = false),
         )
         assertNull(
@@ -283,8 +283,8 @@ class LocalAppsContractTest {
         assertNotEquals(
             "the id-independent marker and the ui_runner detail are different copy, " +
                 "and a missing UI runner renders both",
-            R.string.local_apps_create_confirm_gate_runner_unavailable,
-            R.string.local_apps_create_confirm_gate_ui_runner_unavailable_detail,
+            R.string.local_apps_approval_gate_runner_unavailable,
+            R.string.local_apps_approval_gate_ui_runner_unavailable_detail,
         )
     }
 }

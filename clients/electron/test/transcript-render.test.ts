@@ -259,6 +259,50 @@ test('user messages use a neutral rounded Codex-style bubble', () => {
   assert.doesNotMatch(html, /accentBg/);
 });
 
+test('only a user row becomes a column; an assistant reply keeps its left-aligned row', () => {
+  // The two roles shared ONE row layout until the user bubble needed the actions
+  // underneath it. Both still have to be asserted: a row→column change that
+  // leaked into the assistant branch would re-align every reply in silence.
+  // Adjacent pairs, not two separate one-property matches: the pair is what
+  // differs between the roles, and it cannot be satisfied by a property that
+  // happens to live on some other element in the Stage chrome.
+  const user = renderStage({ type: 'narration', id: 'i1', role: 'user', text: 'A question.' });
+  assert.match(user, /class="transcript-run-item transcript-user-message"/);
+  assert.match(user, /flex-direction:column;align-items:flex-end/);
+
+  const assistant = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: 'An answer.' });
+  assert.match(assistant, /class="transcript-run-item"/);
+  assert.match(assistant, /flex-direction:row;justify-content:flex-start/);
+  assert.doesNotMatch(assistant, /transcript-user-message/);
+});
+
+test('a user message carries its clock and copy affordance under the bubble', () => {
+  // LOCAL parts: the clock is a wall time, so a UTC literal would differ by
+  // timezone.
+  const sentAt = new Date(2026, 7, 26, 23, 35).getTime();
+  const html = renderStage({ type: 'narration', id: 'i1', role: 'user', text: 'A user message.', sentAt });
+  assert.match(html, /class="user-message-actions"/);
+  assert.match(html, /class="user-message-clock">11:35 PM</);
+  assert.match(html, /class="user-message-copy"/);
+  assert.match(html, /aria-label="Copy message"/);
+  // The tone pair reaches the stylesheet rather than the element, so `:hover`
+  // can brighten the icon; an inline colour would win over it.
+  assert.match(html, /--user-message-action:/);
+  assert.match(html, /--user-message-action-hover:/);
+});
+
+test('the actions row keeps its box without a clock and never joins an assistant row', () => {
+  // Restored history has no `sentAt`; the reserved row must still be emitted so
+  // a live prompt appearing beside it cannot change the message's height.
+  const restored = renderStage({ type: 'narration', id: 'i1', role: 'user', text: 'Restored.' });
+  assert.match(restored, /class="user-message-actions"/);
+  assert.doesNotMatch(restored, /user-message-clock/);
+
+  const assistant = renderStage({ type: 'narration', id: 'i1', role: 'assistant', text: 'An answer.' });
+  assert.doesNotMatch(assistant, /user-message-actions/);
+  assert.doesNotMatch(assistant, /user-message-copy/);
+});
+
 test('slash command message parsing is strict and keeps command arguments', () => {
   assert.deepEqual(parseSlashCommandMessage('/cron list'), { name: 'cron', arguments: 'list' });
   assert.deepEqual(parseSlashCommandMessage('  /code-review --fix  '), { name: 'code-review', arguments: '--fix' });

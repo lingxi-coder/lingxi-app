@@ -22,6 +22,7 @@ import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
 import { commandPaletteIcon } from './commandPaletteIcons';
 import { parseSlashCommandMessage } from './slashCommandMessage';
+import { formatClockTime } from '../bridge/sessionPresentation';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
 const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
@@ -125,6 +126,64 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
           <Icon name={expanded ? 'chevron' : 'chevronR'} size={12} stroke={2} />
         </button>
       )}
+    </div>
+  );
+});
+
+/**
+ * When the user sent the prompt, plus a copy button, sitting under the bubble.
+ *
+ * The box is ALWAYS laid out — revealing it on hover only toggles opacity — so
+ * the affordance cannot change the message's height and drag the transcript out
+ * from under the pointer while it is being read. A prompt restored from a
+ * resumed session has no `sentAt` (the engine's `MessageDto` carries no
+ * timestamp), so its row shows the copy button alone rather than guessing a
+ * time.
+ */
+const UserMessageActions = memo(function UserMessageActions({ text, sentAt }: { text: string; sentAt?: number }) {
+  const t = useT();
+  const [state, setState] = useState<'idle' | 'copied' | 'error'>('idle');
+  const resetTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => {
+    if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+  }, []);
+  const copy = async () => {
+    if (resetTimer.current !== undefined) window.clearTimeout(resetTimer.current);
+    try {
+      // Same ladder as the code cards: the preload bridge, then the DOM API.
+      if (window.lingxi?.copyText) await window.lingxi.copyText(text);
+      else if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else throw new Error('Clipboard unavailable');
+      setState('copied');
+      resetTimer.current = window.setTimeout(() => setState('idle'), 1_500);
+    } catch {
+      setState('error');
+      resetTimer.current = window.setTimeout(() => setState('idle'), 2_000);
+    }
+  };
+  const clock = formatClockTime(sentAt);
+  const label = state === 'copied' ? 'Copied' : state === 'error' ? 'Copy failed' : 'Copy message';
+  return (
+    // The resting and hover tones reach the stylesheet as custom properties: an
+    // inline `color` would out-rank `:hover` and freeze the icon at one shade.
+    <div
+      className="user-message-actions"
+      style={{ '--user-message-action': t.text3, '--user-message-action-hover': t.text } as CSSProperties}
+    >
+      {clock !== '' && <span className="user-message-clock">{clock}</span>}
+      <button
+        type="button"
+        className="user-message-copy"
+        data-state={state}
+        aria-label={label}
+        title={label}
+        onClick={() => { void copy(); }}
+        // Only a terminal state paints the icon; otherwise the stylesheet owns it.
+        style={state === 'idle' ? undefined : { color: state === 'error' ? t.danger : t.ok }}
+      >
+        <Icon name={state === 'copied' ? 'check' : state === 'error' ? 'x' : 'copy'} size={13} stroke={state === 'idle' ? 1.7 : 2.2} />
+      </button>
+      <span className="user-message-actions-status" aria-live="polite">{label}</span>
     </div>
   );
 });
@@ -337,13 +396,35 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
           if (item.type === 'narration') {
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
+            const user = item.role === 'user';
+            // A user row is a COLUMN so the actions sit under the bubble and
+            // share its right edge; an assistant row stays a single line.
             return (
-              <div className="transcript-run-item" data-run-type="narration" key={item.id} style={{ display: 'flex', justifyContent: item.role === 'user' ? 'flex-end' : 'flex-start', gap: 10, width: '100%', animation: 'fade-in 0.3s ease' }}>
+              <div
+                className={user ? 'transcript-run-item transcript-user-message' : 'transcript-run-item'}
+                data-run-type="narration"
+                key={item.id}
+                style={{
+                  display: 'flex',
+                  flexDirection: user ? 'column' : 'row',
+                  alignItems: user ? 'flex-end' : undefined,
+                  justifyContent: user ? undefined : 'flex-start',
+                  gap: user ? 4 : 10, width: '100%', animation: 'fade-in 0.3s ease',
+                }}
+              >
                 <NarrationLine
                   item={item}
                   open={collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(item)}
                   onSetOpen={setOpen}
                 />
+                {/*
+                  Keyed by the SESSION, not just by the item: ids restart at `i1`
+                  for every session, so switching straight from one resumed
+                  session to another reuses this row's fiber — and its copy
+                  state — for a message nobody copied. Remounting on the session
+                  key drops that state and clears its reset timer.
+                */}
+                {user && <UserMessageActions key={sessionKey} text={item.text} sentAt={item.sentAt} />}
               </div>
             );
           }

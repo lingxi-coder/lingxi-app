@@ -22,7 +22,7 @@ import {
 } from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
-import { formatRelativeSessionTime, formatSessionMetadata } from '../src/renderer/bridge/sessionPresentation';
+import { formatClockTime, formatRelativeSessionTime, formatSessionMetadata } from '../src/renderer/bridge/sessionPresentation';
 
 const projectPath = '/Users/tester/Projects/LingXi-Next';
 const pinnedProjectPath = '/Users/tester/Projects/MLPlatform';
@@ -453,6 +453,18 @@ test('session rows expose deterministic relative activity metadata', () => {
   assert.equal(formatRelativeSessionTime('2026-08-26T12:05:00.000Z', now), 'just now');
   assert.equal(formatSessionMetadata('2026-08-26T11:58:00.000Z', 2, now), '2 minutes ago · 2 messages');
   assert.equal(formatSessionMetadata('2026-08-26T11:59:00.000Z', 1, now), '1 minute ago · 1 message');
+});
+
+test('message clocks render the 12-hour time of the local send instant', () => {
+  // Built from LOCAL parts on purpose: the clock is a local wall time, so a
+  // UTC literal would assert a different string in every timezone.
+  const at = (hours: number, minutes: number) => new Date(2026, 7, 26, hours, minutes).getTime();
+  assert.equal(formatClockTime(at(23, 35)), '11:35 PM');
+  assert.equal(formatClockTime(at(0, 5)), '12:05 AM');
+  assert.equal(formatClockTime(at(12, 0)), '12:00 PM');
+  assert.equal(formatClockTime(at(9, 7)), '9:07 AM');
+  assert.equal(formatClockTime(undefined), '');
+  assert.equal(formatClockTime(Number.NaN), '');
 });
 
 test('sidebar renders activity metadata for normal and pinned sessions', () => {

@@ -213,7 +213,7 @@ function settleRunningTools(items: RunItem[], status: 'done' | 'error'): boolean
 }
 
 /** A user message immediately echoed when the composer submits (optimistic). */
-export function appendUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = []): ConversationState {
+export function appendUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = [], now = Date.now()): ConversationState {
   const trimmed = text.trim();
   if (!hasVisibleText(trimmed)) return state;
   const items = state.items.slice();
@@ -225,6 +225,9 @@ export function appendUserPrompt(state: ConversationState, text: string, images:
     text: trimmed,
     strong: true,
     role: 'user',
+    // Stamped here rather than read at render time: the message's clock must
+    // not move when the window re-renders or the transcript is scrolled.
+    sentAt: now,
     ...(images.length ? { images: images.map(messageImageFromRef) } : {}),
   });
   return {
@@ -303,7 +306,7 @@ export function beginCompaction(state: ConversationState, now = Date.now()): Con
   }
 
   const pendingIsCompact = state.pendingSlashName?.trim().toLocaleLowerCase() === '/compact';
-  const base = pendingIsCompact ? state : appendUserPrompt(state, '/compact');
+  const base = pendingIsCompact ? state : appendUserPrompt(state, '/compact', [], now);
   const id = itemId(base.nextId);
   return {
     ...base,
@@ -339,8 +342,8 @@ function finishCompaction(
  * asynchronous `turn_started` event arrives. The real terminal event remains
  * the only successful release path.
  */
-export function appendPendingUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = []): ConversationState {
-  const next = appendUserPrompt(state, text, images);
+export function appendPendingUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = [], now = Date.now()): ConversationState {
+  const next = appendUserPrompt(state, text, images, now);
   // An ordinary prompt is definitionally not a pending slash command. Clearing
   // `pendingSlashName` here closes off a stale claim left by a bare picker
   // command (`/model`, `/permissions`, `/effort`, `/theme`, `/config` with no
@@ -399,7 +402,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // owns `running` (released by the ordinary `turn_ended` below), and a
       // stale `pendingSlashName` must not label a later, unrelated result.
       {
-        const next = state.pendingSlashPrompt ? appendUserPrompt(state, state.pendingSlashPrompt) : state;
+        const next = state.pendingSlashPrompt ? appendUserPrompt(state, state.pendingSlashPrompt, [], now) : state;
         return { ...next, items: settlePendingPrompts(next.items), running: true, pendingSlashName: null, pendingSlashPrompt: null, openAssistantIndex: -1, openThinkingIndex: -1, turnToolIds: [] };
       }
 

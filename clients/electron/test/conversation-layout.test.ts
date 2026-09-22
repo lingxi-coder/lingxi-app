@@ -13,6 +13,18 @@ test('conversation items keep user and assistant roles for split message layout'
   assert.equal(assistant.role, 'assistant');
 });
 
+test('an echoed prompt records the send instant, and resumed history does not invent one', () => {
+  const sentAt = Date.parse('2026-08-26T23:35:00.000Z');
+  const item = appendUserPrompt(emptyConversation(), 'hello', [], sentAt).items[0];
+  assert.equal(item.type === 'narration' ? item.sentAt : undefined, sentAt);
+  // The engine's MessageDto carries no timestamp, so history rows stay
+  // `undefined` and the row drops the clock instead of showing a fake one.
+  const restored = conversationFromMessages([
+    { role: 'user', blocks: [{ type: 'text', text: 'question' }] },
+  ]).items[0];
+  assert.equal(restored.type === 'narration' ? restored.sentAt : undefined, undefined);
+});
+
 test('resumed transcripts assign the correct side to each message', () => {
   const state = conversationFromMessages([
     { role: 'user', blocks: [{ type: 'text', text: 'question' }] },

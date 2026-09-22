@@ -86,6 +86,36 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
       const baseline = result.deliveryLayouts[offset];
       for (const layout of result.deliveryLayouts.slice(offset, offset + 4)) assert.deepEqual(layout, baseline, 'delivery changes must not resize or move transcript messages');
     }
+
+    // Hover-revealed clock + copy button under a user message: the row reserves
+    // its box, so revealing it may not resize the message.
+    assert.equal(result.messageAway.opacity, '0', 'the affordance starts hidden');
+    assert.equal(result.messageHover.opacity, '1', 'hovering the message reveals it');
+    assert.notEqual(result.messageAway.clock, '', 'the clock renders when the prompt has a send time');
+    assert.ok(result.messageAway.actions > 0, 'the hidden affordance still occupies its space');
+    assert.equal(result.messageHover.row, result.messageAway.row, 'revealing must not resize the message row');
+    assert.equal(result.messageHover.bubble, result.messageAway.bubble, 'revealing must not resize the bubble');
+    assert.equal(result.messageHover.actions, result.messageAway.actions, 'the reserved box height is stable');
+
+    // The revealed button, clicked for real. Two prompts are on screen and the
+    // click lands on the second, so this pins ROW SELECTION — not merely that
+    // some button copied some text.
+    assert.equal(result.copyPoints.length, 2, 'both prompts expose their own control');
+    assert.equal(result.copyBeforeClick.state, 'idle', 'the control starts idle');
+    assert.equal(result.copyBeforeClick.copied, null, 'nothing is copied before the click');
+    assert.equal(result.copyClick.copied, 'ship the release notes', 'the click copies the row it was on');
+    assert.equal(result.copyClick.state, 'copied', 'the control reports the copy');
+    assert.equal(result.copyClick.label, 'Copied', 'and says so to assistive tech');
+    assert.equal(result.copyClick.neighbourState, 'idle', 'the other message is left alone');
+    assert.equal(result.copyClickReset.state, 'idle', 'the copied state is transient');
+
+    // A failing clipboard: the control must report the failure and must not
+    // claim a copy happened.
+    assert.equal(result.copyFailure.copied, null, 'a failed copy records nothing');
+    assert.equal(result.copyFailure.state, 'error', 'the control reports the failure');
+    assert.equal(result.copyFailure.label, 'Copy failed', 'and says so to assistive tech');
+    assert.equal(result.copyFailure.neighbourState, 'idle', 'the other message is still left alone');
+    assert.equal(result.copyFailureReset.state, 'idle', 'the failed state is transient too');
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

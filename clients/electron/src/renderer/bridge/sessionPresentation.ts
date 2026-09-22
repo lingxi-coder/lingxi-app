@@ -24,6 +24,21 @@ export function formatRelativeSessionTime(modifiedRfc3339: string, now = Date.no
   return plural(Math.floor(elapsed / YEAR), 'year');
 }
 
+/**
+ * Wall-clock time for one transcript message, in the composer's locale —
+ * the `11:35 PM` shape. Hand-formatted rather than `toLocaleTimeString` so the
+ * transcript reads identically in every locale and in tests; returns `''` for a
+ * value that is not a usable timestamp, which the caller renders as no clock.
+ */
+export function formatClockTime(epochMs: number | undefined): string {
+  if (epochMs === undefined || !Number.isFinite(epochMs)) return '';
+  const at = new Date(epochMs);
+  const hours = at.getHours();
+  const hour = hours % 12 === 0 ? 12 : hours % 12;
+  const minutes = at.getMinutes().toString().padStart(2, '0');
+  return `${hour}:${minutes} ${hours < 12 ? 'AM' : 'PM'}`;
+}
+
 export function formatSessionMetadata(modifiedRfc3339: string, messageCount: number, now = Date.now()): string {
   const count = Number.isSafeInteger(messageCount) && messageCount >= 0 ? messageCount : 0;
   return `${formatRelativeSessionTime(modifiedRfc3339, now)} · ${count} ${count === 1 ? 'message' : 'messages'}`;

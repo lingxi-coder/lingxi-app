@@ -2033,6 +2033,46 @@ textarea, input { font-family: inherit; }
 .message-delivery-status { position: absolute; left: -23px; top: 14px; display: flex; align-items: center; }
 .message-delivery-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
+/*
+ * The clock + copy affordance under a user message. Its box is ALWAYS laid out
+ * and only its opacity toggles, so hovering a message can never change that
+ * message's height — the transcript would otherwise shift under the pointer
+ * mid-read. Pointer events are off while hidden so the invisible button is not
+ * a click target; keyboard focus still reaches it, and `:focus-within` then
+ * reveals it.
+ *
+ * `--user-message-action{,-hover}` are set inline from the theme, because the
+ * resting/hover pair cannot be expressed with `currentColor` alone.
+ */
+.user-message-actions {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--user-message-action);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.transcript-user-message:hover .user-message-actions,
+.transcript-user-message:focus-within .user-message-actions { opacity: 1; pointer-events: auto; }
+.user-message-clock { letter-spacing: 0.01em; }
+.user-message-copy {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: opacity 120ms ease, scale 120ms ease;
+}
+.user-message-copy:hover { color: var(--user-message-action-hover); }
+.user-message-copy:active { scale: 0.94; }
+.user-message-actions-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
 .tool-group-trigger:hover,
 .tool-group-trigger:focus-within { --tool-group-background: var(--tool-hover-background); }
 

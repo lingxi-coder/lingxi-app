@@ -23,4 +23,4 @@
 .git-environment-content h2 { margin:0 0 9px; padding:0 8px; color:var(--git-muted); font-size:14px; font-weight:400; }
 .git-environment-content>button { display:flex; align-items:center; gap:11px; padding:9px 8px; min-height:42px; border:0; background:transparent; color:inherit; font:inherit; font-size:14px; text-align:left; border-radius:8px; cursor:pointer; }
 .git-environment-content>button:hover { background:var(--git-hover); }.git-environment-content>button>span { flex:1; overflow:hidden; text-overflow:ellipsis; }.git-environment-content>button:disabled { opacity:.55; }.git-environment-content small { color:var(--git-muted); }
-.git-location { padding:5px 8px 10px 36px; font-size:11px; color:var(--git-muted); overflow-wrap:anywhere; }.git-environment .git-environment-content { border:0; padding:0; }.git-branch-popover::backdrop { background:transparent; }.git-branch-row[aria-current=true]:disabled { opacity:1; }
+.git-environment .git-environment-content { border:0; padding:0; }.git-branch-popover::backdrop { background:transparent; }.git-branch-row[aria-current=true]:disabled { opacity:1; }

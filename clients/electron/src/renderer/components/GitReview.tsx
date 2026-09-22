@@ -83,14 +83,12 @@ export function GitTopBar() {
   </div>;
 }
 export function GitEnvironment({ onNavigate }: { onNavigate?(): void }) {
-  const git = useContext(GitContext); const t = useT(); const [anchor, setAnchor] = useState<DOMRect>(); const [location, setLocation] = useState(false);
+  const git = useContext(GitContext); const t = useT(); const [anchor, setAnchor] = useState<DOMRect>();
   useEffect(() => { setAnchor(undefined); }, [git?.scope?.projectPath, git?.scope?.sessionId]);
   if (!git?.api || !git.scope) return null;
   const navigate = (page: Page) => { git.open(page); onNavigate?.(); };
   return <section className="git-environment-content" aria-label="Environment" style={themeStyle(t)}><h2>Environment</h2>
     <button onClick={() => navigate('changes')}><Icon name="file" size={18}/><span>Changes</span><small>{git.status?.files.length ?? ''}</small></button>
-    <button aria-expanded={location} onClick={() => setLocation(!location)}><Icon name="terminal" size={18}/><span>Local</span><Icon name="chevron" size={14}/></button>
-    {location && <div className="git-location">{git.scope.projectPath}</div>}
     <button data-git-branch-trigger="true" aria-label="Switch branch" aria-expanded={!!anchor} disabled={!git.status?.repository} onClick={(e) => setAnchor(e.currentTarget.getBoundingClientRect())}><BranchIcon/><span>{git.status?.repository ? git.status.branch || git.status.head.slice(0, 8) || 'New repository' : git.loading ? 'Loading repository…' : 'No repository'}</span><Icon name="chevron" size={14}/></button>
     <button onClick={() => navigate('commit')}><Icon name="check" size={18}/><span>Commit or push</span></button>
     {git.error && <div className="git-message git-error" role="alert">{git.error}<button onClick={() => void git.refresh()}>Retry</button></div>}
@@ -136,13 +134,24 @@ function Changes({ fixedMode, fixedTarget }: { fixedMode?: Mode; fixedTarget?: s
   const git = useGit(); const { status, view } = git; const mode = fixedMode ?? view.mode; const target = fixedTarget ?? view.target;
   const [diff, setDiff] = useState<GitDiff>(); const [catalog, setCatalog] = useState<GitFile[]>([]); const [loading, setLoading] = useState(false);
   const [discard, setDiscard] = useState<{ file: GitFile; token: string }>(); const [conflict, setConflict] = useState<string>(); const scroll = useRef<HTMLDivElement>(null); const scrollReady = useRef(false);
-  useEffect(() => { let active = true; scrollReady.current = false; setLoading(true); setDiff(undefined);
+  const comparison = JSON.stringify([mode, target, view.base, view.path]);
+  const previousComparison = useRef<string>();
+  useEffect(() => {
+    let active = true;
+    // Repository tokens cover every file. Revalidate in place so unrelated
+    // edits do not unmount the preview or reset the user's scroll position.
+    if (previousComparison.current !== comparison) {
+      previousComparison.current = comparison;
+      scrollReady.current = false;
+      setDiff(undefined);
+    }
+    setLoading(true);
     if ((mode === 'branch' || mode === 'commit' || mode === 'stash') && !target) { setLoading(false); setCatalog([]); return; }
-    void git.read({ kind: 'diff', mode, base: view.base, target, path: view.path || undefined }).then((r) => { if (active) { setDiff(r?.diff); setLoading(false); } });
+    void git.read({ kind: 'diff', mode, base: view.base, target, path: view.path || undefined }).then((r) => { if (active) { if (r?.diff) setDiff(r.diff); setLoading(false); } });
     return () => { active = false; };
-  }, [mode, target, view.base, view.path, status?.token, git.read]);
+  }, [comparison, mode, target, view.base, view.path, status?.token, git.read]);
   useEffect(() => { if (mode === 'working' || mode === 'staged') { setCatalog(status?.files ?? []); return; } let active = true; if (!target) { setCatalog([]); return; } void git.read({ kind: 'diff', mode, base: view.base, target }).then((r) => { if (active) setCatalog(r?.diff?.files ?? []); }); return () => { active = false; }; }, [mode, target, view.base, status?.token, git.read]);
-  useLayoutEffect(() => { if (diff && scroll.current) { scroll.current.scrollTop = view.scroll; scrollReady.current = true; } }, [diff, view.path, mode, target]);
+  useLayoutEffect(() => { if (diff && scroll.current && !scrollReady.current) { scroll.current.scrollTop = view.scroll; scrollReady.current = true; } }, [diff, view.path, mode, target]);
   const groups: [string, GitFile[]][] = mode === 'working' || mode === 'staged' ? [
     ['Conflicts', catalog.filter((f) => f.conflict)], ['Staged', catalog.filter((f) => !f.conflict && f.index !== ' ' && f.index !== '?' && f.index !== '.')], ['Changes', catalog.filter((f) => !f.conflict && !f.untracked && f.working !== ' ' && f.working !== '.')], ['Untracked', catalog.filter((f) => f.untracked)],
   ] : [['Files', catalog]];
@@ -153,7 +162,7 @@ function Changes({ fixedMode, fixedTarget }: { fixedMode?: Mode; fixedTarget?: s
     <div className="git-file-filter"><input aria-label="Filter files" placeholder="Filter files…" value={view.filter} onChange={(e) => git.update({ filter: e.target.value })}/><button aria-label={view.tree ? 'Use flat file list' : 'Use directory tree'} aria-pressed={view.tree} onClick={() => git.update({ tree: !view.tree })}><Icon name="folder" size={17}/></button><button aria-label="Side by side diff" aria-pressed={view.split} onClick={() => git.update({ split: !view.split })}>±</button></div>
     <div className="git-files">{groups.map(([label, entries]) => { const files = entries.filter((f) => f.path.toLowerCase().includes(view.filter.toLowerCase())).sort((a, b) => a.path.localeCompare(b.path)); return files.length > 0 && <section key={label}><header><h3>{label} <small>{files.length}</small></h3>{(label === 'Staged' || label === 'Changes' || label === 'Untracked') && <button disabled={git.busy} onClick={() => void git.run({ kind: label === 'Staged' ? 'unstage' : 'stage', paths: files.map((f) => f.path), token: status!.token })}>{label === 'Staged' ? 'Unstage all' : 'Stage all'}</button>}</header><DirectoryFiles files={files} tree={view.tree} renderFile={(file) => (<div className={`git-file-row${view.path === file.path ? ' selected' : ''}`}><button className="git-file-select" onClick={() => select(file, label)} title={file.path}><span className="git-file-status">{file.conflict ? '!' : file.untracked ? '?' : label === 'Staged' ? file.index : file.working}</span><span>{view.tree ? file.path.split('/').pop() : file.path}{file.oldPath && <small> ← {file.oldPath}</small>}{file.submodule && <small> submodule</small>}</span><small className="git-stats">{file.binary ? 'binary' : <><i>+{file.additions}</i> <b>−{file.deletions}</b></>}</small></button>{!file.conflict && (label === 'Staged' || label === 'Changes' || label === 'Untracked') && <button title={label === 'Staged' ? 'Unstage file' : 'Stage file'} aria-label={`${label === 'Staged' ? 'Unstage' : 'Stage'} ${file.path}`} disabled={git.busy} onClick={() => void git.run({ kind: label === 'Staged' ? 'unstage' : 'stage', paths: [file.path], token: status!.token })}>{label === 'Staged' ? '−' : '+'}</button>}{(label === 'Changes' || label === 'Untracked') && <button title="Discard file changes" aria-label={`Discard ${file.path}`} disabled={git.busy || status?.busy} onClick={() => setDiscard({ file, token: status!.token })}>↶</button>}</div>)}/></section>; })}</div>
     {catalog.length === 0 && <div className="git-empty"><Icon name="file" size={40}/><h3>{mode === 'branch' && !target ? 'Select a branch to compare' : 'No file changes yet'}</h3><p>Changes in this project will appear here.</p></div>}
-    <div ref={scroll} className="git-diff-scroll" onScroll={(e) => { if (scrollReady.current) git.update({ scroll: e.currentTarget.scrollTop }); }}>{loading ? <div className="git-empty">Loading diff…</div> : diff && <Diff diff={diff} mode={mode} path={view.path}/>}</div>
+    <div ref={scroll} className="git-diff-scroll" onScroll={(e) => { if (scrollReady.current) git.update({ scroll: e.currentTarget.scrollTop }); }}>{diff ? <Diff diff={diff} mode={mode} path={view.path} refreshing={loading}/> : loading && <div className="git-empty">Loading diff…</div>}</div>
     {discard && <Confirm title={discard.file.untracked ? 'Delete untracked file' : 'Discard changes'} description={discard.file.untracked ? 'This permanently deletes the selected untracked file.' : 'Replace unstaged changes with the staged version. This cannot be undone from this panel.'} paths={[discard.file.path]} onClose={() => setDiscard(undefined)} onConfirm={() => git.run({ kind: 'discard', paths: [discard.file.path], untracked: discard.file.untracked, token: discard.token })}/>}
     {conflict && <Conflict path={conflict} onClose={() => setConflict(undefined)}/>}
   </div>;
@@ -167,9 +176,9 @@ function DirectoryFiles({ files, tree, renderFile }: { files: GitFile[]; tree: b
   };
   return tree ? renderLevel(files, '') : <>{files.map((file) => <div key={file.path}>{renderFile(file)}</div>)}</>;
 }
-function Diff({ diff, mode, path }: { diff: GitDiff; mode: Mode; path: string }) {
+function Diff({ diff, mode, path, refreshing }: { diff: GitDiff; mode: Mode; path: string; refreshing: boolean }) {
   const git = useGit(); const hunks = useMemo(() => reviewHunks(diff.patch), [diff.patch]);
-  return <div className="git-diff" aria-label="File diff"><div className="git-diff-title">{path || 'All file changes'}</div>{diff.truncated && <div className="git-message">Preview truncated. Open the file or terminal to inspect the complete diff. Hunk actions are disabled.</div>}{diff.binary ? <div className="git-empty">Binary file changed. No text preview.</div> : hunks.length ? hunks.map((hunk, index) => { const lines = reviewLines(hunk); return <section className="git-hunk" key={`${hunk.heading}-${index}`}><header><code>{hunk.heading}</code>{(mode === 'working' || mode === 'staged') && <button disabled={git.busy || diff.truncated} onClick={() => void git.run({ kind: mode === 'staged' ? 'unstage' : 'stage', patch: hunk.patch, token: diff.token })}>{mode === 'staged' ? 'Unstage hunk' : 'Stage hunk'}</button>}</header>{git.view.split ? <div className="git-split-diff">{splitReviewLines(lines).map(([left, right], i) => <div className="git-split-row" key={i}><DiffCell line={left} side="old"/><DiffCell line={right} side="next"/></div>)}</div> : <div>{lines.map((line, i) => <div className={`git-diff-line ${line.kind}`} key={i}><span className="git-line-number">{line.old}</span><span className="git-line-number">{line.next}</span><code>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}{line.text}</code></div>)}</div>}</section>; }) : diff.patch ? <pre className="git-raw-diff">{diff.patch}</pre> : <div className="git-empty">No changes in this comparison.</div>}</div>;
+  return <div className="git-diff" aria-label="File diff"><div className="git-diff-title">{path || 'All file changes'}</div>{diff.truncated && <div className="git-message">Preview truncated. Open the file or terminal to inspect the complete diff. Hunk actions are disabled.</div>}{diff.binary ? <div className="git-empty">Binary file changed. No text preview.</div> : hunks.length ? hunks.map((hunk, index) => { const lines = reviewLines(hunk); return <section className="git-hunk" key={`${hunk.heading}-${index}`}><header><code>{hunk.heading}</code>{(mode === 'working' || mode === 'staged') && <button disabled={git.busy || refreshing || diff.token !== git.status?.token || diff.truncated} onClick={() => void git.run({ kind: mode === 'staged' ? 'unstage' : 'stage', patch: hunk.patch, token: diff.token })}>{mode === 'staged' ? 'Unstage hunk' : 'Stage hunk'}</button>}</header>{git.view.split ? <div className="git-split-diff">{splitReviewLines(lines).map(([left, right], i) => <div className="git-split-row" key={i}><DiffCell line={left} side="old"/><DiffCell line={right} side="next"/></div>)}</div> : <div>{lines.map((line, i) => <div className={`git-diff-line ${line.kind}`} key={i}><span className="git-line-number">{line.old}</span><span className="git-line-number">{line.next}</span><code>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}{line.text}</code></div>)}</div>}</section>; }) : diff.patch ? <pre className="git-raw-diff">{diff.patch}</pre> : <div className="git-empty">No changes in this comparison.</div>}</div>;
 }
 function DiffCell({ line, side }: { line?: ReviewLine; side: 'old' | 'next' }) { return <div className={`git-diff-line ${line?.kind ?? 'blank'}`}><span className="git-line-number">{line?.[side]}</span><code>{line?.text ?? ''}</code></div>; }
 function Commit() {

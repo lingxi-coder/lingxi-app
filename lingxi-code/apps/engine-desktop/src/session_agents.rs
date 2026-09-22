@@ -456,6 +456,14 @@ impl platform_api::subagent_spawn::SubagentSpawnObserver for DesktopSessionAgent
                 .await;
             }
             SubagentObservation::Message { agent_id, message } => {
+                if matches!(&message, ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "agent_idle")
+                {
+                    // Foreground agents can park after backgrounding their work.
+                    // Their event pump stays alive for a later task notification;
+                    // settle this turn without dropping its observer binding.
+                    self.emit_update(agent_id, "completed", None, false).await;
+                    return;
+                }
                 if !conversation_is_visible(&message) {
                     // A parked worker can wake on a task-notification input.
                     // Publish the lifecycle edge, never its hidden contents —
@@ -867,6 +875,57 @@ mod tests {
         assert_eq!(
             observer.snapshot("session-a")[&agent_id.to_string()].status,
             "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_park_updates_liveness_without_losing_wake_binding() {
+        let sink = client_adapter::MockSink::arc();
+        let observer = DesktopSessionAgentObserver::new(sink.clone(), "session-a");
+        let agent_id = protocol::AgentId::new();
+        allocate(&observer, agent_id, false, 0).await;
+        for _ in 0..2 {
+            let before = sink.events().await.len();
+            observer
+                .on_event(SubagentObservation::Message {
+                    agent_id,
+                    message: ConversationMessage::System {
+                        id: protocol::MessageId::new(),
+                        content: "idle".into(),
+                        subtype: Some("agent_idle".into()),
+                        compact_metadata: None,
+                        refusal_fallback: None,
+                    },
+                })
+                .await;
+            assert_eq!(
+                observer.snapshot("session-a")[&agent_id.to_string()].status,
+                "completed"
+            );
+            let events = sink.events().await;
+            assert!(
+                matches!(&events[before..], [ClientEvent::SessionAgentUpdated { agent, .. }] if agent.status == "completed")
+            );
+            observer
+                .on_event(SubagentObservation::Message {
+                    agent_id,
+                    message: ConversationMessage::user_meta(
+                        protocol::MessageId::new(),
+                        "task finished".into(),
+                    ),
+                })
+                .await;
+            assert_eq!(
+                observer.snapshot("session-a")[&agent_id.to_string()].status,
+                "running"
+            );
+        }
+        observer
+            .on_event(SubagentObservation::Killed { agent_id })
+            .await;
+        assert_eq!(
+            observer.snapshot("session-a")[&agent_id.to_string()].status,
+            "killed"
         );
     }
 

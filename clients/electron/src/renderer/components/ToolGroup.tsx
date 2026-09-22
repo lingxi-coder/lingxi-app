@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
 import type { TranscriptToolGroup } from './transcriptRows';
+import { toolDisplayHeader } from '../model/runItem';
 import { Disclosure } from './Disclosure';
 import { ToolCall, toolIconName } from './ToolCall';
 import { ToolActivityIcon } from './ToolActivityIcon';
@@ -23,7 +24,7 @@ export function ToolGroup({ group, open, toolOpen, onSetOpen }: ToolGroupProps) 
   const failed = group.tools.filter((tool) => tool.status === 'error').length;
   const lastTool = group.tools.at(-1);
   if (!lastTool) return null;
-  const view = lastTool.view;
+  const view = toolDisplayHeader(lastTool);
   const title = view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title;
   const detail = view.sub_line;
   const summary = `${title}${detail ? ` · ${detail.prefix}${detail.text}` : ''}`;

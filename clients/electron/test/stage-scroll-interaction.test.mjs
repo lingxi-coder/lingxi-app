@@ -78,6 +78,9 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     assert.ok(result.resizeGap <= 1, `async child resize bottom gap: ${result.resizeGap}`);
     assert.ok(result.shrinkGap <= 1, `async child shrink bottom gap: ${result.shrinkGap}`);
     assert.equal(result.finalAncestorScroll, 0);
+    for (const layout of result.thinkingLayouts) {
+      assert.deepEqual(layout, result.thinkingLayouts[0], 'thinking visibility must preserve tail height and scroll position');
+    }
 
     for (const offset of [0, 4]) {
       const baseline = result.deliveryLayouts[offset];

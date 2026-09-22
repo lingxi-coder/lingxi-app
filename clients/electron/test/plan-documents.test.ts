@@ -24,3 +24,11 @@ test('structured Chinese and English proposal headings use cards, code examples 
  assert.equal(narrationPlans([assistant('p','```md\n'+plan+'\n```')]).length,0);
  assert.equal(narrationPlans([{type:'narration',id:'u',role:'user',text:plan}]).length,0);
 });
+test('an H2 plan title with bold-led sections is a card too', () => {
+ const plan = '## 计划\n\n**目标**：主会话实现。\n\n**批准绑定**\n- 门就是 ExitPlanMode 的 Allow。\n\n**删除**：旧流水线。';
+ assert.equal(narrationPlans([assistant('p',plan)])[0]?.content,plan);
+ assert.equal(narrationPlans([assistant('p','## 计划\n### 步骤\nA\n### 验证\nB')]).length,1);
+ assert.equal(narrationPlans([assistant('p','# Plan\n**Step one**\n**Step two**')]).length,1);
+ assert.equal(narrationPlans([assistant('p','## 计划\n只有一句话。')]).length,0);
+ assert.equal(narrationPlans([assistant('p','## 计划\n**目标**：只有一个分节。')]).length,0);
+});

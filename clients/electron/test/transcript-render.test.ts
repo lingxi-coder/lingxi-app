@@ -46,6 +46,7 @@ import { Stage } from '../src/renderer/components/Stage';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 import { parseSlashCommandMessage } from '../src/renderer/components/slashCommandMessage';
 import { ToolCall, toolIconName } from '../src/renderer/components/ToolCall';
+import { ToolGroup } from '../src/renderer/components/ToolGroup';
 import {
   ASSISTANT_NARRATION_COLLAPSE_MAX_CHARS,
   compactProgressPercent,
@@ -61,6 +62,23 @@ function render(node: React.ReactElement): string {
     React.createElement(Theme.Provider, { value: tokens(true) }, node),
   );
 }
+
+test('finished shell cards and groups do not announce that commands are still running', () => {
+  for (const status of ['running', 'done', 'error'] as const) {
+    const item: ToolRunItem = {
+      type: 'tool', id: 'shell', tool: 'Bash', status,
+      view: { verb: 'shell', label: 'Running 1 shell command…', title: 'Running 1 shell command…', sub_line: { prefix: '$', text: 'echo done' } },
+    };
+    for (const html of [
+      render(React.createElement(ToolCall, { item, onSetOpen: () => {} })),
+      render(React.createElement(ToolGroup, { group: { type: 'tool-group', id: 'group', tools: [item] }, open: true, toolOpen: () => false, onSetOpen: () => {} })),
+    ]) {
+      assert.equal(html.includes('Running 1 shell command'), status === 'running');
+      assert.ok(html.includes('echo done'));
+      if (status !== 'running') assert.ok(html.includes('Shell command'));
+    }
+  }
+});
 
 /** The text of every span laid out `direction: rtl` (the head-clipped ones). */
 function rtlSpans(html: string): string[] {

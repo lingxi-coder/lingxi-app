@@ -227,6 +227,8 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
     transcriptRows(items, running, Boolean(pendingActivity?.trim())), liveItems, agents ?? [], anchors,
   ), [items, liveItems, running, pendingActivity, agents, anchors]);
 
+  const tailThinking = rows.at(-1)?.type === 'thinking' ? rows.at(-1) : undefined;
+
   // Synchronize the actual scroll extent before paint, including feed padding.
   // A tail element's scrollIntoView also moves ancestors and excludes that padding.
   const syncTail = useCallback(() => {
@@ -345,6 +347,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
               </div>
             );
           }
+          if (item === tailThinking) return null;
           if (item.type === 'thinking') {
             // A backoff owns the waiting indicator while it lasts: "Thinking…"
             // during a multi-minute retry is what made a rate-limited turn look
@@ -392,6 +395,22 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
           }
           return null;
         })}
+
+        {/* Keep the tail slot mounted even when thinking yields to another activity. */}
+        {(rows.length > 0 || running) && (
+          <div className="transcript-run-item transcript-thinking" data-thinking-slot="true"
+            data-run-type={tailThinking ? 'thinking' : undefined}
+            aria-hidden={!tailThinking}
+            role={tailThinking ? 'status' : undefined}
+            style={{ visibility: tailThinking ? 'visible' : 'hidden' }}>
+            {tailThinking && apiRetry ? <ApiRetryNotice retry={apiRetry} /> : (
+              <span className={tailThinking ? 'running-sweep' : undefined}
+                style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>
+                {tailThinking ? 'Thinking…' : '\u00a0'}
+              </span>
+            )}
+          </div>
+        )}
 
         {localPlan && <div role="dialog" aria-label="Plan" style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>Close plan</button><PlanDocument content={localPlan.content}/></div>}
 

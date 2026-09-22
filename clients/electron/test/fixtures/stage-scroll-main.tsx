@@ -17,7 +17,9 @@ const initialItems: RunItem[] = [
 ];
 function Fixture() {
   const [items, setItems] = useState(initialItems);
+  const [thinkingVisible, setThinkingVisible] = useState(true);
   Object.assign(window, { stageScrollFixture: {
+    thinking(visible: boolean) { flushSync(() => setThinkingVisible(visible)); },
     delivery(delivery: 'pending' | 'failed' | undefined, long = false) {
       flushSync(() => setItems([
         { type: 'narration', id: 'delivery-message', role: 'user', text: long ? 'A long follow-up message that wraps across several lines. '.repeat(10) : 'merge dev to main', delivery },
@@ -35,7 +37,7 @@ function Fixture() {
   return <Theme.Provider value={tokens(false)}>
     <div id="scroll-ancestor" style={{ height: 300, overflowY: 'auto' }}>
       <div style={{ height: 420, display: 'flex', flexDirection: 'column' }}>
-        <Stage liveItems={items} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" />
+        <Stage pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" />
       </div>
       <div style={{ height: 300 }} />
     </div>

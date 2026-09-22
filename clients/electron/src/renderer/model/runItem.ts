@@ -42,6 +42,19 @@ export interface ToolRunItem {
   readonly elapsedMs?: number;
 }
 
+/** Shell headers are created at start; settle their wording with the call. */
+export function toolDisplayHeader(item: ToolRunItem): ToolHeaderDto {
+  const { view } = item;
+  if (item.status === 'running' || view.verb !== 'shell'
+    || !['Running shell command', 'Running 1 shell command…'].includes(view.label)) return view;
+  const label = 'Shell command';
+  return {
+    ...view,
+    label,
+    title: `${label}${view.primary ? `(${view.primary})` : ''}${view.qualifier ?? ''}`,
+  };
+}
+
 /** A prose line — the user's prompt, the assistant's answer, or a notice. */
 export interface NarrationRunItem {
   readonly type: 'narration';

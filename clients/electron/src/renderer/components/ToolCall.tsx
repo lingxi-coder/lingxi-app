@@ -27,7 +27,7 @@ import type { ToolIconDto } from '@lingxi/bridge-client';
 
 import { standaloneJsonForDisplay } from '../markdown';
 import type { ToolRunItem } from '../model/runItem';
-import { toolHasBody, toolTruncationNotice } from '../model/runItem';
+import { toolDisplayHeader, toolHasBody, toolTruncationNotice } from '../model/runItem';
 import { useT } from '../theme/ThemeContext';
 import { ltrAnchored } from './bidi';
 import { CodeBlock } from './CodeBlock';
@@ -123,7 +123,8 @@ function ToolGlyph({ item }: { item: ToolRunItem }) {
 
 export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCallProps) {
   const t = useT();
-  const { view, result } = item;
+  const { result } = item;
+  const view = toolDisplayHeader(item);
   const expandable = toolHasBody(item);
   const isOpen = open ?? false;
 

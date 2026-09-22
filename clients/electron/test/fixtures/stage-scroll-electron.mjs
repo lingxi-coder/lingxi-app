@@ -40,6 +40,16 @@ async function main() {
       await settle();
       result.streamingGaps.push((await run(metrics)).gap);
     }
+    result.thinkingLayouts = [];
+    for (const visible of [true, false, true, false, true]) {
+      await run(`window.stageScrollFixture.thinking(${visible})`);
+      await settle();
+      result.thinkingLayouts.push(await run(`(() => {
+        const stage = document.querySelector('.desktop-stage');
+        const slot = document.querySelector('[data-thinking-slot]');
+        return { scrollHeight: stage.scrollHeight, scrollTop: stage.scrollTop, slotHeight: slot.getBoundingClientRect().height };
+      })()`));
+    }
     // Local child layout changes do not update Stage props (e.g. late markdown/media).
     await run(`document.querySelector('.transcript-thinking').style.height = '150px'`);
     await settle();

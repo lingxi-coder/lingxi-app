@@ -18,6 +18,7 @@ let sendPending = false;
 let lastSentPrompt = '';
 let cancelCount = 0;
 let modelRefreshCount = 0;
+const slashCommands: string[] = [];
 const audioRequests: NativeAudioCommand[] = [];
 
 /** The catalog the engine's `model_list` normally fills in. */
@@ -141,7 +142,7 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
     setPermissionMode: async () => undefined,
     emitCommandOutput: () => undefined,
     beginLocalCommand: () => undefined,
-    runSlashCommand: async () => undefined,
+    runSlashCommand: async (command: string) => { slashCommands.push(command); },
     sendPrompt: (text: string) => new Promise<void>((resolve) => {
       lastSentPrompt = text;
       sendPending = true;
@@ -173,6 +174,7 @@ function Fixture() {
       setBackgroundStatus: (session, status) => setBackgroundStatuses((current) => ({ ...current, [session]: status })),
       setCancelling: (session, cancelling) => setCancellingSessions((current) => ({ ...current, [session]: cancelling })),
       cancelCount: () => cancelCount,
+      slashCommands: () => [...slashCommands],
       sendPending: () => sendPending,
       lastSentPrompt: () => lastSentPrompt,
       resolveSend: () => resolvePendingSend?.(),
@@ -221,6 +223,7 @@ declare global {
       setBackgroundStatus(sessionId: string, status: string | undefined): void;
       setCancelling(sessionId: string, cancelling: boolean): void;
       cancelCount(): number;
+      slashCommands(): string[];
       sendPending(): boolean;
       lastSentPrompt(): string;
       resolveSend(): void;

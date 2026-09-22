@@ -411,6 +411,33 @@ async function main() {
     await webContents.executeJavaScript(`window.__composerDraftTest.resolveSend()`);
     await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === ''`);
 
+    // Side questions use the slash path while the main turn stays running.
+    const cancellationsBeforeBtw = await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`);
+    const commandsBeforeBtw = await webContents.executeJavaScript(`window.__composerDraftTest.slashCommands()`);
+    const btwCommand = '/btw Which tasks remain unfinished?';
+    await setPrompt(webContents, btwCommand);
+    await waitFor(webContents, `document.querySelector('[aria-label="Send pending message"]')?.disabled === false`);
+    if (process.env.LINGXI_BTW_COMPOSER_SCREENSHOT) {
+      await writeFile(process.env.LINGXI_BTW_COMPOSER_SCREENSHOT, (await webContents.capturePage()).toPNG());
+    }
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="Send pending message"]').click()`);
+    await waitFor(webContents, `window.__composerDraftTest.slashCommands().length === ${commandsBeforeBtw.length + 1}`);
+    assert.deepEqual(await webContents.executeJavaScript(`window.__composerDraftTest.slashCommands()`), [...commandsBeforeBtw, btwCommand]);
+    await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === '' && document.querySelector('[aria-label="Stop current turn"]')?.disabled === false`);
+    assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`), cancellationsBeforeBtw);
+    assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.sendPending()`), false);
+    assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.lastSentPrompt()`), sentPending);
+    assert.equal(await webContents.executeJavaScript(`document.body.textContent.includes('当前任务完成后才能运行 / 命令。')`), false);
+
+    await setPrompt(webContents, '/status');
+    await waitFor(webContents, `document.querySelector('[aria-label="Send pending message"]')?.disabled === false`);
+    await webContents.executeJavaScript(`document.querySelector('[aria-label="Send pending message"]').click()`);
+    await waitFor(webContents, `document.body.textContent.includes('当前任务完成后才能运行 / 命令。')`);
+    assert.deepEqual(await webContents.executeJavaScript(`window.__composerDraftTest.slashCommands()`), [...commandsBeforeBtw, btwCommand]);
+    assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`), '/status');
+    assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`), cancellationsBeforeBtw);
+    assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.sendPending()`), false);
+
     process.stdout.write(`${JSON.stringify({ audioInteraction, modelSettings, initialPicker, filteredPicker, restoredA, restoredB, survivingDraft, richDraft, runningInteraction, sentPending })}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();

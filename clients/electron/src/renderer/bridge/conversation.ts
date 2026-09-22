@@ -58,7 +58,7 @@ import { collectTurnFileChanges } from '../model/turnFileChanges';
 
 /**
  * The latest live token-usage snapshot fed by `usage_update`. Mirrors the
- * engine's `UsageUpdate` DTO (cumulative per turn). `null` until the first
+ * engine's `UsageUpdate` DTO (latest API request, with partial usage merged). `null` until the first
  * update arrives. Surfaced in the chrome's token counter, not the scrollback.
  */
 export interface UsageSnapshot {
@@ -300,12 +300,13 @@ function finishCompaction(
   now: number,
 ): ConversationState {
   const index = state.items.findIndex((item) => item.id === state.activeCompactionId && item.type === 'compaction');
-  if (index < 0) return state;
+  if (index < 0) return status === 'complete' ? { ...state, usage: null } : state;
   const items = state.items.slice();
   items[index] = { ...items[index], status, detail, finishedAt: now } as RunItem;
   const manual = state.pendingSlashName?.toLowerCase() === '/compact';
   return {
     ...state, items, activeCompactionId: null,
+    usage: status === 'complete' ? null : state.usage,
     ...(manual ? { pendingSlashName: null, running: false } : {}),
   };
 }
@@ -580,17 +581,29 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       };
     }
 
-    case 'usage_update':
-      // Live token counter — captured for the chrome; emits no scrollback item.
+    case 'usage_update': {
+      // OpenAI emits an all-zero placeholder at request start, before usage is
+      // known. Clear the old request seed so later partial events cannot reuse it.
+      if (event.input_tokens === 0 && event.output_tokens === 0
+        && event.cache_read_tokens === 0 && event.cache_creation_tokens === 0) {
+        return state.usage === null ? state : { ...state, usage: null };
+      }
+      // Anthropic's terminal event can contain output only. Input/cache buckets
+      // were seeded at message_start; a new nonempty input snapshot replaces them.
+      const outputOnly = event.input_tokens === 0 && event.cache_read_tokens === 0
+        && event.cache_creation_tokens === 0 && event.output_tokens > 0;
+      const previous = outputOnly ? state.usage : null;
       return {
         ...state,
         usage: {
-          inputTokens: event.input_tokens,
+          inputTokens: previous?.inputTokens ?? event.input_tokens,
           outputTokens: event.output_tokens,
-          cacheReadTokens: event.cache_read_tokens,
-          cacheCreationTokens: event.cache_creation_tokens,
+          cacheReadTokens: previous?.cacheReadTokens ?? event.cache_read_tokens,
+          cacheCreationTokens: previous?.cacheCreationTokens ?? event.cache_creation_tokens,
         },
       };
+
+    }
 
     case 'compaction_status': {
       const phase = event.phase;

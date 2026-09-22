@@ -278,6 +278,32 @@ test('active turns allow live model and permission controls but reject session l
   assert.doesNotThrow(() => assertCommandAllowedDuringTurn({ type: 'list_models' }, false));
 });
 
+test('side questions are allowed during a turn without allowing other slash commands', () => {
+  for (const raw of ['/btw', '/btw progress?', '/btw\nprogress?', '/btw\tprogress?']) {
+    assert.doesNotThrow(() => assertCommandAllowedDuringTurn(
+      validateClientCommand({ type: 'run_slash_command', raw, turn_id: 42 }), true,
+    ));
+  }
+  for (const raw of ['/btwhatever question', '/btw-extra question', '/BTW question', '/clear']) {
+    assert.throws(() => assertCommandAllowedDuringTurn(
+      validateClientCommand({ type: 'run_slash_command', raw }), true,
+    ), /cancel the active turn/);
+  }
+  assert.throws(() => validateClientCommand({ type: 'run_slash_command', raw: '/btw/clear' }), /invalid slash command/);
+});
+
+test('slash commands preserve optional correlation ids and reject invalid ids', () => {
+  for (const turn_id of [1, 42, Number.MAX_SAFE_INTEGER]) {
+    const command = { type: 'run_slash_command', raw: '/btw progress?', turn_id };
+    assert.deepEqual(validateClientCommand(command), command);
+  }
+  for (const turn_id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '42', null, Infinity, NaN]) {
+    assert.throws(() => validateClientCommand({
+      type: 'run_slash_command', raw: '/btw progress?', turn_id,
+    }), /invalid slash command turn id/);
+  }
+});
+
 test('prompt and permission payloads are bounded and exact', () => {
   assert.equal(validatePrompt('hello'), 'hello');
   assert.throws(() => validatePrompt(''), /invalid prompt/);

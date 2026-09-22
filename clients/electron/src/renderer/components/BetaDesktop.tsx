@@ -1,5 +1,6 @@
 import { createPortal } from 'react-dom';
 import { ShellIcon } from './TerminalPanel';
+import { ContextWindow } from './ContextWindow';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type {
   ImageRefDto,
@@ -9,6 +10,7 @@ import type {
 } from '@lingxi/bridge-client';
 
 import { type UseBridge } from '../bridge/useBridge';
+import { isSideQuestionCommand } from '../bridge/sideQuestion';
 import type { ContextSummarySnapshot } from '../bridge/conversation';
 import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
@@ -2391,7 +2393,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
     const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
-    if (bridge.running && isSlashCommand) {
+    if (bridge.running && isSlashCommand && !isSideQuestionCommand(slashCommand, bridge.desktop.slashCommands)) {
       setImageNotice('当前任务完成后才能运行 / 命令。');
       return;
     }
@@ -2949,6 +2951,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
           <div style={{ flex: 1 }} />
 
+          <ContextWindow key={activeSessionId ?? 'new-session'}
+            usage={bridge.sessionLoading ? null : bridge.usage}
+            capacity={currentModelDetail?.context_window_tokens} />
           <div ref={modelControl} className="composer-model-control" style={{ position: 'relative', minWidth: 0 }}>
             <button
               ref={modelTrigger}

@@ -2,6 +2,7 @@ import type { ScheduledScope, ScheduledContext } from '../../shared/scheduled';
 import { submittedSessionCatalogs, type SubmittedSession } from './submittedSessionCatalog';
 import { saveProviderSettings } from './providerSettingsSave';
 import { requestCronManagement } from './cronManagement';
+import { beginSideQuestion, finishSideQuestion, isSideQuestionCommand, SIDE_QUESTION_AGENT_PREFIX } from './sideQuestion';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CronJobDto,
@@ -71,6 +72,7 @@ import {
   reduceRuntimeCenterEvent,
   reduceRuntimeCenterPermission,
   resetRuntimeCenterConnection,
+  interruptedSideQuestionAgents,
   resourcesFromRestoredMessages,
   rollbackRuntimeResources,
   setRuntimeCenterOverviewOpen,
@@ -897,6 +899,8 @@ export function useBridge(): UseBridge {
   const pendingConfigurationOperations = useRef(new Map<string, PendingConfigurationOperation>());
   const turnActiveRefs = useRef(new Map<string, boolean>());
   const slashPendingRefs = useRef(new Map<string, boolean>());
+  const sideQuestionTurns = useRef(new Map<string, Set<number>>());
+  const nextSideQuestionTurn = useRef(Date.now());
   const cancellingRefs = useRef(new Map<string, { current: boolean }>());
   const cancellationTasks = useRef(new Map<string, { current: Promise<void> | null }>());
   const removedRuntimeIds = useRef(new Set<string>());
@@ -1106,7 +1110,7 @@ export function useBridge(): UseBridge {
       // The snapshot is authoritative, so disposal markers have been
       // reconciled once it arrives and must not accumulate across sessions.
       removedRuntimeIds.current.clear();
-      pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, slashPendingRefs.current, cancellingRefs.current, cancellationTasks.current);
+      pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, slashPendingRefs.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
       for (const sessionId of new Set<string>([
         ...pendingTrackedTurns.current.keys(),
         ...activeTrackedTurns.current.keys(),
@@ -1240,6 +1244,17 @@ export function useBridge(): UseBridge {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
       const event = envelope.event;
+      // Side answers use the existing slash protocol, but never claim or release
+      // the main turn, enter its transcript, or reach its speech/plan reducers.
+      if (event.type === 'slash_command_result' && event.turn_id !== undefined
+        && sideQuestionTurns.current.get(sessionId)?.has(event.turn_id)) {
+        const turnId = event.turn_id;
+        updateRuntime(sessionId, (state) => ({
+          ...state,
+          runtimeCenter: finishSideQuestion(state.runtimeCenter, sessionId, turnId, event.display, event.is_error),
+        }));
+        return;
+      }
       if (event.type === 'turn_started') turnActiveRefs.current.set(sessionId, true);
       if (event.type === 'turn_ended' || event.type === 'session_ended') turnActiveRefs.current.set(sessionId, false);
       if (event.type === 'turn_started') {
@@ -1468,7 +1483,7 @@ export function useBridge(): UseBridge {
           removeRuntimeFromMaps(sessionId, next);
           return next.size === previous.size ? previous : next;
         });
-        removeRuntimeFromMaps(sessionId, turnActiveRefs.current, slashPendingRefs.current, cancellingRefs.current, cancellationTasks.current);
+        removeRuntimeFromMaps(sessionId, turnActiveRefs.current, slashPendingRefs.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
         completeTrackedSpeech(sessionId, 'stale');
         return;
       }
@@ -1484,6 +1499,10 @@ export function useBridge(): UseBridge {
           };
         }
         if (shouldClearPendingPermissions(state)) {
+          next.runtimeCenter = {
+            ...current.runtimeCenter,
+            agents: { ...current.runtimeCenter.agents, ...interruptedSideQuestionAgents(current.runtimeCenter) },
+          };
           next.conversation = reduceEvent(current.conversation, {
             type: 'compaction_status', phase: 'error',
             error: 'Connection lost during compaction',
@@ -1690,6 +1709,23 @@ export function useBridge(): UseBridge {
     const command = raw.trim();
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId || !command.startsWith('/')) return;
+    if (isSideQuestionCommand(command, runtimeStatesRef.current.get(sessionId)?.desktop.slashCommands ?? [])) {
+      const turnId = ++nextSideQuestionTurn.current;
+      const turns = sideQuestionTurns.current.get(sessionId) ?? new Set<number>();
+      turns.add(turnId);
+      sideQuestionTurns.current.set(sessionId, turns);
+      updateRuntime(sessionId, (state) => ({
+        ...state, runtimeCenter: beginSideQuestion(state.runtimeCenter, sessionId, turnId, command),
+      }));
+      try {
+        await host.command(sessionId, { type: 'run_slash_command', raw: command, turn_id: turnId });
+      } catch (cause) {
+        updateRuntime(sessionId, (state) => ({
+          ...state, runtimeCenter: finishSideQuestion(state.runtimeCenter, sessionId, turnId, messageFrom(cause), true),
+        }));
+      }
+      return;
+    }
     turnActiveRefs.current.set(sessionId, true);
     claimSlashTurn(slashPendingRefs.current, sessionId);
     updateRuntime(sessionId, (state) => ({ ...state, conversation: beginSlashCommand(state.conversation, command) }));
@@ -2346,6 +2382,7 @@ export function useBridge(): UseBridge {
     }
   }, [capture, host]);
   const loadSessionAgentTranscript = useCallback(async (agentId: string) => {
+    if (agentId.startsWith(SIDE_QUESTION_AGENT_PREFIX)) return;
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !host || !sessionId || !agentId.trim()) return;
     try {

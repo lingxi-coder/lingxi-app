@@ -134,6 +134,45 @@ test('explicit /model persists only on confirmation, including reselecting the c
     assert.deepEqual(commands.at(-1), { type: 'run_slash_command', raw: '/model' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+test('a late side-question reply cannot complete or reject a pending slash model switch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-preference-'));
+  try {
+    const store = new SettingsStore(dir); store.setLastModel('old-model');
+    const { instance, client, commands } = runtime(store);
+    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/btw progress?', turn_id: 41 });
+    const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model next-model', turn_id: 42 });
+    await tick();
+    for (const is_error of [true, false]) {
+      client.emit('event', { type: 'slash_command_result', turn_id: 41, display: 'Side answer', is_error });
+    }
+    await tick();
+    assert.equal(commands.length, 2, 'side replies must not trigger model confirmation');
+    assert.ok((instance as any).pendingModelSwitch);
+    assert.equal(store.getPublic().model, 'old-model');
+    client.emit('event', { type: 'slash_command_result', turn_id: 42, display: 'Switched', is_error: false });
+    client.emit('event', { type: 'model_list', current: 'next-model', models: ['next-model'] });
+    await selecting;
+    assert.equal(store.getPublic().model, 'next-model');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('side-question dispatch and replies preserve main turn ownership', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-preference-'));
+  try {
+    const { instance, client, commands } = runtime(new SettingsStore(dir));
+    client.emit('event', { type: 'turn_started', turn_id: 7 });
+    await instance.dispatchCommand({ type: 'run_slash_command', raw: '/btw progress?', turn_id: 42 });
+    assert.deepEqual(commands, [{ type: 'run_slash_command', raw: '/btw progress?', turn_id: 42 }]);
+    for (const is_error of [true, false]) {
+      client.emit('event', { type: 'slash_command_result', turn_id: 42, display: 'Side answer', is_error });
+      assert.equal(instance.turnActive, true);
+      assert.equal((instance as any).activeTurnId, 7);
+    }
+    client.emit('event', { type: 'turn_ended', turn_id: 7 });
+    assert.equal(instance.turnActive, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('rejected explicit /model never saves or reports success', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-preference-'));
   try {

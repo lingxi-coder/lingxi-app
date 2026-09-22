@@ -488,10 +488,12 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       if (typeof input['enabled'] !== 'boolean') throw new Error('invalid fast mode enabled flag');
       return { type, enabled: input['enabled'] };
     case 'run_slash_command': {
-      exactKeys(input, ['type', 'raw']);
+      exactKeys(input, ['type', 'raw', 'turn_id']);
       const raw = string(input['raw'], 'slash command raw', 4096);
       if (!/^\/[^\s/]+(?:\s|$)/.test(raw)) throw new Error('invalid slash command raw');
-      return { type, raw };
+      return input['turn_id'] === undefined
+        ? { type, raw }
+        : { type, raw, turn_id: integer(input['turn_id'], 'slash command turn id', 1) };
     }
     case 'list_sessions':
       exactKeys(input, ['type', 'limit']);
@@ -634,7 +636,7 @@ export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActiv
     && (
       command.type === 'set_reasoning_selection'
       || command.type === 'set_fast_mode'
-      || command.type === 'run_slash_command'
+      || (command.type === 'run_slash_command' && !/^\/btw(?:\s|$)/.test(command.raw))
       || command.type === 'login'
       || command.type === 'logout'
       || command.type === 'force_compact'

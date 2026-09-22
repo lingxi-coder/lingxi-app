@@ -739,7 +739,7 @@ export class SessionRuntime {
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
   private credentialRoutingSettings: unknown = undefined;
-  private pendingModelSwitch: { model: string; sent: boolean; slash: boolean; promise: Promise<void>; complete(selected?: string): void; fail(error: Error): void } | undefined;
+  private pendingModelSwitch: { model: string; sent: boolean; slash: boolean; turnId?: number; promise: Promise<void>; complete(selected?: string): void; fail(error: Error): void } | undefined;
 
   private pendingPermissionSwitch: {
     mode: PermissionModeId;
@@ -821,7 +821,7 @@ export class SessionRuntime {
       this.notifyActivityChanged();
     };
     const pending = {
-      model, sent: false, slash: !!slashCommand, promise,
+      model, sent: false, slash: !!slashCommand, turnId: slashCommand?.turn_id, promise,
       complete: (selected = model) => {
         try {
           if (persist) this.opts.onModelSelected?.(selected);
@@ -1966,7 +1966,7 @@ export class SessionRuntime {
         this.cancellingTurn = false;
         this.clearTurnInteractions();
       }
-      if (event.type === 'slash_command_result' && this.pendingModelSwitch?.slash && this.pendingModelSwitch.sent) {
+      if (event.type === 'slash_command_result' && this.pendingModelSwitch?.slash && this.pendingModelSwitch.sent && event.turn_id === this.pendingModelSwitch.turnId) {
         const pending = this.pendingModelSwitch;
         if (event.is_error) pending.fail(new Error('Model switch failed.'));
         else void this.scheduledModelCatalog().then(catalog => {

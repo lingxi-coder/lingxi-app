@@ -111,7 +111,7 @@ export function emptyRuntimeCenterState(): RuntimeCenterState {
  */
 export function runningSubagentIds(state: Pick<RuntimeCenterState, 'agents'> | undefined): string[] {
   return Object.values(state?.agents ?? {})
-    .filter((agent) => agent.agent_id !== 'main' && ['running', 'pending'].includes(agent.status))
+    .filter((agent) => agent.agent_id !== 'main' && agent.agent_type !== 'side_question' && ['running', 'pending'].includes(agent.status))
     .map((agent) => agent.agent_id);
 }
 
@@ -457,6 +457,10 @@ export function reduceRuntimeCenterEvent(
     case 'session_agent_list': {
       if (event.session_id !== sessionId) return state;
       const agents = Object.fromEntries(event.agents.map((agent) => [agent.agent_id, mergeCoordinatorWorker(state, agent)]));
+      // /btw uses the existing slash handler, so its inspector transcript is local.
+      for (const agent of Object.values(state.agents)) {
+        if (agent.agent_type === 'side_question') agents[agent.agent_id] = agent;
+      }
       for (const worker of Object.values(state.coordinatorWorkers)) {
         if (!agents[worker.agent_id] && !terminalAgentStatuses.has(worker.status)) {
           agents[worker.agent_id] = { ...state.agents[worker.agent_id], ...worker };
@@ -497,7 +501,7 @@ export function reduceRuntimeCenterEvent(
       return { ...state, plan: event.tasks };
     case 'session_resumed':
       return event.session_id === sessionId
-        ? { ...state, agents: {}, coordinatorWorkers: {} }
+        ? { ...state, agents: interruptedSideQuestionAgents(state), coordinatorWorkers: {} }
         : state;
     case 'session_started':
       return event.session_id === sessionId ? resetRuntimeCenterData(state) : state;
@@ -535,9 +539,17 @@ export function resetRuntimeCenterConnection(state: RuntimeCenterState): Runtime
   return {
     ...state,
     overviewOpen: false,
-    agents: {},
+    agents: interruptedSideQuestionAgents(state),
     coordinatorWorkers: {},
     submittedPlanState,
     submittedPlan: latestSubmittedPlan(submittedPlanState),
   };
+}
+
+export function interruptedSideQuestionAgents(state: RuntimeCenterState): RuntimeCenterState['agents'] {
+  return Object.fromEntries(Object.values(state.agents)
+    .filter((agent) => agent.agent_type === 'side_question')
+    .map((agent) => [agent.agent_id, agent.status === 'running'
+      ? { ...agent, status: 'failed', latest_activity: 'Connection lost while answering the side question.' }
+      : agent]));
 }

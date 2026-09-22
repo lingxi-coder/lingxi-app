@@ -98,7 +98,7 @@ test('summary reserves a side rail only while the message region is wide enough'
   assert.match(render(React.createElement(RuntimeCenterOverview, { bridge })), /data-inspector-open="true"/);
 });
 
-test('pinned summary is a nonmodal region with context actions and four ordered empty categories', () => {
+test('pinned summary is a nonmodal region with context actions and only populated categories', () => {
   const bridge = runtimeBridge();
   bridge.desktop = emptyDesktopState();
   const html = render(React.createElement(RuntimeCenterOverview, { bridge }));
@@ -106,8 +106,9 @@ test('pinned summary is a nonmodal region with context actions and four ordered 
   assert.ok(html.includes('aria-label="Pinned summary"'));
   assert.ok(!html.includes('role="dialog"'));
   const headings = [...html.matchAll(/<h2>(.*?)<\/h2>/g)].map((match) => match[1]);
-  assert.deepEqual(headings, ['Context', 'Subagents', 'Todos', 'Resources', 'Plan']);
-  for (const empty of ['No subagents or background tasks.', 'No todos yet.', 'No input resources in this session.', 'No submitted plan yet.']) assert.ok(html.includes(empty));
+  assert.deepEqual(headings, ['Context']);
+  for (const absent of ['Subagents', 'Todos', 'Resources', 'Plan']) assert.ok(!html.includes(`<h2>${absent}</h2>`));
+  for (const empty of ['No subagents or background tasks.', 'No todos yet.', 'No input resources in this session.', 'No submitted plan yet.']) assert.ok(!html.includes(empty));
 });
 
 test('summary previews only three resources while the resources detail lists every resource', () => {
@@ -127,8 +128,8 @@ test('Todos checklist and submitted Plan body render as distinct detail content'
   const bridge = runtimeBridge();
   bridge.runtimeCenter = { ...bridge.runtimeCenter, plan: [{ subject: 'Implement integration', state: 'in_progress' }], submittedPlan: { id: 'exit-plan-1', content: '# Migration design\n\nPreserve **compatibility**.', status: 'approved' } };
   const summary = render(React.createElement(RuntimeCenterOverview, { bridge }));
-  assert.ok(summary.includes('0 of 1 done'));
-  assert.ok(summary.includes('Implement integration'));
+  assert.ok(!summary.includes('0 of 1 done'));
+  assert.ok(!summary.includes('Implement integration'));
   assert.ok(summary.includes('Migration design'));
   const planTab = { kind: 'plan-document', id: 'exit-plan-1' } as const;
   bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: planTab, tabs: [planTab] };
@@ -383,6 +384,26 @@ test('summary owns context browsing and compaction controls', () => {
   assert.match(html, /aria-label="Open context summaries"/);
   assert.match(html, /aria-label="Compact conversation"/);
   assert.match(html, /Compact/);
+});
+
+ test('subagents are grouped by lifecycle with counts, newest first and empty states', () => {
+  const bridge = runtimeBridge();
+  bridge.desktop = emptyDesktopState();
+  const active = { kind: 'section', id: 'agents' } as const;
+  bridge.runtimeCenter = { ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active],
+    agents: Object.fromEntries(['running', 'pending', 'completed', 'failed', 'cancelled', 'killed', 'idle'].map((status, index) => [status, {
+      agent_id: status, name: `grouped-${status}`, agent_type: 'general-purpose', status, updated_at_ms: index,
+    }])),
+  };
+  const html = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  assert.ok(html.includes('Active · 2'));
+  assert.ok(html.includes('Done · 5'));
+  assert.ok(html.indexOf('grouped-pending') < html.indexOf('grouped-running'));
+  assert.ok(html.indexOf('grouped-running') < html.indexOf('Done · 5'));
+  assert.ok(html.indexOf('Done · 5') < html.indexOf('grouped-completed'));
+  bridge.runtimeCenter.agents = {};
+  const empty = render(React.createElement(RuntimeCenterInspector, { bridge }));
+  for (const label of ['Active · 0', 'Done · 0', 'No active subagents', 'No completed subagents']) assert.ok(empty.includes(label));
 });
 
 test('background agents show task titles and avatars without duplicating linked agents', () => {

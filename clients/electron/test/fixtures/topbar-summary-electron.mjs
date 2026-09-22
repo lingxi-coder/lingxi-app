@@ -87,7 +87,7 @@ async function main() {
     const overview = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); return { width: panel.getBoundingClientRect().width, radius: getComputedStyle(panel).borderRadius, sections: [...panel.querySelectorAll('h2')].map(el=>el.textContent), fourthResource: panel.textContent.includes('acceptance.md') }; })()`);
     assert.equal(overview.width, 300);
     assert.equal(overview.radius, '24px');
-    assert.deepEqual(overview.sections, ['Context', 'Subagents', 'Todos', 'Resources', 'Plan']);
+    assert.deepEqual(overview.sections, ['Context', 'Subagents', 'Resources', 'Plan']);
     assert.equal(overview.fourthResource, false);
     await js(`document.querySelector('[data-fixture-chat]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))`);
     assert.equal(await js(`Boolean(document.querySelector('#runtime-center-overview'))`), true);
@@ -96,12 +96,13 @@ async function main() {
 
     await click('[aria-label="Toggle right panel"]');
     await waitFor(wc, `document.querySelector('.runtime-inspector-landing')?.textContent.includes('Subagents')`);
-    await clickText('#runtime-center-overview [aria-label="Todos"]', '1 of 3');
+    await clickText('.runtime-inspector-landing', 'Todos');
     await waitFor(wc, `document.querySelector('#runtime-inspector-panel')?.textContent.includes('Inspect the existing desktop layout')`);
     assert.equal(await js(`Boolean(document.querySelector('#runtime-center-overview'))`), true);
-    await clickText('#runtime-center-overview [aria-label="Todos"]', '1 of 3');
     assert.equal(await js(`document.querySelectorAll('[role="tab"]').length`), 1);
     await clickText('#runtime-center-overview [aria-label="Plan"]', 'Desktop workspace');
+    await clickText('#runtime-center-overview [aria-label="Plan"]', 'Desktop workspace');
+    assert.equal(await js(`document.querySelectorAll('[role="tab"]').length`), 2);
     await waitFor(wc, `document.querySelector('#runtime-inspector-panel')?.textContent.includes('Bring the desktop toolbar')`);
     await js(`document.querySelector('[data-runtime-inspector-active="true"]').focus()`);
     wc.sendInputEvent({type:'keyDown',keyCode:'Left'});
@@ -159,11 +160,11 @@ async function main() {
     await waitFor(wc, `!document.querySelector('#runtime-center-overview') && !document.querySelector('.runtime-inspector')`);
     await click('[aria-label="Toggle pinned summary"]');
     await click('[aria-label="Toggle right panel"]');
-    assert.equal(await js(`document.querySelectorAll('#runtime-center-overview h2').length`), 5);
-    assert.equal(await js(`document.querySelector('#runtime-center-overview').textContent.includes('No submitted plan yet.')`), true);
+    assert.equal(await js(`document.querySelectorAll('#runtime-center-overview h2').length`), 1);
+    assert.equal(await js(`document.querySelector('#runtime-center-overview').textContent.includes('No submitted plan yet.')`), false);
     assert.equal(await js(`document.querySelector('#runtime-center-overview').textContent.includes('Desktop workspace')`), false);
     await capture('empty-light');
-    checks.push('session reset and four empty states');
+    checks.push('session reset and empty categories stay hidden');
     // Exercise actual wheel input, so an unconstrained overflow:auto child cannot pass.
     await click('[aria-label="Hide right panel"]');
     await js(`window.dispatchEvent(new CustomEvent('fixture-reset',{detail:{longSummaries:true}}))`);

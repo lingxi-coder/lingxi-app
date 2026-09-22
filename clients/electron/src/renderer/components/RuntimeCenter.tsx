@@ -259,7 +259,6 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
   const tasks = orderedTasks(bridge.desktop);
   const agents = useMemo(() => standaloneAgents(center.agents, tasks)
     .sort((left, right) => (statusRank[left.status] ?? 99) - (statusRank[right.status] ?? 99) || (right.updated_at_ms ?? 0) - (left.updated_at_ms ?? 0)), [center.agents, tasks]);
-  const plan = center.plan.length > 0 ? center.plan : bridge.conversation.plan;
   const openerRef = useRef<HTMLElement | null>(null);
   // [Finding 5, rework round 2] Read every poll tick, never a `useEffect`
   // dependency -- see `startPollingWhileActive`'s doc comment for why
@@ -352,24 +351,17 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
       style={{ '--runtime-border': t.border, '--runtime-muted': t.dark ? t.text2 : t.text3, background: t.surface, color: t.text } as CSSProperties}>
       <GitEnvironment onNavigate={() => bridge.setRuntimeCenterOverviewOpen(false)} />
       <SummaryContextActions key={bridge.conversation.sessionKey} bridge={bridge} />
-      <SummarySection section="agents">
-        {agents.length === 0 && tasks.length === 0 ? <EmptyRow>No subagents or background tasks.</EmptyRow> : <>
-          {agents.length > 0 && <OverviewRow icon="subagent" title={agentStatusSummary(agents.map((agent) => agent.status))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
-          {tasks.length > 0 && <OverviewRow icon="activity" title={`${tasks.length} background ${tasks.length === 1 ? 'task' : 'tasks'}`} subtitle={agentStatusSummary(tasks.map(taskSummaryStatus))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
-        </>}
-      </SummarySection>
-      <SummarySection section="todos">
-        {plan.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : <OverviewRow icon="check" title={`${plan.filter((task) => task.state === 'completed').length} of ${plan.length} done`} subtitle={plan.find((task) => task.state === 'in_progress')?.subject ?? 'View checklist'} onClick={() => open({ kind: 'section', id: 'todos' })} />}
-      </SummarySection>
-      <SummarySection section="resources">
-        {center.resources.length === 0 ? <EmptyRow>No input resources in this session.</EmptyRow> : <>
-          {center.resources.slice(0, 3).map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : resource.kind === 'file' ? 'file' : 'resources'} title={resource.name} thumbnail={resource.kind === 'image' ? resource.url : undefined} onClick={() => open({ kind: 'resource', id: resource.id })} />)}
-          <OverviewRow icon="resources" title="View all" onClick={() => open({ kind: 'section', id: 'resources' })} />
-        </>}
-      </SummarySection>
-      <SummarySection section="plan">
-        {center.submittedPlan ? <OverviewRow icon="file" title={planHeading(center.submittedPlan.content)} subtitle={PLAN_STATUS_LABELS[center.submittedPlan.status]} onClick={() => open({ kind: 'plan-document', id: center.submittedPlan!.id })} /> : <EmptyRow>No submitted plan yet.</EmptyRow>}
-      </SummarySection>
+      {(agents.length > 0 || tasks.length > 0) && <SummarySection section="agents">
+        {agents.length > 0 && <OverviewRow icon="subagent" title={agentStatusSummary(agents.map((agent) => agent.status))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
+        {tasks.length > 0 && <OverviewRow icon="activity" title={`${tasks.length} background ${tasks.length === 1 ? 'task' : 'tasks'}`} subtitle={agentStatusSummary(tasks.map(taskSummaryStatus))} onClick={() => open({ kind: 'section', id: 'agents' })} />}
+      </SummarySection>}
+      {center.resources.length > 0 && <SummarySection section="resources">
+        {center.resources.slice(0, 3).map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : resource.kind === 'file' ? 'file' : 'resources'} title={resource.name} thumbnail={resource.kind === 'image' ? resource.url : undefined} onClick={() => open({ kind: 'resource', id: resource.id })} />)}
+        <OverviewRow icon="resources" title="View all" onClick={() => open({ kind: 'section', id: 'resources' })} />
+      </SummarySection>}
+      {center.submittedPlan && <SummarySection section="plan">
+        <OverviewRow icon="file" title={planHeading(center.submittedPlan.content)} subtitle={PLAN_STATUS_LABELS[center.submittedPlan.status]} onClick={() => open({ kind: 'plan-document', id: center.submittedPlan!.id })} />
+      </SummarySection>}
     </div>
   );
 }
@@ -619,6 +611,27 @@ function SubmittedPlanDetail({ plan }: { plan: SubmittedPlan | null | undefined 
   return plan ? <PlanDocument key={plan.id} content={plan.content} status={PLAN_STATUS_LABELS[plan.status]}/> : <div className="runtime-section-detail"><EmptyRow>No submitted plan yet.</EmptyRow></div>;
 }
 
+function SubagentGroups({ agents, bridge }: { agents: SessionAgentSummaryDto[]; bridge: UseBridge }) {
+  const t = useT();
+  const doneStatuses = new Set(['completed', 'failed', 'killed', 'cancelled', 'idle']);
+  const sorted = [...agents].sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0));
+  const groups = [
+    { label: 'Active', agents: sorted.filter((agent) => !doneStatuses.has(agent.status)), empty: 'No active subagents' },
+    { label: 'Done', agents: sorted.filter((agent) => doneStatuses.has(agent.status)), empty: 'No completed subagents' },
+  ];
+  return <div style={{ display: 'grid', gap: 22 }}>
+    {groups.map((group) => <section key={group.label} aria-label={`${group.label} subagents`}>
+      <h3 style={{ margin: '0 9px 8px', color: t.text3, fontSize: 13, fontWeight: 400, fontVariantNumeric: 'tabular-nums' }}>{group.label} · {group.agents.length}</h3>
+      {group.agents.length === 0 ? <EmptyRow>{group.empty}</EmptyRow> : group.agents.map((agent) => <OverviewRow
+        key={agent.agent_id} icon="subagent" agentId={agent.agent_id} title={agent.name || agent.agent_type}
+        subtitle={agent.latest_activity}
+        status={agent.status} statusText={statusLabel(agent.status, 'agent')}
+        onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })}
+      />)}
+    </section>)}
+  </div>;
+}
+
 function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bridge: UseBridge }) {
   const center = bridge.runtimeCenter;
   const tasks = orderedTasks(bridge.desktop);
@@ -630,8 +643,7 @@ function SectionDetail({ section, bridge }: { section: RuntimeCenterSection; bri
     <h2>{SECTION_LABELS[section]}</h2>
     {section === 'todos' && (todos.length === 0 ? <EmptyRow>No todos yet.</EmptyRow> : todos.map((todo, index) => <OverviewRow key={planRuntimeItemId(todo, index, todos)} icon={todo.state === 'completed' ? 'check' : 'goal'} title={todo.subject} status={todo.state} onClick={() => bridge.openRuntimeItem({ kind: 'todo', id: planRuntimeItemId(todo, index, todos) })} />))}
     {section === 'agents' && <>
-      {agents.length === 0 && tasks.length === 0 && <EmptyRow>No subagents or background tasks.</EmptyRow>}
-      {agents.map((agent) => <OverviewRow key={agent.agent_id} icon="subagent" agentId={agent.agent_id} title={agent.name || agent.agent_type} subtitle={`Subagent · ${agent.latest_activity ?? agent.agent_type}`} status={agent.status} statusText={statusLabel(agent.status, 'agent')} onClick={() => bridge.openRuntimeItem({ kind: 'agent', id: agent.agent_id })} />)}
+      <SubagentGroups agents={agents} bridge={bridge} />
       {tasks.map((task) => {
         const agent = task.agent_id ? center.agents[task.agent_id] : undefined;
         const typeLabel = task.task_type === 'local_bash' ? 'Background shell' : taskAvatarId(task) ? 'Background agent' : 'Background task';

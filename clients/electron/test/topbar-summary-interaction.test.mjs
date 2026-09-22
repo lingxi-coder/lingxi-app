@@ -70,7 +70,7 @@ test('real Electron workspace keeps summary pinned with independent details and 
     });
 
     assert.equal(result.checks.length, 9);
-    assert.deepEqual(result.overview.sections, ['Context', 'Subagents', 'Todos', 'Resources', 'Plan']);
+    assert.deepEqual(result.overview.sections, ['Context', 'Subagents', 'Resources', 'Plan']);
     assert.equal(result.overview.width, 300);
     assert.deepEqual(result.heights, { chat: 56, detail: 56, panel: 390 });
 

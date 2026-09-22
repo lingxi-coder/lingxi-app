@@ -16,7 +16,7 @@
 .desktop-terminal button { border: 0; color: inherit; background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
 .desktop-terminal button:disabled { opacity: .4; cursor: default; }
 .desktop-terminal button:focus-visible { outline: 2px solid var(--terminal-muted); outline-offset: -2px; border-radius: 5px; }
-.terminal-icon-button { width: 30px; height: 30px; border-radius: 7px; font-size: 22px !important; color: var(--terminal-muted) !important; flex-shrink: 0; line-height: 1; }
+.terminal-icon-button { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; color: var(--terminal-muted) !important; flex-shrink: 0; }
 .terminal-icon-button:hover { background: var(--terminal-hover); color: var(--terminal-text) !important; }
 .terminal-toolbar-spacer { flex: 1; }
 .terminal-surfaces { flex: 1; min-height: 0; position: relative; }

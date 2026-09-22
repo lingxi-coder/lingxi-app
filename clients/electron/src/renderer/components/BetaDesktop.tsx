@@ -176,9 +176,11 @@ function SidebarSessionProgress({ label }: { label: string }) {
     style={{ color: t.text3 }}><span /></span>;
 }
 
-function SessionRow({ projectPath, session, active, pinned, opening, status, onClick, onPin, onArchive, onRename, reorderable = false, dragging = false, dragTarget = false, onDragStart, onDragMove, onDrop, onDragEnd }: {
+function SessionRow({ projectPath, session, active, pinned, opening, status, metadata, pinnedSection = false, onClick, onPin, onArchive, onRename, reorderable = false, dragging = false, dragTarget = false, onDragStart, onDragMove, onDrop, onDragEnd }: {
   projectPath: string;
-  session: SessionRowDto;
+  session: Pick<SessionRowDto, 'uuid' | 'title' | 'modified_rfc3339' | 'message_count'>;
+  metadata?: string;
+  pinnedSection?: boolean;
   active: boolean;
   pinned: boolean;
   opening: boolean;
@@ -199,7 +201,6 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, onC
   const [actionsPosition, setActionsPosition] = useState<{ left: number; top: number } | null>(null);
   const actionsMenuRef = useRef<HTMLDivElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const longPressOrigin = useRef<{ x: number; y: number } | null>(null);
   const pointerGesture = useRef<{ pointerId: number; x: number; y: number; dragging: boolean } | null>(null);
   const suppressClick = useRef(false);
   const highlighted = active || opening;
@@ -215,7 +216,6 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, onC
   const clearLongPress = useCallback(() => {
     if (longPressTimer.current) clearTimeout(longPressTimer.current);
     longPressTimer.current = null;
-    longPressOrigin.current = null;
   }, []);
   const closeActions = useCallback(() => setActionsPosition(null), []);
   useEffect(() => () => clearLongPress(), [clearLongPress]);
@@ -239,7 +239,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, onC
     setActionsPosition({ left, top });
   }, []);
   const sessionAtPointer = useCallback((x: number, y: number): SessionDropTarget | undefined => {
-    const button = document.elementFromPoint(x, y)?.closest<HTMLButtonElement>('[data-session-id]');
+    const button = document.elementFromPoint(x, y)?.closest('.sidebar-tree-row')?.querySelector<HTMLButtonElement>('[data-session-id]');
     const sessionId = button?.dataset.sessionId;
     const targetProjectPath = button?.dataset.sessionProjectPath;
     return sessionId && targetProjectPath ? { sessionId, projectPath: targetProjectPath } : undefined;
@@ -256,10 +256,15 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, onC
         type="button"
         onPointerDown={(event) => {
           if (event.button !== 0) return;
+          clearLongPress();
+          suppressClick.current = false;
+          const { clientX, clientY } = event;
           event.currentTarget.setPointerCapture(event.pointerId);
           pointerGesture.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, dragging: false };
-          longPressOrigin.current = { x: event.clientX, y: event.clientY };
-          longPressTimer.current = setTimeout(() => openActions(event.clientX, event.clientY), SESSION_ACTIONS_LONG_PRESS_DELAY);
+          longPressTimer.current = setTimeout(() => {
+            pointerGesture.current = null;
+            openActions(clientX, clientY);
+          }, SESSION_ACTIONS_LONG_PRESS_DELAY);
         }}
         onPointerMove={(event) => {
           const gesture = pointerGesture.current;
@@ -296,6 +301,16 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, onC
           if (gesture?.pointerId === event.pointerId && gesture.dragging) onDragEnd?.();
           pointerGesture.current = null;
         }}
+        onLostPointerCapture={() => {
+          clearLongPress();
+          if (pointerGesture.current?.dragging) onDragEnd?.();
+          pointerGesture.current = null;
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          clearLongPress();
+          openActions(event.clientX, event.clientY);
+        }}
         onClick={(event) => {
           if (suppressClick.current) { event.preventDefault(); suppressClick.current = false; return; }
           onClick();
@@ -304,11 +319,12 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, onC
         aria-busy={opening || undefined}
         data-session-id={session.uuid}
         aria-current={active ? 'page' : undefined}
-        title={session.title || 'Untitled session'}
+        title={pinnedSection ? `${session.title || 'Untitled session'}\n${projectPath}` : session.title || 'Untitled session'}
         data-session-project-path={projectPath}
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
-          padding: '6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
+          padding: pinnedSection ? '6px 92px 6px 10px' : '6px 64px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
+          touchAction: 'none', userSelect: 'none',
           background: active ? t.surfaceActive : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
           fontSize: 13, fontWeight: active ? 600 : 500,
@@ -321,13 +337,27 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, onC
             // A session ERROR shows as a ringed mark at this row's trailing edge
             // instead (below), so it is not repeated inline here.
             : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" />
-            : attention && attention.label !== 'Session error' ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+            : attention && (pinnedSection || attention.label !== 'Session error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
         </span>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
-          {formatSessionMetadata(session.modified_rfc3339, session.message_count)}
+          {metadata ?? formatSessionMetadata(session.modified_rfc3339, session.message_count)}
         </span>
       </button>
-      {attention?.label === 'Session error' && (
+      {pinnedSection && <button type="button" className="sidebar-row-action" aria-label={`Rename ${session.title}`} title="Rename chat" onClick={onRename} disabled={opening}
+        style={{ position: 'absolute', right: 60, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
+        <Icon name="pencil" size={13} stroke={1.8} />
+      </button>}
+      <button type="button" className="sidebar-row-action" data-visible={pinnedSection || undefined} aria-label={`${pinned ? 'Unpin' : 'Pin'} ${session.title || 'Untitled session'}`}
+        title={pinned ? 'Unpin session' : 'Pin session'} onClick={onPin} disabled={opening}
+        style={{ position: 'absolute', right: 32, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: pinned ? t.accent : t.text3, cursor: 'pointer' }}>
+        <Icon name="pin" size={13} stroke={1.8} />
+      </button>
+      <button type="button" className="sidebar-row-action" aria-label={`Archive ${session.title || 'Untitled session'}`}
+        title="Archive chat" onClick={onArchive} disabled={opening}
+        style={{ position: 'absolute', right: 4, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
+        <Icon name="archive" size={13} />
+      </button>
+      {!pinnedSection && attention?.label === 'Session error' && (
         // Sits where the pin/archive actions sit, and yields to them: the row
         // reveals those on hover/focus, and two marks in one slot would collide.
         <span
@@ -605,13 +635,14 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
     closeProjectsMenu(true);
   }, [closeProjectsMenu, persistSidebarPreferences]);
   const moveSessionBefore = useCallback((projectPath: string, sessionId: string, targetSessionId: string) => {
-    if (chatSort !== 'manual' || sessionId === targetSessionId) return;
+    if (sessionId === targetSessionId) return;
     const sessions = sortedSessions(projectPath, bridge.bootstrap?.projectCatalogs?.[projectPath]?.sessions ?? []);
     const order = sessions.map((session) => session.uuid).filter((id) => id !== sessionId);
     const targetIndex = order.indexOf(targetSessionId);
     if (targetIndex < 0) return;
     order.splice(targetIndex, 0, sessionId);
-    persistSidebarPreferences({ manualSessionOrder: { ...manualSessionOrder, [projectPath]: order } });
+    setChatSort('manual');
+    persistSidebarPreferences({ chatSort: 'manual', manualSessionOrder: { ...manualSessionOrder, [projectPath]: order } });
     void bridge.touchSession(projectPath, sessionId);
   }, [bridge, chatSort, manualSessionOrder, persistSidebarPreferences, sortedSessions]);
   const startSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -708,66 +739,15 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                   : 'Unavailable';
               const active = !scheduled && visibleSession?.projectPath === pinned.projectPath && visibleSession.sessionId === pinned.sessionId;
               const opening = openingSessionKey === `${pinned.projectPath}\0${pinned.sessionId}`;
-              const status = bridge.sessionRuntimeStatus(pinned.sessionId);
-              const attention = status?.connection.status === 'error' || status?.error
-                ? { label: 'Session error', color: t.danger }
-                : status?.pendingInteractions
-                  ? { label: 'Waiting for input', color: t.warn }
-                  : (status?.turnActive || status?.backgroundAgentsRunning)
-                    ? { label: 'Running', color: t.ok }
-                    : undefined;
               return (
-                <div className="sidebar-tree-row" key={`${pinned.projectPath}-${pinned.sessionId}`} style={{ position: 'relative' }}>
-                  <button
-                    type="button"
-                    aria-current={active ? 'page' : undefined}
-                    aria-busy={opening || undefined}
-                    disabled={opening}
-                    onClick={() => openSidebarSession(pinned.projectPath, pinned.sessionId)}
-                    title={`${title}\n${pinned.projectPath}`}
-                    style={{
-                      width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 92px 6px 10px',
-                      border: 0, borderRadius: 8, background: active ? t.surfaceActive : opening ? t.surface : 'transparent',
-                      color: t.text2, textAlign: 'left', cursor: opening ? 'wait' : 'pointer',
-                    }}
-                  >
-                    <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 600 : 500 }}>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
-                      {opening
-                        ? <SidebarSessionProgress label="Opening session" />
-                        // The PINNED list keeps the inline dot: its unpin action is
-                        // `data-visible="true"`, permanently occupying the trailing
-                        // slot, so a mark there would be hidden at all times.
-                        : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" /> : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
-                    </span>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
-                      {basename(pinned.projectPath)} · {metadata}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="sidebar-row-action"
-                    aria-label={`Rename ${title}`}
-                    title="Rename chat"
-                    onClick={() => prepareRename(pinned.projectPath, pinned.sessionId, title)}
-                    style={{ position: 'absolute', right: 60, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}
-                  >
-                    <Icon name="pencil" size={13} stroke={1.8} />
-                  </button>
-                  <button
-                    type="button"
-                    className="sidebar-row-action"
-                    data-visible="true"
-                    aria-label={`Unpin ${title}`}
-                    title="Unpin session"
-                    onClick={() => invoke(() => bridge.setSessionPinned(pinInput(pinned.projectPath, pinned.sessionId, title), false))}
-                    style={{ position: 'absolute', right: 32, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.accent, cursor: 'pointer' }}
-                  >
-                    <Icon name="pin" size={13} stroke={1.8} />
-                  </button>
-                  <button type="button" className="sidebar-row-action" aria-label={`Archive ${title}`} title="Archive chat" onClick={() => void prepareArchive(pinned.projectPath, pinned.sessionId, title)}
-                    style={{ position: 'absolute', right: 4, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, color: t.text3, background: 'transparent', cursor: 'pointer' }}><Icon name="archive" size={13} /></button>
-                </div>
+                <SessionRow key={`${pinned.projectPath}-${pinned.sessionId}`} projectPath={pinned.projectPath}
+                  session={current ?? { uuid: pinned.sessionId, title, modified_rfc3339: '', message_count: 0 }}
+                  active={active} pinned pinnedSection opening={opening} status={bridge.sessionRuntimeStatus(pinned.sessionId)}
+                  metadata={`${basename(pinned.projectPath)} · ${metadata}`}
+                  onClick={() => openSidebarSession(pinned.projectPath, pinned.sessionId)}
+                  onRename={() => prepareRename(pinned.projectPath, pinned.sessionId, title)}
+                  onPin={() => invoke(() => bridge.setSessionPinned(pinInput(pinned.projectPath, pinned.sessionId, title), false))}
+                  onArchive={() => void prepareArchive(pinned.projectPath, pinned.sessionId, title)} />
               );
             })}
           </section>
@@ -893,7 +873,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                   onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
                   onRename={() => prepareRename(projectPath, session.uuid, session.title || 'Untitled chat')}
                   onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
-                  reorderable={chatSort === 'manual' && !opening}
+                  reorderable={!opening}
                   dragging={draggedSession?.projectPath === projectPath && draggedSession.sessionId === session.uuid}
                   dragTarget={draggedSession?.projectPath === projectPath && dragTargetSessionId === session.uuid}
                   onDragStart={() => setDraggedSession({ projectPath, sessionId: session.uuid })}
@@ -953,11 +933,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                     aria-busy={editingProject === projectPath || undefined}
                     title="Open project draft"
                     onClick={() => editProject(projectPath)}
-                    style={{ position: 'absolute', right: 32, top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: active ? t.surface : t.sidebarBg, color: t.text3, cursor: editingProject !== null ? 'wait' : 'pointer' }}
+                    style={{ position: 'absolute', right: 32, top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: editingProject !== null ? 'wait' : 'pointer' }}
                   >
-                    {editingProject === projectPath
-                      ? <span className="beta-spinner" role="status" aria-label="Opening project draft" />
-                      : <Icon name="pencil" size={13} stroke={1.8} />}
+                    <Icon name="pencil" size={13} stroke={1.8} />
                   </button>
                   <button
                     type="button"
@@ -967,7 +945,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                     aria-label={`Project actions for ${basename(projectPath)}`}
                     aria-expanded={menuProject === projectPath}
                     onClick={() => setMenuProject((current) => current === projectPath ? null : projectPath)}
-                    style={{ position: 'absolute', right: 4, top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: active ? t.surface : t.sidebarBg, color: t.text3, cursor: projectHasActiveWork ? 'not-allowed' : 'pointer' }}
+                    style={{ position: 'absolute', right: 4, top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: projectHasActiveWork ? 'not-allowed' : 'pointer' }}
                   >
                     <Icon name="more" size={14} stroke={1.9} />
                   </button>
@@ -1005,7 +983,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                           onArchive={() => void prepareArchive(projectPath, session.uuid, session.title || 'Untitled chat')}
                           onRename={() => prepareRename(projectPath, session.uuid, session.title || 'Untitled chat')}
                           onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
-                          reorderable={chatSort === 'manual' && !opening}
+                          reorderable={!opening}
                           dragging={draggedSession?.projectPath === projectPath && draggedSession.sessionId === session.uuid}
                           dragTarget={draggedSession?.projectPath === projectPath && dragTargetSessionId === session.uuid}
                           onDragStart={() => setDraggedSession({ projectPath, sessionId: session.uuid })}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Poin
 import type { Terminal as XTerminal } from '@xterm/xterm';
 import type { TerminalScope, TerminalSnapshot } from '../../shared/terminal';
 import { useT } from '../theme/ThemeContext';
+import { Icon } from './Icon';
 
 const HEIGHT_KEY = 'lingxi.terminal.height.v1';
 export const terminalScopeKey = (scope: TerminalScope) => JSON.stringify([scope.projectPath, scope.sessionId]);
@@ -114,11 +115,11 @@ export function TerminalPanel({ controller }: { controller: ReturnType<typeof us
     <div className="terminal-toolbar">
       <div role="tablist" aria-label="Shell terminals" className="terminal-tabs">{controller.visibleTabs.map((tab, index) => <div className="terminal-tab" data-active={tab.id === controller.selected?.id} key={tab.id}>
         <button type="button" role="tab" aria-selected={tab.id === controller.selected?.id} aria-controls={`terminal-${tab.id}`} onClick={() => controller.select(tab.id)}><ShellIcon /><span>{tab.title}{index ? ` ${index + 1}` : ''}</span>{tab.status === 'exited' && <span className="terminal-exited-dot" aria-label="Exited">·</span>}</button>
-        <button type="button" className="terminal-icon-button" aria-label={`Close ${tab.title} terminal`} title="Close terminal" onClick={() => void controller.close(tab.id)}>×</button>
+        <button type="button" className="terminal-icon-button" aria-label={`Close ${tab.title} terminal`} title="Close terminal" onClick={() => void controller.close(tab.id)}><Icon name="x" size={18} /></button>
       </div>)}</div>
-      <button type="button" className="terminal-icon-button" disabled={controller.busy} aria-label="New terminal" title="New terminal" onClick={() => void controller.create()}>+</button>
+      <button type="button" className="terminal-icon-button" disabled={controller.busy} aria-label="New terminal" title="New terminal" onClick={() => void controller.create()}><Icon name="plus" size={18} /></button>
       <div className="terminal-toolbar-spacer" />
-      <button type="button" className="terminal-icon-button" aria-label="Hide terminal panel" title="Hide terminal panel (Ctrl+`)" onClick={controller.hide}>×</button>
+      <button type="button" className="terminal-icon-button" aria-label="Hide terminal panel" title="Hide terminal panel (Ctrl+`)" onClick={controller.hide}><Icon name="x" size={18} /></button>
     </div>
     {controller.error && <div role="alert" className="terminal-error">{controller.error}</div>}
     {!controller.visibleTabs.length && <div className="terminal-empty">{controller.busy ? 'Starting shell…' : <button type="button" onClick={() => void controller.create()}>Open a terminal</button>}</div>}

@@ -362,8 +362,8 @@ pub struct OrchestratorConfig {
     /// merged settings at the composition root. When `Some(_)`,
     /// [`crate::ConversationOrchestrator::plans_dir`] resolves it against the
     /// session's project root with a within-root containment check (falling back
-    /// to the default `<config-home>/plans/` on rejection). `None` (the default)
-    /// keeps the byte-identical default plans directory.
+    /// to the default `<project-root>/.lingxi/plans/` on rejection). `None` (the
+    /// default) keeps the default plans directory.
     #[serde(default)]
     pub plans_directory: Option<String>,
     /// The session's plan-file identity, shared with the permission policy that

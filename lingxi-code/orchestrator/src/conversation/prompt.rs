@@ -957,7 +957,7 @@ As you answer the user's questions, you can use the following context:\n\
     /// `<plansDir>/<slug>.md`). The plans directory is resolved by
     /// [`Self::plans_dir`] (206 `iT`): the `plansDirectory` settings override
     /// (relative to the project root, with a within-root containment check) when
-    /// present, else the default `<config-home>/plans/`. The slug is the
+    /// present, else the default `<project-root>/.lingxi/plans/`. The slug is the
     /// session's UUID (206's slug is likewise session-specific — exact bytes are
     /// not observable, the structure is). Uses the bare UUID (not the `sess:`
     /// display form) so the filename has no `:` separator, matching
@@ -1007,7 +1007,15 @@ As you answer the user's questions, you can use the following context:\n\
     /// `.`/`..` lexically, and accept it only if it is WITHIN the project root
     /// (`W5_`'s primary check `o === n || o.startsWith(n + sep)`) and passes
     /// the hardened protected-dir / same-repo-root checks. On rejection, fall
-    /// through to the default `<config-home>/plans/`.
+    /// through to [`Self::default_plans_dir`].
+    ///
+    /// DIVERGENCE (default location): upstream's `KPp()` is
+    /// `<config-home>/plans/` (`~/.claude/plans/`). LingXi's file tools only
+    /// write inside their trusted set (the project cwd plus additional working
+    /// dirs), so a plan file under the config home is rejected with
+    /// `ToolError::PathBlocked`, the model falls back to pasting the plan into
+    /// the chat, and `ExitPlanMode` reads back an EMPTY plan. The default is
+    /// therefore `<project-root>/.lingxi/plans/`, inside the trusted set.
     pub fn plans_dir(
         project_root: &std::path::Path,
         plans_directory: Option<&str>,
@@ -1029,27 +1037,21 @@ As you answer the user's questions, you can use the following context:\n\
                     return resolved;
                 }
                 tracing::warn!("plansDirectory rejected by hardening guard: {r}");
-                return Self::default_plans_dir();
+                return Self::default_plans_dir(project_root);
             }
             tracing::error!("plansDirectory must be within project root: {r}");
         }
-        Self::default_plans_dir()
+        Self::default_plans_dir(project_root)
     }
 
-    /// The default plans directory — `<config-home>/plans/`, rebranding 206's
-    /// `~/.claude/plans/` to `$LINGXI_CONFIG_DIR ?? ~/.lingxi`
-    /// (`memory::lingxi_md::user_config_dir`).
-    pub fn default_plans_dir() -> std::path::PathBuf {
-        let config_home = dirs::home_dir()
-            .map(|h| memory::lingxi_md::user_config_dir(&h))
-            .unwrap_or_else(|| {
-                // No home: honor an explicit `$LINGXI_CONFIG_DIR`, else cwd-relative.
-                std::env::var_os(branding::CONFIG_DIR_ENV).map_or_else(
-                    || std::path::PathBuf::from(".lingxi"),
-                    std::path::PathBuf::from,
-                )
-            });
-        config_home.join("plans")
+    /// The default plans directory — `<project-root>/.lingxi/plans/`.
+    ///
+    /// Project-local on purpose: the file tools' trusted set is the project cwd
+    /// plus additional working dirs, so this is the one location the plan-mode
+    /// reminder can name and the model can actually write. Repos that do not
+    /// want plans in `git status` ignore `.lingxi/`.
+    pub fn default_plans_dir(project_root: &std::path::Path) -> std::path::PathBuf {
+        project_root.join(branding::DOT_DIR).join("plans")
     }
 
     async fn mobile_runtime_environment_message(&self) -> Option<ConversationMessage> {
@@ -1065,6 +1067,11 @@ As you answer the user's questions, you can use the following context:\n\
 }
 
 // Plans-directory confinement helpers live with prompt/plan path assembly.
+//
+// `.lingxi` is deliberately ABSENT: it is where the default plans directory
+// lives (`<project-root>/.lingxi/plans`), so listing it would reject an
+// explicit `plansDirectory: ".lingxi/plans"` and fall back to the byte-identical
+// default with a spurious "rejected by hardening guard" warning.
 pub(super) const PROTECTED_PLANS_DIR_COMPONENTS: &[&str] = &[
     ".git",
     ".hg",
@@ -1073,7 +1080,6 @@ pub(super) const PROTECTED_PLANS_DIR_COMPONENTS: &[&str] = &[
     ".jj",
     ".sl",
     ".claude",
-    ".lingxi",
     ".cargo",
     "node_modules",
 ];

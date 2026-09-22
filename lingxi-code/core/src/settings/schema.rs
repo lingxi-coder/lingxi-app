@@ -770,7 +770,9 @@ pub struct SettingsJson {
     /// set, resolved against the project root with a within-root containment
     /// check; on failure the byte-exact error `plansDirectory must be within
     /// project root: {r}` is logged and the resolver falls back to the default
-    /// `<config-home>/plans`. Scalar-override merge (not in `MERGE_STRATEGIES`).
+    /// `<project-root>/.lingxi/plans` (DIVERGENCE: upstream `KPp()` defaults to
+    /// `~/.claude/plans/`, which LingXi's file tools reject as outside their
+    /// trusted set). Scalar-override merge (not in `MERGE_STRATEGIES`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plans_directory: Option<String>,
 

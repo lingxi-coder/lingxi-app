@@ -23,7 +23,8 @@
 //! Both sit AFTER the deny/ask rule walks and BEFORE the safety check and the
 //! plan-mode mutation ask, so a plan file inside an otherwise protected
 //! directory is still writable — which matters here, because LingXi's default
-//! plans directory is `<config-home>/plans`, i.e. under `~/.claude`.
+//! plans directory is `<project-root>/.lingxi/plans`, and `.lingxi` is one of
+//! the protected directory components.
 //!
 //! ## Divergence (reason)
 //!

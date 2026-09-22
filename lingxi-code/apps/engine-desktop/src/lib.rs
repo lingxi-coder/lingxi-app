@@ -6045,7 +6045,7 @@ pub struct DesktopConfig {
     /// `settings.json` `plansDirectory` (206 `iT`): custom directory for plan
     /// files, relative to the project root, mapped to
     /// [`orchestrator::OrchestratorConfig::plans_directory`] in `build()`.
-    /// `None` (the default) = the default `<config-home>/plans/`.
+    /// `None` (the default) = the default `<project-root>/.lingxi/plans/`.
     pub plans_directory: Option<String>,
     /// CLI `--max-budget USD`: cost ceiling in USD, mapped to
     /// [`orchestrator::OrchestratorConfig::max_budget_nano_usd`] (× 1e9) in
@@ -12224,7 +12224,8 @@ pub async fn build_with_credential_stack(
         .clone_from(&cfg.plan_mode_instructions);
     // `settings.json` `plansDirectory` (206 `iT`): custom plan-file directory,
     // resolved against the project root with a within-root containment check by
-    // the orchestrator. `None` keeps the default `<config-home>/plans/`.
+    // the orchestrator. `None` keeps the default `<project-root>/.lingxi/plans/`
+    // (project-local so the file tools' trusted-dir gate accepts the plan file).
     // 2.1.266 `Zl`/`ay`: the session's plan-file identity. Published into the
     // permission policy (so plan mode's one write carve-out fires — without it
     // the plan-mode reminder tells the model to write a file the gate then
@@ -14057,6 +14058,10 @@ pub async fn build_with_credential_stack(
     .with_hook_executor(hooks.clone())
     .with_plan_approval_mailbox(coordinator.mailbox_router.clone())
     .with_plan_approval_gate(perms.clone())
+    // The SAME identity the permission carve-out and the plan-mode reminder
+    // resolve through, so a teammate's plan file is `ay(agentId)` inside the
+    // session's plans directory rather than under the config home.
+    .with_plan_files(plan_files.clone())
     .with_hook_context(subagent_hook_session_id, cwd.clone())
     .with_transcript(
         Arc::new(PosixFileSystem::new(cwd.clone())),

@@ -65,6 +65,11 @@ node_modules/
 Cargo.lock.*
 
 # ---------------------------------------------------------------
+# Swift Package Manager build output (ios-framework xcframework)
+# ---------------------------------------------------------------
+lingxi-code/apps/ios-framework/swift/.build/
+
+# ---------------------------------------------------------------
 # Python caches (graphify is python)
 # ---------------------------------------------------------------
 __pycache__/

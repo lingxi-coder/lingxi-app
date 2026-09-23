@@ -122,6 +122,7 @@
   "chat_execution_tasks": "Workflows & tasks",
   "chat_go_enable": "Go enable",
   "chat_go_to_settings": "Go to settings",
+  "chat_jump_to_latest": "Scroll to bottom",
   "chat_live_activity_short_completed": "Done",
   "chat_live_activity_short_failed": "Fail",
   "chat_live_activity_short_paused": "Pause",

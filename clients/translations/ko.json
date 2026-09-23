@@ -122,6 +122,7 @@
   "chat_execution_tasks": "워크플로 및 백그라운드 작업",
   "chat_go_enable": "활성화하러 가기",
   "chat_go_to_settings": "설정으로 이동",
+  "chat_jump_to_latest": "맨 아래로 이동",
   "chat_live_activity_short_completed": "완료",
   "chat_live_activity_short_failed": "실패",
   "chat_live_activity_short_paused": "일시정지",

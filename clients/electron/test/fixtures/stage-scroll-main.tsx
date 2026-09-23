@@ -33,8 +33,28 @@ const initialItems: RunItem[] = [
 function Fixture() {
   const [items, setItems] = useState(initialItems);
   const [thinkingVisible, setThinkingVisible] = useState(true);
+  // Rows a closed `/loop` fold hides, driven by the fold probe below.
+  const [foldedItems, setFoldedItems] = useState<readonly string[]>([]);
+  // Drives the transcript's viewport itself, so a probe can resize it the way
+  // a window or panel resize would. A width of 0 means "fill the ancestor".
+  const [viewport, setViewport] = useState({ width: 0, height: 420 });
+  // The ancestor is deliberately SHORTER than the transcript, so the transcript
+  // is never what scrolls first. Probes that need the whole scrollport on
+  // screen (to click something pinned to it) raise this.
+  const [ancestorHeight, setAncestorHeight] = useState(300);
   Object.assign(window, { stageScrollFixture: {
     thinking(visible: boolean) { flushSync(() => setThinkingVisible(visible)); },
+    longList() { flushSync(() => setItems(initialItems)); },
+    setViewport(width: number, height: number) { flushSync(() => setViewport({ width, height })); },
+    setAncestorHeight(height: number) { flushSync(() => setAncestorHeight(height)); },
+    // A prompt the reader sent: the one content change that must re-engage the
+    // tail even though they had scrolled away.
+    sendPrompt() {
+      flushSync(() => setItems((current) => [
+        ...current,
+        { type: 'narration', id: `prompt-${current.length}`, role: 'user', text: 'A prompt the reader just sent.' },
+      ]));
+    },
     delivery(delivery: 'pending' | 'failed' | undefined, long = false) {
       flushSync(() => setItems([
         // `sentAt` present so the hover affordance renders BOTH halves of itself
@@ -60,12 +80,29 @@ function Fixture() {
         { type: 'narration', id: 'after-prompts', role: 'assistant', text: 'Both prompts are on screen.' },
       ]));
     },
+    // A `/loop` fold hides a contiguous run of rows. The reader's own prompt
+    // can be inside that run, so the fold must not be mistaken for a new prompt.
+    foldSetup() {
+      flushSync(() => {
+        setFoldedItems([]);
+        setItems([
+          ...Array.from({ length: 20 }, (_, index): RunItem => ({
+            type: 'narration', id: `filler-${index}`, role: 'assistant',
+            text: `Filler ${index}: enough transcript to scroll away from the tail.`,
+          })),
+          { type: 'narration', id: 'older-prompt', role: 'user', text: 'An older prompt that stays visible.' },
+          { type: 'narration', id: 'folded-prompt', role: 'user', text: 'The prompt a closed fold can hide.' },
+          { type: 'narration', id: 'loop-wakeup', role: 'assistant', text: 'Loop wakeup', loopWakeupStreak: 2 },
+        ]);
+      });
+    },
+    foldNewestPrompt() { flushSync(() => setFoldedItems(['folded-prompt'])); },
     failCopies(fail: boolean) { copyFails = fail; },
   } });
   return <Theme.Provider value={tokens(false)}>
-    <div id="scroll-ancestor" style={{ height: 300, overflowY: 'auto' }}>
-      <div style={{ height: 420, display: 'flex', flexDirection: 'column' }}>
-        <Stage pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" />
+    <div id="scroll-ancestor" style={{ height: ancestorHeight, overflowY: 'auto' }}>
+      <div style={{ width: viewport.width || undefined, height: viewport.height, display: 'flex', flexDirection: 'column' }}>
+        <Stage pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" foldedItemIds={foldedItems} />
       </div>
       <div style={{ height: 300 }} />
     </div>

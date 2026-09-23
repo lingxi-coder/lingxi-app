@@ -1,19 +1,20 @@
 import SwiftUI
 
-/// The transcript scroller shared by the conversation and by local-app
-/// generation.
+/// The transcript scroller. `ChatView` is its only caller; the local-app
+/// generation surface it once shared this with is gone.
 ///
-/// Both surfaces show the same thing — an assistant talking, at length, while
-/// you watch — so they get the same scrolling behaviour rather than two
-/// implementations that drift. What lives here is exactly the part that is
-/// identical: the bottom anchor, the "stay pinned while the reader is at the
-/// bottom" rule, and the scroll-on-focus nudge. What each caller keeps is its
-/// own content and its own idea of when new content arrived.
+/// What lives here is the bottom anchor, the "stay pinned while the reader is
+/// at the bottom" rule, the jump-to-latest control, and the scroll-on-focus
+/// nudge. The caller keeps its own content and its own idea of when new content
+/// arrived.
 ///
 /// `followsLatest` is a binding rather than internal state because the caller
-/// re-arms it when the visible session changes. Its value is otherwise driven
-/// entirely by `onScrollGeometryChange`: it is true exactly while the scroll
-/// offset is within `TranscriptScrollFollowState.bottomSlack` of the bottom.
+/// re-arms it when the visible session changes, or when the reader sends a
+/// prompt. It is otherwise driven entirely by `onScrollGeometryChange`: it is
+/// true exactly while the scroll offset is within
+/// `TranscriptScrollFollowState.bottomSlack` of the bottom. Re-arming is the
+/// only way back to the tail — nothing here reacts to the passage of time,
+/// because a reader who stopped scrolling is reading, not waiting to be moved.
 struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// Changes to this value mean "new content arrived" and trigger a scroll —
     /// but only when `followsLatest` is true. Callers compose whatever set of
@@ -25,9 +26,9 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// `onScrollGeometryChange`.
     @Binding var followsLatest: Bool
 
-    /// Composer focus. A keyboard coming up must reveal the newest content
-    /// even when the reader had scrolled away — this scroll is unconditional,
-    /// unlike the `follow` one.
+    /// Composer focus. A keyboard coming up reveals the newest content only
+    /// while the reader is still following the tail: a reader who scrolled up
+    /// to read something keeps their place, exactly as the `follow` signal does.
     var focused: Bool = false
 
     /// Identifier for UI tests, applied to the scroll view.
@@ -66,6 +67,11 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             // anchor when SwiftUI re-lays out the container (for example when
             // a sheet changes the available presentation size) instead of
             // falling back to the first row.
+            //
+            // Still unconditional: neither `.bottom` nor `nil` expresses "keep
+            // the offset the reader is at", so making it conditional trades a
+            // bottom re-anchor for a top one. Preserving a detached reader's
+            // place needs an explicit offset restore, which is not implemented.
             .defaultScrollAnchor(.bottom)
             .modifier(ShortTranscriptAlignmentModifier(enabled: alignShortContentToTop))
             .scrollIndicators(.hidden)
@@ -98,8 +104,32 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
                 scrollToLatest(using: proxy, animated: false, requiresFollow: true)
             }
             .onChange(of: focused) { _, isFocused in
+                // Respects the reader now: the keyboard must not pull someone
+                // who scrolled up away from what they are reading.
                 guard isFocused else { return }
-                scrollToLatest(using: proxy, animated: true, requiresFollow: false)
+                scrollToLatest(using: proxy, animated: true, requiresFollow: true)
+            }
+            // The way back for a reader who scrolled up: it re-arms the follow
+            // and scrolls, which a bare re-arm would not do on its own — the
+            // `follow` signal did not change, so `onChange` would not fire.
+            .overlay(alignment: .bottomTrailing) {
+                if !followsLatest {
+                    Button {
+                        followsLatest = true
+                        scrollToLatest(using: proxy, animated: true, requiresFollow: false)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 32, height: 32)
+                            .background(.regularMaterial, in: Circle())
+                            .overlay(Circle().strokeBorder(Color.primary.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 12)
+                    .accessibilityLabel("chat_jump_to_latest")
+                    .accessibilityIdentifier("conversation.jump-to-latest")
+                }
             }
         }
     }

@@ -125,6 +125,47 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
     assert.equal(result.copyFailure.neighbourState, 'idle', 'the other message is still left alone');
     assert.equal(result.copyFailureReset.state, 'idle', 'the failed state is transient too');
     assert.equal(result.copyFailureReset.status, '', 'and its announcement is retracted');
+
+    // A control that appears only once the reader leaves the tail, tracks the
+    // viewport, and re-engages the follow when pressed.
+    assert.equal(result.controlParked, false, 'the control is hidden while parked at the tail');
+    assert.equal(result.controlAway.present, true, 'the control appears once the reader leaves the tail');
+    assert.equal(result.controlAway.onScreen, true, 'the control is on screen, not merely inside the scrollport box');
+    assert.ok(
+      result.controlAway.pinnedToBottom >= 0 && result.controlAway.pinnedToBottom <= 16,
+      `the control is pinned to the scrollport's bottom edge, not the content end: ${result.controlAway.pinnedToBottom}`,
+    );
+    assert.ok(result.jumpAfterClick <= 1, `the control returns to the true bottom: ${result.jumpAfterClick}`);
+    assert.equal(result.controlAfterJump, false, 'the control retires once the reader is back at the tail');
+    assert.ok(result.jumpFollowGap <= 1, `pressing it re-engages the follow: ${result.jumpFollowGap}`);
+
+    // Parking is a band, not an exact fit. A streaming turn moves the bottom
+    // every frame, so an exact test could never be satisfied by hand again.
+    assert.ok(result.bandFollowGap <= 1, `inside the band the tail is still followed: ${result.bandFollowGap}`);
+
+    // The reader's own prompt is one of the explicit re-engagements; nothing
+    // idle-driven may do it, because an idle reader is reading.
+    assert.ok(result.sendBeforeGap > 24, `the reader starts detached: ${result.sendBeforeGap}`);
+    assert.ok(result.sendAfterGap <= 1, `sending re-engages the tail: ${result.sendAfterGap}`);
+
+    // A resize must move the scroll offset, not the content under the reader.
+    assert.ok(result.anchorBeforeResize && result.anchorAfterResize, 'the resize probe found a visible row');
+    assert.equal(result.anchorAfterResize.text, result.anchorBeforeResize.text, 'the same row stays under the reader across a resize');
+    assert.ok(
+      Math.abs(result.anchorAfterResize.offset - result.anchorBeforeResize.offset) <= 1,
+      `the reading offset survives a resize: ${result.anchorBeforeResize.offset} -> ${result.anchorAfterResize.offset}`,
+    );
+
+    // A closed `/loop` fold hides a run of rows that can include the reader's own
+    // prompt. Reading "the newest visible prompt" would then walk back to an
+    // OLDER prompt id, look like a prompt the reader just sent, and drag them to
+    // the bottom with no intent behind it.
+    assert.equal(result.foldControlBefore, true, 'the reader is detached before the fold');
+    assert.ok(
+      Math.abs(result.foldAfter.top - result.foldBefore.top) <= 1,
+      `hiding a folded run must not move a detached reader: ${result.foldBefore.top} -> ${result.foldAfter.top}`,
+    );
+    assert.equal(result.foldControlAfter, true, 'the control is still offered after the fold');
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();

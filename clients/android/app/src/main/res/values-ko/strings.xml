@@ -107,6 +107,7 @@
     <string name="chat_execution_tasks">워크플로 및 백그라운드 작업</string>
     <string name="chat_go_enable">활성화하러 가기</string>
     <string name="chat_go_to_settings">설정으로 이동</string>
+    <string name="chat_jump_to_latest">맨 아래로 이동</string>
     <string name="chat_live_activity_short_completed">완료</string>
     <string name="chat_live_activity_short_failed">실패</string>
     <string name="chat_live_activity_short_paused">일시정지</string>

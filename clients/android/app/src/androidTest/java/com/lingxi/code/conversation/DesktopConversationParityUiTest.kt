@@ -23,6 +23,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.R
 import com.lingxi.code.components.LXIconName
+import com.lingxi.code.components.UiTags
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
@@ -178,6 +179,31 @@ class DesktopConversationParityUiTest {
             assertEquals(listOf("Draft survives history"), sent)
             assertEquals("", draft.value)
         }
+    }
+
+    /** The jump control is the only way back to the tail besides sending. */
+    @Test fun jumpControlReturnsToTheNewestOutput() {
+        val state = mutableStateOf(fixture().copy(
+            messages = List(35) { Message(Role.User, "History $it", id = "history-$it") },
+            sessionAgents = emptyList(),
+        ))
+        rule.setContent {
+            LingXiTheme(darkTheme = false) {
+                ChatScreen(state.value, onSend = {}, onNewChat = {}, onSelectModel = {},
+                    isDark = false, onToggleTheme = {}, draft = "", modifier = Modifier.safeDrawingPadding(),
+                    onDraftChange = {})
+            }
+        }
+        // Park at the top: the reader is detached, so the newest output is off
+        // screen and the control is the way back.
+        rule.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
+        rule.onNodeWithText("History 0").assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.CHAT_JUMP_TO_LATEST).assertIsDisplayed()
+        capture("android-conversation-jump-control")
+        rule.onNodeWithTag(UiTags.CHAT_JUMP_TO_LATEST).performClick()
+        // It re-armed the follow and caught up, and then retired itself.
+        rule.onNodeWithText("History 34").assertIsDisplayed()
+        rule.onNodeWithTag(UiTags.CHAT_JUMP_TO_LATEST).assertDoesNotExist()
     }
 
     private fun capture(name: String, dialog: Boolean = false) {

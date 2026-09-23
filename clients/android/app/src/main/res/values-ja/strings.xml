@@ -107,6 +107,7 @@
     <string name="chat_execution_tasks">ワークフローとバックグラウンドタスク</string>
     <string name="chat_go_enable">有効化する</string>
     <string name="chat_go_to_settings">設定へ</string>
+    <string name="chat_jump_to_latest">最下部へ移動</string>
     <string name="chat_live_activity_short_completed">完了</string>
     <string name="chat_live_activity_short_failed">失敗</string>
     <string name="chat_live_activity_short_paused">一時停止</string>

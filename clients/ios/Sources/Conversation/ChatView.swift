@@ -399,9 +399,8 @@ struct ChatView: View {
     }
 
     private func messageList(showsSelectedAgent: Bool) -> some View {
-        // The scroll container is shared with local-app generation
-        // (`TranscriptScroll`); what stays here is this screen's content and
-        // its own definition of "something new arrived".
+        // `TranscriptScroll` owns the scroll behaviour; what stays here is this
+        // screen's content and its own definition of "something new arrived".
         let groups = showsSelectedAgent ? visibleTimelineGroups : ConversationRenderLayout.timelineGroups(renderItems)
         let visibleRenderItems = showsSelectedAgent ? self.visibleRenderItems : renderItems
         let visibleMessageDetails = showsSelectedAgent ? self.visibleMessageDetails : convo.messageDetails
@@ -792,6 +791,10 @@ struct ChatView: View {
         // accepted the turn so a failed send leaves the attachment retryable.
         attachment = nil
         voiceInteraction.registerAutomaticPlaybackCandidate(token)
+        // Sending is an explicit re-engagement: a reader who had scrolled up to
+        // re-read something must not have their own prompt land off screen. The
+        // re-arm happens only after the turn was accepted.
+        followsLatestMessage = true
     }
 
     // PR-4 item 2: interrupt the in-flight turn.

@@ -122,6 +122,7 @@
   "chat_execution_tasks": "工作流程與背景任務",
   "chat_go_enable": "去啟用",
   "chat_go_to_settings": "去設定",
+  "chat_jump_to_latest": "回到最底部",
   "chat_live_activity_short_completed": "完成",
   "chat_live_activity_short_failed": "失敗",
   "chat_live_activity_short_paused": "暫停",

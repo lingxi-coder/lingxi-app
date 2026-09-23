@@ -122,6 +122,7 @@
   "chat_execution_tasks": "ワークフローとバックグラウンドタスク",
   "chat_go_enable": "有効化する",
   "chat_go_to_settings": "設定へ",
+  "chat_jump_to_latest": "最下部へ移動",
   "chat_live_activity_short_completed": "完了",
   "chat_live_activity_short_failed": "失敗",
   "chat_live_activity_short_paused": "一時停止",

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imeNestedScroll
 import androidx.compose.foundation.layout.padding
@@ -47,6 +48,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -153,27 +155,54 @@ fun ChatScreen(
     // from this builder, so ordering and item keys live in a single testable
     // place (see ChatRenderItem.kt).
     val renderItems = buildChatRenderItems(state)
-    val followsLatest by remember {
+    val slackPx = with(LocalDensity.current) { TranscriptFollow.BOTTOM_SLACK.roundToPx() }
+    // Whether the reader is parked at the tail, measured from the real layout.
+    // Only the FINAL row's end says anything about the end of the content: the
+    // last row on screen always ends at the viewport edge whether or not the
+    // transcript does, and a final row taller than the viewport keeps its newest
+    // lines below the fold even with its top aligned.
+    val followsLatest by remember(listState, slackPx) {
         derivedStateOf {
             val layout = listState.layoutInfo
-            val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index
-            layout.totalItemsCount == 0 ||
-                (lastVisible != null && lastVisible >= layout.totalItemsCount - 3)
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()
+            TranscriptFollow.isAtBottom(
+                totalItemsCount = layout.totalItemsCount,
+                lastVisibleIndex = lastVisible?.index,
+                lastVisibleEndOffset = lastVisible?.let { it.offset + it.size },
+                viewportEndOffset = layout.viewportEndOffset,
+                slackPx = slackPx,
+                canScrollForward = listState.canScrollForward,
+            )
         }
     }
+    // The tail of the content is a zero-height row past the last real one.
+    // Scrolling to THAT is scrolling to the true end, which a tall final row
+    // cannot provide — aligning its top still leaves its newest lines below the
+    // fold.
+    val bottomAnchor = renderItems.size
+    // An explicit re-engagement — the reader's own send, or the jump control —
+    // forces exactly one scroll to the tail. Nothing re-arms the follow on a
+    // timer: a reader who stopped scrolling is reading.
+    var jumpRequest by remember { mutableStateOf(0) }
+    val rearmTail: () -> Unit = { jumpRequest += 1 }
 
-    // Follow new output only while the user is already at the bottom. Forcing
-    // an animated jump from old history on every update is expensive on long
-    // transcripts and prevents the user from reading earlier messages.
+    // Follow new output only while the reader is already at the tail. Forcing a
+    // jump from old history on every update is expensive on long transcripts and
+    // prevents the reader from reading earlier messages.
     LaunchedEffect(
         state.messages.size,
         state.streamingMessage?.id,
         state.shellTools.size,
         state.agentRun?.revision,
         state.streaming,
+        jumpRequest,
     ) {
-        if (!followsLatest) return@LaunchedEffect
-        if (renderItems.isNotEmpty()) listState.scrollToItem(renderItems.size - 1)
+        val requested = jumpRequest != 0
+        if (!followsLatest && !requested) return@LaunchedEffect
+        if (renderItems.isNotEmpty()) listState.scrollToItem(bottomAnchor)
+        // Consumed: the forced scroll happens once, then the measured follow
+        // takes over (it is true by now, because we just landed on the tail).
+        if (requested) jumpRequest = 0
     }
 
     ConversationDetailHost(state) {
@@ -186,15 +215,26 @@ fun ChatScreen(
                 onToggleTheme = onToggleTheme,
                 onNewChat = onNewChat,
             )
-            MessageList(
-                state = state,
-                items = renderItems,
-                listState = listState,
-                onShare = onShare,
-                onOpenTerminal = onOpenTerminal,
-                onToggleToolCall = onToggleToolCall,
-                modifier = Modifier.weight(1f),
-            )
+            Box(modifier = Modifier.weight(1f)) {
+                MessageList(
+                    state = state,
+                    items = renderItems,
+                    listState = listState,
+                    onShare = onShare,
+                    onOpenTerminal = onOpenTerminal,
+                    onToggleToolCall = onToggleToolCall,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                // The way back for a reader who scrolled up.
+                if (!followsLatest) {
+                    JumpToLatestButton(
+                        onClick = rearmTail,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 16.dp, bottom = 16.dp),
+                    )
+                }
+            }
             OfflineBanner(
                 visible = showOfflineBanner,
                 onDismiss = onDismissOffline,
@@ -241,6 +281,10 @@ fun ChatScreen(
                         onSendWithAttachment(draft, attachment)
                         onDraftChange("")
                         onRemoveAttachment()
+                        // Sending is an explicit re-engagement: a reader who
+                        // scrolled up to re-read something must not have their
+                        // own prompt land off screen.
+                        rearmTail()
                     }
                 },
                 onMicClick = onMicClick,
@@ -403,6 +447,9 @@ private fun IconButton(
     }
 }
 
+/** Stable key for the zero-height row that marks the end of the transcript. */
+private const val TRANSCRIPT_BOTTOM_ANCHOR = "transcript.bottom-anchor"
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MessageList(
@@ -487,6 +534,36 @@ private fun MessageList(
                 ChatRenderItem.StreamingIndicator -> StreamingRow()
             }
         }
+        // Zero-height anchor past the last real row, so scrolling to the latest
+        // reaches the true end of the content. Aligning a tall final row's top
+        // is not the same thing: its newest lines stay below the fold.
+        item(key = TRANSCRIPT_BOTTOM_ANCHOR) { Spacer(Modifier.height(0.dp)) }
+    }
+}
+
+/**
+ * Floating "back to the newest output" control. Shown only while the reader is
+ * detached from the tail, and it is the only path back besides sending a prompt.
+ */
+@Composable
+private fun JumpToLatestButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val t = LingXiTheme.palette
+    val label = stringResource(R.string.chat_jump_to_latest)
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .size(34.dp)
+            .clip(CircleShape)
+            .background(t.surface)
+            .border(0.5.dp, t.border, CircleShape)
+            .clickable(onClick = onClick)
+            .semantics {
+                role = Role.Button
+                contentDescription = label
+            }
+            .testTag(UiTags.CHAT_JUMP_TO_LATEST),
+    ) {
+        LXIcon(name = LXIconName.Chevron, size = 16.dp, color = t.text2, stroke = 1.8f)
     }
 }
 

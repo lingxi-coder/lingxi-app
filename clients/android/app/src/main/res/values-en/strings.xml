@@ -107,6 +107,7 @@
     <string name="chat_execution_tasks">Workflows &amp; tasks</string>
     <string name="chat_go_enable">Go enable</string>
     <string name="chat_go_to_settings">Go to settings</string>
+    <string name="chat_jump_to_latest">Scroll to bottom</string>
     <string name="chat_live_activity_short_completed">Done</string>
     <string name="chat_live_activity_short_failed">Fail</string>
     <string name="chat_live_activity_short_paused">Pause</string>

@@ -156,6 +156,106 @@ async function main() {
     result.copyFailure = await run(copyState);
     result.copyFailureReset = await waitForIdle(5_000);
     await run('window.stageScrollFixture.failCopies(false)');
+
+    // ── The jump-to-bottom control, and the band that decides it ──────────
+    await run('window.stageScrollFixture.longList()');
+    // Show the whole scrollport: the control is pinned to its bottom edge, so
+    // it must be really on screen for the click below to be a real click.
+    await run('window.stageScrollFixture.setAncestorHeight(700)');
+    await settle();
+    // Park at the true bottom, then leave it by hand.
+    await run(`(() => { const node = document.querySelector('.desktop-stage'); node.scrollTop = node.scrollHeight; })()`);
+    await settle();
+    result.controlParked = await run('Boolean(document.querySelector(".desktop-stage-jump"))');
+    await run(`(() => { const node = document.querySelector('.desktop-stage'); node.scrollTop = 0; })()`);
+    await settle();
+    result.controlAway = await run(`(() => {
+      const stage = document.querySelector('.desktop-stage');
+      const control = document.querySelector('.desktop-stage-jump');
+      if (!control) return { present: false };
+      const rect = control.getBoundingClientRect();
+      const bounds = stage.getBoundingClientRect();
+      return {
+        present: true,
+        // Really on screen, not merely inside the scrollport's box.
+        onScreen: rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1
+          && rect.bottom <= window.innerHeight + 1 && rect.top >= -1,
+        // Distance from the scrollport's bottom edge. Content-anchored would be
+        // hundreds of pixels away here: the transcript is scrolled to its top.
+        pinnedToBottom: Math.round(bounds.bottom - rect.bottom),
+      };
+    })()`);
+
+    const jumpPoint = await run(`(() => {
+      const control = document.querySelector('.desktop-stage-jump');
+      const rect = control.getBoundingClientRect();
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    })()`);
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: jumpPoint.x, y: jumpPoint.y });
+    await settle();
+    window.webContents.sendInputEvent({ type: 'mouseDown', x: jumpPoint.x, y: jumpPoint.y, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', x: jumpPoint.x, y: jumpPoint.y, button: 'left', clickCount: 1 });
+    await settle();
+    result.jumpAfterClick = (await run(metrics)).gap;
+    result.controlAfterJump = await run('Boolean(document.querySelector(".desktop-stage-jump"))');
+    // The click re-engaged the tail, so the next arrival must be followed.
+    await run('window.stageScrollFixture.insert()');
+    await settle();
+    result.jumpFollowGap = (await run(metrics)).gap;
+
+    // ── The band: an exact fit is not required to keep following ──────────
+    await run(`(() => { const node = document.querySelector('.desktop-stage'); node.scrollTop = node.scrollHeight - node.clientHeight - 20; })()`);
+    await settle();
+    await run('window.stageScrollFixture.insert()');
+    await settle();
+    result.bandFollowGap = (await run(metrics)).gap;
+
+    // ── Sending re-engages the tail, without a timer ──────────────────────
+    await run(`(() => { const node = document.querySelector('.desktop-stage'); node.scrollTop = 0; })()`);
+    await settle();
+    result.sendBeforeGap = (await run(metrics)).gap;
+    await run('window.stageScrollFixture.sendPrompt()');
+    await settle();
+    result.sendAfterGap = (await run(metrics)).gap;
+
+    // ── A resize keeps the row the reader is on exactly where it was ──────
+    await run('window.stageScrollFixture.longList()');
+    await settle();
+    await run(`(() => { const node = document.querySelector('.desktop-stage'); node.scrollTop = 600; })()`);
+    await settle();
+    // The first row crossing the fold, named by its text so "the same row is
+    // still under the reader" is asserted, not merely "some offset matched".
+    const anchorProbe = `(() => {
+      const node = document.querySelector('.desktop-stage');
+      const rows = document.querySelector('.desktop-stage-feed').children;
+      const top = node.getBoundingClientRect().top;
+      for (const row of rows) {
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom > top) return { text: row.textContent.slice(0, 40), offset: Math.round((rect.top - top) * 100) / 100 };
+      }
+      return null;
+    })()`;
+    result.anchorBeforeResize = await run(anchorProbe);
+    // Narrowing the frame rewraps every row above the fold, so the reading
+    // position survives only if the offset is compensated.
+    await run('window.stageScrollFixture.setViewport(420, 560)');
+    await settle();
+    result.anchorAfterResize = await run(anchorProbe);
+
+    // ── A closed `/loop` fold must not read as a new prompt ───────────────
+    await run('window.stageScrollFixture.foldSetup()');
+    await settle();
+    await run(`(() => { const node = document.querySelector('.desktop-stage'); node.scrollTop = 0; })()`);
+    await settle();
+    result.foldBefore = await run(metrics);
+    result.foldControlBefore = await run('Boolean(document.querySelector(".desktop-stage-jump"))');
+    // Hides the reader's own prompt, which is below the fold and untouched by
+    // what they are reading.
+    await run('window.stageScrollFixture.foldNewestPrompt()');
+    await settle();
+    result.foldAfter = await run(metrics);
+    result.foldControlAfter = await run('Boolean(document.querySelector(".desktop-stage-jump"))');
+
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { window.destroy(); app.quit(); }
 }

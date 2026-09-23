@@ -107,6 +107,7 @@
     <string name="chat_execution_tasks">工作流与后台任务</string>
     <string name="chat_go_enable">去启用</string>
     <string name="chat_go_to_settings">去设置</string>
+    <string name="chat_jump_to_latest">回到底部</string>
     <string name="chat_live_activity_short_completed">完成</string>
     <string name="chat_live_activity_short_failed">失败</string>
     <string name="chat_live_activity_short_paused">暂停</string>

@@ -233,15 +233,49 @@ interface StageProps {
   foldedItemIds?: readonly string[];
 }
 
+/**
+ * How far above the true bottom still counts as "at the tail". Rounding, a
+ * streaming row that grew this frame, and the native scrollbar all move the
+ * bottom by a pixel or two, and a streaming turn moves it every frame — an
+ * exact test could not be satisfied by hand once the reader had scrolled away,
+ * which is what made the follow impossible to re-enter. Mirrors the iOS
+ * scroller's `bottomSlack`.
+ */
+const BOTTOM_SLACK = 24;
+
 export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
   const stageRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
+  /**
+   * Whether the reader is parked at the tail. Kept in a ref because the scroll
+   * path must read and write it without a re-render; `atTail` mirrors it purely
+   * to drive the jump-to-bottom control.
+   */
   const followTail = useRef(true);
-  const dragging = useRef(false);
+  const [atTail, setAtTail] = useState(true);
+  /** A pointer is down inside the transcript, so layout drift must not move it. */
+  const pointerHeld = useRef(false);
+  /**
+   * Deadline (`performance.now()`) before which a layout change may not snap the
+   * viewport. A wheel event reaches us before the scroll it causes, so this is
+   * the only way to avoid fighting the gesture for its first frame.
+   */
+  const snapMutedUntil = useRef(0);
+  /** Re-decides the follow once a wheel gesture has settled; see `onWheel`. */
+  const settleTimer = useRef<number | undefined>(undefined);
+  /**
+   * What the reader is looking at while detached from the tail: a direct
+   * reference to the first visible row plus its offset from the viewport top.
+   * Element identity survives reflow, and `isConnected` retires an anchor whose
+   * row was unmounted — an index would quietly point at a different message.
+   */
+  const anchor = useRef<{ node: Element; offset: number } | null>(null);
   const scrollSession = useRef(sessionKey);
+  /** The newest prompt seen, so a freshly sent one can re-arm the tail. */
+  const lastPromptId = useRef<string | null>(null);
 
   /**
    * Explicit open/closed choices, keyed by the item's STABLE id WITHIN a
@@ -292,53 +326,193 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
 
   const tailThinking = rows.at(-1)?.type === 'thinking' ? rows.at(-1) : undefined;
 
+  const newestPromptId = useMemo(() => {
+    // `liveItems`, NOT the fold-filtered `items`: a closed `/loop` fold hides
+    // the reader's own prompt, and "the newest prompt on screen" would then walk
+    // back to an older one. That reads as a brand-new prompt and drags a
+    // detached reader to the bottom with no intent behind it.
+    for (let index = liveItems.length - 1; index >= 0; index -= 1) {
+      const item = liveItems[index]!;
+      if (item.type === 'narration' && item.role === 'user') return item.id;
+    }
+    return null;
+  }, [liveItems]);
+
+  /** The single writer for "the reader is parked at the tail". */
+  const setFollow = useCallback((next: boolean) => {
+    if (followTail.current === next) return;
+    followTail.current = next;
+    setAtTail(next);
+  }, []);
+
+  /**
+   * The measured rule: parking is a band, not an equality. Detaching is the
+   * reader's decision, so it is read back from where they actually left the
+   * viewport rather than inferred from the input that moved it.
+   */
+  const measureFollow = useCallback(() => {
+    const node = stageRef.current;
+    if (!node) return;
+    setFollow(node.scrollHeight - node.scrollTop - node.clientHeight <= BOTTOM_SLACK);
+  }, [setFollow]);
+
   // Synchronize the actual scroll extent before paint, including feed padding.
   // A tail element's scrollIntoView also moves ancestors and excludes that padding.
   const syncTail = useCallback(() => {
     const node = stageRef.current;
-    if (node && followTail.current && !dragging.current) {
-      const bottom = Math.max(0, node.scrollHeight - node.clientHeight);
-      if (Math.abs(node.scrollTop - bottom) > 1) node.scrollTop = bottom;
-    }
+    if (!node || !followTail.current || pointerHeld.current) return;
+    if (performance.now() < snapMutedUntil.current) return;
+    const bottom = Math.max(0, node.scrollHeight - node.clientHeight);
+    if (Math.abs(node.scrollTop - bottom) > 0.5) node.scrollTop = bottom;
+    anchor.current = null;
   }, []);
+
+  /**
+   * Remember the row at the top of a detached viewport. Read while the reader
+   * scrolls; it is then the only record of where they were once layout changes
+   * underneath them.
+   */
+  const captureAnchor = useCallback(() => {
+    const node = stageRef.current;
+    const feed = feedRef.current;
+    if (!node || !feed) return;
+    if (followTail.current) { anchor.current = null; return; }
+    const rows = feed.children;
+    // Rows paint in order, so their top edges are monotonic: find the first one
+    // still crossing the fold instead of walking the whole transcript. The
+    // jump control is the last child and sticks to the viewport, so it is never
+    // the row the reader is reading.
+    let high = rows.length - 1;
+    if (high >= 0 && (rows[high] as HTMLElement).dataset.stageControl !== undefined) high -= 1;
+    const containerTop = node.getBoundingClientRect().top;
+    let low = 0;
+    let first = -1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (rows[middle]!.getBoundingClientRect().bottom > containerTop) { first = middle; high = middle - 1; }
+      else low = middle + 1;
+    }
+    if (first === -1) { anchor.current = null; return; }
+    const element = rows[first]!;
+    anchor.current = { node: element, offset: element.getBoundingClientRect().top - containerTop };
+  }, []);
+
+  /**
+   * Put the anchored row back under the reader. Compensating synchronously,
+   * rather than in a following animation frame, is what keeps the correction
+   * out of the painted frame.
+   *
+   * The anchor is a whole row, so this pins that row's top edge and nothing
+   * finer: for a row taller than the scrollport — a long message or a code
+   * block — a width change still moves the text inside it while the row's own
+   * offset holds.
+   */
+  const restoreAnchor = useCallback(() => {
+    const node = stageRef.current;
+    const held = anchor.current;
+    if (!node || !held) return;
+    // The reader is driving. Compensating mid-gesture would re-apply their own
+    // wheel delta: the anchor was captured before the scroll event for that
+    // movement arrived, so the offset it recorded already includes it.
+    if (performance.now() < snapMutedUntil.current) return;
+    if (!held.node.isConnected) { anchor.current = null; return; }
+    const offset = held.node.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    const delta = offset - held.offset;
+    if (Math.abs(delta) > 0.5) node.scrollTop += delta;
+    held.offset = held.node.getBoundingClientRect().top - node.getBoundingClientRect().top;
+  }, []);
+
+  /**
+   * Re-engage the tail. Reached only from an explicit intent — the reader sends
+   * a prompt, opens a session, or presses the control — never from a timer. An
+   * idle reader who scrolled up is reading, not waiting to be moved back.
+   */
+  const armTail = useCallback(() => {
+    followTail.current = true;
+    setAtTail(true);
+    anchor.current = null;
+    snapMutedUntil.current = 0;
+    // The re-render this triggers would snap through `syncTail` anyway, but an
+    // explicit action must not be blocked by a gesture flag that is still set.
+    const node = stageRef.current;
+    if (node) node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!newestPromptId || newestPromptId === lastPromptId.current) return;
+    lastPromptId.current = newestPromptId;
+    armTail();
+  }, [newestPromptId, armTail]);
+
   useLayoutEffect(() => {
     if (scrollSession.current !== sessionKey) {
-      followTail.current = true;
       scrollSession.current = sessionKey;
+      followTail.current = true;
+      setAtTail(true);
+      anchor.current = null;
+      // Item ids restart at `i1` in every session, so a stale id could match the
+      // new session's prompt and swallow the re-arm for the reader's own send.
+      lastPromptId.current = newestPromptId;
+    } else if (!followTail.current && !pointerHeld.current) {
+      // A detached reader owns the viewport: whatever changed above them moves
+      // the scroll offset, not the content under their eyes.
+      restoreAnchor();
     }
     syncTail();
+    captureAnchor();
   });
   useLayoutEffect(() => {
     const node = stageRef.current;
     const feed = feedRef.current;
     if (!node || !feed) return;
     // Also covers child-only updates, images, disclosures and viewport resizing.
-    const observer = new ResizeObserver(syncTail);
+    const observer = new ResizeObserver(() => {
+      if (pointerHeld.current) return;
+      if (followTail.current) syncTail();
+      else restoreAnchor();
+    });
     observer.observe(node);
     observer.observe(feed);
     const release = () => {
-      if (!dragging.current) return;
-      dragging.current = false;
-      followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 1;
+      if (!pointerHeld.current) return;
+      pointerHeld.current = false;
+      measureFollow();
+      captureAnchor();
     };
     window.addEventListener('pointerup', release);
     window.addEventListener('pointercancel', release);
     window.addEventListener('blur', release);
     return () => {
       observer.disconnect();
+      window.clearTimeout(settleTimer.current);
       window.removeEventListener('pointerup', release);
       window.removeEventListener('pointercancel', release);
       window.removeEventListener('blur', release);
     };
-  }, [syncTail]);
+  }, [captureAnchor, measureFollow, restoreAnchor, syncTail]);
 
   return (
-    <div ref={stageRef} className="desktop-stage" onPointerDown={() => { dragging.current = true; }} onWheel={(event) => {
-      if (event.deltaY < 0) followTail.current = false;
-    }} onScroll={(event) => {
-      const node = event.currentTarget;
-      followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 1;
-    }} style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingInlineStart: 'var(--conversation-gutter, 24px)', paddingInlineEnd: 'calc(var(--conversation-gutter, 24px) + var(--runtime-summary-scroll-overhang, 0px))', background: t.transcriptBg, position: 'relative' }}>
+    <div ref={stageRef} className="desktop-stage" tabIndex={-1} onPointerDown={() => { pointerHeld.current = true; }} onWheel={() => {
+      // Arrives before the scroll it causes, and in either direction: the
+      // reader is driving, so no layout change may move the viewport under them
+      // until the gesture has settled.
+      snapMutedUntil.current = performance.now() + 150;
+      // The gate has to lift by itself — nothing else runs once the gesture
+      // stops, and a silently expired deadline would leave the viewport parked
+      // while `atTail` still claimed the reader was at the tail.
+      window.clearTimeout(settleTimer.current);
+      settleTimer.current = window.setTimeout(() => {
+        // Once the gesture settles the reader's position is authoritative:
+        // decide the follow from where they landed and re-anchor from there.
+        // Never restore here — that would undo the scroll they just made.
+        measureFollow();
+        captureAnchor();
+        syncTail();
+      }, 160);
+    }} onScroll={() => {
+      measureFollow();
+      captureAnchor();
+    }} style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', paddingInlineStart: 'var(--conversation-gutter, 24px)', paddingInlineEnd: 'calc(var(--conversation-gutter, 24px) + var(--runtime-summary-scroll-overhang, 0px))', background: t.transcriptBg, position: 'relative' }}>
       <div
         ref={feedRef}
         className="desktop-stage-feed"
@@ -499,6 +673,39 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
 
         {localPlan && <div role="dialog" aria-label="Plan" style={{position:'fixed',inset:'10%',zIndex:100,background:t.surface,overflow:'auto',borderRadius:16}}><button onClick={()=>setLocalPlan(null)}>Close plan</button><PlanDocument content={localPlan.content}/></div>}
 
+        {/*
+          Mounted even while the button is hidden: it is the last child of the
+          feed, and `captureAnchor` skips it by this marker. Sticky and
+          zero-height keeps it out of the scroll extent — a control that changed
+          `scrollHeight` would move the very bottom the tail math measures.
+        */}
+        <div className="desktop-stage-control" data-stage-control="jump">
+          {!atTail && (
+            <button
+              type="button"
+              className="desktop-stage-jump"
+              aria-label="Scroll to bottom"
+              title="Scroll to bottom"
+              onClick={(event) => {
+                armTail();
+                // Activating this unmounts it. A keyboard user would be left
+                // with focus on the document, so hand it to the transcript they
+                // just jumped to. `detail === 0` means the click came from the
+                // keyboard, so a pointer never moves focus.
+                if (event.detail === 0) stageRef.current?.focus({ preventScroll: true });
+              }}
+              style={{
+                '--jump-bg': t.surface,
+                '--jump-border': t.border,
+                '--jump-fg': t.text2,
+                '--jump-hover-bg': t.accentBg,
+                '--jump-hover-fg': t.text,
+              } as CSSProperties}
+            >
+              <Icon name="chevron" size={15} stroke={2} />
+            </button>
+          )}
+        </div>
 
       </div>
     </div>

@@ -62,6 +62,9 @@ object UiTags {
     /** The conversation's transient status row (engine tool activity / errors). */
     const val CHAT_STATUS = "tag.chatStatus"
 
+    /** The transcript's floating "back to the newest output" control. */
+    const val CHAT_JUMP_TO_LATEST = "tag.chatJumpToLatest"
+
     /** Event-driven workflow/subagent progress panel above the composer. */
     const val WORKFLOW_STATUS_PANEL = "tag.workflowStatusPanel"
     const val EXECUTION_STATUS_PANEL = "tag.executionStatusPanel"

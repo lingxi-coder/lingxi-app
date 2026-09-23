@@ -38,6 +38,18 @@
    changes width. */
 .desktop-chat-layout { container-type: inline-size; }
 @container (min-width: 1040px) {
+  /* Extend the scroll edge past the summary rail; Stage adds matching end
+     padding so the transcript keeps its original readable width. */
+  .desktop-message-list-view:has(+ .runtime-summary) {
+    --runtime-summary-scroll-overhang: 312px;
+  }
+  .desktop-message-list-view:has(+ .runtime-summary[data-inspector-open='true']) {
+    --runtime-summary-scroll-overhang: calc(clamp(320px, 28cqi, 360px) + 12px);
+  }
+  .desktop-message-list-view:has(+ .runtime-summary) .desktop-stage {
+    width: calc(100% + var(--runtime-summary-scroll-overhang));
+    margin-right: calc(0px - var(--runtime-summary-scroll-overhang));
+  }
   .runtime-summary {
     position: static;
     /* Hug the sections the session actually has. Stretching to the row left the

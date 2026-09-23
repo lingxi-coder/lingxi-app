@@ -338,7 +338,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
     }} onScroll={(event) => {
       const node = event.currentTarget;
       followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 1;
-    }} style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingInline: 'var(--conversation-gutter, 24px)', background: t.transcriptBg, position: 'relative' }}>
+    }} style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingInlineStart: 'var(--conversation-gutter, 24px)', paddingInlineEnd: 'calc(var(--conversation-gutter, 24px) + var(--runtime-summary-scroll-overhang, 0px))', background: t.transcriptBg, position: 'relative' }}>
       <div
         ref={feedRef}
         className="desktop-stage-feed"

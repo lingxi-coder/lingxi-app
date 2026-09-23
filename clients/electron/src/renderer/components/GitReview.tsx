@@ -102,15 +102,90 @@ function Dialog({ title, children, onClose, anchor }: { title: string; children:
 }
 function BranchPicker({ onClose, anchor }: { onClose(): void; anchor?: DOMRect }) {
   const git = useGit(); const [query, setQuery] = useState(''); const [name, setName] = useState('');
-  const locked = git.busy || !!git.status?.busy || !!git.status?.files.length;
+  const changedFiles = git.status?.files.length ?? 0;
+  const locked = git.busy || !!git.status?.busy || changedFiles > 0;
+  const lockTitle = git.busy ? 'Git operation in progress' : git.status?.busy ? 'Branch switching is paused' : 'Uncommitted changes';
+  const lockDetail = git.busy
+    ? 'Wait for the current Git operation to finish.'
+    : git.status?.busy
+      ? 'A task is running in this worktree.'
+      : `${changedFiles} ${changedFiles === 1 ? 'file has' : 'files have'} changes. Commit or stash them before switching branches.`;
+  const groups = [false, true].map((remote) => ({
+    remote,
+    title: remote ? 'Remote branches' : 'Local branches',
+    branches: git.branches
+      .filter((branch) => branch.remote === remote && branch.name.toLowerCase().includes(query.trim().toLowerCase()))
+      .sort((a, b) => Number(b.current) - Number(a.current) || a.name.localeCompare(b.name)),
+  }));
+  const visibleBranchCount = groups.reduce((count, group) => count + group.branches.length, 0);
   const checkout = async (branch: string, create = false) => { if (await git.run({ kind: 'checkout', branch, create, token: git.status!.token })) onClose(); };
-  return <Dialog title="Switch branch" onClose={onClose} anchor={anchor}><input autoFocus aria-label="Search branches" placeholder={`Search ${git.scope?.projectPath.split(/[\\/]/).filter(Boolean).pop() ?? 'project'} branches`} value={query} onChange={(e) => setQuery(e.target.value)}/>{locked && <p className="git-message">{git.status?.busy ? 'A task is running in this worktree.' : 'Commit or stash your changes before switching branches.'} <button onClick={() => { git.open('commit'); onClose(); }}>Commit</button><button onClick={() => { git.open('stash'); onClose(); }}>Stash</button></p>}<div className="git-branch-list">{[false, true].map((remote) => <section key={String(remote)}><h3>{remote ? 'Remote branches' : 'Local branches'}</h3>{git.branches.filter((b) => b.remote === remote && b.name.toLowerCase().includes(query.toLowerCase())).sort((a, b) => Number(b.current) - Number(a.current) || a.name.localeCompare(b.name)).map((b) => <button key={b.name} className="git-branch-row" aria-current={b.current ? 'true' : undefined} disabled={locked || b.current || (!!b.worktree && b.worktree !== git.status?.root)} onClick={() => void checkout(b.name)}><BranchIcon/><span>{b.name}{b.current && <small>Uncommitted: {git.status?.files.length ?? 0} files</small>}{!b.current && b.worktree && b.worktree !== git.status?.root && <small>In use: {b.worktree}</small>}{b.upstream && <small>{b.upstream}</small>}</span>{b.current && <span>✓</span>}</button>)}</section>)}</div><form onSubmit={(e) => { e.preventDefault(); void checkout(name.trim(), true); }}><label>New branch<input aria-label="New branch name" placeholder="Branch name" value={name} onChange={(e) => setName(e.target.value)}/></label><button className="git-primary" disabled={locked || !name.trim()}>Create and switch</button></form>{git.error && <p role="alert">{git.error}</p>}</Dialog>;
+  const projectName = git.scope?.projectPath.split(/[\\/]/).filter(Boolean).pop() ?? 'project';
+
+  return <Dialog title="Switch branch" onClose={onClose} anchor={anchor}>
+    <div className="git-branch-picker">
+      <label className="git-branch-search">
+        <Icon name="search" size={16} />
+        <input autoFocus aria-label="Search branches" placeholder={`Search ${projectName} branches`} value={query} onChange={(event) => setQuery(event.target.value)} />
+      </label>
+
+      {locked && <div className={`git-branch-warning${git.busy || git.status?.busy ? ' is-busy' : ''}`} role="status">
+        <span className="git-branch-warning-icon" aria-hidden="true"><Icon name={git.busy || git.status?.busy ? 'info' : 'warning'} size={16} /></span>
+        <div className="git-branch-warning-copy">
+          <strong>{lockTitle}</strong>
+          <p>{lockDetail}</p>
+          {!git.status?.busy && !git.busy && changedFiles > 0 && <div className="git-branch-warning-actions">
+            <button type="button" onClick={() => { git.open('commit'); onClose(); }}>Commit</button>
+            <button type="button" onClick={() => { git.open('stash'); onClose(); }}>Stash</button>
+          </div>}
+        </div>
+      </div>}
+
+      <div className="git-branch-list" role="region" aria-label="Available branches">
+        {groups.map((group) => group.branches.length > 0 && <section className="git-branch-group" key={String(group.remote)}>
+          <header><h3>{group.title}</h3><span>{group.branches.length}</span></header>
+          {group.branches.map((branch) => {
+            const inAnotherWorktree = !branch.current && !!branch.worktree && branch.worktree !== git.status?.root;
+            return <button
+              key={branch.name}
+              className={`git-branch-row${branch.current ? ' is-current' : ''}`}
+              aria-current={branch.current ? 'true' : undefined}
+              disabled={locked || branch.current || inAnotherWorktree}
+              title={branch.name}
+              onClick={() => void checkout(branch.name)}
+            >
+              <span className="git-branch-row-symbol" aria-hidden="true"><BranchIcon /></span>
+              <span className="git-branch-row-copy">
+                <span className="git-branch-name">{branch.name}</span>
+                <small className="git-branch-row-meta">
+                  {branch.current && <span className="git-branch-current-tag">Current</span>}
+                  {inAnotherWorktree && <span title={branch.worktree}>In another worktree</span>}
+                  {branch.upstream && <span title={`Tracks ${branch.upstream}`}>{branch.upstream}</span>}
+                </small>
+              </span>
+              {branch.current && <span className="git-branch-row-check" aria-label="Current branch"><Icon name="check" size={15} stroke={2} /></span>}
+            </button>;
+          })}
+        </section>)}
+        {visibleBranchCount === 0 && <div className="git-branch-empty" role="status">
+          <Icon name="branch" size={22} />
+          <span>{git.loading ? 'Loading branches…' : query.trim() ? `No branches match “${query.trim()}”.` : 'No branches found.'}</span>
+        </div>}
+      </div>
+
+      <form className="git-branch-create" onSubmit={(event) => { event.preventDefault(); void checkout(name.trim(), true); }}>
+        <label>New branch<input aria-label="New branch name" placeholder="Branch name" value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <button className="git-primary" disabled={locked || !name.trim()}><Icon name="plus" size={14} stroke={2} />Create and switch</button>
+      </form>
+
+      {git.error && <p className="git-branch-error" role="alert"><Icon name="circleAlert" size={15} />{git.error}</p>}
+    </div>
+  </Dialog>;
 }
 function Confirm({ title, description, paths, onConfirm, onClose }: { title: string; description: string; paths?: string[]; onConfirm(): Promise<unknown>; onClose(): void }) {
   const [busy, setBusy] = useState(false);
   return <Dialog title={title} onClose={onClose}><p>{description}</p>{paths && <ul className="git-confirm-paths">{paths.map((path) => <li key={path}>{path}</li>)}</ul>}<footer><button onClick={onClose} disabled={busy}>Cancel</button><button className="git-danger" disabled={busy} onClick={async () => { setBusy(true); await onConfirm(); onClose(); }}>{busy ? 'Working…' : title}</button></footer></Dialog>;
 }
-function themeStyle(t: ReturnType<typeof useT>): CSSProperties { return { '--git-bg': t.surface, '--git-fg': t.text, '--git-muted': t.text3, '--git-border': t.border, '--git-hover': t.surfaceHover, '--git-accent': t.accent, '--git-danger': t.danger, '--git-add': t.dark ? 'rgba(74, 190, 110, .13)' : 'rgba(49, 160, 80, .09)', '--git-remove': t.dark ? 'rgba(230, 83, 100, .13)' : 'rgba(220, 65, 85, .09)', ...Object.fromEntries(Object.entries(t.syntax).map(([syntaxClass, color]) => [`--git-syntax-${syntaxClass}`, color])), color: t.text } as CSSProperties; }
+function themeStyle(t: ReturnType<typeof useT>): CSSProperties { return { '--git-bg': t.surface, '--git-fg': t.text, '--git-muted': t.text3, '--git-border': t.border, '--git-hover': t.surfaceHover, '--git-accent': t.accent, '--git-danger': t.danger, '--git-warning': t.warn, '--git-add': t.dark ? 'rgba(74, 190, 110, .13)' : 'rgba(49, 160, 80, .09)', '--git-remove': t.dark ? 'rgba(230, 83, 100, .13)' : 'rgba(220, 65, 85, .09)', ...Object.fromEntries(Object.entries(t.syntax).map(([syntaxClass, color]) => [`--git-syntax-${syntaxClass}`, color])), color: t.text } as CSSProperties; }
 export function GitReview() {
   const git = useContext(GitContext);
   return <GitReviewContent key={`${git?.scope?.projectPath ?? ''}\0${git?.scope?.sessionId ?? ''}`}/>;

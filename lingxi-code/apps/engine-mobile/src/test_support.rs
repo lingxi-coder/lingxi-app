@@ -33,7 +33,7 @@ use client_protocol::permission::PermissionRequest as PermissionRequestDto;
 use orchestrator::StreamingApiClient;
 use platform_api::{
     CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
-    SecureStorage, SharingService, VoiceRecorder, WorktreeManager,
+    SecureStorage, SharingService, WorktreeManager,
 };
 use tokio::sync::Mutex;
 
@@ -102,12 +102,9 @@ impl Platform for HostFakePlatform {
     fn worktree(&self) -> Arc<dyn WorktreeManager> {
         self.worktree.clone()
     }
-    // camera / voice / share default to `None` — the host shim has no device
+    // camera / audio / share default to `None` — the host shim has no device
     // capabilities, exactly the off-device contract.
     fn camera(&self) -> Option<Arc<dyn CameraControl>> {
-        None
-    }
-    fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
         None
     }
     fn share(&self) -> Option<Arc<dyn SharingService>> {

@@ -3,8 +3,8 @@
  * renderer by `microphone-permission-electron.mjs`.
  *
  * What is REAL here: the `Voice` settings page component itself, mounted with
- * real effects; `browserProbeDeps` and `hostMicrophonePermissionReader` — the
- * exact production functions the page calls; a real `contextBridge` preload
+ * real effects; `hostMicrophonePermissionReader` — the exact production
+ * reader the page calls; a real `contextBridge` preload
  * over real IPC to the production `readMicrophoneAccess` in the main process,
  * which reads the real `systemPreferences.getMediaAccessStatus('microphone')`;
  * and a real Chromium session carrying this app's own
@@ -22,11 +22,11 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import { browserProbeDeps, hostMicrophonePermissionReader } from '@renderer/audio/capabilities';
+import { hostMicrophonePermissionReader } from '../../src/shared/microphoneAccess';
 import { Voice } from '@renderer/components/settings/pages/Voice';
 import { Theme } from '@renderer/theme/ThemeContext';
 import { tokens } from '@renderer/theme/tokens';
-import { defaultVoicePreferences } from '@renderer/audio/preferences';
+import { audioConfigurationDefaults } from '../../src/shared/generatedAudioConfiguration';
 import type { PageContentProps } from '@renderer/components/settings/SettingsScreen';
 
 declare global {
@@ -52,7 +52,8 @@ const bridge = {
   bootstrap: {
     settings: {
       model: 'anthropic/claude-opus-5',
-      voice: defaultVoicePreferences(),
+      voice: audioConfigurationDefaults(),
+      voiceRevision: 0,
     },
     providerCredentials: [{ providerId: 'anthropic', configured: true, encryptionAvailable: true }],
   },
@@ -68,7 +69,7 @@ function findOpenSystemSettingsButton(): HTMLButtonElement | null {
 
 window.__microphonePermissionTest = {
   /** What the page's own probe reports, through the page's own dependency wiring. */
-  probe: () => browserProbeDeps(null, [], microphonePermission).queryMicrophonePermission(),
+  probe: microphonePermission,
   /**
    * The value the page USED to show: the Permissions API, answered by this
    * app's own `setPermissionCheckHandler`. Measured, never asserted to be

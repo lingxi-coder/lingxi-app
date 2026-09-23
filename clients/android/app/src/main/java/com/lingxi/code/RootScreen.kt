@@ -140,10 +140,11 @@ import com.lingxi.code.localapps.widget.LocalAppLaunchRequest
 import com.lingxi.code.localapps.widget.LocalAppWidgetPinRequester
 import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.voice.FlowModeOverlay
+import com.lingxi.code.voice.rememberFlowVoiceController
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.cancelActiveHeldVoiceSession
-import com.lingxi.code.voice.rememberOrbVoiceListen
 import com.lingxi.code.voice.rememberVoiceCapture
+import com.lingxi.code.voice.audio.AndroidAudioServiceProvider
 import com.lingxi.code.voice.audio.VoiceSpeechPlayer
 import android.graphics.BitmapFactory
 import android.widget.Toast
@@ -711,18 +712,22 @@ fun RootScreen(
     // FlowMode orb voice driver: a one-shot tap-to-talk listener, plus the live
     // assistant reply text derived from the same conversation state ChatScreen
     // renders (the orb is just another view of the real session).
-    val orbListen = rememberOrbVoiceListen()
+    val flowVoiceController = rememberFlowVoiceController()
     val orbAssistantText = (state.streamingMessage ?: state.messages.lastOrNull())
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
-    DisposableEffect(lifecycleOwner, orbListen, voiceSpeechPlayer) {
+    LaunchedEffect(chatViewModel, state.session.id, activeSessionMode, sourceScope) {
+        flowVoiceController.pause()
+        voiceSpeechPlayer.stop()
+    }
+    DisposableEffect(lifecycleOwner, flowVoiceController) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> appInForeground = true
                 Lifecycle.Event.ON_STOP -> {
                     appInForeground = false
-                    voiceSpeechPlayer.stop()
+                    flowVoiceController.pause()
                     cancelActiveHeldVoiceSession()
-                    orbListen.cancel()
+                    scope.launch { runCatching { AndroidAudioServiceProvider.invalidate(context) } }
                     // Keep Flow Mode open but paused. Returning to the app shows
                     // the latest assistant result; another explicit tap is
                     // required before either microphone starts again.
@@ -2477,7 +2482,7 @@ fun RootScreen(
                                     }
                                 },
                                 onCancel = { chatViewModel.cancel() },
-                                onListen = orbListen,
+                                controller = flowVoiceController,
                                 onClose = { flowActive = false },
                             )
                         },

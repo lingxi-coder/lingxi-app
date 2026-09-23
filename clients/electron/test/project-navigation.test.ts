@@ -133,7 +133,6 @@ test('dictation recording bar exposes live amplitude with separate cancel and fi
     { value: tokens(true) },
     React.createElement(DictationRecorderBar, {
       audio: audio as any,
-      owner: { kind: 'dictation', id: 'dictation-1' },
       onCancel: () => undefined,
       onFinish: () => undefined,
     }),

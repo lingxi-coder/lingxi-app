@@ -5,7 +5,7 @@
 //! task resolves it from an inbound `AudioResponse` command.
 //!
 //! ```text
-//! engine task ── SpeechToText::transcribe() ──▶ AudioBridge parks the reply
+//! engine task ── AudioService::execute(Listen) ──▶ AudioBridge parks the reply
 //!                                            └▶ connection's audio sink emits
 //!            ◀──Frame::Event(AudioRequest{request_id, op})── pushed to client
 //! WS client ──Frame::Request(AudioResponse{request_id, result})──▶ read task
@@ -30,15 +30,52 @@ use bridge::wire::Frame;
 use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::audio_bridge::new_audio_bridge;
 use bridge_server::server::BridgeConnection;
-use client_protocol::commands::{AudioResultDto, ClientCommand};
-use client_protocol::events::{AudioOpDto, ClientEvent};
+use client_protocol::audio::{
+    AudioCapabilitySnapshotDto, AudioOperationDto, AudioOperationIdDto, AudioOperationKindDto,
+    AudioOperationReadinessDto, AudioOperationRequestDto, AudioOperationResultDto,
+    AudioReadinessStateDto,
+};
+use client_protocol::commands::ClientCommand;
+use client_protocol::events::ClientEvent;
 use futures_util::{SinkExt, StreamExt};
-use platform_api::stt::{SpeechToText, SttOpts};
-use platform_api::voice::{VoiceError, VoiceRecorder};
+use platform_api::audio::{
+    AudioOperation, AudioOperationContext, AudioOperationId, AudioOperationSuccess, AudioOwner,
+    AudioRecordingHandle, AudioService,
+};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 
 const TEST_TOKEN: &str = "audio-e2e-token-32chars000000000";
+
+fn audio_capabilities() -> AudioCapabilitySnapshotDto {
+    AudioCapabilitySnapshotDto {
+        service_epoch: 7,
+        support_revision: 1,
+        supported_operations: vec![
+            AudioOperationKindDto::Record,
+            AudioOperationKindDto::Listen,
+            AudioOperationKindDto::Synthesize,
+            AudioOperationKindDto::Speak,
+        ],
+        readiness: vec![AudioOperationReadinessDto {
+            operation: AudioOperationKindDto::Listen,
+            state: AudioReadinessStateDto::Ready,
+        }],
+        max_payload_bytes: 1024,
+    }
+}
+
+fn context() -> AudioOperationContext {
+    AudioOperationContext {
+        identity: AudioOperationId::new(1, 7),
+        owner: AudioOwner::Session {
+            session_id: "session-audio-test".into(),
+        },
+        initiator: None,
+        timeout_budget_ms: Some(5_000),
+        max_payload_bytes: 1024,
+    }
+}
 
 /// Open an authenticated WS connection to `port` and complete the handshake.
 async fn connect(
@@ -67,7 +104,10 @@ async fn connect(
         params: serde_json::to_value(ClientHello {
             protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
             client_name: "audio-test".into(),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                audio: Some(audio_capabilities()),
+                ..Capabilities::default()
+            },
         })
         .unwrap(),
     });
@@ -118,14 +158,14 @@ where
 }
 
 /// Wait for the next `AudioRequest` event, skipping any unrelated event.
-async fn next_audio_request<S>(ws: &mut S) -> (u64, AudioOpDto)
+async fn next_audio_request<S>(ws: &mut S) -> AudioOperationRequestDto
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     loop {
         match next_frame(ws).await {
-            Frame::Event(ClientEvent::AudioRequest { request_id, op }) => {
-                return (request_id, op);
+            Frame::Event(ClientEvent::AudioRequest { request }) => {
+                return request;
             }
             Frame::Event(_) => {}
             other => panic!("unexpected frame while awaiting an AudioRequest: {other:?}"),
@@ -146,19 +186,22 @@ async fn an_audio_request_event_is_answered_by_an_inbound_audio_response() {
 
     let task = tokio::spawn(async move {
         bridge
-            .transcribe(SttOpts {
-                language: Some("zh-CN".to_string()),
-            })
+            .execute(
+                context(),
+                AudioOperation::Listen {
+                    language: Some("zh-CN".to_string()),
+                },
+            )
             .await
     });
 
-    let (request_id, op) = next_audio_request(&mut ws).await;
+    let request = next_audio_request(&mut ws).await;
     assert_eq!(
-        op,
-        AudioOpDto::Transcribe {
+        request.operation,
+        AudioOperationDto::Listen {
             language: Some("zh-CN".to_string())
         },
-        "the trait's options must reach the client intact"
+        "the operation's options must reach the client intact"
     );
 
     // An answer for an id nobody parked must be ignored, not break the
@@ -166,8 +209,11 @@ async fn an_audio_request_event_is_answered_by_an_inbound_audio_response() {
     send_command(
         &mut ws,
         &ClientCommand::AudioResponse {
-            request_id: request_id + 4096,
-            result: AudioResultDto::Transcript {
+            identity: AudioOperationIdDto {
+                id: "unknown-operation".into(),
+                ..request.identity.clone()
+            },
+            result: AudioOperationResultDto::Transcript {
                 text: "for nobody".to_string(),
                 language: None,
                 confidence: None,
@@ -179,8 +225,8 @@ async fn an_audio_request_event_is_answered_by_an_inbound_audio_response() {
     send_command(
         &mut ws,
         &ClientCommand::AudioResponse {
-            request_id,
-            result: AudioResultDto::Transcript {
+            identity: request.identity,
+            result: AudioOperationResultDto::Transcript {
                 text: "你好".to_string(),
                 language: Some("zh-CN".to_string()),
                 confidence: None,
@@ -189,12 +235,13 @@ async fn an_audio_request_event_is_answered_by_an_inbound_audio_response() {
     )
     .await;
 
-    let transcript = task
+    let result = task
         .await
-        .expect("the transcribe task must not panic")
+        .expect("the listen task must not panic")
         .expect("the client answered with a transcript");
-    assert_eq!(transcript.text, "你好");
-    assert_eq!(transcript.language, Some("zh-CN".to_string()));
+    assert!(
+        matches!(result, AudioOperationSuccess::Transcript { transcript } if transcript.text == "你好" && transcript.language.as_deref() == Some("zh-CN"))
+    );
 
     endpoint.shutdown().await;
 }
@@ -211,10 +258,24 @@ async fn disconnect_mid_audio_request_fails_the_parked_call() {
     endpoint.set_auth_token(TEST_TOKEN.to_string());
     let mut ws = connect(endpoint.port()).await;
 
-    let task = tokio::spawn(async move { bridge.stop_recording().await });
+    let task = tokio::spawn(async move {
+        bridge
+            .execute(
+                context(),
+                AudioOperation::StopRecording {
+                    handle: AudioRecordingHandle("recording-1".into()),
+                },
+            )
+            .await
+    });
 
-    let (_request_id, op) = next_audio_request(&mut ws).await;
-    assert_eq!(op, AudioOpDto::StopRecording);
+    let request = next_audio_request(&mut ws).await;
+    assert_eq!(
+        request.operation,
+        AudioOperationDto::StopRecording {
+            handle: "recording-1".into()
+        }
+    );
 
     drop(ws);
 
@@ -224,14 +285,10 @@ async fn disconnect_mid_audio_request_fails_the_parked_call() {
         .await
         .expect("the stop_recording task must not panic")
         .expect_err("a dropped connection cannot answer");
-    match &error {
-        VoiceError::Other(message) => assert!(
-            message.contains("disconnected"),
-            "a dropped connection must drain the parked request rather than let it \
-             wait out its deadline, got: {message}"
-        ),
-        other => panic!("expected VoiceError::Other after a disconnect, got {other:?}"),
-    }
+    assert_eq!(
+        error.kind,
+        platform_api::audio::AudioErrorKind::NativeFailure
+    );
     assert_eq!(
         responder.pending_count().await,
         0,
@@ -246,17 +303,54 @@ async fn disconnect_mid_audio_request_fails_the_parked_call() {
 #[tokio::test]
 async fn an_audio_request_with_no_client_connected_fails_immediately() {
     let connection = BridgeConnection::new();
-    let (bridge, _responder) = new_audio_bridge(connection.audio_sink());
+    let (bridge, responder) = new_audio_bridge(connection.audio_sink());
+    responder.update_capabilities(Some(audio_capabilities()));
 
     let error = bridge
-        .stop_recording()
+        .execute(
+            context(),
+            AudioOperation::StopRecording {
+                handle: AudioRecordingHandle("recording-1".into()),
+            },
+        )
         .await
         .expect_err("there is no client to record anything");
-    match &error {
-        VoiceError::Other(message) => assert!(
-            message.contains("no desktop client"),
-            "the error must name the missing client, got: {message}"
-        ),
-        other => panic!("expected VoiceError::Other with no client, got {other:?}"),
+    assert_eq!(error.kind, platform_api::audio::AudioErrorKind::Unavailable);
+}
+
+#[tokio::test]
+async fn capability_updates_replace_the_live_snapshot_and_notify_the_client() {
+    let connection = BridgeConnection::new();
+    let (bridge, responder) = new_audio_bridge(connection.audio_sink());
+    let endpoint =
+        McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(connection.bind_audio(responder)))
+            .await
+            .expect("endpoint must start");
+    endpoint.set_auth_token(TEST_TOKEN.to_string());
+    let mut ws = connect(endpoint.port()).await;
+    let mut update = audio_capabilities();
+    update.support_revision = 2;
+    update.supported_operations = vec![AudioOperationKindDto::Record];
+
+    send_command(
+        &mut ws,
+        &ClientCommand::UpdateAudioCapabilities {
+            capabilities: update.clone(),
+        },
+    )
+    .await;
+    match next_frame(&mut ws).await {
+        Frame::Event(ClientEvent::AudioCapabilitiesChanged { capabilities }) => {
+            assert_eq!(capabilities, update);
+        }
+        other => panic!("expected capability-change event, got {other:?}"),
     }
+    let current = bridge.capabilities();
+    assert_eq!(current.support_revision, 2);
+    assert_eq!(
+        current.supported_operations,
+        vec![platform_api::audio::AudioOperationKind::Record]
+    );
+
+    endpoint.shutdown().await;
 }

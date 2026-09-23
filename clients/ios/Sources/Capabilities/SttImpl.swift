@@ -15,13 +15,15 @@ import Foundation
         func cancel(with error: Error)
     }
 
+    struct SpeechPermissionDeniedError: Error {}
+
     /// Native STT over `SFSpeechRecognizer` + an `AVAudioEngine` mic tap.
     ///
-    /// UniFFI calls `transcribe` as a one-shot operation. The composer additionally
+    /// The AudioService uses this one-shot operation. The composer additionally
     /// uses `finishRecording` on finger-up and `cancelRecognition` on swipe-away or
     /// lifecycle cancellation. Mutable cross-callback state is protected by
     /// `stateLock`; this is the safety invariant behind `@unchecked Sendable`.
-    final class SttImpl: IosStt, @unchecked Sendable {
+    final class SttImpl: @unchecked Sendable {
         private struct Attempt {
             let id: UUID
             var operation: (any VoiceRecognitionOperation)?
@@ -38,45 +40,118 @@ import Foundation
         private let stateLock = NSLock()
         private var attempt: Attempt?
         private let timeoutNanoseconds: UInt64
+        private let audioSessionCoordinator: VoiceAudioSessionCoordinator
+        private let speechAuthorization: @Sendable () async -> Bool
 
-        init(timeoutNanoseconds: UInt64 = 30_000_000_000) {
+        init(
+            timeoutNanoseconds: UInt64 = 30_000_000_000,
+            coordinator: VoiceAudioSessionCoordinator? = nil,
+            speechAuthorization: @escaping @Sendable () async -> Bool = {
+                let status: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation { continuation in
+                    SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
+                }
+                return status == .authorized
+            }
+        ) {
             self.timeoutNanoseconds = timeoutNanoseconds
+            audioSessionCoordinator = coordinator ?? .shared
+            self.speechAuthorization = speechAuthorization
         }
 
-        func transcribe(language: String?) async throws -> String {
-            try await transcribe(
-                language: language,
-                automaticEndpointAfterSilence: nil
-            )
+        var hasActiveNativeOperation: Bool {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return attempt?.operation != nil
         }
 
         /// Flow Mode supplies a trailing-silence interval so one spoken
-        /// utterance can finish without an explicit tap. The engine-facing
-        /// `IosStt` entry point above remains manual/one-shot compatible.
+        /// utterance can finish without an explicit tap.
         func transcribe(
             language: String?,
-            automaticEndpointAfterSilence: Duration?
+            automaticEndpointAfterSilence: Duration?,
+            routeResolution: AudioRouteResolution? = nil,
+            configurationSnapshot: AudioConfigurationSnapshot? = nil,
+            maximumPayloadBytes: UInt64? = nil,
+            audioSessionPurpose: VoiceAudioSessionCoordinator.Purpose = .recognition,
+            routeResolutionChanged: (@MainActor (AudioRouteResolution) -> Void)? = nil
         ) async throws -> String {
             let attemptID = try beginAttempt()
             defer { endAttempt(attemptID) }
 
             return try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                let preferences = VoicePreferencesSnapshot.load()
-                let resolvedIdentifier = VoiceCapabilityModel.resolvedRecognitionLocaleIdentifier(
-                    configuredLanguage: language ?? preferences.language,
-                    currentLocale: .autoupdatingCurrent
+                let payloadLimit = maximumPayloadBytes ?? maxAudioPayloadBytes()
+                guard payloadLimit > 0, payloadLimit <= UInt64(Int.max) else {
+                    throw AudioServiceFailure.invalidRequest
+                }
+                let snapshot: AudioConfigurationSnapshot
+                if let configurationSnapshot {
+                    snapshot = configurationSnapshot
+                } else {
+                    snapshot = await MainActor.run { AudioConfigurationRuntime.snapshot() }
+                }
+                var selectedRoute: AudioRouteResolution
+                if let routeResolution {
+                    selectedRoute = routeResolution
+                } else {
+                    selectedRoute = await MainActor.run {
+                        AudioConfigurationRuntime.route(
+                            kind: .recognition,
+                            snapshot: snapshot,
+                            languageOverride: language
+                        )
+                    }
+                }
+                let initiallySelectedRoute = selectedRoute
+                await MainActor.run { routeResolutionChanged?(initiallySelectedRoute) }
+                let resolvedIdentifier = resolveAudioLanguageForNativeDevice(
+                    configured: language ?? snapshot.configuration.language,
+                    deviceLocale: Locale.autoupdatingCurrent.identifier
                 )
                 let locale = Locale(identifier: resolvedIdentifier)
                 let recognizer = SFSpeechRecognizer(locale: locale)
-                let route = VoiceRuntimeResolver.recognitionRoute(
-                    preferences: preferences,
-                    languageOverride: language,
-                    systemRecognizerAvailable: VoiceRuntimeResolver.systemRecognitionAvailable(
-                        serviceAvailable: recognizer?.isAvailable == true,
-                        authorization: SFSpeechRecognizer.authorizationStatus()
-                    )
-                )
+                func nativeRoute(_ resolution: AudioRouteResolution) throws -> VoiceRecognitionRoute {
+                    guard resolution.status == .ready || resolution.status == .permissionRequired,
+                          let effective = resolution.effective else { throw AudioServiceFailure.unavailable }
+                    switch effective.source {
+                    case .system:
+                        return .system(languageIdentifier: resolvedIdentifier)
+                    case .offline:
+                        guard let modelID = effective.modelId,
+                              let model = GeneratedVoiceModelCatalog.byID(modelID),
+                              model.kind == .stt,
+                              let modelDirectory = VoiceModelFiles.modelRoot(for: model)
+                        else { throw AudioServiceFailure.modelMissing }
+                        return .sherpa(
+                            languageIdentifier: resolvedIdentifier,
+                            modelID: modelID,
+                            modelDirectory: modelDirectory
+                        )
+                    default:
+                        throw AudioServiceFailure.unavailable
+                    }
+                }
+                var route = try nativeRoute(selectedRoute)
+                if case .system = route {
+                    do {
+                        try await requestSpeechAuthorization(for: attemptID)
+                    } catch is SpeechPermissionDeniedError {
+                        try checkAttempt(attemptID)
+                        guard selectedRoute.requested.source == .automatic else {
+                            throw AudioServiceFailure.permissionDenied
+                        }
+                        selectedRoute = await MainActor.run {
+                            AudioConfigurationRuntime.route(
+                                kind: .recognition,
+                                snapshot: snapshot,
+                                languageOverride: language
+                            )
+                        }
+                        let fallbackSelectedRoute = selectedRoute
+                        await MainActor.run { routeResolutionChanged?(fallbackSelectedRoute) }
+                        route = try nativeRoute(selectedRoute)
+                    }
+                }
 
                 switch route {
                 case let .sherpa(_, modelID, modelDirectory):
@@ -84,15 +159,16 @@ import Foundation
                     try checkAttempt(attemptID)
                     let audioLease: VoiceAudioSessionCoordinator.Lease
                     do {
-                        audioLease = try await VoiceAudioSessionCoordinator.shared.acquire(.recognition)
+                        audioLease = try await audioSessionCoordinator.acquire(audioSessionPurpose)
                     } catch {
-                        throw SpeechFfiError.Retriable(message: "audio session: \(error.localizedDescription)")
+                        throw SpeechRecognitionError.Retriable(message: "audio session: \(error.localizedDescription)")
                     }
                     do {
                         let operation = SherpaRecognitionOperation(
                             modelID: modelID,
                             modelDirectory: modelDirectory,
-                            automaticEndpointAfterSilence: automaticEndpointAfterSilence
+                            automaticEndpointAfterSilence: automaticEndpointAfterSilence,
+                            maximumPayloadBytes: payloadLimit
                         )
                         switch attach(operation, to: attemptID) {
                         case .proceed: break
@@ -100,27 +176,27 @@ import Foundation
                         case let .cancel(error): operation.cancel(with: error)
                         }
                         let transcript = try await operation.run()
-                        await VoiceAudioSessionCoordinator.shared.release(audioLease)
+                        await audioSessionCoordinator.release(audioLease)
                         return transcript
                     } catch {
-                        await VoiceAudioSessionCoordinator.shared.release(audioLease)
+                        await audioSessionCoordinator.release(audioLease)
                         throw error
                     }
                 case let .unavailable(message):
-                    throw SpeechFfiError.Other(message: message)
+                        throw SpeechRecognitionError.Other(message: message)
                 case .system:
                     break
                 }
 
-                try await requestAuthorization()
+                try await requestMicrophoneAuthorization()
                 try checkAttempt(attemptID)
-                guard let recognizer, recognizer.isAvailable else { throw SpeechFfiError.Unavailable }
+                guard let recognizer, recognizer.isAvailable else { throw AudioServiceFailure.unavailable }
 
                 let audioLease: VoiceAudioSessionCoordinator.Lease
                 do {
-                    audioLease = try await VoiceAudioSessionCoordinator.shared.acquire(.recognition)
+                    audioLease = try await audioSessionCoordinator.acquire(audioSessionPurpose)
                 } catch {
-                    throw SpeechFfiError.Retriable(message: "audio session: \(error.localizedDescription)")
+                    throw SpeechRecognitionError.Retriable(message: "audio session: \(error.localizedDescription)")
                 }
 
                 do {
@@ -129,14 +205,13 @@ import Foundation
 
                     let request = SFSpeechAudioBufferRecognitionRequest()
                     request.shouldReportPartialResults = automaticEndpointAfterSilence != nil
-                    let preferOnDevice = UserDefaults.standard.string(forKey: "voiceRecognitionMode")
-                        == VoiceRecognitionMode.onDevice.rawValue
-                    request.requiresOnDeviceRecognition = preferOnDevice && recognizer.supportsOnDeviceRecognition
+                    request.requiresOnDeviceRecognition = false
 
                     let operation = SpeechRecognitionOperation(
                         request: request,
                         timeoutNanoseconds: timeoutNanoseconds,
-                        automaticEndpointAfterSilence: automaticEndpointAfterSilence
+                        automaticEndpointAfterSilence: automaticEndpointAfterSilence,
+                        maximumPayloadBytes: payloadLimit
                     )
                     switch attach(operation, to: attemptID) {
                     case .proceed:
@@ -148,10 +223,10 @@ import Foundation
                     }
 
                     let transcript = try await operation.run(with: recognizer)
-                    await VoiceAudioSessionCoordinator.shared.release(audioLease)
+                    await audioSessionCoordinator.release(audioLease)
                     return transcript
                 } catch {
-                    await VoiceAudioSessionCoordinator.shared.release(audioLease)
+                    await audioSessionCoordinator.release(audioLease)
                     throw error
                 }
             } onCancel: {
@@ -186,8 +261,16 @@ import Foundation
         private func beginAttempt() throws -> UUID {
             stateLock.lock()
             defer { stateLock.unlock() }
+            if let current = attempt,
+               current.operation == nil,
+               current.cancellation != nil {
+                // System permission callbacks cannot be cancelled. A caller may
+                // cancel while the OS sheet is open, so let a fresh request take
+                // over admission. The old callback stays bound to its attempt ID.
+                attempt = nil
+            }
             guard attempt == nil else {
-                throw SpeechFfiError.Retriable(message: "speech recognition is already active")
+                throw SpeechRecognitionError.Retriable(message: "speech recognition is already active")
             }
             let id = UUID()
             attempt = Attempt(id: id)
@@ -238,23 +321,17 @@ import Foundation
             operation?.cancel(with: error)
         }
 
-        /// Request both speech-recognition and microphone authorization.
-        private func requestAuthorization() async throws {
-            let speechStatus: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
-            }
+        private func requestSpeechAuthorization(for attemptID: UUID) async throws {
+            let authorized = await speechAuthorization()
             try Task.checkCancellation()
-            guard speechStatus == .authorized else { throw SpeechFfiError.PermissionDenied }
-
-            let micGranted = await AVAudioApplication.requestRecordPermission()
-            try Task.checkCancellation()
-            guard micGranted else { throw SpeechFfiError.PermissionDenied }
+            try checkAttempt(attemptID)
+            guard authorized else { throw SpeechPermissionDeniedError() }
         }
 
         private func requestMicrophoneAuthorization() async throws {
             let micGranted = await AVAudioApplication.requestRecordPermission()
             try Task.checkCancellation()
-            guard micGranted else { throw SpeechFfiError.PermissionDenied }
+            guard micGranted else { throw SpeechRecognitionError.PermissionDenied }
         }
     }
 
@@ -268,6 +345,7 @@ import Foundation
         private let clock = ContinuousClock()
         private let timeoutNanoseconds: UInt64
         private let automaticEndpointAfterSilence: Duration?
+        private let maximumPayloadBytes: Int
 
         private var continuation: CheckedContinuation<String, Error>?
         private var recognitionTask: SFSpeechRecognitionTask?
@@ -280,16 +358,19 @@ import Foundation
         private var inputStarted = false
         private var inputEnded = false
         private var finishRequested = false
+        private var capturedPayloadBytes = 0
         private var observers: [NSObjectProtocol] = []
 
         init(
             request: SFSpeechAudioBufferRecognitionRequest,
             timeoutNanoseconds: UInt64,
-            automaticEndpointAfterSilence: Duration?
+            automaticEndpointAfterSilence: Duration?,
+            maximumPayloadBytes: UInt64
         ) {
             self.request = request
             self.timeoutNanoseconds = timeoutNanoseconds
             self.automaticEndpointAfterSilence = automaticEndpointAfterSilence
+            self.maximumPayloadBytes = Int(maximumPayloadBytes)
             installLifecycleObservers()
         }
 
@@ -349,9 +430,8 @@ import Foundation
 
             let inputNode = audioEngine.inputNode
             let format = inputNode.outputFormat(forBus: 0)
-            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self, request] buffer, _ in
-                request.append(buffer)
-                self?.observeAudioActivity(in: buffer)
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+                self?.consume(buffer)
             }
             inputStarted = true
             audioEngine.prepare()
@@ -359,9 +439,31 @@ import Foundation
                 try audioEngine.start()
             } catch {
                 endInputLocked()
-                throw SpeechFfiError.Retriable(message: "mic start: \(error.localizedDescription)")
+                throw SpeechRecognitionError.Retriable(message: "mic start: \(error.localizedDescription)")
             }
             if finishRequested { endInputLocked() }
+        }
+
+        private func consume(_ buffer: AVAudioPCMBuffer) {
+            let channels = max(1, Int(buffer.format.channelCount))
+            let frames = Int(buffer.frameLength)
+            guard frames > 0, frames <= Int.max / channels / MemoryLayout<Int16>.size else { return }
+            let inputBytes = frames * channels * MemoryLayout<Int16>.size
+
+            lock.lock()
+            guard terminalResult == nil, !inputEnded else {
+                lock.unlock()
+                return
+            }
+            guard inputBytes <= maximumPayloadBytes - capturedPayloadBytes else {
+                lock.unlock()
+                complete(.failure(AudioServiceFailure.mediaTooLarge))
+                return
+            }
+            capturedPayloadBytes += inputBytes
+            request.append(buffer)
+            lock.unlock()
+            observeAudioActivity(in: buffer)
         }
 
         private func startRecognizer(_ recognizer: SFSpeechRecognizer) {
@@ -389,9 +491,9 @@ import Foundation
                     }
                     let nsError = error as NSError
                     if nsError.domain == "kAFAssistantErrorDomain", nsError.code == 1110 {
-                        complete(.failure(SpeechFfiError.NoSpeech))
+                        complete(.failure(SpeechRecognitionError.NoSpeech))
                     } else {
-                        complete(.failure(SpeechFfiError.Retriable(message: error.localizedDescription)))
+                        complete(.failure(SpeechRecognitionError.Retriable(message: error.localizedDescription)))
                     }
                 }
             }
@@ -411,7 +513,7 @@ import Foundation
                     return
                 }
                 guard !Task.isCancelled else { return }
-                self?.complete(.failure(SpeechFfiError.Retriable(message: "speech recognition timed out")))
+                self?.complete(.failure(SpeechRecognitionError.Retriable(message: "speech recognition timed out")))
             }
             lock.unlock()
         }
@@ -561,7 +663,7 @@ import Foundation
             ) { [weak self] notification in
                 let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
                 guard raw == AVAudioSession.InterruptionType.began.rawValue else { return }
-                self?.complete(.failure(SpeechFfiError.Retriable(message: "audio session interrupted")))
+                    self?.complete(.failure(SpeechRecognitionError.Retriable(message: "audio session interrupted")))
             })
             #if canImport(UIKit)
                 observers.append(center.addObserver(
@@ -569,7 +671,7 @@ import Foundation
                     object: nil,
                     queue: nil
                 ) { [weak self] _ in
-                    self?.complete(.failure(SpeechFfiError.Retriable(message: "speech recognition stopped in background")))
+                    self?.complete(.failure(SpeechRecognitionError.Retriable(message: "speech recognition stopped in background")))
                 })
             #endif
         }

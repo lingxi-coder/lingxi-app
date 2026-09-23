@@ -1,0 +1,200 @@
+{
+  "schemaVersion": 3,
+  "normalization": [
+    {
+      "name": "fresh defaults",
+      "input": {},
+      "expected": {
+        "schemaVersion": 3,
+        "recognition": { "source": "automatic", "offlineModelId": null },
+        "speech": { "source": "automatic", "offlineModelId": null, "voice": null },
+        "language": "auto",
+        "rate": 1,
+        "autoPlayReplies": false
+      }
+    },
+    {
+      "name": "preserve unknown explicit selections",
+      "input": {
+        "schemaVersion": 3,
+        "recognition": { "source": "telepathy", "offlineModelId": "sherpa.future-stt" },
+        "speech": { "source": "offline", "offlineModelId": "sherpa.future-tts", "voice": { "source": "offline", "modelId": "sherpa.future-tts", "id": "voice-future" } },
+        "language": "zh-CN",
+        "rate": 3,
+        "autoPlayReplies": true
+      },
+      "expected": {
+        "schemaVersion": 3,
+        "recognition": { "source": "telepathy", "offlineModelId": "sherpa.future-stt" },
+        "speech": { "source": "offline", "offlineModelId": "sherpa.future-tts", "voice": { "source": "offline", "modelId": "sherpa.future-tts", "id": "voice-future" } },
+        "language": "zh-CN",
+        "rate": 2,
+        "autoPlayReplies": true
+      }
+    },
+    {
+      "name": "automatic speech with a persisted fixed voice is promoted",
+      "input": {
+        "schemaVersion": 3,
+        "recognition": { "source": "automatic", "offlineModelId": null },
+        "speech": { "source": "automatic", "offlineModelId": null, "voice": { "source": "system", "id": "com.apple.voice.compact.en-US.Alex" } },
+        "language": " AUTO ",
+        "rate": 0.25,
+        "autoPlayReplies": false
+      },
+      "expected": {
+        "schemaVersion": 3,
+        "recognition": { "source": "automatic", "offlineModelId": null },
+        "speech": { "source": "system", "offlineModelId": null, "voice": { "source": "system", "id": "com.apple.voice.compact.en-US.Alex" } },
+        "language": "auto",
+        "rate": 0.5,
+        "autoPlayReplies": false
+      }
+    },
+    {
+      "name": "preserve an offline voice whose model metadata is missing",
+      "input": {
+        "schemaVersion": 3,
+        "speech": { "source": "automatic", "offlineModelId": null, "voice": { "source": "offline", "id": "legacy-unbound-voice" } }
+      },
+      "expected": {
+        "schemaVersion": 3,
+        "recognition": { "source": "automatic", "offlineModelId": null },
+        "speech": { "source": "offline", "offlineModelId": null, "voice": { "source": "offline", "id": "legacy-unbound-voice" } },
+        "language": "auto",
+        "rate": 1,
+        "autoPlayReplies": false
+      }
+    }
+  ],
+  "migrations": [
+    {
+      "name": "localOnly becomes explicit offline recognition",
+      "input": { "schemaVersion": 2, "recognitionMode": "localOnly", "language": " zh-CN ", "autoPlayReplies": true },
+      "expected": {
+        "schemaVersion": 3,
+        "recognition": { "source": "offline", "offlineModelId": null },
+        "speech": { "source": "automatic", "offlineModelId": null, "voice": null },
+        "language": "zh-CN",
+        "rate": 1,
+        "autoPlayReplies": true
+      }
+    },
+    {
+      "name": "sherpa voice binds to its explicit model",
+      "input": { "schemaVersion": 2, "recognitionMode": "automatic", "voiceSelection": "sherpa:sherpa.melo-zh-en:melo-zh-en", "language": "zh-CN" },
+      "expected": {
+        "schemaVersion": 3,
+        "recognition": { "source": "automatic", "offlineModelId": null },
+        "speech": { "source": "offline", "offlineModelId": "sherpa.melo-zh-en", "voice": { "source": "offline", "modelId": "sherpa.melo-zh-en", "id": "melo-zh-en" } },
+        "language": "zh-CN",
+        "rate": 1,
+        "autoPlayReplies": false
+      }
+    },
+    {
+      "name": "unknown legacy recognition choice stays unavailable",
+      "input": { "schemaVersion": 1, "recognitionMode": "quantum", "voiceSelection": "system:missing.voice" },
+      "expected": {
+        "schemaVersion": 3,
+        "recognition": { "source": "quantum", "offlineModelId": null },
+        "speech": { "source": "system", "offlineModelId": null, "voice": { "source": "system", "id": "missing.voice" } },
+        "language": "auto",
+        "rate": 1,
+        "autoPlayReplies": false
+      }
+    }
+  ],
+  "routes": [
+    {
+      "name": "automatic is system first",
+      "input": {
+        "kind": "recognition",
+        "preference": { "source": "automatic", "offlineModelId": null },
+        "language": "zh-CN",
+        "systemStatus": "available",
+        "offlineModels": [{ "id": "sherpa.zipformer-zh-14m-mobile", "kind": "recognition", "languages": ["zh"], "installed": true }]
+      },
+      "expected": {
+        "requested": { "source": "automatic", "offlineModelId": null, "voice": null },
+        "effective": { "source": "system", "modelId": null, "voiceId": null },
+        "status": "ready",
+        "reason": "ready",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "automatic falls back in catalog order when system is unavailable",
+      "input": {
+        "kind": "recognition",
+        "preference": { "source": "automatic", "offlineModelId": null },
+        "language": "en-US",
+        "systemStatus": "unavailable",
+        "offlineModels": [
+          { "id": "sherpa.zipformer-zh-14m-mobile", "kind": "recognition", "languages": ["zh"], "installed": true },
+          { "id": "sherpa.moonshine-tiny-en", "kind": "recognition", "languages": ["en"], "installed": true }
+        ]
+      },
+      "expected": {
+        "requested": { "source": "automatic", "offlineModelId": null, "voice": null },
+        "effective": { "source": "offline", "modelId": "sherpa.moonshine-tiny-en", "voiceId": null },
+        "status": "ready",
+        "reason": "ready",
+        "fallbackReason": "systemUnavailable"
+      }
+    },
+    {
+      "name": "explicit unknown offline model remains unavailable",
+      "input": {
+        "kind": "speech",
+        "preference": { "source": "offline", "offlineModelId": "sherpa.future-tts", "voice": null },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": [{ "id": "sherpa.kitten-nano-en", "kind": "speech", "languages": ["en"], "installed": true }]
+      },
+      "expected": {
+        "requested": { "source": "offline", "offlineModelId": "sherpa.future-tts", "voice": null },
+        "effective": null,
+        "status": "unavailable",
+        "reason": "offlineModelUnknown",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "per-call system voice narrows automatic speech",
+      "input": {
+        "kind": "speech",
+        "preference": { "source": "automatic", "offlineModelId": null, "voice": null },
+        "language": "en-US",
+        "systemStatus": "available",
+        "systemVoiceIds": ["com.apple.voice.compact.en-US.Alex"],
+        "voiceOverride": { "source": "system", "id": "com.apple.voice.compact.en-US.Alex" },
+        "offlineModels": [{ "id": "sherpa.kitten-nano-en", "kind": "speech", "languages": ["en"], "installed": true, "voiceIds": ["expr-voice-2-f"] }]
+      },
+      "expected": {
+        "requested": { "source": "automatic", "offlineModelId": null, "voice": { "source": "system", "id": "com.apple.voice.compact.en-US.Alex" } },
+        "effective": { "source": "system", "modelId": null, "voiceId": "com.apple.voice.compact.en-US.Alex" },
+        "status": "ready",
+        "reason": "ready",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "unbound offline voice stays invalid instead of choosing a default voice",
+      "input": {
+        "kind": "speech",
+        "preference": { "source": "offline", "offlineModelId": null, "voice": { "source": "offline", "id": "legacy-unbound-voice" } },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": [{ "id": "sherpa.kitten-nano-en", "kind": "speech", "languages": ["en"], "installed": true, "voiceIds": ["expr-voice-2-f"] }]
+      },
+      "expected": {
+        "requested": { "source": "offline", "offlineModelId": null, "voice": { "source": "offline", "id": "legacy-unbound-voice" } },
+        "effective": null,
+        "status": "invalidRequest",
+        "reason": "offlineModelConflict",
+        "fallbackReason": null
+      }
+    }
+  ]
+}

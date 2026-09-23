@@ -5737,46 +5737,26 @@ pub fn desktop_skill_registry() -> SkillRegistry {
     reg
 }
 
-/// The three device-audio capabilities a desktop host can inject, together.
+/// The single device-audio service a desktop host can inject.
 ///
-/// One struct rather than three independent `Option`s because the desktop's
-/// only implementation — `bridge_server::audio_bridge::AudioBridge` — is a
-/// SINGLE object implementing all three traits over one client connection.
-/// Splitting them here would invite half-wired states that cannot occur and
-/// that nothing downstream knows how to mean.
-///
-/// `None` on every host that has no client to proxy to (CLI, TUI, the offline
-/// factories); `Some` only on the bridge path, filled by
-/// `bridge_server::boot::assemble` from the connection it is assembling.
+/// `None` when the host has no audio path; the bridge path fills it from the
+/// connection it is assembling. That service may report unknown support until
+/// the connected client sends its initial capability snapshot.
 #[derive(Clone)]
 pub struct DesktopAudio {
-    /// Raw microphone capture — the `voice` tool routes here.
-    pub voice: Arc<dyn platform_api::voice::VoiceRecorder>,
-    /// Speech recognition — the `speech` tool's `transcribe` routes here.
-    pub stt: Arc<dyn platform_api::stt::SpeechToText>,
-    /// Speech synthesis — the `speech` tool's `speak` routes here.
-    pub tts: Arc<dyn platform_api::tts::TextToSpeech>,
+    /// App-scoped device audio service.
+    pub service: Arc<dyn platform_api::audio::AudioService>,
 }
 
 impl DesktopAudio {
-    /// Build from one object that implements all three traits.
-    ///
-    /// The desktop case: `AudioBridge` is `SpeechToText + TextToSpeech +
-    /// VoiceRecorder` over a single connection, so all three handles are the
-    /// SAME allocation and share its pending-request table. A host with three
-    /// separate implementations constructs the struct directly instead.
+    /// Build from one app-scoped audio service.
     #[must_use]
     pub fn from_single<T>(implementation: Arc<T>) -> Self
     where
-        T: platform_api::voice::VoiceRecorder
-            + platform_api::stt::SpeechToText
-            + platform_api::tts::TextToSpeech
-            + 'static,
+        T: platform_api::audio::AudioService + 'static,
     {
         Self {
-            voice: implementation.clone(),
-            stt: implementation.clone(),
-            tts: implementation,
+            service: implementation,
         }
     }
 }
@@ -6322,15 +6302,14 @@ pub struct DesktopConfig {
     /// event sink; CLI/TUI hosts leave it unset so their behavior is unchanged.
     pub session_agent_observer:
         Option<Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>>,
-    /// Optional device-audio capability (microphone / recognizer / synthesizer).
+    /// Optional app-scoped device-audio service (capture / live recognition /
+    /// synthesis / playback).
     ///
     /// `Some` only on the bridge path: `bridge_server::boot::assemble` builds an
-    /// `AudioBridge` over the connection it is assembling and fills this, so the
-    /// engine's audio trait calls become `AudioRequest` events at the Electron
-    /// client. Every other desktop host (CLI, TUI, the offline factories) leaves
-    /// it `None`, which keeps `ctx.voice`/`ctx.stt`/`ctx.tts` `None` AND leaves
-    /// the `voice` / `speech` tools unregistered — the tool surface is
-    /// byte-identical to what it was before this field existed.
+    /// `AudioBridge` over the connection it is assembling and fills this. The
+    /// service's live support snapshot controls the model-facing audio action
+    /// schemas. Every other desktop host (CLI, TUI, offline factories) leaves it
+    /// `None`, so audio tools are absent.
     pub audio: Option<DesktopAudio>,
 }
 
@@ -14966,15 +14945,12 @@ pub async fn build_with_credential_stack(
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: None,
-        // Device audio. `None` on every host that has no client to proxy to
-        // (CLI, TUI, the offline factories); on the bridge path all three are
-        // the SAME `AudioBridge`, which turns each trait call into an
-        // `AudioRequest` event for the connected Electron client. Whether the
-        // two audio TOOLS are registered follows from these three being `Some`
-        // — see `register_desktop_tools`.
-        voice: desktop_audio.as_ref().map(|audio| audio.voice.clone()),
-        stt: desktop_audio.as_ref().map(|audio| audio.stt.clone()),
-        tts: desktop_audio.as_ref().map(|audio| audio.tts.clone()),
+        // Device audio. Only bridge connections inject the one service; tools
+        // and host-managed voice handles share it.
+        audio: desktop_audio.as_ref().map(|audio| audio.service.clone()),
+        audio_recording_handles: Arc::new(
+            tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        ),
         share: None,
         notifications: None,
         clipboard: None,

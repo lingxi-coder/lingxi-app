@@ -345,8 +345,8 @@ struct RootView: View {
             initialValue: VoiceInteractionController(
                 voiceCapture: VoiceCapture(),
                 capability: voiceCapability,
-                speechPlayer: SystemVoiceSpeechPlayer(),
-                bargeInRecognizer: VoiceBargeInRecognizer(),
+                speechPlayer: IOSAudioService.shared.speechPlayer,
+                bargeInRecognizer: IOSAudioService.shared.bargeInRecognizer,
                 readinessOverride: voiceReadinessOverride
             )
         )

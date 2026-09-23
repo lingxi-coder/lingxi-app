@@ -5,16 +5,8 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-  browserProbeDeps,
-  hostMicrophonePermissionReader,
-  probePlatform,
-  subscribeMicrophoneGrantChanges,
-  type VoicePermissionStatus,
-} from '../src/renderer/audio/capabilities';
-import { voicePageModel } from '../src/renderer/components/settings/pages/Voice';
-import { defaultNativeAudioSnapshot } from '../src/shared/nativeAudio';
-import { defaultVoicePreferences } from '../src/shared/voicePreferences';
+import { hostMicrophonePermissionReader, type MicrophonePermissionStatus as VoicePermissionStatus } from '../src/shared/microphoneAccess';
+import { subscribeMicrophoneGrantChanges } from '../src/renderer/audio/microphoneLifecycle';
 import { HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { requestMicrophoneAccess } from '../src/main/microphoneAccess';
@@ -185,62 +177,6 @@ test('a machine with no media-access API at all reports "unavailable", never a c
   } finally {
     harness.dispose();
   }
-});
-
-/** Installs the browser globals `browserProbeDeps` touches, with a `navigator.permissions` that lies exactly the way this app's own permission-check handler makes it lie. */
-function installBrowserGlobals(): () => void {
-  const hadWindow = 'window' in globalThis;
-  const previousWindow = (globalThis as { window?: unknown }).window;
-  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-  (globalThis as { window?: unknown }).window = {
-    speechSynthesis: {
-      getVoices: () => [],
-      addEventListener: () => undefined,
-      removeEventListener: () => undefined,
-    },
-  };
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: {
-      language: 'zh-CN',
-      // What `session.setPermissionCheckHandler` makes this answer for the
-      // app's own renderer, whatever macOS actually thinks.
-      permissions: { query: async () => ({ state: 'granted' }) },
-    },
-  });
-  return () => {
-    if (hadWindow) (globalThis as { window?: unknown }).window = previousWindow;
-    else delete (globalThis as { window?: unknown }).window;
-    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
-    else delete (globalThis as { navigator?: unknown }).navigator;
-  };
-}
-
-test('the voice page probe takes the microphone state from the OS-backed host bridge, never from navigator.permissions', async () => {
-  const restore = installBrowserGlobals();
-  try {
-    const deps = browserProbeDeps(null, [], async () => 'denied');
-    assert.equal(
-      await deps.queryMicrophonePermission(),
-      'denied',
-      'the probe answered from navigator.permissions (the page permission this app grants itself), not from the OS grant '
-      + 'the main process reads — the exact substitution that let the row say 已授权 while every recording failed',
-    );
-  } finally {
-    restore();
-  }
-});
-
-test('a denied OS grant reaches the native voice page model and blocking notice', () => {
-  const model = voicePageModel(defaultVoicePreferences(), {
-    ...defaultNativeAudioSnapshot(),
-    permissions: { microphone: 'denied', speech: 'not_determined' },
-    localeTag: 'zh-CN',
-  });
-
-  assert.equal(model.microphonePermission, 'denied');
-  assert.equal(model.microphonePermissionLabel, '未授权');
-  assert.ok(model.notices.some((notice) => /尚未获得麦克风权限/.test(notice)));
 });
 
 test('the microphone System Settings pane is accepted by the main process, so the row\'s button is not a dead link', async () => {

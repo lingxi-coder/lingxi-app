@@ -13,6 +13,7 @@ import {
 } from './credential-broker.js';
 import { CODEX_PROVIDER_ID, parseCodexSession } from './codex-auth.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
+import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
 import { TerminalManager } from './terminal.js';
 import { HostController } from './host.js';
 import { HostNotifier } from './notifications.js';
@@ -192,6 +193,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         userDataPath: userData,
         diagnostics,
         requestMicrophoneAccess: () => requestMicrophoneAccess(),
+        getAudioConfiguration: () => {
+          const error = settings.getAudioConfigurationError();
+          if (error) throw new Error(error);
+          return settings.getPublic().voice ?? audioConfigurationDefaults();
+        },
+        getAudioConfigurationRevision: () => settings.getPublic().voiceRevision ?? 0,
+        isForeground: () => windowFocused,
       })
     : null;
   const sessionCatalog = new ProjectSessionCatalog({
@@ -237,6 +245,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     lockfileTimeoutMs: 30_000,
     providerIds: PROVIDER_IDS,
     diagnostics,
+    audioService: nativeAudio ?? undefined,
     accessState: (ref: SessionRef) => {
       try {
         // Adding a Project is the Desktop trust decision. Repository edits must

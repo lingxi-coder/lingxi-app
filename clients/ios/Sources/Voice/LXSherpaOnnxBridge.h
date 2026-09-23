@@ -9,6 +9,16 @@ extern "C" {
 
 typedef struct LXOnlineRecognizer LXOnlineRecognizer;
 typedef struct LXOnlineStream LXOnlineStream;
+typedef struct LXAudioCancellationToken LXAudioCancellationToken;
+
+#define LX_SHERPA_TTS_SUCCESS 1
+#define LX_SHERPA_TTS_FAILURE 0
+#define LX_SHERPA_TTS_MEDIA_TOO_LARGE 2
+#define LX_SHERPA_TTS_CANCELLED 3
+
+LXAudioCancellationToken *LXAudioCancellationTokenCreate(void);
+void LXAudioCancellationTokenCancel(LXAudioCancellationToken *token);
+void LXAudioCancellationTokenDestroy(LXAudioCancellationToken *token);
 
 LXOnlineRecognizer *LXOnlineRecognizerCreate(const char *model_directory);
 void LXOnlineRecognizerDestroy(LXOnlineRecognizer *recognizer);
@@ -37,6 +47,8 @@ int32_t LXSherpaTtsCopyPCM16(
     const char *text,
     int32_t speaker_id,
     float speed,
+    uint64_t maximum_raw_bytes,
+    LXAudioCancellationToken *cancellation_token,
     int16_t **samples,
     int32_t *sample_count,
     int32_t *sample_rate

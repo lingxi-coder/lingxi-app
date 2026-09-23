@@ -10,9 +10,9 @@
 //! Swift object.
 
 use platform_api::{
-    CalendarProvider, CameraControl, Clipboard, ContactsProvider, DeepLinkOpener,
-    DeviceStatusProvider, HapticService, LocationProvider, NotificationService, SharingService,
-    SpeechToText, TextToSpeech, VoiceRecorder,
+    audio::AudioService, CalendarProvider, CameraControl, Clipboard, ContactsProvider,
+    DeepLinkOpener, DeviceStatusProvider, HapticService, LocationProvider, NotificationService,
+    SharingService,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -93,22 +93,18 @@ impl MediaCache {
 #[derive(Clone, Default)]
 pub(crate) struct DeviceCapabilities {
     pub(crate) camera: Option<Arc<dyn CameraControl>>,
-    pub(crate) voice: Option<Arc<dyn VoiceRecorder>>,
+    /// Shared device AudioService. Local App capture, live transcription and
+    /// silent synthesis use the same service as tools and Computer Use.
+    pub(crate) audio: Option<Arc<dyn AudioService>>,
     pub(crate) location: Option<Arc<dyn LocationProvider>>,
     pub(crate) notifications: Option<Arc<dyn NotificationService>>,
     pub(crate) clipboard: Option<Arc<dyn Clipboard>>,
     pub(crate) share: Option<Arc<dyn SharingService>>,
-    pub(crate) tts: Option<Arc<dyn TextToSpeech>>,
     pub(crate) device_status: Option<Arc<dyn DeviceStatusProvider>>,
     pub(crate) haptics: Option<Arc<dyn HapticService>>,
     pub(crate) deep_link: Option<Arc<dyn DeepLinkOpener>>,
     pub(crate) calendar: Option<Arc<dyn CalendarProvider>>,
     pub(crate) contacts: Option<Arc<dyn ContactsProvider>>,
-    /// Live microphone transcription. This — not an audio attachment — is
-    /// how speech reaches the model: the conversation protocol has no audio
-    /// content block, and `SpeechToText::transcribe` opens the mic for one
-    /// utterance rather than transcribing a file.
-    pub(crate) stt: Option<Arc<dyn SpeechToText>>,
 }
 
 /// Mirror of `SharedLlm` for device handles: read fresh on every use,
@@ -205,6 +201,6 @@ mod tests {
             ..DeviceCapabilities::default()
         });
         assert!(shared.current().camera.is_some());
-        assert!(shared.current().voice.is_none());
+        assert!(shared.current().audio.is_none());
     }
 }

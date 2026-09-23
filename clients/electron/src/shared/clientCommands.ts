@@ -81,7 +81,8 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   mcp_admin: 'exposed',
   plugin_admin: 'exposed',
   hook_admin: 'exposed',
-  audio_response: 'exposed',
+  audio_response: 'host_private',
+  update_audio_capabilities: 'host_private',
 } as const satisfies Record<ClientCommand['type'], DesktopDisposition>;
 
 export const REFRESH_LISTING_DISPOSITIONS = {
@@ -182,7 +183,9 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   thinking_delta: 'exposed',
   usage_update: 'exposed',
   api_retry: 'exposed',
-  audio_request: 'exposed',
+  audio_request: 'host_private',
+  audio_cancel: 'host_private',
+  audio_capabilities_changed: 'host_private',
 } as const satisfies Record<ClientEvent['type'], DesktopDisposition>;
 
 export const PLUGIN_COMMAND_DISPOSITIONS = {
@@ -265,13 +268,6 @@ export const ALLOWED_CLIENT_COMMAND_TYPES = [
   'mcp_admin',
   'plugin_admin',
   'hook_admin',
-  // The renderer's answer to `ClientEvent::AudioRequest` — the client side of
-  // `audio_bridge.rs`'s `AudioBridge`. Unlike every other entry here it is
-  // never sent because a user clicked something: the engine PARKS a call on a
-  // deadline waiting for it (5s / 30s / 180s per op), so leaving it off this
-  // array is not "one fewer feature", it is every microphone and
-  // text-to-speech call in the product stalling and then failing.
-  'audio_response',
 ] as const;
 
 /**

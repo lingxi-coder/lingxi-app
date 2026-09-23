@@ -95,8 +95,12 @@ export interface PublicSettings {
    * `VoiceConfig`, normalized by `shared/voicePreferences.ts`). Omitted
    * (not defaulted) when never written, matching every other optional
    * field here.
-   */
+  */
   voice?: VoicePreferences;
+  /** Revision of the device-local audio configuration; advances after each successful save. */
+  voiceRevision?: number;
+  /** Present when the existing settings file cannot be read safely. */
+  audioConfigurationError?: string;
   /**
    * OS-notification preferences (`shared/notificationPreferences.ts`). The
    * vocabulary is upstream Claude Code's (`inputNeededNotifEnabled`,

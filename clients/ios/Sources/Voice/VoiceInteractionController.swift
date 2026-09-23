@@ -29,19 +29,28 @@ struct VoiceSpeechRequest: Equatable {
     let voiceIdentifier: String
     let languageIdentifier: String
     let speed: Double
+    var route: AudioRouteResolution? = nil
+    var maxPayloadBytes: UInt64? = nil
+    var configurationRevision: UInt64? = nil
 }
 
 struct VoiceSpeechConfiguration: Equatable {
     let voiceIdentifier: String
     let languageIdentifier: String
     let speed: Double
+    var route: AudioRouteResolution? = nil
+    var maxPayloadBytes: UInt64? = nil
+    var configurationRevision: UInt64? = nil
 
     func request(text: String) -> VoiceSpeechRequest {
         VoiceSpeechRequest(
             text: text,
             voiceIdentifier: voiceIdentifier,
             languageIdentifier: languageIdentifier,
-            speed: speed
+            speed: speed,
+            route: route,
+            maxPayloadBytes: maxPayloadBytes,
+            configurationRevision: configurationRevision
         )
     }
 }
@@ -122,15 +131,30 @@ private final class BufferedVoiceSpeechSession: VoiceSpeechStreamingSession {
 
 @MainActor
 final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
+    private let coordinator: VoiceAudioSessionCoordinator
+    private let modelRoot: (GeneratedOfflineModelEntry) -> URL?
     private var activeStream: (any VoiceSpeechStreamingSession)?
     private var activeStreamID: ObjectIdentifier?
+
+    init(
+        coordinator: VoiceAudioSessionCoordinator? = nil,
+        modelRoot: @escaping (GeneratedOfflineModelEntry) -> URL? = VoiceModelFiles.modelRoot
+    ) {
+        self.coordinator = coordinator ?? .shared
+        self.modelRoot = modelRoot
+    }
+
+    var hasActivePlayback: Bool { activeStream != nil }
 
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome {
         let stream = try await openStream(
             configuration: VoiceSpeechConfiguration(
                 voiceIdentifier: request.voiceIdentifier,
                 languageIdentifier: request.languageIdentifier,
-                speed: request.speed
+                speed: request.speed,
+                route: request.route,
+                maxPayloadBytes: request.maxPayloadBytes,
+                configurationRevision: request.configurationRevision
             ),
             managesAudioSession: true
         )
@@ -145,25 +169,88 @@ final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
         Task { await activeStream.stop() }
     }
 
+    func stopAndWait() async {
+        guard let activeStream else { return }
+        self.activeStream = nil
+        activeStreamID = nil
+        await activeStream.stop()
+    }
+
     func openStream(
         configuration: VoiceSpeechConfiguration,
         managesAudioSession: Bool
     ) async throws -> any VoiceSpeechStreamingSession {
+        try Task.checkCancellation()
         if let activeStream {
             await activeStream.stop()
+            try Task.checkCancellation()
         }
-        let lease = managesAudioSession
-            ? try await VoiceAudioSessionCoordinator.shared.acquire(.playback)
-            : nil
-        if let selection = VoiceRuntimeResolver.parseSherpaVoice(configuration.voiceIdentifier),
-           let model = GeneratedVoiceModelCatalog.byID(selection.modelID),
-           let directory = VoiceModelFiles.modelRoot(for: model) {
+        var lease: VoiceAudioSessionCoordinator.Lease?
+        let routedVoiceIdentifier: String
+        if let route = configuration.route {
+            guard route.status == .ready, let effective = route.effective else {
+                throw AudioServiceFailure.unavailable
+            }
+            switch effective.source {
+            case .system:
+                routedVoiceIdentifier = effective.voiceId.map { "system:\($0)" } ?? "system:default"
+                lease = try await acquireLeaseIfNeeded(managesAudioSession)
+            case .offline:
+                guard let modelID = effective.modelId,
+                      let model = GeneratedVoiceModelCatalog.byID(modelID),
+                      model.kind == .tts,
+                      let directory = modelRoot(model)
+                else { throw AudioServiceFailure.modelMissing }
+                guard let voiceID = Self.resolvedOfflineVoiceID(for: effective.voiceId, model: model) else {
+                    throw AudioServiceFailure.voiceMissing
+                }
+                guard let voiceIndex = model.voices.firstIndex(where: { $0.id == voiceID }) else {
+                    throw AudioServiceFailure.voiceMissing
+                }
+                lease = try await acquireLeaseIfNeeded(managesAudioSession)
+                let modelReference = VoiceModelStore.shared.retainForAudioUse(modelID)
+                let stream = SherpaVoiceSpeechStream(
+                    configuration: VoiceSpeechConfiguration(
+                        voiceIdentifier: "sherpa:\(modelID):\(voiceID)",
+                        languageIdentifier: configuration.languageIdentifier,
+                        speed: configuration.speed,
+                        route: route,
+                        maxPayloadBytes: configuration.maxPayloadBytes,
+                        configurationRevision: configuration.configurationRevision
+                    ),
+                    modelID: model.id,
+                    modelDirectory: directory,
+                    speakerID: Int32(voiceIndex),
+                    audioLease: lease,
+                    modelReference: modelReference,
+                    coordinator: coordinator
+                )
+                let streamID = ObjectIdentifier(stream)
+                stream.onTerminal = { [weak self] in
+                    guard self?.activeStreamID == streamID else { return }
+                    self?.activeStream = nil
+                    self?.activeStreamID = nil
+                }
+                activeStream = stream
+                activeStreamID = streamID
+                return stream
+            default:
+                throw AudioServiceFailure.unavailable
+            }
+        } else if let selection = VoiceRuntimeResolver.parseSherpaVoice(configuration.voiceIdentifier),
+                  let model = GeneratedVoiceModelCatalog.byID(selection.modelID),
+                  let directory = VoiceModelFiles.modelRoot(for: model) {
+            routedVoiceIdentifier = configuration.voiceIdentifier
+            lease = try await acquireLeaseIfNeeded(managesAudioSession)
+            let modelReference = VoiceModelStore.shared.retainForAudioUse(model.id)
             let stream = SherpaVoiceSpeechStream(
                 configuration: configuration,
                 modelID: model.id,
                 modelDirectory: directory,
                 speakerID: Int32(model.voices.firstIndex(where: { $0.id == selection.voiceID }) ?? 0),
-                audioLease: lease
+                audioLease: lease,
+                modelReference: modelReference,
+                coordinator: coordinator
             )
             let streamID = ObjectIdentifier(stream)
             stream.onTerminal = { [weak self] in
@@ -174,8 +261,23 @@ final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
             activeStream = stream
             activeStreamID = streamID
             return stream
+        } else {
+            routedVoiceIdentifier = configuration.voiceIdentifier
+            lease = try await acquireLeaseIfNeeded(managesAudioSession)
         }
-        let stream = SystemVoiceSpeechStream(configuration: configuration, audioLease: lease)
+        let systemConfiguration = VoiceSpeechConfiguration(
+            voiceIdentifier: routedVoiceIdentifier,
+            languageIdentifier: configuration.languageIdentifier,
+            speed: configuration.speed,
+            route: configuration.route,
+            maxPayloadBytes: configuration.maxPayloadBytes,
+            configurationRevision: configuration.configurationRevision
+        )
+        let stream = SystemVoiceSpeechStream(
+            configuration: systemConfiguration,
+            audioLease: lease,
+            coordinator: coordinator
+        )
         let streamID = ObjectIdentifier(stream)
         stream.onTerminal = { [weak self] in
             guard self?.activeStreamID == streamID else { return }
@@ -186,11 +288,34 @@ final class SystemVoiceSpeechPlayer: VoiceSpeechPlaying {
         activeStreamID = streamID
         return stream
     }
+
+    static func resolvedOfflineVoiceID(
+        for requestedVoiceID: String?,
+        model: GeneratedOfflineModelEntry
+    ) -> String? {
+        guard model.kind == .tts else { return nil }
+        let voiceID = requestedVoiceID ?? model.voices.first?.id
+        guard let voiceID, model.voices.contains(where: { $0.id == voiceID }) else { return nil }
+        return voiceID
+    }
+
+    private func acquireLeaseIfNeeded(_ managesAudioSession: Bool) async throws -> VoiceAudioSessionCoordinator.Lease? {
+        guard managesAudioSession else { return nil }
+        let lease = try await coordinator.acquire(.playback)
+        do {
+            try Task.checkCancellation()
+            return lease
+        } catch {
+            await coordinator.release(lease)
+            throw error
+        }
+    }
 }
 
 @MainActor
 final class SystemVoiceSpeechStream: NSObject, VoiceSpeechStreamingSession, AVSpeechSynthesizerDelegate {
     private let configuration: VoiceSpeechConfiguration
+    private let coordinator: VoiceAudioSessionCoordinator
     private let synthesizer = AVSpeechSynthesizer()
     private var audioLease: VoiceAudioSessionCoordinator.Lease?
     private var queuedText: [String] = []
@@ -208,10 +333,12 @@ final class SystemVoiceSpeechStream: NSObject, VoiceSpeechStreamingSession, AVSp
 
     init(
         configuration: VoiceSpeechConfiguration,
-        audioLease: VoiceAudioSessionCoordinator.Lease?
+        audioLease: VoiceAudioSessionCoordinator.Lease?,
+        coordinator: VoiceAudioSessionCoordinator? = nil
     ) {
         self.configuration = configuration
         self.audioLease = audioLease
+        self.coordinator = coordinator ?? .shared
         super.init()
         synthesizer.delegate = self
         synthesizer.usesApplicationAudioSession = true
@@ -372,9 +499,10 @@ final class SystemVoiceSpeechStream: NSObject, VoiceSpeechStreamingSession, AVSp
         observers = []
         let lease = audioLease
         audioLease = nil
+        let coordinator = self.coordinator
         Task { @MainActor [weak self] in
             if let lease {
-                await VoiceAudioSessionCoordinator.shared.release(lease)
+                await coordinator.release(lease)
             }
             let continuations = self?.finishContinuations ?? []
             self?.finishContinuations.removeAll()
@@ -416,7 +544,7 @@ final class SystemVoiceSpeechStream: NSObject, VoiceSpeechStreamingSession, AVSp
 /// awaited before Flow Mode tries to acquire the microphone lease.
 @MainActor
 final class VoicePreviewPlayback {
-    static let shared = VoicePreviewPlayback(player: SystemVoiceSpeechPlayer())
+    static let shared = VoicePreviewPlayback(player: IOSAudioService.shared.speechPlayer)
 
     private let player: any VoiceSpeechPlaying
     private var activeID: UUID?
@@ -467,6 +595,7 @@ final class VoicePreviewPlayback {
 private final class FlowResponseContext {
     let token: ConversationTurnToken
     let operation: UInt64
+    let audioConfigurationSnapshot: AudioConfigurationSnapshot
     var segmenter = StreamingSpeechSegmenter()
     var lastSpeechSequence: UInt64 = 0
     var pendingSegments: [String] = []
@@ -478,9 +607,10 @@ private final class FlowResponseContext {
     var isInterrupting = false
     var bargeInUnavailable = false
 
-    init(token: ConversationTurnToken, operation: UInt64) {
+    init(token: ConversationTurnToken, operation: UInt64, audioConfigurationSnapshot: AudioConfigurationSnapshot) {
         self.token = token
         self.operation = operation
+        self.audioConfigurationSnapshot = audioConfigurationSnapshot
     }
 }
 
@@ -526,13 +656,14 @@ final class VoiceInteractionController {
     private var pendingInterruptionTranscript: String?
     private var resumeAfterConfiguration = false
     private var generation: UInt64 = 0
+    private var activeAudioConfigurationSnapshot: AudioConfigurationSnapshot?
 
     init() {
         voiceCapture = VoiceCapture()
         let capability = VoiceCapabilityModel()
         self.capability = capability
-        speechPlayer = SystemVoiceSpeechPlayer()
-        bargeInRecognizer = VoiceBargeInRecognizer()
+        speechPlayer = IOSAudioService.shared.speechPlayer
+        bargeInRecognizer = IOSAudioService.shared.bargeInRecognizer
         readinessOverride = nil
         permissionRequester = { await capability.requestPermissions() }
         loopDelay = .milliseconds(350)
@@ -1019,10 +1150,13 @@ final class VoiceInteractionController {
         caption = ""
         detailOverride = nil
         resumeAfterConfiguration = false
+        let audioConfigurationSnapshot = capability.configurationSnapshot
+        activeAudioConfigurationSnapshot = audioConfigurationSnapshot
         transition(to: .listening)
         voiceCapture.start(
             language: capability.language,
-            automaticEndpointAfterSilence: mode == .flow ? flowSilenceInterval : nil
+            automaticEndpointAfterSilence: mode == .flow ? flowSilenceInterval : nil,
+            configurationSnapshot: audioConfigurationSnapshot
         ) { [weak self] result in
             guard let self, self.generation == operation else { return }
             self.handleCaptureResult(result, operation: operation)
@@ -1080,17 +1214,44 @@ final class VoiceInteractionController {
         flowPausedInBackground = false
         pendingInterruptionTranscript = nil
         let operation = nextGeneration()
-        let context = FlowResponseContext(token: token, operation: operation)
+        let context = FlowResponseContext(
+            token: token,
+            operation: operation,
+            audioConfigurationSnapshot: activeAudioConfigurationSnapshot ?? capability.configurationSnapshot
+        )
         flowContext = context
         startBargeInMonitoring(context)
     }
 
     private var speechConfiguration: VoiceSpeechConfiguration {
-        VoiceSpeechConfiguration(
-            voiceIdentifier: capability.selectedVoice?.id
-                ?? VoicePreferencesSnapshot.defaultVoiceSelection,
-            languageIdentifier: capability.effectiveLanguageIdentifier,
-            speed: capability.speed
+        speechConfiguration(snapshot: capability.configurationSnapshot)
+    }
+
+    private func speechConfiguration(snapshot: AudioConfigurationSnapshot) -> VoiceSpeechConfiguration {
+        let route = AudioConfigurationRuntime.route(kind: .speech, snapshot: snapshot)
+        let voiceIdentifier: String
+        if let effective = route.effective {
+            switch effective.source {
+            case .system:
+                voiceIdentifier = effective.voiceId.map { "system:\($0)" } ?? "system:default"
+            case .offline:
+                voiceIdentifier = "sherpa:\(effective.modelId ?? "unknown"):\(effective.voiceId ?? "unknown")"
+            default:
+                voiceIdentifier = ""
+            }
+        } else {
+            voiceIdentifier = ""
+        }
+        return VoiceSpeechConfiguration(
+            voiceIdentifier: voiceIdentifier,
+            languageIdentifier: resolveAudioLanguageForNativeDevice(
+                configured: snapshot.configuration.language,
+                deviceLocale: Locale.autoupdatingCurrent.identifier
+            ),
+            speed: snapshot.configuration.rate,
+            route: route,
+            maxPayloadBytes: IOSAudioService.shared.maximumPayloadBytes,
+            configurationRevision: snapshot.revision
         )
     }
 
@@ -1112,8 +1273,9 @@ final class VoiceInteractionController {
             guard let self, let context else { return }
             do {
                 let session = try await bargeInRecognizer.start(
-                    language: self.capability.language,
-                    prefersOnDevice: self.capability.mode == .onDevice
+                    language: context.audioConfigurationSnapshot.configuration.language,
+                    prefersOnDevice: context.audioConfigurationSnapshot.configuration.recognition.source == .offline,
+                    configurationSnapshot: context.audioConfigurationSnapshot
                 )
                 guard !Task.isCancelled,
                       self.generation == context.operation,
@@ -1315,7 +1477,7 @@ final class VoiceInteractionController {
             guard let self, let context else { return }
             do {
                 let session = try await self.speechPlayer.openStream(
-                    configuration: self.speechConfiguration,
+                    configuration: self.speechConfiguration(snapshot: context.audioConfigurationSnapshot),
                     managesAudioSession: context.bargeInSession == nil
                 )
                 guard !Task.isCancelled,
@@ -1452,12 +1614,19 @@ final class VoiceInteractionController {
         guard !text.isEmpty else { return }
 
         let operation = nextGeneration()
+        let snapshot = capability.configurationSnapshot
+        let route = AudioConfigurationRuntime.route(kind: .speech, snapshot: snapshot)
         let request = VoiceSpeechRequest(
             text: text,
-            voiceIdentifier: capability.selectedVoice?.id
-                ?? VoicePreferencesSnapshot.defaultVoiceSelection,
-            languageIdentifier: capability.effectiveLanguageIdentifier,
-            speed: capability.speed
+            voiceIdentifier: route.effective?.voiceId ?? VoicePreferencesSnapshot.defaultVoiceSelection,
+            languageIdentifier: resolveAudioLanguageForNativeDevice(
+                configured: snapshot.configuration.language,
+                deviceLocale: Locale.autoupdatingCurrent.identifier
+            ),
+            speed: snapshot.configuration.rate,
+            route: route,
+            maxPayloadBytes: IOSAudioService.shared.maximumPayloadBytes,
+            configurationRevision: snapshot.revision
         )
         speechTask?.cancel()
         speechTask = Task { @MainActor [weak self] in

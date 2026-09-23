@@ -67,8 +67,9 @@ import { MarkdownContent } from './MarkdownContent';
 import { VoiceFlowPanel } from './voice/VoiceFlowPanel';
 import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
-import { defaultVoicePreferences, LANGUAGE_AUTO } from '../../shared/voicePreferences';
-import type { NativeAudioOwner, NativeAudioResponse } from '../../shared/nativeAudio';
+import { audioConfigurationDefaults, resolveAudioLanguage } from '../../shared/generatedAudioConfiguration';
+import type { AudioOperationResultDto } from '@lingxi/bridge-client';
+import type { NativeAudioOwner } from '../../shared/nativeAudio';
 import {
   modelPickerSubmenuPlacement,
   MODEL_PICKER_MENU_WIDTH,
@@ -1353,9 +1354,8 @@ function nativeAudioApi(): NativeAudioApi | undefined {
 
 const DICTATION_WAVEFORM_SAMPLES = 160;
 
-export function DictationRecorderBar({ audio, owner, onCancel, onFinish, turnAction }: {
+export function DictationRecorderBar({ audio, onCancel, onFinish, turnAction }: {
   audio: NativeAudioApi | undefined;
-  owner: NativeAudioOwner;
   onCancel(): void;
   onFinish(): void;
   turnAction?: ReactNode;
@@ -1417,7 +1417,7 @@ export function DictationRecorderBar({ audio, owner, onCancel, onFinish, turnAct
   useEffect(() => {
     if (!audio) return;
     const unsubscribe = audio.onEvent((event) => {
-      if (event.type !== 'input_level' || event.owner.id !== owner.id || event.owner.kind !== owner.kind) return;
+      if (event.type !== 'input_level' || event.owner.kind !== 'ui') return;
       const levels = levelsRef.current;
       levels.copyWithin(0, 1);
       levels[levels.length - 1] = event.level;
@@ -1432,7 +1432,7 @@ export function DictationRecorderBar({ audio, owner, onCancel, onFinish, turnAct
       if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
       frameRef.current = null;
     };
-  }, [audio, drawWaveform, owner.id, owner.kind]);
+  }, [audio, drawWaveform]);
 
   const actionStyle: CSSProperties = {
     width: 40,
@@ -1467,13 +1467,6 @@ export function DictationRecorderBar({ audio, owner, onCancel, onFinish, turnAct
       {turnAction}
     </div>
   );
-}
-
-function resolvedVoiceLanguage(configured: string): string {
-  if (configured === LANGUAGE_AUTO) {
-    return typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US';
-  }
-  return configured;
 }
 
 function modelLabel(model?: string | null): string {
@@ -1668,9 +1661,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   imageAttachmentsRef.current = imageAttachments;
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
   const audio = nativeAudioApi();
-  const voicePrefs = bridge.bootstrap?.settings.voice ?? defaultVoicePreferences();
-  const voicePrefsRef = useRef(voicePrefs);
-  voicePrefsRef.current = voicePrefs;
+  const voicePrefs = bridge.bootstrap?.settings.voice ?? audioConfigurationDefaults();
+  const voicePrefsRef = useRef({ configuration: voicePrefs, revision: bridge.bootstrap?.settings.voiceRevision ?? 0 });
+  voicePrefsRef.current = { configuration: voicePrefs, revision: bridge.bootstrap?.settings.voiceRevision ?? 0 };
   const modelPickerVisibility = bridge.bootstrap?.settings.modelPickerVisibility;
   const dictationOwner = useRef<NativeAudioOwner | null>(null);
   const autoplayOwner = useRef<NativeAudioOwner | null>(null);
@@ -1680,6 +1673,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const flowModeRef = useRef(flowMode);
   flowModeRef.current = flowMode;
   const standardListeningRef = useRef(false);
+  const dictationGeneration = useRef(0);
 
   const slashCommands = useMemo(
     () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
@@ -2128,25 +2122,25 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     id: `${activeSessionId ?? 'desktop'}:${kind}`,
   }), [activeSessionId]);
 
-  const reportNativeAudioFailure = useCallback((response: NativeAudioResponse): boolean => {
-    if (response.type !== 'error') return false;
-    if (response.error.code === 'permission') setVoiceState('denied');
-    else if (response.error.code === 'unavailable') setVoiceState('unsupported');
+  const reportNativeAudioFailure = useCallback((result: AudioOperationResultDto): boolean => {
+    if (result.type !== 'failed') return false;
+    if (result.error.kind === 'permission_denied') setVoiceState('denied');
+    else if (result.error.kind === 'unavailable' || result.error.kind === 'unsupported') setVoiceState('unsupported');
     else setVoiceState('idle');
+    if (result.error.kind !== 'cancelled') setImageNotice(`语音操作失败：${result.error.message}`);
     return true;
   }, []);
 
   const cancelStandardListening = useCallback(async () => {
+    dictationGeneration.current += 1;
     const owner = dictationOwner.current;
     standardListeningRef.current = false;
     dictationOwner.current = null;
     dictationInsertionRange.current = null;
     setVoiceState('idle');
     if (!audio || !owner) return;
-    try {
-      await audio.request({ type: 'cancel', owner });
-    } catch {}
-  }, [audio]);
+    try { await bridge.audioCancel(); } catch {}
+  }, [audio, bridge.audioCancel]);
 
   const cancelAutoplay = useCallback(async () => {
     autoplaySubscription.current?.();
@@ -2154,13 +2148,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     const owner = autoplayOwner.current;
     autoplayOwner.current = null;
     if (!audio || !owner) return;
-    try {
-      await audio.request({ type: 'stop_speaking', owner });
-    } catch {}
-  }, [audio]);
+    try { await bridge.audioCancel(); } catch {}
+  }, [audio, bridge.audioCancel]);
 
   const startStandardListening = async () => {
-    if (!audio) {
+    if (!audio || typeof bridge.audioExecute !== 'function') {
       setVoiceState('unsupported');
       return;
     }
@@ -2168,43 +2160,44 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     dictationInsertionRange.current = editor ? editorSelection(editor).cloneRange() : savedEditorSelection.current?.cloneRange() ?? null;
     const owner = audioOwner('dictation');
     dictationOwner.current = owner;
-    const permissions = await audio.request({ type: 'request_authorization', permissions: ['microphone', 'speech'] });
-    if (reportNativeAudioFailure(permissions)) {
-      dictationOwner.current = null;
-      dictationInsertionRange.current = null;
-      return;
-    }
-    const response = await audio.request({
-      type: 'start_listening',
-      owner,
-      recognitionMode: voicePrefs.recognitionMode,
-      language: resolvedVoiceLanguage(voicePrefs.language),
-    });
-    if (reportNativeAudioFailure(response)) {
-      dictationOwner.current = null;
-      dictationInsertionRange.current = null;
-      return;
-    }
+    const generation = ++dictationGeneration.current;
     standardListeningRef.current = true;
     setVoiceState('listening');
+    setImageNotice(null);
+    let preserveFailureState = false;
+    try {
+      const response = await bridge.audioExecute({
+        type: 'listen',
+        language: resolveAudioLanguage(voicePrefs.language, typeof navigator !== 'undefined' ? navigator.language : 'en-US'),
+      }, bridge.bootstrap?.settings.voiceRevision ?? 0);
+      if (generation !== dictationGeneration.current) return;
+      if (reportNativeAudioFailure(response.result)) {
+        preserveFailureState = true;
+        return;
+      }
+      if (response.result.type === 'transcript') {
+        const transcript = response.result.text.trim();
+        if (transcript) insertVoiceTextAtSelection(transcript);
+      }
+    } catch (cause) {
+      if (generation === dictationGeneration.current) setImageNotice(cause instanceof Error ? cause.message : '本机语音识别失败。');
+    } finally {
+      if (generation === dictationGeneration.current) {
+        standardListeningRef.current = false;
+        dictationOwner.current = null;
+        dictationInsertionRange.current = null;
+        if (!preserveFailureState) setVoiceState('idle');
+      }
+    }
   };
 
   const finishStandardListening = async () => {
-    if (!audio || !dictationOwner.current) return;
-    const owner = dictationOwner.current;
-    standardListeningRef.current = false;
-    dictationOwner.current = null;
-    const response = await audio.request({ type: 'finish_listening', owner });
-    if (reportNativeAudioFailure(response)) {
-      dictationInsertionRange.current = null;
-      return;
+    if (!standardListeningRef.current) return;
+    try {
+      await bridge.audioFinishListen();
+    } catch (cause) {
+      setImageNotice(cause instanceof Error ? cause.message : '停止语音识别失败。');
     }
-    setVoiceState('idle');
-    if (response.type === 'listening_finished') {
-      const transcript = response.transcript?.text.trim() ?? '';
-      if (transcript) insertVoiceTextAtSelection(transcript);
-    }
-    dictationInsertionRange.current = null;
   };
 
   const stopFlowMode = useCallback(async () => {
@@ -2230,8 +2223,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     const controller = new VoiceFlowController({
       audio: {
-        request: (command) => audio.request(command),
-        onEvent: (listener) => audio.onEvent(listener),
+        execute: (operation, revision) => bridge.audioExecute(operation, revision),
+        cancel: bridge.audioCancel,
+        finishListen: bridge.audioFinishListen,
       },
       bridge: {
         sendTrackedPrompt: bridge.sendTrackedPrompt,
@@ -2239,7 +2233,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         cancel: bridge.cancel,
       },
       getPreferences: () => voicePrefsRef.current,
-      createOwner: audioOwner,
       timers: {
         setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
         clearTimeout: (handle) => window.clearTimeout(handle as number),
@@ -2252,7 +2245,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       if (flowControllerRef.current === controller) flowControllerRef.current = null;
       controller.dispose();
     };
-  }, [audio, audioOwner, bridge.cancel, bridge.sendTrackedPrompt, bridge.subscribeTrackedSpeech]);
+  }, [audio, bridge.audioCancel, bridge.audioExecute, bridge.audioFinishListen, bridge.cancel, bridge.sendTrackedPrompt, bridge.subscribeTrackedSpeech]);
 
   useEffect(() => {
     const controller = flowControllerRef.current;
@@ -2269,22 +2262,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       setVoiceState('unsupported');
       return;
     }
-    return audio.onEvent((event) => {
-      if (event.type === 'speech_state'
-          && autoplayOwner.current?.id === event.owner.id
-          && (event.state === 'finished' || event.state === 'interrupted')) {
-        autoplayOwner.current = null;
-      }
-      if (event.type === 'error' && autoplayOwner.current?.id === event.owner?.id) {
-        autoplayOwner.current = null;
-      }
-      if (event.type === 'error' && event.owner && dictationOwner.current && event.owner.id === dictationOwner.current.id) {
-        standardListeningRef.current = false;
-        dictationOwner.current = null;
-        dictationInsertionRange.current = null;
-        setVoiceState(event.error.code === 'permission' ? 'denied' : 'idle');
-      }
-    });
+    return undefined;
   }, [audio]);
 
   const previousAudioSessionId = useRef(activeSessionId);
@@ -2503,14 +2481,18 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             autoplayOwner.current = null;
             return;
           }
-          void audio.request({
+          void bridge.audioExecute({
             type: 'speak',
-            owner: autoplayTokenOwner,
             text: spoken,
-            voiceId: voicePrefs.voiceSelection,
+            language: resolveAudioLanguage(voicePrefs.language, typeof navigator !== 'undefined' ? navigator.language : 'en-US'),
             rate: voicePrefs.rate,
-          }).then((response) => {
-            if (response.type === 'error' && autoplayOwner.current?.id === autoplayTokenOwner.id) {
+            ...(voicePrefs.speech.voice ? {
+              voice: voicePrefs.speech.voice.source === 'offline'
+                ? `sherpa:${voicePrefs.speech.voice.modelId ?? voicePrefs.speech.offlineModelId ?? ''}:${voicePrefs.speech.voice.id}`
+                : `${voicePrefs.speech.voice.source}:${voicePrefs.speech.voice.id}`,
+            } : {}),
+          }, bridge.bootstrap?.settings.voiceRevision ?? 0).then(() => {
+            if (autoplayOwner.current?.id === autoplayTokenOwner.id) {
               autoplayOwner.current = null;
             }
           }).catch(() => {
@@ -2857,7 +2839,6 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           <DictationRecorderBar
             audio={audio}
             turnAction={canStop ? stopTurnButton : undefined}
-            owner={dictationOwner.current ?? audioOwner('dictation')}
             onCancel={() => { void cancelStandardListening(); }}
             onFinish={() => { void finishStandardListening(); }}
           />

@@ -165,10 +165,11 @@ test('the voice page reads the real OS microphone grant, not the page permission
       'the 麦克风权限 row did not follow the OS grant when the user came back to the window; it rendered:\n'
       + result.rowTextAfterRefocus,
     );
-    // The previously unreachable copy, now reachable.
+    // The v3 permissions card keeps the denied state and remedy inline with
+    // the OS-backed row instead of rendering a separate permission banner.
     assert.ok(
-      result.rowTextAfterRefocus.includes('尚未获得麦克风权限，录音功能无法使用。'),
-      `the MicrophonePermissionRequired copy never rendered; the page said:\n${result.rowTextAfterRefocus}`,
+      result.rowTextAfterRefocus.includes('当前状态：未授权'),
+      `the denied OS state was not visible in the microphone row; the page said:\n${result.rowTextAfterRefocus}`,
     );
     assert.ok(
       !result.rowTextAfterRefocus.includes('录音与语音朗读功能不受影响'),

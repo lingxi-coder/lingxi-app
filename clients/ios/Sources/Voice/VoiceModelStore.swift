@@ -61,8 +61,18 @@ enum VoiceModelFiles {
 final class VoiceModelStore {
     static let shared = VoiceModelStore()
 
-    private(set) var states: [String: VoiceModelState] = [:]
+    static let didChangeNotification = Notification.Name("LingxiVoiceModelStoreDidChange")
+
+    private(set) var states: [String: VoiceModelState] = [:] {
+        didSet {
+            let oldReadyModels = Set(oldValue.compactMap { modelID, state in state.isReady ? modelID : nil })
+            let readyModels = Set(states.compactMap { modelID, state in state.isReady ? modelID : nil })
+            guard oldReadyModels != readyModels else { return }
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        }
+    }
     private var tasks: [String: Task<Void, Never>] = [:]
+    private var audioReferences: [UUID: String] = [:]
 
     init() {
         prepareRootDirectory()
@@ -111,10 +121,27 @@ final class VoiceModelStore {
         }
     }
 
-    func remove(_ entry: GeneratedOfflineModelEntry) {
+    func retainForAudioUse(_ modelID: String) -> UUID {
+        let id = UUID()
+        audioReferences[id] = modelID
+        return id
+    }
+
+    func releaseAudioUse(_ reference: UUID) {
+        audioReferences.removeValue(forKey: reference)
+    }
+
+    func canRemove(_ modelID: String) -> Bool {
+        !audioReferences.values.contains(modelID)
+    }
+
+    @discardableResult
+    func remove(_ entry: GeneratedOfflineModelEntry) -> Bool {
+        guard canRemove(entry.id) else { return false }
         cancel(entry.id)
         try? FileManager.default.removeItem(at: VoiceModelFiles.modelDirectory(entry.id))
         states[entry.id] = .notInstalled
+        return true
     }
 
     func reconcileFromDisk() {

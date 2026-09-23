@@ -2,108 +2,65 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  DEFAULT_VOICE_SELECTION,
-  LANGUAGE_AUTO,
   defaultVoicePreferences,
-  normalizeVoiceSelection,
+  isLegacySystemVoiceAlias,
   parseVoicePreferences,
   type VoicePreferences,
-} from '../src/renderer/audio/preferences';
+} from '../src/shared/voicePreferences';
 
-// These expectations are lifted directly from iOS's
-// `VoicePreferencesSnapshot.normalizeVoiceSelection` (VoiceRuntimeConfiguration.swift)
-// and Android's `normalizeVoiceSelection` (VoiceSettingsRepository.kt) —
-// all three platforms must agree on the resulting string.
-test('voice selection normalizes exactly as iOS and Android do', () => {
-  assert.equal(normalizeVoiceSelection(undefined), 'system:default');
-  assert.equal(normalizeVoiceSelection(''), 'system:default');
-  assert.equal(normalizeVoiceSelection('   '), 'system:default');
-  assert.equal(normalizeVoiceSelection('default'), 'system:default');
-  assert.equal(normalizeVoiceSelection('  Alex  '), 'system:Alex');
-  assert.equal(normalizeVoiceSelection('Alex'), 'system:Alex');
-  assert.equal(normalizeVoiceSelection('system:Alex'), 'system:Alex');
-  assert.equal(normalizeVoiceSelection('sherpa:vits-zh:0'), 'sherpa:vits-zh:0');
-  assert.equal(normalizeVoiceSelection('sherpa:m:v'), 'sherpa:m:v');
-  assert.equal(DEFAULT_VOICE_SELECTION, 'system:default');
+test('fresh Desktop audio preferences use the v3 independent-source defaults', () => {
+  const fresh: VoicePreferences = defaultVoicePreferences();
+  assert.deepEqual(fresh, {
+    schemaVersion: 3,
+    recognition: { source: 'automatic', offlineModelId: null },
+    speech: { source: 'automatic', offlineModelId: null, voice: null },
+    language: 'auto',
+    rate: 1,
+    autoPlayReplies: false,
+  });
 });
 
-test('rate is clamped to the mobile range, never rejected', () => {
-  assert.equal(parseVoicePreferences({ rate: 9 }).rate, 2);
-  assert.equal(parseVoicePreferences({ rate: 2.01 }).rate, 2);
-  assert.equal(parseVoicePreferences({ rate: 2.0 }).rate, 2);
-  assert.equal(parseVoicePreferences({ rate: 0.5 }).rate, 0.5);
-  assert.equal(parseVoicePreferences({ rate: 0.49 }).rate, 0.5);
-  assert.equal(parseVoicePreferences({ rate: 0.1 }).rate, 0.5);
-  assert.equal(parseVoicePreferences({ rate: 1.25 }).rate, 1.25);
+test('legacy localOnly recognition migrates to explicit offline without changing speech preference', () => {
+  assert.deepEqual(parseVoicePreferences({ recognitionMode: 'localOnly', language: 'ZH-cn', rate: 0.1 }), {
+    schemaVersion: 3,
+    recognition: { source: 'offline', offlineModelId: null },
+    speech: { source: 'automatic', offlineModelId: null, voice: null },
+    language: 'ZH-cn',
+    rate: 0.5,
+    autoPlayReplies: false,
+  });
 });
 
-test('rate defaults to 1.0 when absent or unparseable, not merely clamped', () => {
-  assert.equal(parseVoicePreferences({}).rate, 1);
-  assert.equal(parseVoicePreferences({ rate: 'fast' }).rate, 1);
-  assert.equal(parseVoicePreferences({ rate: null }).rate, 1);
-  assert.equal(parseVoicePreferences({ rate: Number.NaN }).rate, 1);
+test('legacy voice aliases stay explicit for one-time resolution against the helper catalog', () => {
+  const system = parseVoicePreferences({ voiceSelection: 'system:Tingting' });
+  assert.deepEqual(system.speech, {
+    source: 'system', offlineModelId: null, voice: { source: 'system', id: 'Tingting' },
+  });
+  const sherpa = parseVoicePreferences({ voiceSelection: 'sherpa:vits-zh:0' });
+  assert.deepEqual(sherpa.speech, {
+    source: 'offline', offlineModelId: 'vits-zh', voice: { source: 'offline', modelId: 'vits-zh', id: '0' },
+  });
+  assert.equal(isLegacySystemVoiceAlias('system:Tingting'), true);
+  assert.equal(isLegacySystemVoiceAlias('system:com.apple.voice.compact.zh-CN.Tingting'), false);
 });
 
-test('a fresh install defaults to automatic, matching mobile', () => {
-  const fresh: VoicePreferences = parseVoicePreferences({});
-  assert.equal(fresh.schemaVersion, 2);
-  assert.equal(fresh.recognitionMode, 'automatic');
-  assert.equal(fresh.language, LANGUAGE_AUTO);
-  assert.equal(fresh.voiceSelection, 'system:default');
-  assert.equal(fresh.rate, 1);
-  assert.equal(fresh.autoPlayReplies, false);
+test('unknown source/model/voice requests are preserved as explicit unavailable preferences', () => {
+  const value = parseVoicePreferences({
+    schemaVersion: 3,
+    recognition: { source: 'future-stt', offlineModelId: 'unknown-model' },
+    speech: { source: 'offline', offlineModelId: 'missing-tts', voice: { source: 'offline', modelId: 'missing-tts', id: 'ghost' } },
+  });
+  assert.equal(value.recognition.source, 'future-stt');
+  assert.equal(value.recognition.offlineModelId, 'unknown-model');
+  assert.equal(value.speech.offlineModelId, 'missing-tts');
+  assert.deepEqual(value.speech.voice, { source: 'offline', modelId: 'missing-tts', id: 'ghost' });
 });
 
-test('schemaVersion is always 2, regardless of what was supplied', () => {
-  assert.equal(parseVoicePreferences({ schemaVersion: 1 }).schemaVersion, 2);
-  assert.equal(parseVoicePreferences({ schemaVersion: 999 }).schemaVersion, 2);
-  assert.equal(parseVoicePreferences(undefined).schemaVersion, 2);
-});
-
-test('recognitionMode preserves localOnly and falls back to automatic for everything else, including the Swift case name', () => {
-  assert.equal(parseVoicePreferences({ recognitionMode: 'localOnly' }).recognitionMode, 'localOnly');
-  assert.equal(parseVoicePreferences({ recognitionMode: 'automatic' }).recognitionMode, 'automatic');
-  // 'onDevice' is the Swift *case name*, never a persisted value on either
-  // mobile platform — it must NOT be treated as the on-device mode here.
-  assert.equal(parseVoicePreferences({ recognitionMode: 'onDevice' }).recognitionMode, 'automatic');
-  assert.equal(parseVoicePreferences({ recognitionMode: undefined }).recognitionMode, 'automatic');
-  assert.equal(parseVoicePreferences({ recognitionMode: 'telepathy' }).recognitionMode, 'automatic');
-  assert.equal(parseVoicePreferences({ recognitionMode: 42 }).recognitionMode, 'automatic');
-});
-
-test('language trims and normalizes case-insensitive "auto" to the canonical form', () => {
-  assert.equal(parseVoicePreferences({ language: 'AUTO' }).language, 'auto');
-  assert.equal(parseVoicePreferences({ language: 'Auto' }).language, 'auto');
-  assert.equal(parseVoicePreferences({ language: '  ' }).language, 'auto');
-  assert.equal(parseVoicePreferences({ language: '' }).language, 'auto');
-  assert.equal(parseVoicePreferences({ language: undefined }).language, 'auto');
-  assert.equal(parseVoicePreferences({ language: 'zh-CN' }).language, 'zh-CN');
-  assert.equal(parseVoicePreferences({ language: '  zh-CN  ' }).language, 'zh-CN');
-});
-
-test('voiceSelection is normalized the same way through the full parser', () => {
-  assert.equal(parseVoicePreferences({ voiceSelection: '' }).voiceSelection, 'system:default');
-  assert.equal(parseVoicePreferences({ voiceSelection: 'default' }).voiceSelection, 'system:default');
-  assert.equal(parseVoicePreferences({ voiceSelection: 'Alex' }).voiceSelection, 'system:Alex');
-  assert.equal(parseVoicePreferences({ voiceSelection: 'system:Alex' }).voiceSelection, 'system:Alex');
-  assert.equal(parseVoicePreferences({ voiceSelection: 'sherpa:m:v' }).voiceSelection, 'sherpa:m:v');
-  assert.equal(parseVoicePreferences({ voiceSelection: undefined }).voiceSelection, 'system:default');
-  assert.equal(parseVoicePreferences({ voiceSelection: 123 }).voiceSelection, 'system:default');
-});
-
-test('auto-play-replies persists and defaults false', () => {
-  assert.equal(defaultVoicePreferences().autoPlayReplies, false);
-  assert.equal(parseVoicePreferences({}).autoPlayReplies, false);
-  assert.equal(parseVoicePreferences({ autoPlayReplies: true }).autoPlayReplies, true);
-  assert.equal(parseVoicePreferences({ autoPlayReplies: false }).autoPlayReplies, false);
-  assert.equal(parseVoicePreferences({ autoPlayReplies: 'yes' }).autoPlayReplies, false);
-});
-
-test('parseVoicePreferences never throws on hostile input', () => {
+test('v3 normalization clamps rate and sanitizes hostile outer values without changing source intent', () => {
+  assert.equal(parseVoicePreferences({ schemaVersion: 3, rate: 9 }).rate, 2);
+  assert.equal(parseVoicePreferences({ schemaVersion: 3, rate: 0.1 }).rate, 0.5);
   assert.doesNotThrow(() => parseVoicePreferences(undefined));
   assert.doesNotThrow(() => parseVoicePreferences(null));
   assert.doesNotThrow(() => parseVoicePreferences('garbage'));
-  assert.doesNotThrow(() => parseVoicePreferences(42));
-  assert.doesNotThrow(() => parseVoicePreferences([]));
-  assert.doesNotThrow(() => parseVoicePreferences({ recognitionMode: { nested: true } }));
+  assert.equal(parseVoicePreferences({ schemaVersion: 3, recognition: { source: 'offline' } }).recognition.source, 'offline');
 });

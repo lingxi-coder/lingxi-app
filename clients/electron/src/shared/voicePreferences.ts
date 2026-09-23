@@ -1,129 +1,45 @@
 /**
- * Desktop voice preferences model.
+ * Device-local audio configuration compatibility exports.
  *
- * Mirrors the VALUE vocabulary of iOS's `VoicePreferencesSnapshot`
- * (`clients/ios/Sources/Voice/VoiceRuntimeConfiguration.swift`) and
- * Android's `VoiceConfig` (`clients/android/app/src/main/java/com/lingxi/code/model/SettingsModels.kt`,
- * normalized by `clients/android/.../settings/VoiceSettingsRepository.kt`)
- * byte-for-byte, so a `recognitionMode`/`voiceSelection` string written on
- * one platform means the same thing when read back on another.
- *
- * What is DELIBERATELY NOT mirrored: key names (iOS persists dotted
- * `voice.recognitionMode` keys, Android persists snake_case keys in its own
- * `voice_settings` store — desktop keeps its own settings-file conventions,
- * see `shared/settings.ts`) and legacy-key migration (iOS's
- * `legacyRecognitionMode`/`legacySystemVoice`/`voiceSpeed`/`voiceAutoPlay`
- * and the old `"on-device"` spelling; Android's
- * `migrateLegacyVoiceSelection`). Desktop keeps its own schema but accepts
- * the historical `system:<voice-name>` alias until the settings page can
- * resolve and save the stable macOS voice identifier.
- *
- * Desktop now mirrors mobile's auto-play-replies flag too. Flow Mode owns its
- * own streaming playback loop, while ordinary composer prompts use
- * `autoPlayReplies` to decide whether the final assistant reply should be
- * spoken automatically.
- *
- * This lives in `shared/` — not `main/` or `renderer/` — because, like
- * `PublicSettings` in `shared/settings.ts`, it has to be reachable from the
- * main process (which persists it) and eventually the renderer (which will
- * read/render it), and a type declared independently in each of those
- * drifts exactly the way `bypassPermissionsModeAccepted` once did.
+ * The v3 schema and normalization/migration rules are generated from
+ * `clients/voice`; this file keeps the existing Desktop settings property
+ * name and call sites stable while all consumers move to independent STT/TTS
+ * source selections.
  */
 
-/** Schema version of a persisted `VoicePreferences` value. */
-export const VOICE_SCHEMA_VERSION = 2 as const;
+import {
+  AUDIO_CONFIGURATION_SCHEMA_VERSION,
+  AUDIO_LANGUAGE_AUTO,
+  audioConfigurationDefaults,
+  migrateLegacyAudioConfiguration,
+  normalizeAudioConfiguration,
+  type AudioConfigurationV3,
+} from './generatedAudioConfiguration.js';
 
-export const LANGUAGE_AUTO = 'auto';
+export const VOICE_SCHEMA_VERSION = AUDIO_CONFIGURATION_SCHEMA_VERSION;
+export const LANGUAGE_AUTO = AUDIO_LANGUAGE_AUTO;
+
+/** Historical spellings retained only for migration and legacy aliases. */
 export const DEFAULT_VOICE_ID = 'default';
 export const SYSTEM_VOICE_PREFIX = 'system:';
 export const SHERPA_VOICE_PREFIX = 'sherpa:';
-export const DEFAULT_VOICE_SELECTION = `${SYSTEM_VOICE_PREFIX}${DEFAULT_VOICE_ID}`;
+export const DEFAULT_VOICE_SELECTION = 'system:default';
 
-const MIN_RATE = 0.5;
-const MAX_RATE = 2.0;
-const DEFAULT_RATE = 1.0;
+export type VoicePreferences = AudioConfigurationV3;
 
-export interface VoicePreferences {
-  schemaVersion: typeof VOICE_SCHEMA_VERSION;
-  /**
-   * `'localOnly'` is the only non-default value mobile persists (Android's
-   * `VoiceConfig.MODE_LOCAL_ONLY`; iOS's `VoiceRecognitionMode.onDevice` is
-   * the Swift *case name* — its raw, persisted string is also `"localOnly"`).
-   * Anything else, including the case name `"onDevice"` itself, normalizes
-   * to `'automatic'`.
-   */
-  recognitionMode: 'automatic' | 'localOnly';
-  language: string;
-  voiceSelection: string;
-  rate: number;
-  autoPlayReplies: boolean;
-}
-
-/** The value a fresh install (no persisted voice preferences yet) gets on every platform. */
 export function defaultVoicePreferences(): VoicePreferences {
-  return {
-    schemaVersion: VOICE_SCHEMA_VERSION,
-    recognitionMode: 'automatic',
-    language: LANGUAGE_AUTO,
-    voiceSelection: DEFAULT_VOICE_SELECTION,
-    rate: DEFAULT_RATE,
-    autoPlayReplies: false,
-  };
+  return audioConfigurationDefaults();
 }
 
-/** Port of Android's `normalizeRecognitionMode`. Anything but the literal `'localOnly'` falls back to `'automatic'` — lenient, never throws. */
-export function normalizeRecognitionMode(raw: unknown): 'automatic' | 'localOnly' {
-  return raw === 'localOnly' ? 'localOnly' : 'automatic';
+/** Normalize current values and migrate saved pre-v3 Desktop settings. */
+export function parseVoicePreferences(value: unknown): VoicePreferences {
+  return migrateLegacyAudioConfiguration(value);
 }
 
-/** Port of Android's `normalizeLanguage`. Trims; empty or case-insensitive `"auto"` becomes `LANGUAGE_AUTO`; otherwise the trimmed value. */
-export function normalizeLanguage(raw: unknown): string {
-  const trimmed = typeof raw === 'string' ? raw.trim() : '';
-  if (trimmed === '' || trimmed.toLowerCase() === LANGUAGE_AUTO) return LANGUAGE_AUTO;
-  return trimmed;
-}
-
-/** Port of iOS's `VoicePreferencesSnapshot.normalizeVoiceSelection` / Android's `normalizeVoiceSelection`, retaining the Desktop name alias until device voices are available. */
-export function normalizeVoiceSelection(raw: string | undefined): string {
-  const trimmed = (raw ?? '').trim();
-  if (trimmed === '' || trimmed === DEFAULT_VOICE_ID) return DEFAULT_VOICE_SELECTION;
-  if (trimmed.startsWith(SYSTEM_VOICE_PREFIX) || trimmed.startsWith(SHERPA_VOICE_PREFIX)) return trimmed;
-  return `${SYSTEM_VOICE_PREFIX}${trimmed}`;
-}
-
-/**
- * Legacy desktop/macOS builds persisted `system:<voice-name>` rather than the
- * stable voice identifier. Keep that value parseable so existing settings stay
- * usable until the next save, where the voice settings page can normalize it to
- * the authoritative identifier it probed from the device.
- */
 export function isLegacySystemVoiceAlias(value: string): boolean {
   if (!value.startsWith(SYSTEM_VOICE_PREFIX)) return false;
   const payload = value.slice(SYSTEM_VOICE_PREFIX.length);
   return payload.length > 0 && !payload.includes('.');
 }
 
-/** Port of Android's `rate.coerceIn(0.5f, 2.0f)` / iOS's `min(2, max(0.5, rate))` — clamps, never rejects; defaults to 1.0 when absent or unparseable. */
-function normalizeRate(raw: unknown): number {
-  const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : DEFAULT_RATE;
-  return Math.min(MAX_RATE, Math.max(MIN_RATE, value));
-}
-
-function normalizeAutoPlayReplies(raw: unknown): boolean {
-  return raw === true;
-}
-
-/** Parse an arbitrary (e.g. persisted-JSON or IPC-supplied) value into a complete, normalized `VoicePreferences`. Never throws. */
-export function parseVoicePreferences(value: unknown): VoicePreferences {
-  const raw = (value !== null && typeof value === 'object' ? value : {}) as Record<string, unknown>;
-  return {
-    schemaVersion: VOICE_SCHEMA_VERSION,
-    recognitionMode: normalizeRecognitionMode(raw['recognitionMode']),
-    language: normalizeLanguage(raw['language']),
-    voiceSelection: normalizeVoiceSelection(
-      typeof raw['voiceSelection'] === 'string' ? raw['voiceSelection'] : undefined,
-    ),
-    rate: normalizeRate(raw['rate']),
-    autoPlayReplies: normalizeAutoPlayReplies(raw['autoPlayReplies']),
-  };
-}
+export { normalizeAudioConfiguration };

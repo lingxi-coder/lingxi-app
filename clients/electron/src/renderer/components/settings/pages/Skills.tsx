@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
+import { Icon } from '../../Icon';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { Toggle } from '../primitives';
 import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { boolFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
+import { ExtensionHubTabs, extensionHubStyle, useExtensionHubDialogFocus } from './ExtensionHub';
 import {
   asBoolean,
   asString,
@@ -19,9 +21,6 @@ import {
   parseEventEnvelope,
   searchInputStyle,
   secondaryMetaStyle,
-  sidebarButtonStyle,
-  sidebarListStyle,
-  sidebarSectionTitleStyle,
   SourcePill,
   textareaStyle,
 } from './configurationAdmin';
@@ -131,7 +130,7 @@ function defaultCreateScope(editingLayer: EditableLayer): 'user' | 'project' {
   return editingLayer === 'project' ? 'project' : 'user';
 }
 
-export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
+export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate }: PageContentProps) {
   const t = useT();
   const model = skillsPageModel({ skills: bridge.skillsEvent?.skills });
   const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills]);
@@ -153,6 +152,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
   const [restoreName, setRestoreName] = useState('');
   const [syncDraft, setSyncDraft] = useState(syncEnabled);
   const [pendingSelection, setPendingSelection] = useState<SkillSelection | null>(null);
+  const [pendingHubPage, setPendingHubPage] = useState<string | null>(null);
   const [savingSync, setSavingSync] = useState(false);
   const [loadingDocument, setLoadingDocument] = useState(false);
   const [reloading, setReloading] = useState(false);
@@ -254,6 +254,8 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
     setSelection(next);
   };
 
+  const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list', () => requestSelection({ kind: 'list' }));
+
   const discardDrafts = () => {
     if (selectedDocument) {
       setDraftContent(selectedDocument.markdown);
@@ -274,6 +276,30 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
   };
 
   const syncHasChanges = syncDraft !== syncEnabled;
+  const requestHubNavigation = (pageId: string) => {
+    if (detailDirty || syncHasChanges) {
+      setPendingHubPage(pageId);
+      return;
+    }
+    onNavigate(pageId);
+  };
+  const discardAndNavigate = () => {
+    if (!pendingHubPage) return;
+    discardDrafts();
+    setSyncDraft(syncEnabled);
+    setSelection({ kind: 'list' });
+    onNavigate(pendingHubPage);
+    setPendingHubPage(null);
+  };
+  const navigationPrompt = pendingHubPage && (
+    <div role="alert" style={noteStyle(t, 'warn')}>
+      Unsaved skill settings. Discard them before switching tabs?
+      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        <button type="button" onClick={discardAndNavigate} style={ghostButtonStyle(t)}>Discard and switch</button>
+        <button type="button" onClick={() => setPendingHubPage(null)} style={ghostButtonStyle(t, false, true)}>Continue editing</button>
+      </div>
+    </div>
+  );
 
   const handleReload = () => {
     setReloading(true);
@@ -510,107 +536,124 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
         )
         : <div style={{ ...managerDetailStyle(), padding: 0 }}><EmptyDetail t={t} title="没有可编辑的 skill" body="可以返回列表，或创建新的用户或项目 skill。" /></div>;
 
-  return (
-    <>
-      <Card title="Skills">
-        <div className="configuration-page">
-          <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
-          {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-          {selection.kind === 'list' ? <div className="configuration-list">
-            <div className="configuration-toolbar">
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 skill 名称或路径" aria-label="搜索 skills" style={searchInputStyle(t)} />
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button type="button" onClick={() => requestSelection({ kind: 'create' })} style={ghostButtonStyle(t)}>新建</button>
-                <button type="button" onClick={handleReload} disabled={reloading} style={ghostButtonStyle(t, reloading)}>{reloading ? '重载中…' : '重新加载'}</button>
-              </div>
+  const detailTitle = selection.kind === 'create'
+    ? 'New Skill'
+    : selection.kind === 'trash'
+      ? selectedTrash?.name ?? 'Deleted Skill'
+      : selectedSkill?.name ?? 'Skill details';
 
+  return (
+    <div className="extension-hub-page" style={extensionHubStyle(t)}>
+      <ExtensionHubTabs bridge={bridge} active="skills" onNavigate={requestHubNavigation} />
+      <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
+      {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+      <div className="extension-hub-toolbar">
+        <input className="extension-hub-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search skills" aria-label="搜索 skills" style={searchInputStyle(t)} />
+        <div className="extension-hub-toolbar-actions">
+          <button type="button" onClick={() => requestSelection({ kind: 'create' })} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>Add <Icon name="chevron" size={12} /></button>
+          <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? 'Reloading skills' : 'Reload skills'}><Icon name="refresh" size={16} /></button>
+        </div>
+      </div>
+      {selection.kind === 'list' && navigationPrompt}
+      <div className="extension-hub-group-title">Skills · {filteredSkills.length}</div>
+      <div className="extension-hub-list">
+        {filteredSkills.map((entry) => (
+          <div className="extension-hub-row" key={entry.id}>
+            <span className="extension-hub-icon"><Icon name="sparkle" size={18} color={t.text3} /></span>
+            <button className="extension-hub-row-copy extension-hub-row-open" type="button" onClick={() => requestSelection({ kind: 'skill', id: entry.id })}>
+              <span className="extension-hub-row-title">{entry.name}</span>
+              <span className="extension-hub-row-description">{entry.description ?? entry.whenToUse ?? entry.directory}</span>
+            </button>
+            <div className="extension-hub-row-side">
+              <span className="extension-hub-row-scope">{entry.source === 'project' ? 'Project' : 'Personal'}</span>
+              <button className="extension-hub-icon-button" type="button" aria-label={`View ${entry.name} details`} onClick={() => requestSelection({ kind: 'skill', id: entry.id })}><Icon name="more" size={16} /></button>
             </div>
-            <div style={sidebarListStyle()}>
-              <div style={sidebarSectionTitleStyle(t)}>Skills · {filteredSkills.length}</div>
-              {filteredSkills.map((entry) => (
-                <button className="configuration-entry" key={entry.id} type="button" onClick={() => requestSelection({ kind: 'skill', id: entry.id })} style={sidebarButtonStyle(t, false)}>
-                  <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
-                    <SourcePill t={t} label={entry.source} />
-                    {!entry.writable && <SourcePill t={t} label="只读" tone="warn" />}
-                  </span>
-                  <span className="mono" style={{ fontSize: 11.5, color: t.text4, overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.directory}</span>
-                </button>
-              ))}
-              {filteredSkills.length === 0 && <div style={secondaryMetaStyle(t)}>没有匹配的 skill。</div>}
-              <div style={{ ...sidebarSectionTitleStyle(t), marginTop: 20 }}>回收区 · {filteredTrash.length}</div>
-              {filteredTrash.map((entry) => (
-                <button className="configuration-entry" key={entry.id} type="button" onClick={() => requestSelection({ kind: 'trash', id: entry.id })} style={sidebarButtonStyle(t, false)}>
-                  <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                    <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
-                    <SourcePill t={t} label="已删除" tone="warn" />
-                  </span>
-                  <span className="mono" style={{ fontSize: 11.5, color: t.text4, overflow: 'hidden', textOverflow: 'ellipsis' }}>{entry.directory}</span>
-                </button>
-              ))}
-              {filteredTrash.length === 0 && <div style={secondaryMetaStyle(t)}>回收区为空。</div>}
+          </div>
+        ))}
+        {filteredSkills.length === 0 && <div style={{ padding: '24px 18px', color: t.text3, fontSize: 13 }}>No skills match this search.</div>}
+      </div>
+
+      {filteredTrash.length > 0 && <details className="extension-hub-marketplaces">
+        <summary>Trash · {filteredTrash.length}</summary>
+        <div className="extension-hub-list">
+          {filteredTrash.map((entry) => (
+            <button className="extension-hub-row extension-hub-row-open" key={entry.id} type="button" onClick={() => requestSelection({ kind: 'trash', id: entry.id })}>
+              <span className="extension-hub-icon"><Icon name="archive" size={18} color={t.text3} /></span>
+              <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{entry.name}</span><span className="extension-hub-row-description">{entry.directory}</span></span>
+            </button>
+          ))}
+        </div>
+      </details>}
+
+      {selection.kind !== 'list' && <div className="extension-detail-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) requestSelection({ kind: 'list' }); }}>
+        <section ref={dialogRef} tabIndex={-1} className="extension-detail-dialog" role="dialog" aria-modal="true" aria-label={`${detailTitle} details`} style={extensionHubStyle(t)}>
+          <header className="extension-detail-head">
+            <span className="extension-hub-icon"><Icon name="sparkle" size={20} color={t.text3} /></span>
+            <div className="extension-detail-head-copy">
+              <div className="extension-detail-title-line"><span className="extension-detail-title">{detailTitle}</span><span className="extension-detail-kind">Skill</span></div>
             </div>
-          </div> : <div className="configuration-detail" style={managerDetailStyle()}>
-            <button type="button" className="configuration-back" onClick={() => requestSelection({ kind: 'list' })} style={ghostButtonStyle(t)}>← 返回 Skills</button>
+            <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label="Close details" onClick={() => requestSelection({ kind: 'list' })}><Icon name="x" size={17} /></button>
+          </header>
+          <div className="extension-detail-content">
+            {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+            <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
+            {navigationPrompt}
             {pendingSelection && (
               <div style={noteStyle(t, 'warn')}>
                 当前修改尚未保存。离开前请保存，或丢弃草稿。
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      discardDrafts();
-                      setSelection(pendingSelection);
-                    }}
-                    style={ghostButtonStyle(t)}
-                  >
-                    丢弃并切换
-                  </button>
+                  <button type="button" onClick={() => { discardDrafts(); setSelection(pendingSelection); }} style={ghostButtonStyle(t)}>丢弃并切换</button>
                   <button type="button" onClick={() => setPendingSelection(null)} style={ghostButtonStyle(t, false, true)}>继续编辑</button>
                 </div>
               </div>
             )}
             {detail}
-          </div>}
-        </div>
-      </Card>
-
-      {selection.kind === 'list' && <Card title="Claude.ai 同步">
-        <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        <Row title="syncClaudeAiSkills" desc={(catalog.sync_claude_ai_note ?? 'Stored only. Claude.ai cloud sync is not wired on desktop.').replace('Stored only.', '仅保存。').replace('Claude.ai cloud sync is not wired on desktop.', '当前还没有接入 Claude.ai 云端同步。')} align="center">
-          <Toggle value={syncDraft} onChange={savingSync ? () => undefined : setSyncDraft} />
-        </Row>
-        <Row title="保存" desc="这是本页唯一按层写入的普通设置项。" align="center">
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              type="button"
-              disabled={savingSync || !syncHasChanges}
-              onClick={() => {
-                setSavingSync(true);
-                setPageError(null);
-                void bridge.updateEngineSettings(editingLayer, { syncClaudeAiSkills: syncDraft })
-                  .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 syncClaudeAiSkills。'))
-                  .finally(() => setSavingSync(false));
-              }}
-              style={ghostButtonStyle(t, savingSync || !syncHasChanges)}
-            >
-              保存
-            </button>
-            <button type="button" disabled={savingSync || !syncHasChanges} onClick={() => setSyncDraft(syncEnabled)} style={ghostButtonStyle(t, savingSync || !syncHasChanges, true)}>
-              取消
-            </button>
           </div>
-        </Row>
-      </Card>}
+        </section>
+      </div>}
 
-      {!adminAvailable && selection.kind === 'list' && <Card title="兼容视图">
-        <div style={{ padding: '12px 18px', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
-          当前运行时仅支持查看已发现的 skills。升级运行时后可编辑和管理。
-        </div>
-        {model.skills.slice(0, 3).map((skill) => (
-          <Row key={skill.source_dir} align="center" title={skill.name} desc={<span className="mono" style={{ fontSize: 11.5 }}>{skill.source_dir}</span>}>{null}</Row>
-        ))}
-      </Card>}
-    </>
+      {selection.kind === 'list' && <details className="extension-hub-secondary-settings">
+        <summary>Claude.ai sync</summary>
+        <Card>
+          <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+          <Row title="syncClaudeAiSkills" desc={(catalog.sync_claude_ai_note ?? 'Stored only. Claude.ai cloud sync is not wired on desktop.').replace('Stored only.', '仅保存。').replace('Claude.ai cloud sync is not wired on desktop.', '当前还没有接入 Claude.ai 云端同步。')} align="center">
+            <Toggle value={syncDraft} onChange={savingSync ? () => undefined : setSyncDraft} />
+          </Row>
+          <Row title="Save" desc="这是本页唯一按层写入的普通设置项。" align="center">
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                disabled={savingSync || !syncHasChanges}
+                onClick={() => {
+                  setSavingSync(true);
+                  setPageError(null);
+                  void bridge.updateEngineSettings(editingLayer, { syncClaudeAiSkills: syncDraft })
+                    .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : '无法保存 syncClaudeAiSkills。'))
+                    .finally(() => setSavingSync(false));
+                }}
+                style={ghostButtonStyle(t, savingSync || !syncHasChanges)}
+              >
+                保存
+              </button>
+              <button type="button" disabled={savingSync || !syncHasChanges} onClick={() => setSyncDraft(syncEnabled)} style={ghostButtonStyle(t, savingSync || !syncHasChanges, true)}>
+                取消
+              </button>
+            </div>
+          </Row>
+        </Card>
+      </details>}
+
+      {!adminAvailable && selection.kind === 'list' && <details className="extension-hub-secondary-settings">
+        <summary>Compatibility view</summary>
+        <Card>
+          <div style={{ padding: '12px 18px', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
+            当前运行时仅支持查看已发现的 skills。升级运行时后可编辑和管理。
+          </div>
+          {model.skills.slice(0, 3).map((skill) => (
+            <Row key={skill.source_dir} align="center" title={skill.name} desc={<span className="mono" style={{ fontSize: 11.5 }}>{skill.source_dir}</span>}>{null}</Row>
+          ))}
+        </Card>
+      </details>}
+    </div>
   );
 }

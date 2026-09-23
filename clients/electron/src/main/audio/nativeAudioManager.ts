@@ -3,17 +3,19 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import type { AudioOpDto, AudioResultDto } from '@lingxi/bridge-client';
+import type { AudioErrorKindDto, AudioOperationDto, AudioOperationIdDto, AudioOperationRequestDto, AudioOperationResultDto, AudioOwnerDto } from '@lingxi/bridge-client';
 
 import type { DiagnosticBuffer } from '../host-utils.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 import { offlineVoiceModelById } from '../../shared/voiceModelCatalog.js';
+import { audioConfigurationDefaults, normalizeAudioConfiguration, type AudioConfigurationV3 } from '../../shared/generatedAudioConfiguration.js';
 import {
   defaultNativeAudioSnapshot,
-  nativeAudioResponseToEngineResult,
   validateNativeAudioCommand,
-  validateNativeAudioEngineRequest,
   validateNativeAudioEngineResponse,
+  validateNativeAudioOperationRequest,
+  validateNativeAudioOperation,
+  validateNativeAudioOperationIdentity,
   validateNativeAudioEvent,
   validateNativeAudioResponse,
   type NativeAudioCommand,
@@ -31,6 +33,8 @@ const AUDIO_HELPER_APP = 'LingXiAudioHelper.app';
 const AUDIO_HELPER_BIN = 'LingXiAudioHelper';
 const AUDIO_HELPER_ENV = 'LINGXI_AUDIO_HELPER_BIN';
 const REQUEST_TIMEOUT_MS = 5 * 60_000;
+const SPEAK_TIMEOUT_MS = 20 * 60_000;
+const SUSPEND_TEARDOWN_TIMEOUT_MS = 3_000;
 
 type HelperProcess = Pick<ChildProcessWithoutNullStreams, 'pid' | 'stdin' | 'stdout' | 'stderr' | 'kill' | 'once'>;
 type SpawnHelper = (path: string, args: string[], env: NodeJS.ProcessEnv) => HelperProcess;
@@ -49,11 +53,36 @@ interface PendingCommandRequest {
 
 interface PendingEngineRequest {
   kind: 'engine';
-  owner: NativeAudioOwner;
-  op: AudioOpDto;
-  resolve: (response: AudioResultDto) => void;
+  request: AudioOperationRequestDto;
+  resolve: (response: NativeAudioEngineResponse) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+}
+
+interface InFlightAudioRequest {
+  request: AudioOperationRequestDto;
+  helperId?: string;
+  cancelled: boolean;
+  timedOut: boolean;
+  resolveCancellation: () => void;
+  cancellation: Promise<AudioOperationResultDto>;
+}
+
+interface ActiveRecordingOrigin {
+  owner: AudioOwnerDto;
+  configurationRevision: number;
+}
+
+interface UiListenOperation {
+  identity?: AudioOperationIdDto;
+  finishRequested: boolean;
+  finishAcknowledged: boolean;
+  admitted: boolean;
+  finishCommand?: Promise<void>;
+}
+
+interface UiOperationCancellation {
+  cancelled: boolean;
 }
 
 type PendingRequest = PendingCommandRequest | PendingEngineRequest;
@@ -68,6 +97,10 @@ export interface NativeAudioManagerOptions {
   verifyPackagedHelper?: VerifyPackagedHelper;
   requestMicrophoneAccess?: RequestMicrophoneAccess;
   helperPath?: string;
+  getAudioConfiguration?: () => AudioConfigurationV3;
+  getAudioConfigurationRevision?: () => number;
+  isForeground?: () => boolean;
+  suspendTeardownTimeoutMs?: number;
 }
 
 function launchPermissionHelper(appPath: string, permissions: AudioPermission[]): Promise<void> {
@@ -113,6 +146,30 @@ function cloneSnapshot(snapshot: NativeAudioSnapshot): NativeAudioSnapshot {
     ...(snapshot.recognizerAvailable === undefined ? {} : { recognizerAvailable: snapshot.recognizerAvailable }),
     ...(snapshot.recognition ? { recognition: { ...snapshot.recognition } } : {}),
     ...(snapshot.playback ? { playback: { ...snapshot.playback } } : {}),
+    ...(snapshot.capabilities ? {
+      capabilities: {
+        ...snapshot.capabilities,
+        supported_operations: [...snapshot.capabilities.supported_operations],
+        readiness: snapshot.capabilities.readiness.map((entry) => ({ ...entry })),
+      },
+    } : {}),
+    ...(snapshot.configurationRevision === undefined ? {} : { configurationRevision: snapshot.configurationRevision }),
+    ...(snapshot.currentOperation ? {
+      currentOperation: {
+        identity: { ...snapshot.currentOperation.identity },
+        owner: { ...snapshot.currentOperation.owner },
+      },
+    } : {}),
+    audioOperations: snapshot.audioOperations.map((operation) => ({
+      ...operation,
+      identity: { ...operation.identity },
+      owner: { ...operation.owner },
+    })),
+    activeOperationCount: snapshot.activeOperationCount,
+    pendingOperationCount: snapshot.pendingOperationCount,
+    activeRecordingCount: snapshot.activeRecordingCount,
+    activePlaybackCount: snapshot.activePlaybackCount,
+    activeModelReferenceCount: snapshot.activeModelReferenceCount,
     voices: snapshot.voices.map((voice) => ({ ...voice })),
     models: snapshot.models.map((model) => ({ ...model })),
   };
@@ -122,13 +179,28 @@ function sameOwner(left: NativeAudioOwner | null, right: NativeAudioOwner | null
   return Boolean(left && right && left.kind === right.kind && left.id === right.id);
 }
 
-function opClaimsOwner(op: AudioOpDto): boolean {
-  return op.type === 'start_recording' || op.type === 'transcribe' || op.type === 'synthesize';
-}
-
-function opReleasesOwner(op: AudioOpDto, result: AudioResultDto): boolean {
-  if (op.type === 'start_recording') return result.type === 'failed';
-  return op.type === 'stop_recording' || op.type === 'transcribe' || op.type === 'synthesize';
+function audioOwnerFromSnapshotOwner(owner: NativeAudioOwner): AudioOwnerDto | null {
+  switch (owner.kind) {
+    case 'session':
+    case 'engine':
+      return { type: 'session', session_id: owner.id };
+    case 'local_app': {
+      const separator = owner.id.lastIndexOf(':');
+      if (separator <= 0) return null;
+      const appId = owner.id.slice(0, separator);
+      const runtimeGeneration = Number(owner.id.slice(separator + 1));
+      if (!Number.isSafeInteger(runtimeGeneration) || runtimeGeneration < 0) return null;
+      return { type: 'local_app', app_id: appId, runtime_generation: runtimeGeneration };
+    }
+    case 'ui':
+    case 'system':
+      return { type: owner.kind, instance_id: owner.id };
+    case 'dictation':
+    case 'flow':
+    case 'preview':
+    case 'autoplay':
+      return null;
+  }
 }
 
 function ownerFromCommand(command: NativeAudioCommand): NativeAudioOwner | null {
@@ -142,6 +214,60 @@ function ownerFromCommand(command: NativeAudioCommand): NativeAudioOwner | null 
     default:
       return null;
   }
+}
+
+function failedAudio(kind: AudioErrorKindDto, message: string): AudioOperationResultDto {
+  return { type: 'failed', error: { kind, message } };
+}
+
+function audioIdentityKey(identity: AudioOperationIdDto): string {
+  return `${identity.service_epoch}:${identity.generation}:${identity.id}`;
+}
+
+function audioOwnerKey(owner: AudioOwnerDto): string {
+  switch (owner.type) {
+    case 'session': return `session:${owner.session_id}`;
+    case 'local_app': return `local_app:${owner.app_id}:${owner.runtime_generation}`;
+    case 'ui': return `ui:${owner.instance_id}`;
+    case 'system': return `system:${owner.instance_id}`;
+  }
+}
+
+function sameIdentity(left: AudioOperationIdDto | undefined, right: AudioOperationIdDto): boolean {
+  return left?.id === right.id
+    && left.generation === right.generation
+    && left.service_epoch === right.service_epoch;
+}
+
+function operationKind(operation: AudioOperationRequestDto['operation']): 'record' | 'listen' | 'synthesize' | 'speak' | null {
+  switch (operation.type) {
+    case 'start_recording':
+    case 'stop_recording': return 'record';
+    case 'listen': return 'listen';
+    case 'synthesize': return 'synthesize';
+    case 'speak': return 'speak';
+    case 'status':
+    case 'end_owner': return null;
+  }
+}
+
+function nativeErrorKind(code: NativeAudioErrorCode): AudioErrorKindDto {
+  switch (code) {
+    case 'permission': return 'permission_denied';
+    case 'busy': return 'busy';
+    case 'cancelled': return 'cancelled';
+    case 'model-missing': return 'model_missing';
+    case 'unavailable': return 'unavailable';
+    case 'invalid-request': return 'invalid_request';
+    case 'download':
+    case 'checksum': return 'native_failure';
+    case 'native-error': return 'native_failure';
+  }
+}
+
+function isCurrentOrIdleSnapshot(snapshot: NativeAudioSnapshot, request: AudioOperationRequestDto): boolean {
+  if (snapshot.currentOperation) return sameIdentity(snapshot.currentOperation.identity, request.identity);
+  return snapshot.activity === 'idle' && snapshot.owner === null;
 }
 
 function commandClaimsOwner(command: NativeAudioCommand): boolean {
@@ -187,13 +313,27 @@ export class NativeAudioManager {
   private readonly launchPermissionHelper: LaunchPermissionHelper;
   private readonly subscribers = new Set<(event: NativeAudioEvent) => void>();
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly pendingAudioRequests = new Map<string, InFlightAudioRequest>();
+  private readonly seenAudioIdentities = new Set<string>();
+  private readonly audioIdentityHistory: string[] = [];
+  private readonly activeRecordingOrigins = new Map<string, ActiveRecordingOrigin>();
+  private readonly uiGenerationByInstance = new Map<string, number>();
+  private readonly uiListenOperations = new Map<string, UiListenOperation[]>();
+  private readonly uiOperationsByInstance = new Map<string, Set<UiOperationCancellation>>();
+  private readonly uiConfigurationPins = new Map<string, { revision: number; configuration: AudioConfigurationV3 }>();
+  private readonly suspendedHelpers = new WeakSet<object>();
   private readonly helperPath: string | null;
   private helper: HelperProcess | null = null;
   private helperStartup: Promise<void> | null = null;
+  private capabilitiesHelper: HelperProcess | null = null;
+  private capabilityInitialization: Promise<void> | null = null;
   private permissionResolution: Promise<NativeAudioSnapshot> | null = null;
   private helperStdoutBuffer = '';
   private snapshot = defaultNativeAudioSnapshot();
   private reservedOwner: NativeAudioOwner | null = null;
+  private audioSuspending = false;
+  private suspensionRevision = 0;
+  private suspensionTask: Promise<void> | null = null;
 
   constructor(private readonly opts: NativeAudioManagerOptions) {
     this.storageRoot = join(opts.userDataPath, 'voice-models');
@@ -218,6 +358,14 @@ export class NativeAudioManager {
 
   getSnapshot(): NativeAudioSnapshot {
     return cloneSnapshot(this.snapshot);
+  }
+
+  getCapabilities(): NonNullable<NativeAudioSnapshot['capabilities']> {
+    return this.getSnapshot().capabilities ?? defaultNativeAudioSnapshot().capabilities!;
+  }
+
+  async initializeCapabilities(): Promise<void> {
+    await this.ensureCapabilities();
   }
 
   onEvent(callback: (event: NativeAudioEvent) => void): () => void {
@@ -254,6 +402,9 @@ export class NativeAudioManager {
       }
       const response = await this.sendHelperEnvelope({ id: randomUUID(), kind: 'command', command }, owner);
       const normalized = this.normalizeCommandResponse(command, response);
+      if (this.helper && normalized.type !== 'error' && normalized.snapshot.capabilities) {
+        this.capabilitiesHelper = this.helper;
+      }
       return normalized;
     } catch (error) {
       this.opts.diagnostics.add('error', 'host', `native audio request failed: ${String(error)}`);
@@ -263,55 +414,662 @@ export class NativeAudioManager {
     }
   }
 
-  async executeEngineRequest(sessionId: unknown, opValue: unknown): Promise<AudioResultDto> {
-    const { sessionId: validatedSessionId, op } = validateNativeAudioEngineRequest(sessionId, opValue);
-    const owner = { kind: 'engine', id: validatedSessionId } satisfies NativeAudioOwner;
-    if (op.type === 'is_recording' && this.snapshot.owner && !sameOwner(this.snapshot.owner, owner)) {
-      return { type: 'recording_state', recording: false };
+  async executeAudioRequest(
+    value: unknown,
+    configurationSnapshot?: { configuration: AudioConfigurationV3; revision: number },
+    onNativeAdmission?: () => void | Promise<void>,
+    shouldContinue?: () => boolean,
+  ): Promise<AudioOperationResultDto> {
+    const request = validateNativeAudioOperationRequest(value);
+    const suspensionRevision = this.suspensionRevision;
+    const identityKey = audioIdentityKey(request.identity);
+    if (this.seenAudioIdentities.has(identityKey)) {
+      return failedAudio('cancelled', 'the audio operation identity is stale');
     }
-    if (opClaimsOwner(op) && this.ownerBusy(owner)) {
-      return { type: 'failed', kind: 'busy', message: 'another audio operation is already active on this device' };
+    if (this.audioSuspending && request.operation.type !== 'end_owner' && request.operation.type !== 'status') {
+      return failedAudio('cancelled', 'audio was suspended because the desktop window is hidden');
+    }
+    if (shouldContinue && !shouldContinue()) {
+      return failedAudio('cancelled', 'the audio operation was cancelled');
+    }
+    const deadlineAt = request.timeout_budget_ms === undefined
+      ? null
+      : performance.now() + request.timeout_budget_ms;
+    const timeoutResult = () => failedAudio('timeout', 'the audio operation deadline expired before native admission');
+    const admittedTimeoutResult = () => failedAudio('timeout', 'the audio operation deadline expired after native admission');
+    const remainingBudget = () => deadlineAt === null ? undefined : Math.max(0, deadlineAt - performance.now());
+    if (request.timeout_budget_ms === 0) {
+      return timeoutResult();
     }
     if (!this.helperPath) {
-      return { type: 'failed', kind: 'unavailable', message: this.snapshot.helper.message ?? 'native audio helper is unavailable' };
+      return failedAudio('unavailable', this.snapshot.helper.message ?? 'native audio helper is unavailable');
     }
-    if (opClaimsOwner(op)) this.reservedOwner = { ...owner };
+    const capabilityBudget = remainingBudget();
+    if (capabilityBudget === 0) return timeoutResult();
     try {
-      await this.ensureHelper();
-      if (op.type === 'start_recording' && this.opts.isPackaged) {
-        await this.resolvePackagedPermissions(['microphone']);
+      await this.ensureCapabilities(capabilityBudget ?? REQUEST_TIMEOUT_MS);
+    } catch (error) {
+      if (this.seenAudioIdentities.has(identityKey)) {
+        return failedAudio('cancelled', 'the audio operation identity is stale');
       }
-      const response = await this.sendHelperEnvelope({ id: randomUUID(), kind: 'engine_request', owner, op }, owner);
-      if (response.type === 'engine_result') {
-        this.applySnapshot(response.snapshot);
-        if (opReleasesOwner(op, response.result) && sameOwner(this.snapshot.owner, owner)) {
-          this.releaseOwner();
+      const message = error instanceof Error ? error.message : String(error);
+      if (remainingBudget() === 0 || /timed out/i.test(message)) return timeoutResult();
+      this.opts.diagnostics.add('error', 'host', `native audio capability initialization failed: ${message}`);
+      return failedAudio('unavailable', message);
+    }
+    if (this.seenAudioIdentities.has(identityKey)) {
+      return failedAudio('cancelled', 'the audio operation identity is stale');
+    }
+    if ((this.audioSuspending || this.suspensionRevision !== suspensionRevision)
+      && request.operation.type !== 'end_owner' && request.operation.type !== 'status') {
+      return failedAudio('cancelled', 'audio was suspended because the desktop window is hidden');
+    }
+    if (shouldContinue && !shouldContinue()) {
+      return failedAudio('cancelled', 'the audio operation was cancelled');
+    }
+    if (remainingBudget() === 0) return timeoutResult();
+    const capabilities = this.getCapabilities();
+    if (request.identity.service_epoch !== capabilities.service_epoch) {
+      return failedAudio('cancelled', 'the audio service changed before this request started');
+    }
+    const kind = operationKind(request.operation);
+    if (kind && !capabilities.supported_operations.some((operation) => operation === kind)) {
+      return failedAudio('unsupported', 'this device does not support the requested audio operation');
+    }
+    this.rememberAudioIdentity(identityKey);
+    let operationConfiguration: AudioConfigurationV3;
+    let operationConfigurationRevision: number;
+    if (request.operation.type === 'status' || request.operation.type === 'end_owner') {
+      operationConfiguration = audioConfigurationDefaults();
+      operationConfigurationRevision = 0;
+    } else if (request.operation.type === 'stop_recording') {
+      operationConfiguration = configurationSnapshot?.configuration ?? audioConfigurationDefaults();
+      const ownerKey = audioOwnerKey(request.owner);
+      const activeRecording = [...this.activeRecordingOrigins.values()].find(
+        (recording) => audioOwnerKey(recording.owner) === ownerKey,
+      );
+      operationConfigurationRevision = configurationSnapshot?.revision ?? activeRecording?.configurationRevision ?? 0;
+    } else {
+      try {
+        operationConfiguration = configurationSnapshot?.configuration ?? this.opts.getAudioConfiguration?.() ?? audioConfigurationDefaults();
+        operationConfigurationRevision = configurationSnapshot?.revision ?? this.opts.getAudioConfigurationRevision?.() ?? 0;
+      } catch (error) {
+        return failedAudio('unavailable', error instanceof Error ? error.message : 'the saved audio configuration is unavailable');
+      }
+    }
+    if (
+      (request.operation.type === 'start_recording' || request.operation.type === 'listen')
+      && this.opts.isForeground
+      && !this.opts.isForeground()
+    ) {
+      return failedAudio('unavailable', 'a foreground desktop window is required to start microphone capture');
+    }
+    if (remainingBudget() === 0) return timeoutResult();
+
+    const key = identityKey;
+    let resolveCancellation!: () => void;
+    const cancellation = new Promise<AudioOperationResultDto>((resolve) => {
+      resolveCancellation = () => resolve(failedAudio('cancelled', 'the audio operation was cancelled'));
+    });
+    const inFlight: InFlightAudioRequest = {
+      request,
+      cancelled: false,
+      timedOut: false,
+      resolveCancellation,
+      cancellation,
+    };
+    this.pendingAudioRequests.set(key, inFlight);
+    let resolveTimeout!: (result: AudioOperationResultDto) => void;
+    const timeout = deadlineAt === null ? null : new Promise<AudioOperationResultDto>((resolve) => {
+      resolveTimeout = resolve;
+    });
+    let helperCancellationSent = false;
+    const cancelAdmittedOperationForTimeout = (context: string): void => {
+      const helperId = inFlight.helperId;
+      if (!helperId || helperCancellationSent) return;
+      helperCancellationSent = true;
+      const pending = this.pending.get(helperId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pending.delete(helperId);
+        if (pending.kind === 'engine') {
+          pending.resolve({ type: 'engine_result', snapshot: this.getSnapshot(), result: admittedTimeoutResult() });
+        } else {
+          pending.reject(new Error('the audio operation deadline expired after native admission'));
+        }
+      }
+      void this.cancelHelperOperation(request.identity, context);
+    };
+    const timeoutTimer = deadlineAt === null ? undefined : setTimeout(() => {
+      if (inFlight.cancelled || inFlight.timedOut) return;
+      inFlight.timedOut = true;
+      const result = inFlight.helperId ? admittedTimeoutResult() : timeoutResult();
+      resolveTimeout(result);
+      if (inFlight.helperId) {
+        cancelAdmittedOperationForTimeout('native audio deadline cancellation');
+      }
+    }, Math.max(0, deadlineAt - performance.now()));
+    const terminalFailure = (): AudioOperationResultDto | null => {
+      if ((this.audioSuspending || this.suspensionRevision !== suspensionRevision)
+        && request.operation.type !== 'end_owner' && request.operation.type !== 'status') {
+        return failedAudio('cancelled', 'audio was suspended because the desktop window is hidden');
+      }
+      if (shouldContinue && !shouldContinue()) inFlight.cancelled = true;
+      if (inFlight.cancelled) return failedAudio('cancelled', 'the audio operation was cancelled');
+      if (inFlight.timedOut || remainingBudget() === 0) {
+        inFlight.timedOut = true;
+        if (inFlight.helperId) cancelAdmittedOperationForTimeout('native audio deadline cancellation');
+        return inFlight.helperId ? admittedTimeoutResult() : timeoutResult();
+      }
+      return null;
+    };
+
+    const execute = async (): Promise<AudioOperationResultDto> => {
+      try {
+        await this.ensureHelper();
+        const afterHelperStartup = terminalFailure();
+        if (afterHelperStartup) return afterHelperStartup;
+        if (request.operation.type === 'start_recording' && this.opts.isPackaged) {
+          await this.resolvePackagedPermissions(['microphone'], () => terminalFailure() === null);
+        }
+        const afterMicrophonePermission = terminalFailure();
+        if (afterMicrophonePermission) return afterMicrophonePermission;
+        if (
+          request.operation.type === 'listen'
+          && this.opts.isPackaged
+        ) {
+          await this.resolvePackagedPermissions(['microphone'], () => terminalFailure() === null);
+          const afterMicrophonePermission = terminalFailure();
+          if (afterMicrophonePermission) return afterMicrophonePermission;
+          if (operationConfiguration.recognition.source === 'automatic' || operationConfiguration.recognition.source === 'system') {
+            await this.resolvePackagedPermissions(['speech'], () => terminalFailure() === null);
+          }
+        }
+        const beforeNativeAdmission = terminalFailure();
+        if (beforeNativeAdmission) return beforeNativeAdmission;
+        if (
+          (request.operation.type === 'start_recording' || request.operation.type === 'listen')
+          && this.opts.isForeground
+          && !this.opts.isForeground()
+        ) {
+          return failedAudio('unavailable', 'a foreground desktop window is required to start microphone capture');
+        }
+
+        const budget = remainingBudget();
+        const helperBudget = budget === undefined ? undefined : Math.floor(budget);
+        if (helperBudget === 0) {
+          inFlight.timedOut = true;
+          return timeoutResult();
+        }
+        const id = randomUUID();
+        inFlight.helperId = id;
+        const responseTimeoutMs = request.operation.type === 'speak' ? SPEAK_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+        const responsePromise = this.sendHelperEnvelope({
+          id,
+          kind: 'engine_request',
+          request: helperBudget === undefined ? request : { ...request, timeout_budget_ms: helperBudget },
+          configuration: operationConfiguration,
+          configurationRevision: operationConfigurationRevision,
+        }, null, helperBudget === undefined ? responseTimeoutMs : Math.min(helperBudget, responseTimeoutMs));
+        if (onNativeAdmission) {
+          try {
+            const notification = onNativeAdmission();
+            if (notification && typeof notification.then === 'function') {
+              void notification.catch((error: unknown) => {
+                this.opts.diagnostics.add('warn', 'host', `native audio admission callback failed: ${String(error)}`);
+              });
+            }
+          } catch (error) {
+            this.opts.diagnostics.add('warn', 'host', `native audio admission callback failed: ${String(error)}`);
+          }
+        }
+        const response = await responsePromise;
+        const afterNativeOperation = terminalFailure();
+        if (afterNativeOperation) return afterNativeOperation;
+        if (response.type !== 'engine_result') {
+          return response.type === 'error'
+            ? failedAudio(nativeErrorKind(response.error.code), response.error.message)
+            : failedAudio('native_failure', 'the audio helper returned a command response for an operation request');
+        }
+        if (response.result.type === 'failed' && response.result.error.kind === 'timeout') {
+          inFlight.timedOut = true;
+          cancelAdmittedOperationForTimeout('native engine timeout cancellation');
+          return admittedTimeoutResult();
+        }
+        if (sameIdentity(response.snapshot.currentOperation?.identity, request.identity) || isCurrentOrIdleSnapshot(response.snapshot, request)) {
+          this.applySnapshot(response.snapshot);
         }
         return response.result;
+      } catch (error) {
+        const terminal = terminalFailure();
+        if (terminal) return terminal;
+        const message = error instanceof Error ? error.message : String(error);
+        if (inFlight.helperId && /timed out/i.test(message)) {
+          inFlight.timedOut = true;
+          cancelAdmittedOperationForTimeout('native helper timeout cancellation');
+          return admittedTimeoutResult();
+        }
+        this.opts.diagnostics.add('error', 'host', 'native engine audio request failed: ' + String(error));
+        return failedAudio(/timed out/i.test(message) ? 'timeout' : 'native_failure', message);
       }
-      const result = nativeAudioResponseToEngineResult(response);
-      if (opReleasesOwner(op, result) && sameOwner(this.snapshot.owner, owner)) this.releaseOwner();
+    };
+    try {
+      const races: Promise<AudioOperationResultDto>[] = [execute(), cancellation];
+      if (timeout) races.push(timeout);
+      const result = await Promise.race(races);
+      if (result.type === 'recording_started' && request.operation.type === 'start_recording') {
+        this.activeRecordingOrigins.set(key, { owner: request.owner, configurationRevision: operationConfigurationRevision });
+      } else if (
+        result.type !== 'failed'
+        && (request.operation.type === 'stop_recording' || request.operation.type === 'end_owner')
+      ) {
+        const ownerKey = audioOwnerKey(request.owner);
+        for (const [identity, recording] of this.activeRecordingOrigins) {
+          if (audioOwnerKey(recording.owner) === ownerKey) this.activeRecordingOrigins.delete(identity);
+        }
+      }
       return result;
-    } catch (error) {
-      this.opts.diagnostics.add('error', 'host', `native engine audio request failed: ${String(error)}`);
-      return { type: 'failed', kind: 'other', message: error instanceof Error ? error.message : String(error) };
     } finally {
-      if (sameOwner(this.reservedOwner, owner)) this.reservedOwner = null;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (this.pendingAudioRequests.get(key) === inFlight) this.pendingAudioRequests.delete(key);
     }
   }
 
-  async suspend(reason: string): Promise<void> {
-    if (!this.helper) {
-      this.releaseOwner();
+  async executeUiAudioOperation(
+    value: unknown,
+    instanceId: string,
+    requestedConfigurationRevision?: number,
+    configurationOverride?: unknown,
+  ): Promise<{ snapshot: NativeAudioSnapshot; result: AudioOperationResultDto }> {
+    const operation: AudioOperationDto = validateNativeAudioOperation(value);
+    const suspensionRevision = this.suspensionRevision;
+    if (!instanceId || instanceId.length > 128) throw new Error('invalid desktop UI audio instance');
+    const cancellation: UiOperationCancellation = { cancelled: false };
+    let uiOperations = this.uiOperationsByInstance.get(instanceId);
+    if (!uiOperations) {
+      uiOperations = new Set();
+      this.uiOperationsByInstance.set(instanceId, uiOperations);
+    }
+    uiOperations.add(cancellation);
+    const listenOperation: UiListenOperation | undefined = operation.type === 'listen'
+      ? { finishRequested: false, finishAcknowledged: false, admitted: false }
+      : undefined;
+    if (listenOperation) {
+      const listenOperations = this.uiListenOperations.get(instanceId) ?? [];
+      listenOperations.push(listenOperation);
+      this.uiListenOperations.set(instanceId, listenOperations);
+    }
+    try {
+      if (!this.helperPath) {
+        return {
+          snapshot: this.getSnapshot(),
+          result: failedAudio('unavailable', this.snapshot.helper.message ?? 'native audio helper is unavailable'),
+        };
+      }
+      try {
+        await this.ensureCapabilities();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.opts.diagnostics.add('error', 'host', `native audio capability initialization failed: ${message}`);
+        return { snapshot: this.getSnapshot(), result: failedAudio('unavailable', message) };
+      }
+      if (this.audioSuspending || this.suspensionRevision !== suspensionRevision) {
+        return { snapshot: this.getSnapshot(), result: failedAudio('cancelled', 'audio was suspended because the desktop window is hidden') };
+      }
+      if (cancellation.cancelled) {
+        return { snapshot: this.getSnapshot(), result: failedAudio('cancelled', 'the audio operation was cancelled') };
+      }
+      if (listenOperation && !this.uiListenOperations.get(instanceId)?.includes(listenOperation)) {
+        return { snapshot: this.getSnapshot(), result: failedAudio('cancelled', 'a newer UI listen operation superseded this request') };
+      }
+      const requestedKind = operationKind(operation);
+      if (requestedKind && !this.getCapabilities().supported_operations.includes(requestedKind)) {
+        return {
+          snapshot: this.getSnapshot(),
+          result: failedAudio('unsupported', 'this device does not support the requested audio operation'),
+        };
+      }
+      let configurationSnapshot: { configuration: AudioConfigurationV3; revision: number } | undefined;
+      if (configurationOverride !== undefined) {
+        if (requestedConfigurationRevision !== undefined) {
+          throw new Error('an audio configuration override cannot be combined with a saved configuration revision');
+        }
+        if (typeof configurationOverride !== 'object' || configurationOverride === null || Array.isArray(configurationOverride)) {
+          throw new Error('invalid audio configuration override');
+        }
+        const rawConfiguration = configurationOverride as Record<string, unknown>;
+        if (rawConfiguration['schemaVersion'] !== 3) throw new Error('invalid audio configuration override version');
+        configurationSnapshot = {
+          configuration: normalizeAudioConfiguration(rawConfiguration),
+          revision: 0,
+        };
+      } else if (requestedConfigurationRevision !== undefined) {
+        if (!Number.isSafeInteger(requestedConfigurationRevision) || requestedConfigurationRevision < 0) {
+          throw new Error('invalid audio configuration revision');
+        }
+        const currentPin = this.uiConfigurationPins.get(instanceId);
+        if (currentPin?.revision === requestedConfigurationRevision) {
+          configurationSnapshot = currentPin;
+        } else {
+          const currentRevision = this.opts.getAudioConfigurationRevision?.() ?? 0;
+          if (requestedConfigurationRevision !== currentRevision) {
+            throw new Error('audio configuration changed before this Flow turn began; start a new listen operation');
+          }
+          configurationSnapshot = {
+            configuration: this.opts.getAudioConfiguration?.() ?? audioConfigurationDefaults(),
+            revision: currentRevision,
+          };
+          this.uiConfigurationPins.set(instanceId, configurationSnapshot);
+        }
+      }
+
+      const previous = this.uiGenerationByInstance.get(instanceId) ?? 0;
+      if (previous >= Number.MAX_SAFE_INTEGER) throw new Error('desktop UI audio operation sequence is exhausted');
+      const generation = previous + 1;
+      this.uiGenerationByInstance.set(instanceId, generation);
+      const capabilities = this.getCapabilities();
+      const identity: AudioOperationIdDto = {
+        id: randomUUID(),
+        generation,
+        service_epoch: capabilities.service_epoch,
+      };
+      if (listenOperation) {
+        listenOperation.identity = identity;
+      }
+      if (listenOperation && !this.uiListenOperations.get(instanceId)?.includes(listenOperation)) {
+        return { snapshot: this.getSnapshot(), result: failedAudio('cancelled', 'a newer UI listen operation superseded this request') };
+      }
+      const result = await this.executeAudioRequest({
+        identity,
+        owner: { type: 'ui', instance_id: instanceId },
+        max_payload_bytes: capabilities.max_payload_bytes,
+        operation,
+      }, configurationSnapshot, listenOperation ? () => {
+        listenOperation.admitted = true;
+        if (listenOperation.finishRequested) {
+          void this.sendUiListenFinish(instanceId, listenOperation).catch((error: unknown) => {
+            this.opts.diagnostics.add('warn', 'host', `UI listen finish request failed: ${String(error)}`);
+          });
+        }
+      } : undefined, () => !cancellation.cancelled);
+      return { snapshot: this.getSnapshot(), result };
+    } finally {
+      if (listenOperation) {
+        const listenOperations = this.uiListenOperations.get(instanceId);
+        if (listenOperations) {
+          const index = listenOperations.indexOf(listenOperation);
+          if (index >= 0) listenOperations.splice(index, 1);
+          if (listenOperations.length === 0 && this.uiListenOperations.get(instanceId) === listenOperations) {
+            this.uiListenOperations.delete(instanceId);
+          }
+        }
+      }
+      uiOperations.delete(cancellation);
+      if (uiOperations.size === 0 && this.uiOperationsByInstance.get(instanceId) === uiOperations) {
+        this.uiOperationsByInstance.delete(instanceId);
+      }
+    }
+  }
+
+  async finishUiAudioListen(instanceId: string): Promise<void> {
+    if (!instanceId || instanceId.length > 128) return;
+    const listenOperation = this.uiListenOperations.get(instanceId)?.find((operation) => !operation.finishAcknowledged);
+    if (!listenOperation) return;
+    listenOperation.finishRequested = true;
+    if (!listenOperation.identity || !listenOperation.admitted) return;
+    try {
+      await this.sendUiListenFinish(instanceId, listenOperation);
+    } catch (error) {
+      this.opts.diagnostics.add('warn', 'host', `UI listen finish request failed: ${String(error)}`);
+      if (this.uiListenOperations.get(instanceId)?.includes(listenOperation)) throw error;
+    }
+  }
+
+  private sendUiListenFinish(instanceId: string, listenOperation: UiListenOperation): Promise<void> {
+    if (!listenOperation.identity) return Promise.resolve();
+    if (listenOperation.finishCommand) return listenOperation.finishCommand;
+    const identity = listenOperation.identity;
+    const finishCommand = this.sendHelperEnvelope({
+      id: randomUUID(),
+      kind: 'command',
+      command: {
+        type: 'finish_listening',
+        owner: { kind: 'ui', id: instanceId },
+        identity,
+      },
+    }, { kind: 'ui', id: instanceId }).then((response) => {
+      if (response.type === 'error') throw new Error(response.error.message);
+      if (response.type === 'listening_finished') {
+        listenOperation.finishAcknowledged = true;
+        const snapshot = response.snapshot;
+        if (sameIdentity(snapshot.currentOperation?.identity, identity) || (snapshot.activity === 'idle' && snapshot.owner === null)) {
+          this.applySnapshot(snapshot);
+        }
+      }
+    }).catch((error: unknown) => {
+      if (listenOperation.finishCommand === finishCommand) listenOperation.finishCommand = undefined;
+      throw error;
+    });
+    listenOperation.finishCommand = finishCommand;
+    return finishCommand;
+  }
+
+  async cancelUiAudioOperations(instanceId: string, releaseConfigurationPin = false): Promise<void> {
+    if (!instanceId || instanceId.length > 128) return;
+    for (const operation of this.uiOperationsByInstance.get(instanceId) ?? []) operation.cancelled = true;
+    this.uiListenOperations.delete(instanceId);
+    try {
+      await this.endAudioOwner({ type: 'ui', instance_id: instanceId });
+    } finally {
+      if (releaseConfigurationPin) this.uiConfigurationPins.delete(instanceId);
+    }
+  }
+
+  async cancelAudioRequest(value: unknown): Promise<void> {
+    const identity = validateNativeAudioOperationIdentity(value);
+    const key = audioIdentityKey(identity);
+    const inFlight = this.pendingAudioRequests.get(key);
+    if (!inFlight || !sameIdentity(inFlight.request.identity, identity)) {
+      this.rememberAudioIdentity(key);
+      if (this.activeRecordingOrigins.has(key)
+        && await this.cancelHelperOperation(identity, 'native completed recording rollback')) {
+        this.activeRecordingOrigins.delete(key);
+      }
       return;
     }
-    const owner = this.snapshot.owner;
-    if (!owner) return;
-    const response = await this.request({ type: 'cancel', owner });
-    if (response.type === 'error') {
-      this.opts.diagnostics.add('warn', 'host', `native audio suspend (${reason}) failed: ${response.error.message}`);
-      this.releaseOwner();
+    inFlight.cancelled = true;
+    inFlight.resolveCancellation();
+    const helperId = inFlight.helperId;
+    if (helperId) {
+      const pending = this.pending.get(helperId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pending.delete(helperId);
+      }
+      if (pending) {
+        if (pending.kind === 'engine') {
+          pending.resolve({
+            type: 'engine_result',
+            snapshot: this.getSnapshot(),
+            result: failedAudio('cancelled', 'the audio operation was cancelled'),
+          });
+        } else {
+          pending.reject(new Error('audio operation was cancelled'));
+        }
+      }
+      if (this.pendingAudioRequests.get(key) === inFlight) this.pendingAudioRequests.delete(key);
+      if (!this.helperPath || !this.helper?.stdin?.writable) return;
+      try {
+        const response = await this.sendHelperEnvelope({
+          id: randomUUID(),
+          kind: 'command',
+          command: { type: 'cancel_operation', identity },
+        }, null);
+        if (response.type === 'error') {
+          this.opts.diagnostics.add('warn', 'host', 'native audio cancellation failed: ' + response.error.message);
+        }
+      } catch (error) {
+        this.opts.diagnostics.add('warn', 'host', 'native audio cancellation failed: ' + String(error));
+      }
     }
+  }
+
+  private async cancelHelperOperation(identity: AudioOperationIdDto, context: string): Promise<boolean> {
+    if (!this.helperPath || !this.helper?.stdin?.writable) return false;
+    try {
+      const response = await this.sendHelperEnvelope({
+        id: randomUUID(),
+        kind: 'command',
+        command: { type: 'cancel_operation', identity },
+      }, null);
+      if (response.type === 'error') {
+        this.opts.diagnostics.add('warn', 'host', `${context} failed: ${response.error.message}`);
+        return false;
+      }
+      if (response.type !== 'cancelled') {
+        this.opts.diagnostics.add('warn', 'host', `${context} returned an unexpected response: ${response.type}`);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.opts.diagnostics.add('warn', 'host', `${context} failed: ${String(error)}`);
+      return false;
+    }
+  }
+
+  async endAudioOwner(owner: AudioOwnerDto): Promise<void> {
+    if (await this.endAudioOwnerWithResult(owner)) return;
+    this.stopHelperForTeardown('owner teardown failed');
+    throw new Error('native audio owner could not be ended');
+  }
+
+  private async endAudioOwnerWithResult(owner: AudioOwnerDto): Promise<boolean> {
+    const ownerKey = audioOwnerKey(owner);
+    for (const pending of [...this.pendingAudioRequests.values()]) {
+      if (audioOwnerKey(pending.request.owner) === ownerKey) {
+        await this.cancelAudioRequest(pending.request.identity);
+      }
+    }
+    try {
+      await this.ensureCapabilities();
+    } catch (error) {
+      this.opts.diagnostics.add('warn', 'host', `audio owner teardown could not refresh helper capabilities: ${String(error)}`);
+      return false;
+    }
+    const capabilities = this.getCapabilities();
+    const result = await this.executeAudioRequest({
+      identity: { id: randomUUID(), generation: 1, service_epoch: capabilities.service_epoch },
+      owner,
+      max_payload_bytes: capabilities.max_payload_bytes,
+      operation: { type: 'end_owner' },
+    });
+    if (result.type !== 'failed') {
+      for (const [identity, recording] of this.activeRecordingOrigins) {
+        if (audioOwnerKey(recording.owner) === ownerKey) this.activeRecordingOrigins.delete(identity);
+      }
+    }
+    if (result.type === 'failed' && result.error.kind !== 'unavailable') {
+      this.opts.diagnostics.add('warn', 'host', `audio owner teardown failed (${result.error.kind}): ${result.error.message}`);
+    }
+    return result.type !== 'failed';
+  }
+
+  private rememberAudioIdentity(identityKey: string): void {
+    if (this.seenAudioIdentities.has(identityKey)) return;
+    this.seenAudioIdentities.add(identityKey);
+    this.audioIdentityHistory.push(identityKey);
+    if (this.audioIdentityHistory.length > 4_096) {
+      const oldest = this.audioIdentityHistory.shift();
+      if (oldest) this.seenAudioIdentities.delete(oldest);
+    }
+  }
+
+  suspend(reason: string): Promise<void> {
+    if (this.suspensionTask) return this.suspensionTask;
+    this.audioSuspending = true;
+    this.suspensionRevision += 1;
+    const task = this.performSuspend(reason);
+    this.suspensionTask = task;
+    const clear = (): void => {
+      if (this.suspensionTask === task) {
+        this.suspensionTask = null;
+        this.audioSuspending = false;
+      }
+    };
+    void task.then(clear, clear);
+    return task;
+  }
+
+  private async performSuspend(reason: string): Promise<void> {
+    let timedOut = false;
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        this.stopHelperForTeardown(`suspend (${reason}) timed out`);
+        resolve();
+      }, this.opts.suspendTeardownTimeoutMs ?? SUSPEND_TEARDOWN_TIMEOUT_MS);
+    });
+    try {
+      const cleanup = async (): Promise<void> => {
+        const owners = new Map<string, AudioOwnerDto>();
+        let hasUnmappableOwner = false;
+        const remember = (owner: AudioOwnerDto): void => { owners.set(audioOwnerKey(owner), owner); };
+        const rememberSnapshotOwner = (owner: NativeAudioOwner | null): void => {
+          if (!owner) return;
+          const mapped = audioOwnerFromSnapshotOwner(owner);
+          if (mapped) remember(mapped);
+          else hasUnmappableOwner = true;
+        };
+
+        for (const pending of this.pendingAudioRequests.values()) remember(pending.request.owner);
+        for (const recording of this.activeRecordingOrigins.values()) remember(recording.owner);
+        for (const pending of this.pending.values()) {
+          if (pending.kind === 'command' && pending.owner) rememberSnapshotOwner(pending.owner);
+        }
+        if (this.snapshot.currentOperation) remember(this.snapshot.currentOperation.owner);
+        rememberSnapshotOwner(this.snapshot.owner);
+        rememberSnapshotOwner(this.reservedOwner);
+
+        for (const pending of [...this.pendingAudioRequests.values()]) {
+          await this.cancelAudioRequest(pending.request.identity);
+          if (timedOut) return;
+        }
+        if (!this.helper) {
+          this.releaseOwner();
+          return;
+        }
+        let ownerTeardownFailed = false;
+        for (const owner of owners.values()) {
+          if (timedOut) return;
+          if (!await this.endAudioOwnerWithResult(owner)) ownerTeardownFailed = true;
+        }
+        if (!timedOut && (hasUnmappableOwner || ownerTeardownFailed)) {
+          this.stopHelperForTeardown(`suspend (${reason}) could not confirm owner teardown`);
+        }
+      };
+      await Promise.race([cleanup(), deadline]);
+    } catch (error) {
+      this.stopHelperForTeardown(`suspend (${reason}) failed`);
+      throw error;
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+    }
+  }
+
+  private stopHelperForTeardown(reason: string): void {
+    const helper = this.helper;
+    if (!helper) return;
+    this.opts.diagnostics.add('warn', 'host', `native audio ${reason}; stopping the helper to release audio resources`);
+    this.suspendedHelpers.add(helper as object);
+    for (const pending of [...this.pendingAudioRequests.values()]) {
+      pending.cancelled = true;
+      pending.resolveCancellation();
+    }
+    this.pendingAudioRequests.clear();
+    this.activeRecordingOrigins.clear();
+    this.failPending(`native audio helper stopped during ${reason}`);
+    helper.kill();
   }
 
   async dispose(): Promise<void> {
@@ -323,6 +1081,8 @@ export class NativeAudioManager {
     this.helper?.kill();
     this.helper = null;
     this.helperStartup = null;
+    this.capabilitiesHelper = null;
+    this.capabilityInitialization = null;
     this.helperStdoutBuffer = '';
     this.releaseOwner();
     this.setHelperState('stopped', 'native audio helper stopped');
@@ -352,7 +1112,7 @@ export class NativeAudioManager {
         ? {
             type: 'error',
             snapshot: this.getSnapshot(),
-            error: { code: 'native-error', message: response.result.message },
+            error: { code: 'native-error', message: response.result.error.message },
           }
         : { type: 'snapshot', snapshot: this.getSnapshot() };
     }
@@ -391,15 +1151,34 @@ export class NativeAudioManager {
   }
 
   private applySnapshot(snapshot: NativeAudioSnapshot): void {
+    const previousCapabilities = JSON.stringify(this.snapshot.capabilities ?? null);
     this.snapshot = cloneSnapshot(snapshot);
+    if (JSON.stringify(this.snapshot.capabilities ?? null) !== previousCapabilities) {
+      this.emit({ type: 'snapshot_changed', snapshot: this.getSnapshot() });
+    }
   }
 
   private releaseOwner(): void {
-    if (!this.snapshot.owner && this.snapshot.activity === 'idle') return;
+    if (
+      !this.snapshot.owner
+      && this.snapshot.activity === 'idle'
+      && !this.snapshot.currentOperation
+      && this.snapshot.activeOperationCount === 0
+      && this.snapshot.pendingOperationCount === 0
+      && this.snapshot.activeRecordingCount === 0
+      && this.snapshot.activePlaybackCount === 0
+      && this.snapshot.activeModelReferenceCount === 0
+    ) return;
     this.snapshot = {
       ...this.snapshot,
       owner: null,
       activity: 'idle',
+      currentOperation: undefined,
+      activeOperationCount: 0,
+      pendingOperationCount: 0,
+      activeRecordingCount: 0,
+      activePlaybackCount: 0,
+      activeModelReferenceCount: 0,
     };
     const cloned = this.getSnapshot();
     this.emit({ type: 'owner_changed', snapshot: cloned, owner: null });
@@ -431,28 +1210,63 @@ export class NativeAudioManager {
     }
   }
 
+  private async ensureCapabilities(timeoutMs = REQUEST_TIMEOUT_MS): Promise<void> {
+    if (!this.helperPath) return;
+    await this.ensureHelper();
+    const helper = this.helper;
+    if (!helper) throw new Error('native audio helper failed to start');
+    if (this.capabilitiesHelper === helper) return;
+    if (this.capabilityInitialization) {
+      try {
+        await this.capabilityInitialization;
+      } catch (error) {
+        if (this.helper !== helper) return this.ensureCapabilities(timeoutMs);
+        throw error;
+      }
+      if (this.helper !== helper) return this.ensureCapabilities(timeoutMs);
+      if (this.capabilitiesHelper === helper) return;
+    }
+    const initialization = (async () => {
+      const snapshot = await this.refreshHelperSnapshot(Math.min(REQUEST_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs))));
+      if (this.helper !== helper) throw new Error('native audio helper restarted while refreshing capabilities');
+      if (!snapshot.capabilities) throw new Error('native audio helper did not return its capabilities');
+      this.capabilitiesHelper = helper;
+    })();
+    this.capabilityInitialization = initialization;
+    try {
+      await initialization;
+    } finally {
+      if (this.capabilityInitialization === initialization) this.capabilityInitialization = null;
+    }
+  }
+
   private helperAppPath(): string {
     if (!this.helperPath) throw new Error('native audio helper is unavailable');
     return resolve(this.helperPath, '..', '..', '..');
   }
 
-  private async refreshHelperSnapshot(): Promise<NativeAudioSnapshot> {
+  private async refreshHelperSnapshot(timeoutMs = REQUEST_TIMEOUT_MS): Promise<NativeAudioSnapshot> {
     const response = await this.sendHelperEnvelope({
       id: randomUUID(),
       kind: 'command',
       command: { type: 'get_snapshot' },
-    }, null);
+    }, null, timeoutMs);
     const normalized = this.normalizeCommandResponse({ type: 'get_snapshot' }, response);
     if (normalized.type === 'error') throw new Error(normalized.error.message);
     return this.getSnapshot();
   }
 
-  private async resolvePackagedPermissions(permissions: AudioPermission[]): Promise<NativeAudioSnapshot> {
+  private async resolvePackagedPermissions(
+    permissions: AudioPermission[],
+    shouldContinue: () => boolean = () => true,
+  ): Promise<NativeAudioSnapshot> {
+    if (!shouldContinue()) return this.getSnapshot();
     if (this.permissionResolution) {
       await this.permissionResolution;
-      return this.resolvePackagedPermissions(permissions);
+      if (!shouldContinue()) return this.getSnapshot();
+      return this.resolvePackagedPermissions(permissions, shouldContinue);
     }
-    const resolution = this.performPackagedPermissionResolution(permissions);
+    const resolution = this.performPackagedPermissionResolution(permissions, shouldContinue);
     this.permissionResolution = resolution;
     try {
       return await resolution;
@@ -461,20 +1275,29 @@ export class NativeAudioManager {
     }
   }
 
-  private async performPackagedPermissionResolution(permissions: AudioPermission[]): Promise<NativeAudioSnapshot> {
+  private async performPackagedPermissionResolution(
+    permissions: AudioPermission[],
+    shouldContinue: () => boolean = () => true,
+  ): Promise<NativeAudioSnapshot> {
+    if (!shouldContinue()) return this.getSnapshot();
     if (permissions.includes('microphone')) {
       if (!this.opts.requestMicrophoneAccess) {
         throw new Error('outer application microphone authorization is unavailable');
       }
       await this.opts.requestMicrophoneAccess();
+      if (!shouldContinue()) return this.getSnapshot();
     }
     const before = await this.refreshHelperSnapshot();
+    if (!shouldContinue()) return before;
     const unresolved = permissions.filter((permission, index) => {
       if (permissions.indexOf(permission) !== index) return false;
-      return permission === 'speech' && before.permissions.speech === 'not_determined';
+      if (permission === 'microphone') return before.permissions.microphone === 'prompt';
+      return before.permissions.speech === 'not_determined';
     });
     if (unresolved.length === 0) return before;
+    if (!shouldContinue()) return before;
     await this.launchPermissionHelper(this.helperAppPath(), unresolved);
+    if (!shouldContinue()) return this.getSnapshot();
     return this.refreshHelperSnapshot();
   }
 
@@ -504,11 +1327,13 @@ export class NativeAudioManager {
     });
     child.once('exit', (code, signal) => {
       const detail = `native audio helper exited (code=${String(code)} signal=${String(signal)})`;
+      const suspended = this.suspendedHelpers.has(child as object);
       this.helper = null;
+      if (this.capabilitiesHelper === child) this.capabilitiesHelper = null;
       this.helperStdoutBuffer = '';
       this.failPending(detail);
       this.releaseOwner();
-      this.setHelperState(code === 0 ? 'stopped' : 'failed', detail);
+      this.setHelperState(suspended || code === 0 ? 'stopped' : 'failed', detail);
     });
     this.setHelperState('running');
   }
@@ -571,19 +1396,30 @@ export class NativeAudioManager {
     if (envelope.type === 'error') {
       const response = this.errorResponse('native-error', envelope.error.message);
       if (pending.kind === 'command') pending.resolve(response);
-      else pending.resolve({ type: 'failed', kind: 'other', message: envelope.error.message });
+      else pending.resolve({
+        type: 'engine_result',
+        snapshot: this.getSnapshot(),
+        result: failedAudio('native_failure', envelope.error.message),
+      });
       return;
     }
     try {
       if ((envelope.result as { type?: string }).type === 'engine_result') {
         const response = validateNativeAudioEngineResponse(envelope.result);
-        this.applySnapshot(response.snapshot);
         if (pending.kind === 'command') pending.resolve(this.normalizeCommandResponse({ type: 'get_snapshot' }, response));
-        else pending.resolve(response.result);
+        else if (sameIdentity(response.snapshot.currentOperation?.identity, pending.request.identity) || isCurrentOrIdleSnapshot(response.snapshot, pending.request)) {
+          pending.resolve(response);
+        } else {
+          pending.resolve({ type: 'engine_result', snapshot: this.getSnapshot(), result: response.result });
+        }
       } else {
         const response = validateNativeAudioResponse(envelope.result);
         if (pending.kind === 'command') pending.resolve(response);
-        else pending.resolve(nativeAudioResponseToEngineResult(response));
+        else pending.resolve({
+          type: 'engine_result',
+          snapshot: this.getSnapshot(),
+          result: failedAudio('native_failure', 'the audio helper returned a command response for an operation request'),
+        });
       }
     } catch (error) {
       pending.reject(error instanceof Error ? error : new Error(String(error)));
@@ -601,19 +1437,19 @@ export class NativeAudioManager {
   private sendHelperEnvelope(
     envelope: NativeAudioHelperCommandEnvelope,
     owner: NativeAudioOwner | null,
+    timeoutMs = REQUEST_TIMEOUT_MS,
   ): Promise<NativeAudioResponse | NativeAudioEngineResponse> {
     if (!this.helper?.stdin?.writable) throw new Error('native audio helper is not writable');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(envelope.id);
         reject(new Error(`native audio helper timed out waiting for ${envelope.kind}`));
-      }, REQUEST_TIMEOUT_MS);
-      this.pending.set(envelope.id, owner && envelope.kind === 'engine_request'
+      }, timeoutMs);
+      this.pending.set(envelope.id, envelope.kind === 'engine_request'
         ? {
             kind: 'engine',
-            owner,
-            op: envelope.op,
-            resolve: (result) => resolve({ type: 'engine_result', snapshot: this.getSnapshot(), result }),
+            request: envelope.request,
+            resolve,
             reject,
             timer,
           }

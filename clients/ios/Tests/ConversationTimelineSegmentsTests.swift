@@ -121,7 +121,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
                 apiBase: "https://invalid.example", apiKey: "", model: "",
                 appSandboxRoot: NSTemporaryDirectory(), projectCwd: nil,
                 sessionMode: .code, visionDelegationEnabled: false),
-                handleBuilder: { _, _, _ in throw Offline() })
+                handleBuilder: { _, _, _, _ in throw Offline() })
         }
         func snapshot(_ value: String) -> ClientEvent {
             .settingsSnapshot(effectiveJson: "{\"owner\":\"\(value)\"}", provenanceJson: "{}",

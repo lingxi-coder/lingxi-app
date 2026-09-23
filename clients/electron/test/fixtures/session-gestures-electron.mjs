@@ -14,14 +14,26 @@ async function main() {
     const wait = async expression => {
       const deadline = Date.now() + 6000;
       while (Date.now() < deadline) { if (await run(expression)) return; await delay(20); }
-      throw new Error(`Timed out: ${expression}\n${await run('document.body.innerText')}`);
+      const rows = await run(`Array.from(document.querySelectorAll('.sidebar-tree-row')).map(row => ({
+        sessionId: row.querySelector('[data-session-id]')?.dataset.sessionId,
+        dragging: row.dataset.dragging,
+        dragTarget: row.dataset.dragTarget,
+      }))`);
+      throw new Error(`Timed out: ${expression}\nrows=${JSON.stringify(rows)}\n${await run('document.body.innerText')}`);
     };
     const selector = id => `document.querySelector('[data-session-id="${id}"]')`;
-    const point = id => run(`(() => { const r = ${selector(id)}.getBoundingClientRect(); return { x: Math.round(r.x + 50), y: Math.round(r.y + r.height / 2) }; })()`);
+    const point = id => run(`(() => { const r = ${selector(id)}.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`);
+    const hitTargetExpression = id => `(() => {
+      const button = ${selector(id)};
+      if (!button) return false;
+      const rect = button.getBoundingClientRect();
+      const hit = document.elementFromPoint(Math.round(rect.x + rect.width / 2), Math.round(rect.y + rect.height / 2));
+      return hit?.closest('[data-session-id]') === button;
+    })()`;
     const input = async (type, p, extra = {}) => { window.webContents.sendInputEvent({ type, ...p, ...extra }); await delay(40); };
     const down = p => input('mouseDown', p, { button: 'left', clickCount: 1 });
     const up = p => input('mouseUp', p, { button: 'left', clickCount: 1 });
-    const click = async id => { const p = await point(id); await input('mouseMove', p); await down(p); await up(p); };
+    const click = async id => { await wait(hitTargetExpression(id)); const p = await point(id); await input('mouseMove', p); await down(p); await up(p); };
     const opened = () => run('window.sessionGesturesFixture.opened');
     await wait(`Boolean(${selector('gamma')})`);
     window.focus();
@@ -29,24 +41,30 @@ async function main() {
     const alpha = await point('alpha');
     await input('mouseMove', { x: 600, y: 600 });
     await input('mouseMove', alpha);
-    const actionsVisible = () => run(`(() => {
-      const row = ${selector('alpha')}.closest('.sidebar-tree-row');
+    const actionsVisibleExpression = id => `(() => {
+      const row = ${selector(id)}.closest('.sidebar-tree-row');
       return ['Pin', 'Archive'].every(label => [...row.querySelectorAll('button')].some(button => {
         const name = button.getAttribute('aria-label') || button.title;
         const style = getComputedStyle(button);
         return name?.startsWith(label) && style.visibility !== 'hidden' && Number(style.opacity) > 0 && style.pointerEvents !== 'none';
       }));
-    })()`);
-    await delay(200);
+    })()`;
+    const actionsVisible = () => run(actionsVisibleExpression('alpha'));
+    await wait(actionsVisibleExpression('alpha'));
     assert.equal(await actionsVisible(), true, 'hover exposes pin and archive');
     await input('mouseMove', { x: 600, y: 600 });
     await run(`${selector('alpha')}.focus()`);
-    await delay(200);
+    await wait(actionsVisibleExpression('alpha'));
     assert.equal(await actionsVisible(), true, 'keyboard focus exposes pin and archive');
     await click('alpha');
     assert.deepEqual(await opened(), ['alpha'], 'short click opens exactly once');
+    await delay(200);
     const beta = await point('beta');
+    window.focus();
+    await delay(80);
+    await wait(hitTargetExpression('beta'));
     await input('mouseMove', beta);
+    await delay(200);
     await down(beta);
     await delay(650);
     await wait(`Boolean(document.querySelector('[role="menu"][aria-label="Actions for beta"]'))`);
@@ -55,11 +73,27 @@ async function main() {
     await input('keyDown', {}, { keyCode: 'Escape' });
     await input('keyUp', {}, { keyCode: 'Escape' });
     await wait(`!document.querySelector('[role="menu"]')`);
+    window.focus();
+    await delay(80);
+    await input('mouseMove', { x: 600, y: 600 });
+    await up(beta);
+    await wait(`!document.querySelector('[role="menu"]')`);
     const gamma = await point('gamma');
     await input('mouseMove', gamma);
     await down(gamma);
     await input('mouseMove', { x: gamma.x + 12, y: gamma.y }, { button: 'left', modifiers: ['leftButtonDown'] });
+    await wait(`${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragging === 'true'`);
     await input('mouseMove', alpha, { button: 'left', modifiers: ['leftButtonDown'] });
+    const alphaHit = await run(`(() => {
+      const element = document.elementFromPoint(${alpha.x}, ${alpha.y});
+      const row = element?.closest('.sidebar-tree-row');
+      const button = row?.querySelector('[data-session-id]');
+      return { tag: element?.tagName, className: typeof element?.className === 'string' ? element.className : '', sessionId: button?.dataset.sessionId, projectPath: button?.dataset.sessionProjectPath };
+    })()`);
+    assert.equal(alphaHit.sessionId, 'alpha', `drag pointer did not resolve to alpha: ${JSON.stringify(alphaHit)}`);
+    await wait(`Array.from(document.querySelectorAll('.sidebar-tree-row')).some(row => row.dataset.dragTarget === 'true')`);
+    const dropIndicators = await run(`Array.from(document.querySelectorAll('.sidebar-tree-row[data-drag-target="true"] [data-session-id]')).map(button => button.dataset.sessionId)`);
+    assert.deepEqual(dropIndicators, ['gamma'], 'the sortable placeholder marks the dragged item at its preview position');
     await up(alpha);
     await wait('window.sessionGesturesFixture.touched.length === 1');
     assert.deepEqual(await run('window.sessionGesturesFixture.touched'), ['gamma'], 'updated-sort drag touches the dragged session');

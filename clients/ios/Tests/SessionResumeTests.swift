@@ -1471,7 +1471,7 @@ visionDelegationEnabled: true)
                 try await gate.submit(command)
             }
             var buildCount = 0
-            let source = makeSource(handleBuilder: { _, _, _ in
+            let source = makeSource(handleBuilder: { _, _, _, _ in
                 buildCount += 1
                 return handle
             })
@@ -1504,7 +1504,7 @@ visionDelegationEnabled: true)
         func testEngineHandleConstructionDoesNotRunOnMainThread() async throws {
             let constructed = expectation(description: "engine handle constructed off-main")
             let handle = TestMobileEngineHandle { _ in }
-            let source = makeSource(handleBuilder: { _, _, _ in
+            let source = makeSource(handleBuilder: { _, _, _, _ in
                 XCTAssertFalse(
                     Thread.isMainThread,
                     "synchronous engine construction must not block the setup UI"
@@ -1522,7 +1522,7 @@ visionDelegationEnabled: true)
             let handle = TestMobileEngineHandle { command in
                 try await gate.submit(command)
             }
-            let source = makeSource(handleBuilder: { _, _, _ in handle })
+            let source = makeSource(handleBuilder: { _, _, _, _ in handle })
 
             let prepare = Task { try await source.prepare() }
             await gate.waitForFirstSubmit()
@@ -1547,7 +1547,7 @@ visionDelegationEnabled: true)
             let failingGate = EngineSubmitGate(firstSubmitError: EngineBuildTestError.bootstrapFailed)
             let succeedingGate = EngineSubmitGate()
             var buildCount = 0
-            let source = makeSource(handleBuilder: { _, _, _ in
+            let source = makeSource(handleBuilder: { _, _, _, _ in
                 buildCount += 1
                 if buildCount == 1 {
                     return TestMobileEngineHandle { command in

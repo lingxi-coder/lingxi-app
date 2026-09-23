@@ -136,10 +136,13 @@ pub fn locale_cmp(a: &str, b: &str) -> Ordering {
 /// `description` is awaited from [`Tool::prompt`] (the long-form tool prompt,
 /// the same text claude-code places in the API tool definition's `description`).
 pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> Value {
+    let input_schema = tool
+        .input_schema_snapshot()
+        .unwrap_or_else(|| tool.input_schema().clone());
     json!({
         "name": tool.name(),
         "description": tool.prompt(opts).await,
-        "input_schema": tool.input_schema(),
+        "input_schema": input_schema,
     })
 }
 
@@ -494,6 +497,7 @@ mod tests {
     struct DeferStub {
         name: &'static str,
         defer: bool,
+        snapshot: Option<Value>,
     }
 
     #[async_trait]
@@ -505,6 +509,9 @@ mod tests {
             static SCHEMA: once_cell::sync::Lazy<Value> =
                 once_cell::sync::Lazy::new(|| json!({"type": "object"}));
             &SCHEMA
+        }
+        fn input_schema_snapshot(&self) -> Option<Value> {
+            self.snapshot.clone()
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
@@ -563,6 +570,7 @@ mod tests {
         let tool = DeferStub {
             name: "Task",
             defer: true,
+            snapshot: None,
         };
         let with = tool_to_wire_deferred(&tool, &opts(), true).await;
         assert_eq!(with["defer_loading"], json!(true));
@@ -573,15 +581,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_to_wire_uses_a_live_schema_snapshot_when_provided() {
+        let tool = DeferStub {
+            name: "speech",
+            defer: false,
+            snapshot: Some(json!({
+                "type": "object",
+                "properties": {"action": {"enum": ["transcribe"]}}
+            })),
+        };
+        let wire = tool_to_wire(&tool, &opts()).await;
+        assert_eq!(
+            wire["input_schema"]["properties"]["action"]["enum"],
+            json!(["transcribe"])
+        );
+    }
+
+    #[tokio::test]
     async fn apply_defer_loading_disabled_is_byte_identical() {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(DeferStub {
                 name: "Task",
                 defer: true,
+                snapshot: None,
             }),
             Arc::new(DeferStub {
                 name: "Read",
                 defer: false,
+                snapshot: None,
             }),
         ];
         let baseline = tools_to_wire(&tools, &opts()).await;
@@ -596,10 +623,12 @@ mod tests {
             Arc::new(DeferStub {
                 name: "Task",
                 defer: true,
+                snapshot: None,
             }),
             Arc::new(DeferStub {
                 name: "Read",
                 defer: false,
+                snapshot: None,
             }),
         ];
         let mut wire = tools_to_wire(&tools, &opts()).await;
@@ -616,10 +645,12 @@ mod tests {
             Arc::new(DeferStub {
                 name: "Task",
                 defer: true,
+                snapshot: None,
             }),
             Arc::new(DeferStub {
                 name: "TaskUpdate",
                 defer: true,
+                snapshot: None,
             }),
         ];
         let mut wire = tools_to_wire(&tools, &opts()).await;
@@ -634,10 +665,12 @@ mod tests {
             Arc::new(DeferStub {
                 name: "Task",
                 defer: true,
+                snapshot: None,
             }),
             Arc::new(DeferStub {
                 name: "Read",
                 defer: false,
+                snapshot: None,
             }),
         ];
         let mut wire = tools_to_wire(&tools, &opts()).await;
@@ -655,10 +688,12 @@ mod tests {
             Arc::new(DeferStub {
                 name: "Task",
                 defer: true,
+                snapshot: None,
             }),
             Arc::new(DeferStub {
                 name: "Read",
                 defer: false,
+                snapshot: None,
             }),
         ];
         let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);
@@ -686,6 +721,7 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DeferStub {
             name: "Task",
             defer: true,
+            snapshot: None,
         })];
         let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);
         let mut at_threshold = tools_to_wire(&tools, &opts()).await;
@@ -705,6 +741,7 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(DeferStub {
             name: "Task",
             defer: true,
+            snapshot: None,
         })];
         let state = DeferralState::new(ToolSearchMode::Auto { percentage: 10 }, false);
 

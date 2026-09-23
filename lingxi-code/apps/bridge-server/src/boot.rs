@@ -803,9 +803,8 @@ impl BoundServer {
         self.runtime.registered_tool_names()
     }
 
-    /// This connection's audio bridge — the engine-side object every
-    /// `SpeechToText` / `TextToSpeech` / `VoiceRecorder` call on this
-    /// connection goes through.
+    /// This connection's `AudioService` bridge — every device operation on
+    /// this connection goes through it.
     #[must_use]
     pub fn audio(&self) -> &Arc<AudioBridge> {
         &self.audio
@@ -1328,25 +1327,22 @@ pub async fn assemble_with_credentials(
     let computer_access_broker = Arc::new(client_adapter::BridgeComputerAccessBroker::new(
         connection.computer_access_sink(),
     ));
-    // Device audio (microphone / recognizer / synthesizer). The desktop has no
-    // native implementation — those devices belong to the Electron client — so
-    // one `AudioBridge` over THIS connection's sink stands in for all three
-    // traits: each engine-side call becomes a `ClientEvent::AudioRequest` parked
-    // until the client's `ClientCommand::AudioResponse` comes back.
+    // Device audio (capture / live listen / synthesis / playback). The devices
+    // belong to the Electron client, so one `AudioBridge` over THIS connection's
+    // sink implements the shared `AudioService`: each operation becomes an
+    // identity-scoped `ClientEvent::AudioRequest` until its result returns.
     //
     // Both halves are connection-scoped ON PURPOSE, and this is the only place
     // that can make that true: the bridge parks into a table the responder
     // resolves out of, and BOTH are created here, per `assemble`, per
-    // `BridgeConnection`. A later connection gets a fresh pair, so its
-    // `AudioResponse` cannot resolve a request this one parked (the ids are
-    // per-bridge counters into per-bridge tables), and `on_close` drains what is
-    // still parked instead of leaving a caller to wait out its deadline.
+    // `BridgeConnection`. A later connection gets a fresh pair, so its response
+    // cannot resolve a request this one parked; `on_close` drains pending calls
+    // and invalidates the cached client capability snapshot.
     //
-    // There is deliberately NO capability handshake: this runs before any
-    // client connects, so the desktop cannot know whether the renderer that
-    // eventually attaches implements audio at all. That is answered honestly at
-    // call time instead — `AudioBridge` reports "no desktop client is connected"
-    // when nothing is listening, and a deadline when nothing answers.
+    // The bridge starts with an unknown snapshot. `ClientHello` supplies the
+    // initial operation support/revision and later capability updates replace
+    // it. Until a client connects, tools are not advertised; direct execution
+    // still fails immediately if no transport is attached.
     //
     // Any capability the caller put on `cfg` is REPLACED, not honored: it could
     // only have been built over some other connection, and the engine's audio

@@ -20,7 +20,9 @@ struct VoicePreferencesSnapshot: Equatable, Sendable {
         switch storedMode {
         case VoiceRecognitionMode.automatic.rawValue:
             mode = .automatic
-        case VoiceRecognitionMode.onDevice.rawValue, "on-device":
+        case VoiceRecognitionMode.system.rawValue:
+            mode = .system
+        case VoiceRecognitionMode.onDevice.rawValue, "localOnly", "on-device", "ondevice":
             // Preserve the old explicit privacy choice during migration.
             mode = .onDevice
         default:
@@ -137,6 +139,11 @@ enum VoiceRuntimeResolver {
         )
         let sherpa = sherpaRecognitionModel(for: language)
         switch preferences.recognitionMode {
+        case .system:
+            guard systemRecognizerAvailable else {
+                return .unavailable("The system recognizer is unavailable for \(language).")
+            }
+            return .system(languageIdentifier: language)
         case .onDevice:
             guard let sherpa, let root = modelRoot(sherpa) else {
                 return .unavailable("A verified offline Sherpa model for \(language) is required.")

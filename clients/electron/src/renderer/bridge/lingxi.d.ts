@@ -4,8 +4,7 @@ import type { TerminalApi } from '../../shared/terminal.js';
 import type { CronJobDto } from '@lingxi/bridge-client';
 import type {
   AskUserQuestionRequestDto,
-  AudioOpDto,
-  AudioResultDto,
+  AudioOperationDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -17,11 +16,13 @@ import type {
 import type { AllowedClientCommand } from '../../shared/clientCommands.js';
 import type {
   NativeAudioCommand,
+  NativeAudioOperationResponse,
   NativeAudioResponse,
   NativeAudioEvent,
 } from '../../shared/nativeAudio.js';
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
+import type { AudioConfigurationV3 } from '../../shared/generatedAudioConfiguration.js';
 
 export interface WorkspaceFilePreview {
   kind: 'text' | 'binary';
@@ -106,8 +107,10 @@ export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean
 export type Unsubscribe = () => void;
 export interface NativeAudioApi {
   request(command: NativeAudioCommand): Promise<NativeAudioResponse>;
+  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV3): Promise<NativeAudioOperationResponse>;
+  cancel(): Promise<void>;
+  finishListen(): Promise<void>;
   onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
-  executeEngineRequest(sessionId: string, op: AudioOpDto): Promise<AudioResultDto>;
 }
 
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
@@ -129,6 +132,7 @@ export interface LingxiApi {
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
+    voiceRevision?: number;
     notifications?: unknown;
     modelPickerVisibility?: unknown;
     sidebar?: unknown;

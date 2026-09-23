@@ -7,8 +7,7 @@ import type { CronJobDto } from '@lingxi/bridge-client';
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type {
   AskUserQuestionRequestDto,
-  AudioOpDto,
-  AudioResultDto,
+  AudioOperationDto,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -20,18 +19,22 @@ import type {
 import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
 import type { AllowedClientCommand } from '../shared/clientCommands.js';
 import {
-  CH_NATIVE_AUDIO_ENGINE_REQUEST,
+  CH_NATIVE_AUDIO_CANCEL,
   CH_NATIVE_AUDIO_EVENT,
+  CH_NATIVE_AUDIO_FINISH_LISTEN,
+  CH_NATIVE_AUDIO_OPERATION,
   CH_NATIVE_AUDIO_REQUEST,
 } from '../shared/nativeAudio.js';
 import type {
   NativeAudioCommand,
   NativeAudioCommandResult,
   NativeAudioEvent,
+  NativeAudioOperationResponse,
   NativeAudioResponse,
 } from '../shared/nativeAudio.js';
 import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
+import type { AudioConfigurationV3 } from '../shared/generatedAudioConfiguration.js';
 import type { PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
@@ -154,8 +157,10 @@ export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean
 export type Unsubscribe = () => void;
 export interface NativeAudioApi {
   request(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
+  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV3): Promise<NativeAudioOperationResponse>;
+  cancel(): Promise<void>;
+  finishListen(): Promise<void>;
   onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
-  executeEngineRequest(sessionId: string, op: AudioOpDto): Promise<AudioResultDto>;
 }
 
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
@@ -177,6 +182,7 @@ export interface LingxiApi {
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
+    voiceRevision?: number;
     notifications?: unknown;
     modelPickerVisibility?: unknown;
     sidebar?: unknown;
@@ -330,10 +336,10 @@ const api: LingxiApi = {
   onConnectionStateChanged: (callback) => subscribe(CH_STATE_CHANGED, callback),
   audio: {
     request: (command) => ipcRenderer.invoke(CH_NATIVE_AUDIO_REQUEST, command) as Promise<NativeAudioCommandResult>,
+    execute: (operation, configurationRevision, configurationOverride) => ipcRenderer.invoke(CH_NATIVE_AUDIO_OPERATION, operation, configurationRevision, configurationOverride) as Promise<NativeAudioOperationResponse>,
+    cancel: () => ipcRenderer.invoke(CH_NATIVE_AUDIO_CANCEL) as Promise<void>,
+    finishListen: () => ipcRenderer.invoke(CH_NATIVE_AUDIO_FINISH_LISTEN) as Promise<void>,
     onEvent: (callback) => subscribe(CH_NATIVE_AUDIO_EVENT, callback),
-    executeEngineRequest: (sessionId, op) => (
-      ipcRenderer.invoke(CH_NATIVE_AUDIO_ENGINE_REQUEST, sessionId, op) as Promise<AudioResultDto>
-    ),
   },
 };
 

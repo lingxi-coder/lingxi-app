@@ -13,6 +13,7 @@
 //! concrete handles; library crates stay `#[cfg]`-free.
 
 use crate::android_ui::AndroidUiAutomation;
+use crate::audio::AudioService;
 use crate::calendar::CalendarProvider;
 use crate::camera::CameraControl;
 use crate::clipboard::Clipboard;
@@ -31,9 +32,6 @@ use crate::process::ProcessRunner;
 use crate::sandbox::Sandbox;
 use crate::secure_storage::SecureStorage;
 use crate::share::SharingService;
-use crate::stt::SpeechToText;
-use crate::tts::TextToSpeech;
-use crate::voice::VoiceRecorder;
 use crate::worktree::WorktreeManager;
 use std::sync::Arc;
 
@@ -58,20 +56,12 @@ pub trait Platform: Send + Sync {
     fn camera(&self) -> Option<Arc<dyn CameraControl>> {
         None
     }
-    /// Native microphone recorder, if the platform has one.
-    fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
+    /// Device-local unified audio service, if the platform has audio support.
+    fn audio_service(&self) -> Option<Arc<dyn AudioService>> {
         None
     }
     /// Native one-shot location provider, if the platform has one.
     fn location(&self) -> Option<Arc<dyn LocationProvider>> {
-        None
-    }
-    /// Native speech-to-text (live mic → transcript), if available.
-    fn stt(&self) -> Option<Arc<dyn SpeechToText>> {
-        None
-    }
-    /// Native text-to-speech (text → PCM audio), if available.
-    fn tts(&self) -> Option<Arc<dyn TextToSpeech>> {
         None
     }
     /// Native share sheet, if the platform has one.

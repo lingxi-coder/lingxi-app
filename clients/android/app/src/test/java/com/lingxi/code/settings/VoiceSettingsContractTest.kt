@@ -1,6 +1,12 @@
 package com.lingxi.code.settings
 
-import com.lingxi.code.model.VoiceConfig
+import com.lingxi.code.voice.audio.AudioConfigurationNormalizer
+import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioReadiness
+import com.lingxi.code.voice.audio.AudioRecognitionPreference
+import com.lingxi.code.voice.audio.AudioSource
+import com.lingxi.code.voice.audio.AudioSpeechPreference
+import com.lingxi.code.voice.audio.AudioVoiceSelection
 import com.lingxi.code.voice.offline.ModelState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,38 +14,35 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoiceSettingsContractTest {
-
     @Test
-    fun migratesLegacyPreferencesAndAppearanceVoiceLang() {
-        val config = resolveVoiceConfig(
-            schemaVersion = 0,
-            recognitionMode = null,
-            language = null,
-            voiceSelection = null,
-            rate = null,
-            autoPlayReplies = null,
-            legacyInputLanguage = "auto",
-            legacyVoiceId = "zh-CN-XiaoxiaoNeural",
-            legacySpeed = 1.4f,
-            legacyAutoPlay = true,
-            legacyVoiceLang = "en",
+    fun migratesLegacyOfflineRecognitionAndVoiceIntoV3Preferences() {
+        val config = AudioConfigurationNormalizer.migrateLegacy(
+            mapOf(
+                "schemaVersion" to 2,
+                "recognitionMode" to "localOnly",
+                "inputLanguage" to "auto",
+                "voiceSelection" to "sherpa:sherpa.melo-zh-en:melo-zh-en",
+                "speed" to 1.4,
+                "autoPlay" to true,
+                "legacyVoiceLang" to "en",
+            ),
         )
 
-        assertEquals(VoiceConfig.CURRENT_SCHEMA_VERSION, config.schemaVersion)
-        assertEquals(VoiceConfig.MODE_AUTOMATIC, config.recognitionMode)
+        assertEquals(3, config.schemaVersion)
+        assertEquals(AudioSource.OFFLINE, config.recognition.source)
+        assertEquals(AudioSource.OFFLINE, config.speech.source)
+        assertEquals("sherpa.melo-zh-en", config.speech.offlineModelId)
         assertEquals("en-US", config.language)
-        assertEquals(VoiceConfig.DEFAULT_VOICE_SELECTION, config.voiceSelection)
-        assertEquals(1.4f, config.rate, 1e-4f)
+        assertEquals(1.4, config.rate, 1e-4)
         assertTrue(config.autoPlayReplies)
     }
 
     @Test
-    fun automaticPrefersSystemRecognizerWhenAvailable() {
+    fun automaticRecognitionUsesSystemWhenAvailableEvenWithOfflineModelsInstalled() {
         val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = VoiceConfig(
-                recognitionMode = VoiceConfig.MODE_AUTOMATIC,
+            preferences = AudioConfigurationV3(
+                recognition = AudioRecognitionPreference(source = AudioSource.AUTOMATIC),
                 language = "zh-CN",
-                voiceSelection = VoiceConfig.DEFAULT_VOICE_SELECTION,
             ),
             platform = platformSnapshot(
                 recognizerAvailable = true,
@@ -47,129 +50,60 @@ class VoiceSettingsContractTest {
             ),
         )
 
-        assertEquals("system", capability.effectiveRecognitionBackend)
+        assertEquals(AudioSource.SYSTEM.value, capability.effectiveRecognitionBackend)
+        assertEquals(AudioReadiness.AVAILABLE, capability.recognitionReadiness)
         assertTrue(capability.blockingIssues.isEmpty())
     }
 
     @Test
-    fun localOnlyRequiresReadySherpaRecognitionModel() {
+    fun explicitOfflineRecognitionRequiresItsInstalledCompatibleModel() {
         val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = VoiceConfig(
-                recognitionMode = VoiceConfig.MODE_LOCAL_ONLY,
+            preferences = AudioConfigurationV3(
+                recognition = AudioRecognitionPreference(source = AudioSource.OFFLINE),
                 language = "zh-CN",
-                voiceSelection = VoiceConfig.DEFAULT_VOICE_SELECTION,
             ),
             platform = platformSnapshot(recognizerAvailable = true),
         )
 
         assertEquals("unavailable", capability.effectiveRecognitionBackend)
+        assertEquals(AudioReadiness.UNAVAILABLE, capability.recognitionReadiness)
         assertTrue(capability.blockingIssues.contains(VoiceBlockingIssue.OfflineRecognitionModelRequired))
     }
 
     @Test
-    fun runtimeRouteUsesSameStrictLocalAndAutomaticFallbackRules() {
-        val readyStates = mapOf("sherpa.zipformer-zh-14m-mobile" to ModelState.Ready)
-        val strictMissing = resolveVoiceExecutionRoute(
-            preferences = VoiceConfig(
-                recognitionMode = VoiceConfig.MODE_LOCAL_ONLY,
-                language = "zh-CN",
-            ),
-            localeTag = "en-US",
-            platformRecognizerAvailable = true,
-            modelStates = emptyMap(),
-        )
-        assertEquals(VoiceRecognitionBackend.Unavailable, strictMissing.recognitionBackend)
-
-        val strictReady = resolveVoiceExecutionRoute(
-            preferences = VoiceConfig(
-                recognitionMode = VoiceConfig.MODE_LOCAL_ONLY,
-                language = "zh-CN",
-            ),
-            localeTag = "en-US",
-            platformRecognizerAvailable = true,
-            modelStates = readyStates,
-        )
-        assertEquals(VoiceRecognitionBackend.Sherpa, strictReady.recognitionBackend)
-
-        val automaticFallback = resolveVoiceExecutionRoute(
-            preferences = VoiceConfig(
-                recognitionMode = VoiceConfig.MODE_AUTOMATIC,
-                language = "zh-CN",
-            ),
-            localeTag = "en-US",
-            platformRecognizerAvailable = false,
-            modelStates = readyStates,
-        )
-        assertEquals(VoiceRecognitionBackend.Sherpa, automaticFallback.recognitionBackend)
-    }
-
-    @Test
-    fun missingRequestedVoiceFallsBackToSystemDefaultButKeepsRequestedSelection() {
-        val requestedSelection = VoiceConfig.sherpaVoiceSelection("sherpa.kitten-nano-en", "missing")
+    fun explicitUnknownOfflineVoiceRemainsUnavailableInsteadOfFallingBack() {
+        val voice = AudioVoiceSelection(AudioSource.OFFLINE, "missing", "sherpa.kitten-nano-en")
         val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = VoiceConfig(
-                recognitionMode = VoiceConfig.MODE_AUTOMATIC,
+            preferences = AudioConfigurationV3(
+                speech = AudioSpeechPreference(
+                    source = AudioSource.OFFLINE,
+                    offlineModelId = voice.modelId,
+                    voice = voice,
+                ),
                 language = "en-US",
-                voiceSelection = requestedSelection,
             ),
             platform = platformSnapshot(
-                recognizerAvailable = true,
                 modelStates = mapOf("sherpa.kitten-nano-en" to ModelState.Ready),
             ),
         )
 
-        assertEquals(requestedSelection, capability.requestedVoice?.id)
-        assertEquals(
-            VoiceConfig.sherpaVoiceSelection("sherpa.kitten-nano-en", "expr-voice-2-f"),
-            capability.effectiveVoice?.id,
-        )
+        assertEquals(voice, capability.requestedVoice?.selection)
+        assertEquals(null, capability.effectiveVoice)
         assertTrue(capability.blockingIssues.contains(VoiceBlockingIssue.RequestedVoiceUnavailable))
     }
 
     @Test
-    fun incompatibleSherpaVoiceFallsBackToSystemDefaultForSettingsAndRuntime() {
-        val requestedSelection = VoiceConfig.sherpaVoiceSelection("sherpa.kitten-nano-en", "expr-voice-2-f")
+    fun microphoneDenialDoesNotHidePlaybackVoiceSupport() {
         val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = VoiceConfig(
-                recognitionMode = VoiceConfig.MODE_AUTOMATIC,
-                language = "ja-JP",
-                voiceSelection = requestedSelection,
-            ),
-            platform = platformSnapshot(
-                recognizerAvailable = true,
-                modelStates = mapOf("sherpa.kitten-nano-en" to ModelState.Ready),
-            ),
-        )
-
-        assertEquals(requestedSelection, capability.requestedVoice?.id)
-        assertEquals(VoiceConfig.DEFAULT_VOICE_SELECTION, capability.effectiveVoice?.id)
-        assertTrue(capability.blockingIssues.contains(VoiceBlockingIssue.RequestedVoiceUnavailable))
-
-        val route = resolveVoiceExecutionRoute(
-            preferences = VoiceConfig(
-                recognitionMode = VoiceConfig.MODE_AUTOMATIC,
-                language = "ja-JP",
-                voiceSelection = requestedSelection,
-            ),
-            localeTag = "en-US",
-            platformRecognizerAvailable = true,
-            modelStates = mapOf("sherpa.kitten-nano-en" to ModelState.Ready),
-        )
-        assertEquals(VoiceSpeechBackend.System, route.speechBackend)
-        assertEquals(null, route.systemVoiceId)
-    }
-
-    @Test
-    fun microphoneDenialBlocksRecognitionButNotPlaybackCatalog() {
-        val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = VoiceConfig(language = "en-US"),
+            preferences = AudioConfigurationV3(language = "en-US"),
             platform = platformSnapshot(
                 microphonePermission = VoicePermissionStatus.Denied,
                 recognizerAvailable = true,
             ),
         )
 
-        assertEquals("unavailable", capability.effectiveRecognitionBackend)
+        assertEquals(AudioReadiness.PERMISSION_REQUIRED, capability.recognitionReadiness)
+        assertEquals(AudioReadiness.AVAILABLE, capability.speechReadiness)
         assertTrue(capability.blockingIssues.contains(VoiceBlockingIssue.MicrophonePermissionRequired))
         assertFalse(capability.systemVoiceOptions.isEmpty())
     }
@@ -178,28 +112,30 @@ class VoiceSettingsContractTest {
         microphonePermission: VoicePermissionStatus = VoicePermissionStatus.Granted,
         recognizerAvailable: Boolean = true,
         modelStates: Map<String, ModelState> = emptyMap(),
-    ): VoicePlatformSnapshot = VoicePlatformSnapshot(
+    ) = VoicePlatformSnapshot(
         localeTag = "en-US",
         microphonePermission = microphonePermission,
         platformRecognizerAvailable = recognizerAvailable,
         systemVoices = listOf(
             VoiceOption(
-                id = VoiceConfig.DEFAULT_VOICE_SELECTION,
+                id = "system:default",
                 label = "System default",
                 languageTag = "en-US",
                 source = VoiceOptionSource.System,
                 familyId = "system",
                 isDefault = true,
+                selection = AudioVoiceSelection(AudioSource.SYSTEM, "default"),
             ),
             VoiceOption(
-                id = VoiceConfig.systemVoiceSelection("android-en-1"),
+                id = "system:android-en-1",
                 label = "Android English 1",
                 languageTag = "en-US",
                 source = VoiceOptionSource.System,
                 familyId = "system",
+                selection = AudioVoiceSelection(AudioSource.SYSTEM, "android-en-1"),
             ),
         ),
-        defaultSystemVoiceId = VoiceConfig.DEFAULT_VOICE_SELECTION,
+        defaultSystemVoiceId = "default",
         modelStates = modelStates,
     )
 }

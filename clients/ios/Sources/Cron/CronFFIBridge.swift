@@ -243,14 +243,13 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
                 makeIosHostEnvironment(launchMode: .scheduledHeadless)
             }
         )
+        let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
         let handle = try buildIosEngineWithConfig(
             config: config,
             listener: listener,
-            stt: SttImpl(),
-            tts: TtsImpl(),
+            audio: audio,
             camera: CameraImpl(),
             share: ShareImpl(),
-            voice: VoiceImpl(),
             notifications: NotificationImpl(),
             clipboard: ClipboardImpl(),
             permissions: permissionSink,

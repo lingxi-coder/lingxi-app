@@ -39,10 +39,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
+use client_protocol::audio::{
+    AudioCapabilitySnapshotDto, AudioOperationDto, AudioOperationIdDto, AudioOperationKindDto,
+    AudioOperationReadinessDto, AudioOperationRequestDto, AudioOperationResultDto, AudioOwnerDto,
+    AudioReadinessStateDto,
+};
 use client_protocol::commands::{
-    AppCreateModeDto, AudioResultDto, ClientCommand, HookAdminCommandDto, ImageRefDto,
-    ListingKindDto, McpAdminCommandDto, PermissionBehaviorDto, PluginAdminCommandDto,
-    PromptModeDto, ProviderCredentialSecretDto, SkillAdminCommandDto, WritableScopeDto,
+    AppCreateModeDto, ClientCommand, HookAdminCommandDto, ImageRefDto, ListingKindDto,
+    McpAdminCommandDto, PermissionBehaviorDto, PluginAdminCommandDto, PromptModeDto,
+    ProviderCredentialSecretDto, SkillAdminCommandDto, WritableScopeDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -55,8 +60,8 @@ use client_protocol::controls::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{
-    AttachmentDto, AudioOpDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto,
-    TurnRecoverySnapshotDto, TurnRecoveryStateDto,
+    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+    TurnRecoveryStateDto,
 };
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, ConfigurationDomainDto, ConfigurationEffectDto,
@@ -1354,9 +1359,49 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
         (
             "event/audio_request.json",
             ClientEvent::AudioRequest {
-                request_id: 7,
-                op: AudioOpDto::Transcribe {
-                    language: Some("zh-CN".to_string()),
+                request: AudioOperationRequestDto {
+                    identity: AudioOperationIdDto {
+                        id: "00000000-0000-4000-8000-000000000007".to_string(),
+                        generation: 2,
+                        service_epoch: 3,
+                    },
+                    owner: AudioOwnerDto::Session {
+                        session_id: "session-1".to_string(),
+                    },
+                    initiator: None,
+                    timeout_budget_ms: Some(1_000),
+                    max_payload_bytes: 12_533_760,
+                    operation: AudioOperationDto::Listen {
+                        language: Some("zh-CN".to_string()),
+                    },
+                },
+            },
+        ),
+        (
+            "event/audio_cancel.json",
+            ClientEvent::AudioCancel {
+                identity: AudioOperationIdDto {
+                    id: "00000000-0000-4000-8000-000000000007".to_string(),
+                    generation: 2,
+                    service_epoch: 3,
+                },
+            },
+        ),
+        (
+            "event/audio_capabilities_changed.json",
+            ClientEvent::AudioCapabilitiesChanged {
+                capabilities: AudioCapabilitySnapshotDto {
+                    service_epoch: 3,
+                    support_revision: 2,
+                    supported_operations: vec![
+                        AudioOperationKindDto::Listen,
+                        AudioOperationKindDto::Speak,
+                    ],
+                    readiness: vec![AudioOperationReadinessDto {
+                        operation: AudioOperationKindDto::Listen,
+                        state: AudioReadinessStateDto::NeedsPermission,
+                    }],
+                    max_payload_bytes: 12_533_760,
                 },
             },
         ),
@@ -1959,11 +2004,33 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/audio_response.json",
             ClientCommand::AudioResponse {
-                request_id: 7,
-                result: AudioResultDto::Transcript {
+                identity: AudioOperationIdDto {
+                    id: "00000000-0000-4000-8000-000000000007".to_string(),
+                    generation: 2,
+                    service_epoch: 3,
+                },
+                result: AudioOperationResultDto::Transcript {
                     text: "你好".to_string(),
                     language: Some("zh-CN".to_string()),
                     confidence: Some(0.9),
+                },
+            },
+        ),
+        (
+            "command/update_audio_capabilities.json",
+            ClientCommand::UpdateAudioCapabilities {
+                capabilities: AudioCapabilitySnapshotDto {
+                    service_epoch: 3,
+                    support_revision: 2,
+                    supported_operations: vec![
+                        AudioOperationKindDto::Listen,
+                        AudioOperationKindDto::Speak,
+                    ],
+                    readiness: vec![AudioOperationReadinessDto {
+                        operation: AudioOperationKindDto::Listen,
+                        state: AudioReadinessStateDto::NeedsPermission,
+                    }],
+                    max_payload_bytes: 12_533_760,
                 },
             },
         ),

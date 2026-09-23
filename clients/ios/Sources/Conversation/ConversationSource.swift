@@ -2038,6 +2038,7 @@ final class MockConversationSource: ConversationSource {
         typealias HandleBuilder = (
             _ config: IosEngineLaunchConfigFfi,
             _ listener: IosEventListener,
+            _ audio: IOSAudioServiceCallbackAdapter,
             _ permissions: IosPermissionSink
         ) throws -> MobileEngineHandle
 
@@ -3526,9 +3527,10 @@ final class MockConversationSource: ConversationSource {
             // bridge, verify the bundled archive, and extract the rootfs on a
             // first launch. A child `Task` would inherit MainActor here and make
             // the entire setup UI unresponsive until that work completed.
+            let audio = IOSAudioServiceCallbackAdapter.shared
             let buildTask = Task.detached(priority: .userInitiated) {
-                [handleBuilder, launchConfig, listener, permissionSink] in
-                let handle = try handleBuilder(launchConfig, listener, permissionSink)
+                [handleBuilder, launchConfig, listener, audio, permissionSink] in
+                let handle = try handleBuilder(launchConfig, listener, audio, permissionSink)
                 // Bootstrap listings are part of construction: never publish a
                 // handle that failed halfway through initialization.
                 try await handle.submit(command: .listModels)
@@ -3573,16 +3575,15 @@ final class MockConversationSource: ConversationSource {
         private nonisolated static func buildDefaultHandle(
             config: IosEngineLaunchConfigFfi,
             listener: IosEventListener,
+            audio: IOSAudioServiceCallbackAdapter,
             permissions: IosPermissionSink
         ) throws -> MobileEngineHandle {
             try buildIosEngineWithConfig(
                 config: config,
                 listener: listener,
-                stt: SttImpl(),
-                tts: TtsImpl(),
+                audio: audio,
                 camera: CameraImpl(),
                 share: ShareImpl(),
-                voice: VoiceImpl(),
                 notifications: NotificationImpl(),
                 clipboard: ClipboardImpl(),
                 permissions: permissions,

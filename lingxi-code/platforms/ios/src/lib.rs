@@ -26,11 +26,11 @@
 #![allow(missing_docs)]
 
 use platform_api::{
-    CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider, DeepLinkOpener,
-    DeviceStatusProvider, FileSystem, HapticService, HttpTransport, LocationProvider,
-    MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec, NotificationService,
-    Platform, ProcessRunner, Sandbox, SandboxBackend, SecureStorage, SharingService, SpeechToText,
-    TextToSpeech, UnavailableMobileLinuxRuntime, VoiceRecorder, WorktreeManager,
+    AudioService, CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider,
+    DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService, HttpTransport,
+    LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec,
+    NotificationService, Platform, ProcessRunner, Sandbox, SandboxBackend, SecureStorage,
+    SharingService, UnavailableMobileLinuxRuntime, WorktreeManager,
 };
 use platform_common::{GuestPathFileSystem, MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
@@ -45,15 +45,10 @@ pub struct IosPlatformInputs {
     pub app_sandbox_root: PathBuf,
     /// Native camera (Swift impl).
     pub camera: Arc<dyn CameraControl>,
-    /// Native microphone recorder (Swift impl).
-    pub voice: Arc<dyn VoiceRecorder>,
+    /// Unified app-scoped device audio service (Swift impl).
+    pub audio: Arc<dyn AudioService>,
     /// Native share sheet (Swift impl).
     pub share: Arc<dyn SharingService>,
-    /// Native speech-to-text (Swift impl), when wired. `None` keeps the
-    /// pre-speech behavior (the `speech` tool reports "unavailable").
-    pub stt: Option<Arc<dyn SpeechToText>>,
-    /// Native text-to-speech (Swift impl), when wired.
-    pub tts: Option<Arc<dyn TextToSpeech>>,
     /// Native system notifications (Swift impl), when wired. `None` keeps the
     /// `notification` tool reporting "unavailable".
     pub notifications: Option<Arc<dyn NotificationService>>,
@@ -94,10 +89,8 @@ pub struct IosPlatform {
     sandbox: Arc<dyn Sandbox>,
     worktree: Arc<dyn WorktreeManager>,
     camera: Arc<dyn CameraControl>,
-    voice: Arc<dyn VoiceRecorder>,
+    audio: Arc<dyn AudioService>,
     share: Arc<dyn SharingService>,
-    stt: Option<Arc<dyn SpeechToText>>,
-    tts: Option<Arc<dyn TextToSpeech>>,
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
     device_status: Option<Arc<dyn DeviceStatusProvider>>,
@@ -176,10 +169,8 @@ impl IosPlatform {
             sandbox,
             worktree: Arc::new(PosixWorktree::new()),
             camera: inputs.camera,
-            voice: inputs.voice,
+            audio: inputs.audio,
             share: inputs.share,
-            stt: inputs.stt,
-            tts: inputs.tts,
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
             device_status: inputs.device_status,
@@ -233,17 +224,11 @@ impl Platform for IosPlatform {
     fn camera(&self) -> Option<Arc<dyn CameraControl>> {
         Some(self.camera.clone())
     }
-    fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
-        Some(self.voice.clone())
+    fn audio_service(&self) -> Option<Arc<dyn AudioService>> {
+        Some(self.audio.clone())
     }
     fn share(&self) -> Option<Arc<dyn SharingService>> {
         Some(self.share.clone())
-    }
-    fn stt(&self) -> Option<Arc<dyn SpeechToText>> {
-        self.stt.clone()
-    }
-    fn tts(&self) -> Option<Arc<dyn TextToSpeech>> {
-        self.tts.clone()
     }
     fn location(&self) -> Option<Arc<dyn LocationProvider>> {
         self.location.clone()
@@ -285,7 +270,7 @@ mod tests {
     use async_trait::async_trait;
     use platform_api::{
         CameraError, CapturePhotoOpts, CapturedImage, FsError, ShareError, SharePayload,
-        ShareResult, UnavailableMobileLinuxRuntime, VoiceError, VoiceRecording, VoiceRecordingOpts,
+        ShareResult, UnavailableMobileLinuxRuntime,
     };
 
     struct StubCamera;
@@ -302,17 +287,33 @@ mod tests {
         }
     }
 
-    struct StubVoice;
+    struct StubAudio;
     #[async_trait]
-    impl VoiceRecorder for StubVoice {
-        async fn start_recording(&self, _opts: VoiceRecordingOpts) -> Result<(), VoiceError> {
-            Err(VoiceError::Other("stub".to_string()))
+    impl AudioService for StubAudio {
+        fn capabilities(&self) -> platform_api::AudioCapabilitySnapshot {
+            platform_api::AudioCapabilitySnapshot {
+                service_epoch: 0,
+                support_revision: 0,
+                supported_operations: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 0,
+            }
         }
-        async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
-            Err(VoiceError::Other("stub".to_string()))
+        async fn execute(
+            &self,
+            _context: platform_api::AudioOperationContext,
+            _operation: platform_api::AudioOperation,
+        ) -> Result<platform_api::AudioOperationSuccess, platform_api::AudioError> {
+            Err(platform_api::AudioError::new(
+                platform_api::AudioErrorKind::Unavailable,
+                "audio service not wired",
+            ))
         }
-        async fn is_recording(&self) -> bool {
-            false
+        async fn cancel(
+            &self,
+            _identity: platform_api::AudioOperationId,
+        ) -> Result<(), platform_api::AudioError> {
+            Ok(())
         }
     }
 
@@ -331,10 +332,8 @@ mod tests {
         IosPlatformInputs {
             app_sandbox_root: root.to_path_buf(),
             camera: Arc::new(StubCamera),
-            voice: Arc::new(StubVoice),
+            audio: Arc::new(StubAudio),
             share: Arc::new(StubShare),
-            stt: None,
-            tts: None,
             notifications: None,
             clipboard: None,
             device_status: None,

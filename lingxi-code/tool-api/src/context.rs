@@ -7,6 +7,9 @@
 use crate::content_replacement::ContentReplacementState;
 use crate::registry::ToolRegistry;
 use lingxi_core::SessionState;
+use platform_api::audio::{
+    AudioError, AudioErrorKind, AudioInitiator, AudioOperationContext, AudioOperationId, AudioOwner,
+};
 use platform_api::tool_invoker::ToolExecutionPolicy;
 use protocol::{AgentId, McpConnectionId, MessageId, SessionId, ToolUseId};
 use std::sync::Arc;
@@ -120,6 +123,42 @@ pub struct ToolUseContext {
 }
 
 impl ToolUseContext {
+    /// Build device-audio ownership only from trusted host context. The
+    /// per-call agent/tool IDs remain attribution and never become the stable
+    /// recording owner.
+    pub async fn audio_operation_context(
+        &self,
+        identity: AudioOperationId,
+        timeout_budget_ms: Option<u64>,
+        max_payload_bytes: u64,
+    ) -> Result<AudioOperationContext, AudioError> {
+        let session_id = if let Some(origin_session_id) = self.origin_session_id.as_ref() {
+            origin_session_id.to_string()
+        } else if let Some(session) = self.session.as_ref() {
+            session.lock().await.session_id.to_string()
+        } else {
+            return Err(AudioError::new(
+                AudioErrorKind::InvalidRequest,
+                "audio call has no trusted session owner",
+            ));
+        };
+
+        let initiator = AudioInitiator {
+            agent_id: self.agent_id.as_ref().map(ToString::to_string),
+            tool_use_id: self.tool_use_id.as_ref().map(ToString::to_string),
+            request_id: None,
+        };
+
+        Ok(AudioOperationContext {
+            identity,
+            owner: AudioOwner::Session { session_id },
+            initiator: (initiator.agent_id.is_some() || initiator.tool_use_id.is_some())
+                .then_some(initiator),
+            timeout_budget_ms,
+            max_payload_bytes,
+        })
+    }
+
     /// Build a minimal context that carries ONLY `main_loop_model`; every other
     /// field is inert (`None` / empty / default).
     ///

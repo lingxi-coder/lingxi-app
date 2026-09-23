@@ -14,6 +14,7 @@ use crate::session_cwd::SessionCwd;
 use crate::worktree_session::WorktreeSessionCell;
 use permission::PermissionMode;
 use platform_api::agent_name_registry::AgentNameRegistry;
+use platform_api::audio::{AudioRecordingHandle, AudioService};
 use platform_api::budget::BudgetEnforcerHandle;
 use platform_api::camera::CameraControl;
 use platform_api::clipboard::Clipboard;
@@ -28,11 +29,8 @@ use platform_api::permission_gate::PermissionGate;
 use platform_api::process::ProcessRunner;
 use platform_api::sandbox::Sandbox;
 use platform_api::share::SharingService;
-use platform_api::stt::SpeechToText;
 use platform_api::subagent_spawn::SubagentSpawner;
 use platform_api::task_registry::TaskRegistryHandle;
-use platform_api::tts::TextToSpeech;
-use platform_api::voice::VoiceRecorder;
 use platform_api::worktree::WorktreeManager;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
@@ -232,15 +230,17 @@ pub struct BuiltinToolContext {
     /// desktop; mobile composition roots wire `platform.camera()` (a Swift /
     /// Kotlin impl via UniFFI).
     pub camera: Option<Arc<dyn CameraControl>>,
-    /// Native microphone recorder — `tool-voice`'s `VoiceTool` routes here.
-    /// `None` on desktop.
-    pub voice: Option<Arc<dyn VoiceRecorder>>,
-    /// Native speech-to-text — `tool-speech`'s `SpeechTool` (`transcribe`)
-    /// routes here. `None` on desktop; mobile wires `platform.stt()`.
-    pub stt: Option<Arc<dyn SpeechToText>>,
-    /// Native text-to-speech — `tool-speech`'s `SpeechTool` (`speak`) routes
-    /// here. `None` on desktop; mobile wires `platform.tts()`.
-    pub tts: Option<Arc<dyn TextToSpeech>>,
+    /// Unified per-device audio service. The audio tools, Local App adapter,
+    /// and Computer Use audio routes share this app-scoped service.
+    pub audio: Option<Arc<dyn AudioService>>,
+    /// Host-managed recording handles for public voice start/stop actions.
+    /// Keyed by stable owner so a later call from another tool-use identity
+    /// can stop only that owner's recording.
+    pub audio_recording_handles: Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<platform_api::audio::AudioOwner, AudioRecordingHandle>,
+        >,
+    >,
     /// Native share sheet — `tool-share`'s `ShareTool` routes here. `None` on
     /// desktop.
     pub share: Option<Arc<dyn SharingService>>,

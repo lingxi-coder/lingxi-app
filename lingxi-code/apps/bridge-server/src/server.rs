@@ -53,7 +53,6 @@ use bridge::{
 use client_adapter::{
     BridgeAskUserQuestionBroker, ClientEventSink, ComputerAccessRequestSink, PermissionRequestSink,
 };
-use client_protocol::commands::AudioResultDto;
 use client_protocol::commands::{ClientCommand, ImageRefDto};
 use client_protocol::computer_access::{ComputerAccessRequestDto, ComputerAccessResponseDto};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
@@ -480,8 +479,7 @@ pub struct BridgeConnection {
     /// Connection-scoped broker for `AskUserQuestion` UI exchanges.
     ask_user_question_broker: Option<Arc<BridgeAskUserQuestionBroker>>,
     /// The response side of the connection's [`crate::audio_bridge::AudioBridge`]
-    /// (the desktop's stand-in for the mobile clients' native
-    /// `SpeechToText`/`TextToSpeech`/`VoiceRecorder`). `None` when no audio
+    /// (the desktop service's response half). `None` when no audio
     /// bridge was wired at boot — `AudioResponse` is then silently dropped,
     /// exactly like an unrouted command with no [`CommandRouter`] bound.
     audio_responder: Option<AudioResponder>,
@@ -1129,7 +1127,7 @@ impl BridgeConnection {
     }
 
     /// The connection-scoped [`AudioRequestSink`] to build an
-    /// [`crate::audio_bridge::AudioBridge`] over. Every audio trait call the
+    /// [`crate::audio_bridge::AudioBridge`] over. Every audio operation the
     /// engine makes flows through here as a
     /// [`Frame::Event`]`(`[`ClientEvent::AudioRequest`]`)`.
     #[must_use]
@@ -1140,13 +1138,13 @@ impl BridgeConnection {
     }
 
     /// Attach the response side of the connection's audio bridge, so an inbound
-    /// `AudioResponse` resolves the parked trait call and a disconnect drains
+    /// `AudioResponse` resolves the parked operation and a disconnect drains
     /// every request still parked. Additive over [`Self::bind`]: a connection
     /// built without this call (e.g. most existing tests) simply never receives
     /// an audio bridge, and `AudioResponse` is a no-op.
     ///
     /// Unlike [`Self::bind_computer_access`] there is no receive loop to spawn:
-    /// the audio traits ARE the request source, so the bridge emits directly
+    /// audio operations ARE the request source, so the bridge emits directly
     /// through [`Self::audio_sink`] rather than draining a channel.
     #[must_use]
     pub fn bind_audio(mut self, responder: AudioResponder) -> Self {
@@ -1289,6 +1287,9 @@ impl BridgeConnection {
         );
 
         let response = if bridge_ok && client_ok {
+            if let Some(responder) = self.audio_responder.as_ref() {
+                responder.update_capabilities(hello.capabilities.audio.clone());
+            }
             self.handshaken.store(true, Ordering::SeqCst);
             BridgeResponse {
                 id: request_id,
@@ -1410,8 +1411,11 @@ impl BridgeConnection {
             ClientCommand::DenyComputerAccess { request_id } => {
                 self.deny_computer_access(request_id).await;
             }
-            ClientCommand::AudioResponse { request_id, result } => {
-                self.resolve_audio(request_id, result).await;
+            ClientCommand::AudioResponse { identity, result } => {
+                self.resolve_audio(identity, result).await;
+            }
+            ClientCommand::UpdateAudioCapabilities { capabilities } => {
+                self.update_audio_capabilities(capabilities).await;
             }
             ClientCommand::AnswerAskUserQuestion {
                 request_id,
@@ -1860,20 +1864,37 @@ impl BridgeConnection {
     /// Resolve a parked audio trait call with the client's outcome (the WS read
     /// task side of the SAME inverted handshake the permission gate and the
     /// computer-access broker use).
-    async fn resolve_audio(&self, request_id: u64, result: AudioResultDto) {
+    async fn resolve_audio(
+        &self,
+        identity: client_protocol::audio::AudioOperationIdDto,
+        result: client_protocol::audio::AudioOperationResultDto,
+    ) {
         let Some(responder) = self.audio_responder.as_ref() else {
             return;
         };
-        let resolved = responder.resolve(request_id, result).await;
+        let resolved = responder.resolve(identity.clone(), result).await;
         if !resolved {
             // Unknown, already resolved, or already past its deadline. A safe
             // no-op: the caller has been given an answer either way, and a
             // client is allowed to answer a request we stopped waiting for.
             tracing::debug!(
-                request_id,
+                operation_id = %identity.id,
                 "bridge-server: response for unknown / already-resolved audio id"
             );
         }
+    }
+
+    async fn update_audio_capabilities(
+        &self,
+        capabilities: client_protocol::audio::AudioCapabilitySnapshotDto,
+    ) {
+        let Some(responder) = self.audio_responder.as_ref() else {
+            return;
+        };
+        responder.update_capabilities(Some(capabilities.clone()));
+        self.unscoped_event_sink()
+            .emit(ClientEvent::AudioCapabilitiesChanged { capabilities })
+            .await;
     }
 
     async fn resolve_ask_user_question(&self, request_id: u64, answers: HashMap<String, String>) {
@@ -1916,6 +1937,12 @@ impl FramePump for BridgeConnection {
             // prompt has claimed an owner and the cancelled work starts later.
             Ok(ClientCommand::Cancel { turn_id }) => {
                 self.active_turn.cancellation_target(turn_id).is_some()
+            }
+            // Keep epoch changes ordered with audio responses even when an
+            // unrelated ordinary command is stalled. Before hello completes,
+            // the update must remain behind the handshake.
+            Ok(ClientCommand::UpdateAudioCapabilities { .. }) => {
+                self.handshaken.load(Ordering::SeqCst)
             }
             Ok(
                 ClientCommand::ApprovePermission { .. }
@@ -2684,6 +2711,32 @@ mod tests {
         assert!(connection.is_priority_frame(&cancel(Some(42))));
         connection.active_turn.finish(generation);
         assert!(!connection.is_priority_frame(&cancel(Some(42))));
+    }
+
+    #[test]
+    fn audio_capability_updates_share_the_response_lane_after_handshake() {
+        use bridge::wire::{BridgeRequest, Frame};
+        use bridge::FramePump;
+
+        let connection = BridgeConnection::new();
+        let update = Frame::Request(BridgeRequest {
+            id: 1,
+            method: "command".into(),
+            params: serde_json::to_value(ClientCommand::UpdateAudioCapabilities {
+                capabilities: client_protocol::audio::AudioCapabilitySnapshotDto {
+                    service_epoch: 8,
+                    support_revision: 1,
+                    supported_operations: vec![],
+                    readiness: vec![],
+                    max_payload_bytes: 1024,
+                },
+            })
+            .unwrap(),
+        });
+
+        assert!(!connection.is_priority_frame(&update));
+        connection.handshaken.store(true, Ordering::SeqCst);
+        assert!(connection.is_priority_frame(&update));
     }
 
     #[tokio::test]

@@ -27,6 +27,7 @@ let package = Package(
       ],
       sources: [
         "AudioHelperMain.swift",
+        "GeneratedAudioConfiguration.swift",
         "GeneratedVoiceModels.swift",
       ],
       linkerSettings: [

@@ -241,13 +241,10 @@ test('settings pages and the Hooks configuration-file shortcut render real conte
   assert.equal(fileActions.rawEditor, false);
 });
 
-test('switching layers re-seeds a dirty draft field instead of leaving stale text next to a different layer\'s data', async () => {
-  // Task 18 fix round 1, Critical: `ToolsAgent`'s `enabledTools` input and
-  // `Plugins`' per-plugin config textarea are both seeded via `useState`'s
-  // one-time initializer with no re-seed on `editingLayer` change and no
-  // remount `key` from the shell — so a save after switching layers could
-  // write one layer's stale text into a different layer entirely
-  // (`enabledTools` is `ConcatDedup`, so that duplicates permanently).
+test('switching layers clears dirty settings drafts and reopens plugin config from the new layer', async () => {
+  // Layer changes remount the settings page. Verify a dirty Tools Agent field
+  // is re-seeded immediately and an extension detail reopened afterward reads
+  // the selected plugin's config from the new layer.
   const {
     toolsInitial, toolsDirty, toolsAfterSwitch,
     configInitial, configDirty, configAfterSwitch,
@@ -264,7 +261,7 @@ test('switching layers re-seeds a dirty draft field instead of leaving stale tex
   assert.equal(configDirty, 'not even json', 'the textarea must reflect what was typed before any layer switch');
   assert.equal(
     configAfterSwitch, JSON.stringify({ from: 'project' }, null, 2),
-    'switching from user to project must re-seed the SAME plugin id\'s textarea with project\'s own config, not the dirty text or the stale user-layer value',
+    'reopening the same plugin after switching to project must show project config, not the dirty user-layer draft',
   );
 });
 

@@ -115,6 +115,7 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   plugin_admin: true,
   hook_admin: true,
   audio_response: true,
+  update_audio_capabilities: true,
 };
 
 export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
@@ -200,6 +201,8 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   usage_update: true,
   api_retry: true,
   audio_request: true,
+  audio_cancel: true,
+  audio_capabilities_changed: true,
 };
 
 export const ALL_PLUGIN_COMMAND_TYPES: Record<PluginCommandDto['type'], true> = {

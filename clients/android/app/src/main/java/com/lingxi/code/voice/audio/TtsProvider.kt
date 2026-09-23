@@ -19,6 +19,11 @@ interface TtsProvider {
     ): Flow<ByteArray>
 }
 
+/** A non-streaming renderer that can report the format of the PCM it produced. */
+interface TtsPcmRenderer {
+    suspend fun renderPcm(text: String, voice: String?, maxPcmBytes: Int): Pair<ByteArray, Int>
+}
+
 data class TtsCapabilities(
     val streaming: Boolean,
     val voices: List<TtsVoice>,

@@ -89,31 +89,57 @@ protocol VoiceTranscriptionSession: AnyObject {
         language: String?,
         automaticEndpointAfterSilence: Duration?
     ) async throws -> String
+    func transcribe(
+        language: String?,
+        automaticEndpointAfterSilence: Duration?,
+        configurationSnapshot: AudioConfigurationSnapshot
+    ) async throws -> String
     func finishRecording()
     func cancelRecognition()
+}
+
+extension VoiceTranscriptionSession {
+    func transcribe(
+        language: String?,
+        automaticEndpointAfterSilence: Duration?,
+        configurationSnapshot _: AudioConfigurationSnapshot
+    ) async throws -> String {
+        try await transcribe(language: language, automaticEndpointAfterSilence: automaticEndpointAfterSilence)
+    }
 }
 
 #if canImport(Speech) && canImport(AVFoundation)
     @MainActor
     private final class SystemVoiceTranscriptionSession: VoiceTranscriptionSession {
-        private let implementation = SttImpl()
-
         func transcribe(
             language: String?,
             automaticEndpointAfterSilence: Duration?
         ) async throws -> String {
-            try await implementation.transcribe(
+            try await IOSAudioService.shared.transcribeFromUI(
                 language: language,
-                automaticEndpointAfterSilence: automaticEndpointAfterSilence
+                automaticEndpointAfterSilence: automaticEndpointAfterSilence,
+                configurationSnapshot: AudioConfigurationRuntime.snapshot()
+            )
+        }
+
+        func transcribe(
+            language: String?,
+            automaticEndpointAfterSilence: Duration?,
+            configurationSnapshot: AudioConfigurationSnapshot
+        ) async throws -> String {
+            try await IOSAudioService.shared.transcribeFromUI(
+                language: language,
+                automaticEndpointAfterSilence: automaticEndpointAfterSilence,
+                configurationSnapshot: configurationSnapshot
             )
         }
 
         func finishRecording() {
-            implementation.finishRecording()
+            IOSAudioService.shared.finishUITranscription()
         }
 
         func cancelRecognition() {
-            implementation.cancelRecognition()
+            IOSAudioService.shared.cancelUITranscription()
         }
     }
 #endif
@@ -123,7 +149,7 @@ protocol VoiceTranscriptionSession: AnyObject {
 ///
 /// `SttImpl` requests speech-recognition + microphone authorization before
 /// opening the tap. This helper owns the UI-facing press lifecycle and maps the
-/// generated `SpeechFfiError` onto a stable result.
+/// native `SpeechRecognitionError` onto a stable result.
 @MainActor
 @Observable
 final class VoiceCapture {
@@ -160,6 +186,7 @@ final class VoiceCapture {
     func start(
         language: String? = nil,
         automaticEndpointAfterSilence: Duration? = nil,
+        configurationSnapshot: AudioConfigurationSnapshot? = nil,
         completion: @escaping Completion
     ) {
         cancel()
@@ -173,10 +200,20 @@ final class VoiceCapture {
         let task = Task { [weak self, session] in
             let result: VoiceCaptureResult
             do {
-                let text = try await session.transcribe(
-                    language: language,
-                    automaticEndpointAfterSilence: automaticEndpointAfterSilence
-                )
+                let transcribed: String
+                if let configurationSnapshot {
+                    transcribed = try await session.transcribe(
+                        language: language,
+                        automaticEndpointAfterSilence: automaticEndpointAfterSilence,
+                        configurationSnapshot: configurationSnapshot
+                    )
+                } else {
+                    transcribed = try await session.transcribe(
+                        language: language,
+                        automaticEndpointAfterSilence: automaticEndpointAfterSilence
+                    )
+                }
+                let text = transcribed
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 result = text.isEmpty ? .empty : .transcript(text)
             } catch is CancellationError {
@@ -217,8 +254,8 @@ final class VoiceCapture {
 
     #if canImport(Speech) && canImport(AVFoundation)
         private static func mapError(_ error: Error) -> VoiceCaptureResult {
-            guard let ffi = error as? SpeechFfiError else { return .failed("\(error)") }
-            switch ffi {
+            guard let speechError = error as? SpeechRecognitionError else { return .failed("\(error)") }
+            switch speechError {
             case .PermissionDenied:
                 return .permissionDenied
             case .NoSpeech:

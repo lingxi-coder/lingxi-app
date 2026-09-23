@@ -45,13 +45,13 @@ import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.computeruse.ComputerUseGrant
 import com.lingxi.code.computeruse.ComputerUseSessionState
 import com.lingxi.code.computeruse.ComputerUseTier
-import com.lingxi.code.model.VoiceConfig
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.voice.audio.AudioConfigurationV3
 import java.util.Locale
 
 @Composable
 fun ComputerUseSettingsPage(
-    voice: VoiceConfig,
+    voice: AudioConfigurationV3,
     capability: VoiceCapabilitySnapshot,
     onOpenAudioSettings: () -> Unit,
 ) {

@@ -17,7 +17,6 @@ import com.lingxi.code.notify.NotificationController
 import com.lingxi.code.clipboard.ClipboardController
 import com.lingxi.code.device.AndroidDeviceControlController
 import com.lingxi.code.location.LocationController
-import com.lingxi.code.voice.recorder.RecorderController
 import com.lingxi.code.offload.NativeOffloadRuntime
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
@@ -150,11 +149,6 @@ class MainActivity : ComponentActivity() {
         // the FFI seam to launch the system share sheet (the device analog of
         // how the camera/picker is invoked, but with no ActivityResult to await).
         ShareController.attach(applicationContext)
-        // Device-voice: hand the application Context to the process-global
-        // RecorderController, which the UniFFI AndroidVoice adapter drives across
-        // the FFI seam to run a MediaRecorder mic session (engine-driven through
-        // tool-voice; no UI button, unlike the STT hold-to-talk path).
-        RecorderController.attach(applicationContext)
         // Device-notifications: hand the application Context to the process-global
         // NotificationController, which the UniFFI AndroidNotification adapter
         // drives across the FFI seam to post to the system NotificationManager
@@ -445,19 +439,19 @@ class MainActivity : ComponentActivity() {
                         initialVoiceLang = prefs.voiceLang,
                         onFinish = { assistantName, userName, voiceprint, modelId, voiceLang ->
                             scope.launch {
-                                val migratedVoiceLanguage = when (voiceLang.lowercase()) {
-                                    "zh" -> "zh-CN"
-                                    "en" -> "en-US"
-                                    else -> settingsState.voice.language
-                                }
                                 store.setAssistantName(assistantName)
                                 store.setUserName(userName)
                                 store.setVoiceprint(voiceprint)
                                 store.setDefaultModel(modelId)
                                 store.setVoiceLang(voiceLang)
-                                settingsStore.setVoice(
-                                    settingsState.voice.copy(language = migratedVoiceLanguage),
-                                )
+                                settingsStore.updateVoice { current ->
+                                    val migratedLanguage = when (voiceLang.lowercase()) {
+                                        "zh" -> "zh-CN"
+                                        "en" -> "en-US"
+                                        else -> current.language
+                                    }
+                                    current.copy(language = migratedLanguage)
+                                }
                                 store.setSetupDone(true)
                             }
                         },
@@ -507,7 +501,6 @@ class MainActivity : ComponentActivity() {
         // the process-global controller and any in-flight capture is cancelled.
         CameraController.detach()
         ShareController.detach()
-        RecorderController.detach()
         NotificationController.detach()
         ClipboardController.detach()
         AndroidDeviceControlController.detach()

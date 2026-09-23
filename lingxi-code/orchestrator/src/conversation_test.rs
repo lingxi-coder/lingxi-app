@@ -18,6 +18,10 @@ mod prompt_snapshot_tests;
 #[path = "conversation/tests/bounded_post_compact_read_tests.rs"]
 mod bounded_post_compact_read_tests;
 
+#[cfg(test)]
+#[path = "conversation/tests/audio_schema_projection_tests.rs"]
+mod audio_schema_projection_tests;
+
 #[path = "conversation/tests/durable_cost_handoff_tests.rs"]
 mod durable_cost_handoff_tests;
 

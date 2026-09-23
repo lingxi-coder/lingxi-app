@@ -495,16 +495,15 @@ test('parseSettings normalizes a persisted voice value, repairing garbage rather
     projects: [],
     pinnedSessions: [],
     trustedWorkspaces: {},
-    // 'onDevice' is the Swift case name, not a persisted value on either
-    // mobile platform; rate is out of range. Both must be repaired, not
-    // rejected wholesale.
+    // Legacy recognition spellings migrate to explicit offline selection;
+    // the legacy voice name remains explicit system preference.
     voice: { recognitionMode: 'onDevice', rate: 99, voiceSelection: 'Alex' },
   });
   const expected: VoicePreferences = {
-    schemaVersion: 2,
-    recognitionMode: 'automatic',
+    schemaVersion: 3,
+    recognition: { source: 'offline', offlineModelId: null },
+    speech: { source: 'system', offlineModelId: null, voice: { source: 'system', id: 'Alex' } },
     language: 'auto',
-    voiceSelection: 'system:Alex',
     rate: 2,
     autoPlayReplies: false,
   };
@@ -514,12 +513,12 @@ test('parseSettings normalizes a persisted voice value, repairing garbage rather
 test('publicSettings passes voice through as an independent copy', () => {
   const parsed = parseSettings({
     version: 1, projects: [], pinnedSessions: [], trustedWorkspaces: {},
-    voice: { recognitionMode: 'localOnly' },
+    voice: { recognition: { source: 'offline' } },
   });
   const pub1 = publicSettings(parsed);
   assert.deepEqual(pub1.voice, parsed.voice);
-  if (pub1.voice) pub1.voice.recognitionMode = 'automatic';
-  assert.equal(parsed.voice?.recognitionMode, 'localOnly', 'mutating the returned copy must not affect stored settings');
+  if (pub1.voice) pub1.voice.recognition.source = 'system';
+  assert.equal(parsed.voice?.recognition.source, 'offline', 'mutating the returned copy must not affect stored settings');
 });
 
 test('SettingsStore.update writes and reloads voice preferences, normalized', () => {
@@ -527,29 +526,44 @@ test('SettingsStore.update writes and reloads voice preferences, normalized', ()
   const store = new SettingsStore(userData);
   assert.equal(store.getPublic().voice, undefined, 'a fresh store has no voice preferences yet');
 
-  const result = store.update({ voice: { recognitionMode: 'localOnly', language: 'ZH-cn', rate: 0.1 } });
+  const result = store.update({ voice: { recognition: { source: 'offline' }, language: 'ZH-cn', rate: 0.1 }, voiceRevision: 0 });
   const expected: VoicePreferences = {
-    schemaVersion: 2,
-    recognitionMode: 'localOnly',
+    schemaVersion: 3,
+    recognition: { source: 'offline', offlineModelId: null },
+    speech: { source: 'automatic', offlineModelId: null, voice: null },
     language: 'ZH-cn',
-    voiceSelection: 'system:default',
     rate: 0.5,
     autoPlayReplies: false,
   };
   assert.deepEqual(result.voice, expected);
+  assert.equal(result.voiceRevision, 1);
   assert.deepEqual(new SettingsStore(userData).getPublic().voice, expected, 'voice preferences must survive a reload');
 
   // A later update() replaces the whole snapshot, matching how both mobile
   // platforms persist it (never a partial per-field merge).
-  const replaced = store.update({ voice: { rate: 1.75 } });
+  const replaced = store.update({ voice: { rate: 1.75 }, voiceRevision: 1 });
   assert.deepEqual(replaced.voice, {
-    schemaVersion: 2,
-    recognitionMode: 'automatic',
+    schemaVersion: 3,
+    recognition: { source: 'automatic', offlineModelId: null },
+    speech: { source: 'automatic', offlineModelId: null, voice: null },
     language: 'auto',
-    voiceSelection: 'system:default',
     rate: 1.75,
     autoPlayReplies: false,
   }, 'the earlier localOnly/ZH-cn values must be replaced wholesale, not merged into');
+});
+
+test('an unreadable existing settings file disables audio and is preserved on save attempts', () => {
+  const userData = temporaryDirectory();
+  const path = join(userData, 'settings.v1.json');
+  const original = '{"version":1,"voice":{"schemaVersion":3,"speech":';
+  writeFileSync(path, original, 'utf8');
+  const store = new SettingsStore(userData);
+
+  assert.match(store.getAudioConfigurationError() ?? '', /unreadable/i);
+  assert.match(store.getPublic().audioConfigurationError ?? '', /Audio is unavailable|audio is unavailable/i);
+  assert.throws(() => store.update({ voice: { language: 'fr-FR' }, voiceRevision: 0 }), /unreadable/i);
+  assert.equal(readFileSync(path, 'utf8'), original, 'a later audio save must not overwrite the corrupt original');
+  assert.equal(new SettingsStore(userData).getPublic().audioConfigurationError !== undefined, true);
 });
 
 test('Codex OAuth credentials use only the private stdin envelope', () => {

@@ -48,14 +48,15 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
     private func exercise(root: URL, workspace: URL,
                           layers: [(WritableScopeDto, String, URL, String)], write: Bool) async throws {
         let listener = SettingsRoundtripListener()
+        let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
         let handle = try buildIosEngineWithConfig(config: IosEngineLaunchConfigFfi(
             apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: workspace.path,
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
             mobileLinux: nil, localAppsFullRuntime: false, localAppsRuntimeRoot: nil,
             physicalMemoryBytes: 0, hostEnvironment: nil),
-            listener: listener, stt: SttImpl(), tts: TtsImpl(), camera: CameraImpl(), share: ShareImpl(),
-            voice: VoiceImpl(), notifications: NotificationImpl(), clipboard: ClipboardImpl(),
+            listener: listener, audio: audio, camera: CameraImpl(), share: ShareImpl(),
+            notifications: NotificationImpl(), clipboard: ClipboardImpl(),
             permissions: NoopPermissionSink(), secureStorage: nil, deviceControl: nil)
         try await handle.submit(command: .refreshListings(which: [.settings]))
         let initial = try await snapshot(listener)

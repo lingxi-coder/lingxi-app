@@ -12,17 +12,23 @@
 use super::{BridgeFailure, LocalAppsHostBroker};
 use base64::Engine as _;
 use client_protocol::local_apps::AppCapabilityKindDto;
-use local_apps::AppCapability;
+use local_apps::{load_permissions, AppCapability};
+use platform_api::audio::{
+    AudioError, AudioErrorKind, AudioInitiator, AudioOperation, AudioOperationContext,
+    AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioRecordingHandle,
+    AudioService,
+};
 use platform_api::{
     CalendarError, CalendarEvent, CalendarQuery, CameraError, CameraPosition, CapturePhotoOpts,
     ClipboardError, ContactsError, ContactsQuery, DeepLinkError, DeviceStatusError, HapticError,
     HapticStyle, LocationError, NotificationError, NotificationRequest, ShareError, SharePayload,
-    ShareResult, SttError, SttOpts, TtsError, TtsOpts, VoiceError, VoiceRecorder, VoiceRecording,
-    VoiceRecordingOpts,
+    ShareResult, VoiceRecording,
 };
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 
 /// Cap on the base64 body of one media response. A default-preset photo is
@@ -45,6 +51,9 @@ const FINISHED_RECORDING_TTL: Duration = Duration::from_secs(60);
 const LOCATION_TIMEOUT: Duration = Duration::from_secs(30);
 const RECORD_SAMPLE_RATE_HZ: u32 = 16_000;
 const RECORD_FORMAT: &str = "m4a";
+const LOCAL_APP_AUDIO_START_TIMEOUT: Duration = Duration::from_secs(120);
+const LOCAL_APP_AUDIO_TIMEOUT: Duration = Duration::from_secs(60);
+static NEXT_LOCAL_APP_AUDIO_GENERATION: AtomicU64 = AtomicU64::new(1);
 const NOTIFICATION_TITLE_MAX_CHARS: usize = 100;
 const NOTIFICATION_BODY_MAX_CHARS: usize = 500;
 const NOTIFICATION_TAG_MAX_LEN: usize = 64;
@@ -78,18 +87,433 @@ const REASON_MEDIA: &str = "应用请求读取它自己刚刚获取的媒体内�
 /// The single in-flight `device.recordAudio*` session.
 pub(super) struct ActiveRecording {
     app_id: String,
+    runtime_generation: u64,
+    invocation: local_apps::InvocationContext,
+    handle: AudioRecordingHandle,
     started: Instant,
     watchdog: tokio::task::JoinHandle<()>,
+    replacing: bool,
+    stopping: bool,
     finished: Option<FinishedRecording>,
-    /// The recorder this session was STARTED on, pinned for its lifetime.
-    ///
-    /// The one place a live device handle must NOT be re-read per call: a
-    /// recording spans two bridge calls, and `profile_apps` swaps the whole
-    /// device set on every engine (re)build. Resolving the recorder again at
-    /// stop time would call a fresh `VoiceImpl` that was never started —
-    /// losing the audio and stranding the shared audio-session lease on the
-    /// old object with no handle left that can release it.
-    voice: Arc<dyn VoiceRecorder>,
+    /// Pin the app-scoped service used to start this handle across profile
+    /// swaps, just as the old recorder path pinned its native recorder.
+    audio: Arc<dyn AudioService>,
+}
+
+#[derive(Clone)]
+struct RecordingReplacement {
+    app_id: String,
+    runtime_generation: u64,
+    invocation: local_apps::InvocationContext,
+    handle: AudioRecordingHandle,
+    audio: Arc<dyn AudioService>,
+}
+
+#[derive(Clone)]
+struct ManualRecordingStop {
+    app_id: String,
+    runtime_generation: u64,
+    handle: AudioRecordingHandle,
+    context: AudioOperationContext,
+    audio: Arc<dyn AudioService>,
+    duration_ms: u64,
+}
+
+struct RecordingReplacementGuard {
+    recording: Arc<Mutex<Option<ActiveRecording>>>,
+    replacement: RecordingReplacement,
+    stopped: bool,
+    armed: bool,
+}
+
+impl RecordingReplacementGuard {
+    fn new(
+        recording: Arc<Mutex<Option<ActiveRecording>>>,
+        replacement: RecordingReplacement,
+    ) -> Self {
+        Self {
+            recording,
+            replacement,
+            stopped: false,
+            armed: true,
+        }
+    }
+
+    fn mark_stopped(&mut self) {
+        self.stopped = true;
+    }
+
+    async fn finish(&mut self) {
+        let stopped = self.stopped;
+        let mut slot = self.recording.lock().await;
+        finish_recording_replacement_slot(&mut slot, &self.replacement, stopped);
+        self.armed = false;
+    }
+}
+
+impl Drop for RecordingReplacementGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut slot) = self.recording.try_lock() {
+            finish_recording_replacement_slot(&mut slot, &self.replacement, self.stopped);
+            return;
+        }
+
+        let recording = self.recording.clone();
+        let replacement = self.replacement.clone();
+        let stopped = self.stopped;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let mut slot = recording.lock().await;
+                finish_recording_replacement_slot(&mut slot, &replacement, stopped);
+            });
+        }
+    }
+}
+
+fn finish_recording_replacement_slot(
+    slot: &mut Option<ActiveRecording>,
+    replacement: &RecordingReplacement,
+    stopped: bool,
+) {
+    let still_registered = slot.as_ref().is_some_and(|active| {
+        active.app_id == replacement.app_id
+            && active.runtime_generation == replacement.runtime_generation
+            && active.handle == replacement.handle
+    });
+    if !still_registered {
+        return;
+    }
+    if stopped {
+        if let Some(active) = slot.take() {
+            active.watchdog.abort();
+        }
+    } else if let Some(active) = slot.as_mut() {
+        active.replacing = false;
+    }
+}
+
+fn manual_stop_matches(active: &ActiveRecording, stop: &ManualRecordingStop) -> bool {
+    active.app_id == stop.app_id
+        && active.runtime_generation == stop.runtime_generation
+        && active.handle == stop.handle
+}
+
+async fn execute_manual_recording_stop(
+    recording: Arc<Mutex<Option<ActiveRecording>>>,
+    stop: ManualRecordingStop,
+) -> Result<(), BridgeFailure> {
+    let result = execute_local_audio(
+        &stop.audio,
+        stop.context.clone(),
+        AudioOperation::StopRecording {
+            handle: stop.handle.clone(),
+        },
+    )
+    .await;
+    let mut slot = recording.lock().await;
+    let Some(active) = slot
+        .as_mut()
+        .filter(|active| manual_stop_matches(active, &stop) && active.stopping)
+    else {
+        return Err(BridgeFailure::coded(
+            "cancelled",
+            "Local App recording changed while it was being stopped",
+        ));
+    };
+
+    match result {
+        Ok(AudioOperationSuccess::Recording {
+            recording: native_recording,
+        }) => {
+            let finished_at = Instant::now();
+            active.finished = Some(FinishedRecording {
+                recording: native_recording,
+                duration_ms: stop.duration_ms,
+                at: finished_at,
+                auto_stopped: false,
+            });
+            active.stopping = false;
+            active.watchdog.abort();
+            active.watchdog = spawn_finished_recording_expiry(
+                recording.clone(),
+                stop.app_id,
+                stop.runtime_generation,
+                stop.handle,
+                finished_at,
+            );
+            Ok(())
+        }
+        Ok(_) => {
+            active.stopping = false;
+            Err(BridgeFailure::coded(
+                "native_failure",
+                "audio service returned an invalid recording-stop result",
+            ))
+        }
+        Err(error) => {
+            active.stopping = false;
+            Err(error)
+        }
+    }
+}
+
+async fn clear_manual_recording_stop(
+    recording: &Mutex<Option<ActiveRecording>>,
+    stop: &ManualRecordingStop,
+) {
+    let mut slot = recording.lock().await;
+    if let Some(active) = slot
+        .as_mut()
+        .filter(|active| manual_stop_matches(active, stop))
+    {
+        active.stopping = false;
+    }
+}
+
+fn spawn_finished_recording_expiry(
+    recording: Arc<Mutex<Option<ActiveRecording>>>,
+    app_id: String,
+    runtime_generation: u64,
+    handle: AudioRecordingHandle,
+    finished_at: Instant,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep_until(finished_at + FINISHED_RECORDING_TTL).await;
+        let mut slot = recording.lock().await;
+        let expired = slot.as_ref().is_some_and(|active| {
+            active.app_id == app_id
+                && active.runtime_generation == runtime_generation
+                && active.handle == handle
+                && active
+                    .finished
+                    .as_ref()
+                    .is_some_and(|finished| finished.at == finished_at)
+        });
+        if expired {
+            // Dropping this task's own JoinHandle detaches the nearly-finished
+            // task; it returns immediately after releasing the registry lock.
+            drop(slot.take());
+        }
+    })
+}
+
+/// A native start that has not yet delivered its host-owned handle. Retained
+/// separately from `ActiveRecording` so runtime teardown can cancel the exact
+/// operation while the native permission prompt or device start is pending.
+pub(super) struct PendingRecordingStart {
+    app_id: String,
+    runtime_generation: u64,
+    context: AudioOperationContext,
+    audio: Arc<dyn AudioService>,
+    scope: Arc<LocalAppAudioScope>,
+}
+
+/// Cancellation scope for every audio request admitted by one Local App
+/// runtime generation. It is intentionally host-local and generation-scoped:
+/// cancelling it never tombstones the stable AudioOwner used by the service.
+pub(super) struct LocalAppAudioScope {
+    cancelled: AtomicBool,
+    cancellation: Notify,
+    state: std::sync::Mutex<()>,
+}
+
+impl LocalAppAudioScope {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            cancellation: Notify::new(),
+            state: std::sync::Mutex::new(()),
+        }
+    }
+
+    fn cancelled() -> Self {
+        let scope = Self::new();
+        scope.cancel();
+        scope
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn cancel(&self) {
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.cancellation.notify_waiters();
+    }
+
+    fn commit_if_active<T>(&self, commit: impl FnOnce() -> T) -> Option<T> {
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.is_cancelled() {
+            None
+        } else {
+            Some(commit())
+        }
+    }
+
+    async fn cancelled_signal(&self) {
+        loop {
+            let notified = self.cancellation.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Registry plus a per-app high-water mark. Runtime generations are minted
+/// from the host's monotonic request counter, so an ended generation cannot
+/// be re-created by a late bridge continuation after its runtime has stopped.
+#[derive(Default)]
+pub(super) struct LocalAppAudioScopeRegistry {
+    scopes: std::collections::HashMap<(String, u64), Arc<LocalAppAudioScope>>,
+    cancelled_through: std::collections::HashMap<String, u64>,
+}
+
+struct PendingStartGuard {
+    pending: Arc<Mutex<Option<PendingRecordingStart>>>,
+    identity: AudioOperationId,
+    handle: Option<AudioRecordingHandle>,
+    armed: bool,
+}
+
+impl PendingStartGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingStartGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let pending = self.pending.clone();
+        let identity = self.identity.clone();
+        let handle = self.handle.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let start = {
+                    let guard = pending.lock().await;
+                    guard
+                        .as_ref()
+                        .filter(|start| start.context.identity == identity)
+                        .map(|start| {
+                            (
+                                start.context.clone(),
+                                start.audio.clone(),
+                                start.app_id.clone(),
+                                start.runtime_generation,
+                            )
+                        })
+                };
+                if let Some((context, audio, app_id, runtime_generation)) = start {
+                    cleanup_uncommitted_recording(
+                        pending,
+                        context,
+                        audio,
+                        app_id,
+                        runtime_generation,
+                        handle,
+                    )
+                    .await;
+                }
+            });
+        }
+    }
+}
+
+async fn cleanup_uncommitted_recording(
+    pending: Arc<Mutex<Option<PendingRecordingStart>>>,
+    start_context: AudioOperationContext,
+    audio: Arc<dyn AudioService>,
+    app_id: String,
+    runtime_generation: u64,
+    handle: Option<AudioRecordingHandle>,
+) {
+    let request_id = start_context
+        .initiator
+        .as_ref()
+        .and_then(|initiator| initiator.request_id.as_deref())
+        .unwrap_or("orphaned-recording")
+        .to_string();
+    loop {
+        if handle.is_none()
+            && !pending
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|start| start.context.identity == start_context.identity)
+        {
+            return;
+        }
+        if handle.is_none() {
+            let _ = tokio::time::timeout(
+                LOCAL_APP_AUDIO_TIMEOUT,
+                audio.cancel(start_context.identity.clone()),
+            )
+            .await;
+        }
+        let stopped = if let Some(handle) = &handle {
+            let context = local_audio_context_for_owner(
+                &audio,
+                &app_id,
+                runtime_generation,
+                &request_id,
+                LOCAL_APP_AUDIO_TIMEOUT,
+            );
+            matches!(
+                execute_local_audio(
+                    &audio,
+                    context,
+                    AudioOperation::StopRecording {
+                        handle: handle.clone(),
+                    },
+                )
+                .await,
+                Ok(AudioOperationSuccess::Recording { .. })
+            )
+        } else {
+            false
+        };
+        let released = if stopped {
+            true
+        } else {
+            let context = local_audio_context_for_owner(
+                &audio,
+                &app_id,
+                runtime_generation,
+                &request_id,
+                LOCAL_APP_AUDIO_TIMEOUT,
+            );
+            let ended = matches!(
+                execute_local_audio(&audio, context, AudioOperation::EndOwner).await,
+                Ok(AudioOperationSuccess::OwnerEnded)
+            );
+            ended
+        };
+        if released {
+            let mut guard = pending.lock().await;
+            if guard
+                .as_ref()
+                .is_some_and(|start| start.context.identity == start_context.identity)
+            {
+                *guard = None;
+            }
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// A recording the duration watchdog already stopped, parked until the page
@@ -122,13 +546,109 @@ fn map_camera_error(error: CameraError) -> BridgeFailure {
     }
 }
 
-fn map_voice_error(error: VoiceError) -> BridgeFailure {
-    let message = error.to_string();
-    match error {
-        VoiceError::PermissionDenied => BridgeFailure::coded("permission_denied", message),
-        VoiceError::Busy => BridgeFailure::coded("audio_session_busy", message),
-        VoiceError::NotRecording => BridgeFailure::coded("not_recording", message),
-        VoiceError::Other(_) => BridgeFailure::from(message),
+fn map_audio_error(error: AudioError) -> BridgeFailure {
+    let (code, message) = match error.kind {
+        AudioErrorKind::PermissionDenied => ("permission_denied", error.message),
+        AudioErrorKind::Busy => ("audio_session_busy", error.message),
+        AudioErrorKind::Cancelled => ("cancelled", error.message),
+        AudioErrorKind::Timeout => ("timeout", error.message),
+        AudioErrorKind::NoSpeech => ("no_speech", error.message),
+        AudioErrorKind::NotRecording => ("not_recording", error.message),
+        AudioErrorKind::Unavailable => ("device_unavailable", error.message),
+        AudioErrorKind::Unsupported => ("unsupported", error.message),
+        AudioErrorKind::ModelMissing => ("model_missing", error.message),
+        AudioErrorKind::VoiceMissing => ("voice_missing", error.message),
+        AudioErrorKind::InvalidRequest => ("invalid_request", error.message),
+        AudioErrorKind::SynthesisFailed => ("synthesis_failed", error.message),
+        AudioErrorKind::NativeFailure => ("native_failure", error.message),
+        AudioErrorKind::MediaTooLarge => ("media_too_large", error.message),
+    };
+    BridgeFailure::coded(code, message)
+}
+
+fn local_audio_context(
+    audio: &Arc<dyn AudioService>,
+    invocation: &local_apps::InvocationContext,
+    runtime_generation: u64,
+    timeout: Duration,
+) -> Result<AudioOperationContext, BridgeFailure> {
+    invocation
+        .validate()
+        .map_err(|error| invalid(format!("invalid Local App invocation context: {error}")))?;
+    Ok(local_audio_context_for_owner(
+        audio,
+        &invocation.app_id,
+        runtime_generation,
+        &invocation.request_id,
+        timeout,
+    ))
+}
+
+fn local_audio_context_for_owner(
+    audio: &Arc<dyn AudioService>,
+    app_id: &str,
+    runtime_generation: u64,
+    request_id: &str,
+    timeout: Duration,
+) -> AudioOperationContext {
+    let capabilities = audio.capabilities();
+    let generation = NEXT_LOCAL_APP_AUDIO_GENERATION
+        .fetch_add(1, Ordering::Relaxed)
+        .max(1);
+    let identity = AudioOperationId::new(generation, capabilities.service_epoch);
+    let timeout_budget_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    let initiator = AudioInitiator {
+        agent_id: None,
+        tool_use_id: None,
+        request_id: Some(request_id.to_string()),
+    };
+    AudioOperationContext {
+        identity,
+        owner: AudioOwner::LocalApp {
+            app_id: app_id.to_string(),
+            runtime_generation,
+        },
+        initiator: Some(initiator),
+        timeout_budget_ms: Some(timeout_budget_ms),
+        max_payload_bytes: capabilities.max_payload_bytes,
+    }
+}
+
+async fn execute_local_audio(
+    audio: &Arc<dyn AudioService>,
+    context: AudioOperationContext,
+    operation: AudioOperation,
+) -> Result<AudioOperationSuccess, BridgeFailure> {
+    let timeout = Duration::from_millis(
+        context
+            .timeout_budget_ms
+            .unwrap_or(LOCAL_APP_AUDIO_TIMEOUT.as_millis() as u64),
+    );
+    tokio::time::timeout(timeout, audio.execute(context, operation))
+        .await
+        .map_err(|_| BridgeFailure::coded("timeout", "Local App audio operation timed out"))?
+        .map_err(map_audio_error)
+}
+
+async fn execute_local_audio_scoped(
+    audio: &Arc<dyn AudioService>,
+    context: AudioOperationContext,
+    operation: AudioOperation,
+    scope: &Arc<LocalAppAudioScope>,
+) -> Result<AudioOperationSuccess, BridgeFailure> {
+    if scope.is_cancelled() {
+        return Err(BridgeFailure::coded(
+            "cancelled",
+            "Local App runtime ended before the audio operation started",
+        ));
+    }
+    tokio::select! {
+        biased;
+        _ = scope.cancelled_signal() => Err(BridgeFailure::coded(
+            "cancelled",
+            "Local App runtime ended while the audio operation was running",
+        )),
+        result = execute_local_audio(audio, context, operation) => result,
     }
 }
 
@@ -187,23 +707,6 @@ fn photo_scaling(payload: &Value) -> Result<(u32, f32), BridgeFailure> {
     Ok((max_dimension, quality))
 }
 
-fn map_stt_error(error: SttError) -> BridgeFailure {
-    let message = error.to_string();
-    match error {
-        SttError::PermissionDenied => BridgeFailure::coded("permission_denied", message),
-        SttError::Unavailable => BridgeFailure::coded("device_unavailable", message),
-        // The SAME code recording reports for the same cause: an app told to
-        // branch on `audio_session_busy` must not have to learn a second
-        // name for "the mic is in use".
-        SttError::Busy => BridgeFailure::coded("audio_session_busy", message),
-        // Distinct from an error the app should surface as a failure: the
-        // mic simply heard nothing, which a UI usually retries silently.
-        SttError::NoSpeech => BridgeFailure::coded("no_speech", message),
-        SttError::Retriable(_) => BridgeFailure::coded("retriable", message),
-        SttError::Other(_) => BridgeFailure::from(message),
-    }
-}
-
 fn map_clipboard_error(error: ClipboardError) -> BridgeFailure {
     let message = error.to_string();
     match error {
@@ -217,15 +720,6 @@ fn map_share_error(error: ShareError) -> BridgeFailure {
     match error {
         ShareError::Unsupported => BridgeFailure::coded("unsupported", message),
         ShareError::Other(_) => BridgeFailure::from(message),
-    }
-}
-
-fn map_tts_error(error: TtsError) -> BridgeFailure {
-    let message = error.to_string();
-    match error {
-        TtsError::Unavailable => BridgeFailure::coded("device_unavailable", message),
-        TtsError::SynthesisFailed(_) => BridgeFailure::coded("synthesis_failed", message),
-        TtsError::Other(_) => BridgeFailure::from(message),
     }
 }
 
@@ -388,6 +882,141 @@ impl LocalAppsHostBroker {
             .ok_or_else(|| unavailable("the device capability set"))
     }
 
+    /// Build a trusted context for an app flow step that calls a device
+    /// capability. The step id is host-minted by the flow executor and is
+    /// carried to AudioService as request attribution; the app/runtime owner
+    /// generation still comes from the live host registry.
+    pub(super) async fn flow_audio_invocation(
+        &self,
+        app_id: &str,
+        flow_id: &str,
+        request_id: &str,
+        capability: local_apps::CapabilityId,
+    ) -> Result<(local_apps::InvocationContext, u64), BridgeFailure> {
+        let layout = self.layout(app_id).map_err(BridgeFailure::from)?;
+        let permissions =
+            load_permissions(&layout).map_err(|error| BridgeFailure::from(error.to_string()))?;
+        let (runtime_generation, _) = self
+            .runtime_identity(app_id)
+            .await
+            .map_err(BridgeFailure::from)?
+            .ok_or_else(|| {
+                BridgeFailure::coded("runtime_stopped", "Local App runtime is not running")
+            })?;
+        let invocation = local_apps::InvocationContext {
+            app_id: app_id.to_string(),
+            app_instance_id: format!("flow-{flow_id}"),
+            request_id: request_id.to_string(),
+            turn_id: None,
+            origin: local_apps::InvocationOrigin::ConversationAgent,
+            grant_epoch: permissions.grant_epoch,
+            capability_instance: Some(format!("{app_id}:{}", capability.as_str())),
+            call_chain: Vec::new(),
+        };
+        invocation.validate().map_err(|error| {
+            invalid(format!(
+                "invalid Local App flow invocation context: {error}"
+            ))
+        })?;
+        Ok((invocation, runtime_generation))
+    }
+
+    /// Resolve the current host-owned app runtime generation only after the
+    /// caller has built and validated its invocation context. A page cannot
+    /// claim an owner generation in payload JSON.
+    pub(super) async fn audio_runtime_generation(
+        &self,
+        invocation: &local_apps::InvocationContext,
+    ) -> Result<u64, BridgeFailure> {
+        invocation
+            .validate()
+            .map_err(|error| invalid(format!("invalid Local App invocation context: {error}")))?;
+        let (generation, _) = self
+            .runtime_identity(&invocation.app_id)
+            .await
+            .map_err(BridgeFailure::from)?
+            .ok_or_else(|| {
+                BridgeFailure::coded("runtime_stopped", "Local App runtime is not running")
+            })?;
+        Ok(generation)
+    }
+
+    fn local_app_audio_scope(
+        &self,
+        app_id: &str,
+        runtime_generation: u64,
+    ) -> Arc<LocalAppAudioScope> {
+        let mut registry = self
+            .audio_runtime_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if registry
+            .cancelled_through
+            .get(app_id)
+            .is_some_and(|cancelled_through| runtime_generation <= *cancelled_through)
+        {
+            return Arc::new(LocalAppAudioScope::cancelled());
+        }
+        registry
+            .scopes
+            .entry((app_id.to_string(), runtime_generation))
+            .or_insert_with(|| Arc::new(LocalAppAudioScope::new()))
+            .clone()
+    }
+
+    pub(super) fn cancel_local_app_audio_scope(&self, app_id: &str, runtime_generation: u64) {
+        let mut registry = self
+            .audio_runtime_scopes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry
+            .cancelled_through
+            .entry(app_id.to_string())
+            .and_modify(|cancelled_through| {
+                *cancelled_through = (*cancelled_through).max(runtime_generation)
+            })
+            .or_insert(runtime_generation);
+        registry.scopes.retain(|(scope_app_id, generation), scope| {
+            if scope_app_id == app_id && *generation <= runtime_generation {
+                scope.cancel();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    async fn ensure_local_app_audio_scope_active(
+        &self,
+        invocation: &local_apps::InvocationContext,
+        runtime_generation: u64,
+        scope: &Arc<LocalAppAudioScope>,
+    ) -> Result<(), BridgeFailure> {
+        if scope.is_cancelled() {
+            return Err(BridgeFailure::coded(
+                "cancelled",
+                "Local App runtime ended before the audio operation started",
+            ));
+        }
+        if !matches!(
+            self.audio_runtime_generation(invocation).await,
+            Ok(generation) if generation == runtime_generation
+        ) {
+            self.cancel_local_app_audio_scope(&invocation.app_id, runtime_generation);
+            return Err(BridgeFailure::coded(
+                "cancelled",
+                "Local App runtime ended before the audio operation started",
+            ));
+        }
+        if scope.is_cancelled() {
+            return Err(BridgeFailure::coded(
+                "cancelled",
+                "Local App runtime ended before the audio operation started",
+            ));
+        }
+        Ok(())
+    }
+
     /// Retain one capture and build the JSON envelope for it.
     ///
     /// The envelope carries BOTH the base64 (so the page can render it right
@@ -513,9 +1142,14 @@ impl LocalAppsHostBroker {
 
     pub(super) async fn record_audio_start_value(
         &self,
-        app_id: &str,
+        invocation: &local_apps::InvocationContext,
+        runtime_generation: u64,
         payload: &Value,
     ) -> Result<Value, BridgeFailure> {
+        let app_id = invocation.app_id.as_str();
+        let scope = self.local_app_audio_scope(app_id, runtime_generation);
+        self.ensure_local_app_audio_scope_active(invocation, runtime_generation, &scope)
+            .await?;
         self.authorize_declared_capability(
             app_id,
             AppCapability::Microphone,
@@ -523,10 +1157,24 @@ impl LocalAppsHostBroker {
             REASON_MICROPHONE,
         )
         .await?;
-        let voice = self
+        // Authorization may have waited on a native prompt while this runtime
+        // was closed or replaced. Never admit its late approval into audio.
+        self.ensure_local_app_audio_scope_active(invocation, runtime_generation, &scope)
+            .await?;
+        let audio = self
             .devices()?
-            .voice
-            .ok_or_else(|| unavailable("the microphone"))?;
+            .audio
+            .ok_or_else(|| unavailable("the device audio service"))?;
+        if !audio
+            .capabilities()
+            .supported_operations
+            .contains(&platform_api::audio::AudioOperationKind::Record)
+        {
+            return Err(BridgeFailure::coded(
+                "unsupported",
+                "raw recording is not supported on this device",
+            ));
+        }
         let max_duration_ms = match payload.get("maxDurationMs") {
             None | Some(Value::Null) => RECORD_DEFAULT_DURATION_MS,
             Some(value) => value
@@ -535,13 +1183,9 @@ impl LocalAppsHostBroker {
         }
         .clamp(RECORD_MIN_DURATION_MS, RECORD_MAX_DURATION_MS);
 
-        // Serializes STARTS only, and never blocks: a start crosses into
-        // Swift, and the first mic use of an app's life begins with an OS
-        // permission alert whose think time is the user's. Holding the state
-        // lock across that would block `force_stop_recording` — awaited by a
-        // runtime stop — and every other app's `recordAudioStop` until the
-        // user answered. `try_lock` keeps the fast `audio_session_busy`
-        // answer instead of converting it into a second hang.
+        // Serializes STARTS only, and never blocks another start on the OS
+        // permission prompt. Runtime teardown uses the separately stored
+        // pending operation identity to cancel this exact start.
         let _start_gate = match self.recording_start.try_lock() {
             Ok(gate) => gate,
             Err(_) => {
@@ -552,8 +1196,9 @@ impl LocalAppsHostBroker {
             }
         };
 
-        // Short critical section: decide, and take the orphan OUT. The
-        // native calls below run with no state lock held.
+        // Short critical section: reserve an unfinished same-app recording
+        // for replacement while keeping its cleanup handle and watchdog
+        // registered until the native stop succeeds.
         let orphan = {
             let mut guard = self.recording.lock().await;
             if let Some(active) = guard.as_ref() {
@@ -574,63 +1219,363 @@ impl LocalAppsHostBroker {
                     ));
                 }
             }
-            guard.take()
+            if guard.as_ref().is_some_and(|active| active.replacing) {
+                return Err(BridgeFailure::coded(
+                    "audio_session_busy",
+                    "another recording replacement is already in progress",
+                ));
+            }
+            if guard.as_ref().is_some_and(|active| active.stopping) {
+                return Err(BridgeFailure::coded(
+                    "audio_session_busy",
+                    "the active recording is already stopping",
+                ));
+            }
+            if guard
+                .as_ref()
+                .is_some_and(|active| active.finished.is_some())
+            {
+                if let Some(finished) = guard.take() {
+                    finished.watchdog.abort();
+                }
+                None
+            } else if let Some(active) = guard.as_mut() {
+                active.replacing = true;
+                Some(RecordingReplacement {
+                    app_id: active.app_id.clone(),
+                    runtime_generation: active.runtime_generation,
+                    invocation: active.invocation.clone(),
+                    handle: active.handle.clone(),
+                    audio: active.audio.clone(),
+                })
+            } else {
+                None
+            }
         };
 
-        // A same-app restart (a reloaded page) or an expired parked recording
-        // is reclaimed rather than fatal — the orphan's bytes are discarded
-        // and, crucially, the native audio-session lease is released on the
-        // recorder the orphan actually started on.
+        // A same-app restart or an expired parked recording is reclaimed.
+        // Release an unfinished capture through the exact pinned service,
+        // owner generation, and handle that created it. Keep it addressable if
+        // native stop fails so a later stop or runtime teardown can retry.
         let mut replaced_active = false;
         if let Some(orphan) = orphan {
-            orphan.watchdog.abort();
-            if orphan.finished.is_none() {
-                replaced_active = true;
-                let _ = orphan.voice.stop_recording().await;
+            let mut replacement_guard =
+                RecordingReplacementGuard::new(self.recording.clone(), orphan.clone());
+            let context = match local_audio_context(
+                &orphan.audio,
+                &orphan.invocation,
+                orphan.runtime_generation,
+                LOCAL_APP_AUDIO_TIMEOUT,
+            ) {
+                Ok(context) => context,
+                Err(error) => {
+                    replacement_guard.finish().await;
+                    return Err(error);
+                }
+            };
+            let stop_result = execute_local_audio(
+                &orphan.audio,
+                context,
+                AudioOperation::StopRecording {
+                    handle: orphan.handle.clone(),
+                },
+            )
+            .await;
+            match stop_result {
+                Ok(AudioOperationSuccess::Recording { .. }) => {
+                    replacement_guard.mark_stopped();
+                    replacement_guard.finish().await;
+                    replaced_active = true;
+                }
+                Ok(_) => {
+                    replacement_guard.finish().await;
+                    return Err(BridgeFailure::coded(
+                        "native_failure",
+                        "audio service returned an invalid recording-stop result",
+                    ));
+                }
+                Err(error) => {
+                    replacement_guard.finish().await;
+                    return Err(error);
+                }
             }
         }
-        voice
-            .start_recording(VoiceRecordingOpts {
+
+        self.ensure_local_app_audio_scope_active(invocation, runtime_generation, &scope)
+            .await?;
+
+        let start_context = local_audio_context(
+            &audio,
+            invocation,
+            runtime_generation,
+            LOCAL_APP_AUDIO_START_TIMEOUT,
+        )?;
+        let pending = PendingRecordingStart {
+            app_id: app_id.to_string(),
+            runtime_generation,
+            context: start_context.clone(),
+            audio: audio.clone(),
+            scope: scope.clone(),
+        };
+        {
+            let mut slot = self.recording_pending.lock().await;
+            if slot.as_ref().is_some_and(|start| {
+                start.context.identity.service_epoch != start_context.identity.service_epoch
+            }) {
+                *slot = None;
+            }
+            if slot.is_some() {
+                return Err(BridgeFailure::coded(
+                    "audio_session_busy",
+                    "another recording is already starting",
+                ));
+            }
+            *slot = Some(pending);
+        }
+        let mut pending_guard = PendingStartGuard {
+            pending: self.recording_pending.clone(),
+            identity: start_context.identity.clone(),
+            handle: None,
+            armed: true,
+        };
+        let start_result = execute_local_audio_scoped(
+            &audio,
+            start_context.clone(),
+            AudioOperation::StartRecording {
                 sample_rate_hz: RECORD_SAMPLE_RATE_HZ,
                 format: RECORD_FORMAT.into(),
-            })
-            .await
-            .map_err(map_voice_error)?;
+            },
+            &scope,
+        )
+        .await?;
+        let handle = match start_result {
+            AudioOperationSuccess::RecordingStarted { handle } => handle,
+            _ => {
+                return Err(BridgeFailure::coded(
+                    "native_failure",
+                    "audio service returned an invalid recording-start result",
+                ));
+            }
+        };
+        pending_guard.handle = Some(handle.clone());
+
+        // A permission prompt can outlive the Local App runtime that initiated
+        // it. If teardown won the race, release the returned exact handle before
+        // publishing it to the host recording table.
+        if !matches!(
+            self.audio_runtime_generation(invocation).await,
+            Ok(generation) if generation == runtime_generation
+        ) {
+            pending_guard.disarm();
+            tokio::spawn(cleanup_uncommitted_recording(
+                self.recording_pending.clone(),
+                start_context.clone(),
+                audio.clone(),
+                app_id.to_string(),
+                runtime_generation,
+                Some(handle),
+            ));
+            return Err(BridgeFailure::coded(
+                "cancelled",
+                "Local App runtime ended while microphone capture was starting",
+            ));
+        }
 
         let watchdog = {
             let recording_cell = self.recording.clone();
-            let voice = voice.clone();
+            let audio = audio.clone();
             let app = app_id.to_string();
+            let invocation = invocation.clone();
+            let handle = handle.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(max_duration_ms)).await;
-                let mut guard = recording_cell.lock().await;
-                let Some(active) = guard.as_mut() else { return };
-                if active.app_id != app || active.finished.is_some() {
-                    return;
-                }
-                let duration_ms =
-                    u64::try_from(active.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                match voice.stop_recording().await {
-                    Ok(recording) => {
-                        active.finished = Some(FinishedRecording {
-                            recording,
-                            duration_ms,
-                            at: Instant::now(),
-                            auto_stopped: true,
-                        });
+                loop {
+                    let mut guard = recording_cell.lock().await;
+                    let Some(active) = guard.as_mut() else { return };
+                    if active.app_id != app
+                        || active.runtime_generation != runtime_generation
+                        || active.handle != handle
+                        || active.finished.is_some()
+                    {
+                        return;
                     }
-                    // The native side already lost the session; nothing to park.
-                    Err(_) => *guard = None,
+                    if active.replacing || active.stopping {
+                        drop(guard);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                    let duration_ms =
+                        u64::try_from(active.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let context = match local_audio_context(
+                        &audio,
+                        &invocation,
+                        runtime_generation,
+                        LOCAL_APP_AUDIO_TIMEOUT,
+                    ) {
+                        Ok(context) => context,
+                        Err(_) => {
+                            *guard = None;
+                            return;
+                        }
+                    };
+                    active.stopping = true;
+                    drop(guard);
+                    let result = execute_local_audio(
+                        &audio,
+                        context,
+                        AudioOperation::StopRecording {
+                            handle: handle.clone(),
+                        },
+                    )
+                    .await;
+                    let mut guard = recording_cell.lock().await;
+                    let Some(active) = guard.as_mut().filter(|active| {
+                        active.app_id == app
+                            && active.runtime_generation == runtime_generation
+                            && active.handle == handle
+                            && active.stopping
+                    }) else {
+                        return;
+                    };
+                    match result {
+                        Ok(AudioOperationSuccess::Recording { recording }) => {
+                            let finished_at = Instant::now();
+                            active.stopping = false;
+                            active.finished = Some(FinishedRecording {
+                                recording,
+                                duration_ms,
+                                at: finished_at,
+                                auto_stopped: true,
+                            });
+                            active.watchdog = spawn_finished_recording_expiry(
+                                recording_cell.clone(),
+                                app.clone(),
+                                runtime_generation,
+                                handle.clone(),
+                                finished_at,
+                            );
+                        }
+                        other => {
+                            tracing::warn!(
+                                app_id = %app,
+                                runtime_generation,
+                                result = ?other,
+                                "watchdog could not stop Local App recording"
+                            );
+                            drop(guard);
+                            let released = match local_audio_context(
+                                &audio,
+                                &invocation,
+                                runtime_generation,
+                                LOCAL_APP_AUDIO_TIMEOUT,
+                            ) {
+                                Ok(context) => {
+                                    matches!(
+                                        execute_local_audio(
+                                            &audio,
+                                            context,
+                                            AudioOperation::EndOwner,
+                                        )
+                                        .await,
+                                        Ok(AudioOperationSuccess::OwnerEnded)
+                                    )
+                                }
+                                Err(_) => false,
+                            };
+                            let mut guard = recording_cell.lock().await;
+                            let Some(active) = guard.as_mut().filter(|active| {
+                                active.app_id == app
+                                    && active.runtime_generation == runtime_generation
+                                    && active.handle == handle
+                                    && active.stopping
+                            }) else {
+                                return;
+                            };
+                            if released {
+                                *guard = None;
+                            } else {
+                                active.stopping = false;
+                                drop(guard);
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                                continue;
+                            }
+                        }
+                    }
+                    return;
                 }
             })
         };
-        *self.recording.lock().await = Some(ActiveRecording {
-            app_id: app_id.to_string(),
-            started: Instant::now(),
-            watchdog,
-            finished: None,
-            voice,
-        });
+        let mut watchdog = Some(watchdog);
+
+        // Acquire both host registries before committing. The pending guard
+        // remains armed through each await, so cancellation before both locks
+        // are held still cancels the exact native start identity. Once both
+        // are held, the handle insertion and pending-reservation removal are
+        // synchronous and form one host-side commit.
+        let mut recording = self.recording.lock().await;
+        let mut pending = self.recording_pending.lock().await;
+        let pending_matches = pending
+            .as_ref()
+            .is_some_and(|start| start.context.identity == start_context.identity);
+        let runtime_matches = matches!(
+            self.audio_runtime_generation(invocation).await,
+            Ok(generation) if generation == runtime_generation
+        );
+        let commit_valid = pending_matches && runtime_matches && recording.is_none();
+        let committed = if commit_valid {
+            scope.commit_if_active(|| {
+                *recording = Some(ActiveRecording {
+                    app_id: app_id.to_string(),
+                    runtime_generation,
+                    invocation: invocation.clone(),
+                    handle: handle.clone(),
+                    started: Instant::now(),
+                    watchdog: watchdog.take().expect("watchdog is present before commit"),
+                    replacing: false,
+                    stopping: false,
+                    finished: None,
+                    audio: audio.clone(),
+                });
+                *pending = None;
+            })
+        } else {
+            None
+        };
+        if committed.is_none() {
+            drop(pending);
+            drop(recording);
+            if let Some(watchdog) = watchdog.take() {
+                watchdog.abort();
+            }
+            pending_guard.disarm();
+            tokio::spawn(cleanup_uncommitted_recording(
+                self.recording_pending.clone(),
+                start_context.clone(),
+                audio.clone(),
+                app_id.to_string(),
+                runtime_generation,
+                Some(handle),
+            ));
+            return Err(BridgeFailure::coded(
+                "cancelled",
+                "Local App runtime ended while microphone capture was starting",
+            ));
+        }
+        drop(pending);
+        drop(recording);
+        pending_guard.disarm();
+        if scope.is_cancelled()
+            || !matches!(
+                self.audio_runtime_generation(invocation).await,
+                Ok(generation) if generation == runtime_generation
+            )
+        {
+            self.force_stop_recording(app_id, runtime_generation).await;
+            return Err(BridgeFailure::coded(
+                "cancelled",
+                "Local App runtime ended while microphone capture was starting",
+            ));
+        }
         Ok(json!({
             "started": true,
             "maxDurationMs": max_duration_ms,
@@ -643,108 +1588,257 @@ impl LocalAppsHostBroker {
     // grant was consumed would keep it hot instead.
     pub(super) async fn record_audio_stop_value(
         &self,
-        app_id: &str,
+        invocation: &local_apps::InvocationContext,
+        runtime_generation: u64,
     ) -> Result<Value, BridgeFailure> {
-        let mut guard = self.recording.lock().await;
-        match guard.take() {
-            None => Err(BridgeFailure::coded(
-                "not_recording",
-                "no recording is active",
-            )),
-            Some(active) if active.app_id != app_id => {
-                let refused =
-                    BridgeFailure::coded("not_recording", "another app owns the active recording");
-                *guard = Some(active);
-                Err(refused)
+        let app_id = invocation.app_id.as_str();
+        let (finished, stop) = {
+            let mut guard = self.recording.lock().await;
+            let Some(active) = guard.as_ref() else {
+                return Err(BridgeFailure::coded(
+                    "not_recording",
+                    "no recording is active",
+                ));
+            };
+            if active.app_id != app_id || active.runtime_generation != runtime_generation {
+                return Err(BridgeFailure::coded(
+                    "not_recording",
+                    "another app owns the active recording",
+                ));
             }
-            Some(mut active) => {
-                let finished = match active.finished.take() {
-                    Some(finished) => {
-                        active.watchdog.abort();
-                        if finished.at.elapsed() > FINISHED_RECORDING_TTL {
-                            return Err(BridgeFailure::coded(
-                                "not_recording",
-                                "the auto-stopped recording expired uncollected",
-                            ));
-                        }
-                        finished
-                    }
-                    None => {
-                        let duration_ms =
-                            u64::try_from(active.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        // Stop on the pinned recorder, and only give up the
-                        // session once it has actually stopped. Taking the
-                        // entry (and aborting the watchdog) before this call
-                        // meant a transient native failure left the lease
-                        // open with nothing left to reclaim it: a retried
-                        // stop answered `not_recording`, and the runtime-stop
-                        // hook found no session to force-stop.
-                        let recording = match active.voice.stop_recording().await {
-                            Ok(recording) => recording,
-                            Err(error) => {
-                                *guard = Some(active);
-                                return Err(map_voice_error(error));
-                            }
-                        };
-                        active.watchdog.abort();
-                        FinishedRecording {
-                            recording,
-                            duration_ms,
-                            at: Instant::now(),
-                            auto_stopped: false,
-                        }
-                    }
+            if active.replacing {
+                return Err(BridgeFailure::coded(
+                    "audio_session_busy",
+                    "the active recording is being replaced",
+                ));
+            }
+            if active.stopping {
+                return Err(BridgeFailure::coded(
+                    "audio_session_busy",
+                    "the active recording is already stopping",
+                ));
+            }
+
+            if active.finished.is_some() {
+                let active = guard.take().expect("checked above");
+                active.watchdog.abort();
+                (active.finished, None)
+            } else {
+                let duration_ms =
+                    u64::try_from(active.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let context = local_audio_context(
+                    &active.audio,
+                    invocation,
+                    runtime_generation,
+                    LOCAL_APP_AUDIO_TIMEOUT,
+                )?;
+                let stop = ManualRecordingStop {
+                    app_id: active.app_id.clone(),
+                    runtime_generation: active.runtime_generation,
+                    handle: active.handle.clone(),
+                    context,
+                    audio: active.audio.clone(),
+                    duration_ms,
                 };
-                let mime_type = finished.recording.mime_type.clone();
-                self.media_envelope(
-                    app_id,
-                    &mime_type,
-                    finished.recording.audio_bytes,
-                    json!({
-                        "durationMs": finished.duration_ms,
-                        "autoStopped": finished.auto_stopped,
-                    }),
-                )
+                guard
+                    .as_mut()
+                    .expect("recording remained registered")
+                    .stopping = true;
+                (None, Some(stop))
+            }
+        };
+
+        if let Some(finished) = finished {
+            if finished.at.elapsed() > FINISHED_RECORDING_TTL {
+                return Err(BridgeFailure::coded(
+                    "not_recording",
+                    "the recording expired uncollected",
+                ));
+            }
+            return self.media_envelope(
+                app_id,
+                &finished.recording.mime_type,
+                finished.recording.audio_bytes,
+                json!({
+                    "durationMs": finished.duration_ms,
+                    "autoStopped": finished.auto_stopped,
+                }),
+            );
+        }
+
+        let stop = stop.expect("unfinished recording schedules a native stop");
+        let worker = tokio::spawn(execute_manual_recording_stop(
+            self.recording.clone(),
+            stop.clone(),
+        ));
+        match worker.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(error) => {
+                clear_manual_recording_stop(&self.recording, &stop).await;
+                return Err(BridgeFailure::coded(
+                    "native_failure",
+                    format!("recording stop task failed: {error}"),
+                ));
             }
         }
+
+        let mut guard = self.recording.lock().await;
+        let active = guard
+            .as_ref()
+            .filter(|active| manual_stop_matches(active, &stop));
+        if !active.is_some_and(|active| active.finished.is_some()) {
+            return Err(BridgeFailure::coded(
+                "not_recording",
+                "the recording ended before its media result could be collected",
+            ));
+        }
+        let active = guard
+            .take()
+            .expect("finished recording remained registered");
+        active.watchdog.abort();
+        let finished = active.finished.expect("checked above");
+        self.media_envelope(
+            app_id,
+            &finished.recording.mime_type,
+            finished.recording.audio_bytes,
+            json!({ "durationMs": finished.duration_ms, "autoStopped": false }),
+        )
     }
 
     /// Reclaim the recorder when `app_id`'s runtime stops (user stop, quota
     /// eviction, process exit) so the native audio-session lease never
     /// outlives the page that opened it.
-    pub(super) async fn force_stop_recording(&self, app_id: &str) {
-        let mut guard = self.recording.lock().await;
-        let owned = matches!(guard.as_ref(), Some(active) if active.app_id == app_id);
-        if !owned {
-            return;
+    pub(super) async fn force_stop_recording(&self, app_id: &str, runtime_generation: u64) {
+        self.cancel_local_app_audio_scope(app_id, runtime_generation);
+        let active = {
+            let guard = self.recording.lock().await;
+            guard
+                .as_ref()
+                .filter(|active| {
+                    active.app_id == app_id && active.runtime_generation == runtime_generation
+                })
+                .map(|active| {
+                    (
+                        active.audio.clone(),
+                        active.invocation.clone(),
+                        active.handle.clone(),
+                    )
+                })
+        };
+        let active_owned = active.is_some();
+        let pending = {
+            let slot = self.recording_pending.lock().await;
+            slot.as_ref()
+                .filter(|start| {
+                    start.app_id == app_id && start.runtime_generation == runtime_generation
+                })
+                .map(|start| PendingRecordingStart {
+                    app_id: start.app_id.clone(),
+                    runtime_generation: start.runtime_generation,
+                    context: start.context.clone(),
+                    audio: start.audio.clone(),
+                    scope: start.scope.clone(),
+                })
+        };
+
+        if let Some((audio, invocation, handle)) = active {
+            let context = match local_audio_context(
+                &audio,
+                &invocation,
+                runtime_generation,
+                LOCAL_APP_AUDIO_TIMEOUT,
+            ) {
+                Ok(context) => context,
+                Err(_) => return,
+            };
+            if let Err(error) = execute_local_audio(&audio, context, AudioOperation::EndOwner).await
+            {
+                tracing::warn!(
+                    app_id,
+                    runtime_generation,
+                    error = %error.message,
+                    "could not end Local App audio owner during runtime teardown"
+                );
+                return;
+            }
+            let mut guard = self.recording.lock().await;
+            if guard.as_ref().is_some_and(|active| {
+                active.app_id == app_id
+                    && active.runtime_generation == runtime_generation
+                    && active.handle == handle
+            }) {
+                if let Some(active) = guard.take() {
+                    active.watchdog.abort();
+                }
+            }
         }
-        let active = guard.take().expect("checked above");
-        active.watchdog.abort();
-        if active.finished.is_none() {
-            // The recorder the session started on — the live device cell may
-            // already hold a different connection's `VoiceImpl`, which would
-            // leave this one's audio-session lease open forever.
-            let _ = active.voice.stop_recording().await;
+
+        if let Some(pending) = pending {
+            pending.scope.cancel();
+            let identity = pending.context.identity.clone();
+            let _ = pending.audio.cancel(identity.clone()).await;
+            let request_id = pending
+                .context
+                .initiator
+                .as_ref()
+                .and_then(|initiator| initiator.request_id.as_deref())
+                .unwrap_or("runtime-teardown");
+            let context = local_audio_context_for_owner(
+                &pending.audio,
+                app_id,
+                runtime_generation,
+                request_id,
+                LOCAL_APP_AUDIO_TIMEOUT,
+            );
+            if let Err(error) =
+                execute_local_audio(&pending.audio, context, AudioOperation::EndOwner).await
+            {
+                tracing::warn!(
+                    app_id,
+                    runtime_generation,
+                    error = %error.message,
+                    "could not cancel pending Local App audio start during runtime teardown"
+                );
+            }
+        } else if !active_owned {
+            // Runtime teardown also cancels short owner-scoped operations even
+            // when no recording handle was installed.
+            if let Ok(devices) = self.devices() {
+                if let Some(audio) = devices.audio {
+                    let context = local_audio_context_for_owner(
+                        &audio,
+                        app_id,
+                        runtime_generation,
+                        "runtime-teardown",
+                        LOCAL_APP_AUDIO_TIMEOUT,
+                    );
+                    let _ = execute_local_audio(&audio, context, AudioOperation::EndOwner).await;
+                }
+            }
         }
     }
 
     /// Listen once and return what was said.
     ///
-    /// This is the audio story on this stack, and it is not an accident:
-    /// the conversation protocol has no audio content block, and
-    /// `SpeechToText::transcribe` opens the microphone for one utterance
-    /// rather than transcribing a file — so a recorded m4a cannot be sent to
-    /// a model no matter how it is packaged. An app that wants voice input
-    /// transcribes here and sends the text.
+    /// Live `Listen` opens the microphone for one utterance. A completed
+    /// Local App recording stays a media result and is never reused as an
+    /// implicit recognition fallback; an app that wants voice input requests
+    /// a live transcript here and sends that text.
     ///
     /// Rides `Microphone`: it is the same hardware and the same user-visible
     /// risk, so a second capability would be a distinction without a
     /// difference.
     pub(super) async fn transcribe_speech_value(
         &self,
-        app_id: &str,
+        invocation: &local_apps::InvocationContext,
+        runtime_generation: u64,
         payload: &Value,
     ) -> Result<Value, BridgeFailure> {
+        let app_id = invocation.app_id.as_str();
+        let scope = self.local_app_audio_scope(app_id, runtime_generation);
+        self.ensure_local_app_audio_scope_active(invocation, runtime_generation, &scope)
+            .await?;
         self.authorize_declared_capability(
             app_id,
             AppCapability::Microphone,
@@ -752,10 +1846,22 @@ impl LocalAppsHostBroker {
             REASON_TRANSCRIBE,
         )
         .await?;
-        let stt = self
+        self.ensure_local_app_audio_scope_active(invocation, runtime_generation, &scope)
+            .await?;
+        let audio = self
             .devices()?
-            .stt
-            .ok_or_else(|| unavailable("speech recognition"))?;
+            .audio
+            .ok_or_else(|| unavailable("the device audio service"))?;
+        if !audio
+            .capabilities()
+            .supported_operations
+            .contains(&AudioOperationKind::Listen)
+        {
+            return Err(BridgeFailure::coded(
+                "unsupported",
+                "live speech recognition is not supported on this device",
+            ));
+        }
         let language = match payload.get("language") {
             None | Some(Value::Null) => None,
             Some(value) => Some(
@@ -765,10 +1871,39 @@ impl LocalAppsHostBroker {
                     .to_string(),
             ),
         };
-        let transcript = stt
-            .transcribe(SttOpts { language })
-            .await
-            .map_err(map_stt_error)?;
+        let context = local_audio_context(
+            &audio,
+            invocation,
+            runtime_generation,
+            LOCAL_APP_AUDIO_TIMEOUT,
+        )?;
+        let transcript = match execute_local_audio_scoped(
+            &audio,
+            context,
+            AudioOperation::Listen { language },
+            &scope,
+        )
+        .await?
+        {
+            AudioOperationSuccess::Transcript { transcript } => transcript,
+            _ => {
+                return Err(BridgeFailure::coded(
+                    "native_failure",
+                    "audio service returned an invalid listen result",
+                ));
+            }
+        };
+        if scope.is_cancelled()
+            || !matches!(
+                self.audio_runtime_generation(invocation).await,
+                Ok(generation) if generation == runtime_generation
+            )
+        {
+            return Err(BridgeFailure::coded(
+                "cancelled",
+                "Local App runtime ended while speech recognition was running",
+            ));
+        }
         Ok(json!({
             "text": transcript.text,
             "language": transcript.language,
@@ -1003,9 +2138,14 @@ impl LocalAppsHostBroker {
 
     pub(super) async fn synthesize_speech_value(
         &self,
-        app_id: &str,
+        invocation: &local_apps::InvocationContext,
+        runtime_generation: u64,
         payload: &Value,
     ) -> Result<Value, BridgeFailure> {
+        let app_id = invocation.app_id.as_str();
+        let scope = self.local_app_audio_scope(app_id, runtime_generation);
+        self.ensure_local_app_audio_scope_active(invocation, runtime_generation, &scope)
+            .await?;
         self.authorize_declared_capability(
             app_id,
             AppCapability::TextToSpeech,
@@ -1013,6 +2153,8 @@ impl LocalAppsHostBroker {
             REASON_TTS,
         )
         .await?;
+        self.ensure_local_app_audio_scope_active(invocation, runtime_generation, &scope)
+            .await?;
         let text = payload
             .get("text")
             .and_then(Value::as_str)
@@ -1031,17 +2173,85 @@ impl LocalAppsHostBroker {
                     .to_string(),
             ),
         };
-        let tts = self
+        let language = match payload.get("language") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid("language must be a BCP-47 string"))?
+                    .to_string(),
+            ),
+        };
+        let rate = match payload.get("rate") {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let rate = value
+                    .as_f64()
+                    .ok_or_else(|| invalid("rate must be a number between 0.5 and 2"))?;
+                if !rate.is_finite() || !(0.5..=2.0).contains(&rate) {
+                    return Err(invalid("rate must be a number between 0.5 and 2"));
+                }
+                Some(rate as f32)
+            }
+        };
+        let audio = self
             .devices()?
-            .tts
-            .ok_or_else(|| unavailable("text-to-speech"))?;
-        let audio = tts
-            .synthesize(TtsOpts {
+            .audio
+            .ok_or_else(|| unavailable("the device audio service"))?;
+        if !audio
+            .capabilities()
+            .supported_operations
+            .contains(&AudioOperationKind::Synthesize)
+        {
+            return Err(BridgeFailure::coded(
+                "unsupported",
+                "speech synthesis is not supported on this device",
+            ));
+        }
+        let context = local_audio_context(
+            &audio,
+            invocation,
+            runtime_generation,
+            LOCAL_APP_AUDIO_TIMEOUT,
+        )?;
+        let audio = match execute_local_audio_scoped(
+            &audio,
+            context,
+            AudioOperation::Synthesize {
                 text: text.to_string(),
+                language,
+                rate,
                 voice,
-            })
-            .await
-            .map_err(map_tts_error)?;
+            },
+            &scope,
+        )
+        .await?
+        {
+            AudioOperationSuccess::Synthesized { audio } => audio,
+            _ => {
+                return Err(BridgeFailure::coded(
+                    "native_failure",
+                    "audio service returned an invalid synthesis result",
+                ));
+            }
+        };
+        if audio.pcm.is_empty() || audio.pcm.len() % 2 != 0 || audio.sample_rate_hz == 0 {
+            return Err(BridgeFailure::coded(
+                "native_failure",
+                "audio service returned invalid PCM16 mono audio",
+            ));
+        }
+        if scope.is_cancelled()
+            || !matches!(
+                self.audio_runtime_generation(invocation).await,
+                Ok(generation) if generation == runtime_generation
+            )
+        {
+            return Err(BridgeFailure::coded(
+                "cancelled",
+                "Local App runtime ended while speech synthesis was running",
+            ));
+        }
         self.media_envelope(
             app_id,
             "audio/pcm",
@@ -1188,6 +2398,12 @@ impl LocalAppsHostBroker {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        execute_manual_recording_stop, local_audio_context, local_audio_context_for_owner,
+        LocalAppAudioScope, ManualRecordingStop, PendingRecordingStart, PendingStartGuard,
+        RecordingReplacement, RecordingReplacementGuard, FINISHED_RECORDING_TTL,
+        LOCAL_APP_AUDIO_TIMEOUT, RECORD_FORMAT, RECORD_SAMPLE_RATE_HZ,
+    };
     use crate::local_apps_device::{DeviceCapabilities, SharedDeviceCapabilities};
     use crate::local_apps_host::LocalAppsHostBroker;
     use async_trait::async_trait;
@@ -1203,20 +2419,26 @@ mod tests {
         AppDependencyRecord, AppDependencyState, AppLayout, AppRuntimeProfile, AppService,
         AppSurface, NoopAppEventObserver, APPS_SCHEMA_VERSION,
     };
+    use platform_api::audio::{
+        AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
+        AudioOperationId, AudioOperationKind, AudioOperationReadiness, AudioOperationSuccess,
+        AudioOwner, AudioReadinessState, AudioRecordingHandle, AudioService, AudioStatus,
+    };
     use platform_api::{
         CalendarError, CalendarEvent, CalendarProvider, CalendarQuery, CameraControl, CameraError,
         CapturePhotoOpts, CapturedImage, Clipboard, ClipboardError, Contact, ContactsError,
         ContactsProvider, ContactsQuery, LocationError, LocationFix, LocationProvider,
         NotificationError, NotificationRequest, NotificationService, ShareError, SharePayload,
-        ShareResult, SharingService, TextToSpeech, TtsAudio, TtsError, TtsOpts, VoiceError,
-        VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
+        ShareResult, SharingService, SttTranscript, TtsAudio, VoiceRecording,
     };
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
     use tokio::time::timeout;
 
     // ---- fakes ------------------------------------------------------------
@@ -1324,15 +2546,173 @@ mod tests {
         }
     }
 
-    struct FakeTts;
+    #[derive(Default)]
+    struct FakeAudio {
+        active: StdMutex<HashMap<AudioOwner, AudioRecordingHandle>>,
+        starts: StdMutex<HashMap<AudioOperationId, AudioOwner>>,
+        cancelled: StdMutex<HashSet<AudioOperationId>>,
+        cancel_wakeup: tokio::sync::Notify,
+        operations: StdMutex<Vec<(AudioOperationContext, AudioOperation)>>,
+        stopped: AtomicBool,
+        fail_next_stop: StdMutex<Option<AudioErrorKind>>,
+        start_gate: Option<Arc<tokio::sync::Notify>>,
+        start_entered: Option<Arc<tokio::sync::Notify>>,
+        stop_gate: Option<Arc<tokio::sync::Notify>>,
+        stop_entered: Option<Arc<tokio::sync::Notify>>,
+        stop_succeeded: Option<Arc<tokio::sync::Notify>>,
+        cancel_gate: Option<Arc<tokio::sync::Notify>>,
+        cancel_entered: Option<Arc<tokio::sync::Notify>>,
+        synthesize_gate: Option<Arc<tokio::sync::Notify>>,
+        synthesize_entered: Option<Arc<tokio::sync::Notify>>,
+    }
 
     #[async_trait]
-    impl TextToSpeech for FakeTts {
-        async fn synthesize(&self, opts: TtsOpts) -> Result<TtsAudio, TtsError> {
-            Ok(TtsAudio {
-                pcm: opts.text.into_bytes(),
-                sample_rate_hz: 24_000,
-            })
+    impl AudioService for FakeAudio {
+        fn capabilities(&self) -> AudioCapabilitySnapshot {
+            let supported_operations = vec![
+                AudioOperationKind::Record,
+                AudioOperationKind::Listen,
+                AudioOperationKind::Synthesize,
+            ];
+            AudioCapabilitySnapshot {
+                service_epoch: 7,
+                support_revision: 1,
+                readiness: supported_operations
+                    .iter()
+                    .copied()
+                    .map(|operation| AudioOperationReadiness {
+                        operation,
+                        state: AudioReadinessState::Ready,
+                    })
+                    .collect(),
+                supported_operations,
+                max_payload_bytes: 4 * 1024 * 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            context: AudioOperationContext,
+            operation: AudioOperation,
+        ) -> Result<AudioOperationSuccess, AudioError> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push((context.clone(), operation.clone()));
+            match operation {
+                AudioOperation::StartRecording { .. } => {
+                    let handle = AudioRecordingHandle(context.identity.id.clone());
+                    self.active
+                        .lock()
+                        .unwrap()
+                        .insert(context.owner.clone(), handle.clone());
+                    self.starts
+                        .lock()
+                        .unwrap()
+                        .insert(context.identity.clone(), context.owner.clone());
+                    if let Some(entered) = &self.start_entered {
+                        entered.notify_one();
+                    }
+                    if let Some(gate) = &self.start_gate {
+                        tokio::select! {
+                            _ = gate.notified() => {},
+                            _ = self.cancel_wakeup.notified() => {},
+                        }
+                        if self.cancelled.lock().unwrap().contains(&context.identity) {
+                            return Err(AudioError::new(
+                                AudioErrorKind::Cancelled,
+                                "start cancelled",
+                            ));
+                        }
+                    }
+                    Ok(AudioOperationSuccess::RecordingStarted { handle })
+                }
+                AudioOperation::StopRecording { handle } => {
+                    if let Some(entered) = &self.stop_entered {
+                        entered.notify_one();
+                    }
+                    if let Some(gate) = &self.stop_gate {
+                        gate.notified().await;
+                    }
+                    if let Some(kind) = self.fail_next_stop.lock().unwrap().take() {
+                        return Err(AudioError::new(kind, "injected recording stop failure"));
+                    }
+                    let mut active = self.active.lock().unwrap();
+                    if active.get(&context.owner) != Some(&handle) {
+                        return Err(AudioError::new(
+                            AudioErrorKind::NotRecording,
+                            "unknown recording handle",
+                        ));
+                    }
+                    active.remove(&context.owner);
+                    self.stopped.store(true, Ordering::SeqCst);
+                    if let Some(succeeded) = &self.stop_succeeded {
+                        succeeded.notify_one();
+                    }
+                    Ok(AudioOperationSuccess::Recording {
+                        recording: VoiceRecording {
+                            audio_bytes: vec![7, 7, 7],
+                            mime_type: "audio/m4a".into(),
+                        },
+                    })
+                }
+                AudioOperation::Listen { .. } => Ok(AudioOperationSuccess::Transcript {
+                    transcript: SttTranscript {
+                        text: "明天下午三点开会".into(),
+                        language: Some("zh-CN".into()),
+                        confidence: Some(0.9),
+                    },
+                }),
+                AudioOperation::Synthesize { .. } => {
+                    if let Some(entered) = &self.synthesize_entered {
+                        entered.notify_one();
+                    }
+                    if let Some(gate) = &self.synthesize_gate {
+                        gate.notified().await;
+                    }
+                    Ok(AudioOperationSuccess::Synthesized {
+                        audio: TtsAudio {
+                            pcm: vec![0, 0, 1, 0],
+                            sample_rate_hz: 24_000,
+                        },
+                    })
+                }
+                AudioOperation::Status { handle } => {
+                    let active = self.active.lock().unwrap();
+                    let recording = handle
+                        .as_ref()
+                        .is_some_and(|handle| active.get(&context.owner) == Some(handle));
+                    Ok(AudioOperationSuccess::Status {
+                        status: AudioStatus {
+                            recording,
+                            playing: false,
+                        },
+                    })
+                }
+                AudioOperation::EndOwner => {
+                    self.active.lock().unwrap().remove(&context.owner);
+                    self.stopped.store(true, Ordering::SeqCst);
+                    Ok(AudioOperationSuccess::OwnerEnded)
+                }
+                AudioOperation::Speak { .. } => {
+                    Ok(AudioOperationSuccess::PlaybackCompleted { duration_ms: 50 })
+                }
+            }
+        }
+
+        async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError> {
+            if let Some(entered) = &self.cancel_entered {
+                entered.notify_one();
+            }
+            if let Some(gate) = &self.cancel_gate {
+                gate.notified().await;
+            }
+            self.cancelled.lock().unwrap().insert(identity.clone());
+            if let Some(owner) = self.starts.lock().unwrap().remove(&identity) {
+                self.active.lock().unwrap().remove(&owner);
+            }
+            self.cancel_wakeup.notify_one();
+            Ok(())
         }
     }
 
@@ -1364,41 +2744,6 @@ mod tests {
         async fn search(&self, query: ContactsQuery) -> Result<Vec<Contact>, ContactsError> {
             self.queries.lock().unwrap().push(query);
             Ok(self.contacts.clone())
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeVoice {
-        recording: AtomicBool,
-        stopped: AtomicBool,
-        /// Held closed to stand in for the OS microphone permission alert:
-        /// `start_recording` does not return until the test opens it.
-        start_gate: Option<Arc<tokio::sync::Notify>>,
-    }
-
-    #[async_trait]
-    impl VoiceRecorder for FakeVoice {
-        async fn start_recording(&self, _opts: VoiceRecordingOpts) -> Result<(), VoiceError> {
-            if let Some(gate) = self.start_gate.clone() {
-                gate.notified().await;
-            }
-            self.recording.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
-            if !self.recording.swap(false, Ordering::SeqCst) {
-                return Err(VoiceError::NotRecording);
-            }
-            self.stopped.store(true, Ordering::SeqCst);
-            Ok(VoiceRecording {
-                audio_bytes: vec![7, 7, 7],
-                mime_type: "audio/m4a".into(),
-            })
-        }
-
-        async fn is_recording(&self) -> bool {
-            self.recording.load(Ordering::SeqCst)
         }
     }
 
@@ -1593,6 +2938,9 @@ mod tests {
 
         let build_root = layout.root().join(layout.build_rel(false));
         let output_root = build_root.join(crate::local_apps_build::VITE_OUTPUT_DIR);
+        std::fs::create_dir_all(&output_root).expect("create fixture output");
+        std::fs::write(output_root.join("index.html"), "<html>ok</html>")
+            .expect("write fixture output");
         let output_sha256 = digest_tree(&output_root);
         let build_receipt = json!({
             "version": 3,
@@ -1663,6 +3011,15 @@ mod tests {
     fn declare_and_grant(h: &Harness, capability: AppCapability) {
         declare(h, capability);
         grant(h, capability);
+    }
+
+    async fn start_runtime(h: &Harness) {
+        let started = h
+            .broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "start"}))
+            .await
+            .expect("runtime starts");
+        assert_eq!(started["state"], "running");
     }
 
     async fn execute(
@@ -1967,13 +3324,14 @@ mod tests {
 
     #[tokio::test]
     async fn record_stop_returns_the_recording_with_duration() {
-        let voice = Arc::new(FakeVoice::default());
+        let audio = Arc::new(FakeAudio::default());
         let h = harness(DeviceCapabilities {
-            voice: Some(voice.clone()),
+            audio: Some(audio.clone()),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
 
         let (ok, started, _, _) =
             execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
@@ -1990,7 +3348,415 @@ mod tests {
             .decode(result["base64"].as_str().expect("base64"))
             .expect("decodes");
         assert_eq!(bytes, vec![7, 7, 7]);
-        assert!(voice.stopped.load(Ordering::SeqCst));
+        assert!(audio.stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn rejected_recording_start_stops_its_returned_handle() {
+        let start_gate = Arc::new(tokio::sync::Notify::new());
+        let start_entered = Arc::new(tokio::sync::Notify::new());
+        let audio = Arc::new(FakeAudio {
+            start_gate: Some(start_gate.clone()),
+            start_entered: Some(start_entered.clone()),
+            ..FakeAudio::default()
+        });
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+
+        let starting = {
+            let broker = h.broker.clone();
+            let app_id = h.app_id.clone();
+            tokio::spawn(async move {
+                broker
+                    .execute_bridge(AppBridgeRequestDto {
+                        request_id: "rejected-start".into(),
+                        app_id,
+                        operation: AppBridgeOperationDto::RecordAudioStart,
+                        payload_json: Some("{}".into()),
+                    })
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(2), start_entered.notified())
+            .await
+            .expect("native recording start is pending");
+        h.broker.recording_pending.lock().await.take();
+        start_gate.notify_one();
+        timeout(Duration::from_secs(2), starting)
+            .await
+            .expect("rejected start settles")
+            .expect("bridge task joins");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if audio.active.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the uncommitted native handle is stopped");
+        assert!(audio
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, operation)| { matches!(operation, AudioOperation::StopRecording { .. }) }));
+    }
+
+    #[tokio::test]
+    async fn dropped_start_with_a_returned_handle_stops_the_recording() {
+        let fake = Arc::new(FakeAudio::default());
+        let audio: Arc<dyn AudioService> = fake.clone();
+        let context = local_audio_context_for_owner(
+            &audio,
+            "cancelled-app",
+            17,
+            "dropped-start",
+            LOCAL_APP_AUDIO_TIMEOUT,
+        );
+        let handle = match audio
+            .execute(
+                context.clone(),
+                AudioOperation::StartRecording {
+                    sample_rate_hz: RECORD_SAMPLE_RATE_HZ,
+                    format: RECORD_FORMAT.into(),
+                },
+            )
+            .await
+            .unwrap()
+        {
+            AudioOperationSuccess::RecordingStarted { handle } => handle,
+            _ => panic!("expected a recording handle"),
+        };
+        let pending = Arc::new(Mutex::new(Some(PendingRecordingStart {
+            app_id: "cancelled-app".into(),
+            runtime_generation: 17,
+            context: context.clone(),
+            audio,
+            scope: Arc::new(LocalAppAudioScope::new()),
+        })));
+        drop(PendingStartGuard {
+            pending: pending.clone(),
+            identity: context.identity,
+            handle: Some(handle),
+            armed: true,
+        });
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if pending.lock().await.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completed native capture is released");
+        assert!(fake.active.lock().unwrap().is_empty());
+        assert!(fake
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, operation)| { matches!(operation, AudioOperation::StopRecording { .. }) }));
+    }
+
+    #[tokio::test]
+    async fn a_new_audio_service_epoch_releases_a_stale_pending_start() {
+        let fake = Arc::new(FakeAudio::default());
+        let audio: Arc<dyn AudioService> = fake.clone();
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+        let mut stale = local_audio_context_for_owner(
+            &audio,
+            &h.app_id,
+            1,
+            "disconnected-start",
+            LOCAL_APP_AUDIO_TIMEOUT,
+        );
+        stale.identity.service_epoch -= 1;
+        *h.broker.recording_pending.lock().await = Some(PendingRecordingStart {
+            app_id: h.app_id.clone(),
+            runtime_generation: 1,
+            context: stale,
+            audio,
+            scope: Arc::new(LocalAppAudioScope::new()),
+        });
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        assert!(
+            ok,
+            "new epoch should not inherit a stale busy reservation: {error:?} {code:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_pending_start_does_not_hold_registry_during_native_cancel() {
+        let start_gate = Arc::new(tokio::sync::Notify::new());
+        let start_entered = Arc::new(tokio::sync::Notify::new());
+        let cancel_gate = Arc::new(tokio::sync::Notify::new());
+        let cancel_entered = Arc::new(tokio::sync::Notify::new());
+        let audio = Arc::new(FakeAudio {
+            start_gate: Some(start_gate.clone()),
+            start_entered: Some(start_entered.clone()),
+            cancel_gate: Some(cancel_gate.clone()),
+            cancel_entered: Some(cancel_entered.clone()),
+            ..FakeAudio::default()
+        });
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+
+        let starting = {
+            let broker = h.broker.clone();
+            let app_id = h.app_id.clone();
+            tokio::spawn(async move {
+                broker
+                    .execute_bridge(AppBridgeRequestDto {
+                        request_id: "cancelled-pending-start".into(),
+                        app_id,
+                        operation: AppBridgeOperationDto::RecordAudioStart,
+                        payload_json: Some("{}".into()),
+                    })
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(2), start_entered.notified())
+            .await
+            .expect("native start is pending");
+        starting.abort();
+        let _ = starting.await;
+        timeout(Duration::from_secs(2), cancel_entered.notified())
+            .await
+            .expect("native cancel is pending");
+        let _ = timeout(
+            Duration::from_millis(100),
+            h.broker.recording_pending.lock(),
+        )
+        .await
+        .expect("pending registry remains accessible during native cancellation");
+        cancel_gate.notify_one();
+        start_gate.notify_one();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if h.broker.recording_pending.lock().await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancelled start eventually releases its reservation");
+    }
+
+    #[tokio::test]
+    async fn cancelled_manual_stop_keeps_the_native_result_for_the_next_stop_call() {
+        let stop_gate = Arc::new(tokio::sync::Notify::new());
+        let stop_entered = Arc::new(tokio::sync::Notify::new());
+        let stop_succeeded = Arc::new(tokio::sync::Notify::new());
+        let audio = Arc::new(FakeAudio {
+            stop_gate: Some(stop_gate.clone()),
+            stop_entered: Some(stop_entered.clone()),
+            stop_succeeded: Some(stop_succeeded.clone()),
+            ..FakeAudio::default()
+        });
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+        let stopping = {
+            let broker = h.broker.clone();
+            let app_id = h.app_id.clone();
+            tokio::spawn(async move {
+                broker
+                    .execute_bridge(AppBridgeRequestDto {
+                        request_id: "cancelled-manual-stop".into(),
+                        app_id,
+                        operation: AppBridgeOperationDto::RecordAudioStop,
+                        payload_json: Some("{}".into()),
+                    })
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(2), stop_entered.notified())
+            .await
+            .expect("manual stop reaches the audio service");
+
+        // Hold the host registry after the native stop starts so it can finish
+        // while the caller is cancelled, before its result is cached there.
+        let registry = h.broker.recording.lock().await;
+        stop_gate.notify_one();
+        timeout(Duration::from_secs(2), stop_succeeded.notified())
+            .await
+            .expect("native StopRecording succeeds");
+        assert!(audio.active.lock().unwrap().is_empty());
+
+        stopping.abort();
+        assert!(stopping
+            .await
+            .expect_err("outer manual-stop request is cancelled")
+            .is_cancelled());
+        drop(registry);
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if h.broker
+                    .recording
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|active| active.finished.is_some() && !active.stopping)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("detached stop task caches the native result");
+
+        let (ok, result, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+        assert!(
+            ok,
+            "cached stop result remains collectible: {error:?} {code:?}"
+        );
+        assert_eq!(result["autoStopped"], false);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(result["base64"].as_str().expect("base64"))
+            .expect("decodes");
+        assert_eq!(bytes, vec![7, 7, 7]);
+        assert!(h.broker.recording.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_teardown_during_manual_stop_cannot_restore_the_recording() {
+        let stop_gate = Arc::new(tokio::sync::Notify::new());
+        let stop_entered = Arc::new(tokio::sync::Notify::new());
+        let audio = Arc::new(FakeAudio {
+            stop_gate: Some(stop_gate.clone()),
+            stop_entered: Some(stop_entered.clone()),
+            ..FakeAudio::default()
+        });
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+
+        let stopping = {
+            let broker = h.broker.clone();
+            let app_id = h.app_id.clone();
+            tokio::spawn(async move {
+                broker
+                    .execute_bridge(AppBridgeRequestDto {
+                        request_id: "manual-stop-racing-runtime-teardown".into(),
+                        app_id,
+                        operation: AppBridgeOperationDto::RecordAudioStop,
+                        payload_json: Some("{}".into()),
+                    })
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(2), stop_entered.notified())
+            .await
+            .expect("manual stop reaches the audio service");
+
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
+            .await
+            .expect("runtime teardown ends the audio owner");
+        assert!(audio.active.lock().unwrap().is_empty());
+        assert!(h.broker.recording.lock().await.is_none());
+
+        // The detached native stop can finish after teardown. Its generation
+        // and handle no longer match the registry, so it must not resurrect it.
+        stop_gate.notify_one();
+        let _ = timeout(Duration::from_secs(2), stopping)
+            .await
+            .expect("in-flight stop settles after teardown")
+            .expect("manual-stop request task joins");
+
+        assert!(audio.active.lock().unwrap().is_empty());
+        assert!(h.broker.recording.lock().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_uncollected_manual_stop_result_expires_from_the_registry() {
+        let audio = Arc::new(FakeAudio::default());
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+        let stop = {
+            let mut slot = h.broker.recording.lock().await;
+            let active = slot.as_mut().expect("host recording handle");
+            active.stopping = true;
+            ManualRecordingStop {
+                app_id: active.app_id.clone(),
+                runtime_generation: active.runtime_generation,
+                handle: active.handle.clone(),
+                context: local_audio_context(
+                    &active.audio,
+                    &active.invocation,
+                    active.runtime_generation,
+                    LOCAL_APP_AUDIO_TIMEOUT,
+                )
+                .expect("valid recording stop context"),
+                audio: active.audio.clone(),
+                duration_ms: u64::try_from(active.started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX),
+            }
+        };
+
+        execute_manual_recording_stop(h.broker.recording.clone(), stop)
+            .await
+            .expect("native manual stop completes");
+        assert!(matches!(
+            h.broker.recording.lock().await.as_ref(),
+            Some(active) if active.finished.is_some()
+        ));
+
+        tokio::time::advance(FINISHED_RECORDING_TTL + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(h.broker.recording.lock().await.is_none());
+        assert!(audio.active.lock().unwrap().is_empty());
     }
 
     /// The first mic use of an app's life begins with an OS permission
@@ -2001,16 +3767,19 @@ mod tests {
     #[tokio::test]
     async fn a_start_waiting_on_the_os_permission_alert_does_not_block_a_reclaim() {
         let gate = Arc::new(tokio::sync::Notify::new());
-        let voice = Arc::new(FakeVoice {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let audio = Arc::new(FakeAudio {
             start_gate: Some(gate.clone()),
-            ..FakeVoice::default()
+            start_entered: Some(entered.clone()),
+            ..FakeAudio::default()
         });
         let h = harness(DeviceCapabilities {
-            voice: Some(voice.clone()),
+            audio: Some(audio.clone()),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
 
         let starting = {
             let broker = h.broker.clone();
@@ -2027,36 +3796,66 @@ mod tests {
             })
         };
         // Let the start reach the (blocked) native call.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("start reaches the native permission gate");
+        let start_identity = audio
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(context, operation)| {
+                matches!(operation, AudioOperation::StartRecording { .. })
+                    .then(|| context.identity.clone())
+            })
+            .expect("native start identity");
         assert!(
             !starting.is_finished(),
             "the fixture start must still be pending"
         );
 
         // The reclaim path must answer while that alert is still up.
+        let (runtime_generation, _) = h
+            .broker
+            .runtime_identity(&h.app_id)
+            .await
+            .expect("runtime lookup")
+            .expect("runtime is active");
         timeout(
             Duration::from_millis(500),
-            h.broker.force_stop_recording(&h.app_id),
+            h.broker
+                .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"})),
         )
         .await
-        .expect(
-            "force_stop_recording blocked behind an in-flight start — a runtime stop would \
-             hang on an unanswered OS permission alert",
+        .expect("runtime stop must not block behind the permission prompt")
+        .expect("runtime stop succeeds");
+        assert_ne!(runtime_generation, 0);
+        assert!(
+            audio.active.lock().unwrap().is_empty(),
+            "targeted cancellation releases a capture created before delivery"
         );
-
         gate.notify_one();
-        starting.await.expect("the start completes");
+        starting.await.expect("the start task completes");
+        assert!(
+            audio.cancelled.lock().unwrap().contains(&start_identity),
+            "runtime teardown cancels the exact undelivered start identity"
+        );
+        assert!(
+            h.broker.recording.lock().await.is_none(),
+            "a cancelled pending start is never committed"
+        );
     }
 
     #[tokio::test]
     async fn a_stop_without_a_recording_is_typed() {
-        let voice = Arc::new(FakeVoice::default());
+        let audio = Arc::new(FakeAudio::default());
         let h = harness(DeviceCapabilities {
-            voice: Some(voice),
+            audio: Some(audio),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
 
         let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
         assert!(!ok);
@@ -2065,13 +3864,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_recording_held_by_another_app_is_busy() {
-        let voice = Arc::new(FakeVoice::default());
+        let audio = Arc::new(FakeAudio::default());
         let h = harness(DeviceCapabilities {
-            voice: Some(voice),
+            audio: Some(audio),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
 
         let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
         assert!(ok);
@@ -2091,6 +3891,13 @@ mod tests {
         let mut permissions = load_permissions(&layout).expect("second permissions");
         permissions.grant(AppCapability::Microphone);
         save_permissions(&layout, &permissions).expect("second grant");
+        let record = prepare_launchable_runtime_fixture(&h.service, record, &layout).await;
+        let second_started = h
+            .broker
+            .manage_runtime_value(json!({"app_id": record.id, "action": "start"}))
+            .await
+            .expect("second runtime starts");
+        assert_eq!(second_started["state"], "running");
         h.broker
             .execute_bridge(AppBridgeRequestDto {
                 request_id: "req-b".into(),
@@ -2118,13 +3925,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_same_app_restart_replaces_the_orphaned_recording() {
-        let voice = Arc::new(FakeVoice::default());
+        let audio = Arc::new(FakeAudio::default());
         let h = harness(DeviceCapabilities {
-            voice: Some(voice.clone()),
+            audio: Some(audio.clone()),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
 
         let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
         assert!(ok);
@@ -2138,15 +3946,211 @@ mod tests {
         assert!(ok);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn the_watchdog_auto_stops_and_caches_the_recording() {
-        let voice = Arc::new(FakeVoice::default());
+    #[tokio::test]
+    async fn a_failed_replacement_stop_keeps_the_old_recording_available_for_cleanup() {
+        for (kind, expected_code) in [
+            (AudioErrorKind::Timeout, "timeout"),
+            (AudioErrorKind::NativeFailure, "native_failure"),
+        ] {
+            let audio = Arc::new(FakeAudio::default());
+            let h = harness(DeviceCapabilities {
+                audio: Some(audio.clone()),
+                ..DeviceCapabilities::default()
+            })
+            .await;
+            declare_and_grant(&h, AppCapability::Microphone);
+            start_runtime(&h).await;
+
+            let (ok, _, error, code) =
+                execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+            assert!(ok, "{error:?} {code:?}");
+            let old_handle = audio
+                .active
+                .lock()
+                .unwrap()
+                .values()
+                .next()
+                .expect("native recording handle")
+                .clone();
+            *audio.fail_next_stop.lock().unwrap() = Some(kind);
+
+            let (ok, _, error, code) =
+                execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+            assert!(!ok, "replacement should report the failed native stop");
+            assert_eq!(code.as_deref(), Some(expected_code), "{error:?}");
+
+            assert!(
+                matches!(
+                    h.broker.recording.lock().await.as_ref(),
+                    Some(active) if active.handle == old_handle && !active.replacing
+                ),
+                "failed replacement must leave the old host cleanup handle registered"
+            );
+            assert!(audio
+                .active
+                .lock()
+                .unwrap()
+                .values()
+                .any(|handle| handle == &old_handle));
+
+            let (ok, _, error, code) =
+                execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+            assert!(
+                ok,
+                "the preserved handle remains stoppable: {error:?} {code:?}"
+            );
+            assert!(audio.active.lock().unwrap().is_empty());
+            assert!(h.broker.recording.lock().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_replacement_stop_releases_its_reservation_and_keeps_the_handle() {
+        let stop_gate = Arc::new(tokio::sync::Notify::new());
+        let stop_entered = Arc::new(tokio::sync::Notify::new());
+        let audio = Arc::new(FakeAudio {
+            stop_gate: Some(stop_gate.clone()),
+            stop_entered: Some(stop_entered.clone()),
+            ..FakeAudio::default()
+        });
         let h = harness(DeviceCapabilities {
-            voice: Some(voice.clone()),
+            audio: Some(audio.clone()),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+        let old_handle = audio
+            .active
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .expect("native recording handle")
+            .clone();
+
+        let replacement = {
+            let broker = h.broker.clone();
+            let app_id = h.app_id.clone();
+            tokio::spawn(async move {
+                broker
+                    .execute_bridge(AppBridgeRequestDto {
+                        request_id: "cancelled-replacement".into(),
+                        app_id,
+                        operation: AppBridgeOperationDto::RecordAudioStart,
+                        payload_json: Some("{}".into()),
+                    })
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(2), stop_entered.notified())
+            .await
+            .expect("replacement reaches native stop");
+        assert!(matches!(
+            h.broker.recording.lock().await.as_ref(),
+            Some(active) if active.handle == old_handle && active.replacing
+        ));
+
+        replacement.abort();
+        assert!(replacement
+            .await
+            .expect_err("replacement is cancelled")
+            .is_cancelled());
+        assert!(
+            matches!(
+                h.broker.recording.lock().await.as_ref(),
+                Some(active) if active.handle == old_handle && !active.replacing
+            ),
+            "dropping a replacement request must release its reservation"
+        );
+
+        stop_gate.notify_one();
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
+        assert!(
+            ok,
+            "the original handle remains stoppable: {error:?} {code:?}"
+        );
+        assert!(audio.active.lock().unwrap().is_empty());
+        assert!(h.broker.recording.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_successful_replacement_commit_removes_the_stopped_handle() {
+        let audio = Arc::new(FakeAudio::default());
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+
+        let mut slot = h.broker.recording.lock().await;
+        let active = slot.as_mut().expect("host recording handle");
+        active.replacing = true;
+        let old_handle = active.handle.clone();
+        let replacement = RecordingReplacement {
+            app_id: active.app_id.clone(),
+            runtime_generation: active.runtime_generation,
+            invocation: active.invocation.clone(),
+            handle: active.handle.clone(),
+            audio: active.audio.clone(),
+        };
+        audio.active.lock().unwrap().clear();
+        audio.stopped.store(true, Ordering::SeqCst);
+
+        let mut guard = RecordingReplacementGuard::new(h.broker.recording.clone(), replacement);
+        guard.mark_stopped();
+        let cleanup = tokio::spawn(async move { guard.finish().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !cleanup.is_finished(),
+            "registry cleanup is waiting on its lock"
+        );
+
+        cleanup.abort();
+        assert!(cleanup
+            .await
+            .expect_err("commit cleanup is cancelled")
+            .is_cancelled());
+        assert!(matches!(
+            slot.as_ref(),
+            Some(active) if active.handle == old_handle && active.replacing
+        ));
+        drop(slot);
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if h.broker.recording.lock().await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("drop cleanup removes the already-stopped handle");
+        assert!(audio.active.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_watchdog_auto_stops_and_caches_the_recording() {
+        let audio = Arc::new(FakeAudio::default());
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
 
         let (ok, _, _, _) = execute(
             &h,
@@ -2158,7 +4162,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(1_500)).await;
         assert!(
-            voice.stopped.load(Ordering::SeqCst),
+            audio.stopped.load(Ordering::SeqCst),
             "the watchdog must stop the native recorder at the duration cap"
         );
 
@@ -2169,22 +4173,98 @@ mod tests {
         assert!(result["base64"].is_string());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_releases_the_owner_when_recording_stop_fails() {
+        let audio = Arc::new(FakeAudio::default());
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+        let (ok, _, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::RecordAudioStart,
+            json!({"maxDurationMs": 1_000}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+        *audio.fail_next_stop.lock().unwrap() = Some(AudioErrorKind::NativeFailure);
+
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(audio.active.lock().unwrap().is_empty());
+        assert!(audio.stopped.load(Ordering::SeqCst));
+        assert!(h.broker.recording.lock().await.is_none());
+        assert!(audio
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, operation)| { matches!(operation, AudioOperation::EndOwner) }));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_watchdog_stop_does_not_hold_the_recording_registry() {
+        let stop_gate = Arc::new(tokio::sync::Notify::new());
+        let stop_entered = Arc::new(tokio::sync::Notify::new());
+        let audio = Arc::new(FakeAudio {
+            stop_gate: Some(stop_gate.clone()),
+            stop_entered: Some(stop_entered.clone()),
+            ..FakeAudio::default()
+        });
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
+        let (ok, _, error, code) = execute(
+            &h,
+            AppBridgeOperationDto::RecordAudioStart,
+            json!({"maxDurationMs": 1_000}),
+        )
+        .await;
+        assert!(ok, "{error:?} {code:?}");
+
+        timeout(Duration::from_secs(2), stop_entered.notified())
+            .await
+            .expect("watchdog reaches native stop");
+        let registry = timeout(Duration::from_millis(200), h.broker.recording.lock())
+            .await
+            .expect("native stop must not hold the recording registry");
+        drop(registry);
+
+        let generation = h
+            .broker
+            .runtime_identity(&h.app_id)
+            .await
+            .expect("runtime lookup")
+            .expect("runtime is active")
+            .0;
+        timeout(
+            Duration::from_secs(2),
+            h.broker.force_stop_recording(&h.app_id, generation),
+        )
+        .await
+        .expect("runtime teardown must pass the blocked watchdog");
+        stop_gate.notify_one();
+        tokio::task::yield_now().await;
+        assert!(h.broker.recording.lock().await.is_none());
+    }
+
     #[tokio::test]
     async fn stopping_the_runtime_reclaims_an_active_recording() {
-        let voice = Arc::new(FakeVoice::default());
+        let audio = Arc::new(FakeAudio::default());
         let h = harness(DeviceCapabilities {
-            voice: Some(voice.clone()),
+            audio: Some(audio.clone()),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
 
-        let started = h
-            .broker
-            .manage_runtime_value(json!({"app_id": h.app_id, "action": "start"}))
-            .await
-            .expect("runtime starts");
-        assert_eq!(started["state"], "running");
+        start_runtime(&h).await;
         let (ok, _, _, _) = execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
         assert!(ok);
 
@@ -2193,42 +4273,90 @@ mod tests {
             .await
             .expect("runtime stops");
         assert!(
-            voice.stopped.load(Ordering::SeqCst),
+            audio.stopped.load(Ordering::SeqCst),
             "a runtime stop must release the recorder (and its audio-session lease)"
         );
-        let (ok, _, _, code) = execute(&h, AppBridgeOperationDto::RecordAudioStop, json!({})).await;
-        assert!(!ok);
-        assert_eq!(code.as_deref(), Some("not_recording"));
+        assert!(audio.active.lock().unwrap().is_empty());
+        assert!(h.broker.recording.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_runtime_teardown_cannot_end_a_newer_capture_generation() {
+        let audio = Arc::new(FakeAudio::default());
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::Microphone);
+
+        start_runtime(&h).await;
+        let (old_generation, _) = h
+            .broker
+            .runtime_identity(&h.app_id)
+            .await
+            .expect("runtime lookup")
+            .expect("old runtime is active");
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
+            .await
+            .expect("old runtime stops");
+        assert!(audio.active.lock().unwrap().is_empty());
+
+        start_runtime(&h).await;
+        let (new_generation, _) = h
+            .broker
+            .runtime_identity(&h.app_id)
+            .await
+            .expect("runtime lookup")
+            .expect("new runtime is active");
+        assert_ne!(old_generation, new_generation);
+        let (ok, _, error, code) =
+            execute(&h, AppBridgeOperationDto::RecordAudioStart, json!({})).await;
+        assert!(ok, "{error:?} {code:?}");
+
+        h.broker
+            .force_stop_recording(&h.app_id, old_generation)
+            .await;
+        assert!(
+            audio
+                .active
+                .lock()
+                .unwrap()
+                .contains_key(&AudioOwner::LocalApp {
+                    app_id: h.app_id.clone(),
+                    runtime_generation: new_generation,
+                }),
+            "an old generation's teardown must target only its owner"
+        );
+        assert!(matches!(
+            h.broker.recording.lock().await.as_ref(),
+            Some(active) if active.runtime_generation == new_generation
+        ));
+
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
+            .await
+            .expect("new runtime stops");
     }
 
     // ---- location / notifications -----------------------------------------
-
-    struct FakeStt(String);
-
-    #[async_trait]
-    impl platform_api::SpeechToText for FakeStt {
-        async fn transcribe(
-            &self,
-            _opts: platform_api::SttOpts,
-        ) -> Result<platform_api::SttTranscript, platform_api::SttError> {
-            Ok(platform_api::SttTranscript {
-                text: self.0.clone(),
-                language: Some("zh-CN".into()),
-                confidence: Some(0.9),
-            })
-        }
-    }
 
     /// The audio path that actually exists on this stack: listen, transcribe,
     /// hand back text the app can send to the model.
     #[tokio::test]
     async fn transcribe_speech_returns_text_under_the_microphone_capability() {
+        let audio = Arc::new(FakeAudio::default());
         let h = harness(DeviceCapabilities {
-            stt: Some(Arc::new(FakeStt("明天下午三点开会".into()))),
+            audio: Some(audio.clone()),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Microphone);
+        start_runtime(&h).await;
 
         let (ok, result, error, code) = execute(
             &h,
@@ -2239,15 +4367,176 @@ mod tests {
         assert!(ok, "{error:?} {code:?}");
         assert_eq!(result["text"], "明天下午三点开会");
         assert_eq!(result["language"], "zh-CN");
+        assert!(matches!(
+            audio.operations.lock().unwrap().last().map(|(_, operation)| operation),
+            Some(AudioOperation::Listen { language: Some(language) }) if language == "zh-CN"
+        ));
+        assert!(matches!(
+            &audio.operations.lock().unwrap().last().expect("listen operation").0.owner,
+            AudioOwner::LocalApp { app_id, runtime_generation } if app_id == &h.app_id && *runtime_generation > 0
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_teardown_during_audio_authorization_prevents_late_native_admission() {
+        let audio = Arc::new(FakeAudio::default());
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare(&h, AppCapability::Microphone);
+        declare(&h, AppCapability::TextToSpeech);
+        start_runtime(&h).await;
+
+        let operations = [
+            (
+                AppBridgeOperationDto::RecordAudioStart,
+                json!({}),
+                "recordAudioStart",
+            ),
+            (
+                AppBridgeOperationDto::TranscribeSpeech,
+                json!({ "language": "en-US" }),
+                "transcribeSpeech",
+            ),
+            (
+                AppBridgeOperationDto::SynthesizeSpeech,
+                json!({ "text": "late approval" }),
+                "synthesizeSpeech",
+            ),
+        ];
+
+        for (index, (operation, payload, label)) in operations.into_iter().enumerate() {
+            let previous_requests = h
+                .sink
+                .events()
+                .await
+                .into_iter()
+                .filter_map(|event| match event {
+                    ClientEvent::AppEvent {
+                        event: AppEventDto::AppCapabilityRequested { request },
+                    } => Some(request.request_id),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let request_id = format!("audio-auth-race-{index}");
+            let pending = {
+                let broker = h.broker.clone();
+                let app_id = h.app_id.clone();
+                let payload_json = Some(payload.to_string());
+                let bridge_request_id = request_id.clone();
+                tokio::spawn(async move {
+                    broker
+                        .execute_bridge(AppBridgeRequestDto {
+                            request_id: bridge_request_id,
+                            app_id,
+                            operation,
+                            payload_json,
+                        })
+                        .await;
+                })
+            };
+
+            let capability_request_id = timeout(Duration::from_secs(2), async {
+                loop {
+                    for event in h.sink.events().await {
+                        if let ClientEvent::AppEvent {
+                            event: AppEventDto::AppCapabilityRequested { request },
+                        } = event
+                        {
+                            if request.app_id == h.app_id
+                                && !previous_requests.contains(&request.request_id)
+                            {
+                                return request.request_id;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{label} must wait for capability approval"));
+
+            let (old_generation, _) = h
+                .broker
+                .runtime_identity(&h.app_id)
+                .await
+                .expect("runtime lookup")
+                .expect("runtime is active");
+            h.broker
+                .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
+                .await
+                .expect("runtime stops during authorization");
+            start_runtime(&h).await;
+            let (new_generation, _) = h
+                .broker
+                .runtime_identity(&h.app_id)
+                .await
+                .expect("runtime lookup")
+                .expect("replacement runtime is active");
+            assert_ne!(old_generation, new_generation);
+
+            assert!(
+                h.broker
+                    .resolve_capability(
+                        &capability_request_id,
+                        AppAuthorizationDecisionDto::AllowOnce,
+                    )
+                    .await
+            );
+            timeout(Duration::from_secs(2), pending)
+                .await
+                .expect("late authorization completes")
+                .expect("bridge task completes");
+
+            let response = h
+                .sink
+                .events()
+                .await
+                .into_iter()
+                .rev()
+                .find_map(|event| match event {
+                    ClientEvent::AppEvent {
+                        event: AppEventDto::AppBridgeResponse { response },
+                    } if response.request_id == request_id => Some(response),
+                    _ => None,
+                })
+                .expect("bridge response");
+            assert!(!response.ok, "a stopped runtime cannot use late approval");
+            assert_eq!(response.error_code.as_deref(), Some("cancelled"));
+        }
+
+        assert!(
+            audio
+                .operations
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, operation)| {
+                    !matches!(
+                        operation,
+                        AudioOperation::StartRecording { .. }
+                            | AudioOperation::Listen { .. }
+                            | AudioOperation::Synthesize { .. }
+                    )
+                }),
+            "no capture, listen, or synth request enters the service after teardown"
+        );
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
+            .await
+            .expect("replacement runtime stops");
     }
 
     #[tokio::test]
     async fn transcribe_speech_is_refused_when_the_microphone_is_undeclared() {
         let h = harness(DeviceCapabilities {
-            stt: Some(Arc::new(FakeStt("不该到这里".into()))),
+            audio: Some(Arc::new(FakeAudio::default())),
             ..DeviceCapabilities::default()
         })
         .await;
+        start_runtime(&h).await;
 
         let (ok, _, _, code) =
             execute(&h, AppBridgeOperationDto::TranscribeSpeech, json!({})).await;
@@ -2471,16 +4760,18 @@ mod tests {
     async fn clipboard_share_and_tts_use_declared_native_capabilities() {
         let clipboard = Arc::new(FakeClipboard::default());
         let share = Arc::new(FakeShare::default());
+        let audio = Arc::new(FakeAudio::default());
         let h = harness(DeviceCapabilities {
             clipboard: Some(clipboard.clone()),
             share: Some(share.clone()),
-            tts: Some(Arc::new(FakeTts)),
+            audio: Some(audio.clone()),
             ..DeviceCapabilities::default()
         })
         .await;
         declare_and_grant(&h, AppCapability::Clipboard);
         declare_and_grant(&h, AppCapability::Share);
         declare_and_grant(&h, AppCapability::TextToSpeech);
+        start_runtime(&h).await;
 
         let (ok, result, error, code) = execute(
             &h,
@@ -2511,10 +4802,23 @@ mod tests {
         assert_eq!(payloads[0].url.as_deref(), Some("https://example.com"));
         drop(payloads);
 
+        let (expected_generation, _) = h
+            .broker
+            .runtime_identity(&h.app_id)
+            .await
+            .expect("runtime lookup")
+            .expect("runtime is active");
         let (ok, result, error, code) = execute(
             &h,
             AppBridgeOperationDto::SynthesizeSpeech,
-            json!({"text": "speech", "voice": "default"}),
+            json!({
+                "text": "speech",
+                "voice": "default",
+                "language": "en-US",
+                "rate": 1.25,
+                "requestId": "attacker-request",
+                "runtimeGeneration": 999_999,
+            }),
         )
         .await;
         assert!(ok, "{error:?} {code:?}");
@@ -2525,7 +4829,113 @@ mod tests {
             base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .unwrap(),
-            b"speech"
+            vec![0, 0, 1, 0]
+        );
+        let (audio_context, audio_operation) = audio
+            .operations
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("synthesis request reaches AudioService");
+        assert!(matches!(
+            audio_operation,
+            AudioOperation::Synthesize {
+                language: Some(language),
+                rate: Some(rate),
+                voice: Some(voice),
+                ..
+            } if language == "en-US" && rate == 1.25 && voice == "default"
+        ));
+        assert!(matches!(
+            audio_context.owner,
+            AudioOwner::LocalApp { ref app_id, runtime_generation } if app_id == &h.app_id && runtime_generation == expected_generation
+        ));
+        assert_eq!(
+            audio_context
+                .initiator
+                .and_then(|initiator| initiator.request_id),
+            Some("req-1".into()),
+            "the trusted bridge request id reaches the device operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_synthesis_from_a_stopped_runtime_is_not_published() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let audio = Arc::new(FakeAudio {
+            synthesize_gate: Some(gate.clone()),
+            synthesize_entered: Some(entered.clone()),
+            ..FakeAudio::default()
+        });
+        let h = harness(DeviceCapabilities {
+            audio: Some(audio.clone()),
+            ..DeviceCapabilities::default()
+        })
+        .await;
+        declare_and_grant(&h, AppCapability::TextToSpeech);
+        start_runtime(&h).await;
+        let (runtime_generation, _) = h
+            .broker
+            .runtime_identity(&h.app_id)
+            .await
+            .expect("runtime lookup")
+            .expect("runtime is active");
+
+        let request = AppBridgeRequestDto {
+            request_id: "synth-late".into(),
+            app_id: h.app_id.clone(),
+            operation: AppBridgeOperationDto::SynthesizeSpeech,
+            payload_json: Some(r#"{"text":"hello"}"#.into()),
+        };
+        let pending = tokio::spawn({
+            let broker = h.broker.clone();
+            async move { broker.execute_bridge(request).await }
+        });
+        timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("synthesis reaches the device AudioService");
+
+        h.broker
+            .manage_runtime_value(json!({"app_id": h.app_id, "action": "stop"}))
+            .await
+            .expect("runtime stops while synthesis is pending");
+        gate.notify_one();
+        pending.await.expect("bridge task completes");
+
+        let response = h
+            .sink
+            .events()
+            .await
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeResponse { response },
+                } if response.request_id == "synth-late" => Some(response),
+                _ => None,
+            })
+            .expect("synthesis response");
+        assert!(!response.ok);
+        assert_eq!(response.error_code.as_deref(), Some("cancelled"));
+        let (context, operation) = audio
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, operation)| matches!(operation, AudioOperation::Synthesize { .. }))
+            .cloned()
+            .expect("synthesis operation");
+        assert!(matches!(operation, AudioOperation::Synthesize { .. }));
+        assert!(matches!(
+            context.owner,
+            AudioOwner::LocalApp { ref app_id, runtime_generation: generation }
+                if app_id == &h.app_id && generation == runtime_generation
+        ));
+        assert_eq!(
+            context.initiator.and_then(|initiator| initiator.request_id),
+            Some("synth-late".into())
         );
     }
 }

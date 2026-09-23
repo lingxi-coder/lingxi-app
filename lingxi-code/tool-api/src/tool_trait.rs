@@ -57,6 +57,22 @@ pub trait Tool: Send + Sync {
     /// JSON Schema for the tool's input parameters.
     fn input_schema(&self) -> &Value;
 
+    /// Owned schema snapshot for capabilities that can change while a
+    /// registry is live. The wire builder calls this for each model request,
+    /// so a capability update cannot leave a stale action list in the schema
+    /// cache or ToolSearch view. Static tools keep the borrowed schema above.
+    fn input_schema_snapshot(&self) -> Option<Value> {
+        None
+    }
+
+    /// Revision token for a live schema snapshot. Include every non-content
+    /// version component that changes its shape (for example a device service
+    /// epoch and supported-operation revision) so per-session wire caches are
+    /// invalidated before reusing serialized schemas.
+    fn input_schema_revision(&self) -> Option<String> {
+        None
+    }
+
     /// Runtime parser schema, distinct from advertised foreign JSON Schema.
     /// MCP server schemas are inputJSONSchema on the wire; their local parser
     /// is the passthrough object inherited from H4 (Claude Code 2.1.263).

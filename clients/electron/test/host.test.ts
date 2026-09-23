@@ -1204,22 +1204,39 @@ test('settings model, voice and Thought patches persist without restarting a liv
     assert.equal(modelResult.model, 'openrouter/minimax/minimax-m3:free');
     assert.equal(restartCalls, 0, 'persisting a selected model must not restart its session engine');
 
+    const expectedVoiceRevision = settings.getPublic().voiceRevision ?? 0;
     const result = await Promise.resolve(update!(event, {
-      voice: { schemaVersion: 2, recognitionMode: 'localOnly', language: '  ZH-cn  ', voiceSelection: 'Alex', rate: 99, autoPlayReplies: true },
-    })) as { voice?: Record<string, unknown> };
+      voiceRevision: expectedVoiceRevision,
+      voice: {
+        schemaVersion: 3,
+        recognition: { source: 'offline', offlineModelId: null },
+        speech: {
+          source: 'automatic',
+          offlineModelId: null,
+          voice: { source: 'system', id: 'Alex' },
+        },
+        language: '  ZH-cn  ',
+        rate: 99,
+        autoPlayReplies: true,
+      },
+    })) as { voice?: Record<string, unknown>; voiceRevision?: number };
 
-    // Normalized through the REAL `parseVoicePreferences` (Task 4), not
-    // echoed back raw: language is trimmed (case preserved — only an
-    // "auto"-insensitive match is special-cased), `rate` is clamped into
-    // [0.5, 2.0], and the bare voice name gets its `system:` prefix.
+    // Normalized through the generated v3 contract, not echoed back raw:
+    // language is trimmed, rate is clamped, and a fixed voice makes an
+    // otherwise automatic persisted speech source explicitly system-backed.
     assert.deepEqual(result.voice, {
-      schemaVersion: 2,
-      recognitionMode: 'localOnly',
+      schemaVersion: 3,
+      recognition: { source: 'offline', offlineModelId: null },
+      speech: {
+        source: 'system',
+        offlineModelId: null,
+        voice: { source: 'system', id: 'Alex' },
+      },
       language: 'ZH-cn',
-      voiceSelection: 'system:Alex',
       rate: 2.0,
       autoPlayReplies: true,
     });
+    assert.equal(result.voiceRevision, expectedVoiceRevision + 1);
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
 

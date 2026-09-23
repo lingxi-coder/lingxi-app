@@ -5,8 +5,7 @@ import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.notify.NotificationPolicy
 
 /**
- * Persistence for [NotifConfig], in the shape [VoiceSettingsRepository]
- * established: a process-wide SharedPreferences file with synchronous
+ * Persistence for [NotifConfig], using a process-wide SharedPreferences file with synchronous
  * `load()` / `save()`.
  *
  * Synchronous on purpose. The reader is

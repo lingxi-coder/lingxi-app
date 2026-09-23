@@ -1,11 +1,21 @@
-import type { AudioErrorKindDto, AudioOpDto, AudioResultDto } from '@lingxi/bridge-client';
+import type {
+  AudioCapabilitySnapshotDto,
+  AudioErrorKindDto,
+  AudioOperationDto,
+  AudioOperationIdDto,
+  AudioOperationRequestDto,
+  AudioOperationResultDto,
+  AudioOwnerDto,
+} from '@lingxi/bridge-client';
 import type { MicrophonePermissionStatus } from './microphoneAccess.js';
+import type { AudioConfigurationV3 } from './generatedAudioConfiguration.js';
 import {
   isSendableAudioBase64,
-  isSendableAudioSampleRate,
   isSendableAudioText,
   MAX_AUDIO_FAILURE_MESSAGE_LENGTH,
+  MAX_AUDIO_BASE64_LENGTH,
   MAX_AUDIO_MIME_TYPE_LENGTH,
+  MAX_AUDIO_PAYLOAD_BYTES,
 } from './audioResponse.js';
 
 const MAX_OWNER_ID_LENGTH = 512;
@@ -14,13 +24,15 @@ const MAX_TEXT_LENGTH = 256 * 1024;
 const MAX_VOICE_ID_LENGTH = 512;
 const MAX_MODEL_ID_LENGTH = 256;
 const MIN_SAMPLE_RATE_HZ = 8_000;
-const MAX_SAMPLE_RATE_HZ = 48_000;
+const MAX_SAMPLE_RATE_HZ = 768_000;
 const MIN_RATE = 0.5;
 const MAX_RATE = 2.0;
 
 export const CH_NATIVE_AUDIO_REQUEST = 'lingxi:audio:request';
 export const CH_NATIVE_AUDIO_EVENT = 'lingxi:audio:event';
-export const CH_NATIVE_AUDIO_ENGINE_REQUEST = 'lingxi:audio:engine-request';
+export const CH_NATIVE_AUDIO_OPERATION = 'lingxi:audio:execute';
+export const CH_NATIVE_AUDIO_CANCEL = 'lingxi:audio:cancel';
+export const CH_NATIVE_AUDIO_FINISH_LISTEN = 'lingxi:audio:finish-listen';
 
 export type SpeechPermissionStatus =
   | 'authorized'
@@ -46,7 +58,7 @@ export interface NativeAudioError {
 }
 
 export interface NativeAudioOwner {
-  kind: 'dictation' | 'flow' | 'preview' | 'autoplay' | 'engine';
+  kind: 'dictation' | 'flow' | 'preview' | 'autoplay' | 'engine' | 'session' | 'local_app' | 'ui' | 'system';
   id: string;
 }
 
@@ -90,6 +102,29 @@ export interface NativeAudioPlaybackSnapshot {
   effectiveVoiceLabel: string;
 }
 
+export type NativeAudioTraceOperation =
+  | 'start_recording'
+  | 'stop_recording'
+  | 'listen'
+  | 'synthesize'
+  | 'speak'
+  | 'status'
+  | 'end_owner';
+
+export interface NativeAudioOperationTrace {
+  identity: AudioOperationIdDto;
+  owner: AudioOwnerDto;
+  operation: NativeAudioTraceOperation;
+  configurationRevision: number;
+  requestedSource?: string;
+  requestedModelId?: string;
+  requestedVoiceId?: string;
+  effectiveSource?: string;
+  effectiveModelId?: string;
+  effectiveVoiceId?: string;
+  fallbackReason?: string;
+}
+
 export interface NativeAudioSnapshot {
   helper: {
     state: 'stopped' | 'starting' | 'running' | 'failed';
@@ -105,6 +140,15 @@ export interface NativeAudioSnapshot {
   recognizerAvailable?: boolean;
   recognition?: NativeAudioRecognitionSnapshot;
   playback?: NativeAudioPlaybackSnapshot;
+  capabilities?: AudioCapabilitySnapshotDto;
+  configurationRevision?: number;
+  currentOperation?: { identity: AudioOperationIdDto; owner: AudioOwnerDto };
+  audioOperations: NativeAudioOperationTrace[];
+  activeOperationCount: number;
+  pendingOperationCount: number;
+  activeRecordingCount: number;
+  activePlaybackCount: number;
+  activeModelReferenceCount: number;
   voices: NativeAudioVoiceOption[];
   models: NativeAudioModelSnapshot[];
 }
@@ -127,6 +171,7 @@ export type NativeAudioEvent =
 
 export type NativeAudioCommand =
   | { type: 'get_snapshot' }
+  | { type: 'cancel_operation'; identity: AudioOperationIdDto }
   | { type: 'request_authorization'; permissions: Array<'microphone' | 'speech'> }
   | { type: 'start_listening'; owner: NativeAudioOwner; recognitionMode: 'automatic' | 'localOnly'; language?: string; sampleRateHz?: number; format?: 'wav' | 'm4a' }
   | { type: 'finish_listening'; owner: NativeAudioOwner }
@@ -137,6 +182,12 @@ export type NativeAudioCommand =
   | { type: 'install_model'; modelId: string }
   | { type: 'cancel_model'; modelId: string }
   | { type: 'remove_model'; modelId: string };
+
+export type NativeAudioHelperCommand = NativeAudioCommand | {
+  type: 'finish_listening';
+  owner: NativeAudioOwner;
+  identity: AudioOperationIdDto;
+};
 
 export type NativeAudioResponse =
   | { type: 'snapshot'; snapshot: NativeAudioSnapshot }
@@ -153,14 +204,25 @@ export type NativeAudioResponse =
 export interface NativeAudioEngineResponse {
   type: 'engine_result';
   snapshot: NativeAudioSnapshot;
-  result: AudioResultDto;
+  result: AudioOperationResultDto;
+}
+
+export interface NativeAudioOperationResponse {
+  snapshot: NativeAudioSnapshot;
+  result: AudioOperationResultDto;
 }
 
 export type NativeAudioCommandResult = NativeAudioResponse | NativeAudioEngineResponse;
 
 export type NativeAudioHelperCommandEnvelope =
-  | { id: string; kind: 'command'; command: NativeAudioCommand }
-  | { id: string; kind: 'engine_request'; owner: NativeAudioOwner; op: AudioOpDto };
+  | { id: string; kind: 'command'; command: NativeAudioHelperCommand }
+  | {
+      id: string;
+      kind: 'engine_request';
+      request: AudioOperationRequestDto;
+      configuration: AudioConfigurationV3;
+      configurationRevision: number;
+    };
 
 export type NativeAudioHelperEnvelope =
   | { type: 'event'; event: NativeAudioEvent }
@@ -203,7 +265,17 @@ function validateOwner(value: unknown): NativeAudioOwner {
   const input = object(value, 'audio owner');
   exactKeys(input, ['kind', 'id'], 'audio owner');
   const kind = boundedString(input['kind'], 'audio owner kind', 32);
-  if (kind !== 'dictation' && kind !== 'flow' && kind !== 'preview' && kind !== 'autoplay' && kind !== 'engine') {
+  if (
+    kind !== 'dictation'
+    && kind !== 'flow'
+    && kind !== 'preview'
+    && kind !== 'autoplay'
+    && kind !== 'engine'
+    && kind !== 'session'
+    && kind !== 'local_app'
+    && kind !== 'ui'
+    && kind !== 'system'
+  ) {
     throw new Error('invalid audio owner kind');
   }
   return { kind, id: boundedString(input['id'], 'audio owner id', MAX_OWNER_ID_LENGTH) };
@@ -280,6 +352,48 @@ function validateModel(value: unknown): NativeAudioModelSnapshot {
   };
 }
 
+function validateAudioOperationTrace(value: unknown): NativeAudioOperationTrace {
+  const input = object(value, 'audio operation trace');
+  exactKeys(input, [
+    'identity', 'owner', 'operation', 'configurationRevision',
+    'requestedSource', 'requestedModelId', 'requestedVoiceId',
+    'effectiveSource', 'effectiveModelId', 'effectiveVoiceId', 'fallbackReason',
+  ], 'audio operation trace');
+  const operation = boundedString(input['operation'], 'audio trace operation', 32);
+  if (![
+    'start_recording', 'stop_recording', 'listen', 'synthesize', 'speak', 'status', 'end_owner',
+  ].includes(operation)) throw new Error('invalid audio trace operation');
+  return {
+    identity: validateNativeAudioOperationIdentity(input['identity']),
+    owner: validateAudioOwnerDto(input['owner']),
+    operation: operation as NativeAudioTraceOperation,
+    configurationRevision: boundedInteger(
+      input['configurationRevision'], 'audio trace configuration revision', 0, Number.MAX_SAFE_INTEGER,
+    ),
+    ...(input['requestedSource'] === undefined ? {} : {
+      requestedSource: boundedString(input['requestedSource'], 'audio requested source', 64),
+    }),
+    ...(input['requestedModelId'] === undefined ? {} : {
+      requestedModelId: boundedString(input['requestedModelId'], 'audio requested model id', MAX_MODEL_ID_LENGTH),
+    }),
+    ...(input['requestedVoiceId'] === undefined ? {} : {
+      requestedVoiceId: boundedString(input['requestedVoiceId'], 'audio requested voice id', MAX_VOICE_ID_LENGTH),
+    }),
+    ...(input['effectiveSource'] === undefined ? {} : {
+      effectiveSource: boundedString(input['effectiveSource'], 'audio effective source', 64),
+    }),
+    ...(input['effectiveModelId'] === undefined ? {} : {
+      effectiveModelId: boundedString(input['effectiveModelId'], 'audio effective model id', MAX_MODEL_ID_LENGTH),
+    }),
+    ...(input['effectiveVoiceId'] === undefined ? {} : {
+      effectiveVoiceId: boundedString(input['effectiveVoiceId'], 'audio effective voice id', MAX_VOICE_ID_LENGTH),
+    }),
+    ...(input['fallbackReason'] === undefined ? {} : {
+      fallbackReason: boundedString(input['fallbackReason'], 'audio fallback reason', 2_048),
+    }),
+  };
+}
+
 export function defaultNativeAudioSnapshot(): NativeAudioSnapshot {
   return {
     helper: { state: 'stopped' },
@@ -288,6 +402,20 @@ export function defaultNativeAudioSnapshot(): NativeAudioSnapshot {
     activity: 'idle',
     voices: [],
     models: [],
+    capabilities: {
+      service_epoch: 0,
+      support_revision: 0,
+      supported_operations: [],
+      readiness: [],
+      max_payload_bytes: 0,
+    },
+    configurationRevision: 0,
+    audioOperations: [],
+    activeOperationCount: 0,
+    pendingOperationCount: 0,
+    activeRecordingCount: 0,
+    activePlaybackCount: 0,
+    activeModelReferenceCount: 0,
   };
 }
 
@@ -295,7 +423,12 @@ export function validateNativeAudioSnapshot(value: unknown): NativeAudioSnapshot
   const input = object(value, 'audio snapshot');
   exactKeys(
     input,
-    ['helper', 'permissions', 'owner', 'activity', 'localeTag', 'recognizerAvailable', 'recognition', 'playback', 'voices', 'models'],
+    [
+      'helper', 'permissions', 'owner', 'activity', 'localeTag', 'recognizerAvailable', 'recognition', 'playback',
+      'voices', 'models', 'capabilities', 'configurationRevision', 'currentOperation', 'audioOperations',
+      'activeOperationCount', 'pendingOperationCount', 'activeRecordingCount', 'activePlaybackCount',
+      'activeModelReferenceCount',
+    ],
     'audio snapshot',
   );
   const helper = object(input['helper'], 'audio helper');
@@ -328,6 +461,28 @@ export function validateNativeAudioSnapshot(value: unknown): NativeAudioSnapshot
     activity,
     voices: Array.isArray(input['voices']) ? input['voices'].map((entry) => validateVoiceOption(entry)) : [],
     models: Array.isArray(input['models']) ? input['models'].map((entry) => validateModel(entry)) : [],
+    ...(input['capabilities'] === undefined ? {} : { capabilities: validateAudioCapability(input['capabilities']) }),
+    ...(input['configurationRevision'] === undefined ? {} : {
+      configurationRevision: boundedInteger(input['configurationRevision'], 'audio configuration revision', 0, Number.MAX_SAFE_INTEGER),
+    }),
+    ...(input['currentOperation'] === undefined ? {} : {
+      currentOperation: (() => {
+        const current = object(input['currentOperation'], 'audio current operation');
+        exactKeys(current, ['identity', 'owner'], 'audio current operation');
+        return { identity: validateNativeAudioOperationIdentity(current['identity']), owner: validateAudioOwnerDto(current['owner']) };
+      })(),
+    }),
+    audioOperations: (() => {
+      if (!Array.isArray(input['audioOperations']) || input['audioOperations'].length > 64) {
+        throw new Error('invalid audio operation trace');
+      }
+      return input['audioOperations'].map((entry) => validateAudioOperationTrace(entry));
+    })(),
+    activeOperationCount: boundedInteger(input['activeOperationCount'], 'active audio operation count', 0, Number.MAX_SAFE_INTEGER),
+    pendingOperationCount: boundedInteger(input['pendingOperationCount'], 'pending audio operation count', 0, Number.MAX_SAFE_INTEGER),
+    activeRecordingCount: boundedInteger(input['activeRecordingCount'], 'active audio recording count', 0, Number.MAX_SAFE_INTEGER),
+    activePlaybackCount: boundedInteger(input['activePlaybackCount'], 'active audio playback count', 0, Number.MAX_SAFE_INTEGER),
+    activeModelReferenceCount: boundedInteger(input['activeModelReferenceCount'], 'active audio model reference count', 0, Number.MAX_SAFE_INTEGER),
   };
   if (input['localeTag'] !== undefined) snapshot.localeTag = boundedString(input['localeTag'], 'audio locale', MAX_LANGUAGE_LENGTH);
   if (typeof input['recognizerAvailable'] === 'boolean') snapshot.recognizerAvailable = input['recognizerAvailable'];
@@ -368,6 +523,9 @@ export function validateNativeAudioCommand(value: unknown): NativeAudioCommand {
     case 'list_models':
       exactKeys(input, ['type'], 'audio command');
       return { type };
+    case 'cancel_operation':
+      exactKeys(input, ['type', 'identity'], 'audio command');
+      return { type, identity: validateNativeAudioOperationIdentity(input['identity']) };
     case 'request_authorization': {
       exactKeys(input, ['type', 'permissions'], 'audio command');
       const permissions = input['permissions'];
@@ -471,88 +629,205 @@ export function validateNativeAudioResponse(value: unknown): NativeAudioResponse
   }
 }
 
-export function validateNativeAudioEngineRequest(sessionId: unknown, op: unknown): { sessionId: string; op: AudioOpDto } {
-  const input = object(op, 'audio op');
-  const type = boundedString(input['type'], 'audio op type', 32);
+export function validateNativeAudioOperationIdentity(value: unknown): AudioOperationIdDto {
+  const input = object(value, 'audio operation identity');
+  exactKeys(input, ['id', 'generation', 'service_epoch'], 'audio operation identity');
+  const id = boundedString(input['id'], 'audio operation id', 64);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error('invalid audio operation id');
+  }
+  return {
+    id,
+    generation: boundedInteger(input['generation'], 'audio operation generation', 0, Number.MAX_SAFE_INTEGER),
+    service_epoch: boundedInteger(input['service_epoch'], 'audio service epoch', 0, Number.MAX_SAFE_INTEGER),
+  };
+}
+
+function validateAudioOwnerDto(value: unknown): AudioOwnerDto {
+  const input = object(value, 'audio operation owner');
+  const type = boundedString(input['type'], 'audio owner type', 16);
   switch (type) {
-    case 'is_recording':
-    case 'stop_recording':
-      exactKeys(input, ['type'], 'audio op');
-      return { sessionId: boundedString(sessionId, 'audio session id', 128), op: { type } };
-    case 'start_recording':
-      exactKeys(input, ['type', 'sample_rate_hz', 'format'], 'audio op');
+    case 'session':
+      exactKeys(input, ['type', 'session_id'], 'audio operation owner');
+      return { type, session_id: boundedString(input['session_id'], 'audio session id', 128) };
+    case 'local_app':
+      exactKeys(input, ['type', 'app_id', 'runtime_generation'], 'audio operation owner');
       return {
-        sessionId: boundedString(sessionId, 'audio session id', 128),
-        op: {
-          type,
-          sample_rate_hz: boundedInteger(input['sample_rate_hz'], 'audio op sample rate', MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ),
-          format: boundedString(input['format'], 'audio op format', 32),
-        },
+        type,
+        app_id: boundedString(input['app_id'], 'audio app id', 128),
+        runtime_generation: boundedInteger(input['runtime_generation'], 'audio app runtime generation', 0, Number.MAX_SAFE_INTEGER),
       };
-    case 'transcribe':
-      exactKeys(input, ['type', 'language'], 'audio op');
-      return {
-        sessionId: boundedString(sessionId, 'audio session id', 128),
-        op: {
-          type,
-          ...(input['language'] === undefined ? {} : { language: boundedString(input['language'], 'audio op language', MAX_LANGUAGE_LENGTH) }),
-        },
-      };
-    case 'synthesize':
-      exactKeys(input, ['type', 'text', 'voice'], 'audio op');
-      return {
-        sessionId: boundedString(sessionId, 'audio session id', 128),
-        op: {
-          type,
-          text: boundedString(input['text'], 'audio op text', MAX_TEXT_LENGTH),
-          ...(input['voice'] === undefined ? {} : { voice: boundedString(input['voice'], 'audio op voice', MAX_VOICE_ID_LENGTH) }),
-        },
-      };
+    case 'ui':
+    case 'system':
+      exactKeys(input, ['type', 'instance_id'], 'audio operation owner');
+      return { type, instance_id: boundedString(input['instance_id'], 'audio owner instance id', MAX_OWNER_ID_LENGTH) };
     default:
-      throw new Error('invalid audio op');
+      throw new Error('invalid audio operation owner');
   }
 }
 
-function validateAudioResult(value: unknown): AudioResultDto {
-  const input = object(value, 'audio engine result');
-  const type = boundedString(input['type'], 'audio engine result type', 32);
+function validateAudioOperation(value: unknown): AudioOperationDto {
+  const input = object(value, 'audio operation');
+  const type = boundedString(input['type'], 'audio operation type', 32);
   switch (type) {
-    case 'ok':
-      exactKeys(input, ['type'], 'audio engine result');
-      return { type };
-    case 'recording_state':
-      exactKeys(input, ['type', 'recording'], 'audio engine result');
-      if (typeof input['recording'] !== 'boolean') throw new Error('invalid audio engine recording state');
-      return { type, recording: input['recording'] };
-    case 'recording':
-      exactKeys(input, ['type', 'audio_base64', 'mime_type'], 'audio engine result');
-      if (!isSendableAudioBase64(input['audio_base64'])) throw new Error('invalid audio engine recording');
-      if (!isSendableAudioText(input['mime_type'], MAX_AUDIO_MIME_TYPE_LENGTH)) throw new Error('invalid audio engine recording mime');
-      return { type, audio_base64: input['audio_base64'], mime_type: input['mime_type'] };
-    case 'transcript':
-      exactKeys(input, ['type', 'text', 'language', 'confidence'], 'audio engine result');
+    case 'start_recording':
+      exactKeys(input, ['type', 'sample_rate_hz', 'format'], 'audio operation');
       return {
         type,
-        text: boundedString(input['text'], 'audio engine transcript text', MAX_TEXT_LENGTH),
-        ...(input['language'] === undefined ? {} : { language: boundedString(input['language'], 'audio engine transcript language', MAX_LANGUAGE_LENGTH) }),
-        ...(input['confidence'] === undefined ? {} : { confidence: boundedNumber(input['confidence'], 'audio engine transcript confidence', 0, 1) }),
+        sample_rate_hz: boundedInteger(input['sample_rate_hz'], 'audio sample rate', MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ),
+        format: boundedString(input['format'], 'audio format', 32),
       };
-    case 'audio':
-      exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz'], 'audio engine result');
-      if (!isSendableAudioBase64(input['pcm_base64'])) throw new Error('invalid audio engine pcm');
-      if (!isSendableAudioSampleRate(input['sample_rate_hz'])) throw new Error('invalid audio engine sample rate');
-      return { type, pcm_base64: input['pcm_base64'], sample_rate_hz: input['sample_rate_hz'] };
-    case 'failed': {
-      exactKeys(input, ['type', 'kind', 'message'], 'audio engine result');
-      const kind = boundedString(input['kind'], 'audio engine error kind', 32) as AudioErrorKindDto;
-      if (!['permission_denied', 'no_speech', 'not_recording', 'unavailable', 'busy', 'retriable', 'synthesis_failed', 'other'].includes(kind)) {
-        throw new Error('invalid audio engine error kind');
+    case 'stop_recording':
+      exactKeys(input, ['type', 'handle'], 'audio operation');
+      return { type, handle: boundedString(input['handle'], 'audio recording handle', 128) };
+    case 'listen':
+      exactKeys(input, ['type', 'language'], 'audio operation');
+      return { type, ...(input['language'] === undefined ? {} : { language: boundedString(input['language'], 'audio language', MAX_LANGUAGE_LENGTH) }) };
+    case 'synthesize':
+    case 'speak':
+      exactKeys(input, ['type', 'text', 'language', 'rate', 'voice'], 'audio operation');
+      return {
+        type,
+        text: boundedString(input['text'], 'audio speech text', MAX_TEXT_LENGTH),
+        ...(input['language'] === undefined ? {} : { language: boundedString(input['language'], 'audio language', MAX_LANGUAGE_LENGTH) }),
+        ...(input['rate'] === undefined ? {} : { rate: boundedNumber(input['rate'], 'audio rate', MIN_RATE, MAX_RATE) }),
+        ...(input['voice'] === undefined ? {} : { voice: boundedString(input['voice'], 'audio voice', MAX_VOICE_ID_LENGTH) }),
+      };
+    case 'status':
+      exactKeys(input, ['type', 'handle'], 'audio operation');
+      return { type, ...(input['handle'] === undefined ? {} : { handle: boundedString(input['handle'], 'audio recording handle', 128) }) };
+    case 'end_owner':
+      exactKeys(input, ['type'], 'audio operation');
+      return { type };
+    default:
+      throw new Error('invalid audio operation');
+  }
+}
+
+export function validateNativeAudioOperation(value: unknown): AudioOperationDto {
+  return validateAudioOperation(value);
+}
+
+function validateAudioKind(value: unknown): AudioErrorKindDto {
+  const kind = boundedString(value, 'audio error kind', 32);
+  if (![
+    'permission_denied', 'busy', 'cancelled', 'timeout', 'no_speech', 'not_recording',
+    'unavailable', 'unsupported', 'model_missing', 'voice_missing', 'invalid_request',
+    'synthesis_failed', 'native_failure', 'media_too_large',
+  ].includes(kind)) throw new Error('invalid audio error kind');
+  return kind as AudioErrorKindDto;
+}
+
+function validateAudioCapability(value: unknown): AudioCapabilitySnapshotDto {
+  const input = object(value, 'audio capability snapshot');
+  exactKeys(input, ['service_epoch', 'support_revision', 'supported_operations', 'readiness', 'max_payload_bytes'], 'audio capability snapshot');
+  if (!Array.isArray(input['supported_operations']) || !Array.isArray(input['readiness'])) throw new Error('invalid audio capability arrays');
+  const operationKind = (entry: unknown): AudioCapabilitySnapshotDto['supported_operations'][number] => {
+    const kind = boundedString(entry, 'audio operation kind', 16);
+    if (kind !== 'record' && kind !== 'listen' && kind !== 'synthesize' && kind !== 'speak') throw new Error('invalid audio operation kind');
+    return kind;
+  };
+  const readiness = input['readiness'].map((entry): AudioCapabilitySnapshotDto['readiness'][number] => {
+    const row = object(entry, 'audio readiness entry');
+    exactKeys(row, ['operation', 'state'], 'audio readiness entry');
+    const state = boundedString(row['state'], 'audio readiness state', 24);
+    if (!['ready', 'needs_permission', 'busy', 'missing_model', 'unavailable'].includes(state)) throw new Error('invalid audio readiness state');
+    return {
+      operation: operationKind(row['operation']),
+      state: state as AudioCapabilitySnapshotDto['readiness'][number]['state'],
+    };
+  });
+  return {
+    service_epoch: boundedInteger(input['service_epoch'], 'audio service epoch', 0, Number.MAX_SAFE_INTEGER),
+    support_revision: boundedInteger(input['support_revision'], 'audio support revision', 0, Number.MAX_SAFE_INTEGER),
+    supported_operations: input['supported_operations'].map(operationKind),
+    readiness,
+    max_payload_bytes: boundedInteger(input['max_payload_bytes'], 'audio payload bound', 0, MAX_AUDIO_PAYLOAD_BYTES),
+  };
+}
+
+export function validateNativeAudioOperationRequest(value: unknown): AudioOperationRequestDto {
+  const input = object(value, 'audio operation request');
+  exactKeys(input, ['identity', 'owner', 'initiator', 'timeout_budget_ms', 'max_payload_bytes', 'operation'], 'audio operation request');
+  let initiator: AudioOperationRequestDto['initiator'];
+  if (input['initiator'] !== undefined) {
+    const raw = object(input['initiator'], 'audio operation initiator');
+    exactKeys(raw, ['agent_id', 'tool_use_id', 'request_id'], 'audio operation initiator');
+    initiator = {
+      ...(raw['agent_id'] === undefined ? {} : { agent_id: boundedString(raw['agent_id'], 'audio agent id', 128) }),
+      ...(raw['tool_use_id'] === undefined ? {} : { tool_use_id: boundedString(raw['tool_use_id'], 'audio tool use id', 128) }),
+      ...(raw['request_id'] === undefined ? {} : { request_id: boundedString(raw['request_id'], 'audio request id', 128) }),
+    };
+  }
+  const timeout = input['timeout_budget_ms'] === undefined
+    ? undefined : boundedInteger(input['timeout_budget_ms'], 'audio timeout budget', 0, Number.MAX_SAFE_INTEGER);
+  return {
+    identity: validateNativeAudioOperationIdentity(input['identity']),
+    owner: validateAudioOwnerDto(input['owner']),
+    ...(initiator === undefined ? {} : { initiator }),
+    ...(timeout === undefined ? {} : { timeout_budget_ms: timeout }),
+    max_payload_bytes: boundedInteger(input['max_payload_bytes'], 'audio payload bound', 0, MAX_AUDIO_PAYLOAD_BYTES),
+    operation: validateAudioOperation(input['operation']),
+  };
+}
+
+export function validateNativeAudioOperationResult(value: unknown): AudioOperationResultDto {
+  const input = object(value, 'audio operation result');
+  const type = boundedString(input['type'], 'audio operation result type', 32);
+  switch (type) {
+    case 'recording_started':
+      exactKeys(input, ['type', 'handle'], 'audio operation result');
+      return { type, handle: boundedString(input['handle'], 'audio recording handle', 128) };
+    case 'recording': {
+      exactKeys(input, ['type', 'audio_base64', 'mime_type'], 'audio operation result');
+      const audio = input['audio_base64'];
+      if (!isSendableAudioBase64(audio) || audio.length > MAX_AUDIO_BASE64_LENGTH) throw new Error('invalid or oversized audio recording payload');
+      if (!isSendableAudioText(input['mime_type'], MAX_AUDIO_MIME_TYPE_LENGTH)) throw new Error('invalid audio recording mime type');
+      return { type, audio_base64: audio, mime_type: input['mime_type'] };
+    }
+    case 'transcript':
+      exactKeys(input, ['type', 'text', 'language', 'confidence'], 'audio operation result');
+      return {
+        type,
+        text: boundedString(input['text'], 'audio transcript text', MAX_TEXT_LENGTH),
+        ...(input['language'] === undefined ? {} : { language: boundedString(input['language'], 'audio transcript language', MAX_LANGUAGE_LENGTH) }),
+        ...(input['confidence'] === undefined ? {} : { confidence: boundedNumber(input['confidence'], 'audio transcript confidence', 0, 1) }),
+      };
+    case 'synthesized': {
+      exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz'], 'audio operation result');
+      const pcm = input['pcm_base64'];
+      if (!isSendableAudioBase64(pcm) || pcm.length === 0 || pcm.length > MAX_AUDIO_BASE64_LENGTH) throw new Error('invalid or oversized synthesized audio payload');
+      const padding = pcm.endsWith('==') ? 2 : pcm.endsWith('=') ? 1 : 0;
+      const decodedLength = (pcm.length / 4) * 3 - padding;
+      if (decodedLength <= 0 || decodedLength % 2 !== 0 || decodedLength > MAX_AUDIO_PAYLOAD_BYTES) {
+        throw new Error('synthesized PCM must be nonempty aligned PCM16');
       }
-      if (!isSendableAudioText(input['message'], MAX_AUDIO_FAILURE_MESSAGE_LENGTH)) throw new Error('invalid audio engine error message');
-      return { type, kind, message: input['message'] };
+      const rate = input['sample_rate_hz'];
+      if (!Number.isInteger(rate) || (rate as number) < MIN_SAMPLE_RATE_HZ || (rate as number) > MAX_SAMPLE_RATE_HZ) throw new Error('invalid synthesized audio sample rate');
+      return { type, pcm_base64: pcm, sample_rate_hz: rate as number };
+    }
+    case 'playback_completed':
+      exactKeys(input, ['type', 'duration_ms'], 'audio operation result');
+      return { type, duration_ms: boundedInteger(input['duration_ms'], 'audio playback duration', 0, Number.MAX_SAFE_INTEGER) };
+    case 'status': {
+      exactKeys(input, ['type', 'status'], 'audio operation result');
+      const status = object(input['status'], 'audio status');
+      exactKeys(status, ['recording', 'playing'], 'audio status');
+      if (typeof status['recording'] !== 'boolean' || typeof status['playing'] !== 'boolean') throw new Error('invalid audio status');
+      return { type, status: { recording: status['recording'], playing: status['playing'] } };
+    }
+    case 'owner_ended':
+      exactKeys(input, ['type'], 'audio operation result');
+      return { type };
+    case 'failed': {
+      exactKeys(input, ['type', 'error'], 'audio operation result');
+      const error = object(input['error'], 'audio error');
+      exactKeys(error, ['kind', 'message'], 'audio error');
+      const message = boundedString(error['message'], 'audio error message', MAX_AUDIO_FAILURE_MESSAGE_LENGTH);
+      return { type, error: { kind: validateAudioKind(error['kind']), message } };
     }
     default:
-      throw new Error('invalid audio engine result type');
+      throw new Error('invalid audio operation result type');
   }
 }
 
@@ -563,7 +838,7 @@ export function validateNativeAudioEngineResponse(value: unknown): NativeAudioEn
   return {
     type: 'engine_result',
     snapshot: validateNativeAudioSnapshot(input['snapshot']),
-    result: validateAudioResult(input['result']),
+    result: validateNativeAudioOperationResult(input['result']),
   };
 }
 
@@ -615,58 +890,5 @@ export function validateNativeAudioEvent(value: unknown): NativeAudioEvent {
       return { type, snapshot, ...(input['owner'] === undefined ? {} : { owner: validateOwner(input['owner']) }), error: validateError(input['error']) };
     default:
       throw new Error('invalid audio event type');
-  }
-}
-
-function errorCodeToKind(code: NativeAudioErrorCode): AudioErrorKindDto {
-  switch (code) {
-    case 'permission':
-      return 'permission_denied';
-    case 'busy':
-      return 'busy';
-    case 'cancelled':
-      return 'retriable';
-    case 'model-missing':
-    case 'unavailable':
-      return 'unavailable';
-    case 'download':
-    case 'checksum':
-    case 'invalid-request':
-    case 'native-error':
-      return 'other';
-  }
-}
-
-export function nativeAudioResponseToEngineResult(response: NativeAudioResponse): AudioResultDto {
-  switch (response.type) {
-    case 'listening_finished':
-      if (response.recording) {
-        return {
-          type: 'recording',
-          audio_base64: response.recording.audioBase64,
-          mime_type: response.recording.mimeType,
-        };
-      }
-      if (response.transcript) {
-        return {
-          type: 'transcript',
-          text: response.transcript.text,
-          ...(response.transcript.language ? { language: response.transcript.language } : {}),
-          ...(response.transcript.confidence === undefined ? {} : { confidence: response.transcript.confidence }),
-        };
-      }
-      return { type: 'failed', kind: 'other', message: 'native audio finished without a transcript or recording' };
-    case 'snapshot':
-    case 'authorization':
-    case 'listening_started':
-    case 'speaking_started':
-    case 'speaking_stopped':
-    case 'models':
-    case 'model_operation':
-      return { type: 'ok' };
-    case 'cancelled':
-      return { type: 'failed', kind: 'retriable', message: 'native audio operation was cancelled' };
-    case 'error':
-      return { type: 'failed', kind: errorCodeToKind(response.error.code), message: response.error.message };
   }
 }

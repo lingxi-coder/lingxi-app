@@ -204,7 +204,12 @@ pub fn local_app_builtin_tools(
     // host-owned LINGXI.md binding and the tool permission refinement can
     // scope calls to that app. Chat's existing session allowlist remains the
     // policy boundary; this function is used by the Code/mobile host path.
-    const GLOBAL_LOCAL_APP_TOOLS: &[&str] = &["LocalAppCreate", "LocalAppList", "LocalAppGet", "LocalAppPrepare"];
+    const GLOBAL_LOCAL_APP_TOOLS: &[&str] = &[
+        "LocalAppCreate",
+        "LocalAppList",
+        "LocalAppGet",
+        "LocalAppPrepare",
+    ];
     let global_session = session_app_id.is_none();
     let catalog = LocalAppsMcpTransport::host_tool_catalog();
     LOCAL_APP_TOOLS

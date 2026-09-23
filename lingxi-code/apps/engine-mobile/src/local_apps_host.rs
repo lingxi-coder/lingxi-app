@@ -15,13 +15,11 @@ use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
     AppCapabilityKindDto, AppCapabilityRequestDto, AppDependencyChangeConfirmationRequestDto,
     AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto,
-    AppSurfaceDto, AppUiActionKindDto,
-    AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto,
+    AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto,
     LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
     LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
-    LocalAppPluginErrorCodeDto,
-    LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
-    ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
+    LocalAppPluginErrorCodeDto, LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto,
+    ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto, McpAppWidgetDto,
 };
 use futures_util::StreamExt;
 use local_apps::{
@@ -1411,6 +1409,13 @@ pub(crate) struct LocalAppsHostBroker {
     /// blocked behind that alert. Taken with `try_lock`: a second start
     /// answers `audio_session_busy` rather than queueing behind it.
     recording_start: Mutex<()>,
+    /// Identity and service for the currently pending permission/start call.
+    /// A runtime teardown can cancel this exact operation without waiting for
+    /// the OS microphone prompt to return.
+    recording_pending: Arc<Mutex<Option<device_ops::PendingRecordingStart>>>,
+    /// Cancellation state for short audio requests across authorization and
+    /// native admission, keyed by the host-minted Local App runtime generation.
+    audio_runtime_scopes: std::sync::Mutex<device_ops::LocalAppAudioScopeRegistry>,
     /// Weak self-reference handed to the runtime-exit watchers, which are
     /// spawned onto the profile worker and outlive the call that started
     /// them. Weak so a watcher can never be what keeps the broker alive.
@@ -1567,6 +1572,10 @@ impl LocalAppsHostBroker {
             background_task_writes: Mutex::new(()),
             background_inflight: Mutex::new(std::collections::HashSet::new()),
             recording_start: Mutex::new(()),
+            recording_pending: Arc::new(Mutex::new(None)),
+            audio_runtime_scopes: std::sync::Mutex::new(
+                device_ops::LocalAppAudioScopeRegistry::default(),
+            ),
             self_ref: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
             pending_dependency_change_confirmations: Mutex::new(HashMap::new()),
@@ -3039,16 +3048,8 @@ impl LocalAppsHostBroker {
                 approval_contract_sha256: candidate.approval_contract_sha256.clone(),
                 tool_surface_sha256: candidate.validated.tool_surface_sha256.clone(),
                 tool_diffs: mcp_tool_diffs(current, proposed),
-                required_flow_changes: candidate
-                    .validated
-                    .proposal
-                    .required_flow_changes
-                    .clone(),
-                excluded_capabilities: candidate
-                    .validated
-                    .proposal
-                    .excluded_capabilities
-                    .clone(),
+                required_flow_changes: candidate.validated.proposal.required_flow_changes.clone(),
+                excluded_capabilities: candidate.validated.proposal.excluded_capabilities.clone(),
                 pending_gates: Self::pending_verification_gates(proposed_tool_count),
             },
         };
@@ -6256,7 +6257,8 @@ impl LocalAppsHostBroker {
         // the v2 attribution context is created here, inside the trusted host,
         // before any capability handler runs. A page cannot manufacture its
         // origin, app instance, or grant epoch.
-        self.build_bridge_invocation_context(request)
+        let invocation_context = self
+            .build_bridge_invocation_context(request)
             .map_err(BridgeFailure::from)?;
         let mut input = payload.as_object().cloned().ok_or_else(|| {
             BridgeFailure::coded("payload_invalid", "bridge payload must be a JSON object")
@@ -6292,11 +6294,14 @@ impl LocalAppsHostBroker {
                 self.pick_image_value(&request.app_id, &payload).await
             }
             AppBridgeOperationDto::RecordAudioStart => {
-                self.record_audio_start_value(&request.app_id, &payload)
+                let runtime_generation = self.audio_runtime_generation(&invocation_context).await?;
+                self.record_audio_start_value(&invocation_context, runtime_generation, &payload)
                     .await
             }
             AppBridgeOperationDto::RecordAudioStop => {
-                self.record_audio_stop_value(&request.app_id).await
+                let runtime_generation = self.audio_runtime_generation(&invocation_context).await?;
+                self.record_audio_stop_value(&invocation_context, runtime_generation)
+                    .await
             }
             AppBridgeOperationDto::GetLocation => self.get_location_value(&request.app_id).await,
             AppBridgeOperationDto::PostNotification => {
@@ -6304,7 +6309,8 @@ impl LocalAppsHostBroker {
                     .await
             }
             AppBridgeOperationDto::TranscribeSpeech => {
-                self.transcribe_speech_value(&request.app_id, &payload)
+                let runtime_generation = self.audio_runtime_generation(&invocation_context).await?;
+                self.transcribe_speech_value(&invocation_context, runtime_generation, &payload)
                     .await
             }
             AppBridgeOperationDto::ClipboardGetText => {
@@ -6316,7 +6322,8 @@ impl LocalAppsHostBroker {
             }
             AppBridgeOperationDto::Share => self.share_value(&request.app_id, &payload).await,
             AppBridgeOperationDto::SynthesizeSpeech => {
-                self.synthesize_speech_value(&request.app_id, &payload)
+                let runtime_generation = self.audio_runtime_generation(&invocation_context).await?;
+                self.synthesize_speech_value(&invocation_context, runtime_generation, &payload)
                     .await
             }
             AppBridgeOperationDto::FileRead => {
@@ -6951,7 +6958,12 @@ impl LocalAppsHostBroker {
             .record(app_id)
             .await
             .map_err(|error| error.to_string())?;
-        self.release_app_runtime_state(app_id).await;
+        let runtime_generation = self
+            .runtime_identity(app_id)
+            .await?
+            .map(|(generation, _)| generation);
+        self.release_app_runtime_state(app_id, runtime_generation)
+            .await;
         let publication_cell = self.runtime_publication_cell(app_id)?;
         // Classify and remove under ONE acquisition: a start woken in the gap
         // between a `remove` and its rollback `insert` finds no entry, kills the
@@ -7085,8 +7097,15 @@ impl LocalAppsHostBroker {
     /// while USING the app, and a grant that quietly survives the app's death
     /// behaves as "always allow" while staying invisible to permissions.json
     /// and unrevokable short of a full reset.
-    pub(crate) async fn release_app_runtime_state(&self, app_id: &str) {
-        self.force_stop_recording(app_id).await;
+    pub(crate) async fn release_app_runtime_state(
+        &self,
+        app_id: &str,
+        runtime_generation: Option<u64>,
+    ) {
+        if let Some(generation) = runtime_generation {
+            self.cancel_local_app_audio_scope(app_id, generation);
+            self.force_stop_recording(app_id, generation).await;
+        }
         self.clear_media(app_id);
         self.session_permissions.lock().await.revoke_app(app_id);
     }
@@ -9437,10 +9456,20 @@ impl LocalAppsHostBroker {
                 .deep_link_value(app_id, &input)
                 .await
                 .map_err(|error| error.message),
-            local_apps::CapabilityId::TextToSpeech => self
-                .synthesize_speech_value(app_id, &input)
-                .await
-                .map_err(|error| error.message),
+            local_apps::CapabilityId::TextToSpeech => {
+                let (invocation, runtime_generation) = self
+                    .flow_audio_invocation(
+                        app_id,
+                        flow_id,
+                        &request_id,
+                        local_apps::CapabilityId::TextToSpeech,
+                    )
+                    .await
+                    .map_err(|error| error.message)?;
+                self.synthesize_speech_value(&invocation, runtime_generation, &input)
+                    .await
+                    .map_err(|error| error.message)
+            }
             local_apps::CapabilityId::Location => self
                 .get_location_value(app_id)
                 .await
@@ -12920,7 +12949,9 @@ async fn reconcile_static_runtime_exit(
     // recording the stop, so a page that was mid-recording does not leave the
     // audio session held by nothing.
     if let Some(broker) = broker.upgrade() {
-        broker.release_app_runtime_state(&app_id).await;
+        broker
+            .release_app_runtime_state(&app_id, Some(generation))
+            .await;
     }
     if let Ok(record) = service.runtime_record(&app_id).await {
         let _ = service
@@ -18083,7 +18114,9 @@ mod tests {
             ),
         };
         assert!(
-            broker.resolve_mcp_proposal_approval(&request_id, true).await,
+            broker
+                .resolve_mcp_proposal_approval(&request_id, true)
+                .await,
             "approval resolver must consume the pending MCP-proposal approval"
         );
         let approved = approval
@@ -19278,7 +19311,9 @@ mod tests {
                 CreateApprovalAuthority::ApprovedPlan,
             )
             .await
-            .expect_err("a third call while the receipt is claimed must not hand out a second live receipt");
+            .expect_err(
+                "a third call while the receipt is claimed must not hand out a second live receipt",
+            );
         assert!(
             third_error.starts_with("create_approval_in_flight:"),
             "the in-flight refusal must be named, got {third_error:?}"
@@ -19514,7 +19549,11 @@ mod tests {
         })
         .await
         .expect("mcp proposal approval request");
-        assert!(broker.resolve_mcp_proposal_approval(&request_id, true).await);
+        assert!(
+            broker
+                .resolve_mcp_proposal_approval(&request_id, true)
+                .await
+        );
         let approval = approval_task
             .await
             .expect("approval task")
@@ -19765,7 +19804,9 @@ mod tests {
         .await
         .expect("mcp proposal approval request");
         assert!(
-            broker.resolve_mcp_proposal_approval(&request_id, true).await
+            broker
+                .resolve_mcp_proposal_approval(&request_id, true)
+                .await
         );
         let approval = approval_task
             .await

@@ -10,6 +10,7 @@ import type {
   CronRequestDto,
   AgentDto,
   AskUserQuestionRequestDto,
+  AudioOperationDto,
   AuthStateDto,
   ClientEvent,
   ComputerAccessRequestDto,
@@ -29,7 +30,6 @@ import type {
   SkillAdminCommandDto,
 } from '@lingxi/bridge-client';
 
-import type { AudioRequestDeps } from '../audio/requests';
 import {
   hostMicrophonePermissionReader,
   type MicrophonePermissionStatus as VoicePermissionStatus,
@@ -38,12 +38,14 @@ import {
   defaultNativeAudioSnapshot,
   type NativeAudioCommand,
   type NativeAudioCommandResult,
+  type NativeAudioOperationResponse,
   type NativeAudioResponse,
   type NativeAudioSnapshot,
 } from '../../shared/nativeAudio.js';
 import type { VoicePreferences } from '../../shared/voicePreferences';
 import type { NotificationPreferences } from '../../shared/notificationPreferences';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings';
+import type { AudioConfigurationV3 } from '../../shared/generatedAudioConfiguration';
 import {
   appendPendingUserPrompt,
   acknowledgePromptDispatch,
@@ -271,7 +273,7 @@ export interface UseBridge {
    * Never restarts the bridge: unlike `model`/`apiBaseUrl`, nothing here
    * changes what the running engine talks to.
    */
-  setVoicePreferences(voice: VoicePreferences): Promise<void>;
+  setVoicePreferences(voice: VoicePreferences, expectedRevision: number): Promise<void>;
   setModelPickerVisibility(modelPickerVisibility: ModelPickerVisibilitySettings): Promise<void>;
   /**
    * Writes a JSON-object patch into one engine settings file layer via the
@@ -340,6 +342,9 @@ export interface UseBridge {
   copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   audioRequest(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
+  audioExecute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV3): Promise<NativeAudioOperationResponse>;
+  audioCancel(): Promise<void>;
+  audioFinishListen(): Promise<void>;
   refresh(): Promise<void>;
   newSession(projectPath?: string): Promise<void>;
   resumeSession(sessionId: string): Promise<void>;
@@ -576,66 +581,6 @@ export function clearSlashTurnClaim(pending: Map<string, boolean>, sessionId: st
 
 export function shouldReleaseSlashTurn(pending: Map<string, boolean>, sessionId: string): boolean {
   return pending.get(sessionId) === true;
-}
-
-/**
- * The audio bindings for ONE session, built on first use and then kept for
- * that session's lifetime.
- *
- * Per session, not per hook. A capture spans a `start_recording` /
- * `stop_recording` PAIR of engine requests, so the recorder has to outlive a
- * single request — but `SessionRuntimeManager` runs a Map of concurrent
- * runtimes, each with its own engine and its own `AudioBridge`, and each
- * registering the `voice` tool. One shared `MicrophoneCapture` across all of
- * them means session B's `is_recording` answers `true` for a capture session A
- * started, B's `stop_recording` finalizes A's clip into B's transcript, and A's
- * own stop then answers `not_recording` having lost its recording entirely.
- * Keying by session is what makes each answer describe the session that asked.
- *
- * `build` is a factory rather than a value because it touches
- * `navigator.mediaDevices` and `window.speechSynthesis`, which a
- * server-rendered probe of this hook has neither of — nothing is constructed
- * until an `audio_request` actually arrives for that session.
- */
-export function sessionAudioBindings(
-  bindings: Map<string, AudioRequestDeps>,
-  sessionId: string,
-  build: () => AudioRequestDeps,
-): AudioRequestDeps {
-  const existing = bindings.get(sessionId);
-  if (existing) return existing;
-  const built = build();
-  bindings.set(sessionId, built);
-  return built;
-}
-
-/**
- * Drops one session's audio bindings, stopping a capture that is still running.
- *
- * Nothing else holds that `MicrophoneCapture`: dropping the entry while it is
- * recording would leave the OS microphone (and its indicator) on for the life
- * of the app, with no object left that could release it.
- */
-export function discardAudioBindings(bindings: Map<string, AudioRequestDeps>, sessionId: string): void {
-  const deps = bindings.get(sessionId);
-  if (!deps) return;
-  bindings.delete(sessionId);
-  try {
-    if (deps.recorder.isRecording()) void deps.recorder.stop().catch(() => undefined);
-  } catch {
-    // Releasing a device on teardown must never take the caller down with it.
-  }
-}
-
-/** `pruneRuntimeMaps` for the audio bindings, which need the release above. */
-export function pruneAudioBindings(
-  bindings: Map<string, AudioRequestDeps>,
-  runtimeIds: Iterable<string>,
-): void {
-  const authoritativeIds = new Set(runtimeIds);
-  for (const sessionId of [...bindings.keys()]) {
-    if (!authoritativeIds.has(sessionId)) discardAudioBindings(bindings, sessionId);
-  }
 }
 
 export function shouldApplyBootstrapSnapshot(
@@ -1531,34 +1476,6 @@ export function useBridge(): UseBridge {
         updateRuntime(sessionId, (state) => ({ ...state, error: event.message }));
         if (activeSessionIdRef.current === sessionId) setError(event.message);
       }
-      if (event.type === 'audio_request') {
-        const result = host.audio
-          ? host.audio.executeEngineRequest(sessionId, event.op)
-          : Promise.resolve(event.op.type === 'is_recording'
-              ? { type: 'recording_state', recording: false } as const
-              : {
-                  type: 'failed',
-                  kind: 'unavailable',
-                  message: 'native audio is unavailable on this host',
-                } as const);
-        void result
-          .catch((cause) => {
-            const message = messageFrom(cause);
-            updateRuntime(sessionId, (state) => ({ ...state, error: message }));
-            if (activeSessionIdRef.current === sessionId) setError(message);
-            return { type: 'failed', kind: 'other', message } as const;
-          })
-          .then((result) => host.command(sessionId, {
-            type: 'audio_response',
-            request_id: event.request_id,
-            result,
-          }))
-          .catch((cause) => {
-            const message = messageFrom(cause);
-            updateRuntime(sessionId, (state) => ({ ...state, error: message }));
-            if (activeSessionIdRef.current === sessionId) setError(message);
-          });
-      }
     });
     const offState = host.onConnectionStateChanged((envelope) => {
       const sessionId = envelope.sessionId;
@@ -2298,10 +2215,10 @@ export function useBridge(): UseBridge {
     try { patchBootstrap({ settings: await host.updateSettings({ apiBaseUrl }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
 
-  const setVoicePreferences = useCallback(async (voice: VoicePreferences) => {
-    if (!host) return;
-    try { patchBootstrap({ settings: await host.updateSettings({ voice }) }); } catch (cause) { capture(cause); }
-  }, [capture, host, patchBootstrap]);
+  const setVoicePreferences = useCallback(async (voice: VoicePreferences, expectedRevision: number) => {
+    if (!host) throw new Error('settings host is unavailable');
+    patchBootstrap({ settings: await host.updateSettings({ voice, voiceRevision: expectedRevision }) });
+  }, [host, patchBootstrap]);
 
   const setNotificationPreferences = useCallback(async (notifications: NotificationPreferences) => {
     if (!host) return;
@@ -2374,6 +2291,27 @@ export function useBridge(): UseBridge {
       };
     }
   }, [capture, host]);
+
+  const audioExecute = useCallback(async (
+    operation: AudioOperationDto,
+    configurationRevision?: number,
+    configurationOverride?: AudioConfigurationV3,
+  ): Promise<NativeAudioOperationResponse> => {
+    if (!host?.audio) throw new Error('native audio is unavailable on this host');
+    const response = await host.audio.execute(operation, configurationRevision, configurationOverride);
+    setAudioSnapshot(response.snapshot);
+    return response;
+  }, [host]);
+
+  const audioCancel = useCallback(async () => {
+    if (!host?.audio) throw new Error('native audio is unavailable on this host');
+    await host.audio.cancel();
+  }, [host]);
+
+  const audioFinishListen = useCallback(async () => {
+    if (!host?.audio) throw new Error('native audio is unavailable on this host');
+    await host.audio.finishListen();
+  }, [host]);
 
   const command = useCallback(async (value: Parameters<NonNullable<typeof host>['command']>[1]) => {
     const sessionId = activeSessionIdRef.current;
@@ -2796,6 +2734,9 @@ export function useBridge(): UseBridge {
     openSystemSettings,
     microphonePermission,
     audioRequest,
+    audioExecute,
+    audioCancel,
+    audioFinishListen,
     addProject,
     activateProject,
     removeProject,

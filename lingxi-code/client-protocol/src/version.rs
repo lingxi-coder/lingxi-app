@@ -117,7 +117,8 @@
 /// grows two fields and mobile binding layouts are positional — the same reason
 /// 9.0.0 and 12.0.0 were real majors for otherwise wire-additive additions
 /// (12.0.0 was this very record). Mobile bindings version-lock with the host.
-/// 15.0.0 adds versioned cron configuration and history records to native DTOs.
-/// (Renumbered from 14.0.0: multi-connection providers landed on 14.0.0 first.
-/// The owning session should replace this line with its own wording.)
-pub const CLIENT_PROTOCOL_VERSION: &str = "16.0.0";
+/// Bumped to 17.0.0 for the unified audio operation/request contract. The old
+/// split voice/STT/TTS operation and result DTOs were replaced by a single
+/// owner-scoped request, targeted cancellation, structured outcomes, status,
+/// and capability snapshots; mobile bindings change positionally as well.
+pub const CLIENT_PROTOCOL_VERSION: &str = "17.0.0";

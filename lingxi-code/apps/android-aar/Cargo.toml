@@ -8,7 +8,7 @@ license.workspace = true
 # M8-P12 → M10-F3: the Android UniFFI packager crate. Wraps the SHARED session
 # host (`engine_mobile::MobileEngineHandle`, F3-04 — re-exported, not re-derived)
 # behind the Android-specific `Platform`-construction wrapper, accepting
-# foreign-supplied (Kotlin) callback objects (camera / voice / share) to build an
+# foreign-supplied (Kotlin) callback objects (camera / audio / share) to build an
 # `AndroidPlatform`.
 #
 # UniFFI: F3-00 vendored/pinned `uniffi` 0.28.3 offline, so the `uniffi` feature

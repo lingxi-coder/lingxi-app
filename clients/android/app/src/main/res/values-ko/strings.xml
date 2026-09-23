@@ -2027,7 +2027,8 @@
     <string name="voice_flow_busy_wait_to_retry">현재 응답 또는 세션 전환이 끝난 후 다시 시도해 주세요</string>
     <string name="voice_flow_exit_a11y">심리스 모드 종료</string>
     <string name="voice_flow_hint_with_input">%1$s · 아래 입력창을 계속 사용할 수 있습니다</string>
-    <string name="voice_flow_listening_hint">말이 끝나면 탭하여 녹음 종료 · 또는 계속 말하기</string>
+    <string name="voice_flow_listening_hint">마치면 탭하여 인식을 끝내세요 · 계속 말해도 됩니다</string>
+    <string name="voice_flow_finalizing_hint">음성 인식이 끝나기를 기다리는 중…</string>
     <string name="voice_flow_listening_label">듣는 중</string>
     <string name="voice_flow_mode_label">심리스 모드</string>
     <string name="voice_flow_release_hint">놓으면 전송 · 위로 밀어 취소</string>

@@ -2027,7 +2027,8 @@
     <string name="voice_flow_busy_wait_to_retry">現在の返信または会話の切り替えが完了してから再試行してください</string>
     <string name="voice_flow_exit_a11y">心流を終了</string>
     <string name="voice_flow_hint_with_input">%1$s · 下の入力欄も引き続き使えます</string>
-    <string name="voice_flow_listening_hint">話し終えたらタップして収音を終了 · または続けて話す</string>
+    <string name="voice_flow_listening_hint">話し終えたらタップして認識を終了 · 続けて話すこともできます</string>
+    <string name="voice_flow_finalizing_hint">音声認識の完了を待っています…</string>
     <string name="voice_flow_listening_label">聞き取り中</string>
     <string name="voice_flow_mode_label">心流モード</string>
     <string name="voice_flow_release_hint">指を離して送信 · 上にスワイプでキャンセル</string>

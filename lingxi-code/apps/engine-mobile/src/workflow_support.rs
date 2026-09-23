@@ -266,7 +266,6 @@ impl MobileWorkflowCheckpointStore {
             .join(WORKFLOW_PROVENANCE_FILE)
     }
 
-
     fn read_provenance_sidecar(
         &self,
         session_uuid: &str,

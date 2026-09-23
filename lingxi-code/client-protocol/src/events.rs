@@ -16,6 +16,7 @@
 //! (decision §0.4).
 
 use crate::ask_user_question::AskUserQuestionRequestDto;
+use crate::audio::{AudioCapabilitySnapshotDto, AudioOperationIdDto, AudioOperationRequestDto};
 use crate::controls::ConversationControlsDto;
 use crate::listings::{
     AgentDto, AuthStateDto, ConfigurationDomainDto, ConfigurationEffectDto,
@@ -510,18 +511,10 @@ pub enum ClientEvent {
         enabled: bool,
     },
 
-    /// Ask a client to perform one microphone/speaker operation. Mirrors the
-    /// [`ComputerAccessRequestDto`](crate::computer_access::ComputerAccessRequestDto)
-    /// engine->client request/response shape: correlated by `request_id`, and
-    /// the client's outcome round-trips back as an
-    /// [`AudioResultDto`](crate::commands::AudioResultDto) on
-    /// [`ClientCommand::AudioResponse`](crate::commands::ClientCommand::AudioResponse).
+    /// Ask a client to perform one host-owned audio operation.
     AudioRequest {
-        /// Connection-scoped correlator; echoed back verbatim on the matching
-        /// `AudioResponse`.
-        request_id: u64,
-        /// The operation the client should perform.
-        op: AudioOpDto,
+        /// Trusted owner, operation identity, budget, and requested operation.
+        request: AudioOperationRequestDto,
     },
     /// Authoritative durable state for one mobile turn. Emitted on attach,
     /// resume, recovery gating, and every terminal transition.
@@ -692,6 +685,14 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Cancel one pending audio operation without affecting other owners.
+    AudioCancel {
+        identity: AudioOperationIdDto,
+    },
+    /// Publish the latest support/readiness snapshot to the UI client.
+    AudioCapabilitiesChanged {
+        capabilities: AudioCapabilitySnapshotDto,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -820,59 +821,6 @@ pub struct CostDto {
     pub session_duration_secs: u64,
     /// Pre-formatted display string (e.g. `"$0.0123"`).
     pub formatted: String,
-}
-
-/// One audio operation the engine asks a client to perform on its device
-/// microphone/speaker. Carried by [`ClientEvent::AudioRequest`]. Internally
-/// tagged on `type`, `snake_case`. `#[non_exhaustive]` so a future op is
-/// additive.
-///
-/// Mirrors the argument shapes of `platform_api::{VoiceRecorder, SpeechToText,
-/// TextToSpeech}` one-to-one, so this contract can carry every call those
-/// traits make without loss: `StartRecording`/`StopRecording`/`IsRecording`
-/// lower `VoiceRecorder::{start_recording, stop_recording, is_recording}`
-/// (`StartRecording`'s fields are `platform_api::VoiceRecordingOpts`); `Transcribe`
-/// lowers `SpeechToText::transcribe`'s `SttOpts`; `Synthesize` lowers
-/// `TextToSpeech::synthesize`'s `TtsOpts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum AudioOpDto {
-    /// Begin a recording session — `VoiceRecordingOpts`.
-    StartRecording {
-        /// Target sample rate in Hz (e.g. `16_000` for speech).
-        sample_rate_hz: u32,
-        /// Container/codec hint (e.g. `"m4a"`, `"wav"`).
-        format: String,
-    },
-    /// Stop the active recording session and return the captured audio.
-    /// Answered by
-    /// [`AudioResultDto::Recording`](crate::commands::AudioResultDto::Recording).
-    StopRecording,
-    /// Query whether a recording session is currently active. Answered by
-    /// [`AudioResultDto::RecordingState`](crate::commands::AudioResultDto::RecordingState).
-    /// `VoiceRecorder::is_recording` returns a bare `bool` with no error
-    /// channel, so this op has no engine-defined `Failed` outcome to carry —
-    /// only a transport-level failure could prevent an answer, and handling
-    /// that is a proxy (Task 2) concern, not part of this contract.
-    IsRecording,
-    /// Open the microphone, listen for a single utterance, and return the
-    /// final transcript — `SttOpts`.
-    Transcribe {
-        /// BCP-47 language hint (e.g. `"en-US"`, `"zh-CN"`). `None` = device
-        /// default.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        language: Option<String>,
-    },
-    /// Synthesize text to speech — `TtsOpts`.
-    Synthesize {
-        /// Text to speak.
-        text: String,
-        /// Provider-specific voice id (`None` = the system default voice).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        voice: Option<String>,
-    },
 }
 
 /// A durable task from the workspace's existing cron scheduler.

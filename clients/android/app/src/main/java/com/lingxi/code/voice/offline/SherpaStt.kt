@@ -13,8 +13,12 @@ import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import com.lingxi.code.voice.audio.AudioDriverException
+import com.lingxi.code.voice.audio.DeviceAudioError
+import com.lingxi.code.voice.audio.DeviceAudioErrorKind
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -25,6 +29,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.coroutineContext
 import kotlin.math.sqrt
 
@@ -58,10 +63,15 @@ class SherpaStt private constructor(
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
                 maxOf(minBuf, sampleRate),
             )
-        } catch (_: SecurityException) {
-            return@withContext null
+        } catch (denied: SecurityException) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.PermissionDenied, denied.message ?: "Microphone permission is not granted."))
+        } catch (error: Throwable) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.Unavailable, error.message ?: "Microphone capture is unavailable"))
         }
-        if (record.state != AudioRecord.STATE_INITIALIZED) { record.release(); return@withContext null }
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.Unavailable, "Offline microphone capture is unavailable"))
+        }
         val all = ArrayList<Float>(sampleRate * 6)
         try {
             record.startRecording()
@@ -74,7 +84,8 @@ class SherpaStt private constructor(
             while (frames < maxFrames) {
                 coroutineContext.ensureActive()
                 val n = record.read(buf, 0, frame)
-                if (n <= 0) continue
+                if (n == 0) continue
+                if (n < 0) throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.NativeFailure, "Offline microphone read failed ($n)"))
                 var sum = 0.0
                 for (i in 0 until n) { val f = buf[i] / 32768f; all.add(f); sum += (f * f).toDouble() }
                 val rms = sqrt(sum / n).toFloat()
@@ -84,8 +95,14 @@ class SherpaStt private constructor(
                 if (rms > thr) { voiced++; silence = 0; if (voiced >= 3) started = true }
                 else if (started) { silence++; if (silence >= 12) break } // ~1.2s trailing silence ends turn
             }
-        } catch (_: Throwable) {
-            return@withContext null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: AudioDriverException) {
+            throw error
+        } catch (denied: SecurityException) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.PermissionDenied, denied.message ?: "Microphone permission was revoked"))
+        } catch (error: Throwable) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.NativeFailure, error.message ?: "Offline speech recognition failed"))
         } finally {
             try { record.stop() } catch (_: Throwable) {}
             record.release()
@@ -101,6 +118,10 @@ class SherpaStt private constructor(
     ): RealtimeSpeechSession {
         val stopped = AtomicBoolean(false)
         val closed = AtomicBoolean(false)
+        val recorderRef = AtomicReference<AudioRecord?>(null)
+        fun notifyClosed() {
+            if (closed.compareAndSet(false, true)) callbacks.onClosed()
+        }
         val job = scope.launch {
             val sampleRate = 16_000
             val minBuf = AudioRecord.getMinBufferSize(
@@ -118,13 +139,19 @@ class SherpaStt private constructor(
                 )
             } catch (_: SecurityException) {
                 callbacks.onError("permission_denied", "Missing microphone permission", false)
-                callbacks.onClosed()
+                notifyClosed()
+                return@launch
+            } catch (error: Throwable) {
+                callbacks.onError("audio_io_unavailable", error.message ?: "AudioRecord is unavailable", true)
+                notifyClosed()
                 return@launch
             }
+            recorderRef.set(record)
             if (record.state != AudioRecord.STATE_INITIALIZED) {
+                recorderRef.compareAndSet(record, null)
                 record.release()
                 callbacks.onError("audio_io_unavailable", "AudioRecord is unavailable", true)
-                callbacks.onClosed()
+                notifyClosed()
                 return@launch
             }
             callbacks.onReady()
@@ -144,7 +171,15 @@ class SherpaStt private constructor(
                 while (frames < 120 && !stopped.get()) {
                     coroutineContext.ensureActive()
                     val n = record.read(buf, 0, frame)
-                    if (n <= 0) continue
+                    if (n == 0) continue
+                    if (n < 0) {
+                        throw AudioDriverException(
+                            DeviceAudioError(
+                                DeviceAudioErrorKind.NativeFailure,
+                                "Offline microphone read failed ($n)",
+                            ),
+                        )
+                    }
                     val chunk = FloatArray(n)
                     var sum = 0.0
                     for (i in 0 until n) {
@@ -201,6 +236,10 @@ class SherpaStt private constructor(
                     else -> decode(pcm, sampleRate)
                 }.trim()
                 callbacks.onFinal(finalText)
+            } catch (error: AudioDriverException) {
+                if (!stopped.get()) {
+                    callbacks.onError("provider_error", error.error.message, true)
+                }
             } catch (_: Throwable) {
                 if (!stopped.get()) {
                     callbacks.onError("provider_error", "Offline speech recognition failed", true)
@@ -208,19 +247,28 @@ class SherpaStt private constructor(
             } finally {
                 onlineStream?.release()
                 runCatching { record.stop() }
+                recorderRef.compareAndSet(record, null)
                 record.release()
-                if (closed.compareAndSet(false, true)) callbacks.onClosed()
+                notifyClosed()
             }
+        }
+        job.invokeOnCompletion {
+            recorderRef.getAndSet(null)?.let { record ->
+                runCatching { record.stop() }
+                runCatching { record.release() }
+            }
+            notifyClosed()
         }
         return object : RealtimeSpeechSession {
             override fun stop() {
                 stopped.set(true)
+                recorderRef.get()?.let { runCatching { it.stop() } }
             }
 
             override fun cancel() {
                 stopped.set(true)
                 job.cancel()
-                if (closed.compareAndSet(false, true)) callbacks.onClosed()
+                recorderRef.get()?.let { runCatching { it.stop() } }
             }
 
             override fun close() {

@@ -391,8 +391,8 @@ fn write_journal_row(path: &Path, row: &CandidateJournalRow) -> Result<(), Strin
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create candidate journal: {error}"))?;
     }
-    let bytes =
-        serde_json::to_vec_pretty(row).map_err(|error| format!("serialize candidate journal: {error}"))?;
+    let bytes = serde_json::to_vec_pretty(row)
+        .map_err(|error| format!("serialize candidate journal: {error}"))?;
     let temp = path.with_extension("json.tmp");
     std::fs::write(&temp, bytes).map_err(|error| format!("write candidate journal: {error}"))?;
     std::fs::rename(&temp, path).map_err(|error| format!("commit candidate journal: {error}"))

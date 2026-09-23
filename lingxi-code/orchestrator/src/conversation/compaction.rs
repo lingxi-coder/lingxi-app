@@ -2014,8 +2014,7 @@ impl ConversationOrchestrator {
         // move the gate with it. `refresh_autocompact_threshold` is a no-op for
         // fixed-threshold callers (tests, embedded hosts) — it returns their
         // configured value.
-        let threshold =
-            compactor.refresh_autocompact_threshold(&model, &self.api.active_betas());
+        let threshold = compactor.refresh_autocompact_threshold(&model, &self.api.active_betas());
 
         // Threshold gate: under threshold ⇒ strict no-op. `snip_freed = 0`
         // because we have done no snip work yet at the call site.

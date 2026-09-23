@@ -30,6 +30,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   CLIENT_PROTOCOL_VERSION,
   MAX_BRIDGE_FRAME_BYTES,
+  type AudioCapabilitySnapshotDto,
   type ClientCommand,
   type ClientEvent,
   type ComputerAccessRequestDto,
@@ -66,6 +67,8 @@ export interface BridgeClientOptions {
   host?: string;
   /** Human-readable client identifier sent in the {@link ClientHello}. */
   clientName?: string;
+  /** Initial device capabilities; omitted until the device service is known. */
+  audioCapabilities?: AudioCapabilitySnapshotDto;
   /** Handshake timeout in milliseconds (default 10_000). */
   handshakeTimeoutMs?: number;
 }
@@ -248,6 +251,7 @@ export class BridgeClient extends EventEmitter {
         supports_skills: true,
         supports_commands: true,
         client_protocol_version: CLIENT_PROTOCOL_VERSION,
+        ...(this.opts.audioCapabilities === undefined ? {} : { audio: this.opts.audioCapabilities }),
       },
     };
 

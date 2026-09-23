@@ -3,51 +3,26 @@ package com.lingxi.code.voice.audio
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import com.lingxi.code.bindings.SpeechFfiException
 import kotlinx.coroutines.CancellableContinuation
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
-import java.io.RandomAccessFile
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.Locale
 import java.util.UUID
 import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
- * Android system [TextToSpeech] wrapped as [TtsProvider].
+ * Android system [TextToSpeech] renderer used by the app-scoped AudioService.
  *
  * `TextToSpeech.synthesizeToFile` writes a WAV; we strip the 44-byte
- * header and emit the raw PCM body as a single Flow chunk. Sample rate is
- * read from the WAV header (most engines emit 22050 or 24000 Hz mono).
+ * header and return the raw PCM body together with its actual WAV sample rate.
  *
  * Cancellation: the underlying engine call doesn't have a clean abort;
- * we let the synthesize complete and the caller's Flow consumer discard.
- * Acceptable because system TTS for chat-length replies finishes in
- * <500 ms.
+ * cancellation shuts down the temporary system TTS engine.
  */
-class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
+class SystemTextToSpeechTts(private val context: Context) {
 
-    override val id: String = "system"
-
-    override val capabilities: TtsCapabilities = TtsCapabilities(
-        streaming = false,
-        voices = listOf(
-            TtsVoice(id = "default", displayName = "System default", language = "auto"),
-        ),
-        sampleRateHz = 22_050, // most Android voices; actual rate comes from the WAV header
-    )
-
-    override suspend fun synthesize(
-        text: String,
-        voice: String?,
-        keyProvider: suspend () -> String?,
-    ): Flow<ByteArray> = flow {
-        val (pcm, _) = renderToPcm(text, voice = voice, strictVoice = voice != null)
-        if (pcm.isNotEmpty()) emit(pcm)
-    }
+    private val defaultSampleRateHz = 22_050 // actual rate is read from the WAV header
 
     /** Returns (pcmBytes, sampleRateHz) so callers can drive AudioTrack correctly. */
     suspend fun renderToPcm(
@@ -56,8 +31,9 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
         speed: Float = 1.0f,
         language: String? = null,
         strictVoice: Boolean = voice != null,
+        maxPcmBytes: Int = Int.MAX_VALUE,
     ): Pair<ByteArray, Int> {
-        if (text.isBlank()) return ByteArray(0) to capabilities.sampleRateHz
+        if (text.isBlank()) return ByteArray(0) to defaultSampleRateHz
         val wavFile = File(context.cacheDir, "tts/sys-${UUID.randomUUID()}.wav").also {
             it.parentFile?.mkdirs()
         }
@@ -71,7 +47,7 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
                 language == null || languageMatches(it.locale?.toLanguageTag(), language)
             }
             if (voice != null && voice != "default" && languageCompatibleVoice == null && strictVoice) {
-                throw SpeechFfiException.Unavailable()
+                throw AudioOperationException(DeviceAudioErrorKind.VoiceMissing, "The selected system voice is unavailable.")
             }
             val effectiveVoice = languageCompatibleVoice
                 ?: if (voice != null && voice != "default") {
@@ -90,12 +66,17 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
             if (effectiveVoice != null) {
                 tts.voice = effectiveVoice
             } else if (language != null && (voice == null || voice == "default")) {
-                tts.language = Locale.forLanguageTag(language)
+                val languageStatus = tts.setLanguage(Locale.forLanguageTag(language))
+                if (languageStatus == TextToSpeech.LANG_MISSING_DATA || languageStatus == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "System speech does not support the selected language.")
+                }
             }
             val utterance = "lingxi-${UUID.randomUUID()}"
             val status = synthesizeToFile(tts, text, utterance, wavFile)
-            if (status != TextToSpeech.SUCCESS) return ByteArray(0) to capabilities.sampleRateHz
-            return readWav(wavFile)
+            if (status != TextToSpeech.SUCCESS) {
+                throw AudioOperationException(DeviceAudioErrorKind.SynthesisFailed, "system speech synthesis failed")
+            }
+            return readWav(wavFile, maxPcmBytes)
         } finally {
             runCatching { tts.shutdown() }
             runCatching { wavFile.delete() }
@@ -115,7 +96,7 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
                     cont.resume(tts)
                 } else if (cont.isActive) {
                     runCatching { tts.shutdown() }
-                    cont.resume(tts) // resume with a non-init TTS so synth fails gracefully
+                    cont.resumeWithException(AudioOperationException(DeviceAudioErrorKind.Unavailable, "System speech service is unavailable."))
                 }
             }
             cont.invokeOnCancellation { runCatching { tts.shutdown() } }
@@ -142,25 +123,6 @@ class SystemTextToSpeechTts(private val context: Context) : TtsProvider {
         if (cont.isActive) cont.resume(value)
     }
 
-    /**
-     * Strip a standard RIFF/WAV header to recover the raw PCM frames.
-     * Works for the typical 44-byte canonical layout the Android engine
-     * produces. Falls back to "whole file minus 44 bytes" if the header
-     * isn't recognised.
-     */
-    private fun readWav(file: File): Pair<ByteArray, Int> {
-        if (!file.exists() || file.length() < 44) return ByteArray(0) to capabilities.sampleRateHz
-        RandomAccessFile(file, "r").use { raf ->
-            val header = ByteArray(44)
-            raf.readFully(header)
-            val buf = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
-            val riff = String(header, 0, 4, Charsets.US_ASCII)
-            val wave = String(header, 8, 4, Charsets.US_ASCII)
-            val sampleRate = if (riff == "RIFF" && wave == "WAVE") buf.getInt(24) else capabilities.sampleRateHz
-            val dataSizeFromHeader = if (riff == "RIFF" && wave == "WAVE") buf.getInt(40) else (raf.length() - 44).toInt()
-            val body = ByteArray(dataSizeFromHeader.coerceAtMost((raf.length() - 44).toInt()).coerceAtLeast(0))
-            raf.read(body)
-            return body to sampleRate
-        }
-    }
+    private fun readWav(file: File, maxPcmBytes: Int): Pair<ByteArray, Int> =
+        readPcm16Wav(file, maxPcmBytes)
 }

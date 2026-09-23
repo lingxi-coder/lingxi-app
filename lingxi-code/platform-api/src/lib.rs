@@ -99,6 +99,7 @@ pub mod agent_name_registry;
 pub mod agent_processes;
 pub mod agent_view;
 pub mod android_ui;
+pub mod audio;
 pub mod auth;
 pub mod backgrounding;
 pub mod bg_session_forker;
@@ -190,6 +191,12 @@ pub use android_ui::{
     AndroidRect, AndroidScreenshot, AndroidUiAutomation, AndroidUiNode, AndroidUiSnapshot,
     AndroidWaitCondition, MAX_ANDROID_AUDIO_LISTEN_MS, MAX_ANDROID_AUDIO_SPEAK_CHARS,
     MAX_ANDROID_UI_BATCH, MAX_ANDROID_UI_DEPTH, MAX_ANDROID_UI_NODES, MAX_ANDROID_UI_WAIT_MS,
+};
+pub use audio::{
+    AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioInitiator, AudioOperation,
+    AudioOperationContext, AudioOperationId, AudioOperationKind, AudioOperationReadiness,
+    AudioOperationSuccess, AudioOwner, AudioReadinessState, AudioRecordingHandle, AudioService,
+    AudioStatus,
 };
 pub use auth::{AuthError, AuthHandle, LoginInfo};
 pub use backgrounding::{
@@ -319,7 +326,7 @@ pub use secure_storage::{
 };
 pub use share::{ShareError, SharePayload, ShareResult, SharingService};
 pub use skill_loader::{SkillLoad, SkillLoader};
-pub use stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+pub use stt::SttTranscript;
 pub use subagent_spawn::{
     StructuredOutputMode, SubagentInheritance, SubagentObservation, SubagentResult,
     SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
@@ -337,8 +344,8 @@ pub use tokio_util::sync::CancellationToken;
 pub use tool_invoker::{
     SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker, ToolInvokerError,
 };
-pub use tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
-pub use voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
+pub use tts::TtsAudio;
+pub use voice::VoiceRecording;
 pub use web_search::{WebSearchConfigProvider, WebSearchRuntimeConfig};
 pub use workflow_output::{
     WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope, WorkflowOutputScopes,

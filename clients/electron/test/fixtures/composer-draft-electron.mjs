@@ -272,11 +272,15 @@ async function main() {
         const cancellations = await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`);
         await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop current turn"]').click()`);
         assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.cancelCount()`), cancellations + 1);
-        assert.deepEqual(await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`), ['request_authorization', 'start_listening']);
+        assert.deepEqual(await webContents.executeJavaScript(`window.__composerDraftTest.audioOperationTypes()`), ['listen']);
         assert.equal(await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop dictation"]')?.disabled`), false);
       }
-      const dictationStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
+      const dictationStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioOperationTypes()`);
+      const finishCount = await webContents.executeJavaScript(`window.__composerDraftTest.audioFinishCount()`);
+      const audioCancelCount = await webContents.executeJavaScript(`window.__composerDraftTest.audioCancelCount()`);
       await webContents.executeJavaScript(`document.querySelector('[aria-label="Stop dictation"]').click()`);
+      await waitFor(webContents, `window.__composerDraftTest.audioFinishCount() === ${finishCount + 1}`);
+      assert.equal(await webContents.executeJavaScript(`window.__composerDraftTest.audioCancelCount()`), audioCancelCount);
       await waitFor(webContents, `document.querySelector('[aria-label="Prompt"]')?.textContent === 'dictated text'`);
       const dictatedText = await webContents.executeJavaScript(`document.querySelector('[aria-label="Prompt"]')?.textContent`);
 
@@ -287,8 +291,8 @@ async function main() {
       await webContents.executeJavaScript(`window.__composerDraftTest.clearAudioRequests()`);
       await webContents.executeJavaScript(`document.querySelector('[aria-label="开启心流模式"]').click()`);
       await waitFor(webContents, `Boolean(document.querySelector('[role="group"][aria-label="心流模式"]'))`);
-      await waitFor(webContents, `window.__composerDraftTest.audioRequestTypes().includes('start_listening')`);
-      const flowStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioRequestTypes()`);
+      await waitFor(webContents, `window.__composerDraftTest.audioOperationTypes().includes('listen')`);
+      const flowStartRequests = await webContents.executeJavaScript(`window.__composerDraftTest.audioOperationTypes()`);
       const audioInteraction = { dictationStartRequests, dictatedText, flowStartRequests };
       await webContents.executeJavaScript(`document.querySelector('[aria-label="关闭心流模式"]').click()`);
       await waitFor(webContents, `!document.querySelector('[role="group"][aria-label="心流模式"]')`);

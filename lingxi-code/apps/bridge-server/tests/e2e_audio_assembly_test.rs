@@ -36,15 +36,53 @@ use std::time::Duration;
 use bridge::wire::Frame;
 use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
 use bridge_server::boot;
-use client_protocol::commands::{AudioResultDto, ClientCommand};
-use client_protocol::events::{AudioOpDto, ClientEvent};
+use client_protocol::audio::{
+    AudioCapabilitySnapshotDto, AudioOperationDto, AudioOperationKindDto,
+    AudioOperationReadinessDto, AudioOperationRequestDto, AudioOperationResultDto,
+    AudioReadinessStateDto,
+};
+use client_protocol::commands::ClientCommand;
+use client_protocol::events::ClientEvent;
 use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
-use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+use platform_api::audio::{
+    AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
+    AudioOperationSuccess, AudioOwner, AudioService,
+};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 
 const TEST_TOKEN: &str = "audio-asm-token-32chars000000000";
+
+fn audio_capabilities() -> AudioCapabilitySnapshotDto {
+    AudioCapabilitySnapshotDto {
+        service_epoch: 7,
+        support_revision: 1,
+        supported_operations: vec![
+            AudioOperationKindDto::Record,
+            AudioOperationKindDto::Listen,
+            AudioOperationKindDto::Synthesize,
+            AudioOperationKindDto::Speak,
+        ],
+        readiness: vec![AudioOperationReadinessDto {
+            operation: AudioOperationKindDto::Listen,
+            state: AudioReadinessStateDto::Ready,
+        }],
+        max_payload_bytes: 1024,
+    }
+}
+
+fn audio_context() -> AudioOperationContext {
+    AudioOperationContext {
+        identity: AudioOperationId::new(1, 7),
+        owner: AudioOwner::Session {
+            session_id: "audio-assembly-session".into(),
+        },
+        initiator: None,
+        timeout_budget_ms: Some(5_000),
+        max_payload_bytes: 1024,
+    }
+}
 
 /// Serializes the assembles in this binary. `boot::assemble` builds a real
 /// `DesktopRuntime`, which touches process-global runtime state (the same
@@ -126,7 +164,10 @@ async fn connect(
         params: serde_json::to_value(ClientHello {
             protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
             client_name: "audio-assembly-test".into(),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                audio: Some(audio_capabilities()),
+                ..Capabilities::default()
+            },
         })
         .unwrap(),
     });
@@ -158,13 +199,13 @@ where
 }
 
 /// Wait for the next `AudioRequest` event, skipping any unrelated event.
-async fn next_audio_request<S>(ws: &mut S) -> (u64, AudioOpDto)
+async fn next_audio_request<S>(ws: &mut S) -> AudioOperationRequestDto
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     loop {
         match next_frame(ws).await {
-            Frame::Event(ClientEvent::AudioRequest { request_id, op }) => return (request_id, op),
+            Frame::Event(ClientEvent::AudioRequest { request }) => return request,
             Frame::Event(_) => {}
             other => panic!("unexpected frame while awaiting an AudioRequest: {other:?}"),
         }
@@ -200,7 +241,10 @@ async fn barrier(
         params: serde_json::to_value(ClientHello {
             protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
             client_name: "audio-assembly-test".into(),
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                audio: Some(audio_capabilities()),
+                ..Capabilities::default()
+            },
         })
         .unwrap(),
     });
@@ -286,19 +330,24 @@ async fn a_response_on_another_connection_cannot_resolve_this_connections_reques
     let mut ws_b = connect(endpoint_b.port()).await;
 
     // The engine task: one `transcribe` on A's capability.
-    let call: tokio::task::JoinHandle<Result<SttTranscript, SttError>> =
-        tokio::spawn(async move { audio_a.transcribe(SttOpts::default()).await });
+    let call: tokio::task::JoinHandle<Result<AudioOperationSuccess, AudioError>> =
+        tokio::spawn(async move {
+            audio_a
+                .execute(audio_context(), AudioOperation::Listen { language: None })
+                .await
+        });
 
-    let (request_id, op) = next_audio_request(&mut ws_a).await;
+    let request = next_audio_request(&mut ws_a).await;
     assert!(
-        matches!(op, AudioOpDto::Transcribe { .. }),
-        "A's client must be asked to transcribe, got {op:?}"
+        matches!(request.operation, AudioOperationDto::Listen { .. }),
+        "A's client must be asked to listen, got {:?}",
+        request.operation
     );
 
     // The wrong connection answers first, with the right id.
     let answer = ClientCommand::AudioResponse {
-        request_id,
-        result: AudioResultDto::Transcript {
+        identity: request.identity.clone(),
+        result: AudioOperationResultDto::Transcript {
             text: "answered by the wrong connection".to_string(),
             language: None,
             confidence: None,
@@ -320,8 +369,8 @@ async fn a_response_on_another_connection_cannot_resolve_this_connections_reques
 
     // The right connection answers the same id.
     let answer = ClientCommand::AudioResponse {
-        request_id,
-        result: AudioResultDto::Transcript {
+        identity: request.identity.clone(),
+        result: AudioOperationResultDto::Transcript {
             text: "answered by the right connection".to_string(),
             language: Some("en-US".to_string()),
             confidence: Some(0.9),
@@ -334,10 +383,14 @@ async fn a_response_on_another_connection_cannot_resolve_this_connections_reques
         .expect("the parked call must resolve once ITS OWN connection answers")
         .expect("the call task must not panic")
         .expect("the answer is a success result");
-    assert_eq!(
-        transcript.text, "answered by the right connection",
+    assert!(
+        matches!(
+            transcript,
+            AudioOperationSuccess::Transcript { transcript }
+                if transcript.text == "answered by the right connection"
+        ),
         "the resolved value must be the one its OWN connection sent — had the \
-         other connection's response resolved the call, this would carry its text"
+     other connection's response resolved the call, this would carry its text"
     );
 }
 
@@ -362,9 +415,13 @@ async fn dropping_the_client_fails_an_assembled_connections_parked_call() {
     endpoint.set_auth_token(TEST_TOKEN.to_string());
     let mut ws = connect(endpoint.port()).await;
 
-    let call: tokio::task::JoinHandle<Result<SttTranscript, SttError>> =
-        tokio::spawn(async move { audio.transcribe(SttOpts::default()).await });
-    let (_request_id, _op) = next_audio_request(&mut ws).await;
+    let call: tokio::task::JoinHandle<Result<AudioOperationSuccess, AudioError>> =
+        tokio::spawn(async move {
+            audio
+                .execute(audio_context(), AudioOperation::Listen { language: None })
+                .await
+        });
+    let _request = next_audio_request(&mut ws).await;
 
     drop(ws);
 
@@ -373,11 +430,5 @@ async fn dropping_the_client_fails_an_assembled_connections_parked_call() {
         .expect("a disconnect must fail the parked call, not leave it to its deadline")
         .expect("the call task must not panic")
         .expect_err("a drained request cannot produce a transcript");
-    match error {
-        SttError::Retriable(message) => assert!(
-            message.contains("disconnected"),
-            "the drain failure must say the client went away, got: {message}"
-        ),
-        other => panic!("expected a retriable disconnect failure, got {other:?}"),
-    }
+    assert_eq!(error.kind, AudioErrorKind::NativeFailure);
 }

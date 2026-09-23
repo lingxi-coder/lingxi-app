@@ -279,7 +279,10 @@ fun SettingsHost(
                     VoicePage(
                         voice = state.voice,
                         capability = state.voiceCapability,
-                        onChange = resolvedStore::setVoice,
+                        revision = state.voiceRevision,
+                        saving = state.voiceSaving,
+                        saveError = state.voiceSaveError,
+                        onChange = resolvedStore::updateVoice,
                     )
                 }
                 page(SettingsRoutes.PROVIDER_LIST) {

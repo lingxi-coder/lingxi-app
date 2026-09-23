@@ -14,7 +14,7 @@ use client_protocol::controls::{
     PermissionModeOptionDto, ReasoningControlSpecDto, ReasoningControlStateDto, ReasoningOptionDto,
     ReasoningSelectionDto,
 };
-use client_protocol::events::{AudioOpDto, ClientEvent, CostDto, TurnOutcomeDto};
+use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::listings::SessionAgentSummaryDto;
 use client_protocol::local_apps::{
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
@@ -1016,62 +1016,40 @@ fn end_turn_outcome_variants() {
     }
 }
 
-/// `ClientEvent::AudioRequest` round trip — the engine asking a client to
-/// perform one audio operation, correlated by `request_id`. Mirrors the
-/// `ComputerAccessRequestDto` engine->client shape (module doc,
-/// `client_protocol::computer_access`), but the request/response ride on
-/// `ClientEvent`/`ClientCommand` directly rather than a bespoke DTO pair.
+/// An engine request carries a stable resource owner and a local timeout budget.
 #[test]
 fn audio_request_round_trips_on_the_wire() {
+    use client_protocol::audio::{
+        AudioOperationDto, AudioOperationIdDto, AudioOperationRequestDto, AudioOwnerDto,
+    };
     let request = ClientEvent::AudioRequest {
-        request_id: 7,
-        op: AudioOpDto::Transcribe {
-            language: Some("zh-CN".to_string()),
+        request: AudioOperationRequestDto {
+            identity: AudioOperationIdDto {
+                id: "00000000-0000-4000-8000-000000000007".into(),
+                generation: 2,
+                service_epoch: 3,
+            },
+            owner: AudioOwnerDto::Session {
+                session_id: "session-1".into(),
+            },
+            initiator: None,
+            timeout_budget_ms: Some(1_000),
+            max_payload_bytes: 12_533_760,
+            operation: AudioOperationDto::Listen {
+                language: Some("zh-CN".into()),
+            },
         },
     };
     let json = serde_json::to_value(&request).expect("serialize AudioRequest");
     assert_eq!(json["type"], "audio_request");
-    assert_eq!(json["request_id"], 7);
-    assert_eq!(json["op"]["type"], "transcribe");
-    assert_eq!(json["op"]["language"], "zh-CN");
+    assert_eq!(json["request"]["identity"]["service_epoch"], 3);
+    assert_eq!(json["request"]["owner"]["session_id"], "session-1");
+    assert_eq!(json["request"]["operation"]["type"], "listen");
+    assert_eq!(json["request"]["operation"]["language"], "zh-CN");
     assert_eq!(
-        serde_json::from_value::<ClientEvent>(json).expect("deserialize AudioRequest"),
+        serde_json::from_value::<ClientEvent>(json).unwrap(),
         request
     );
-}
-
-/// Enumerate every `AudioOpDto` variant and assert the `snake_case` wire tag
-/// plus a byte-stable round trip. These mirror
-/// `platform_api::{VoiceRecorder, SpeechToText, TextToSpeech}`'s argument shapes:
-/// `StartRecording`/`StopRecording`/`IsRecording` <- `VoiceRecordingOpts` /
-/// bare calls; `Transcribe` <- `SttOpts`; `Synthesize` <- `TtsOpts`.
-#[test]
-fn audio_op_variants_round_trip_with_expected_tags() {
-    let cases = [
-        (
-            AudioOpDto::StartRecording {
-                sample_rate_hz: 16_000,
-                format: "wav".to_string(),
-            },
-            "start_recording",
-        ),
-        (AudioOpDto::StopRecording, "stop_recording"),
-        (AudioOpDto::IsRecording, "is_recording"),
-        (AudioOpDto::Transcribe { language: None }, "transcribe"),
-        (
-            AudioOpDto::Synthesize {
-                text: "hello".to_string(),
-                voice: Some("en-US-default".to_string()),
-            },
-            "synthesize",
-        ),
-    ];
-    for (op, tag) in cases {
-        let json = serde_json::to_value(&op).expect("serialize AudioOpDto");
-        assert_eq!(json["type"], tag, "AudioOpDto::{op:?} tag mismatch");
-        let back: AudioOpDto = serde_json::from_value(json).expect("deserialize AudioOpDto");
-        assert_eq!(back, op);
-    }
 }
 
 /// Progress is independent of successful compaction counts and survives idle commands.

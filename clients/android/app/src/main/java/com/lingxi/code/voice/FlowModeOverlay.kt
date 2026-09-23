@@ -35,13 +35,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,7 +61,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.withFrameNanos
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -70,12 +68,32 @@ import com.lingxi.code.R
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.oklch
-import com.lingxi.code.voice.audio.VoiceSpeechPlayer
-import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
+
+/** Delivers chat-turn cancellation once for each visible Flow session. */
+internal class FlowCloseCancellation {
+    private var wasVisible = false
+    private var cancellationDelivered = false
+
+    fun onVisibilityChanged(visible: Boolean, onCancel: () -> Unit) {
+        if (visible) {
+            wasVisible = true
+            cancellationDelivered = false
+        } else if (wasVisible) {
+            wasVisible = false
+            cancelOnce(onCancel)
+        }
+    }
+
+    fun cancelOnce(onCancel: () -> Unit) {
+        if (cancellationDelivered) return
+        cancellationDelivered = true
+        onCancel()
+    }
+}
 
 // MARK: - FlowMode voice orb ("心流" — living LLM presence)
 //
@@ -88,7 +106,6 @@ import kotlin.math.sin
 // → speaking), char-by-char captions, a status label, and an optional pop-up
 // text input. Opened by a TAP on the composer mic.
 
-enum class OrbPhase { Idle, Listening, Thinking, Speaking }
 private class OrbParticle(var a: Float, val rad: Float, val sp: Float, val sz: Float, val tw: Float)
 private class OrbStar(val x: Float, val y: Float, val z: Float, val tw: Float)
 
@@ -287,7 +304,7 @@ private fun LaunchedFrameLoop(onFrame: (now: Long, dt: Float) -> Unit) {
  * entering Flow Mode never replaces the conversation screen.
  */
 @Composable
-fun FlowModeOverlay(
+internal fun FlowModeOverlay(
     visible: Boolean,
     assistantName: String,
     inputDialog: Boolean,
@@ -295,10 +312,16 @@ fun FlowModeOverlay(
     assistantText: String,
     onSend: (String) -> Unit,
     onCancel: () -> Unit,
-    onListen: (onResult: (String?) -> Unit) -> Unit,
+    controller: FlowVoiceController,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val closeCancellation = remember(controller) { FlowCloseCancellation() }
+    val latestOnCancel by rememberUpdatedState(onCancel)
+    LaunchedEffect(visible, controller) {
+        closeCancellation.onVisibilityChanged(visible) { latestOnCancel() }
+        if (!visible) controller.pause()
+    }
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn(tween(300)),
@@ -312,7 +335,8 @@ fun FlowModeOverlay(
             assistantText,
             onSend,
             onCancel,
-            onListen,
+            controller,
+            closeCancellation,
             onClose,
         )
     }
@@ -326,61 +350,28 @@ private fun FlowModeContent(
     assistantText: String,
     onSend: (String) -> Unit,
     onCancel: () -> Unit,
-    onListen: (onResult: (String?) -> Unit) -> Unit,
+    controller: FlowVoiceController,
+    closeCancellation: FlowCloseCancellation,
     onClose: () -> Unit,
 ) {
-    var phase by remember { mutableStateOf(OrbPhase.Idle) }
-    var userCaption by remember { mutableStateOf("") }
-    var didSend by remember { mutableStateOf(false) }
-    var listenGeneration by remember { mutableLongStateOf(0L) }
+    val voiceState by controller.state.collectAsState()
+    val phase = voiceState.phase
     val name = assistantName.ifBlank { stringResource(R.string.app_name) }
-    val (speak, stopSpeak) = rememberTts()
 
-    // Start a one-shot listen → send → (engine streams the reply) cycle.
-    fun listen() {
-        val generation = ++listenGeneration
-        onCancel(); stopSpeak(); userCaption = ""; didSend = false; phase = OrbPhase.Listening
-        onListen { text ->
-            if (generation != listenGeneration) return@onListen
-            if (!text.isNullOrBlank()) {
-                userCaption = text; didSend = true; phase = OrbPhase.Thinking; onSend(text)
-            } else if (phase == OrbPhase.Listening) {
-                phase = OrbPhase.Idle
-            }
-        }
-    }
-    // Auto-listen on open; cancel the turn + stop TTS on close.
-    LaunchedEffect(Unit) { listen() }
-    DisposableEffect(Unit) {
-        onDispose {
-            listenGeneration++
-            cancelActiveOrbVoiceSession()
-            onCancel()
-            stopSpeak()
-        }
-    }
-    // First assistant delta flips thinking → speaking.
-    LaunchedEffect(assistantText) {
-        if (phase == OrbPhase.Thinking && assistantText.isNotEmpty()) phase = OrbPhase.Speaking
-    }
-    // Turn end (streaming → false) settles the orb and speaks the reply aloud.
-    LaunchedEffect(streaming) {
-        if (streaming) {
-            if (phase == OrbPhase.Thinking && assistantText.isNotEmpty()) phase = OrbPhase.Speaking
-        } else if (phase == OrbPhase.Thinking || phase == OrbPhase.Speaking) {
-            phase = OrbPhase.Idle; speak(assistantText)
-        }
-    }
+    // The plain controller owns the pinned listen/reply cycle. Compose only reports
+    // conversation state and forwards user actions.
+    LaunchedEffect(controller) { controller.listen(onSend, onCancel) }
+    LaunchedEffect(assistantText, streaming) { controller.updateReply(assistantText, streaming) }
 
     // The live caption: the user's recognized text while thinking, the streaming
     // assistant reply while speaking.
     val caption = when (phase) {
         OrbPhase.Listening -> ""
-        OrbPhase.Thinking -> userCaption
+        OrbPhase.Thinking -> voiceState.userCaption
         OrbPhase.Speaking -> assistantText
-        OrbPhase.Idle -> if (didSend) assistantText else ""
+        OrbPhase.Idle -> if (voiceState.didSend) assistantText else ""
     }
-    val isAi = phase == OrbPhase.Speaking || (phase == OrbPhase.Idle && didSend)
+    val isAi = phase == OrbPhase.Speaking || (phase == OrbPhase.Idle && voiceState.didSend)
 
     val label = when (phase) {
         OrbPhase.Idle, OrbPhase.Listening -> stringResource(R.string.voice_flow_listening_label)
@@ -388,8 +379,10 @@ private fun FlowModeContent(
         OrbPhase.Speaking -> name
     }
     val sub = when (phase) {
-        OrbPhase.Idle -> ""
-        OrbPhase.Listening -> stringResource(R.string.voice_flow_listening_hint)
+        OrbPhase.Idle -> voiceState.error?.message.orEmpty()
+        OrbPhase.Listening -> stringResource(
+            if (voiceState.isFinalizing) R.string.voice_flow_finalizing_hint else R.string.voice_flow_listening_hint,
+        )
         OrbPhase.Thinking -> stringResource(R.string.voice_flow_thinking_hint)
         OrbPhase.Speaking -> stringResource(R.string.voice_flow_speaking_hint)
     }
@@ -407,20 +400,21 @@ private fun FlowModeContent(
                 ),
             ),
     ) {
-        // The orb — stop the active utterance, or interrupt/re-listen otherwise.
+        // Tapping while listening waits for recognition to finish on its normal silence path.
         OrbCanvas(
             phase = phase,
             cyFrac = 0.43f,
             modifier = Modifier
                 .fillMaxSize()
                 .clickable(
+                    enabled = phase != OrbPhase.Listening || !voiceState.isFinalizing,
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                 ) {
                     if (phase == OrbPhase.Listening) {
-                        stopActiveOrbVoiceSession()
+                        controller.stopListening()
                     } else {
-                        listen()
+                        controller.listen(onSend, onCancel)
                     }
                 },
         )
@@ -446,8 +440,8 @@ private fun FlowModeContent(
                 )
             }
             CircleGlassButton(LXIconName.X, stringResource(R.string.voice_flow_exit_a11y)) {
-                listenGeneration++
-                cancelActiveOrbVoiceSession()
+                controller.close()
+                closeCancellation.cancelOnce(onCancel)
                 onClose()
             }
         }
@@ -599,25 +593,4 @@ private fun FlowTextInput(
             }
         }
     }
-}
-
-/**
- * A best-effort device TTS handle for speaking the assistant reply aloud.
- * Returns (speak, stop); the synthesizer is created/torn down with the caller.
- */
-@Composable
-private fun rememberTts(): Pair<(String) -> Unit, () -> Unit> {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val player = remember(context) { VoiceSpeechPlayer(context) }
-    DisposableEffect(player) {
-        onDispose { player.stop() }
-    }
-    val speak: (String) -> Unit = { text ->
-        if (text.isNotBlank()) {
-            scope.launch { player.speak(text) }
-        }
-    }
-    val stop: () -> Unit = { player.stop() }
-    return speak to stop
 }

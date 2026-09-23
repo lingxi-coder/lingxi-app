@@ -14,6 +14,11 @@ import { fileURLToPath } from 'node:url';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import {
   type AskUserQuestionRequestDto,
+  type AudioCapabilitySnapshotDto,
+  type AudioOperationIdDto,
+  type AudioOperationRequestDto,
+  type AudioOperationResultDto,
+  type AudioOwnerDto,
   BridgeClient,
   type ClientCommand,
   type ClientEvent,
@@ -36,6 +41,15 @@ import {
   validateRequestId,
 } from './validation.js';
 import { resolveFusionCredentialProviderIds, resolveModelCredentialProviderIds } from './credential-broker.js';
+
+export interface DesktopAudioService {
+  getCapabilities(): AudioCapabilitySnapshotDto;
+  initializeCapabilities(): Promise<void>;
+  executeAudioRequest(request: AudioOperationRequestDto): Promise<AudioOperationResultDto>;
+  cancelAudioRequest(identity: AudioOperationIdDto): Promise<void>;
+  endAudioOwner(owner: AudioOwnerDto): Promise<void>;
+  onEvent(callback: (event: { type: string; snapshot?: { capabilities?: AudioCapabilitySnapshotDto } }) => void): () => void;
+}
 
 export const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 export const CH_APPROVE = 'lingxi:approve';
@@ -109,6 +123,8 @@ export interface BridgeManagerOptions {
   /** Direct unit-test/legacy mode can keep the old runtime IPC registration. */
   registerIpc?: boolean;
   diagnostics?: DiagnosticBuffer;
+  /** Main-process device service. Engine audio is dispatched here directly. */
+  audioService?: DesktopAudioService;
   /** Internal process-inspection seam used to recover detached Desktop runtimes after a main-process restart. */
   readProcessCommand?: (pid: number) => string | undefined;
   /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */
@@ -182,6 +198,7 @@ const SERVER_BIN_NAME = process.platform === 'win32' ? 'bridge-server.exe' : 'br
 const MAX_PENDING_PERMISSIONS = 1_000;
 const MAX_PENDING_COMPUTER_ACCESS = 1_000;
 const MAX_PENDING_ASK_USER_QUESTION = 1_000;
+const MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME = 256;
 const require = createRequire(import.meta.url);
 const electronModule = require('electron');
 const ipcMain = (typeof electronModule === 'string' ? undefined : electronModule.ipcMain) ?? {
@@ -194,6 +211,19 @@ function moduleDir(): string {
     return dirname(fileURLToPath(import.meta.url));
   } catch {
     return process.cwd();
+  }
+}
+
+function audioIdentityKey(identity: AudioOperationIdDto): string {
+  return `${identity.service_epoch}:${identity.generation}:${identity.id}`;
+}
+
+function audioOwnerKey(owner: AudioOwnerDto): string {
+  switch (owner.type) {
+    case 'session': return `session:${owner.session_id}`;
+    case 'local_app': return `local_app:${owner.app_id}:${owner.runtime_generation}`;
+    case 'ui': return `ui:${owner.instance_id}`;
+    case 'system': return `system:${owner.instance_id}`;
   }
 }
 
@@ -579,51 +609,6 @@ const TRANSCRIPT_REPLAY_BASE_EVENTS = new Set<ClientEvent['type']>([
   'session_resumed',
 ]);
 
-/**
- * Engine events that must be answered EXACTLY ONCE, and therefore go to a
- * single renderer rather than to every registered one.
- *
- * `audio_request` is not a notification. `audio_bridge.rs` parks the engine
- * call waiting for one `audio_response` (5s / 30s / 180s per op). Broadcast to
- * N windows, each renderer would service it independently: N calls to
- * `getUserMedia`, N real recordings, N answers. The engine drops all but the
- * first, so the WIRE looks correct and nothing reports a problem — but the
- * DEVICE is wrong, and the user sees two recording indicators.
- *
- * Only one `BrowserWindow` exists today (`main/index.ts`), which is precisely
- * why this is enforced structurally instead of noted in a comment: whoever
- * adds a second window will not be looking for this, and the symptom would
- * appear at the microphone rather than in any test or log. Any future
- * engine->client request that expects a single reply belongs in this set.
- */
-const SINGLE_RESPONDER_EVENTS = new Set<ClientEvent['type']>(['audio_request']);
-
-/**
- * How many single-responder requests may be tracked at once. Real use has one
- * or two in flight; past this the request is still delivered but no longer
- * tracked, which is exactly the behaviour before tracking existed - a bound
- * that degrades rather than one that starts refusing real work.
- */
-const MAX_OUTSTANDING_RESPONDER_REQUESTS = 32;
-
-/**
- * What the engine is told when a single-responder request arrives with no
- * window that could service it.
- *
- * Distinct from `reassignResponderRequests`' message on purpose: that one names
- * a window that WAS asked and then closed, this one names a request that never
- * reached a renderer at all. Both are answered from main rather than dropped,
- * for the same reason — see `broadcastClientEvent`.
- */
-const NO_RESPONDER_WINDOW_MESSAGE =
-  'no desktop window is open to perform this audio operation';
-
-/** The correlation id of a single-responder event, or `null` if it carries none. */
-function singleResponderRequestId(event: ClientEvent): number | null {
-  const requestId = (event as { request_id?: unknown }).request_id;
-  return Number.isSafeInteger(requestId) && (requestId as number) >= 0 ? requestId as number : null;
-}
-
 const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'turn_started',
   'turn_ended',
@@ -968,27 +953,35 @@ export class SessionRuntime {
 
   private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
   private readonly targets = new Map<WebContents, Set<string>>();
-  /**
-   * Single-responder requests the engine is currently parked on, and the
-   * window each was handed to.
-   *
-   * Main has to carry this because electing one responder removed the
-   * accidental redundancy broadcasting used to provide: a permission request
-   * reaches every window, so another can answer it, but an audio request has
-   * exactly one addressee and no second chance. If that window dies while the
-   * engine waits, only main knows enough to reroute or to fail the call - the
-   * dead renderer cannot, and the engine has no idea a window ever existed.
-   * The event itself is kept, not just the id, because rerouting means asking
-   * the same question again.
-   */
-  private readonly outstandingResponderRequests = new Map<number, { event: ClientEvent; responder: WebContents }>();
   private readonly diagnostics: DiagnosticBuffer;
   private startPromise: Promise<void> | null = null;
+  private lastAudioCapabilities = '';
+  private readonly unsubscribeAudioService?: () => void;
+  private readonly audioRequestsByGeneration = new Map<number, Map<string, AudioOperationRequestDto>>();
+  private readonly audioStartsByGeneration = new Map<number, Map<string, AudioOperationRequestDto>>();
+  private readonly audioOwnersByGeneration = new Map<number, Map<string, AudioOwnerDto>>();
+  private readonly audioCleanupGenerations = new Map<number, Promise<void>>();
+  private readonly closedAudioGenerations = new Set<number>();
 
   constructor(private readonly opts: BridgeManagerOptions) {
     this.sessionId = opts.sessionId ?? randomUUID();
     this.projectPath = opts.projectPath ?? '';
     this.diagnostics = opts.diagnostics ?? new DiagnosticBuffer();
+    if (opts.audioService) {
+      this.lastAudioCapabilities = JSON.stringify(opts.audioService.getCapabilities());
+      this.unsubscribeAudioService = opts.audioService.onEvent((event) => {
+        const capabilities = event.snapshot?.capabilities;
+        if (!capabilities) return;
+        const serialized = JSON.stringify(capabilities);
+        if (serialized === this.lastAudioCapabilities) return;
+        this.lastAudioCapabilities = serialized;
+        try {
+          this.client?.sendCommand({ type: 'update_audio_capabilities', capabilities });
+        } catch (error) {
+          this.diagnostics.add('warn', 'bridge', `failed to update audio capabilities: ${sanitizeDiagnostic(error)}`);
+        }
+      });
+    }
   }
 
   private startupDiagnostic(event: string, details: Record<string, unknown> = {}): void {
@@ -1266,49 +1259,7 @@ export class SessionRuntime {
     webContents.send(CH_EVENT, this.opts.envelopeEvents ? envelope : event);
   }
 
-  /**
-   * The one renderer that answers single-responder requests: the
-   * first-registered live window. Deterministic (a `Map` preserves insertion
-   * order) and self-healing — destroyed windows are dropped as they are
-   * encountered, the same bookkeeping `broadcast` does.
-   */
-  private responderTarget(): WebContents | null {
-    for (const webContents of this.targets.keys()) {
-      if (webContents.isDestroyed()) this.targets.delete(webContents);
-      else return webContents;
-    }
-    return null;
-  }
-
   private broadcastClientEvent(event: ClientEvent): void {
-    if (SINGLE_RESPONDER_EVENTS.has(event.type)) {
-      // Sent to one window, or to none — never to several. See
-      // SINGLE_RESPONDER_EVENTS. `sendClientEvent` handles both the
-      // enveloped and bare wire shapes, so this needs no second branch.
-      const requestId = singleResponderRequestId(event);
-      const responder = this.responderTarget();
-      if (!responder) {
-        // Nobody can service it, and — unlike the post-dispatch case
-        // `reassignResponderRequests` handles — there is nothing recorded for a
-        // later reopen to rescue either. The engine parked the moment the sink
-        // accepted this event (`FrameAudioSink::emit_request` reports success
-        // while main's socket is up, which it is: `main/index.ts` keeps the app
-        // and the bridge alive on macOS when the last window closes), so
-        // returning silently costs it the full deadline and a failure with
-        // nothing to explain it. Answer from here instead, for the same reason
-        // `reassignResponderRequests` does.
-        if (requestId !== null) this.failResponderRequest(requestId, NO_RESPONDER_WINDOW_MESSAGE);
-        return;
-      }
-      this.sendClientEvent(responder, event, false);
-      if (requestId === null) return;
-      if (this.outstandingResponderRequests.size >= MAX_OUTSTANDING_RESPONDER_REQUESTS) {
-        this.diagnostics.add('warn', 'host', 'too many outstanding audio requests to track');
-        return;
-      }
-      this.outstandingResponderRequests.set(requestId, { event, responder });
-      return;
-    }
     const envelope = this.eventEnvelope(event, true);
     if (!this.opts.envelopeEvents) {
       this.broadcast(CH_EVENT, event);
@@ -1340,55 +1291,7 @@ export class SessionRuntime {
   }
 
   unregisterWindow(webContents: WebContents): void {
-    // Drop the target FIRST, so `responderTarget()` below cannot hand the
-    // request back to the window that is going away.
     this.targets.delete(webContents);
-    this.reassignResponderRequests(webContents);
-  }
-
-  /**
-   * Rescues every request the lost window was going to answer: hands it to
-   * another live window if there is one, and otherwise answers the engine
-   * from here.
-   *
-   * Answering from main is not a nicety. `main/index.ts` keeps the app alive
-   * on macOS when the last window closes, so "start a recording, close the
-   * window" leaves the engine parked with no renderer in existence that could
-   * ever reply. Without this it waits out its whole deadline and fails with
-   * nothing to explain it; with it the failure is immediate and says what
-   * happened.
-   */
-  private reassignResponderRequests(lost: WebContents): void {
-    for (const [requestId, pending] of [...this.outstandingResponderRequests]) {
-      if (pending.responder !== lost) continue;
-      this.outstandingResponderRequests.delete(requestId);
-      const next = this.responderTarget();
-      if (next) {
-        this.outstandingResponderRequests.set(requestId, { event: pending.event, responder: next });
-        this.sendClientEvent(next, pending.event, false);
-        continue;
-      }
-      this.failResponderRequest(
-        requestId,
-        'the desktop window that was asked to perform this audio operation closed before it could answer',
-      );
-    }
-  }
-
-  /** Answers a parked engine request from main, because no renderer can. */
-  private failResponderRequest(requestId: number, message: string): void {
-    const command: ClientCommand = {
-      type: 'audio_response',
-      request_id: requestId,
-      result: { type: 'failed', kind: 'unavailable', message },
-    };
-    try {
-      this.client?.sendCommand(command);
-    } catch (error) {
-      // The transport may already be gone, in which case the engine's own
-      // drain will fail the call. Never let this throw out of window teardown.
-      this.diagnostics.add('warn', 'host', error);
-    }
   }
 
   private clearPendingAskUserQuestion(requestId: number): void {
@@ -1400,24 +1303,7 @@ export class SessionRuntime {
     this.opts.onActivityChanged?.();
   }
 
-  /**
-   * Forgets the interactions the engine itself drops when a turn ends.
-   *
-   * `outstandingResponderRequests` is deliberately NOT among them. The engine
-   * drains parked audio requests from `BridgeConnection::close_connection`
-   * only — `AudioResponder::drain()` has no other call site, `TurnInteractions`
-   * carries the permission gate, the computer-access broker, the
-   * AskUserQuestion broker and the tool-name map but no audio responder, and
-   * server.rs says so in as many words: "Audio requests are drained on
-   * DISCONNECT only, never at end-of-turn". `cancel_active_turn` sets a
-   * cooperative token rather than aborting the tool future, and neither
-   * `speech` nor `voice` overrides `Tool::interrupt_behavior`, whose default
-   * `Block` keeps the parked call alive across a Stop. So an audio request is
-   * still parked after this runs, and dropping the tracking here would disarm
-   * the window-close rescue for exactly the case it was written for. The
-   * matching clear lives in `stopBridge`, which is where the disconnect — and
-   * therefore the engine's own drain — actually happens.
-   */
+  /** Turn completion clears prompts, while successful recordings remain owner-scoped. */
   private clearTurnInteractions(): void {
     this.pendingPermissionIds.clear();
     this.resolvedPermissionIds.clear();
@@ -1621,11 +1507,13 @@ export class SessionRuntime {
       this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, generation));
       if (generation !== this.generation) return;
       this.child = null;
+      void this.teardownAudioGeneration(generation);
       if (!this.disposed) {
         this.setState({ status: 'disconnected', reason: `bridge-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})` });
       }
     });
     child.once('error', (error) => {
+      if (generation === this.generation) void this.teardownAudioGeneration(generation);
       if (generation === this.generation && !this.disposed) this.fail(`failed to spawn bridge-server: ${error.message}`);
     });
 
@@ -1659,7 +1547,17 @@ export class SessionRuntime {
     this.setState({ status: 'connecting' });
     const startedAt = Date.now();
     this.startupDiagnostic('bridge_connect_started', { generation, restorePermission });
-    const client = new BridgeClient({ lockfilePath, clientName: 'lingxi-electron/0.1.0' });
+    try {
+      await this.opts.audioService?.initializeCapabilities();
+    } catch (error) {
+      this.diagnostics.add('warn', 'bridge', `audio capability initialization failed: ${sanitizeDiagnostic(error)}`);
+    }
+    const initialAudioCapabilities = this.opts.audioService?.getCapabilities();
+    const client = new BridgeClient({
+      lockfilePath,
+      clientName: 'lingxi-electron/0.1.0',
+      ...(initialAudioCapabilities ? { audioCapabilities: initialAudioCapabilities } : {}),
+    });
     this.client = client;
     this.wireClient(client, generation);
     const handshakeStartedAt = Date.now();
@@ -1670,6 +1568,14 @@ export class SessionRuntime {
       phase: 'websocket_handshake',
     });
     if (generation !== this.generation || this.disposed) return;
+    const currentAudioCapabilities = this.opts.audioService?.getCapabilities();
+    if (
+      currentAudioCapabilities
+      && JSON.stringify(currentAudioCapabilities) !== JSON.stringify(initialAudioCapabilities)
+    ) {
+      client.sendCommand({ type: 'update_audio_capabilities', capabilities: currentAudioCapabilities });
+      this.lastAudioCapabilities = JSON.stringify(currentAudioCapabilities);
+    }
     this.lastRuntimeVersions = {
       serverName: hello.server_name,
       serverProtocol: hello.protocol_version,
@@ -1951,6 +1857,23 @@ export class SessionRuntime {
     // from SessionResumed by other connection events. Live deltas still need a turn.
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation) return;
+      if (event.type === 'audio_request') {
+        void this.dispatchAudioRequest(client, generation, event.request);
+        return;
+      }
+      if (event.type === 'audio_cancel') {
+        const identityKey = audioIdentityKey(event.identity);
+        const start = this.audioStartsByGeneration.get(generation)?.get(identityKey);
+        if (start) this.audioStartsByGeneration.get(generation)?.delete(identityKey);
+        this.audioRequestsByGeneration.get(generation)?.delete(audioIdentityKey(event.identity));
+        void this.opts.audioService?.cancelAudioRequest(event.identity).catch((error) => {
+          this.diagnostics.add('warn', 'bridge', `native audio cancellation failed: ${sanitizeDiagnostic(error)}`);
+        });
+        if (start) void this.opts.audioService?.endAudioOwner(start.owner).catch((error) => {
+          this.diagnostics.add('warn', 'bridge', `cancelled recording rollback failed: ${sanitizeDiagnostic(error)}`);
+        });
+        return;
+      }
       const resumedUsage = event.type === 'usage_update' && event.is_snapshot === true;
       this.gitActivity.accept(event);
       if (event.type === 'openai_oauth_updated') {
@@ -2244,11 +2167,101 @@ export class SessionRuntime {
       }
     });
     client.on('close', (code, reason) => {
+      if (generation === this.generation) void this.teardownAudioGeneration(generation);
       if (generation === this.generation && !this.disposed) this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
     });
     client.on('error', (error) => {
+      if (generation === this.generation) void this.teardownAudioGeneration(generation);
       if (generation === this.generation && !this.disposed) this.fail(error);
     });
+  }
+
+  private async dispatchAudioRequest(
+    client: BridgeClient,
+    generation: number,
+    request: AudioOperationRequestDto,
+  ): Promise<void> {
+    const unavailable: AudioOperationResultDto = {
+      type: 'failed',
+      error: { kind: 'unavailable', message: 'the desktop audio service is unavailable' },
+    };
+    const requestKey = audioIdentityKey(request.identity);
+    const requests = this.audioRequestsByGeneration.get(generation) ?? new Map<string, AudioOperationRequestDto>();
+    if (requests.size >= MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME && !requests.has(requestKey)) {
+      try {
+        client.sendCommand({ type: 'audio_response', identity: request.identity, result: {
+          type: 'failed', error: { kind: 'busy', message: 'too many audio operations are pending for this runtime' },
+        } });
+      } catch { /* The connection is already gone. */ }
+      return;
+    }
+    requests.set(requestKey, request);
+    this.audioRequestsByGeneration.set(generation, requests);
+    const starts = this.audioStartsByGeneration.get(generation) ?? new Map<string, AudioOperationRequestDto>();
+    this.audioStartsByGeneration.set(generation, starts);
+    const owners = this.audioOwnersByGeneration.get(generation) ?? new Map<string, AudioOwnerDto>();
+    owners.set(audioOwnerKey(request.owner), request.owner);
+    this.audioOwnersByGeneration.set(generation, owners);
+    let result: AudioOperationResultDto = unavailable;
+    try {
+      result = this.opts.audioService
+        ? await this.opts.audioService.executeAudioRequest(request)
+        : unavailable;
+    } catch (error) {
+      result = {
+        type: 'failed',
+        error: { kind: 'native_failure', message: sanitizeDiagnostic(error) },
+      };
+    }
+    requests.delete(requestKey);
+    if (generation !== this.generation || client !== this.client || this.disposed || this.closedAudioGenerations.has(generation)) {
+      await this.opts.audioService?.cancelAudioRequest(request.identity).catch(() => undefined);
+      if (request.operation.type === 'start_recording' && result.type === 'recording_started') {
+        await this.opts.audioService?.endAudioOwner(request.owner).catch(() => undefined);
+      }
+      return;
+    }
+    if (
+      result.type !== 'failed'
+      && (request.operation.type === 'end_owner'
+        || request.operation.type === 'stop_recording'
+        || request.operation.type === 'listen')
+    ) {
+      const ownerKey = audioOwnerKey(request.owner);
+      owners.delete(ownerKey);
+      for (const [identity, start] of starts) if (audioOwnerKey(start.owner) === ownerKey) starts.delete(identity);
+    }
+    if (request.operation.type === 'start_recording' && result.type === 'recording_started') starts.set(requestKey, request);
+    try {
+      client.sendCommand({ type: 'audio_response', identity: request.identity, result });
+    } catch (error) {
+      this.diagnostics.add('warn', 'bridge', `failed to return native audio result: ${sanitizeDiagnostic(error)}`);
+      void this.opts.audioService?.cancelAudioRequest(request.identity);
+      if (request.operation.type === 'start_recording' && result.type === 'recording_started') {
+        void this.opts.audioService?.endAudioOwner(request.owner);
+      }
+    }
+  }
+
+  private async teardownAudioGeneration(generation: number): Promise<void> {
+    this.closedAudioGenerations.add(generation);
+    if (this.closedAudioGenerations.size > 64) this.closedAudioGenerations.delete(this.closedAudioGenerations.values().next().value!);
+    const existing = this.audioCleanupGenerations.get(generation);
+    if (existing) return existing;
+    const requests = this.audioRequestsByGeneration.get(generation);
+    const starts = this.audioStartsByGeneration.get(generation);
+    const owners = this.audioOwnersByGeneration.get(generation);
+    this.audioRequestsByGeneration.delete(generation);
+    this.audioStartsByGeneration.delete(generation);
+    this.audioOwnersByGeneration.delete(generation);
+    const cleanup = Promise.allSettled([
+      ...[...(requests?.values() ?? [])].map((request) => this.opts.audioService?.cancelAudioRequest(request.identity)),
+      ...[...(starts?.values() ?? [])].map((request) => this.opts.audioService?.cancelAudioRequest(request.identity)),
+      ...[...(owners?.values() ?? [])].map((owner) => this.opts.audioService?.endAudioOwner(owner)),
+    ]).then(() => undefined);
+    this.audioCleanupGenerations.set(generation, cleanup);
+    await cleanup;
+    this.audioCleanupGenerations.delete(generation);
   }
 
   private handleProviderCredentialStatus(event: ProviderCredentialStatus): void {
@@ -2583,12 +2596,6 @@ export class SessionRuntime {
       if (!accepted) {
         throw new Error('Bypass Permissions mode was not accepted');
       }
-    }
-    if (validated.type === 'audio_response') {
-      // The renderer answered; nothing left for a window closure to rescue.
-      // Forgetting BEFORE the forward matters: a failure invented afterwards
-      // would race a real reply the engine has already accepted.
-      this.outstandingResponderRequests.delete(validated.request_id);
     }
     if (validated.type === 'set_model' && (this.opts.resolveProviderCredential || this.opts.resolveOpenAiOAuth || this.opts.onModelSelected)) {
       if (validated.model.startsWith('openai-chatgpt/') && !this.openAiOAuthActive && this.opts.resolveOpenAiOAuth) {
@@ -2927,6 +2934,9 @@ export class SessionRuntime {
   }
 
   private async stopBridge(): Promise<void> {
+    const stoppingGeneration = this.generation;
+    ++this.generation;
+    await this.teardownAudioGeneration(stoppingGeneration);
     await this.oauthPersistence;
     this.openAiOAuthActive = false;
     for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
@@ -2935,7 +2945,6 @@ export class SessionRuntime {
     this.pendingScheduledTurns.clear();
     for (const pending of this.pendingRunBindings.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled execution interrupted.')); }
     this.pendingRunBindings.clear();
-    ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
     this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
@@ -2945,12 +2954,6 @@ export class SessionRuntime {
     this.credentialRoutingSettings = undefined;
     this.pendingPromptHydrations.clear();
     this.clearTurnInteractions();
-    // Losing the connection IS the engine's own drain: `close_connection`
-    // drops every parked audio sender, so each in-flight call has already
-    // failed and a window closing later must not answer one nobody is waiting
-    // on. This is the only place that premise holds — see
-    // `clearTurnInteractions`.
-    this.outstandingResponderRequests.clear();
     for (const pending of this.pendingCredentialOperations.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('bridge credential operation was interrupted'));
@@ -3057,6 +3060,7 @@ export class SessionRuntime {
       this.setState({ status: 'disconnected', reason: SESSION_RUNTIME_DISPOSED_REASON });
     }
     await this.stopBridge();
+    this.unsubscribeAudioService?.();
     this.unregisterIpc();
     this.targets.clear();
   }

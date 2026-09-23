@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.ContextCompat
 import androidx.core.content.pm.PackageInfoCompat
@@ -30,16 +31,21 @@ import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.SessionModeDto
-import com.lingxi.code.bindings.SpeechFfiException
 import com.lingxi.code.bindings.WorkflowProgressDto
 import com.lingxi.code.bindings.buildAndroidEngineWithMobileLinux
 import com.lingxi.code.location.AndroidLocationAdapter
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.toDto
-import com.lingxi.code.voice.audio.AndroidSttAdapter
-import com.lingxi.code.voice.audio.AndroidTtsAdapter
-import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
+import com.lingxi.code.voice.audio.AndroidAudioServiceProvider
+import com.lingxi.code.voice.audio.AndroidNativeAudioServiceAdapter
+import com.lingxi.code.voice.audio.AudioOwnerKey
+import com.lingxi.code.voice.audio.DeviceAudioErrorKind
+import com.lingxi.code.voice.audio.DeviceAudioOperation
+import com.lingxi.code.voice.audio.DeviceAudioResult
+import com.lingxi.code.voice.audio.AudioOperationException
+import com.lingxi.code.voice.audio.AudioDriverException
+import com.lingxi.code.voice.audio.DeviceAudioError
 import com.lingxi.code.vision.AndroidCameraAdapter
 import com.lingxi.code.share.AndroidShareAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
@@ -49,12 +55,16 @@ import com.lingxi.code.device.AndroidDeviceControlAdapter
 import com.lingxi.code.secure.AndroidSecureStorageAdapter
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
-import com.lingxi.code.voice.recorder.AndroidVoiceAdapter
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "VoiceController"
 
@@ -156,23 +166,17 @@ fun voiceStrings(context: Context): VoiceStrings =
  *
  * Two concerns live here:
  *  1. [buildVoiceEngine] constructs the real [MobileEngineHandle] through the
- *     generated UniFFI `buildAndroidEngine(...)`, handing it the [AndroidStt] /
- *     [AndroidTts] adapters (T3.2) over the device's system recognizer /
- *     synthesizer plus a foreground event listener and config. This is the
- *     end-to-end FFI seam: the engine's `tool-speech` now routes through the
- *     device's native STT/TTS. On a non-Android host (and if the cdylib fails to
- *     load) it returns `null` rather than crashing the shell.
- *  2. [rememberVoiceCapture] turns the hold-to-talk release into a real
- *     transcription. Releasing the held mic checks the `RECORD_AUDIO` runtime
- *     permission (requesting it on first use) and, when granted, drives the same
- *     [SystemSpeechRecognizerStt] adapter to capture one utterance; the
- *     recognized text is routed back into the composer draft via [onTranscript].
+ *     generated UniFFI `buildAndroidEngine(...)` with one app-scoped audio
+ *     callback. UI, Flow, tool, Local App, and Computer Use requests all share
+ *     the same service and resource arbitration. On a non-Android host (and if
+ *     the cdylib fails to load) it returns `null` rather than crashing the shell.
+ *  2. [rememberVoiceCapture] routes hold-to-talk through the app-scoped audio
+ *     service. It gates on `RECORD_AUDIO`, starts one owner-bound live Listen
+ *     session, and sends the final transcript back to the composer draft.
  */
 
 /**
- * Build the engine over the device's native speech stack. The STT/TTS adapters
- * are the exact objects the engine bridges onto `traits::SpeechToText` /
- * `traits::TextToSpeech`, so the speech tool runs on-device.
+ * Build the engine over the device's app-scoped audio service.
  *
  * [onEvent] is the single sink for every inbound engine [ClientEvent]: the
  * caller (the conversation source) owns the registered listener so the chat
@@ -216,9 +220,7 @@ fun buildVoiceEngine(
     },
 ): MobileEngineHandle? {
     val appContext = context.applicationContext
-    val voiceRuntime = AndroidVoiceRuntime(appContext)
-    val stt = AndroidSttAdapter(RuntimeSpeechRecognizerStt(voiceRuntime))
-    val tts = AndroidTtsAdapter(RuntimeTextToSpeechTts(voiceRuntime))
+    val audio = AndroidNativeAudioServiceAdapter(appContext)
     // Device-vision: the camera adapter drives the process-global CameraController,
     // whose ActivityResult launchers are registered by MainActivity. The engine
     // bridges this onto `traits::CameraControl`, lighting up `tool-camera` on-device.
@@ -227,11 +229,6 @@ fun buildVoiceEngine(
     // whose Context is attached by MainActivity. The engine bridges this onto
     // `traits::SharingService`, lighting up `tool-share` on-device.
     val share = AndroidShareAdapter()
-    // Device-voice: the voice adapter drives the process-global RecorderController,
-    // whose Context is attached by MainActivity. The engine bridges this onto
-    // `traits::VoiceRecorder`, lighting up `tool-voice`'s raw mic recorder
-    // on-device (distinct from the STT hold-to-talk path above).
-    val voice = AndroidVoiceAdapter()
     // Device-notifications: the notification adapter drives the process-global
     // NotificationController, whose Context is attached by MainActivity. The
     // engine bridges this onto `traits::NotificationService`, lighting up
@@ -319,11 +316,9 @@ fun buildVoiceEngine(
                 hostEnvironment = androidHostEnvironment(appContext, launchMode),
             ),
             listener = listener,
-            stt = stt,
-            tts = tts,
+            audio = audio,
             camera = camera,
             share = share,
-            voice = voice,
             location = location,
             notifications = notifications,
             clipboard = clipboard,
@@ -419,29 +414,11 @@ object VoiceCaptureStore {
 
 /** Drives a single hold-to-talk transcription, gated on RECORD_AUDIO. */
 class VoiceCapture internal constructor(
-    private val context: Context,
     private val requestPermission: () -> Unit,
     private val hasPermission: () -> Boolean,
     private val onPartialTranscript: (String) -> Unit = {},
-    private val openRealtimeSession: (String?, RealtimeSpeechCallbacks) -> RealtimeSpeechSession? = { language, callbacks ->
-        SystemSpeechRecognizerStt(context.applicationContext).openRealtimeSession(language, callbacks)
-    },
-    private val transcribeOnce: suspend (String?) -> VoiceCaptureResult = { language ->
-        val adapter = AndroidSttAdapter(SystemSpeechRecognizerStt(context.applicationContext))
-        try {
-            val text = adapter.transcribe(language).trim()
-            if (text.isEmpty()) VoiceCaptureResult.Empty
-            else VoiceCaptureResult.Transcript(text)
-        } catch (e: SpeechFfiException.PermissionDenied) {
-            VoiceCaptureResult.PermissionDenied
-        } catch (e: SpeechFfiException.NoSpeech) {
-            VoiceCaptureResult.Empty
-        } catch (e: SpeechFfiException) {
-            VoiceCaptureResult.Failed(e.message ?: "speech error")
-        } catch (t: Throwable) {
-            VoiceCaptureResult.Failed(t.message ?: "speech error")
-        }
-    },
+    private val openRealtimeSession: (String?, RealtimeSpeechCallbacks) -> RealtimeSpeechSession?,
+    private val transcribeOnce: suspend (String?) -> VoiceCaptureResult,
     private val strings: VoiceStrings = DefaultVoiceStrings,
 ) {
     private var session: RealtimeSpeechSession? = null
@@ -491,6 +468,7 @@ class VoiceCapture internal constructor(
         val captureGeneration = ++generation
         session = null
         pendingResult = onResult
+        val terminalResultDelivered = AtomicBoolean(false)
         previousSession?.cancel()
         VoiceCaptureStore.update {
             it.copy(
@@ -502,7 +480,7 @@ class VoiceCapture internal constructor(
             )
         }
         session = try {
-            openRealtimeSession(language, object : RealtimeSpeechCallbacks {
+            val openedSession = openRealtimeSession(language, object : RealtimeSpeechCallbacks {
                 override fun onReady() {
                     if (generation != captureGeneration) return
                     VoiceCaptureStore.update {
@@ -528,7 +506,7 @@ class VoiceCapture internal constructor(
                 }
 
                 override fun onFinal(text: String) {
-                    if (generation != captureGeneration) return
+                    if (generation != captureGeneration || !terminalResultDelivered.compareAndSet(false, true)) return
                     val trimmed = text.trim()
                     VoiceCaptureStore.update {
                         it.copy(
@@ -551,7 +529,7 @@ class VoiceCapture internal constructor(
                 }
 
                 override fun onError(code: String, message: String, retriable: Boolean) {
-                    if (generation != captureGeneration) return
+                    if (generation != captureGeneration || !terminalResultDelivered.compareAndSet(false, true)) return
                     session = null
                     val result = when (code) {
                         "permission_denied" -> VoiceCaptureResult.PermissionDenied
@@ -597,6 +575,7 @@ class VoiceCapture internal constructor(
                     }
                 }
             })
+            if (terminalResultDelivered.get()) null else openedSession
         } catch (e: IllegalStateException) {
             val callback = pendingResult
             pendingResult = null
@@ -680,82 +659,6 @@ class VoiceCapture internal constructor(
     }
 }
 
-/**
- * Lifecycle-aware control for Flow Mode's tap-to-talk recognizer.
- *
- * A first tap starts one live recognizer session, a second tap asks Android to
- * finish that same utterance, and [cancel] tears the session down without
- * delivering a late transcript.
- */
-interface OrbVoiceListenController : ((String?) -> Unit) -> Unit {
-    fun isActive(): Boolean
-    fun start(onResult: (String?) -> Unit)
-    fun stop()
-    fun cancel()
-
-    override fun invoke(onResult: (String?) -> Unit) {
-        start(onResult)
-    }
-}
-
-internal class DefaultOrbVoiceListenController(
-    private val capture: VoiceCapture,
-) : OrbVoiceListenController {
-    override fun isActive(): Boolean = capture.isActive()
-
-    override fun start(onResult: (String?) -> Unit) {
-        if (capture.isActive()) {
-            capture.stop()
-            return
-        }
-        capture.ensurePermission()
-        if (!capture.isPermitted()) {
-            onResult(null)
-            return
-        }
-        capture.start { result ->
-            onResult((result as? VoiceCaptureResult.Transcript)?.text)
-        }
-    }
-
-    override fun stop() {
-        capture.stop()
-    }
-
-    override fun cancel() {
-        capture.cancel()
-    }
-}
-
-private object OrbVoiceSessionRegistry {
-    private var controller: OrbVoiceListenController? = null
-
-    fun attach(value: OrbVoiceListenController) {
-        controller = value
-    }
-
-    fun detach(value: OrbVoiceListenController) {
-        if (controller === value) controller = null
-    }
-
-    fun stopActive(): Boolean {
-        val activeController = controller?.takeIf { it.isActive() } ?: return false
-        activeController.stop()
-        return true
-    }
-
-    fun cancelActive() {
-        controller?.takeIf { it.isActive() }?.cancel()
-    }
-}
-
-internal fun stopActiveOrbVoiceSession(): Boolean =
-    OrbVoiceSessionRegistry.stopActive()
-
-internal fun cancelActiveOrbVoiceSession() {
-    OrbVoiceSessionRegistry.cancelActive()
-}
-
 private object HeldVoiceSessionRegistry {
     private var capture: VoiceCapture? = null
 
@@ -791,7 +694,8 @@ fun rememberVoiceCapture(
     onPartialTranscript: (String) -> Unit = {},
 ): Pair<() -> Unit, () -> Unit> {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val voiceRuntime = remember(context) { AndroidVoiceRuntime(context) }
+    val coroutineScope = rememberCoroutineScope()
+    val owner = remember(context) { AudioOwnerKey.ui("held-voice-${UUID.randomUUID()}") }
     val currentOnPartial = rememberUpdatedState(onPartialTranscript)
     val currentOnTranscript = rememberUpdatedState(onTranscript)
 
@@ -801,7 +705,6 @@ fun rememberVoiceCapture(
 
     val capture = remember(context) {
         VoiceCapture(
-            context = context,
             requestPermission = { permLauncher.launch(Manifest.permission.RECORD_AUDIO) },
             hasPermission = {
                 ContextCompat.checkSelfPermission(
@@ -811,20 +714,23 @@ fun rememberVoiceCapture(
             },
             onPartialTranscript = { currentOnPartial.value(it) },
             openRealtimeSession = { language, callbacks ->
-                voiceRuntime.openRealtimeSession(language, callbacks)
+                ServiceRealtimeListenSession(coroutineScope, callbacks) { serviceCallbacks ->
+                    AndroidAudioServiceProvider.openRealtimeListen(context, owner, language, serviceCallbacks)
+                }
             },
             transcribeOnce = { language ->
-                when (val result = voiceRuntime.transcribe(language)) {
-                    is com.lingxi.code.voice.audio.SttResult.Ok -> {
-                        val text = result.text.trim()
-                        if (text.isEmpty()) VoiceCaptureResult.Empty
-                        else VoiceCaptureResult.Transcript(text)
+                when (val result = AndroidAudioServiceProvider.perform(
+                    context = context,
+                    owner = owner,
+                    operation = DeviceAudioOperation.Listen(language),
+                )) {
+                    is DeviceAudioResult.Transcript -> VoiceCaptureResult.Transcript(result.text.trim())
+                    is DeviceAudioResult.Failed -> when (result.error.kind) {
+                        DeviceAudioErrorKind.PermissionDenied -> VoiceCaptureResult.PermissionDenied
+                        DeviceAudioErrorKind.NoSpeech -> VoiceCaptureResult.Empty
+                        else -> VoiceCaptureResult.Failed(result.error.message)
                     }
-                    is com.lingxi.code.voice.audio.SttResult.Err -> when (result.code) {
-                        "permission_denied" -> VoiceCaptureResult.PermissionDenied
-                        "no_speech" -> VoiceCaptureResult.Empty
-                        else -> VoiceCaptureResult.Failed(result.message)
-                    }
+                    else -> VoiceCaptureResult.Failed("Audio service returned an unexpected listen result.")
                 }
             },
             strings = voiceStrings(context),
@@ -856,57 +762,62 @@ fun rememberVoiceCapture(
     return onHoldStart to onHoldRelease
 }
 
-/**
- * Compose entry point for the FlowMode orb's one-shot listen. The recognizer
- * remains live after [OrbVoiceListenController.start] until Android delivers a
- * final/error result, the user calls [OrbVoiceListenController.stop], or the
- * overlay calls [OrbVoiceListenController.cancel].
- */
-@Composable
-fun rememberOrbVoiceListen(): OrbVoiceListenController {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val voiceRuntime = remember(context) { AndroidVoiceRuntime(context) }
-    val permLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { /* observed on the next listen via hasPermission() */ }
-    val capture = remember(context) {
-        VoiceCapture(
-            context = context,
-            requestPermission = { permLauncher.launch(Manifest.permission.RECORD_AUDIO) },
-            hasPermission = {
-                ContextCompat.checkSelfPermission(
-                    context, Manifest.permission.RECORD_AUDIO,
-                ) == PackageManager.PERMISSION_GRANTED
-            },
-            openRealtimeSession = { language, callbacks ->
-                voiceRuntime.openRealtimeSession(language, callbacks)
-            },
-            transcribeOnce = { language ->
-                when (val result = voiceRuntime.transcribe(language)) {
-                    is com.lingxi.code.voice.audio.SttResult.Ok -> {
-                        val text = result.text.trim()
-                        if (text.isEmpty()) VoiceCaptureResult.Empty
-                        else VoiceCaptureResult.Transcript(text)
-                    }
-                    is com.lingxi.code.voice.audio.SttResult.Err -> when (result.code) {
-                        "permission_denied" -> VoiceCaptureResult.PermissionDenied
-                        "no_speech" -> VoiceCaptureResult.Empty
-                        else -> VoiceCaptureResult.Failed(result.message)
-                    }
+/** Adapts the service's live Listen operation to VoiceCapture's callback lifecycle. */
+internal class ServiceRealtimeListenSession(
+    scope: CoroutineScope,
+    callbacks: RealtimeSpeechCallbacks,
+    private val openServiceSession: suspend (RealtimeSpeechCallbacks) -> RealtimeSpeechSession,
+) : RealtimeSpeechSession {
+    @Volatile private var terminal = false
+    @Volatile private var stopRequested = false
+    @Volatile private var nativeSession: RealtimeSpeechSession? = null
+    private val job: Job = scope.launch {
+        try {
+            val session = openServiceSession(callbacks)
+            nativeSession = session
+            if (stopRequested) session.stop()
+            if (terminal) session.cancel()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            if (!terminal) {
+                terminal = true
+                callbacks.onError("cancelled", "Speech recognition was cancelled.", false)
+                callbacks.onClosed()
+            }
+        } catch (error: Throwable) {
+            if (!terminal) {
+                terminal = true
+                val audioError = when (error) {
+                    is AudioOperationException -> DeviceAudioError(error.kind, error.message ?: "Speech recognition failed.")
+                    is AudioDriverException -> error.error
+                    else -> DeviceAudioError(DeviceAudioErrorKind.NativeFailure, error.message ?: "Speech recognition failed.")
                 }
-            },
-            strings = voiceStrings(context),
-        )
-    }
-    val controller = remember(capture) {
-        DefaultOrbVoiceListenController(capture)
-    }
-    DisposableEffect(capture, controller) {
-        OrbVoiceSessionRegistry.attach(controller)
-        onDispose {
-            OrbVoiceSessionRegistry.detach(controller)
-            capture.dispose()
+                val code = when (audioError.kind) {
+                    DeviceAudioErrorKind.PermissionDenied -> "permission_denied"
+                    DeviceAudioErrorKind.NoSpeech -> "no_speech"
+                    DeviceAudioErrorKind.Timeout -> "timeout"
+                    DeviceAudioErrorKind.Cancelled -> "cancelled"
+                    else -> audioError.kind.name.lowercase()
+                }
+                callbacks.onError(
+                    code,
+                    audioError.message,
+                    audioError.kind in setOf(DeviceAudioErrorKind.Busy, DeviceAudioErrorKind.Timeout, DeviceAudioErrorKind.Unavailable, DeviceAudioErrorKind.NativeFailure),
+                )
+                callbacks.onClosed()
+            }
         }
     }
-    return controller
+
+    override fun stop() {
+        stopRequested = true
+        nativeSession?.stop()
+    }
+
+    override fun cancel() {
+        terminal = true
+        nativeSession?.cancel()
+        job.cancel()
+    }
+
+    override fun close() = cancel()
 }

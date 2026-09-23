@@ -1001,6 +1001,7 @@ pub(crate) struct MainThreadAgentState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WireToolSchemaCacheKey {
     tool_names: Vec<String>,
+    dynamic_schema_revisions: Vec<(String, String)>,
     model: String,
     model_profile: Option<String>,
     /// Whether the `workflow-authoring` skill was loadable when this entry was

@@ -2027,7 +2027,8 @@
     <string name="voice_flow_busy_wait_to_retry">Please wait for the current reply or conversation switch to finish before retrying</string>
     <string name="voice_flow_exit_a11y">Exit flow mode</string>
     <string name="voice_flow_hint_with_input">%1$s · You can keep using the input box below</string>
-    <string name="voice_flow_listening_hint">Tap to stop recording when done · or keep talking</string>
+    <string name="voice_flow_listening_hint">Tap when done to finish recognition · or keep talking</string>
+    <string name="voice_flow_finalizing_hint">Waiting for speech recognition to finish…</string>
     <string name="voice_flow_listening_label">Listening</string>
     <string name="voice_flow_mode_label">Flow Mode</string>
     <string name="voice_flow_release_hint">Release to send · swipe up to cancel</string>

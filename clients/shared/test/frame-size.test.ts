@@ -46,8 +46,8 @@ test('sendCommand refuses an oversize command instead of putting it on the socke
   assert.throws(
     () => client.sendCommand({
       type: 'audio_response',
-      request_id: 1,
-      result: { type: 'recording', audio_base64: 'A'.repeat(MAX_BRIDGE_FRAME_BYTES), mime_type: 'audio/webm' },
+      identity: { id: '00000000-0000-4000-8000-000000000001', generation: 1, service_epoch: 1 },
+      result: { type: 'recording', audio_base64: 'A'.repeat(MAX_BRIDGE_FRAME_BYTES), mime_type: 'audio/wav' },
     } as never),
     /too large/,
     'an over-length command must fail here, not tear the connection down at the engine',

@@ -4,6 +4,9 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import android.content.ContextWrapper
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -17,6 +20,62 @@ import java.nio.ByteOrder
  * 44-byte canonical PCM header against the WAV spec, not just "it parses".
  */
 class PcmWavTest {
+
+    private fun chunk(tag: String, payload: ByteArray): ByteArray =
+        ByteArrayOutputStream().apply {
+            write(tag.toByteArray(Charsets.US_ASCII))
+            write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(payload.size).array())
+            write(payload)
+            if (payload.size % 2 != 0) write(0)
+        }.toByteArray()
+
+    private fun wavWithChunks(
+        pcm: ByteArray,
+        sampleRate: Int = 24_000,
+        format: Int = 1,
+    ): ByteArray {
+        val fmt = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
+            .putShort(format.toShort())
+            .putShort(1)
+            .putInt(sampleRate)
+            .putInt(sampleRate * 2)
+            .putShort(2)
+            .putShort(16)
+            .array()
+        val body = ByteArrayOutputStream().apply {
+            write("WAVE".toByteArray(Charsets.US_ASCII))
+            write(chunk("JUNK", byteArrayOf(9, 8, 7))) // odd-sized chunk and pad byte
+            write(chunk("fmt ", fmt))
+            write(chunk("data", pcm))
+        }.toByteArray()
+        return ByteArrayOutputStream().apply {
+            write("RIFF".toByteArray(Charsets.US_ASCII))
+            write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(body.size).array())
+            write(body)
+        }.toByteArray()
+    }
+
+    /** Exercises the same parser called after TextToSpeech.synthesizeToFile. */
+    private fun readWavThroughSystemProvider(
+        bytes: ByteArray,
+        maxPcmBytes: Int = 1_000_000,
+    ): Pair<ByteArray, Int> {
+        val file = File.createTempFile("lingxi-audio-test", ".wav")
+        return try {
+            file.writeBytes(bytes)
+            val provider = SystemTextToSpeechTts(ContextWrapper(null))
+            val parser = SystemTextToSpeechTts::class.java.getDeclaredMethod(
+                "readWav",
+                File::class.java,
+                Int::class.javaPrimitiveType,
+            )
+                .apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            parser.invoke(provider, file, maxPcmBytes) as Pair<ByteArray, Int>
+        } finally {
+            file.delete()
+        }
+    }
 
     /** Read a 4-byte ASCII tag at [offset]. */
     private fun ByteArray.ascii(offset: Int, len: Int): String =
@@ -128,5 +187,36 @@ class PcmWavTest {
         val ex = runCatching { pcm16ToWav(ByteArray(4), sampleRateHz = 16_000, channels = 3) }
         assertTrue("3 channels must be rejected", ex.isFailure)
         assertTrue(ex.exceptionOrNull() is IllegalArgumentException)
+    }
+
+    @Test
+    fun parserFindsPcmAndSampleRateAcrossUnknownOddSizedRiffChunks() {
+        val pcm = byteArrayOf(1, 0, 2, 0, 3, 0)
+
+        val (actualPcm, actualRate) = readWavThroughSystemProvider(wavWithChunks(pcm))
+
+        assertArrayEquals(pcm, actualPcm)
+        assertEquals(24_000, actualRate)
+    }
+
+    @Test
+    fun parserRejectsUnsupportedWavEncoding() {
+        val result = runCatching {
+            readWavThroughSystemProvider(wavWithChunks(byteArrayOf(1, 2, 3, 4), format = 3))
+        }
+
+        assertTrue("float WAV is not PCM16 and must be rejected", result.isFailure)
+    }
+
+    @Test
+    fun parserRejectsDataLargerThanRequestLimitBeforeAllocatingPcm() {
+        val result = runCatching {
+            readWavThroughSystemProvider(
+                wavWithChunks(byteArrayOf(1, 0, 2, 0, 3, 0)),
+                maxPcmBytes = 4,
+            )
+        }
+
+        assertTrue("oversize output must fail against the request's raw-byte limit", result.isFailure)
     }
 }

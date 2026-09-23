@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <math.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <sherpa-onnx/c-api/c-api.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +22,24 @@ struct LXOnlineRecognizer {
 struct LXOnlineStream {
     const SherpaOnnxOnlineStream *value;
 };
+
+struct LXAudioCancellationToken {
+    atomic_bool cancelled;
+};
+
+LXAudioCancellationToken *LXAudioCancellationTokenCreate(void) {
+    LXAudioCancellationToken *token = calloc(1, sizeof(*token));
+    if (token != NULL) atomic_init(&token->cancelled, false);
+    return token;
+}
+
+void LXAudioCancellationTokenCancel(LXAudioCancellationToken *token) {
+    if (token != NULL) atomic_store_explicit(&token->cancelled, true, memory_order_release);
+}
+
+void LXAudioCancellationTokenDestroy(LXAudioCancellationToken *token) {
+    free(token);
+}
 
 static void LXPath(char *output, size_t capacity, const char *directory, const char *name) {
     snprintf(output, capacity, "%s/%s", directory, name);
@@ -157,12 +177,42 @@ char *LXOfflineMoonshineCopyText(
     return text;
 }
 
+typedef struct {
+    uint64_t sample_count;
+    uint64_t maximum_samples;
+    int32_t exceeded_limit;
+    int32_t invalid_chunk;
+    LXAudioCancellationToken *cancellation_token;
+} LXSherpaTtsCallbackContext;
+
+static int32_t LXCollectTtsChunk(const float *samples, int32_t count, float progress, void *userdata) {
+    (void)progress;
+    LXSherpaTtsCallbackContext *context = (LXSherpaTtsCallbackContext *)userdata;
+    if (context == NULL) return 0;
+    if (context->cancellation_token != NULL &&
+        atomic_load_explicit(&context->cancellation_token->cancelled, memory_order_acquire)) {
+        return 0;
+    }
+    if (count < 0 || (count > 0 && samples == NULL)) {
+        context->invalid_chunk = 1;
+        return 0;
+    }
+    if ((uint64_t)count > context->maximum_samples - context->sample_count) {
+        context->exceeded_limit = 1;
+        return 0;
+    }
+    context->sample_count += (uint64_t)count;
+    return 1;
+}
+
 int32_t LXSherpaTtsCopyPCM16(
     const char *model_directory,
     const char *model_id,
     const char *text,
     int32_t speaker_id,
     float speed,
+    uint64_t maximum_raw_bytes,
+    LXAudioCancellationToken *cancellation_token,
     int16_t **samples,
     int32_t *sample_count,
     int32_t *sample_rate
@@ -172,6 +222,11 @@ int32_t LXSherpaTtsCopyPCM16(
     *samples = NULL;
     *sample_count = 0;
     *sample_rate = 0;
+    if (maximum_raw_bytes < sizeof(int16_t)) return LX_SHERPA_TTS_MEDIA_TOO_LARGE;
+    if (cancellation_token != NULL &&
+        atomic_load_explicit(&cancellation_token->cancelled, memory_order_acquire)) {
+        return LX_SHERPA_TTS_CANCELLED;
+    }
 
     SherpaOnnxOfflineTtsConfig config;
     memset(&config, 0, sizeof(config));
@@ -217,18 +272,53 @@ int32_t LXSherpaTtsCopyPCM16(
     generation.sid = speaker_id;
     generation.speed = fminf(2.0f, fmaxf(0.5f, speed));
     generation.silence_scale = 0.2f;
+    LXSherpaTtsCallbackContext callback_context = {
+        .sample_count = 0,
+        .maximum_samples = maximum_raw_bytes / sizeof(int16_t),
+        .exceeded_limit = 0,
+        .invalid_chunk = 0,
+        .cancellation_token = cancellation_token,
+    };
     const SherpaOnnxGeneratedAudio *audio =
-        SherpaOnnxOfflineTtsGenerateWithConfig(tts, text, &generation, NULL, NULL);
+        SherpaOnnxOfflineTtsGenerateWithConfig(
+            tts,
+            text,
+            &generation,
+            LXCollectTtsChunk,
+            &callback_context
+        );
+    if (callback_context.exceeded_limit) {
+        if (audio != NULL) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        SherpaOnnxDestroyOfflineTts(tts);
+        return LX_SHERPA_TTS_MEDIA_TOO_LARGE;
+    }
+    if (callback_context.invalid_chunk) {
+        if (audio != NULL) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        SherpaOnnxDestroyOfflineTts(tts);
+        return LX_SHERPA_TTS_FAILURE;
+    }
+    if (callback_context.cancellation_token != NULL &&
+        atomic_load_explicit(&callback_context.cancellation_token->cancelled, memory_order_acquire)) {
+        if (audio != NULL) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        SherpaOnnxDestroyOfflineTts(tts);
+        return LX_SHERPA_TTS_CANCELLED;
+    }
     if (audio == NULL || audio->samples == NULL || audio->n <= 0) {
         if (audio != NULL) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
         SherpaOnnxDestroyOfflineTts(tts);
-        return 0;
+        return LX_SHERPA_TTS_FAILURE;
+    }
+    if ((uint64_t)audio->n > callback_context.maximum_samples || audio->sample_rate <= 0 ||
+        (uint64_t)audio->n > SIZE_MAX / sizeof(int16_t)) {
+        SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        SherpaOnnxDestroyOfflineTts(tts);
+        return LX_SHERPA_TTS_MEDIA_TOO_LARGE;
     }
     int16_t *pcm = malloc((size_t)audio->n * sizeof(int16_t));
     if (pcm == NULL) {
         SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
         SherpaOnnxDestroyOfflineTts(tts);
-        return 0;
+        return LX_SHERPA_TTS_FAILURE;
     }
     for (int32_t i = 0; i < audio->n; ++i) {
         float value = fminf(1.0f, fmaxf(-1.0f, audio->samples[i]));
@@ -239,7 +329,7 @@ int32_t LXSherpaTtsCopyPCM16(
     *sample_rate = audio->sample_rate;
     SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
     SherpaOnnxDestroyOfflineTts(tts);
-    return 1;
+    return LX_SHERPA_TTS_SUCCESS;
 }
 
 static int LXSafeArchivePath(const char *path) {

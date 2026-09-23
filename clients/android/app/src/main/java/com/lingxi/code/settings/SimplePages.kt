@@ -37,10 +37,17 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.components.tint
-import com.lingxi.code.model.VoiceConfig
 import com.lingxi.code.theme.AppLanguage
 import com.lingxi.code.theme.AppLanguageStore
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioProviderKind
+import com.lingxi.code.voice.audio.AudioReadiness
+import com.lingxi.code.voice.audio.AudioRecognitionPreference
+import com.lingxi.code.voice.audio.AudioSource
+import com.lingxi.code.voice.audio.AudioSpeechPreference
+import com.lingxi.code.voice.audio.AudioVoiceSelection
+import com.lingxi.code.voice.offline.OfflineModelCatalog
 import com.lingxi.code.voice.offline.ModelState
 import com.lingxi.code.voice.offline.VoiceModelDownloader
 import kotlinx.coroutines.launch
@@ -88,25 +95,20 @@ private tailrec fun Context.findComponentActivity(): ComponentActivity? = when (
  * at call time, so an Agent listen/speak call uses the same language, voice and
  * speed selected here.
  *
- * @param voice the live voice config (recognition / language / voice / rate).
+ * @param voice the live device-local v3 audio config.
  * @param onChange writes a mutated config back into the store.
  */
 @Composable
 fun VoicePage(
-    voice: VoiceConfig,
+    voice: AudioConfigurationV3,
     capability: VoiceCapabilitySnapshot,
-    onChange: (VoiceConfig) -> Unit,
+    revision: Long = 0,
+    saving: Boolean = false,
+    saveError: String? = null,
+    onChange: ((AudioConfigurationV3) -> AudioConfigurationV3) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
-    val issueLabels = mapOf(
-        VoiceBlockingIssue.MicrophonePermissionRequired to stringResource(R.string.voice_issue_need_mic_permission),
-        VoiceBlockingIssue.OfflineLanguageUnsupported to stringResource(R.string.settings_voice_issue_offline_language_unsupported),
-        VoiceBlockingIssue.OfflineRecognitionModelRequired to stringResource(R.string.settings_voice_issue_offline_pack_required),
-        VoiceBlockingIssue.AutomaticRecognizerUnavailable to stringResource(R.string.voice_recognizer_unavailable_for_language),
-        VoiceBlockingIssue.RequestedVoiceUnavailable to stringResource(R.string.voice_issue_voice_not_available),
-        VoiceBlockingIssue.PlaybackVoiceUnavailable to stringResource(R.string.voice_no_playback_voice_available),
-    )
     val allClearLabel = stringResource(R.string.settings_voice_all_clear)
     val appSettingsIntent = remember(context) {
         Intent(
@@ -123,19 +125,53 @@ fun VoicePage(
             RadioList(
                 options = listOf(
                     RadioOption(
-                        VoiceConfig.MODE_AUTOMATIC,
+                        AudioSource.AUTOMATIC.value,
                         stringResource(R.string.settings_voice_mode_automatic),
                         stringResource(R.string.settings_voice_mode_automatic_sub),
                     ),
                     RadioOption(
-                        VoiceConfig.MODE_LOCAL_ONLY,
+                        AudioSource.SYSTEM.value,
+                        stringResource(R.string.settings_voice_backend_system),
+                        stringResource(R.string.settings_voice_android_system_sub),
+                    ),
+                    RadioOption(
+                        AudioSource.OFFLINE.value,
                         stringResource(R.string.settings_voice_mode_local_only),
                         stringResource(R.string.settings_voice_mode_local_only_sub),
                     ),
                 ),
-                selected = voice.recognitionMode,
-                onSelect = { onChange(voice.copy(recognitionMode = it)) },
+                selected = voice.recognition.source.value,
+                onSelect = { source ->
+                    onChange { current ->
+                        current.copy(
+                            recognition = current.recognition.copy(
+                                source = AudioSource(source),
+                                offlineModelId = if (source == AudioSource.OFFLINE.value) current.recognition.offlineModelId else null,
+                            ),
+                        )
+                    }
+                },
             )
+            if (voice.recognition.source == AudioSource.OFFLINE) {
+                val sttModels = OfflineModelCatalog.all.filter { it.kind == com.lingxi.code.voice.offline.ModelKind.Stt }
+                RadioList(
+                    options = listOf(
+                        RadioOption("", "Language default model", "Select the first installed model for this language"),
+                    ) + sttModels.map { model ->
+                        RadioOption(
+                            model.id,
+                            model.localizedDisplayName("en"),
+                            model.languages.joinToString(", "),
+                        )
+                    },
+                    selected = voice.recognition.offlineModelId.orEmpty(),
+                    onSelect = { modelId ->
+                        onChange { current ->
+                            current.copy(recognition = current.recognition.copy(offlineModelId = modelId.ifBlank { null }))
+                        }
+                    },
+                )
+            }
             Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
@@ -175,7 +211,7 @@ fun VoicePage(
                                         t.surfaceActive
                                     },
                                 )
-                                .clickable { onChange(voice.copy(language = language)) }
+                                .clickable { onChange { current -> current.copy(language = language) } }
                                 .weight(1f)
                                 .sizeIn(minHeight = 48.dp)
                                 .padding(horizontal = 6.dp, vertical = 7.dp),
@@ -185,13 +221,13 @@ fun VoicePage(
             }
             SettingsRow(
                 label = stringResource(R.string.settings_voice_requested_backend),
-                value = recognitionBackendLabel(voice.recognitionMode),
+                value = audioSourceLabel(voice.recognition.source),
                 chevron = false,
             )
             SettingsRow(
                 label = stringResource(R.string.settings_voice_effective_backend),
-                value = recognitionBackendLabel(capability.effectiveRecognitionBackend),
-                sub = capability.fallbackReason,
+                value = "${capability.effectiveRecognitionBackend} · ${readinessLabel(capability.recognitionReadiness)}",
+                sub = capability.recognitionReason,
                 chevron = false,
                 isLast = true,
             )
@@ -203,38 +239,83 @@ fun VoicePage(
         ) {
             val systemVoices = capability.systemVoiceOptions
             val offlineVoices = capability.offlineVoiceOptions
-            if (systemVoices.isNotEmpty()) {
+            RadioList(
+                options = listOf(
+                    RadioOption(AudioSource.AUTOMATIC.value, stringResource(R.string.settings_voice_mode_automatic), "Resolve system first, then an installed offline model"),
+                    RadioOption(AudioSource.SYSTEM.value, stringResource(R.string.settings_voice_backend_system), stringResource(R.string.settings_voice_android_system_sub)),
+                    RadioOption(AudioSource.OFFLINE.value, stringResource(R.string.settings_voice_mode_local_only), stringResource(R.string.settings_voice_mode_local_only_sub)),
+                ),
+                selected = voice.speech.source.value,
+                onSelect = { source ->
+                    onChange { current ->
+                        current.copy(
+                            speech = AudioSpeechPreference(
+                                source = AudioSource(source),
+                                offlineModelId = if (source == AudioSource.OFFLINE.value) current.speech.offlineModelId else null,
+                                voice = current.speech.voice?.takeIf { it.source.value == source },
+                            ),
+                        )
+                    }
+                },
+            )
+            if (voice.speech.source == AudioSource.OFFLINE) {
+                val ttsModels = OfflineModelCatalog.all.filter { it.kind == com.lingxi.code.voice.offline.ModelKind.Tts }
                 RadioList(
                     options = listOf(
-                        RadioOption(
-                            VoiceConfig.DEFAULT_VOICE_SELECTION,
-                            stringResource(R.string.settings_voice_system_default),
-                            stringResource(R.string.settings_provider_preset_system_voice_sub),
-                        ),
-                    ) + systemVoices.map {
-                        RadioOption(it.id, it.label, it.details)
+                        RadioOption("", "Language default model", "Select the first installed model for this language"),
+                    ) + ttsModels.map { model ->
+                        RadioOption(model.id, model.localizedDisplayName("en"), model.languages.joinToString(", "))
                     },
-                    selected = voice.voiceSelection.takeIf { it.startsWith(VoiceConfig.SYSTEM_VOICE_PREFIX) }
-                        ?: VoiceConfig.DEFAULT_VOICE_SELECTION,
-                    onSelect = { onChange(voice.copy(voiceSelection = it)) },
+                    selected = voice.speech.offlineModelId.orEmpty(),
+                    onSelect = { modelId ->
+                        val selectedModel = modelId.ifBlank { null }
+                        onChange { current ->
+                            current.copy(
+                                speech = current.speech.copy(
+                                    offlineModelId = selectedModel,
+                                    voice = current.speech.voice?.takeIf { it.modelId == selectedModel },
+                                ),
+                            )
+                        }
+                    },
                 )
             }
-            if (offlineVoices.isNotEmpty()) {
-                Column(Modifier.fillMaxWidth().padding(top = 10.dp)) {
-                    Text(
-                        text = stringResource(R.string.settings_voice_offline_group),
-                        color = t.text3,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(horizontal = 2.dp, vertical = 6.dp),
-                    )
-                    RadioList(
-                        options = offlineVoices.map { RadioOption(it.id, it.label, it.details) },
-                        selected = voice.voiceSelection.takeIf { it.startsWith(VoiceConfig.SHERPA_VOICE_PREFIX) }.orEmpty(),
-                        onSelect = { onChange(voice.copy(voiceSelection = it)) },
-                    )
+            val voiceChoices = when (voice.speech.source) {
+                AudioSource.SYSTEM -> systemVoices
+                AudioSource.OFFLINE -> offlineVoices.filter {
+                    voice.speech.offlineModelId == null || it.selection?.modelId == voice.speech.offlineModelId
                 }
+                else -> emptyList()
             }
+            RadioList(
+                options = listOf(
+                    RadioOption("", stringResource(R.string.settings_voice_system_default), "Use the selected source's default voice"),
+                ) + voiceChoices.map { option -> RadioOption(option.id, option.label, option.details) },
+                selected = voice.speech.voice?.let { requested ->
+                    voiceChoices.firstOrNull { it.selection == requested }?.id ?: "unavailable"
+                } ?: "",
+                onSelect = { key ->
+                    val option = voiceChoices.firstOrNull { it.id == key }
+                    if (option == null) {
+                        onChange { current ->
+                            current.copy(
+                                speech = current.speech.copy(voice = null),
+                            )
+                        }
+                    } else {
+                        val selection = checkNotNull(option.selection)
+                        onChange { current ->
+                            current.copy(
+                                speech = current.speech.copy(
+                                    source = selection.source,
+                                    offlineModelId = selection.modelId,
+                                    voice = selection,
+                                ),
+                            )
+                        }
+                    }
+                },
+            )
             SettingsRow(
                 label = stringResource(R.string.settings_voice_requested_voice),
                 value = capability.requestedVoice?.label ?: stringResource(R.string.settings_voice_system_default),
@@ -243,7 +324,14 @@ fun VoicePage(
             SettingsRow(
                 label = stringResource(R.string.settings_voice_effective_voice),
                 value = capability.effectiveVoice?.label ?: stringResource(R.string.settings_voice_unavailable_short),
-                sub = capability.effectiveVoice?.details,
+                sub = capability.speechReason ?: capability.effectiveVoice?.details,
+                chevron = false,
+                isLast = true,
+            )
+            SettingsRow(
+                label = "Playback route preview",
+                value = "${capability.speechRoute?.effective?.source?.value ?: "unavailable"} · ${readinessLabel(capability.speechReadiness)}",
+                sub = capability.speechReason,
                 chevron = false,
                 isLast = true,
             )
@@ -281,9 +369,9 @@ fun VoicePage(
                 chevron = false,
             ) {
                 Slider(
-                    value = voice.rate,
+                    value = voice.rate.toFloat(),
                     onValueChange = { v ->
-                        onChange(voice.copy(rate = snapVoiceSpeed(v)))
+                        onChange { current -> current.copy(rate = snapVoiceSpeed(v).toDouble()) }
                     },
                     valueRange = 0.5f..2.0f,
                     steps = 14,
@@ -298,7 +386,7 @@ fun VoicePage(
             SettingsRow(label = stringResource(R.string.voice_auto_play), chevron = false, isLast = true) {
                 LXToggle(
                     checked = voice.autoPlayReplies,
-                    onCheckedChange = { onChange(voice.copy(autoPlayReplies = it)) },
+                    onCheckedChange = { enabled -> onChange { current -> current.copy(autoPlayReplies = enabled) } },
                 )
             }
         }
@@ -330,10 +418,23 @@ fun VoicePage(
             SettingsRow(
                 label = stringResource(R.string.settings_voice_blocking_issues),
                 value = capability.blockingIssues.size.toString(),
-                sub = capability.blockingIssues.mapNotNull(issueLabels::get).joinToString(" · ")
-                    .ifBlank { allClearLabel },
+                sub = capability.blockingIssues.joinToString(" · ") { it.name }.ifBlank { allClearLabel },
                 isLast = true,
                 onTap = { context.startActivity(appSettingsIntent) },
+            )
+        }
+
+        SettingsSection(label = "Configuration") {
+            SettingsRow(
+                label = "Expected revision",
+                value = revision.toString(),
+                sub = when {
+                    saving -> "Saving…"
+                    saveError != null -> saveError
+                    else -> "Saved on this device"
+                },
+                chevron = false,
+                isLast = true,
             )
         }
     }
@@ -364,11 +465,19 @@ private fun voiceLanguageShortLabel(language: String): String = when (language) 
 }
 
 @Composable
-private fun recognitionBackendLabel(backend: String): String = when (backend) {
-    VoiceConfig.MODE_LOCAL_ONLY, "sherpa" -> stringResource(R.string.settings_voice_backend_sherpa)
-    VoiceConfig.MODE_AUTOMATIC -> stringResource(R.string.settings_voice_mode_automatic)
-    "system" -> stringResource(R.string.settings_voice_backend_system)
-    else -> stringResource(R.string.settings_voice_unavailable_short)
+private fun audioSourceLabel(source: AudioSource): String = when (source) {
+    AudioSource.AUTOMATIC -> stringResource(R.string.settings_voice_mode_automatic)
+    AudioSource.SYSTEM -> stringResource(R.string.settings_voice_backend_system)
+    AudioSource.OFFLINE -> stringResource(R.string.settings_voice_backend_sherpa)
+    else -> source.value
+}
+
+@Composable
+private fun readinessLabel(readiness: AudioReadiness): String = when (readiness) {
+    AudioReadiness.AVAILABLE -> stringResource(R.string.settings_status_on)
+    AudioReadiness.PERMISSION_REQUIRED -> stringResource(R.string.voice_permission_denied_label)
+    AudioReadiness.DENIED -> stringResource(R.string.voice_permission_denied_label)
+    AudioReadiness.UNAVAILABLE -> stringResource(R.string.settings_voice_unavailable_short)
 }
 
 @Composable

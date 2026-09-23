@@ -22,8 +22,10 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.AndroidComputerUseFfiException
 import com.lingxi.code.bindings.AndroidComputerUseHost
 import com.lingxi.code.bindings.AndroidScreenshotFfi
-import com.lingxi.code.model.VoiceConfig
-import com.lingxi.code.settings.VoiceSettingsRepository
+import com.lingxi.code.settings.AudioConfigurationRepository
+import com.lingxi.code.settings.settingsKey
+import com.lingxi.code.voice.audio.AudioOperationException
+import com.lingxi.code.voice.audio.DeviceAudioErrorKind
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -442,6 +444,8 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
     override suspend fun statusJson(): String {
         refreshServiceStatus()
         val current = mutableState.value
+        val audioConfiguration = applicationContext
+            ?.let { AudioConfigurationRepository(it).load().snapshot.configuration }
         return JSONObject()
             .put("service_enabled", current.serviceEnabled)
             .put("session_state", current.sessionState.name.toSnakeCase())
@@ -459,15 +463,15 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
             .put("audio_speak_enabled", mutableConfiguration.value.speakEnabled)
             .putNullable(
                 "audio_input_language",
-                applicationContext?.let { VoiceSettingsRepository(it).load().language },
+                audioConfiguration?.language,
             )
             .putNullable(
                 "audio_voice",
-                applicationContext?.let { VoiceSettingsRepository(it).load().voiceSelection },
+                audioConfiguration?.speech?.voice?.settingsKey(),
             )
             .put(
                 "audio_speed",
-                applicationContext?.let { VoiceSettingsRepository(it).load().rate } ?: 1.0f,
+                audioConfiguration?.rate ?: 1.0,
             )
             .toString()
     }
@@ -611,10 +615,10 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
             )
         }
         val request = JSONObject(requestJson)
-        val voiceConfig = VoiceSettingsRepository(context).load()
+        val voiceConfig = AudioConfigurationRepository(context).load().snapshot.configuration
         val language = request.optString("language")
             .takeIf { it.isNotBlank() && it != "null" }
-            ?: voiceConfig.language.takeUnless { it == VoiceConfig.LANGUAGE_AUTO }
+            ?: voiceConfig.language.takeUnless { it.equals("auto", ignoreCase = true) }
         val timeoutMs = request.optLong(
             "timeout_ms",
             config.maxListenSeconds * 1_000L,
@@ -643,6 +647,8 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
             throw error
         } catch (error: AndroidComputerUseFfiException) {
             throw error
+        } catch (error: AudioOperationException) {
+            throw error.toComputerUseAudioFfiException()
         } catch (error: Throwable) {
             throw AndroidComputerUseFfiException.Other(
                 error.message ?: "语音听取失败",
@@ -664,14 +670,14 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         if (text.isBlank() || text.length > 4_000) {
             throw AndroidComputerUseFfiException.Other("语音播报文本长度必须为 1–4000 字符")
         }
-        val voiceConfig = VoiceSettingsRepository(context).load()
+        val voiceConfig = AudioConfigurationRepository(context).load().snapshot.configuration
         val voice = request.optString("voice")
             .takeIf { it.isNotBlank() && it != "null" }
-            ?: voiceConfig.voiceSelection
+            ?: voiceConfig.speech.voice?.settingsKey()
         val speed = if (request.has("speed") && !request.isNull("speed")) {
-            request.optDouble("speed", voiceConfig.rate.toDouble()).toFloat()
+            request.optDouble("speed", voiceConfig.rate).toFloat()
         } else {
-            voiceConfig.rate
+            voiceConfig.rate.toFloat()
         }.coerceIn(0.5f, 2.0f)
         return try {
             val result = requireNotNull(audioController) {
@@ -695,6 +701,8 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
             throw error
         } catch (error: AndroidComputerUseFfiException) {
             throw error
+        } catch (error: AudioOperationException) {
+            throw error.toComputerUseAudioFfiException()
         } catch (error: Throwable) {
             throw AndroidComputerUseFfiException.Other(
                 error.message ?: "语音播报失败",
@@ -704,7 +712,17 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
 
     override suspend fun stopAudio() {
         requireActive()
-        audioController?.stop()
+        try {
+            audioController?.stopAndWait()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: AndroidComputerUseFfiException) {
+            throw error
+        } catch (error: AudioOperationException) {
+            throw error.toComputerUseAudioFfiException()
+        } catch (error: Throwable) {
+            throw AndroidComputerUseFfiException.Other(error.message ?: "音频停止失败")
+        }
     }
 
     override suspend fun stop() {
@@ -1725,4 +1743,16 @@ object ComputerUseFeatureProvider : ComputerUseFeature, AndroidComputerUseHost {
         "notifications",
         "quick_settings",
     )
+}
+
+internal fun AudioOperationException.toComputerUseAudioFfiException(): AndroidComputerUseFfiException = when (kind) {
+    DeviceAudioErrorKind.PermissionDenied -> AndroidComputerUseFfiException.PermissionDenied(
+        message ?: "麦克风权限未授予",
+    )
+    DeviceAudioErrorKind.Timeout -> AndroidComputerUseFfiException.Timeout(message ?: "音频操作超时")
+    DeviceAudioErrorKind.Unsupported -> AndroidComputerUseFfiException.Unsupported(message ?: "音频操作不受支持")
+    DeviceAudioErrorKind.Busy -> AndroidComputerUseFfiException.Other(
+        "音频设备暂时繁忙，请稍后重试：${message ?: "audio operation is busy"}",
+    )
+    else -> AndroidComputerUseFfiException.Other("${kind.name.lowercase()}: ${message ?: "音频操作失败"}")
 }

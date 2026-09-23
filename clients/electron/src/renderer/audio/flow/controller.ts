@@ -1,12 +1,7 @@
-import type { ImageRefDto } from '@lingxi/bridge-client';
+import type { ImageRefDto, AudioOperationDto, AudioOperationResultDto } from '@lingxi/bridge-client';
 
-import type {
-  NativeAudioCommand,
-  NativeAudioEvent,
-  NativeAudioOwner,
-  NativeAudioResponse,
-} from '../../../shared/nativeAudio.js';
-import { LANGUAGE_AUTO } from '../../../shared/voicePreferences.js';
+import type { AudioConfigurationV3 } from '../../../shared/generatedAudioConfiguration.js';
+import { resolveAudioLanguage } from '../../../shared/generatedAudioConfiguration.js';
 import { StreamingSpeechSegmenter } from './segmenter.js';
 
 export type VoiceFlowPhase =
@@ -34,10 +29,8 @@ export const DEFAULT_VOICE_FLOW_STATE: VoiceFlowState = {
 };
 
 export interface VoiceFlowPreferences {
-  recognitionMode: 'automatic' | 'localOnly';
-  language: string;
-  voiceSelection: string;
-  rate: number;
+  configuration: AudioConfigurationV3;
+  revision: number;
 }
 
 export interface VoiceFlowTurnToken {
@@ -66,8 +59,9 @@ export interface VoiceFlowBridge {
 }
 
 export interface VoiceFlowAudio {
-  request(command: NativeAudioCommand): Promise<NativeAudioResponse>;
-  onEvent(listener: (event: NativeAudioEvent) => void): () => void;
+  execute(operation: AudioOperationDto, configurationRevision: number): Promise<{ result: AudioOperationResultDto }>;
+  finishListen(): Promise<void>;
+  cancel(): Promise<void>;
 }
 
 export interface VoiceFlowTimers {
@@ -79,7 +73,6 @@ export interface VoiceFlowControllerOptions {
   audio: VoiceFlowAudio;
   bridge: VoiceFlowBridge;
   getPreferences: () => VoiceFlowPreferences;
-  createOwner: (kind: NativeAudioOwner['kind']) => NativeAudioOwner;
   timers: VoiceFlowTimers;
   onStateChange: (state: VoiceFlowState) => void;
 }
@@ -87,27 +80,30 @@ export interface VoiceFlowControllerOptions {
 interface InterruptContext {
   pausedSegments: string[];
   turnId?: number;
+  previousPreferences: VoiceFlowPreferences | null;
 }
 
-function resolvedLanguage(configured: string): string {
-  if (configured === LANGUAGE_AUTO) {
-    return typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US';
-  }
-  return configured;
+function errorDetail(result: AudioOperationResultDto): string | null {
+  return result.type === 'failed' ? `${result.error.kind}: ${result.error.message}` : null;
 }
 
-function isConfigError(response: NativeAudioResponse): boolean {
-  return response.type === 'error'
-    && (response.error.code === 'permission' || response.error.code === 'model-missing' || response.error.code === 'unavailable');
+function requiresConfiguration(result: AudioOperationResultDto): boolean {
+  if (result.type !== 'failed') return false;
+  return ['permission_denied', 'model_missing', 'voice_missing', 'unavailable', 'unsupported', 'invalid_request'].includes(result.error.kind);
+}
+
+function voiceOverride(configuration: AudioConfigurationV3): string | undefined {
+  const voice = configuration.speech.voice;
+  if (!voice) return undefined;
+  return voice.source === 'offline'
+    ? `sherpa:${voice.modelId ?? configuration.speech.offlineModelId ?? ''}:${voice.id}`
+    : voice.source === 'system' ? `system:${voice.id}` : undefined;
 }
 
 export class VoiceFlowController {
   private generation = 0;
   private state: VoiceFlowState = DEFAULT_VOICE_FLOW_STATE;
-  private readonly owner: NativeAudioOwner;
-  private readonly offAudio: () => void;
   private offTrackedSpeech: (() => void) | null = null;
-  private silenceTimer: unknown = null;
   private relistenTimer: unknown = null;
   private currentToken: VoiceFlowTurnToken | null = null;
   private currentTurnId: number | undefined;
@@ -118,13 +114,11 @@ export class VoiceFlowController {
   private streamComplete = false;
   private interruptContext: InterruptContext | null = null;
   private listeningActive = false;
+  private listeningFinalizeRequested = false;
+  private turnPreferences: VoiceFlowPreferences | null = null;
   private disposed = false;
 
   constructor(private readonly options: VoiceFlowControllerOptions) {
-    this.owner = options.createOwner('flow');
-    this.offAudio = options.audio.onEvent((event) => {
-      this.handleAudioEvent(event);
-    });
     this.publish();
   }
 
@@ -133,20 +127,11 @@ export class VoiceFlowController {
   }
 
   async start(): Promise<void> {
+    if (this.listeningActive || this.disposed) return;
     const generation = this.bumpGeneration();
     this.clearTimers();
     this.resetTurnState();
-    this.listeningActive = false;
-    this.update({ phase: 'requestingPermission', detail: '正在请求麦克风与语音权限…' });
-    const permissions = await this.options.audio.request({
-      type: 'request_authorization',
-      permissions: ['microphone', 'speech'],
-    });
-    if (!this.isCurrent(generation)) return;
-    if (permissions.type === 'error') {
-      this.handleFailure(permissions);
-      return;
-    }
+    this.update({ phase: 'requestingPermission', detail: '正在准备本机音频服务…' });
     await this.startListening(generation, false);
   }
 
@@ -156,16 +141,9 @@ export class VoiceFlowController {
     this.clearTimers();
     this.cleanupTrackedSpeech();
     this.listeningActive = false;
-    try {
-      await this.options.audio.request({ type: 'cancel', owner: this.owner });
-    } catch {}
-    try {
-      await this.options.audio.request({ type: 'stop_speaking', owner: this.owner });
-    } catch {}
+    try { await this.options.audio.cancel(); } catch { /* best-effort owner teardown */ }
     if (turnId !== undefined) {
-      try {
-        await this.options.bridge.cancel(turnId);
-      } catch {}
+      try { await this.options.bridge.cancel(turnId); } catch { /* the runtime may already be closed */ }
     }
     this.resetTurnState();
     this.update({ phase: 'paused', detail: '轻点 Orb 开始聆听' });
@@ -206,55 +184,51 @@ export class VoiceFlowController {
     this.clearTimers();
     this.cleanupTrackedSpeech();
     this.resetTurnState();
-    this.offAudio();
-    void this.options.audio.request({ type: 'cancel', owner: this.owner }).catch(() => undefined);
-    void this.options.audio.request({ type: 'stop_speaking', owner: this.owner }).catch(() => undefined);
-    if (turnId !== undefined) {
-      void this.options.bridge.cancel(turnId).catch(() => undefined);
-    }
+    void this.options.audio.cancel().catch(() => undefined);
+    if (turnId !== undefined) void this.options.bridge.cancel(turnId).catch(() => undefined);
   }
 
   private async startListening(generation: number, interrupting: boolean): Promise<void> {
     const preferences = this.options.getPreferences();
-    const response = await this.options.audio.request({
-      type: 'start_listening',
-      owner: this.owner,
-      recognitionMode: preferences.recognitionMode,
-      language: resolvedLanguage(preferences.language),
-      sampleRateHz: 16_000,
-      format: 'wav',
-    });
-    if (!this.isCurrent(generation)) return;
-    if (response.type === 'error') {
-      this.handleFailure(response);
-      return;
-    }
+    this.turnPreferences = {
+      configuration: structuredClone(preferences.configuration),
+      revision: preferences.revision,
+    };
     this.listeningActive = true;
+    this.listeningFinalizeRequested = false;
     this.update({
       phase: interrupting ? 'interrupting' : 'listening',
       detail: interrupting ? '请说出新的问题…' : '正在聆听…',
     });
-  }
-
-  private async finishListening(generation: number): Promise<void> {
-    if (!this.listeningActive) return;
-    this.listeningActive = false;
-    this.options.timers.clearTimeout(this.silenceTimer);
-    this.silenceTimer = null;
-    const response = await this.options.audio.request({ type: 'finish_listening', owner: this.owner });
-    if (!this.isCurrent(generation)) return;
-    if (response.type === 'error') {
-      this.handleFailure(response);
+    let result: AudioOperationResultDto;
+    try {
+      ({ result } = await this.options.audio.execute({
+        type: 'listen',
+        language: resolveAudioLanguage(this.turnPreferences.configuration.language, typeof navigator !== 'undefined' ? navigator.language : 'en-US'),
+      }, this.turnPreferences.revision));
+    } catch (cause) {
+      if (!this.isCurrent(generation)) return;
+      this.listeningActive = false;
+      this.listeningFinalizeRequested = false;
+      this.update({ phase: 'failed', detail: cause instanceof Error ? cause.message : '本机语音识别失败。' });
       return;
     }
-    if (response.type !== 'listening_finished') return;
-    const transcript = response.transcript?.text.trim() ?? '';
+    if (!this.isCurrent(generation)) return;
+    this.listeningActive = false;
+    this.listeningFinalizeRequested = false;
+    const detail = errorDetail(result);
+    if (detail) {
+      this.handleFailure(result, detail);
+      return;
+    }
+    if (result.type !== 'transcript') {
+      this.update({ phase: 'failed', detail: '本机语音服务返回了无效的识别结果。' });
+      return;
+    }
+    const transcript = result.text.trim();
     if (this.interruptContext) {
-      if (transcript) {
-        await this.commitInterrupt(transcript);
-      } else {
-        this.resumeAfterEmptyInterrupt();
-      }
+      if (transcript) await this.commitInterrupt(transcript);
+      else this.resumeAfterEmptyInterrupt();
       return;
     }
     if (!transcript) {
@@ -262,6 +236,24 @@ export class VoiceFlowController {
       return;
     }
     this.beginTrackedPrompt(transcript);
+  }
+
+  private async finishListening(generation: number): Promise<void> {
+    if (!this.listeningActive || this.listeningFinalizeRequested || !this.isCurrent(generation)) return;
+    this.listeningFinalizeRequested = true;
+    this.update(this.interruptContext
+      ? { phase: 'interrupting', detail: '正在等待插话识别完成…' }
+      : { phase: 'recognizing', detail: '正在等待当前语音识别完成…' });
+    try {
+      await this.options.audio.finishListen();
+    } catch (cause) {
+      if (!this.isCurrent(generation) || !this.listeningActive || !this.listeningFinalizeRequested) return;
+      this.listeningFinalizeRequested = false;
+      const error = cause instanceof Error ? cause.message : '无法结束当前本机语音识别。';
+      this.update(this.interruptContext
+        ? { phase: 'interrupting', detail: `结束插话识别失败：${error}；仍在等待识别结果…` }
+        : { phase: 'recognizing', detail: `结束识别失败：${error}；仍在等待识别结果…` });
+    }
   }
 
   private beginTrackedPrompt(text: string): void {
@@ -311,22 +303,44 @@ export class VoiceFlowController {
   private async maybeStartSpeaking(generation: number): Promise<void> {
     if (!this.isCurrent(generation) || this.speechInFlight || this.speechQueue.length === 0 || this.interruptContext) return;
     const segment = this.speechQueue.shift()!;
-    const preferences = this.options.getPreferences();
+    const preferences = this.turnPreferences ?? this.options.getPreferences();
     this.currentSpeechSegment = segment;
     this.speechInFlight = true;
     this.update({ phase: 'speaking', detail: segment });
-    const response = await this.options.audio.request({
-      type: 'speak',
-      owner: this.owner,
-      text: segment,
-      voiceId: preferences.voiceSelection,
-      rate: preferences.rate,
-    });
-    if (!this.isCurrent(generation)) return;
-    if (response.type === 'error') {
+    try {
+      const { result } = await this.options.audio.execute({
+        type: 'speak',
+        text: segment,
+        language: resolveAudioLanguage(preferences.configuration.language, typeof navigator !== 'undefined' ? navigator.language : 'en-US'),
+        rate: preferences.configuration.rate,
+        ...(voiceOverride(preferences.configuration) ? { voice: voiceOverride(preferences.configuration) } : {}),
+      }, preferences.revision);
+      if (!this.isCurrent(generation)) return;
+      const detail = errorDetail(result);
+      if (detail) {
+        this.speechInFlight = false;
+        this.currentSpeechSegment = null;
+        if (this.interruptContext && result.type === 'failed' && result.error.kind === 'cancelled') return;
+        this.handleFailure(result, detail);
+        return;
+      }
+      if (result.type !== 'playback_completed') {
+        this.speechInFlight = false;
+        this.currentSpeechSegment = null;
+        this.update({ phase: 'failed', detail: '本机语音服务未确认播放完成。' });
+        return;
+      }
       this.speechInFlight = false;
       this.currentSpeechSegment = null;
-      this.handleFailure(response);
+      if (this.interruptContext) return;
+      if (this.speechQueue.length > 0) void this.maybeStartSpeaking(generation);
+      else if (this.streamComplete) this.scheduleRelisten();
+      else this.update({ phase: 'thinking', detail: '正在继续生成回复…' });
+    } catch (cause) {
+      if (!this.isCurrent(generation)) return;
+      this.speechInFlight = false;
+      this.currentSpeechSegment = null;
+      this.update({ phase: 'failed', detail: cause instanceof Error ? cause.message : '语音播放失败。' });
     }
   }
 
@@ -341,28 +355,27 @@ export class VoiceFlowController {
         ...this.speechQueue,
       ],
       turnId: this.currentTurnId,
+      previousPreferences: this.turnPreferences,
     };
     this.speechQueue = [];
     this.currentSpeechSegment = null;
     this.speechInFlight = false;
     this.update({ phase: 'interrupting', detail: '请说出新的问题…' });
-    try {
-      await this.options.audio.request({ type: 'stop_speaking', owner: this.owner });
-    } catch {}
+    try { await this.options.audio.cancel(); } catch { /* pending playback may already be done */ }
     if (!this.isCurrent(generation)) return;
     await this.startListening(generation, true);
   }
 
   private async commitInterrupt(transcript: string): Promise<void> {
     const turnId = this.interruptContext?.turnId;
+    const replacementPreferences = this.turnPreferences;
     this.interruptContext = null;
     this.cleanupTrackedSpeech();
     this.resetTurnState();
+    this.turnPreferences = replacementPreferences;
     const generation = this.bumpGeneration();
     if (turnId !== undefined) {
-      try {
-        await this.options.bridge.cancel(turnId);
-      } catch {}
+      try { await this.options.bridge.cancel(turnId); } catch { /* turn already ended */ }
       if (!this.isCurrent(generation)) return;
     }
     this.beginTrackedPrompt(transcript);
@@ -371,6 +384,7 @@ export class VoiceFlowController {
   private resumeAfterEmptyInterrupt(): void {
     const paused = this.interruptContext;
     this.interruptContext = null;
+    if (paused) this.turnPreferences = paused.previousPreferences;
     if (paused && paused.pausedSegments.length > 0) {
       this.speechQueue = [...paused.pausedSegments, ...this.speechQueue];
       this.update({ phase: 'paused', detail: '继续当前回复…' });
@@ -384,81 +398,18 @@ export class VoiceFlowController {
     this.scheduleRelisten();
   }
 
-  private handleAudioEvent(event: NativeAudioEvent): void {
-    if (event.type === 'recognition_state' && event.progress.owner.id === this.owner.id && this.listeningActive) {
-      const text = event.progress.text.trim();
-      if (event.progress.isFinal) {
-        this.listeningActive = false;
-        this.options.timers.clearTimeout(this.silenceTimer);
-        this.silenceTimer = null;
-        if (this.interruptContext) {
-          if (text) void this.commitInterrupt(text);
-          else this.resumeAfterEmptyInterrupt();
-        } else if (text) {
-          this.beginTrackedPrompt(text);
-        } else {
-          this.scheduleRelisten();
-        }
-        return;
-      }
-      this.update({
-        phase: this.interruptContext ? 'interrupting' : (text ? 'recognizing' : 'listening'),
-        detail: text || (this.interruptContext ? '请说出新的问题…' : '正在聆听…'),
-      });
-      if (text) {
-        this.options.timers.clearTimeout(this.silenceTimer);
-        const generation = this.generation;
-        this.silenceTimer = this.options.timers.setTimeout(() => {
-          void this.finishListening(generation);
-        }, 1_200);
-      }
-      return;
-    }
-    if (event.type === 'speech_state' && event.owner.id === this.owner.id) {
-      if (event.state === 'starting' || event.state === 'speaking') {
-        this.update({ phase: 'speaking', detail: this.currentSpeechSegment ?? this.state.detail });
-        return;
-      }
-      if (event.state === 'finished' || event.state === 'interrupted') {
-        this.speechInFlight = false;
-        this.currentSpeechSegment = null;
-        if (this.interruptContext) return;
-        if (this.speechQueue.length > 0) {
-          void this.maybeStartSpeaking(this.generation);
-        } else if (this.streamComplete) {
-          this.scheduleRelisten();
-        } else {
-          this.update({ phase: 'thinking', detail: '正在继续生成回复…' });
-        }
-      }
-      return;
-    }
-    if (event.type === 'error' && event.owner?.id === this.owner.id) {
-      this.listeningActive = false;
-      this.handleFailure({
-        type: 'error',
-        snapshot: event.snapshot,
-        error: event.error,
-      });
-    }
-  }
-
   private scheduleRelisten(): void {
     this.options.timers.clearTimeout(this.relistenTimer);
     const generation = this.generation;
     this.relistenTimer = this.options.timers.setTimeout(() => {
       if (!this.isCurrent(generation)) return;
-      this.update({ phase: 'listening', detail: '正在重新聆听…' });
+      this.relistenTimer = null;
       void this.startListening(generation, false);
     }, 350);
   }
 
-  private handleFailure(response: Extract<NativeAudioResponse, { type: 'error' }>): void {
-    if (isConfigError(response)) {
-      this.update({ phase: 'configurationRequired', detail: response.error.message });
-      return;
-    }
-    this.update({ phase: 'failed', detail: response.error.message });
+  private handleFailure(result: AudioOperationResultDto, detail: string): void {
+    this.update({ phase: requiresConfiguration(result) ? 'configurationRequired' : 'failed', detail });
   }
 
   private resetTurnState(): void {
@@ -470,6 +421,8 @@ export class VoiceFlowController {
     this.currentToken = null;
     this.currentTurnId = undefined;
     this.interruptContext = null;
+    this.listeningFinalizeRequested = false;
+    this.turnPreferences = null;
   }
 
   private cleanupTrackedSpeech(): void {
@@ -479,9 +432,7 @@ export class VoiceFlowController {
   }
 
   private clearTimers(): void {
-    this.options.timers.clearTimeout(this.silenceTimer);
     this.options.timers.clearTimeout(this.relistenTimer);
-    this.silenceTimer = null;
     this.relistenTimer = null;
   }
 
@@ -495,11 +446,7 @@ export class VoiceFlowController {
   }
 
   private update(patch: Partial<VoiceFlowState>): void {
-    this.state = {
-      ...this.state,
-      ...patch,
-      generation: this.generation,
-    };
+    this.state = { ...this.state, ...patch, generation: this.generation };
     this.publish();
   }
 

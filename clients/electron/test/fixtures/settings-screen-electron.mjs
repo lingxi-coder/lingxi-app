@@ -246,10 +246,19 @@ async function runLayerReseedScenario(webContents) {
     'window.__settingsScreenTest.setLayeredSnapshot({ user: { pluginConfigs: { "a@b": { from: "user" } } }, project: { pluginConfigs: { "a@b": { from: "project" } } } })',
   );
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("plugins")');
+  await webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('.configuration-entry .extension-hub-row-open');
+    if (!row) throw new Error('missing installed plugin configuration row');
+    row.click();
+  })()`);
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-detail-dialog"))');
   const configInitial = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
   await webContents.executeJavaScript('window.__settingsScreenTest.setFieldValue(\'[aria-label="a@b 配置"]\', "not even json")');
   const configDirty = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
   await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
+  await waitFor(webContents, '!document.querySelector(".extension-detail-dialog") && Boolean(document.querySelector(".configuration-entry .extension-hub-row-open"))');
+  await webContents.executeJavaScript(`document.querySelector('.configuration-entry .extension-hub-row-open').click()`);
+  await waitFor(webContents, 'Boolean(document.querySelector(\'[aria-label="a@b 配置"]\'))');
   const configAfterSwitch = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
 
   return {
@@ -411,8 +420,20 @@ async function runVisualAdminScenario(window, webContents) {
     await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
     await delay(100);
     if (page === 'mcp') {
-      await webContents.executeJavaScript(`document.querySelector('.configuration-entry').click()`);
+      await webContents.executeJavaScript(`(() => {
+        const row = document.querySelector('.configuration-entry .extension-hub-row-open');
+        if (!row) throw new Error('missing MCP configuration row');
+        row.click();
+      })()`);
       await delay(50);
+    }
+    if (page === 'plugins') {
+      await webContents.executeJavaScript(`(() => {
+        const row = document.querySelector('.configuration-entry .extension-hub-row-open');
+        if (!row) throw new Error('missing installed plugin configuration row');
+        row.click();
+      })()`);
+      await waitFor(webContents, 'Boolean(document.querySelector("[aria-label=\\\"REGION option\\\"]"))');
     }
     if (page === 'hooks') {
       for (const label of ['PreToolUse', 'Group 1', 'Handler 1']) {
@@ -424,14 +445,16 @@ async function runVisualAdminScenario(window, webContents) {
       }
     }
     layout[page] = await webContents.executeJavaScript(`(() => {
-      const dialog = document.querySelector('[role="dialog"]');
+      const dialog = document.querySelector('.extension-detail-dialog')
+        ?? document.querySelector('.configuration-detail')
+        ?? document.querySelector('[role="dialog"]');
       const state = window.__settingsScreenTest.state();
       return {
         ...state,
         horizontalOverflow: dialog ? dialog.scrollWidth > dialog.clientWidth + 1 : true,
         structuredHookEditor: Boolean(document.querySelector('[aria-label="hook type"]')),
         advancedHookJson: Boolean(document.querySelector('[aria-label="hooks-json"]')),
-        structuredMcpEditor: Boolean(document.querySelector('[aria-label="mcp-transport"]')),
+        structuredMcpEditor: Boolean(document.querySelector('[aria-label="MCP transport type"]')),
         manifestPluginEditor: Boolean(document.querySelector('[aria-label="REGION option"]')),
       };
     })()`);
@@ -609,11 +632,11 @@ async function runProviderSessionIsolation(webContents) {
 async function runConfigurationNavigation(window, webContents) {
   const run = (code) => webContents.executeJavaScript(code);
   const click = async (selector) => {
-    await run(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    await run(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element) throw new Error('missing selector: ' + ${JSON.stringify(selector)}); element.click(); })()`);
     await delay(60);
   };
   const button = async (label) => {
-    await run(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === ${JSON.stringify(label)}).click()`);
+    await run(`(() => { const element = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === ${JSON.stringify(label)}); if (!element) throw new Error('missing button: ' + ${JSON.stringify(label)}); element.click(); })()`);
     await delay(60);
   };
   const capture = async (name) => {
@@ -627,30 +650,40 @@ async function runConfigurationNavigation(window, webContents) {
   for (const page of ['skills', 'mcp']) {
     await run(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
     await delay(80);
-    const initialList = await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
+    const initialList = page === 'skills'
+      ? await run(`Boolean(document.querySelector('.extension-hub-page')) && !document.querySelector('.extension-detail-dialog')`)
+      : await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
     const searchLabel = page === 'skills' ? '搜索 skills' : '搜索 MCP 服务器';
     const query = page === 'skills' ? 'release-notes' : 'context7';
     await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${searchLabel}"]`)}, ${JSON.stringify(query)})`);
     await delay(40);
     await capture(`${page}-list`);
-    await click('.configuration-entry');
-    const detailOnly = await run(`Boolean(document.querySelector('.configuration-detail')) && !document.querySelector('.configuration-list')`);
+    await click(page === 'skills' ? '.extension-hub-row-open' : '.configuration-entry .extension-hub-row-open');
+    const detailOnly = page === 'skills'
+      ? await run(`Boolean(document.querySelector('.extension-detail-dialog'))`)
+      : await run(`Boolean(document.querySelector('.configuration-detail')) && !document.querySelector('.configuration-list')`);
     await capture(`${page}-detail`);
-    await click('.configuration-back');
+    await click(page === 'skills' ? '[aria-label="Close details"]' : '.configuration-back');
     const searchRetained = await run(`document.querySelector(${JSON.stringify(`[aria-label="${searchLabel}"]`)}).value === ${JSON.stringify(query)}`);
-    await button('新建');
+    await button('Add');
     await capture(`${page}-create`);
     const nameLabel = page === 'skills' ? 'skill-create-name' : 'mcp-name';
-    const createOpened = await run(`Boolean(document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)})) && !document.querySelector('.configuration-list')`);
+    const createOpened = page === 'skills'
+      ? await run(`Boolean(document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)})) && Boolean(document.querySelector('.extension-detail-dialog'))`)
+      : await run(`Boolean(document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)})) && !document.querySelector('.configuration-list')`);
     await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${nameLabel}"]`)}, 'draft-test')`);
     await delay(40);
-    await click('.configuration-back');
-    const guarded = await run(`Boolean(document.querySelector('.configuration-detail')) && document.body.textContent.includes('丢弃并切换')`);
+    await click(page === 'skills' ? '[aria-label="Close details"]' : '.configuration-back');
+    const guarded = page === 'skills'
+      ? await run(`Boolean(document.querySelector('.extension-detail-dialog')) && document.body.textContent.includes('丢弃并切换')`)
+      : await run(`Boolean(document.querySelector('.configuration-detail')) && document.body.textContent.includes('丢弃并切换')`);
     await button('继续编辑');
     const draftRetained = await run(`document.querySelector(${JSON.stringify(`[aria-label="${nameLabel}"]`)}).value === 'draft-test'`);
-    await click('.configuration-back');
+    await click(page === 'skills' ? '[aria-label="Close details"]' : '.configuration-back');
     await button('丢弃并切换');
-    const returned = await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
+    const returned = page === 'skills'
+      ? await run(`Boolean(document.querySelector('.extension-hub-page')) && !document.querySelector('.extension-detail-dialog')`)
+      : await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
     results[page] = { initialList, detailOnly, searchRetained, createOpened, guarded, draftRetained, returned };
   }
   await run('window.__settingsScreenTest.selectPage("hooks")');

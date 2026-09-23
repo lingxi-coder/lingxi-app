@@ -1,9 +1,9 @@
 //! `ios-framework` (M8-P12 → M10-F3) — the iOS `UniFFI` packager.
 //!
 //! This crate is the FFI boundary between the Rust engine and the iOS app. The
-//! Swift layer implements the [`platform_api::CameraControl`] / [`platform_api::VoiceRecorder`]
-//! / [`platform_api::SharingService`] callback interfaces (see the skeletons under
-//! `swift/`), hands them across as a [`PlatformImpls`] record, and Rust uses
+//! Swift layer implements the unified [`platform_api::AudioService`] plus the
+//! [`platform_api::CameraControl`] / [`platform_api::SharingService`] callbacks
+//! (see the skeletons under `swift/`), hands them across as a [`PlatformImpls`] record, and Rust uses
 //! them to construct an `IosPlatform` and assemble the mobile engine — so Rust
 //! drives the device's native capabilities by calling *back* into Swift. That
 //! bidirectional flow is the whole point of the `UniFFI` seam.
@@ -71,7 +71,7 @@
 
 #[cfg(feature = "uniffi")]
 use platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
-use platform_api::{CameraControl, SharingService, VoiceRecorder};
+use platform_api::{AudioService, CameraControl, SharingService};
 use std::sync::Arc;
 #[cfg(feature = "uniffi")]
 use std::sync::{Mutex as StdMutex, OnceLock};
@@ -87,10 +87,10 @@ use platform_api::Platform;
 // the shared host.
 #[cfg(feature = "uniffi")]
 pub use engine_mobile::{
-    ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto, FiredCronJobDto,
-    LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileSessionMode,
-    ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
+    max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
+    CronTaskDto, FiredCronJobDto, LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle,
+    MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto,
+    MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ModelPricingTierDto, PermissionRequestSink, ProviderCatalogEntryDto, ProviderConnectionTestDto,
     SessionModeDto,
 };
@@ -101,8 +101,8 @@ pub use engine_mobile::{
 pub struct PlatformImpls {
     /// Swift `CameraControl` impl.
     pub camera: Arc<dyn CameraControl>,
-    /// Swift `VoiceRecorder` impl.
-    pub voice: Arc<dyn VoiceRecorder>,
+    /// Unified Swift device AudioService.
+    pub audio: Arc<dyn AudioService>,
     /// Swift `SharingService` impl.
     pub share: Arc<dyn SharingService>,
     /// Swift Keychain-backed `SecureStorage` impl, if provided. When `None` the
@@ -534,10 +534,8 @@ pub fn build_mobile_engine(
         let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
             app_sandbox_root: std::path::PathBuf::from(impls.app_sandbox_root),
             camera: impls.camera,
-            voice: impls.voice,
+            audio: impls.audio,
             share: impls.share,
-            stt: None,
-            tts: None,
             notifications: None,
             clipboard: None,
             device_status: None,
@@ -546,8 +544,7 @@ pub fn build_mobile_engine(
             calendar: None,
             contacts: None,
             secure_storage: impls.secure_storage,
-            // This lower-level entry point takes no location impl, like the
-            // stt/tts/notification/clipboard slots above it.
+            // This lower-level entry point takes no location impl.
             location: None,
             mobile_linux: ios_mobile_linux_runtime(impls.mobile_linux.as_ref()),
             workspace_host_path: Some(workspace_host_path),
@@ -1430,21 +1427,13 @@ fn probe_runtime(
 // M10-P3a: the foreign-callable engine constructor.
 // ---------------------------------------------------------------------------
 //
-// `build_mobile_engine` (above) takes an `Arc<dyn Platform>` + the foreign
-// callback objects (camera / voice / share) — none of which are UniFFI types —
-// so it cannot itself cross the FFI boundary. The Swift app needs SOME exported
-// constructor to obtain a `MobileEngineHandle`; the only piece it must supply
-// for a text conversation is the `ClientEventListener` (already a UniFFI
-// callback interface) — the engine's own `IosPlatform` supplies fs / http /
-// clock from `platform-posix-minimal`, and a text turn never touches the
-// camera / voice / share device capabilities.
-//
-// So this thin `#[uniffi::export]` wrapper takes ONLY UniFFI-marshalable inputs
-// (the listener + plain config strings), constructs default device-capability
-// stubs + a no-op permission sink on the Rust side, threads the runtime config
-// (api base / key / model) into a `MobileConfig`, and delegates to the shared
-// `build_mobile_engine`. This is ADDITIVE FFI packaging only — it changes no
-// engine semantics and touches neither the `platform-api` crate nor Android.
+// `build_mobile_engine` (above) takes an `Arc<dyn Platform>` plus listener and
+// permission traits. This thin exported constructor accepts the Swift-local
+// callback interfaces (including one unified audio service), adapts them to the
+// internal shared host traits, builds `IosPlatform`, and delegates to the same
+// mobile engine. Filesystem / HTTP / clock still come from
+// `platform-posix-minimal`; audio support is projected from the callback's
+// initial snapshot and updated by its service lifecycle.
 //
 // SECRETS: `api_key` arrives as a parameter the Swift side reads from the
 // process environment (`ANTHROPIC_API_KEY`) / an app setting at runtime; it is
@@ -1452,7 +1441,7 @@ fn probe_runtime(
 // orchestrator only fails at `run_turn` with a 401 (mirrors `MobileConfig`).
 
 /// Device-capability stubs used when the foreign host does not (yet) wire the
-/// camera / voice / share callbacks. A text conversation never invokes these;
+/// camera / share callbacks. A text conversation never invokes these;
 /// each method returns the trait's "unavailable" error so an accidental call is
 /// a clean error rather than a panic. M9 replaces these with the real
 /// Swift-backed callback objects threaded through a richer constructor.
@@ -1466,7 +1455,7 @@ mod stub_capabilities {
     use async_trait::async_trait;
     use platform_api::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, ShareError, SharePayload,
-        ShareResult, SharingService, VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
+        ShareResult, SharingService,
     };
 
     /// No-op camera: capture / pick both report the hardware as unavailable.
@@ -1482,22 +1471,6 @@ mod stub_capabilities {
         }
         async fn pick_from_library(&self) -> Result<CapturedImage, CameraError> {
             Err(CameraError::DeviceUnavailable)
-        }
-    }
-
-    /// No-op voice recorder: never records.
-    pub struct StubVoice;
-
-    #[async_trait]
-    impl VoiceRecorder for StubVoice {
-        async fn start_recording(&self, _opts: VoiceRecordingOpts) -> Result<(), VoiceError> {
-            Err(VoiceError::Other("voice capture not wired".to_string()))
-        }
-        async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
-            Err(VoiceError::NotRecording)
-        }
-        async fn is_recording(&self) -> bool {
-            false
         }
     }
 
@@ -1606,6 +1579,71 @@ pub trait IosEventListener: Send + Sync {
     }
 }
 
+/// Flat cancellation error for the iOS-local `AudioService` callback.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum IosAudioFfiError {
+    /// The Swift service could not cancel the requested operation.
+    #[error("audio cancellation failed: {message}")]
+    NativeFailure { message: String },
+}
+
+/// Crate-local iOS callback interface for the single app-scoped audio service.
+/// Kept in this packager because UniFFI 0.28 cannot reference an external
+/// callback-interface definition from `engine-mobile` metadata.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosAudioService: Send + Sync {
+    /// Current support/readiness snapshot; must not request permission.
+    fn capabilities(&self) -> client_protocol::audio::AudioCapabilitySnapshotDto;
+    /// Execute one audio operation and return its structured terminal result.
+    async fn execute(
+        &self,
+        request: client_protocol::audio::AudioOperationRequestDto,
+    ) -> client_protocol::audio::AudioOperationResultDto;
+    /// Cancel only the matching pending operation identity.
+    async fn cancel(
+        &self,
+        identity: client_protocol::audio::AudioOperationIdDto,
+    ) -> Result<(), IosAudioFfiError>;
+}
+
+#[cfg(feature = "uniffi")]
+struct IosAudioServiceBridge {
+    inner: Box<dyn IosAudioService>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl engine_mobile::NativeAudioService for IosAudioServiceBridge {
+    fn capabilities(&self) -> client_protocol::audio::AudioCapabilitySnapshotDto {
+        self.inner.capabilities()
+    }
+
+    async fn execute(
+        &self,
+        request: client_protocol::audio::AudioOperationRequestDto,
+    ) -> client_protocol::audio::AudioOperationResultDto {
+        self.inner.execute(request).await
+    }
+
+    async fn cancel(
+        &self,
+        identity: client_protocol::audio::AudioOperationIdDto,
+    ) -> Result<(), engine_mobile::AudioFfiError> {
+        self.inner
+            .cancel(identity)
+            .await
+            .map_err(|error| match error {
+                IosAudioFfiError::NativeFailure { message } => {
+                    engine_mobile::AudioFfiError::NativeFailure { message }
+                }
+            })
+    }
+}
+
 /// Adapts the crate-local [`IosEventListener`] callback interface to the shared
 /// [`ClientEventListener`] the engine's adapter sink expects. One forwarding hop
 /// per event; no transformation. (`UniFFI` lifts a `callback_interface` as a
@@ -1636,95 +1674,8 @@ impl ClientEventListener for IosListenerBridge {
 }
 
 // ---------------------------------------------------------------------------
-// Device-capability FFI block (iOS parity with android-aar).
+// Other device-capability FFI callbacks (iOS parity with android-aar).
 // ---------------------------------------------------------------------------
-//
-// Mirrors `android-aar`'s AndroidStt/AndroidTts/AndroidCamera/AndroidShare/
-// AndroidVoice/AndroidNotification/AndroidClipboard callback interfaces + their
-// FFI types + engine bridges, s/Android/Ios/ for the interface/bridge names.
-// These interfaces are DEFINED IN THIS CRATE (mirroring `IosEventListener`) so
-// their UniFFI `FfiConverter`s register under `ios_framework`'s tag — a
-// prerequisite for naming them as parameter types in `build_ios_engine`. The
-// engine consumes the SHARED `platform_api::*` seams, so each crate-local interface is
-// adapted by a thin bridge struct to its `traits` counterpart.
-//
-// RETURN SHAPE (UniFFI 0.28.3): async callback-interface methods return
-// `Result<T, E>` where `E` is a `#[derive(uniffi::Error)]` enum.
-
-/// FFI error surface for the iOS speech callback interfaces. A flat enum so
-/// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer `platform_api::SttError` / `platform_api::TtsError`.
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
-#[derive(Debug, thiserror::Error)]
-pub enum SpeechFfiError {
-    /// The user denied microphone permission (STT only).
-    #[error("microphone permission denied")]
-    PermissionDenied,
-    /// No speech detected before the listen timeout (STT only).
-    #[error("no speech detected")]
-    NoSpeech,
-    /// No usable recognizer / synthesizer on the device.
-    #[error("speech service unavailable")]
-    Unavailable,
-    /// The shared `AVAudioSession` is held by another consumer, exactly as
-    /// [`VoiceFfiError::Busy`] reports for recording.
-    #[error("audio session busy")]
-    Busy,
-    /// A transient failure — safe to retry.
-    #[error("transient speech error: {message}")]
-    Retriable {
-        /// Human-readable detail from the native side.
-        message: String,
-    },
-    /// Any other native failure.
-    #[error("speech error: {message}")]
-    Other {
-        /// Human-readable detail from the native side.
-        message: String,
-    },
-}
-
-/// Crate-local foreign callback interface for native speech-to-text — the Swift
-/// app implements it over `SFSpeechRecognizer` (opens the live mic, listens for
-/// one utterance, returns the final transcript). Bridged to
-/// [`platform_api::SpeechToText`] by [`IosSttBridge`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
-#[async_trait::async_trait]
-pub trait IosStt: Send + Sync {
-    /// Open the mic, listen for a single utterance, and return the recognized
-    /// text. `language` is a BCP-47 hint (`None` = device default).
-    async fn transcribe(&self, language: Option<String>) -> Result<String, SpeechFfiError>;
-}
-
-/// Crate-local foreign callback interface for native text-to-speech — the Swift
-/// app implements it over `AVSpeechSynthesizer`, returning 16-bit signed
-/// little-endian mono PCM. Bridged to [`platform_api::TextToSpeech`] by [`IosTtsBridge`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
-#[async_trait::async_trait]
-pub trait IosTts: Send + Sync {
-    /// Synthesize `text` to PCM16 audio at [`TtsAudioFfi::sample_rate_hz`].
-    /// `voice` is a provider-specific id (`None` = system default voice).
-    async fn synthesize(
-        &self,
-        text: String,
-        voice: Option<String>,
-    ) -> Result<TtsAudioFfi, SpeechFfiError>;
-}
-
-/// FFI carrier for synthesized audio crossing the callback-interface seam:
-/// PCM16 frames + the sample rate the Swift engine produced them at.
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[derive(Debug, Clone)]
-pub struct TtsAudioFfi {
-    /// Raw PCM16 frames (16-bit signed little-endian, mono).
-    pub pcm: Vec<u8>,
-    /// Sample rate of `pcm` in Hz.
-    pub sample_rate_hz: u32,
-}
 
 /// FFI error surface for the iOS share callback interface. A flat enum so `UniFFI`
 /// can render it for an async `callback_interface` method; the bridge fans it
@@ -2516,204 +2467,13 @@ fn securestorage_error_from_ffi(e: SecureStorageFfiError) -> platform_api::Secur
     }
 }
 
-/// FFI error surface for the iOS mic-recorder callback interface. A flat enum so
-/// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`platform_api::VoiceError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
-#[derive(Debug, thiserror::Error)]
-pub enum VoiceFfiError {
-    /// The user denied microphone permission.
-    #[error("microphone permission denied")]
-    PermissionDenied,
-    /// `stop_recording` was called with no active session.
-    #[error("not currently recording")]
-    NotRecording,
-    /// The shared `AVAudioSession` is held by another consumer (FlowMode's
-    /// voice orb, a hold-to-talk capture): the recorder is fine, the session
-    /// is not free. Distinct from `Other` so a local app can tell the user
-    /// "try again in a moment" instead of surfacing an opaque failure.
-    #[error("audio session busy")]
-    Busy,
-    /// Any other native failure.
-    #[error("voice error: {message}")]
-    Other {
-        /// Human-readable detail from the native side.
-        message: String,
-    },
-}
-
-/// FFI carrier for a finished recording crossing the callback-interface seam:
-/// the encoded audio bytes + their MIME type. Mapped to [`platform_api::VoiceRecording`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[derive(Debug, Clone)]
-pub struct VoiceRecordingFfi {
-    /// Encoded audio bytes.
-    pub audio_bytes: Vec<u8>,
-    /// MIME type of `audio_bytes` (e.g. `"audio/m4a"`).
-    pub mime_type: String,
-}
-
-/// Crate-local foreign callback interface for native mic recording — the Swift
-/// app implements it over `AVAudioRecorder`. Bridged to [`platform_api::VoiceRecorder`]
-/// by [`IosVoiceBridge`]. Driven by the engine through `tool-voice`
-/// (start/stop/is_recording); the recording opts cross the seam as the flat
-/// `sample_rate_hz` / `format` args.
-#[cfg(feature = "uniffi")]
-#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
-#[async_trait::async_trait]
-pub trait IosVoice: Send + Sync {
-    /// Begin a mic recording session at the given sample rate / container format.
-    async fn start_recording(
-        &self,
-        sample_rate_hz: u32,
-        format: String,
-    ) -> Result<(), VoiceFfiError>;
-    /// Stop the active session and return the captured audio.
-    async fn stop_recording(&self) -> Result<VoiceRecordingFfi, VoiceFfiError>;
-    /// Whether a recording session is currently active.
-    async fn is_recording(&self) -> bool;
-}
-
-/// Adapts the crate-local [`IosVoice`] callback interface to the shared
-/// [`platform_api::VoiceRecorder`] seam the engine consumes. Destructures
-/// [`platform_api::VoiceRecordingOpts`] into the flat `sample_rate_hz` / `format`
-/// args, converts [`VoiceRecordingFfi`] back to [`platform_api::VoiceRecording`], and
-/// fans [`VoiceFfiError`] back out onto [`platform_api::VoiceError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-struct IosVoiceBridge {
-    inner: Box<dyn IosVoice>,
-}
-
-#[cfg(feature = "uniffi")]
-#[async_trait::async_trait]
-impl platform_api::VoiceRecorder for IosVoiceBridge {
-    async fn start_recording(
-        &self,
-        opts: platform_api::VoiceRecordingOpts,
-    ) -> Result<(), platform_api::VoiceError> {
-        let platform_api::VoiceRecordingOpts {
-            sample_rate_hz,
-            format,
-        } = opts;
-        self.inner
-            .start_recording(sample_rate_hz, format)
-            .await
-            .map_err(voice_error_from_ffi)
-    }
-    async fn stop_recording(
-        &self,
-    ) -> Result<platform_api::VoiceRecording, platform_api::VoiceError> {
-        match self.inner.stop_recording().await {
-            Ok(rec) => Ok(platform_api::VoiceRecording {
-                audio_bytes: rec.audio_bytes,
-                mime_type: rec.mime_type,
-            }),
-            Err(e) => Err(voice_error_from_ffi(e)),
-        }
-    }
-    async fn is_recording(&self) -> bool {
-        self.inner.is_recording().await
-    }
-}
-
-/// Fan a flat [`VoiceFfiError`] back out onto the richer [`platform_api::VoiceError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-fn voice_error_from_ffi(e: VoiceFfiError) -> platform_api::VoiceError {
-    match e {
-        VoiceFfiError::PermissionDenied => platform_api::VoiceError::PermissionDenied,
-        VoiceFfiError::NotRecording => platform_api::VoiceError::NotRecording,
-        VoiceFfiError::Busy => platform_api::VoiceError::Busy,
-        VoiceFfiError::Other { message } => platform_api::VoiceError::Other(message),
-    }
-}
-
-/// Adapts the crate-local [`IosStt`] callback interface to the shared
-/// [`platform_api::SpeechToText`] seam the engine consumes. One forwarding hop per
-/// call; maps [`SpeechFfiError`] onto [`platform_api::SttError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-struct IosSttBridge {
-    inner: Box<dyn IosStt>,
-}
-
-#[cfg(feature = "uniffi")]
-#[async_trait::async_trait]
-impl platform_api::SpeechToText for IosSttBridge {
-    async fn transcribe(
-        &self,
-        opts: platform_api::SttOpts,
-    ) -> Result<platform_api::SttTranscript, platform_api::SttError> {
-        match self.inner.transcribe(opts.language.clone()).await {
-            Ok(text) => Ok(platform_api::SttTranscript {
-                text,
-                language: opts.language,
-                confidence: None,
-            }),
-            Err(e) => Err(match e {
-                SpeechFfiError::PermissionDenied => platform_api::SttError::PermissionDenied,
-                SpeechFfiError::NoSpeech => platform_api::SttError::NoSpeech,
-                SpeechFfiError::Unavailable => platform_api::SttError::Unavailable,
-                SpeechFfiError::Busy => platform_api::SttError::Busy,
-                SpeechFfiError::Retriable { message } => platform_api::SttError::Retriable(message),
-                SpeechFfiError::Other { message } => platform_api::SttError::Other(message),
-            }),
-        }
-    }
-}
-
-/// Adapts the crate-local [`IosTts`] callback interface to the shared
-/// [`platform_api::TextToSpeech`] seam the engine consumes. Maps [`SpeechFfiError`]
-/// onto [`platform_api::TtsError`].
-#[cfg(feature = "uniffi")]
-#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-struct IosTtsBridge {
-    inner: Box<dyn IosTts>,
-}
-
-#[cfg(feature = "uniffi")]
-#[async_trait::async_trait]
-impl platform_api::TextToSpeech for IosTtsBridge {
-    async fn synthesize(
-        &self,
-        opts: platform_api::TtsOpts,
-    ) -> Result<platform_api::TtsAudio, platform_api::TtsError> {
-        match self.inner.synthesize(opts.text, opts.voice).await {
-            Ok(audio) => Ok(platform_api::TtsAudio {
-                pcm: audio.pcm,
-                sample_rate_hz: audio.sample_rate_hz,
-            }),
-            Err(e) => Err(match e {
-                SpeechFfiError::Unavailable => platform_api::TtsError::Unavailable,
-                SpeechFfiError::Retriable { message } | SpeechFfiError::Other { message } => {
-                    platform_api::TtsError::SynthesisFailed(message)
-                }
-                // STT-only variants are not produced by a TTS impl; fold them
-                // into a generic TTS error rather than panic.
-                SpeechFfiError::PermissionDenied => {
-                    platform_api::TtsError::Other("permission denied".to_string())
-                }
-                SpeechFfiError::NoSpeech => platform_api::TtsError::Other("no speech".to_string()),
-                // Audio-session contention is real for playback too, but
-                // `TtsError` has no busy variant; keep it recognizable in
-                // the message rather than folding it into a bare "other".
-                SpeechFfiError::Busy => {
-                    platform_api::TtsError::Other("audio session busy".to_string())
-                }
-            }),
-        }
-    }
-}
-
 /// Foreign-callable constructor for the iOS app (plan M10-P3a).
 ///
 /// Builds a fully-wired [`MobileEngineHandle`] from the Swift-supplied event
-/// listener + runtime config. The handle owns its tokio runtime and streams
-/// every [`client_protocol::events::ClientEvent`] to `listener.on_event(..)`;
-/// the app drives turns via [`MobileEngineHandle::submit`].
+/// listener, app-scoped audio callback, other device callbacks, and runtime
+/// config. The handle owns its tokio runtime and streams every
+/// [`client_protocol::events::ClientEvent`] to `listener.on_event(..)`; the app
+/// drives turns via [`MobileEngineHandle::submit`].
 ///
 /// - `api_base`  — Anthropic-compatible base URL (e.g. `https://api.anthropic.com`).
 /// - `api_key`   — read by Swift from `ANTHROPIC_API_KEY` / an app setting at
@@ -2767,11 +2527,9 @@ pub fn build_ios_cron_store(
 pub fn build_ios_engine_with_config(
     config: IosEngineLaunchConfigFfi,
     listener: Box<dyn IosEventListener>,
-    stt: Box<dyn IosStt>,
-    tts: Box<dyn IosTts>,
+    audio: Box<dyn IosAudioService>,
     camera: Box<dyn IosCamera>,
     share: Box<dyn IosShare>,
-    voice: Box<dyn IosVoice>,
     notifications: Box<dyn IosNotification>,
     clipboard: Box<dyn IosClipboard>,
     permissions: Box<dyn IosPermissionSink>,
@@ -2790,6 +2548,9 @@ pub fn build_ios_engine_with_config(
     #[cfg(target_os = "ios")]
     {
         use platform_ios::{IosPlatform, IosPlatformInputs};
+        let native_audio: Arc<dyn engine_mobile::NativeAudioService> =
+            Arc::new(IosAudioServiceBridge { inner: audio });
+        let audio = engine_mobile::from_native_audio_service(native_audio);
         let device_status = device_control
             .clone()
             .map(|service| service.clone() as Arc<dyn platform_api::DeviceStatusProvider>);
@@ -2828,10 +2589,8 @@ pub fn build_ios_engine_with_config(
         let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
             app_sandbox_root: std::path::PathBuf::from(&config.app_sandbox_root),
             camera: Arc::new(IosCameraBridge { inner: camera }),
-            voice: Arc::new(IosVoiceBridge { inner: voice }),
+            audio,
             share: Arc::new(IosShareBridge { inner: share }),
-            stt: Some(Arc::new(IosSttBridge { inner: stt })),
-            tts: Some(Arc::new(IosTtsBridge { inner: tts })),
             notifications: Some(Arc::new(IosNotificationBridge {
                 inner: notifications,
             })),
@@ -2861,11 +2620,9 @@ pub fn build_ios_engine_with_config(
         let _ = (
             config,
             listener,
-            stt,
-            tts,
+            audio,
             camera,
             share,
-            voice,
             notifications,
             clipboard,
             permissions,
@@ -2885,11 +2642,9 @@ pub fn build_ios_engine(
     model: String,
     app_sandbox_root: String,
     listener: Box<dyn IosEventListener>,
-    stt: Box<dyn IosStt>,
-    tts: Box<dyn IosTts>,
+    audio: Box<dyn IosAudioService>,
     camera: Box<dyn IosCamera>,
     share: Box<dyn IosShare>,
-    voice: Box<dyn IosVoice>,
     notifications: Box<dyn IosNotification>,
     clipboard: Box<dyn IosClipboard>,
     permissions: Box<dyn IosPermissionSink>,
@@ -2914,11 +2669,9 @@ pub fn build_ios_engine(
             host_environment: None,
         },
         listener,
-        stt,
-        tts,
+        audio,
         camera,
         share,
-        voice,
         notifications,
         clipboard,
         permissions,
@@ -3734,7 +3487,7 @@ mod tests {
     use engine_mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
     use platform_api::{
         CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
-        SharingService, VoiceRecorder, WorktreeManager,
+        SharingService, WorktreeManager,
     };
     use tokio::sync::Mutex;
 
@@ -3787,9 +3540,6 @@ mod tests {
             self.worktree.clone()
         }
         fn camera(&self) -> Option<Arc<dyn CameraControl>> {
-            None
-        }
-        fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
             None
         }
         fn share(&self) -> Option<Arc<dyn SharingService>> {

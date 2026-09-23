@@ -1,5 +1,35 @@
 import AVFoundation
 
+protocol VoiceAudioSessionDriving: Sendable {
+    func activate(_ purpose: VoiceAudioSessionCoordinator.Purpose) throws
+    func deactivate()
+}
+
+struct AVAudioSessionDriver: VoiceAudioSessionDriving {
+    func activate(_ purpose: VoiceAudioSessionCoordinator.Purpose) throws {
+        let session = AVAudioSession.sharedInstance()
+        switch purpose {
+        case .recognition:
+            try session.setCategory(.record, mode: .measurement, options: [.duckOthers, .allowBluetoothHFP])
+        case .recording:
+            try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetoothHFP])
+        case .playback:
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        case .flowDuplex:
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.defaultToSpeaker, .allowBluetoothHFP]
+            )
+        }
+        try session.setActive(true, options: .notifyOthersOnDeactivation)
+    }
+
+    func deactivate() {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+}
+
 /// Serializes microphone, recognition and speech playback ownership so Flow
 /// Mode, hold-to-talk and engine tool callbacks cannot fight over AVAudioSession.
 actor VoiceAudioSessionCoordinator {
@@ -17,6 +47,17 @@ actor VoiceAudioSessionCoordinator {
         let purpose: Purpose
     }
 
+    enum InvalidationReason: Sendable {
+        case interruption
+        case background
+        case routeChange
+    }
+
+    struct Invalidation: Sendable {
+        let lease: Lease
+        let reason: InvalidationReason
+    }
+
     enum CoordinationError: LocalizedError {
         case busy(Purpose)
 
@@ -32,14 +73,16 @@ actor VoiceAudioSessionCoordinator {
     private enum State: Equatable {
         case idle
         case active(Lease)
-        case interrupted(Lease)
-        case backgrounded(Lease)
+        case invalidated(Lease)
     }
 
+    private let sessionDriver: any VoiceAudioSessionDriving
+    private var invalidationContinuations: [UUID: AsyncStream<Invalidation>.Continuation] = [:]
     private var state: State = .idle
     private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
 
-    init() {
+    init(sessionDriver: any VoiceAudioSessionDriving = AVAudioSessionDriver()) {
+        self.sessionDriver = sessionDriver
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: AVAudioSession.interruptionNotification,
@@ -72,80 +115,80 @@ actor VoiceAudioSessionCoordinator {
         if let currentLease {
             throw CoordinationError.busy(currentLease.purpose)
         }
-        try configureAndActivate(requested)
+        try sessionDriver.activate(requested)
         let lease = Lease(id: UUID(), purpose: requested)
         state = .active(lease)
         return lease
     }
 
-    private func configureAndActivate(_ requested: Purpose) throws {
-        let session = AVAudioSession.sharedInstance()
-        switch requested {
-        case .recognition:
-            try session.setCategory(.record, mode: .measurement, options: [.duckOthers, .allowBluetoothHFP])
-        case .recording:
-            try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetoothHFP])
-        case .playback:
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-        case .flowDuplex:
-            try session.setCategory(
-                .playAndRecord,
-                mode: .voiceChat,
-                options: [.defaultToSpeaker, .allowBluetoothHFP]
-            )
-        }
-        try session.setActive(true, options: .notifyOthersOnDeactivation)
-    }
-
     func release(_ lease: Lease) {
         guard currentLease == lease else { return }
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if case .active = state { sessionDriver.deactivate() }
         state = .idle
     }
 
     func suspendForBackground() {
         guard case .active(let lease) = state else { return }
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        state = .backgrounded(lease)
+        sessionDriver.deactivate()
+        state = .invalidated(lease)
+        publishInvalidation(.init(lease: lease, reason: .background))
     }
 
-    func resumeAfterForeground() {
-        guard case .backgrounded(let lease) = state else { return }
-        do {
-            try configureAndActivate(lease.purpose)
-            state = .active(lease)
-        } catch {
-            // The caller still owns the lease even when reactivation fails.
-            // Only `release` may make the coordinator idle; otherwise a second
-            // microphone or synthesizer could start over the stale owner.
-            state = .backgrounded(lease)
+    func resumeAfterForeground() {}
+
+    func invalidationEvents() -> AsyncStream<Invalidation> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: Invalidation.self,
+            bufferingPolicy: .bufferingNewest(16)
+        )
+        invalidationContinuations[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeInvalidationSubscriber(id) }
         }
+        return stream
+    }
+
+    func invalidationSubscriberCount() -> Int {
+        invalidationContinuations.count
     }
 
     private var currentLease: Lease? {
         switch state {
-        case .active(let lease), .interrupted(let lease), .backgrounded(let lease): return lease
+        case .active(let lease), .invalidated(let lease): return lease
         case .idle: return nil
         }
     }
 
-    private func handleInterruption(rawType: UInt, rawOptions: UInt) {
+    func owns(_ lease: Lease) -> Bool {
+        currentLease == lease
+    }
+
+    func activePurpose() -> Purpose? {
+        currentLease?.purpose
+    }
+
+    func leaseStateForDiagnostics() -> (purpose: Purpose?, awaitingOwnerCleanup: Bool) {
+        switch state {
+        case .idle: (nil, false)
+        case .active(let lease): (lease.purpose, false)
+        case .invalidated(let lease): (lease.purpose, true)
+        }
+    }
+
+    func handleInterruption(rawType: UInt, rawOptions _: UInt) {
         guard let type = AVAudioSession.InterruptionType(rawValue: rawType) else { return }
         switch type {
         case .began:
-            if case .active(let lease) = state { state = .interrupted(lease) }
+            guard case .active(let lease) = state else { return }
+            sessionDriver.deactivate()
+            state = .invalidated(lease)
+            publishInvalidation(.init(lease: lease, reason: .interruption))
         case .ended:
-            guard case .interrupted(let lease) = state else { return }
-            if AVAudioSession.InterruptionOptions(rawValue: rawOptions).contains(.shouldResume) {
-                do {
-                    try configureAndActivate(lease.purpose)
-                    state = .active(lease)
-                } catch {
-                    state = .interrupted(lease)
-                }
-            } else {
-                state = .interrupted(lease)
-            }
+            // The interrupted operation ended when the system took the audio
+            // session. It must reacquire as a new operation after the user
+            // explicitly starts it again.
+            break
         @unknown default:
             break
         }
@@ -157,13 +200,16 @@ actor VoiceAudioSessionCoordinator {
             let reason = AVAudioSession.RouteChangeReason(rawValue: rawReason),
             reason == .oldDeviceUnavailable || reason == .newDeviceAvailable
         else { return }
-        // Reapply the purpose-specific category so Bluetooth HFP and speaker
-        // routes recover consistently after headsets connect or disconnect.
-        do {
-            try configureAndActivate(lease.purpose)
-            state = .active(lease)
-        } catch {
-            state = .interrupted(lease)
-        }
+        sessionDriver.deactivate()
+        state = .invalidated(lease)
+        publishInvalidation(.init(lease: lease, reason: .routeChange))
+    }
+
+    private func publishInvalidation(_ invalidation: Invalidation) {
+        invalidationContinuations.values.forEach { $0.yield(invalidation) }
+    }
+
+    private func removeInvalidationSubscriber(_ id: UUID) {
+        invalidationContinuations.removeValue(forKey: id)
     }
 }

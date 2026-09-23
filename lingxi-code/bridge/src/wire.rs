@@ -10,6 +10,7 @@
 //! public types are re-exported at the crate root, so consumers write
 //! `bridge::ServerHello` regardless.
 
+use client_protocol::audio::AudioCapabilitySnapshotDto;
 use client_protocol::computer_access::ComputerAccessRequestDto;
 use client_protocol::events::ClientEvent;
 use client_protocol::permission::PermissionRequest;
@@ -42,6 +43,10 @@ pub struct Capabilities {
     /// INDEPENDENTLY of [`BRIDGE_PROTOCOL_VERSION`]: the wire envelope and the
     /// DTO contract are versioned separately (governing decision §0.10).
     pub client_protocol_version: String,
+    /// Device audio support/readiness snapshot. `None` means the endpoint has
+    /// not reported its device-local AudioService capabilities yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioCapabilitySnapshotDto>,
 }
 
 impl Default for Capabilities {
@@ -52,6 +57,7 @@ impl Default for Capabilities {
             supports_skills: true,
             supports_commands: true,
             client_protocol_version: CLIENT_PROTOCOL_VERSION.to_string(),
+            audio: None,
         }
     }
 }

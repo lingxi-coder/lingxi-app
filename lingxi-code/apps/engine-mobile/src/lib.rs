@@ -53,6 +53,8 @@ use tool_ui::ask_user_question::AskUserQuestionResolver;
 // crates (`ios-framework` / `android-aar`) re-export this shared host (F3-04) so
 // iOS and Android cannot drift.
 #[cfg(feature = "uniffi")]
+mod audio_service;
+#[cfg(feature = "uniffi")]
 mod host;
 
 // Audit fix (#14): the disk-backed Skill loader the FFI host wires so the mobile
@@ -98,7 +100,7 @@ mod local_app_template_catalog;
 mod local_apps_build;
 #[cfg(feature = "uniffi")]
 mod local_apps_host;
-// Live per-connection device handles (camera / voice / location /
+// Live per-connection device handles (camera / audio / location /
 // notifications) behind a SharedLlm-style swap cell — see the module doc for
 // why a bare OnceLock would pin a torn-down engine's Swift objects.
 #[cfg(feature = "uniffi")]
@@ -154,6 +156,10 @@ pub mod test_support;
 // register and the `PermissionRequestSink` the gate emits to). Re-exporting them
 // from the shared host crate keeps the FFI crates free of a direct
 // `client-adapter` import for these types — the shared host is the single seam.
+#[cfg(feature = "uniffi")]
+pub use audio_service::{
+    from_native_audio_service, max_audio_payload_bytes, AudioFfiError, NativeAudioService,
+};
 #[cfg(feature = "uniffi")]
 pub use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
 
@@ -832,7 +838,7 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
         None => tool_ui::register_all(reg, ctx.clone()),
     }
     // ----- mobile-exclusive tools ------------------------------------------
-    // camera / voice / speech / notification / clipboard / share, folded into
+    // camera / audio / notification / clipboard / share, folded into
     // the single `tool-mobile` crate.
     tool_mobile::register_all(reg, ctx.clone());
     // P3/P4: mobile shell tool. The composition root pre-gates it so a selected

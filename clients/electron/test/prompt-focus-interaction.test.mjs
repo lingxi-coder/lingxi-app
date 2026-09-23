@@ -165,9 +165,9 @@ test('real Electron restores an independent unsent composer draft for each sessi
 
     assert.deepEqual(result, {
       audioInteraction: {
-        dictationStartRequests: ['request_authorization', 'start_listening'],
+        dictationStartRequests: ['listen'],
         dictatedText: 'dictated text',
-        flowStartRequests: ['request_authorization', 'start_listening'],
+        flowStartRequests: ['listen'],
       },
       modelSettings: {
         resetToDefaultVisible: false,

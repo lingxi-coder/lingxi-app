@@ -121,14 +121,20 @@ fn the_project_local_default_is_not_rejected_as_protected() {
     // instead of being bounced by the hardening guard.
     let repo = repo_root();
     let got = ConversationOrchestrator::plans_dir(repo.path(), Some(".lingxi/plans"));
-    assert_eq!(got, ConversationOrchestrator::default_plans_dir(repo.path()));
+    assert_eq!(
+        got,
+        ConversationOrchestrator::default_plans_dir(repo.path())
+    );
 }
 
 #[test]
 fn protected_directory_component_is_rejected() {
     let repo = repo_root();
     let got = ConversationOrchestrator::plans_dir(repo.path(), Some(".git/plans"));
-    assert_eq!(got, ConversationOrchestrator::default_plans_dir(repo.path()));
+    assert_eq!(
+        got,
+        ConversationOrchestrator::default_plans_dir(repo.path())
+    );
 }
 
 #[test]
@@ -137,7 +143,10 @@ fn nested_repository_boundary_is_rejected() {
     std::fs::create_dir_all(repo.path().join("nested/.git")).unwrap();
     std::fs::create_dir_all(repo.path().join("nested/plans")).unwrap();
     let got = ConversationOrchestrator::plans_dir(repo.path(), Some("nested/plans"));
-    assert_eq!(got, ConversationOrchestrator::default_plans_dir(repo.path()));
+    assert_eq!(
+        got,
+        ConversationOrchestrator::default_plans_dir(repo.path())
+    );
 }
 
 #[test]
@@ -145,7 +154,10 @@ fn existing_file_component_is_rejected() {
     let repo = repo_root();
     std::fs::write(repo.path().join("README.md"), "x").unwrap();
     let got = ConversationOrchestrator::plans_dir(repo.path(), Some("README.md/plans"));
-    assert_eq!(got, ConversationOrchestrator::default_plans_dir(repo.path()));
+    assert_eq!(
+        got,
+        ConversationOrchestrator::default_plans_dir(repo.path())
+    );
 }
 
 #[cfg(unix)]
@@ -156,7 +168,10 @@ fn symlinked_component_is_rejected() {
     std::fs::create_dir_all(outside.path().join("plans")).unwrap();
     std::os::unix::fs::symlink(outside.path(), repo.path().join("linked")).unwrap();
     let got = ConversationOrchestrator::plans_dir(repo.path(), Some("linked/plans"));
-    assert_eq!(got, ConversationOrchestrator::default_plans_dir(repo.path()));
+    assert_eq!(
+        got,
+        ConversationOrchestrator::default_plans_dir(repo.path())
+    );
 }
 
 #[test]

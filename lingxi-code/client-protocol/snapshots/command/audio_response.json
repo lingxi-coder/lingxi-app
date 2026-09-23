@@ -1,6 +1,10 @@
 {
   "type": "audio_response",
-  "request_id": 7,
+  "identity": {
+    "id": "00000000-0000-4000-8000-000000000007",
+    "generation": 2,
+    "service_epoch": 3
+  },
   "result": {
     "type": "transcript",
     "text": "你好",

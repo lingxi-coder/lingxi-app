@@ -332,13 +332,14 @@ impl LocalAppsHostBroker {
                 // A template that disappeared or changed since the plan was
                 // written is refused by name instead of being swapped for a
                 // similar one.
-                let (handle, selection) = crate::local_app_template_catalog::journal_plan_selection(
-                    &self.root,
-                    &app_id,
-                    &execution_id,
-                    &template_id,
-                    "the user approved this template in the plan",
-                )?;
+                let (handle, selection) =
+                    crate::local_app_template_catalog::journal_plan_selection(
+                        &self.root,
+                        &app_id,
+                        &execution_id,
+                        &template_id,
+                        "the user approved this template in the plan",
+                    )?;
                 let staged = self
                     .local_app_contract(json!({
                         "operation": "stage",

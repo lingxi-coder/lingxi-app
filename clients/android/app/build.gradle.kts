@@ -110,6 +110,7 @@ android {
     }
 
     sourceSets {
+        getByName("test").resources.srcDir("../../voice")
         // Native libraries are built independently so the Play artifact never
         // links the Direct-only android_use implementation.
         getByName("main").jniLibs.setSrcDirs(emptyList<String>())

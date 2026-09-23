@@ -83,22 +83,9 @@ test('the allowlists are the exposed subset of the exhaustive desktop dispositio
   assert.equal(CLIENT_EVENT_DISPOSITIONS.app_event, 'not_applicable');
 });
 
-test('audio_response is on the one shared array both gates derive from', () => {
-  // The compile-time gate (`AllowedClientCommand`) and the runtime gate
-  // (`main/validation.ts`'s `ALLOWED_COMMANDS`) both read this array. If a
-  // future change adds `audio_response` to the runtime gate by restating it
-  // there instead, the renderer's `host.command(...)` call stops
-  // type-checking while the runtime happily accepts the frame — the exact
-  // asymmetry this file exists to prevent.
-  const shared = readFileSync(join(root, 'src/shared/clientCommands.ts'), 'utf8');
-  assert.ok(shared.includes("'audio_response'"), "expected ALLOWED_CLIENT_COMMAND_TYPES to include 'audio_response'");
-  const validation = readFileSync(join(root, 'src/main/validation.ts'), 'utf8');
-  assert.ok(
-    validation.includes('ALLOWED_CLIENT_COMMAND_TYPES'),
-    'the runtime allowlist must still be built from the shared array, not a second literal list',
-  );
-  assert.ok(
-    !/const ALLOWED_COMMANDS[^=]*=\s*new Set<string>\(\[\s*'/.test(validation),
-    'the runtime allowlist must not open with a literal command string — that is a forked copy',
-  );
+test('engine audio response and capability commands stay private to main', () => {
+  assert.equal(ALLOWED_CLIENT_COMMAND_TYPES.includes('audio_response' as never), false);
+  assert.equal(ALLOWED_CLIENT_COMMAND_TYPES.includes('update_audio_capabilities' as never), false);
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.audio_response, 'host_private');
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.update_audio_capabilities, 'host_private');
 });

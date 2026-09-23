@@ -551,6 +551,13 @@ impl ConversationOrchestrator {
         }));
         let cache_key = WireToolSchemaCacheKey {
             tool_names: tools.iter().map(|t| t.name().to_string()).collect(),
+            dynamic_schema_revisions: tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.input_schema_revision()
+                        .map(|revision| (tool.name().to_string(), revision))
+                })
+                .collect(),
             model: model.clone(),
             model_profile: model_profile.clone(),
             workflow_authoring_skill_reachable:

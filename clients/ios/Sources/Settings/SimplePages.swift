@@ -252,7 +252,7 @@ struct VoicePage: View {
     }
 
     private func handlePermissionAction() {
-        let speechDenied = capability.mode == .automatic && (capability.speechAuthorization == .denied
+        let speechDenied = capability.mode != .onDevice && (capability.speechAuthorization == .denied
             || capability.speechAuthorization == .restricted
         )
         let microphoneDenied = capability.microphonePermissionStatus == .denied
@@ -327,6 +327,22 @@ private struct VoiceSpeechSettingsSection: View {
             label: String(localized: "settings_voice_speak_section"),
             footer: String(localized: "settings_voice_speak_footer")
         ) {
+            SettingsRow(label: "Playback source", chevron: false) {
+                Picker("Playback source", selection: speechModeBinding) {
+                    ForEach(VoiceSpeechMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 190)
+            }
+            SettingsRow(
+                label: "Preview route",
+                sub: capability.speechRoutePreview.fallbackReason,
+                value: capability.speechRoutePreview.effective?.source.rawValue
+                    ?? capability.speechRoutePreview.reason,
+                chevron: false
+            )
             SettingsRow(label: String(localized: "voice_voice_name"), chevron: false) {
                 Picker("voice_voice_name", selection: voiceBinding) {
                     ForEach(capability.voices) { voice in
@@ -366,9 +382,13 @@ private struct VoiceSpeechSettingsSection: View {
 
     private var voiceBinding: Binding<String> {
         Binding(
-            get: { capability.selectedVoice?.id ?? capability.voiceIdentifier },
+            get: { capability.voiceIdentifier },
             set: capability.setVoice
         )
+    }
+
+    private var speechModeBinding: Binding<VoiceSpeechMode> {
+        Binding(get: { capability.speechMode }, set: capability.setSpeechMode)
     }
 }
 

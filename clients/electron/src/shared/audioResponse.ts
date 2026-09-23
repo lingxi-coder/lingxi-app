@@ -64,13 +64,16 @@ const AUDIO_RESPONSE_FRAMING_ALLOWANCE = 64 * 1024;
  */
 export const MAX_AUDIO_BASE64_LENGTH = MAX_BRIDGE_FRAME_BYTES - AUDIO_RESPONSE_FRAMING_ALLOWANCE;
 
+/** Raw PCM bytes that fit the base64 ceiling, rounded down to a PCM16 sample boundary. */
+export const MAX_AUDIO_PAYLOAD_BYTES = Math.floor((MAX_AUDIO_BASE64_LENGTH * 3) / 4) & ~1;
+
 /** Bound on `AudioResultDto::Failed`'s message. The renderer trims to fit. */
 export const MAX_AUDIO_FAILURE_MESSAGE_LENGTH = 4096;
 
 /** Bound on a recording's reported mime type (`audio/webm;codecs=opus` and friends). */
 export const MAX_AUDIO_MIME_TYPE_LENGTH = 256;
 
-/** Highest plausible PCM sample rate. `0` is legal — it is half of the "played in place" pair. */
+/** Highest plausible PCM sample rate; synthesized PCM must carry a real positive rate. */
 export const MAX_AUDIO_SAMPLE_RATE_HZ = 768_000;
 
 
@@ -140,9 +143,9 @@ export function isSendableAudioBase64(value: unknown): value is string {
     && isBase64(value);
 }
 
-/** Whether a value may travel as a sample rate. `0` is legal - see the bound's doc. */
+/** Whether a value may travel as a real sample rate. */
 export function isSendableAudioSampleRate(value: unknown): value is number {
   return Number.isSafeInteger(value)
-    && (value as number) >= 0
+    && (value as number) >= 8_000
     && (value as number) <= MAX_AUDIO_SAMPLE_RATE_HZ;
 }

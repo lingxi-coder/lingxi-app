@@ -18,13 +18,16 @@ import com.lingxi.code.model.ProviderPreset
 import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.SettingsMock
 import com.lingxi.code.model.Skill
-import com.lingxi.code.model.VoiceConfig
+import com.lingxi.code.voice.audio.AudioConfigurationNormalizer
+import com.lingxi.code.voice.audio.AudioConfigurationV3
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -48,7 +51,10 @@ data class SettingsUiState(
     val llmCatalogLoaded: Boolean = false,
     val searchProviders: List<GenericProvider> = emptyList(),
     val fetchProviders: List<GenericProvider> = emptyList(),
-    val voice: VoiceConfig = VoiceConfig(),
+    val voice: AudioConfigurationV3 = AudioConfigurationNormalizer.defaults,
+    val voiceRevision: Long = 0,
+    val voiceSaving: Boolean = false,
+    val voiceSaveError: String? = null,
     val voiceCapability: VoiceCapabilitySnapshot = VoiceCapabilitySnapshot(),
     val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
     val skills: List<Skill> = SettingsMock.bundledSkills(),
@@ -93,7 +99,7 @@ data class SettingsUiState(
 
 class SettingsStore(
     private val providerRepo: ProviderSettingsRepository? = null,
-    private val voiceRepo: VoiceSettingsRepository? = null,
+    private val voiceRepo: AudioConfigurationRepository? = null,
     private val notifRepo: NotificationPrefsStore? = null,
     private val permissionModeRepo: PermissionModeSettingsRepository? = null,
     /**
@@ -114,6 +120,7 @@ class SettingsStore(
         resolveString(id).ifEmpty { fallback }
 
     private val initialPermissionMode: String = permissionModeRepo?.load() ?: "auto"
+    private val initialAudioConfiguration = voiceRepo?.load()
 
     private val _state = MutableStateFlow(
         providerRepo?.loadProviderState()?.let { (llm, search, fetch) ->
@@ -124,7 +131,9 @@ class SettingsStore(
                 visionDelegationEnabled = providerRepo.visionDelegationEnabled(),
                 permissionMode = initialPermissionMode,
                 effectivePermissionMode = initialPermissionMode,
-                voice = voiceRepo?.load() ?: VoiceConfig(),
+                voice = initialAudioConfiguration?.snapshot?.configuration ?: AudioConfigurationNormalizer.defaults,
+                voiceRevision = initialAudioConfiguration?.snapshot?.revision ?: 0,
+                voiceSaveError = initialAudioConfiguration?.persistenceError,
                 notifs = notifRepo?.load() ?: NotifConfig(),
                 skills = SettingsMock.bundledSkills(::resolveWithFallback),
                 localAppPlugin = SettingsMock.localAppPlugin(),
@@ -138,7 +147,9 @@ class SettingsStore(
             )
         } ?: SettingsUiState(
             visionDelegationEnabled = providerRepo?.visionDelegationEnabled() ?: true,
-            voice = voiceRepo?.load() ?: VoiceConfig(),
+            voice = initialAudioConfiguration?.snapshot?.configuration ?: AudioConfigurationNormalizer.defaults,
+            voiceRevision = initialAudioConfiguration?.snapshot?.revision ?: 0,
+            voiceSaveError = initialAudioConfiguration?.persistenceError,
             notifs = notifRepo?.load() ?: NotifConfig(),
             permissionMode = initialPermissionMode,
             effectivePermissionMode = initialPermissionMode,
@@ -248,10 +259,56 @@ class SettingsStore(
         // left unset while still compiling.
         _state.update { it.copy(notifs = notifs) }
     }
-    fun setVoice(voice: VoiceConfig) {
-        voiceRepo?.save(voice)
-        _state.update { it.copy(voice = voice) }
+    private val voiceUpdates = Mutex()
+
+    /** Updates one or more voice fields against the latest serialized snapshot. */
+    fun updateVoice(update: (AudioConfigurationV3) -> AudioConfigurationV3) {
+        viewModelScope.launch {
+            voiceUpdates.withLock {
+                val current = _state.value
+                val updatedVoice = update(current.voice)
+                _state.update { it.copy(voiceSaving = true, voiceSaveError = null) }
+                val repository = voiceRepo
+                if (repository == null) {
+                    _state.update {
+                        it.copy(
+                            voice = updatedVoice,
+                            voiceSaving = false,
+                            voiceSaveError = null,
+                        )
+                    }
+                    return@withLock
+                }
+                val result = withContext(Dispatchers.IO) {
+                    repository.save(updatedVoice, expectedRevision = current.voiceRevision)
+                }
+                when (result) {
+                    is AudioConfigurationSaveResult.Saved -> _state.update {
+                        it.copy(
+                            voice = result.snapshot.configuration,
+                            voiceRevision = result.snapshot.revision,
+                            voiceSaving = false,
+                            voiceSaveError = null,
+                        )
+                    }
+                    is AudioConfigurationSaveResult.Conflict -> _state.update {
+                        it.copy(
+                            voice = result.current.configuration,
+                            voiceRevision = result.current.revision,
+                            voiceSaving = false,
+                            voiceSaveError = "Audio settings changed elsewhere. Please retry your edit.",
+                        )
+                    }
+                    is AudioConfigurationSaveResult.Failed -> _state.update {
+                        it.copy(voiceSaving = false, voiceSaveError = result.message)
+                    }
+                }
+            }
+        }
     }
+
+    /** Replaces the configuration for non-editor callers; editors should use [updateVoice]. */
+    fun setVoice(voice: AudioConfigurationV3) = updateVoice { voice }
 
     fun setVoiceCapability(snapshot: VoiceCapabilitySnapshot) =
         _state.update { it.copy(voiceCapability = snapshot) }
@@ -758,7 +815,7 @@ class SettingsStore(
                     val appContext = context.applicationContext
                     return SettingsStore(
                         providerRepo = ProviderSettingsRepository(appContext),
-                        voiceRepo = VoiceSettingsRepository(appContext),
+                        voiceRepo = AudioConfigurationRepository(appContext),
                         notifRepo = NotificationPrefsStore(appContext),
                         permissionModeRepo = PermissionModeSettingsRepository(appContext),
                         resolveString = appContext::getString,

@@ -2027,7 +2027,8 @@
     <string name="voice_flow_busy_wait_to_retry">请等待当前回复或会话切换完成后重试</string>
     <string name="voice_flow_exit_a11y">退出心流</string>
     <string name="voice_flow_hint_with_input">%1$s · 可继续使用下方输入框</string>
-    <string name="voice_flow_listening_hint">说完轻点收音 · 或继续</string>
+    <string name="voice_flow_listening_hint">说完后轻点结束识别 · 也可继续说</string>
+    <string name="voice_flow_finalizing_hint">正在等待语音识别完成…</string>
     <string name="voice_flow_listening_label">聆听中</string>
     <string name="voice_flow_mode_label">心流模式</string>
     <string name="voice_flow_release_hint">松开发送 · 上滑取消</string>

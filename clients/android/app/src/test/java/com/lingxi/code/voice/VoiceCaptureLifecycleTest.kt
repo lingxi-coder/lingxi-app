@@ -1,8 +1,13 @@
 package com.lingxi.code.voice
 
-import android.content.ContextWrapper
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -15,9 +20,14 @@ class VoiceCaptureLifecycleTest {
         var stopped = false
         var cancelled = false
         var closed = false
+        var finalOnStop: String? = null
 
         override fun stop() {
             stopped = true
+            finalOnStop?.let {
+                callbacks.onFinal(it)
+                callbacks.onClosed()
+            }
         }
 
         override fun cancel() {
@@ -41,7 +51,6 @@ class VoiceCaptureLifecycleTest {
     fun start_without_permission_requests_permission_and_sets_state() {
         var requested = false
         val capture = VoiceCapture(
-            context = ContextWrapper(null),
             requestPermission = { requested = true },
             hasPermission = { false },
             openRealtimeSession = { _, _ -> error("should not open session") },
@@ -60,7 +69,6 @@ class VoiceCaptureLifecycleTest {
         var finalTranscript: String? = null
         var partialTranscript: String? = null
         val capture = VoiceCapture(
-            context = ContextWrapper(null),
             requestPermission = {},
             hasPermission = { true },
             onPartialTranscript = { partialTranscript = it },
@@ -95,7 +103,6 @@ class VoiceCaptureLifecycleTest {
         lateinit var session: FakeRealtimeSession
         var finalTranscript: String? = null
         val capture = VoiceCapture(
-            context = ContextWrapper(null),
             requestPermission = {},
             hasPermission = { true },
             openRealtimeSession = { _, callbacks ->
@@ -120,37 +127,94 @@ class VoiceCaptureLifecycleTest {
     }
 
     @Test
-    fun orb_controller_start_does_not_stop_and_cancel_suppresses_late_result() {
+    fun serviceAdapterReleaseStopsTheSameLiveRecognizerAndKeepsItsFinalTranscript() = runTest {
         lateinit var session: FakeRealtimeSession
-        var callbackCount = 0
+        var finalTranscript: String? = null
+        var partialTranscript: String? = null
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         val capture = VoiceCapture(
-            context = ContextWrapper(null),
             requestPermission = {},
             hasPermission = { true },
+            onPartialTranscript = { partialTranscript = it },
             openRealtimeSession = { _, callbacks ->
-                FakeRealtimeSession(callbacks).also { session = it }
+                ServiceRealtimeListenSession(scope, callbacks) { serviceCallbacks ->
+                    FakeRealtimeSession(serviceCallbacks).also {
+                        session = it
+                        it.finalOnStop = "transcript from released session"
+                        it.ready()
+                        it.partial("partial from service")
+                    }
+                }
             },
             transcribeOnce = { VoiceCaptureResult.Empty },
         )
-        val controller = DefaultOrbVoiceListenController(capture)
+        capture.start { result -> finalTranscript = (result as? VoiceCaptureResult.Transcript)?.text }
+        runCurrent()
+        assertEquals("partial from service", partialTranscript)
 
-        controller.start { callbackCount++ }
+        capture.stop()
 
-        assertTrue(!session.stopped)
-        assertTrue(!session.cancelled)
+        assertTrue("release must stop the service-owned recognizer", session.stopped)
+        assertEquals("transcript from released session", finalTranscript)
+        assertEquals(VoiceCapturePhase.Completed, VoiceCaptureStore.state.value.phase)
+        scope.coroutineContext[Job]?.cancel()
+    }
 
-        controller.cancel()
-        session.final("late transcript")
+    @Test
+    fun finalTranscriptIsNotOverwrittenByALaterTerminalCallback() {
+        lateinit var session: FakeRealtimeSession
+        val delivered = mutableListOf<VoiceCaptureResult>()
+        val capture = VoiceCapture(
+            requestPermission = {},
+            hasPermission = { true },
+            openRealtimeSession = { _, callbacks -> FakeRealtimeSession(callbacks).also { session = it } },
+            transcribeOnce = { VoiceCaptureResult.Empty },
+        )
 
-        assertTrue(session.cancelled)
-        assertEquals(0, callbackCount)
+        capture.start { delivered += it }
+        session.final("recognized transcript")
+        session.error("no_speech", "Speech recognition ended without a result.")
+        session.close()
+
+        assertEquals(listOf(VoiceCaptureResult.Transcript("recognized transcript")), delivered)
+        assertEquals(VoiceCapturePhase.Completed, VoiceCaptureStore.state.value.phase)
+        assertEquals("recognized transcript", VoiceCaptureStore.state.value.finalTranscript)
+    }
+
+    @Test
+    fun restartAfterCancelIgnoresCallbacksFromTheOldSession() {
+        val sessions = mutableListOf<FakeRealtimeSession>()
+        val delivered = mutableListOf<String>()
+        val capture = VoiceCapture(
+            requestPermission = {},
+            hasPermission = { true },
+            openRealtimeSession = { _, callbacks ->
+                FakeRealtimeSession(callbacks).also(sessions::add)
+            },
+            transcribeOnce = { VoiceCaptureResult.Empty },
+        )
+        capture.start { delivered += (it as VoiceCaptureResult.Transcript).text }
+        sessions.single().ready()
+        capture.cancel()
+        capture.start { delivered += (it as VoiceCaptureResult.Transcript).text }
+        sessions.last().ready()
+        sessions.first().partial("stale partial")
+        sessions.first().final("stale final")
+
+        assertEquals(2, sessions.size)
+        assertTrue(capture.isActive())
+        assertEquals(VoiceCapturePhase.Listening, VoiceCaptureStore.state.value.phase)
+        assertEquals("", VoiceCaptureStore.state.value.partialTranscript)
+        assertTrue("the cancelled interaction cannot deliver into its replacement", delivered.isEmpty())
+
+        sessions.last().final("new foreground utterance")
+        assertEquals(listOf("new foreground utterance"), delivered)
     }
 
     @Test
     fun cancel_clears_pending_result_and_marks_cancelled() {
         lateinit var session: FakeRealtimeSession
         val capture = VoiceCapture(
-            context = ContextWrapper(null),
             requestPermission = {},
             hasPermission = { true },
             openRealtimeSession = { _, callbacks ->
@@ -174,7 +238,6 @@ class VoiceCaptureLifecycleTest {
         lateinit var session: FakeRealtimeSession
         var callbackCount = 0
         val capture = VoiceCapture(
-            context = ContextWrapper(null),
             requestPermission = {},
             hasPermission = { true },
             openRealtimeSession = { _, callbacks ->

@@ -1,6 +1,7 @@
 @import "./components/settings/pages/ConfigurationPage.css";
 @import './components/TurnFileSummary.css';
 @import './components/settings/pages/McpServers.css';
+@import './components/settings/pages/ExtensionHub.css';
 @import './components/settings/pages/Hooks.css';
 
 :root {

@@ -6,6 +6,7 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
     private let modelID: String
     private let modelDirectory: URL
     private let automaticEndpointAfterSilence: Duration?
+    private let maximumSampleCount: Int
     private let audioEngine = AVAudioEngine()
     private let clock = ContinuousClock()
 
@@ -27,11 +28,13 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
     init(
         modelID: String,
         modelDirectory: URL,
-        automaticEndpointAfterSilence: Duration?
+        automaticEndpointAfterSilence: Duration?,
+        maximumPayloadBytes: UInt64
     ) {
         self.modelID = modelID
         self.modelDirectory = modelDirectory
         self.automaticEndpointAfterSilence = automaticEndpointAfterSilence
+        self.maximumSampleCount = Int(min(maximumPayloadBytes / UInt64(MemoryLayout<Int16>.size), UInt64(Int.max)))
     }
 
     deinit {
@@ -79,7 +82,7 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
         Task { [weak self] in
             guard let self else { return }
             guard capturedSamples.count >= Int(capturedRate / 4) else {
-                complete(.failure(SpeechFfiError.NoSpeech))
+                complete(.failure(SpeechRecognitionError.NoSpeech))
                 return
             }
             do {
@@ -90,7 +93,7 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
                     sampleRate: capturedRate
                 )
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                complete(trimmed.isEmpty ? .failure(SpeechFfiError.NoSpeech) : .success(trimmed))
+                complete(trimmed.isEmpty ? .failure(SpeechRecognitionError.NoSpeech) : .success(trimmed))
             } catch {
                 complete(.failure(error))
             }
@@ -120,7 +123,7 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
             try audioEngine.start()
         } catch {
             endInputLocked()
-            throw SpeechFfiError.Retriable(message: "offline mic start: \(error.localizedDescription)")
+            throw SpeechRecognitionError.Retriable(message: "offline mic start: \(error.localizedDescription)")
         }
         if finishRequested { endInputLocked() }
     }
@@ -128,6 +131,10 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
     private func consume(_ buffer: AVAudioPCMBuffer) {
         let count = Int(buffer.frameLength)
         guard count > 0 else { return }
+        guard count <= maximumSampleCount else {
+            complete(.failure(AudioServiceFailure.mediaTooLarge))
+            return
+        }
         var values = [Float](repeating: 0, count: count)
         if let channel = buffer.floatChannelData?[0] {
             values.withUnsafeMutableBufferPointer { output in
@@ -147,6 +154,11 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
         lock.lock()
         guard terminalResult == nil, !inputEnded else {
             lock.unlock()
+            return
+        }
+        guard count <= maximumSampleCount - samples.count else {
+            lock.unlock()
+            complete(.failure(AudioServiceFailure.mediaTooLarge))
             return
         }
         samples.append(contentsOf: values)
@@ -226,14 +238,14 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
         try await Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             return try samples.withUnsafeBufferPointer { buffer in
-                guard let base = buffer.baseAddress else { throw SpeechFfiError.NoSpeech }
+                guard let base = buffer.baseAddress else { throw SpeechRecognitionError.NoSpeech }
                 let copied: UnsafeMutablePointer<CChar>?
                 if modelID.contains("zipformer") {
                     let recognizer = modelDirectory.path.withCString(LXOnlineRecognizerCreate)
-                    guard let recognizer else { throw SpeechFfiError.Unavailable }
+                    guard let recognizer else { throw SpeechRecognitionError.Unavailable }
                     defer { LXOnlineRecognizerDestroy(recognizer) }
                     guard let stream = LXOnlineStreamCreate(recognizer) else {
-                        throw SpeechFfiError.Unavailable
+                        throw SpeechRecognitionError.Unavailable
                     }
                     defer { LXOnlineStreamDestroy(stream) }
                     LXOnlineStreamAccept(
@@ -255,7 +267,7 @@ final class SherpaRecognitionOperation: VoiceRecognitionOperation, @unchecked Se
                         )
                     }
                 }
-                guard let copied else { throw SpeechFfiError.Unavailable }
+                guard let copied else { throw SpeechRecognitionError.Unavailable }
                 defer { LXFree(copied) }
                 return String(cString: copied)
             }
@@ -269,37 +281,59 @@ enum SherpaSpeechRenderer {
         modelID: String,
         modelDirectory: URL,
         speakerID: Int32,
-        speed: Double
+        speed: Double,
+        maximumBytes: UInt64,
+        cancellationToken suppliedToken: SherpaAudioCancellationToken? = nil
     ) async throws -> (pcm: Data, sampleRate: UInt32) {
-        try await Task.detached(priority: .userInitiated) {
-            var pointer: UnsafeMutablePointer<Int16>?
-            var count: Int32 = 0
-            var sampleRate: Int32 = 0
-            let success = modelDirectory.path.withCString { directory in
-                modelID.withCString { model in
-                    text.withCString { text in
-                        LXSherpaTtsCopyPCM16(
-                            directory,
-                            model,
-                            text,
-                            speakerID,
-                            Float(min(2, max(0.5, speed))),
-                            &pointer,
-                            &count,
-                            &sampleRate
-                        )
+        guard maximumBytes >= UInt64(MemoryLayout<Int16>.size),
+              maximumBytes <= UInt64(Int.max)
+        else { throw AudioServiceFailure.invalidRequest }
+        guard let cancellation = suppliedToken ?? SherpaAudioCancellationToken() else {
+            throw AudioServiceFailure.nativeFailure("unable to create Sherpa cancellation token")
+        }
+        return try await withTaskCancellationHandler {
+            try await Task.detached(priority: .userInitiated) {
+                var pointer: UnsafeMutablePointer<Int16>?
+                var count: Int32 = 0
+                var sampleRate: Int32 = 0
+                let result = modelDirectory.path.withCString { directory in
+                    modelID.withCString { model in
+                        text.withCString { text in
+                            LXSherpaTtsCopyPCM16(
+                                directory,
+                                model,
+                                text,
+                                speakerID,
+                                Float(min(2, max(0.5, speed))),
+                                maximumBytes,
+                                cancellation.pointer,
+                                &pointer,
+                                &count,
+                                &sampleRate
+                            )
+                        }
                     }
                 }
-            }
-            guard success == 1, let pointer, count > 0, sampleRate > 0 else {
-                throw SpeechFfiError.Unavailable
-            }
-            defer { LXFree(pointer) }
-            return (
-                Data(bytes: pointer, count: Int(count) * MemoryLayout<Int16>.size),
-                UInt32(sampleRate)
-            )
-        }.value
+                switch result {
+                case 1:
+                    guard let pointer, count > 0, sampleRate > 0 else {
+                        throw AudioServiceFailure.synthesisFailed("Sherpa returned invalid PCM", operationStarted: false)
+                    }
+                    defer { LXFree(pointer) }
+                    let byteCount = Int(count) * MemoryLayout<Int16>.size
+                    guard UInt64(byteCount) <= maximumBytes else { throw AudioServiceFailure.mediaTooLarge }
+                    return (Data(bytes: pointer, count: byteCount), UInt32(sampleRate))
+                case 2:
+                    throw AudioServiceFailure.mediaTooLarge
+                case 3:
+                    throw CancellationError()
+                default:
+                    throw SpeechRecognitionError.Unavailable
+                }
+            }.value
+        } onCancel: {
+            cancellation.cancel()
+        }
     }
 }
 
@@ -311,7 +345,10 @@ final class SherpaVoiceSpeechStream: VoiceSpeechStreamingSession {
     private let speakerID: Int32
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    private let coordinator: VoiceAudioSessionCoordinator
     private var audioLease: VoiceAudioSessionCoordinator.Lease?
+    private var modelReference: UUID?
+    private var activeRenderCancellation: SherpaAudioCancellationToken?
     private var queuedText: [String] = []
     private var playbackContinuation: CheckedContinuation<VoiceSpeechPlaybackOutcome, Never>?
     private var terminalOutcome: VoiceSpeechPlaybackOutcome?
@@ -323,13 +360,17 @@ final class SherpaVoiceSpeechStream: VoiceSpeechStreamingSession {
         modelID: String,
         modelDirectory: URL,
         speakerID: Int32,
-        audioLease: VoiceAudioSessionCoordinator.Lease?
+        audioLease: VoiceAudioSessionCoordinator.Lease?,
+        modelReference: UUID? = nil,
+        coordinator: VoiceAudioSessionCoordinator? = nil
     ) {
         self.configuration = configuration
         self.modelID = modelID
         self.modelDirectory = modelDirectory
         self.speakerID = speakerID
         self.audioLease = audioLease
+        self.modelReference = modelReference
+        self.coordinator = coordinator ?? .shared
         engine.attach(player)
     }
 
@@ -356,14 +397,31 @@ final class SherpaVoiceSpeechStream: VoiceSpeechStreamingSession {
         let segments = queuedText
         queuedText.removeAll()
         for segment in segments {
-            try Task.checkCancellation()
-            let rendered = try await SherpaSpeechRenderer.render(
-                text: segment,
-                modelID: modelID,
-                modelDirectory: modelDirectory,
-                speakerID: speakerID,
-                speed: configuration.speed
-            )
+            let rendered: (pcm: Data, sampleRate: UInt32)
+            do {
+                try Task.checkCancellation()
+                guard let maximumBytes = configuration.maxPayloadBytes else {
+                    throw AudioServiceFailure.invalidRequest
+                }
+                guard let cancellation = SherpaAudioCancellationToken() else {
+                    throw AudioServiceFailure.nativeFailure("unable to create Sherpa cancellation token")
+                }
+                activeRenderCancellation = cancellation
+                rendered = try await SherpaSpeechRenderer.render(
+                    text: segment,
+                    modelID: modelID,
+                    modelDirectory: modelDirectory,
+                    speakerID: speakerID,
+                    speed: configuration.speed,
+                    maximumBytes: maximumBytes,
+                    cancellationToken: cancellation
+                )
+                activeRenderCancellation = nil
+            } catch {
+                activeRenderCancellation = nil
+                await complete(.interrupted)
+                throw error
+            }
             let outcome = await play(rendered.pcm, sampleRate: rendered.sampleRate)
             guard outcome == .completed else {
                 await complete(.interrupted)
@@ -433,6 +491,8 @@ final class SherpaVoiceSpeechStream: VoiceSpeechStreamingSession {
     private func complete(_ outcome: VoiceSpeechPlaybackOutcome) async {
         guard terminalOutcome == nil else { return }
         terminalOutcome = outcome
+        activeRenderCancellation?.cancel()
+        activeRenderCancellation = nil
         queuedText.removeAll()
         player.stop()
         engine.stop()
@@ -441,9 +501,30 @@ final class SherpaVoiceSpeechStream: VoiceSpeechStreamingSession {
         continuation?.resume(returning: outcome)
         if let audioLease {
             self.audioLease = nil
-            await VoiceAudioSessionCoordinator.shared.release(audioLease)
+            await coordinator.release(audioLease)
+        }
+        if let modelReference {
+            self.modelReference = nil
+            VoiceModelStore.shared.releaseAudioUse(modelReference)
         }
         onTerminal?()
         onTerminal = nil
+    }
+}
+
+final class SherpaAudioCancellationToken: @unchecked Sendable {
+    let pointer: OpaquePointer
+
+    init?() {
+        guard let pointer = LXAudioCancellationTokenCreate() else { return nil }
+        self.pointer = pointer
+    }
+
+    func cancel() {
+        LXAudioCancellationTokenCancel(pointer)
+    }
+
+    deinit {
+        LXAudioCancellationTokenDestroy(pointer)
     }
 }

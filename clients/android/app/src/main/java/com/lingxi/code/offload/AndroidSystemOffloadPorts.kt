@@ -7,29 +7,33 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
-import android.media.MediaPlayer
 import android.net.Uri
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import android.provider.ContactsContract
 import android.provider.MediaStore
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import androidx.core.content.ContextCompat
 import com.lingxi.code.cron.AndroidCronRepository
-import kotlinx.coroutines.CompletableDeferred
+import com.lingxi.code.voice.audio.AudioOwnerKey
+import com.lingxi.code.voice.audio.DeviceAudioResult
+import com.lingxi.code.voice.audio.OffloadMediaCommand
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Real Android-backed command ports available to both distributions. */
 internal object AndroidSystemOffloadPorts {
     fun create(context: Context): Map<String, NativeCommandPort> {
         val app = context.applicationContext
+        val audio = AndroidOffloadAudioService(app)
         return mapOf(
             "alarm" to AlarmPort(app),
             "calendar" to CalendarPort(app),
@@ -37,8 +41,8 @@ internal object AndroidSystemOffloadPorts {
             "location" to LocationPort(app),
             "open" to OpenPort(app),
             "photos" to PhotosPort(app),
-            "player" to PlayerPort(app),
-            "speech" to SpeechPort(app),
+            "player" to PlayerPort(audio),
+            "speech" to SpeechPort(audio),
             "scheduled" to ScheduledPort(app),
         )
     }
@@ -321,126 +325,140 @@ private class PhotosPort(private val context: Context) : NativeCommandPort {
     }
 }
 
-private class PlayerPort(private val context: Context) : NativeCommandPort {
-    private val players = ConcurrentHashMap<String, MediaPlayer>()
+internal class PlayerPort(private val audio: OffloadAudioService) : NativeCommandPort {
+    private val cleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private data class MediaKey(val owner: AudioOwnerKey, val label: String)
 
-    override suspend fun execute(request: NativeOffloadRequest): NativeOffloadResult =
-        when (request.arguments.firstOrNull()) {
-            "play" -> play(request)
-            "pause" -> withPlayer(request) { it.pause(); NativeOffloadResult.success() }
-            "resume" -> withPlayer(request) { it.start(); NativeOffloadResult.success() }
-            "stop" -> stop(request.arguments.getOrNull(1) ?: request.sessionId)
-            "status" -> withPlayer(request) {
-                NativeOffloadResult.success(
-                    "playing=${it.isPlaying}\npositionMs=${it.currentPosition}\ndurationMs=${it.duration}\n",
-                )
+    private val lifetime = OffloadPortLifetime()
+    private val namespace = UUID.randomUUID().toString().replace("-", "")
+    private val stateLock = Any()
+    private val ownedMedia = mutableSetOf<MediaKey>()
+    private var closed = false
+
+    override suspend fun execute(request: NativeOffloadRequest): NativeOffloadResult = lifetime.execute {
+        if (isClosed()) return@execute NativeOffloadResult.unavailable("player", "audio host is closing")
+        val owner = owner(request) ?: return@execute NativeOffloadResult.usage("player: session owner is required")
+        val command = request.arguments.firstOrNull()
+        val userLabel = when (command) {
+            "play" -> request.arguments.getOrNull(2)
+            "pause", "resume", "stop", "status" -> request.arguments.getOrNull(1)
+            else -> null
+        }?.takeIf { it.isNotBlank() } ?: request.sessionId
+        val label = serviceLabel(userLabel)
+
+        return@execute when (command) {
+            "play" -> {
+                val target = request.arguments.getOrNull(1)
+                    ?: return@execute NativeOffloadResult.usage("player play <path-or-uri> [session]")
+                if (!rememberMedia(owner, userLabel)) {
+                    return@execute NativeOffloadResult.unavailable("player", "audio host is closing")
+                }
+                audio.playMedia(owner, label, target).toPlayerResult(userLabel)
             }
+            "pause" -> audio.controlMedia(owner, label, OffloadMediaCommand.PAUSE).toPlayerResult()
+            "resume" -> audio.controlMedia(owner, label, OffloadMediaCommand.RESUME).toPlayerResult()
+            "stop" -> audio.controlMedia(owner, label, OffloadMediaCommand.STOP).toPlayerResult()
+            "status" -> audio.controlMedia(owner, label, OffloadMediaCommand.STATUS).toPlayerResult(includeStatus = true)
             else -> NativeOffloadResult.usage(
                 "Usage: player play <path-or-uri> [session] | player pause|resume|stop|status [session]",
             )
         }
-
-    private suspend fun play(request: NativeOffloadRequest): NativeOffloadResult =
-        withContext(Dispatchers.IO) {
-            val target = request.arguments.getOrNull(1)
-                ?: return@withContext NativeOffloadResult.usage("player play <path-or-uri> [session]")
-            val session = request.arguments.getOrNull(2) ?: request.sessionId
-            stop(session)
-            val player = MediaPlayer()
-            try {
-                if (target.contains("://")) {
-                    player.setDataSource(context, Uri.parse(target))
-                } else {
-                    val file = File(target).canonicalFile
-                    if (!file.exists() || !file.isFile) {
-                        player.release()
-                        return@withContext NativeOffloadResult(
-                            exitCode = NativeOffloadResult.EXIT_FAILURE,
-                            stderr = "player: file not found\n".toByteArray(),
-                        )
-                    }
-                    player.setDataSource(file.path)
-                }
-                player.prepare()
-                player.start()
-                players[session] = player
-                player.setOnCompletionListener { stop(session) }
-                NativeOffloadResult.success("session=$session\ndurationMs=${player.duration}\n")
-            } catch (error: Throwable) {
-                player.release()
-                throw error
-            }
-        }
-
-    private fun withPlayer(
-        request: NativeOffloadRequest,
-        block: (MediaPlayer) -> NativeOffloadResult,
-    ): NativeOffloadResult {
-        val session = request.arguments.getOrNull(1) ?: request.sessionId
-        val player = players[session]
-            ?: return NativeOffloadResult(
-                exitCode = NativeOffloadResult.EXIT_FAILURE,
-                stderr = "player: unknown session '$session'\n".toByteArray(),
-            )
-        return block(player)
-    }
-
-    private fun stop(session: String): NativeOffloadResult {
-        val player = players.remove(session) ?: return NativeOffloadResult.success()
-        runCatching { if (player.isPlaying) player.stop() }
-        player.release()
-        return NativeOffloadResult.success()
     }
 
     override fun close() {
-        players.keys.toList().forEach(::stop)
-    }
-}
-
-private class SpeechPort(private val context: Context) : NativeCommandPort {
-    override suspend fun execute(request: NativeOffloadRequest): NativeOffloadResult {
-        if (request.arguments.firstOrNull() !in setOf("speak", "say")) {
-            return NativeOffloadResult.usage("speech speak <text>")
+        val mediaAtClose = synchronized(stateLock) {
+            if (closed) return
+            closed = true
+            ownedMedia.toList()
         }
-        val text = request.arguments.drop(1).joinToString(" ")
-            .ifEmpty { request.stdin.toString(Charsets.UTF_8) }
-        if (text.isBlank()) return NativeOffloadResult.usage("speech speak <text>")
-        return withContext(Dispatchers.Main) {
-            withTimeout(30_000) {
-                val ready = CompletableDeferred<Pair<TextToSpeech, Int>>()
-                lateinit var engine: TextToSpeech
-                engine = TextToSpeech(context) { status -> ready.complete(engine to status) }
-                val (tts, status) = ready.await()
-                if (status != TextToSpeech.SUCCESS) {
-                    tts.shutdown()
-                    return@withTimeout NativeOffloadResult(
-                        exitCode = NativeOffloadResult.EXIT_FAILURE,
-                        stderr = "speech: Android TTS initialization failed\n".toByteArray(),
-                    )
-                }
-                try {
-                    val done = CompletableDeferred<Boolean>()
-                    val utteranceId = "lingxi-offload-${UUID.randomUUID()}"
-                    tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                        override fun onStart(id: String?) = Unit
-                        override fun onDone(id: String?) { done.complete(true) }
-                        override fun onError(id: String?) { done.complete(false) }
-                        override fun onError(id: String?, errorCode: Int) { done.complete(false) }
-                    })
-                    val queued = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
-                    if (queued != TextToSpeech.SUCCESS) done.complete(false)
-                    val succeeded = done.await()
-                    if (succeeded) NativeOffloadResult.success() else NativeOffloadResult(
-                        exitCode = NativeOffloadResult.EXIT_FAILURE,
-                        stderr = "speech: synthesis/playback failed\n".toByteArray(),
-                    )
-                } finally {
-                    runCatching { tts.stop() }
-                    runCatching { tts.shutdown() }
+        lifetime.close()
+        cleanupScope.launch {
+            mediaAtClose.forEach { media ->
+                runCatching {
+                    audio.controlMedia(media.owner, serviceLabel(media.label), OffloadMediaCommand.STOP)
                 }
             }
         }
     }
+
+    private fun isClosed(): Boolean = synchronized(stateLock) { closed }
+
+    private fun rememberMedia(owner: AudioOwnerKey, label: String): Boolean = synchronized(stateLock) {
+        if (closed) {
+            false
+        } else {
+            ownedMedia.add(MediaKey(owner, label))
+            true
+        }
+    }
+
+    private fun serviceLabel(userLabel: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(userLabel.toByteArray(Charsets.UTF_8))
+        val hash = digest.joinToString(separator = "") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+        return "$namespace-$hash"
+    }
+
+    private fun owner(request: NativeOffloadRequest) = request.sessionId
+        .takeIf { it.isNotBlank() }
+        ?.let(AudioOwnerKey::session)
+
+}
+
+internal class SpeechPort(private val audio: OffloadAudioService) : NativeCommandPort {
+    private val lifetime = OffloadPortLifetime()
+    private val closed = AtomicBoolean(false)
+
+    override suspend fun execute(request: NativeOffloadRequest): NativeOffloadResult = lifetime.execute {
+        if (closed.get()) return@execute NativeOffloadResult.unavailable("speech", "audio host is closing")
+        if (request.arguments.firstOrNull() !in setOf("speak", "say")) {
+            return@execute NativeOffloadResult.usage("speech speak <text>")
+        }
+        val text = request.arguments.drop(1).joinToString(" ")
+            .ifEmpty { request.stdin.toString(Charsets.UTF_8) }
+        if (text.isBlank()) return@execute NativeOffloadResult.usage("speech speak <text>")
+        val owner = request.sessionId.takeIf { it.isNotBlank() }
+            ?.let(AudioOwnerKey::session)
+            ?: return@execute NativeOffloadResult.usage("speech: session owner is required")
+        audio.speak(owner, text, timeoutBudgetMs = SPEECH_TIMEOUT_MS).toSpeechResult()
+    }
+
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        lifetime.close()
+    }
+
+    private companion object { const val SPEECH_TIMEOUT_MS = 30_000L }
+}
+
+private fun DeviceAudioResult.toPlayerResult(
+    label: String? = null,
+    includeStatus: Boolean = false,
+): NativeOffloadResult = when (this) {
+    is DeviceAudioResult.OffloadMedia -> {
+        if (includeStatus) {
+            NativeOffloadResult.success(
+                "playing=${state.playing}\npositionMs=${state.positionMs}\ndurationMs=${state.durationMs}\n",
+            )
+        } else if (label != null) {
+            NativeOffloadResult.success("session=$label\ndurationMs=${state.durationMs}\n")
+        } else {
+            NativeOffloadResult.success()
+        }
+    }
+    is DeviceAudioResult.Failed -> NativeOffloadResult(
+        exitCode = NativeOffloadResult.EXIT_FAILURE,
+        stderr = "player: ${error.message}\n".toByteArray(),
+    )
+    else -> NativeOffloadResult.internal("player", "audio service returned an unexpected result")
+}
+
+private fun DeviceAudioResult.toSpeechResult(): NativeOffloadResult = when (this) {
+    is DeviceAudioResult.PlaybackCompleted -> NativeOffloadResult.success()
+    is DeviceAudioResult.Failed -> NativeOffloadResult(
+        exitCode = NativeOffloadResult.EXIT_FAILURE,
+        stderr = "speech: ${error.message}\n".toByteArray(),
+    )
+    else -> NativeOffloadResult.internal("speech", "audio service returned an unexpected result")
 }
 
 private class ScheduledPort(private val context: Context) : NativeCommandPort {

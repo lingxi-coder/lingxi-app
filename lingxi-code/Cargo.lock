@@ -1170,7 +1170,6 @@ dependencies = [
 name = "client-protocol"
 version = "0.1.0"
 dependencies = [
- "platform-api",
  "protocol",
  "serde",
  "serde_json",
@@ -7515,9 +7514,11 @@ dependencies = [
  "once_cell",
  "permission",
  "platform-api",
+ "protocol",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tool-api",
 ]
 

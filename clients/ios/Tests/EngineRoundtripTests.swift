@@ -207,11 +207,9 @@ import XCTest
                 try buildIosEngineWithConfig(
                     config: config,
                     listener: NoopEventListener(),
-                    stt: SttImpl(),
-                    tts: TtsImpl(),
+                    audio: IOSAudioServiceCallbackAdapter.shared,
                     camera: CameraImpl(),
                     share: ShareImpl(),
-                    voice: VoiceImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
@@ -300,6 +298,7 @@ import XCTest
             // cannot silently turn this into a credentialed/network-success test.
             let apiKey = ""
             let handle: MobileEngineHandle
+            let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
             do {
                 handle = try buildIosEngine(
                     apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
@@ -308,11 +307,9 @@ import XCTest
                     model: "claude-sonnet-4-20250514",
                     appSandboxRoot: sandbox.path,
                     listener: listener,
-                    stt: SttImpl(),
-                    tts: TtsImpl(),
+                    audio: audio,
                     camera: CameraImpl(),
                     share: ShareImpl(),
-                    voice: VoiceImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),
@@ -406,6 +403,7 @@ import XCTest
             // branded mock id. `build_ios_engine` only overrides default_model when
             // the passed id is non-empty, so "" exercises exactly that path.
             let handle: MobileEngineHandle
+            let audio = await MainActor.run { IOSAudioServiceCallbackAdapter.shared }
             do {
                 handle = try buildIosEngine(
                     apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
@@ -414,11 +412,9 @@ import XCTest
                     model: "",
                     appSandboxRoot: sandbox.path,
                     listener: listener,
-                    stt: SttImpl(),
-                    tts: TtsImpl(),
+                    audio: audio,
                     camera: CameraImpl(),
                     share: ShareImpl(),
-                    voice: VoiceImpl(),
                     notifications: NotificationImpl(),
                     clipboard: ClipboardImpl(),
                     permissions: NoopPermissionSink(),

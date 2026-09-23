@@ -3,6 +3,45 @@ import XCTest
 
 @MainActor
 final class VoiceInteractionControllerTests: XCTestCase {
+    func testStreamingOfflineSpeechUsesModelDefaultWhenReadyRouteHasNoVoiceID() async throws {
+        let model = try XCTUnwrap(GeneratedVoiceModelCatalog.all.first(where: { $0.kind == .tts }))
+        let route = AudioRouteResolution(
+            requested: .init(source: .offline, offlineModelId: model.id, voice: nil),
+            effective: .init(source: .offline, modelId: model.id, voiceId: nil),
+            status: .ready,
+            reason: "ready",
+            fallbackReason: nil
+        )
+        let effective = try XCTUnwrap(route.effective)
+        let defaultVoiceID = try XCTUnwrap(model.voices.first?.id)
+
+        XCTAssertNil(effective.voiceId)
+        XCTAssertEqual(
+            SystemVoiceSpeechPlayer.resolvedOfflineVoiceID(for: effective.voiceId, model: model),
+            defaultVoiceID
+        )
+        XCTAssertEqual(
+            SystemVoiceSpeechPlayer.resolvedOfflineVoiceID(for: defaultVoiceID, model: model),
+            defaultVoiceID
+        )
+
+        let player = SystemVoiceSpeechPlayer(modelRoot: { _ in FileManager.default.temporaryDirectory })
+        let stream = try await player.openStream(
+            configuration: VoiceSpeechConfiguration(
+                voiceIdentifier: "",
+                languageIdentifier: "en-US",
+                speed: 1,
+                route: route,
+                maxPayloadBytes: 16_384
+            ),
+            managesAudioSession: false
+        )
+        XCTAssertTrue(stream is SherpaVoiceSpeechStream)
+        XCTAssertFalse(VoiceModelStore.shared.canRemove(model.id))
+        await stream.stop()
+        XCTAssertTrue(VoiceModelStore.shared.canRemove(model.id))
+    }
+
     func testDictationWritesTranscriptWithoutSendingTurn() async {
         let session = ControllerVoiceSession(transcript: "hello world")
         let controller = makeController(sessions: [session])
@@ -44,6 +83,48 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertEqual(player.requests.map(\.text), ["agent reply"])
         XCTAssertEqual(controller.phase, .listening)
         XCTAssertEqual(second.transcribeCalls, 1)
+    }
+
+    func testFlowPinsAudioConfigurationThroughReplyAndUsesLatestRevisionOnNextListen() async {
+        let first = ControllerVoiceSession(
+            transcript: "pinned turn",
+            automaticallyFinishesWhenEndpointingEnabled: true
+        )
+        let second = ControllerVoiceSession(transcript: "latest turn")
+        let player = RecordingStreamingSpeechPlayer()
+        let source = ControllerConversationSource()
+        let controller = makeController(
+            sessions: [first, second],
+            player: player,
+            bargeInRecognizer: nil
+        )
+        let initialSnapshot = controller.capability.configurationSnapshot
+
+        controller.startFlow(source: source)
+        await settle()
+        XCTAssertEqual(first.configurationSnapshots.first, initialSnapshot)
+
+        controller.capability.setSpeed(1.25)
+        let changedSnapshot = controller.capability.configurationSnapshot
+        XCTAssertGreaterThan(changedSnapshot.revision, initialSnapshot.revision)
+
+        let token = try! XCTUnwrap(source.lastToken)
+        controller.handleTurnSpeechUpdate(.init(
+            token: token,
+            sequence: 1,
+            delta: "Pinned audio response!"
+        ))
+        await settle(30)
+
+        let pinnedSpeechConfiguration = try! XCTUnwrap(player.configurations.first)
+        XCTAssertEqual(pinnedSpeechConfiguration.route?.requested.source, initialSnapshot.configuration.speech.source)
+        XCTAssertEqual(pinnedSpeechConfiguration.configurationRevision, initialSnapshot.revision)
+
+        source.complete(token: token, text: "Pinned audio response!")
+        controller.handleTurnCompletion(try! XCTUnwrap(source.model.turnCompletion))
+        await settle()
+
+        XCTAssertEqual(second.configurationSnapshots.first, changedSnapshot)
     }
 
     func testFlowEnqueuesNaturalSentenceBeforeTurnCompletes() async {
@@ -765,6 +846,7 @@ private final class ControllerVoiceSession: VoiceTranscriptionSession {
     private(set) var finishCalls = 0
     private(set) var cancelCalls = 0
     private(set) var automaticEndpointAfterSilence: Duration?
+    private(set) var configurationSnapshots: [AudioConfigurationSnapshot] = []
 
     init(
         transcript: String,
@@ -795,6 +877,18 @@ private final class ControllerVoiceSession: VoiceTranscriptionSession {
                 self.continuation = continuation
             }
         }
+    }
+
+    func transcribe(
+        language: String?,
+        automaticEndpointAfterSilence: Duration?,
+        configurationSnapshot: AudioConfigurationSnapshot
+    ) async throws -> String {
+        configurationSnapshots.append(configurationSnapshot)
+        return try await transcribe(
+            language: language,
+            automaticEndpointAfterSilence: automaticEndpointAfterSilence
+        )
     }
 
     func finishRecording() {
@@ -885,6 +979,7 @@ private final class FailingStreamingSpeechPlayer: VoiceSpeechPlaying {
 private final class RecordingStreamingSpeechPlayer: VoiceSpeechPlaying {
     private(set) var session: RecordingStreamingSpeechSession?
     private(set) var openCalls = 0
+    private(set) var configurations: [VoiceSpeechConfiguration] = []
 
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome {
         session?.enqueue(request.text)
@@ -894,10 +989,11 @@ private final class RecordingStreamingSpeechPlayer: VoiceSpeechPlaying {
     func stop() {}
 
     func openStream(
-        configuration _: VoiceSpeechConfiguration,
+        configuration: VoiceSpeechConfiguration,
         managesAudioSession _: Bool
     ) async throws -> any VoiceSpeechStreamingSession {
         openCalls += 1
+        configurations.append(configuration)
         let session = RecordingStreamingSpeechSession()
         self.session = session
         return session

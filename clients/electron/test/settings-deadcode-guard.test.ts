@@ -8,8 +8,8 @@ const root = join(import.meta.dirname, '../../..');
 
 function hits(needle: string): string[] {
   try {
-    return execFileSync('git', ['grep', '-l', '-F', needle, '--', 'clients/electron/src'],
-      { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+    return execFileSync('rg', ['-l', '-F', '--', needle, 'clients/electron/src'],
+      { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean).sort();
   } catch {
     return [];   // git grep 无命中时退出码为 1
   }
@@ -108,10 +108,10 @@ test('no settings button explains itself with a native title tooltip', () => {
 function declarationSites(name: string): string[] {
   try {
     return execFileSync(
-      'git',
-      ['grep', '-l', '-E', `^export (interface|type) ${name}[ <={]`, '--', 'clients/electron/src'],
+      'rg',
+      ['-l', '-U', '-e', `^export (interface|type) ${name}[ <={]`, '--', 'clients/electron/src'],
       { cwd: root, encoding: 'utf8' },
-    ).trim().split('\n').filter(Boolean);
+    ).trim().split('\n').filter(Boolean).sort();
   } catch {
     return [];
   }
@@ -138,20 +138,15 @@ test('the device settings shape is declared exactly once, in src/shared', () => 
 
 // ---------------------------------------------------------------------------
 // Task 7 follow-up: the desktop-audio-capability plan added
-// VoicePreferences/VoiceOption/VoicePlatformSnapshot with no equivalent
-// tripwire — flagged in the Task 4+5 review as an open gap. VoicePreferences
-// crosses the main/renderer boundary the same way PublicSettings does (see
-// shared/voicePreferences.ts's own doc comment), so it lives in src/shared;
-// VoiceOption/VoicePlatformSnapshot are the capability probe's own
-// vocabulary and belong to renderer/audio/capabilities.ts. No duplicate
-// exists today — this only guards against one appearing later.
+// v3 audio preferences are shared with the native helper; the old browser
+// capability vocabulary was removed when Electron moved audio work into main.
 // ---------------------------------------------------------------------------
 
-test('the voice preference and capability shapes are declared exactly once', () => {
+test('the voice preference and native audio shapes are declared exactly once', () => {
   const expectedHomes: Record<string, string> = {
     VoicePreferences: 'clients/electron/src/shared/voicePreferences.ts',
-    VoiceOption: 'clients/electron/src/renderer/audio/capabilities.ts',
-    VoicePlatformSnapshot: 'clients/electron/src/renderer/audio/capabilities.ts',
+    AudioConfigurationV3: 'clients/electron/src/shared/generatedAudioConfiguration.ts',
+    NativeAudioVoiceOption: 'clients/electron/src/shared/nativeAudio.ts',
   };
   for (const [name, home] of Object.entries(expectedHomes)) {
     assert.deepEqual(

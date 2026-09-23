@@ -43,7 +43,7 @@ import {
 import { validateClipboardText, validateClientCommand } from './validation.js';
 import { readMicrophoneAccess, type MediaAccessReader } from './microphoneAccess.js';
 import type { NativeAudioManager } from './audio/nativeAudioManager.js';
-import { CH_NATIVE_AUDIO_ENGINE_REQUEST, CH_NATIVE_AUDIO_EVENT, CH_NATIVE_AUDIO_REQUEST } from '../shared/nativeAudio.js';
+import { CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_EVENT, CH_NATIVE_AUDIO_FINISH_LISTEN, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_REQUEST } from '../shared/nativeAudio.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
 import { CODEX_PROVIDER_ID, loginCodex } from './codex-auth.js';
 import type { SettingsStore } from './settings.js';
@@ -462,15 +462,21 @@ export class HostController {
       this.terminalDeliveries.get(webContents)?.dispose();
       this.terminalDeliveries.delete(webContents);
     };
+    const detachAudio = () => {
+      void this.nativeAudio?.cancelUiAudioOperations(String(webContents.id), true).catch((error) => {
+        this.diagnostics.add('warn', 'host', `desktop UI audio teardown failed: ${sanitizeDiagnostic(error)}`);
+      });
+    };
     // A replacement renderer will subscribe afresh. Its predecessor cannot
     // keep the PTY paused waiting for acknowledgements that will never arrive.
     webContents.on?.('did-start-navigation', (_event, _url, inPlace, mainFrame) => {
-      if (mainFrame && !inPlace) detachTerminals();
+      if (mainFrame && !inPlace) { detachTerminals(); detachAudio(); }
     });
-    webContents.on?.('render-process-gone', detachTerminals);
+    webContents.on?.('render-process-gone', () => { detachTerminals(); detachAudio(); });
     webContents.once('destroyed', () => {
       this.targets.delete(webContents);
       detachTerminals();
+      detachAudio();
     });
   }
 
@@ -487,6 +493,8 @@ export class HostController {
       this.offNativeAudio = this.nativeAudio.onEvent((audioEvent) => {
         for (const webContents of this.targets.keys()) {
           if (webContents.isDestroyed()) continue;
+          if (audioEvent.type === 'input_level' && audioEvent.owner.kind === 'ui'
+              && audioEvent.owner.id !== String(webContents.id)) continue;
           webContents.send(CH_NATIVE_AUDIO_EVENT, audioEvent);
         }
       });
@@ -587,15 +595,13 @@ export class HostController {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'notifications' && key !== 'modelPickerVisibility' && key !== 'sidebar')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'theme' && key !== 'collapseThoughtsByDefault' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice' && key !== 'voiceRevision' && key !== 'notifications' && key !== 'modelPickerVisibility' && key !== 'sidebar')) throw new Error('unsupported setting');
       const restartsBridge = 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
       // `model` is applied to a live session through `set_model`, then mirrored
       // here by `onModelChanged`; persisting the default must not restart any
-      // session. `voice` also never restarts the bridge: recognition/synthesis read
-      // `bootstrap.settings.voice` fresh on every audio request
-      // (`renderer/audio/requests.ts`'s `playback()`), so a write here takes
-      // effect on the NEXT request. `notifications` does not restart anything
+      // session. `voice` is a separately revisioned device-local configuration;
+      // each operation snapshots it from main when dispatched. `notifications` does not restart anything
       // either, but it IS pushed at the notifier below: the notifier lives in
       // the main process and holds armed timers, so it cannot re-read a value
       // it is never told about. Only the legacy Anthropic API base changes the
@@ -606,6 +612,7 @@ export class HostController {
         model?: string | null;
         apiBaseUrl?: string | null;
         voice?: unknown;
+        voiceRevision?: number;
         notifications?: unknown;
         modelPickerVisibility?: unknown;
         sidebar?: unknown;
@@ -1055,14 +1062,28 @@ export class HostController {
       if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
       return this.nativeAudio.request(command);
     });
-    this.ipc.handle(CH_NATIVE_AUDIO_ENGINE_REQUEST, async (
+    this.ipc.handle(CH_NATIVE_AUDIO_OPERATION, async (
       event: IpcMainInvokeEvent,
-      sessionId: unknown,
-      op: unknown,
+      operation: unknown,
+      configurationRevision?: unknown,
+      configurationOverride?: unknown,
     ) => {
       this.assertSender(event);
       if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
-      return this.nativeAudio.executeEngineRequest(sessionId, op);
+      return this.nativeAudio.executeUiAudioOperation(
+        operation,
+        String(event.sender.id),
+        configurationRevision as number | undefined,
+        configurationOverride,
+      );
+    });
+    this.ipc.handle(CH_NATIVE_AUDIO_CANCEL, async (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      await this.nativeAudio?.cancelUiAudioOperations(String(event.sender.id));
+    });
+    this.ipc.handle(CH_NATIVE_AUDIO_FINISH_LISTEN, async (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      await this.nativeAudio?.finishUiAudioListen(String(event.sender.id));
     });
   }
 
@@ -1733,7 +1754,7 @@ export class HostController {
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
-      CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_ENGINE_REQUEST,
+      CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN,
     ]) this.ipc.removeHandler(channel);
     this.offNativeAudio?.();
     this.offNativeAudio = undefined;

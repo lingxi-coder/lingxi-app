@@ -26,6 +26,8 @@ import {
 export class SettingsStore {
   readonly settingsPath: string;
   private settings: PersistedSettings;
+  private audioConfigurationError: string | undefined;
+  private settingsWritable = true;
   private volatileActiveSession: SessionRef | undefined;
   // Canonical form of the managed scope. Every caller that compares a path
   // against it has already run it through `canonicalWorkspace` (which
@@ -48,8 +50,17 @@ export class SettingsStore {
   }
 
   private readSettings(): PersistedSettings {
+    let contents: string;
     try {
-      const raw: unknown = JSON.parse(readFileSync(this.settingsPath, 'utf8'));
+      contents = readFileSync(this.settingsPath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return defaultSettings();
+      this.settingsWritable = false;
+      this.audioConfigurationError = 'Device settings cannot be read. Audio is unavailable until the original settings file is restored.';
+      return defaultSettings();
+    }
+    try {
+      const raw: unknown = JSON.parse(contents);
       const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
       const settings = parseSettings(raw);
       // Decode the managed scope separately so the Project limit and legacy
@@ -65,24 +76,43 @@ export class SettingsStore {
       }
       return settings;
     } catch {
+      this.settingsWritable = false;
+      this.audioConfigurationError = 'Device settings are unreadable. Audio is unavailable until the original settings file is restored.';
       return defaultSettings();
     }
   }
 
   private persist(): void {
+    if (!this.settingsWritable) throw new Error(this.audioConfigurationError ?? 'Device settings cannot be safely updated.');
     mkdirSync(dirname(this.settingsPath), { recursive: true, mode: 0o700 });
     const temporary = `${this.settingsPath}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(this.settings, null, 2)}\n`, { mode: 0o600 });
+    const completesAudioMigration = Boolean(
+      this.settings.voice
+      && this.settings.audioConfigRecovery !== undefined
+      && this.settings.audioConfigMigrationComplete !== true,
+    );
+    const persisted = completesAudioMigration
+      ? { ...this.settings, audioConfigMigrationComplete: true as const }
+      : this.settings;
+    writeFileSync(temporary, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
     renameSync(temporary, this.settingsPath);
+    if (completesAudioMigration) this.settings.audioConfigMigrationComplete = true;
   }
 
   getPublic(): PublicSettings {
-    return publicSettings({
+    const settings = publicSettings({
       ...this.settings,
       activeSession: this.volatileActiveSession
         ? { ...this.volatileActiveSession }
         : this.settings.activeSession ? { ...this.settings.activeSession } : undefined,
     });
+    if (settings.voice) settings.voiceRevision = this.settings.audioConfigurationRevision ?? 0;
+    if (this.audioConfigurationError) settings.audioConfigurationError = this.audioConfigurationError;
+    return settings;
+  }
+
+  getAudioConfigurationError(): string | undefined {
+    return this.audioConfigurationError;
   }
 
   getWorkspace(): string | undefined {
@@ -184,10 +214,35 @@ export class SettingsStore {
     model?: string | null;
     apiBaseUrl?: string | null;
     voice?: unknown;
+    voiceRevision?: number;
     notifications?: unknown;
     modelPickerVisibility?: unknown;
     sidebar?: unknown;
   }): PublicSettings {
+    if ('voice' in patch) {
+      if (Object.keys(patch).some((key) => key !== 'voice' && key !== 'voiceRevision')) {
+        throw new Error('audio configuration must be saved separately from other settings');
+      }
+      const currentRevision = this.settings.audioConfigurationRevision ?? 0;
+      if (!Number.isSafeInteger(patch.voiceRevision) || patch.voiceRevision !== currentRevision) {
+        throw new Error('audio configuration changed in another view; reload it before saving');
+      }
+      if (currentRevision >= Number.MAX_SAFE_INTEGER) throw new Error('audio configuration revision is exhausted');
+      const previous = this.settings;
+      this.settings = {
+        ...previous,
+        voice: parseVoicePreferences(patch.voice),
+        audioConfigurationRevision: currentRevision + 1,
+      };
+      try {
+        this.persist();
+      } catch (error) {
+        this.settings = previous;
+        throw error;
+      }
+      return this.getPublic();
+    }
+    if ('voiceRevision' in patch) throw new Error('audio configuration revision requires a voice value');
     if ('collapseThoughtsByDefault' in patch && typeof patch.collapseThoughtsByDefault !== 'boolean') {
       throw new Error('invalid collapseThoughtsByDefault');
     }
@@ -204,13 +259,6 @@ export class SettingsStore {
     if ('apiBaseUrl' in patch) {
       if (patch.apiBaseUrl === null || patch.apiBaseUrl === '') delete this.settings.apiBaseUrl;
       else this.settings.apiBaseUrl = validateApiBaseUrl(patch.apiBaseUrl);
-    }
-    if ('voice' in patch) {
-      // Whole-object replace, normalized leniently — matches how both
-      // mobile platforms persist voice preferences (iOS's `persist()`,
-      // Android's `save()` each write the full snapshot at once, never a
-      // partial merge of individual fields).
-      this.settings.voice = parseVoicePreferences(patch.voice);
     }
     if ('notifications' in patch) {
       // Whole-object replace, normalized leniently — same reasoning as

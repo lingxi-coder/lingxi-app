@@ -4,7 +4,7 @@
 //! WebSocket `Frame::Event` writer: where bridge-server wraps an mpsc/socket in
 //! a [`ClientEventSink`](crate::sink::ClientEventSink), mobile wraps a
 //! foreign-supplied (Swift/Kotlin) callback object. It is the OUTBOUND sibling
-//! of the existing INBOUND device callbacks (`CameraControl` / `VoiceRecorder`
+//! of the existing INBOUND device callbacks (`CameraControl` / `AudioService`
 //! / `SharingService`): Rust calls *out* into the host with each translated
 //! [`ClientEvent`].
 //!

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 3,
+  "languageAuto": "auto",
+  "minimumRate": 0.5,
+  "maximumRate": 2.0,
+  "defaultRate": 1.0,
+  "sources": ["automatic", "system", "offline"],
+  "defaults": {
+    "schemaVersion": 3,
+    "recognition": { "source": "automatic", "offlineModelId": null },
+    "speech": { "source": "automatic", "offlineModelId": null, "voice": null },
+    "language": "auto",
+    "rate": 1.0,
+    "autoPlayReplies": false
+  }
+}

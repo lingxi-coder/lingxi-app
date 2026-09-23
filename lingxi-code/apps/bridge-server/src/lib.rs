@@ -17,11 +17,10 @@
 //! - [`router::CommandRouter`] — the engine-routing seam for the FULL command
 //!   surface (model, listings, slash, tasks, session control) the connection
 //!   delegates non-turn/non-permission commands to (F2-08).
-//! - [`audio_bridge::AudioBridge`] — the desktop proxies for
-//!   `platform_api::{SpeechToText, TextToSpeech, VoiceRecorder}`: each trait call
-//!   becomes one [`client_protocol::events::ClientEvent::AudioRequest`] awaiting
-//!   the client's `AudioResponse` (the microphone/speaker live in Electron, not
-//!   in the engine).
+//! - [`audio_bridge::AudioBridge`] — the desktop `platform_api::AudioService`
+//!   proxy: each device operation becomes one identity-scoped
+//!   [`client_protocol::events::ClientEvent::AudioRequest`] awaiting the client's
+//!   `AudioResponse` (the microphone/speaker live in Electron, not in the engine).
 //! - [`boot`] — S2: env/argv → [`engine_desktop::DesktopConfig`] resolution and
 //!   the assembly of a fully-bound [`server::BridgeConnection`] from a real
 //!   [`engine_desktop::DesktopRuntime`], shared by the binary and its tests.

@@ -28,6 +28,7 @@
 #![allow(missing_docs)]
 
 pub mod ask_user_question;
+pub mod audio;
 pub mod commands;
 pub mod computer_access;
 pub mod controls;

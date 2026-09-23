@@ -630,20 +630,74 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ApiRetry.delay_ms", "u64");
 
     put("ClientEvent::AudioRequest", "audio_request");
-    put("ClientEvent::AudioRequest.request_id", "u64");
-    put("ClientEvent::AudioRequest.op", "AudioOpDto");
+    put(
+        "ClientEvent::AudioRequest.request",
+        "AudioOperationRequestDto",
+    );
+    put("ClientEvent::AudioCancel", "audio_cancel");
+    put("ClientEvent::AudioCancel.identity", "AudioOperationIdDto");
+    put(
+        "ClientEvent::AudioCapabilitiesChanged",
+        "audio_capabilities_changed",
+    );
+    put(
+        "ClientEvent::AudioCapabilitiesChanged.capabilities",
+        "AudioCapabilitySnapshotDto",
+    );
 
-    // ── AudioOpDto (events.rs) ────────────────────────────────────────────
-    put("AudioOpDto::StartRecording", "start_recording");
-    put("AudioOpDto::StartRecording.sample_rate_hz", "u32");
-    put("AudioOpDto::StartRecording.format", "String");
-    put("AudioOpDto::StopRecording", "stop_recording");
-    put("AudioOpDto::IsRecording", "is_recording");
-    put("AudioOpDto::Transcribe", "transcribe");
-    put("AudioOpDto::Transcribe.language", "Option<String>");
-    put("AudioOpDto::Synthesize", "synthesize");
-    put("AudioOpDto::Synthesize.text", "String");
-    put("AudioOpDto::Synthesize.voice", "Option<String>");
+    put("AudioOperationIdDto.id", "String");
+    put("AudioOperationIdDto.generation", "u64");
+    put("AudioOperationIdDto.service_epoch", "u64");
+    put("AudioOwnerDto::Session", "session");
+    put("AudioOwnerDto::Session.session_id", "String");
+    put("AudioOwnerDto::LocalApp", "local_app");
+    put("AudioOwnerDto::LocalApp.app_id", "String");
+    put("AudioOwnerDto::LocalApp.runtime_generation", "u64");
+    put("AudioOwnerDto::Ui", "ui");
+    put("AudioOwnerDto::Ui.instance_id", "String");
+    put("AudioOwnerDto::System", "system");
+    put("AudioOwnerDto::System.instance_id", "String");
+    put("AudioInitiatorDto.agent_id", "Option<String>");
+    put("AudioInitiatorDto.tool_use_id", "Option<String>");
+    put("AudioInitiatorDto.request_id", "Option<String>");
+    put("AudioOperationRequestDto.identity", "AudioOperationIdDto");
+    put("AudioOperationRequestDto.owner", "AudioOwnerDto");
+    put(
+        "AudioOperationRequestDto.initiator",
+        "Option<AudioInitiatorDto>",
+    );
+    put("AudioOperationRequestDto.timeout_budget_ms", "Option<u64>");
+    put("AudioOperationRequestDto.max_payload_bytes", "u64");
+    put("AudioOperationRequestDto.operation", "AudioOperationDto");
+
+    put("AudioOperationDto::StartRecording", "start_recording");
+    put("AudioOperationDto::StartRecording.sample_rate_hz", "u32");
+    put("AudioOperationDto::StartRecording.format", "String");
+    put("AudioOperationDto::StopRecording", "stop_recording");
+    put("AudioOperationDto::StopRecording.handle", "String");
+    put("AudioOperationDto::Listen", "listen");
+    put("AudioOperationDto::Listen.language", "Option<String>");
+    for variant in ["Synthesize", "Speak"] {
+        let tag = if variant == "Speak" {
+            "speak"
+        } else {
+            "synthesize"
+        };
+        put(&format!("AudioOperationDto::{variant}"), tag);
+        put(&format!("AudioOperationDto::{variant}.text"), "String");
+        put(
+            &format!("AudioOperationDto::{variant}.language"),
+            "Option<String>",
+        );
+        put(&format!("AudioOperationDto::{variant}.rate"), "Option<f32>");
+        put(
+            &format!("AudioOperationDto::{variant}.voice"),
+            "Option<String>",
+        );
+    }
+    put("AudioOperationDto::Status", "status");
+    put("AudioOperationDto::Status.handle", "Option<String>");
+    put("AudioOperationDto::EndOwner", "end_owner");
 
     // ── ErrorKindDto (events.rs) ──────────────────────────────────────────
     put("ErrorKindDto::Transport", "transport");
@@ -1045,36 +1099,106 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::RemoveMcpServer.name", "String");
 
     put("ClientCommand::AudioResponse", "audio_response");
-    put("ClientCommand::AudioResponse.request_id", "u64");
-    put("ClientCommand::AudioResponse.result", "AudioResultDto");
+    put(
+        "ClientCommand::AudioResponse.identity",
+        "AudioOperationIdDto",
+    );
+    put(
+        "ClientCommand::AudioResponse.result",
+        "AudioOperationResultDto",
+    );
+    put(
+        "ClientCommand::UpdateAudioCapabilities",
+        "update_audio_capabilities",
+    );
+    put(
+        "ClientCommand::UpdateAudioCapabilities.capabilities",
+        "AudioCapabilitySnapshotDto",
+    );
 
-    // ── AudioErrorKindDto (commands.rs) ────────────────────────────────────
     put("AudioErrorKindDto::PermissionDenied", "permission_denied");
+    put("AudioErrorKindDto::Busy", "busy");
+    put("AudioErrorKindDto::Cancelled", "cancelled");
+    put("AudioErrorKindDto::Timeout", "timeout");
     put("AudioErrorKindDto::NoSpeech", "no_speech");
     put("AudioErrorKindDto::NotRecording", "not_recording");
     put("AudioErrorKindDto::Unavailable", "unavailable");
-    put("AudioErrorKindDto::Busy", "busy");
-    put("AudioErrorKindDto::Retriable", "retriable");
+    put("AudioErrorKindDto::Unsupported", "unsupported");
+    put("AudioErrorKindDto::ModelMissing", "model_missing");
+    put("AudioErrorKindDto::VoiceMissing", "voice_missing");
+    put("AudioErrorKindDto::InvalidRequest", "invalid_request");
     put("AudioErrorKindDto::SynthesisFailed", "synthesis_failed");
-    put("AudioErrorKindDto::Other", "other");
+    put("AudioErrorKindDto::NativeFailure", "native_failure");
+    put("AudioErrorKindDto::MediaTooLarge", "media_too_large");
+    put("AudioErrorDto.kind", "AudioErrorKindDto");
+    put("AudioErrorDto.message", "String");
+    put("AudioStatusDto.recording", "bool");
+    put("AudioStatusDto.playing", "bool");
 
-    // ── AudioResultDto (commands.rs) ───────────────────────────────────────
-    put("AudioResultDto::Ok", "ok");
-    put("AudioResultDto::RecordingState", "recording_state");
-    put("AudioResultDto::RecordingState.recording", "bool");
-    put("AudioResultDto::Recording", "recording");
-    put("AudioResultDto::Recording.audio_base64", "String");
-    put("AudioResultDto::Recording.mime_type", "String");
-    put("AudioResultDto::Transcript", "transcript");
-    put("AudioResultDto::Transcript.text", "String");
-    put("AudioResultDto::Transcript.language", "Option<String>");
-    put("AudioResultDto::Transcript.confidence", "Option<f32>");
-    put("AudioResultDto::Audio", "audio");
-    put("AudioResultDto::Audio.pcm_base64", "String");
-    put("AudioResultDto::Audio.sample_rate_hz", "u32");
-    put("AudioResultDto::Failed", "failed");
-    put("AudioResultDto::Failed.kind", "AudioErrorKindDto");
-    put("AudioResultDto::Failed.message", "String");
+    put(
+        "AudioOperationResultDto::RecordingStarted",
+        "recording_started",
+    );
+    put("AudioOperationResultDto::RecordingStarted.handle", "String");
+    put("AudioOperationResultDto::Recording", "recording");
+    put("AudioOperationResultDto::Recording.audio_base64", "String");
+    put("AudioOperationResultDto::Recording.mime_type", "String");
+    put("AudioOperationResultDto::Transcript", "transcript");
+    put("AudioOperationResultDto::Transcript.text", "String");
+    put(
+        "AudioOperationResultDto::Transcript.language",
+        "Option<String>",
+    );
+    put(
+        "AudioOperationResultDto::Transcript.confidence",
+        "Option<f32>",
+    );
+    put("AudioOperationResultDto::Synthesized", "synthesized");
+    put("AudioOperationResultDto::Synthesized.pcm_base64", "String");
+    put("AudioOperationResultDto::Synthesized.sample_rate_hz", "u32");
+    put(
+        "AudioOperationResultDto::PlaybackCompleted",
+        "playback_completed",
+    );
+    put(
+        "AudioOperationResultDto::PlaybackCompleted.duration_ms",
+        "u64",
+    );
+    put("AudioOperationResultDto::Status", "status");
+    put("AudioOperationResultDto::Status.status", "AudioStatusDto");
+    put("AudioOperationResultDto::OwnerEnded", "owner_ended");
+    put("AudioOperationResultDto::Failed", "failed");
+    put("AudioOperationResultDto::Failed.error", "AudioErrorDto");
+
+    put("AudioOperationKindDto::Record", "record");
+    put("AudioOperationKindDto::Listen", "listen");
+    put("AudioOperationKindDto::Synthesize", "synthesize");
+    put("AudioOperationKindDto::Speak", "speak");
+    for (state, tag) in [
+        ("Ready", "ready"),
+        ("NeedsPermission", "needs_permission"),
+        ("Busy", "busy"),
+        ("MissingModel", "missing_model"),
+        ("Unavailable", "unavailable"),
+    ] {
+        put(&format!("AudioReadinessStateDto::{state}"), tag);
+    }
+    put(
+        "AudioOperationReadinessDto.operation",
+        "AudioOperationKindDto",
+    );
+    put("AudioOperationReadinessDto.state", "AudioReadinessStateDto");
+    put("AudioCapabilitySnapshotDto.service_epoch", "u64");
+    put("AudioCapabilitySnapshotDto.support_revision", "u64");
+    put(
+        "AudioCapabilitySnapshotDto.supported_operations",
+        "Vec<AudioOperationKindDto>",
+    );
+    put(
+        "AudioCapabilitySnapshotDto.readiness",
+        "Vec<AudioOperationReadinessDto>",
+    );
+    put("AudioCapabilitySnapshotDto.max_payload_bytes", "u64");
 
     // ── WritableScopeDto (commands.rs) ─────────────────────────────────────────
     put("WritableScopeDto::User", "user");
@@ -2735,10 +2859,15 @@ fn current_contract_matches_index_or_version_bumped() {
 // allowed here rather than worked around.
 #[allow(clippy::too_many_lines, clippy::no_effect_underscore_binding)]
 fn contract_index_covers_every_dto() {
+    use client_protocol::audio::{
+        AudioCapabilitySnapshotDto, AudioErrorDto, AudioErrorKindDto, AudioInitiatorDto,
+        AudioOperationDto, AudioOperationIdDto, AudioOperationKindDto, AudioOperationReadinessDto,
+        AudioOperationRequestDto, AudioOperationResultDto, AudioOwnerDto, AudioReadinessStateDto,
+        AudioStatusDto,
+    };
     use client_protocol::commands::{
-        AppCreateModeDto, AudioErrorKindDto, AudioResultDto, ClientCommand, CommandResultDto,
-        ImageRefDto, ListingKindDto, PermissionBehaviorDto, PromptModeDto,
-        ProviderCredentialSecretDto, WritableScopeDto,
+        AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto,
+        PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, WritableScopeDto,
     };
     use client_protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -2751,7 +2880,7 @@ fn contract_index_covers_every_dto() {
     };
     use client_protocol::error::ClientError;
     use client_protocol::events::{
-        AudioOpDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+        ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
         TurnRecoveryStateDto,
     };
     use client_protocol::listings::{
@@ -2856,24 +2985,63 @@ fn contract_index_covers_every_dto() {
             event_json: String::new(),
         },
         ClientEvent::AudioRequest {
-            request_id: 0,
-            op: AudioOpDto::IsRecording,
+            request: AudioOperationRequestDto {
+                identity: AudioOperationIdDto {
+                    id: String::new(),
+                    generation: 0,
+                    service_epoch: 0,
+                },
+                owner: AudioOwnerDto::Session {
+                    session_id: String::new(),
+                },
+                initiator: None,
+                timeout_budget_ms: None,
+                max_payload_bytes: 0,
+                operation: AudioOperationDto::Status { handle: None },
+            },
+        },
+        ClientEvent::AudioCancel {
+            identity: AudioOperationIdDto {
+                id: String::new(),
+                generation: 0,
+                service_epoch: 0,
+            },
+        },
+        ClientEvent::AudioCapabilitiesChanged {
+            capabilities: AudioCapabilitySnapshotDto {
+                service_epoch: 0,
+                support_revision: 0,
+                supported_operations: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 0,
+            },
         },
     ];
     let _outcome = TurnOutcomeDto::EndTurn;
-    // Every `AudioOpDto` variant, so a removed op fails THIS compile.
-    let _audio_ops: Vec<AudioOpDto> = vec![
-        AudioOpDto::StartRecording {
+    // Every AudioOperationDto variant, so a removed operation fails THIS compile.
+    let _audio_ops: Vec<AudioOperationDto> = vec![
+        AudioOperationDto::StartRecording {
             sample_rate_hz: 16_000,
             format: String::new(),
         },
-        AudioOpDto::StopRecording,
-        AudioOpDto::IsRecording,
-        AudioOpDto::Transcribe { language: None },
-        AudioOpDto::Synthesize {
+        AudioOperationDto::StopRecording {
+            handle: String::new(),
+        },
+        AudioOperationDto::Listen { language: None },
+        AudioOperationDto::Synthesize {
             text: String::new(),
+            language: None,
+            rate: None,
             voice: None,
         },
+        AudioOperationDto::Speak {
+            text: String::new(),
+            language: None,
+            rate: None,
+            voice: None,
+        },
+        AudioOperationDto::Status { handle: None },
+        AudioOperationDto::EndOwner,
     ];
 
     // tool_display.rs — the pre-derived render model.
@@ -3014,43 +3182,110 @@ fn contract_index_covers_every_dto() {
             name: String::new(),
         },
         ClientCommand::AudioResponse {
-            request_id: 0,
-            result: AudioResultDto::Ok,
+            identity: AudioOperationIdDto {
+                id: String::new(),
+                generation: 0,
+                service_epoch: 0,
+            },
+            result: AudioOperationResultDto::OwnerEnded,
+        },
+        ClientCommand::UpdateAudioCapabilities {
+            capabilities: AudioCapabilitySnapshotDto {
+                service_epoch: 0,
+                support_revision: 0,
+                supported_operations: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 0,
+            },
         },
     ];
-    // Every `AudioResultDto` variant, so a removed outcome fails THIS compile.
-    let _audio_results: Vec<AudioResultDto> = vec![
-        AudioResultDto::Ok,
-        AudioResultDto::RecordingState { recording: false },
-        AudioResultDto::Recording {
+    // Every operation result and error variant must remain constructible.
+    let _audio_results: Vec<AudioOperationResultDto> = vec![
+        AudioOperationResultDto::RecordingStarted {
+            handle: String::new(),
+        },
+        AudioOperationResultDto::Recording {
             audio_base64: String::new(),
             mime_type: String::new(),
         },
-        AudioResultDto::Transcript {
+        AudioOperationResultDto::Transcript {
             text: String::new(),
             language: None,
             confidence: None,
         },
-        AudioResultDto::Audio {
+        AudioOperationResultDto::Synthesized {
             pcm_base64: String::new(),
             sample_rate_hz: 0,
         },
-        AudioResultDto::Failed {
-            kind: AudioErrorKindDto::Other,
-            message: String::new(),
+        AudioOperationResultDto::PlaybackCompleted { duration_ms: 0 },
+        AudioOperationResultDto::Status {
+            status: AudioStatusDto {
+                recording: false,
+                playing: false,
+            },
+        },
+        AudioOperationResultDto::OwnerEnded,
+        AudioOperationResultDto::Failed {
+            error: AudioErrorDto {
+                kind: AudioErrorKindDto::NativeFailure,
+                message: String::new(),
+            },
         },
     ];
-    // Every `AudioErrorKindDto` variant, so a removed kind fails THIS compile.
+    // Every AudioErrorKindDto variant, so a removed class fails this compile.
     let _audio_error_kinds: Vec<AudioErrorKindDto> = vec![
         AudioErrorKindDto::PermissionDenied,
+        AudioErrorKindDto::Busy,
+        AudioErrorKindDto::Cancelled,
+        AudioErrorKindDto::Timeout,
         AudioErrorKindDto::NoSpeech,
         AudioErrorKindDto::NotRecording,
         AudioErrorKindDto::Unavailable,
-        AudioErrorKindDto::Busy,
-        AudioErrorKindDto::Retriable,
+        AudioErrorKindDto::Unsupported,
+        AudioErrorKindDto::ModelMissing,
+        AudioErrorKindDto::VoiceMissing,
+        AudioErrorKindDto::InvalidRequest,
         AudioErrorKindDto::SynthesisFailed,
-        AudioErrorKindDto::Other,
+        AudioErrorKindDto::NativeFailure,
+        AudioErrorKindDto::MediaTooLarge,
     ];
+    let _audio_owners = [
+        AudioOwnerDto::Session {
+            session_id: String::new(),
+        },
+        AudioOwnerDto::LocalApp {
+            app_id: String::new(),
+            runtime_generation: 0,
+        },
+        AudioOwnerDto::Ui {
+            instance_id: String::new(),
+        },
+        AudioOwnerDto::System {
+            instance_id: String::new(),
+        },
+    ];
+    let _audio_initiator = AudioInitiatorDto {
+        agent_id: None,
+        tool_use_id: None,
+        request_id: None,
+    };
+    let _audio_kinds = [
+        AudioOperationKindDto::Record,
+        AudioOperationKindDto::Listen,
+        AudioOperationKindDto::Synthesize,
+        AudioOperationKindDto::Speak,
+    ];
+    let _audio_readiness = [
+        AudioReadinessStateDto::Ready,
+        AudioReadinessStateDto::NeedsPermission,
+        AudioReadinessStateDto::Busy,
+        AudioReadinessStateDto::MissingModel,
+        AudioReadinessStateDto::Unavailable,
+    ];
+    let _audio_readiness_entry = AudioOperationReadinessDto {
+        operation: AudioOperationKindDto::Listen,
+        state: AudioReadinessStateDto::Busy,
+    };
     let _mcp_scope = WritableScopeDto::User;
     let _settings_destination = WritableScopeDto::User;
     let _permission_behavior = PermissionBehaviorDto::Allow;

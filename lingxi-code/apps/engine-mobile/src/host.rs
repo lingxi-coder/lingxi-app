@@ -40,15 +40,15 @@ mod permission_preference;
 mod settings_commands;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use client_adapter::lowering::lower_status_snapshot;
 use client_adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
     PermissionRequestSink, TurnWrapper,
 };
-use client_adapter::lowering::lower_status_snapshot;
 use client_protocol::commands::{
     AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto as ProtocolListingKind,
     PromptModeDto, ProviderCredentialSecretDto,
@@ -98,6 +98,10 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
+use platform_api::audio::{
+    AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
+    AudioOperationSuccess, AudioOwner, AudioService,
+};
 use platform_api::http::{
     HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
@@ -115,6 +119,55 @@ use tool_api::AnthropicRequestBuilder;
 use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_workflow::WorkflowLauncher as _;
+
+static NEXT_MOBILE_AUDIO_TEARDOWN_GENERATION: AtomicU64 = AtomicU64::new(1);
+const MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+async fn end_mobile_audio_owner(
+    service: &Arc<dyn AudioService>,
+    recording_handles: &Arc<
+        tokio::sync::Mutex<HashMap<AudioOwner, platform_api::audio::AudioRecordingHandle>>,
+    >,
+    owner: AudioOwner,
+) -> Result<(), AudioError> {
+    let capabilities = service.capabilities();
+    let context = AudioOperationContext {
+        identity: AudioOperationId::new(
+            NEXT_MOBILE_AUDIO_TEARDOWN_GENERATION
+                .fetch_add(1, Ordering::Relaxed)
+                .max(1),
+            capabilities.service_epoch,
+        ),
+        owner: owner.clone(),
+        initiator: None,
+        timeout_budget_ms: Some(
+            u64::try_from(MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET.as_millis()).unwrap_or(u64::MAX),
+        ),
+        max_payload_bytes: capabilities.max_payload_bytes,
+    };
+    let result = tokio::time::timeout(
+        MOBILE_AUDIO_OWNER_TEARDOWN_BUDGET,
+        service.execute(context, AudioOperation::EndOwner),
+    )
+    .await
+    .map_err(|_| {
+        AudioError::new(
+            AudioErrorKind::Timeout,
+            "audio owner teardown exceeded its shutdown budget",
+        )
+    })??;
+
+    match result {
+        AudioOperationSuccess::OwnerEnded => {
+            recording_handles.lock().await.remove(&owner);
+            Ok(())
+        }
+        _ => Err(AudioError::new(
+            AudioErrorKind::NativeFailure,
+            "audio service returned an invalid owner-teardown result",
+        )),
+    }
+}
 
 use crate::{
     local_apps_host::{
@@ -3005,7 +3058,7 @@ fn mobile_mcp_oauth_authorization_callback(
 ///
 /// Off-device-deterministic: no `std::env` / argv reads. The OS handles
 /// (filesystem / http / clock / process / sandbox / worktree) and the device
-/// capabilities (camera / voice / share) are read from `platform`; everything
+/// capabilities (camera / audio / share) are read from `platform`; everything
 /// else arrives via `cfg`. The `listener` becomes the adapter's
 /// [`client_adapter::ClientEventSink`] (wrapped in a [`ListenerSink`]) so every
 /// translated [`client_protocol::events::ClientEvent`] is delivered to the
@@ -4238,7 +4291,7 @@ async fn build_mobile_inner_with_ask(
         .unwrap_or_else(|| Arc::new(StaticMemoryProvider::empty()));
 
     // (7) Assemble the mobile tool registry through the composition root. The
-    //     device capabilities (camera / voice / share) come from `platform`;
+    //     device capabilities (camera / audio / share) come from `platform`;
     //     desktop-only seams (subagent / mcp / lsp / team / worktree-tool) are
     //     absent because `engine-mobile` does not link those tool crates.
     // P1-06: ONE per-session read-file-state registry (see engine-desktop
@@ -4735,9 +4788,10 @@ async fn build_mobile_inner_with_ask(
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: platform.camera(),
-        voice: platform.voice(),
-        stt: platform.stt(),
-        tts: platform.tts(),
+        audio: platform.audio_service(),
+        audio_recording_handles: Arc::new(
+            tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        ),
         share: platform.share(),
         notifications: platform.notifications(),
         clipboard: platform.clipboard(),
@@ -5870,6 +5924,32 @@ impl MobileRuntime {
         session_id: protocol::SessionId,
         cwd: &str,
     ) {
+        let next_session_id = session_id.as_uuid().to_string();
+        let previous_session_id = self
+            .active_session_uuid
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if previous_session_id != next_session_id {
+            if let Some(audio) = self.mcp_tool_context.audio.as_ref() {
+                let owner = AudioOwner::Session {
+                    session_id: previous_session_id,
+                };
+                if let Err(error) = end_mobile_audio_owner(
+                    audio,
+                    &self.mcp_tool_context.audio_recording_handles,
+                    owner,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        kind = %error.kind,
+                        %error,
+                        "mobile audio owner teardown failed during session switch"
+                    );
+                }
+            }
+        }
         if let Some(scheduler) = self.wakeup_scheduler.get() {
             tool_cron::stop_dynamic_loop(Some(scheduler)).await;
             if let Some(state) = scheduler.loop_runtime() {
@@ -5884,7 +5964,7 @@ impl MobileRuntime {
         self.session_writer.retarget(path).await;
         // Keep the local-apps MCP origin-conversation source in lockstep with
         // the session every retarget (New/Resume/Clear).
-        let session_uuid = session_id.as_uuid().to_string();
+        let session_uuid = next_session_id;
         {
             let mut guard = self
                 .active_session_uuid
@@ -5922,30 +6002,51 @@ impl Drop for MobileEngineHandle {
                 profile.domain_events.unsubscribe(subscription);
             }
         }
-        // LSP children are connection-scoped. Drive their graceful shutdown
-        // while the handle-owned Tokio runtime is still alive; an OS helper
-        // thread keeps this safe even when the FFI object is released from a
-        // Tokio worker, where calling Runtime::block_on directly would panic.
+        // Native audio callbacks may need the platform's UI executor. In
+        // particular, Swift can release this handle on MainActor while an
+        // EndOwner callback is awaiting MainActor; Drop must return before that
+        // callback can finish. The process-lifetime automation runtime survives
+        // this handle's disposal, so use it for bounded owner cleanup and the
+        // remaining graceful shutdown work without joining from a foreign
+        // executor or relying on the runtime being dropped here.
+        let audio_service = self.inner.mcp_tool_context.audio.clone();
+        let audio_recording_handles = self.inner.mcp_tool_context.audio_recording_handles.clone();
+        let current_session_id = self
+            .inner
+            .active_session_uuid
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let lsp_registry = self.inner.lsp_registry.clone();
         let session_cron = self.session_cron.clone();
-        let runtime_handle = self.runtime.handle().clone();
-        match std::thread::Builder::new()
-            .name("lingxi-mobile-lsp-shutdown".into())
-            .spawn(move || {
-                runtime_handle.block_on(async move {
-                    if let Some(scheduler) = session_cron {
-                        let _ = scheduler.stop().await;
+        mobile_automation_runtime().spawn(async move {
+            if let Some(audio_service) = audio_service {
+                let mut audio_owners = vec![AudioOwner::Session {
+                    session_id: current_session_id,
+                }];
+                for owner in audio_recording_handles.lock().await.keys() {
+                    if !audio_owners.contains(owner) {
+                        audio_owners.push(owner.clone());
                     }
-                    lsp_registry.shutdown_all().await;
-                })
-            }) {
-            Ok(join) => {
-                if join.join().is_err() {
-                    tracing::warn!("mobile LSP shutdown thread panicked");
+                }
+                for owner in audio_owners {
+                    if let Err(error) =
+                        end_mobile_audio_owner(&audio_service, &audio_recording_handles, owner)
+                            .await
+                    {
+                        tracing::warn!(
+                            kind = %error.kind,
+                            %error,
+                            "mobile audio owner teardown failed during engine disposal"
+                        );
+                    }
                 }
             }
-            Err(error) => tracing::warn!(%error, "could not start mobile LSP shutdown thread"),
-        }
+            if let Some(scheduler) = session_cron {
+                let _ = scheduler.stop().await;
+            }
+            lsp_registry.shutdown_all().await;
+        });
         // Drop the strong observer after unregistering its weak fanout entry.
         self.app_domain_observer.take();
     }
@@ -10987,11 +11088,13 @@ impl MobileEngineHandle {
                     .ok_or_else(|| ClientError::Rejected {
                         message: format!("workflow task {task_id} has no resumable run id"),
                     })?;
-                let script_path = workflow.script_path.clone().ok_or_else(|| {
-                    ClientError::Rejected {
-                        message: format!("workflow task {task_id} has no persisted script"),
-                    }
-                })?;
+                let script_path =
+                    workflow
+                        .script_path
+                        .clone()
+                        .ok_or_else(|| ClientError::Rejected {
+                            message: format!("workflow task {task_id} has no persisted script"),
+                        })?;
                 let args = workflow
                     .args
                     .as_deref()
@@ -14662,13 +14765,11 @@ pub fn build_mobile_engine_inner(
         inner.local_apps_llm.clone(),
         crate::local_apps_device::DeviceCapabilities {
             camera: firer_platform.camera(),
-            voice: firer_platform.voice(),
+            audio: firer_platform.audio_service(),
             location: firer_platform.location(),
             notifications: firer_platform.notifications(),
-            stt: firer_platform.stt(),
             clipboard: firer_platform.clipboard(),
             share: firer_platform.share(),
-            tts: firer_platform.tts(),
             device_status: firer_platform.device_status(),
             haptics: firer_platform.haptics(),
             deep_link: firer_platform.deep_link(),
@@ -16052,10 +16153,15 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             local_app_tool_names,
-            ["LocalAppCreate", "LocalAppGet", "LocalAppList", "LocalAppPrepare"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+            [
+                "LocalAppCreate",
+                "LocalAppGet",
+                "LocalAppList",
+                "LocalAppPrepare"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
             "a global Code cold boot must register only the global Local App management \
              tools: the four in `local_apps_tools::GLOBAL_LOCAL_APP_TOOLS`"
         );
@@ -16159,10 +16265,15 @@ mod tests {
                 .collect()
         }
 
-        let global_tools = ["LocalAppCreate", "LocalAppGet", "LocalAppList", "LocalAppPrepare"]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<std::collections::BTreeSet<_>>();
+        let global_tools = [
+            "LocalAppCreate",
+            "LocalAppGet",
+            "LocalAppList",
+            "LocalAppPrepare",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
         let global_skills = ["create-local-app", "expose-as-mcp", "local-app-use"]
             .into_iter()
             .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
@@ -16866,7 +16977,12 @@ mod tests {
         // role agents went with it. Pin their ABSENCE: an agent file left
         // behind re-advertises a stage the flow no longer has, and the count
         // assertion above would not notice a swap of one agent for another.
-        for retired in ["builder", "designer", "template-selector", "create-preparer"] {
+        for retired in [
+            "builder",
+            "designer",
+            "template-selector",
+            "create-preparer",
+        ] {
             assert!(
                 !plugin_agent_names
                     .contains(&format!("{}:{retired}", crate::MOBILE_BUILTIN_PLUGIN_NAME)),
@@ -17837,6 +17953,11 @@ mod tests {
     use client_protocol::error::ClientError;
     use client_protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
     use client_protocol::permission::PermissionResponseDto;
+    use platform_api::audio::{
+        AudioCapabilitySnapshot, AudioError, AudioOperation, AudioOperationContext,
+        AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioOwner,
+        AudioRecordingHandle, AudioService,
+    };
 
     /// Build a real, fully-wired [`MobileEngineHandle`] off-device (host fake
     /// `Platform`) so the F3-05 `submit` path is exercised on CI. Returns the
@@ -17851,8 +17972,13 @@ mod tests {
     /// `api.anthropic.com` request — a test that wants a scripted success
     /// overrides it via `set_local_apps_model` before triggering.
     fn build_submit_handle(root: &std::path::Path) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
-        let platform: Arc<dyn platform_api::Platform> =
-            Arc::new(HostFakePlatform::new(root.to_path_buf()));
+        build_submit_handle_with_platform(root, Arc::new(HostFakePlatform::new(root.to_path_buf())))
+    }
+
+    fn build_submit_handle_with_platform(
+        root: &std::path::Path,
+        platform: Arc<dyn platform_api::Platform>,
+    ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
         let listener = Arc::new(FakeListener::default());
         let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -17861,6 +17987,129 @@ mod tests {
             .expect("build_mobile_engine failed");
         handle.set_local_apps_model(ScriptedModel::new());
         (handle, listener)
+    }
+
+    struct AudioHostFakePlatform {
+        base: HostFakePlatform,
+        audio: Arc<dyn AudioService>,
+    }
+
+    impl platform_api::Platform for AudioHostFakePlatform {
+        fn filesystem(&self) -> Arc<dyn platform_api::FileSystem> {
+            self.base.filesystem()
+        }
+
+        fn http(&self) -> Arc<dyn platform_api::HttpTransport> {
+            self.base.http()
+        }
+
+        fn clock(&self) -> Arc<dyn platform_api::Clock> {
+            self.base.clock()
+        }
+
+        fn process(&self) -> Arc<dyn platform_api::ProcessRunner> {
+            self.base.process()
+        }
+
+        fn sandbox(&self) -> Arc<dyn platform_api::Sandbox> {
+            self.base.sandbox()
+        }
+
+        fn worktree(&self) -> Arc<dyn platform_api::WorktreeManager> {
+            self.base.worktree()
+        }
+
+        fn audio_service(&self) -> Option<Arc<dyn AudioService>> {
+            Some(self.audio.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct AudioOwnerTeardownProbe {
+        operations: StdMutex<Vec<(AudioOwner, AudioOperation)>>,
+        operations_changed: std::sync::Condvar,
+    }
+
+    #[async_trait]
+    impl AudioService for AudioOwnerTeardownProbe {
+        fn capabilities(&self) -> AudioCapabilitySnapshot {
+            AudioCapabilitySnapshot {
+                service_epoch: 19,
+                support_revision: 1,
+                supported_operations: vec![AudioOperationKind::Record],
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            context: AudioOperationContext,
+            operation: AudioOperation,
+        ) -> Result<AudioOperationSuccess, AudioError> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push((context.owner, operation.clone()));
+            self.operations_changed.notify_all();
+            match operation {
+                AudioOperation::EndOwner => Ok(AudioOperationSuccess::OwnerEnded),
+                _ => Err(AudioError::new(
+                    platform_api::audio::AudioErrorKind::Unsupported,
+                    "teardown probe only accepts EndOwner",
+                )),
+            }
+        }
+
+        async fn cancel(&self, _identity: AudioOperationId) -> Result<(), AudioError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct AudioDropGateState {
+        callback_started: bool,
+        drop_returned: bool,
+        callback_completed: bool,
+    }
+
+    struct AudioDropGateService {
+        state: Arc<(StdMutex<AudioDropGateState>, std::sync::Condvar)>,
+    }
+
+    #[async_trait]
+    impl AudioService for AudioDropGateService {
+        fn capabilities(&self) -> AudioCapabilitySnapshot {
+            AudioCapabilitySnapshot {
+                service_epoch: 20,
+                support_revision: 1,
+                supported_operations: vec![AudioOperationKind::Record],
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: AudioOperationContext,
+            operation: AudioOperation,
+        ) -> Result<AudioOperationSuccess, AudioError> {
+            assert!(matches!(operation, AudioOperation::EndOwner));
+            let (state, changed) = self.state.as_ref();
+            let mut state = state.lock().unwrap();
+            state.callback_started = true;
+            changed.notify_all();
+            while !state.drop_returned {
+                state = changed.wait(state).unwrap();
+            }
+            state.callback_completed = true;
+            changed.notify_all();
+            Ok(AudioOperationSuccess::OwnerEnded)
+        }
+
+        async fn cancel(&self, _identity: AudioOperationId) -> Result<(), AudioError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -21819,6 +22068,220 @@ mod tests {
                 .in_flight_prompt()
                 .is_none());
         });
+    }
+
+    #[test]
+    fn mobile_session_switch_ends_only_the_previous_audio_owner() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let audio = Arc::new(AudioOwnerTeardownProbe::default());
+        let platform: Arc<dyn platform_api::Platform> = Arc::new(AudioHostFakePlatform {
+            base: HostFakePlatform::new(tmp.path().to_path_buf()),
+            audio: audio.clone(),
+        });
+        let (handle, _) = build_submit_handle_with_platform(tmp.path(), platform);
+        let previous_session = handle.active_session_id();
+        let previous_owner = AudioOwner::Session {
+            session_id: previous_session,
+        };
+        let unrelated_owner = AudioOwner::Session {
+            session_id: "unrelated-session".into(),
+        };
+        handle.runtime().block_on(async {
+            {
+                let mut handles = handle
+                    .inner
+                    .mcp_tool_context
+                    .audio_recording_handles
+                    .lock()
+                    .await;
+                handles.insert(
+                    previous_owner.clone(),
+                    AudioRecordingHandle("old-recording".into()),
+                );
+                handles.insert(
+                    unrelated_owner.clone(),
+                    AudioRecordingHandle("other-recording".into()),
+                );
+            }
+
+            handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
+                .await
+                .expect("new session should be created");
+
+            let handles = handle
+                .inner
+                .mcp_tool_context
+                .audio_recording_handles
+                .lock()
+                .await;
+            assert!(!handles.contains_key(&previous_owner));
+            assert!(handles.contains_key(&unrelated_owner));
+        });
+
+        let operations = audio.operations.lock().unwrap().clone();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].0, previous_owner);
+        assert!(matches!(&operations[0].1, AudioOperation::EndOwner));
+    }
+
+    #[test]
+    fn mobile_turn_end_preserves_recording_until_engine_disposal() {
+        use crate::test_support::new_engine_with_streaming;
+        use orchestrator::test_support_stream::*;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let listener = Arc::new(FakeListener::default());
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("audio-owner-lifecycle", "test"),
+            content_block_start_text(0),
+            text_delta(0, "turn completed"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        let audio = Arc::new(AudioOwnerTeardownProbe::default());
+        let handle = new_engine_with_streaming(
+            test_config(tmp.path()),
+            Arc::new(AudioHostFakePlatform {
+                base: HostFakePlatform::new(tmp.path().to_path_buf()),
+                audio: audio.clone(),
+            }),
+            listener.clone(),
+            Arc::new(RecordingPermissionSink::default()),
+            Some(streaming),
+        )
+        .expect("mobile engine builds");
+        let session_id = handle.active_session_id();
+        let owner = AudioOwner::Session {
+            session_id: session_id.clone(),
+        };
+        handle.runtime().block_on(async {
+            handle
+                .inner
+                .mcp_tool_context
+                .audio_recording_handles
+                .lock()
+                .await
+                .insert(owner.clone(), AudioRecordingHandle("live-recording".into()));
+
+            handle
+                .submit(ClientCommand::SendPrompt {
+                    text: "finish this turn".into(),
+                    prompt_mode: None,
+                    images: Vec::new(),
+                    turn_id: Some(71),
+                })
+                .await
+                .expect("prompt is accepted");
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let ended = listener
+                        .received
+                        .lock()
+                        .await
+                        .iter()
+                        .any(|event| matches!(event, Ev::TurnEnded { .. }));
+                    if ended && handle.active_cancel.lock().await.is_none() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the normal turn should finish");
+
+            assert!(handle
+                .inner
+                .mcp_tool_context
+                .audio_recording_handles
+                .lock()
+                .await
+                .contains_key(&owner));
+        });
+        assert!(audio.operations.lock().unwrap().is_empty());
+
+        drop(handle);
+        let operations = audio.operations.lock().unwrap();
+        let (operations, wait) = audio
+            .operations_changed
+            .wait_timeout_while(
+                operations,
+                std::time::Duration::from_secs(2),
+                |operations| operations.is_empty(),
+            )
+            .unwrap();
+        assert!(!wait.timed_out(), "engine disposal should end its owner");
+        let operations = operations.clone();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].0, owner);
+        assert!(matches!(&operations[0].1, AudioOperation::EndOwner));
+    }
+
+    #[test]
+    fn mobile_drop_does_not_wait_for_ui_bound_audio_callback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let service = Arc::new(AudioDropGateService {
+            state: Arc::new((
+                StdMutex::new(AudioDropGateState::default()),
+                Default::default(),
+            )),
+        });
+        let state = service.state.clone();
+        let platform: Arc<dyn platform_api::Platform> = Arc::new(AudioHostFakePlatform {
+            base: HostFakePlatform::new(tmp.path().to_path_buf()),
+            audio: service,
+        });
+        let (handle, _) = build_submit_handle_with_platform(tmp.path(), platform);
+        let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+        let drop_thread = std::thread::spawn(move || {
+            drop(handle);
+            let _ = drop_tx.send(());
+        });
+
+        let (state_lock, changed) = state.as_ref();
+        let state_guard = state_lock.lock().unwrap();
+        let (mut state_guard, wait) = changed
+            .wait_timeout_while(state_guard, std::time::Duration::from_secs(2), |state| {
+                !state.callback_started
+            })
+            .unwrap();
+        assert!(
+            state_guard.callback_started,
+            "the native cleanup callback should be dispatched"
+        );
+        let drop_returned_before_callback = drop_rx
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .is_ok();
+        state_guard.drop_returned = true;
+        changed.notify_all();
+        drop(state_guard);
+
+        if !drop_returned_before_callback {
+            drop_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("opening the UI callback gate must release a synchronous drop");
+        }
+        drop_thread.join().expect("drop thread should complete");
+
+        let state_guard = state_lock.lock().unwrap();
+        let (state_guard, completion_wait) = changed
+            .wait_timeout_while(state_guard, std::time::Duration::from_secs(2), |state| {
+                !state.callback_completed
+            })
+            .unwrap();
+        assert!(
+            state_guard.callback_completed && !completion_wait.timed_out(),
+            "the callback should complete after the caller releases its executor"
+        );
+        assert!(
+            drop_returned_before_callback,
+            "engine Drop must return before native callbacks that wait on the UI executor"
+        );
+        assert!(!wait.timed_out());
     }
 
     #[test]

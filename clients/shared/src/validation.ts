@@ -1,6 +1,14 @@
 import type {
   AppEventDto,
   AppRuntimeProfileDto,
+  AudioCapabilitySnapshotDto,
+  AudioInitiatorDto,
+  AudioOperationIdDto,
+  AudioOperationKindDto,
+  AudioOperationReadinessDto,
+  AudioOperationRequestDto,
+  AudioOwnerDto,
+  AudioReadinessStateDto,
   ClientEvent,
   LocalAppCreateConfirmationRequestDto,
   LocalAppGateStatusDto,
@@ -46,6 +54,143 @@ function optionalString(value: unknown, name: string): string | undefined {
 function stringArray(value: unknown, name: string): string[] {
   if (!Array.isArray(value)) throw new Error(`invalid ${name}`);
   return value.map((entry, index) => string(entry, `${name}[${index}]`));
+}
+
+function audioIdentity(value: unknown): AudioOperationIdDto {
+  const input = object(value, 'audio operation identity');
+  exactKeys(input, ['id', 'generation', 'service_epoch'], 'audio operation identity');
+  return {
+    id: string(input['id'], 'audio operation id'),
+    generation: integer(input['generation'], 'audio operation generation'),
+    service_epoch: integer(input['service_epoch'], 'audio service epoch'),
+  };
+}
+
+function audioOwner(value: unknown): AudioOwnerDto {
+  const input = object(value, 'audio owner');
+  switch (input['type']) {
+    case 'session':
+      exactKeys(input, ['type', 'session_id'], 'audio owner');
+      return { type: 'session', session_id: string(input['session_id'], 'audio session id') };
+    case 'local_app':
+      exactKeys(input, ['type', 'app_id', 'runtime_generation'], 'audio owner');
+      return {
+        type: 'local_app',
+        app_id: string(input['app_id'], 'audio app id'),
+        runtime_generation: integer(input['runtime_generation'], 'audio app runtime generation'),
+      };
+    case 'ui':
+    case 'system':
+      exactKeys(input, ['type', 'instance_id'], 'audio owner');
+      return { type: input['type'], instance_id: string(input['instance_id'], 'audio owner instance id') };
+    default:
+      throw new Error('invalid audio owner type');
+  }
+}
+
+function audioOperationRequest(value: unknown): AudioOperationRequestDto {
+  const input = object(value, 'audio operation request');
+  exactKeys(input, ['identity', 'owner', 'initiator', 'timeout_budget_ms', 'max_payload_bytes', 'operation'], 'audio operation request');
+  let initiator: AudioInitiatorDto | undefined;
+  if (input['initiator'] !== undefined) {
+    const raw = object(input['initiator'], 'audio initiator');
+    exactKeys(raw, ['agent_id', 'tool_use_id', 'request_id'], 'audio initiator');
+    initiator = {
+      ...(raw['agent_id'] === undefined ? {} : { agent_id: string(raw['agent_id'], 'audio agent id') }),
+      ...(raw['tool_use_id'] === undefined ? {} : { tool_use_id: string(raw['tool_use_id'], 'audio tool use id') }),
+      ...(raw['request_id'] === undefined ? {} : { request_id: string(raw['request_id'], 'audio initiator request id') }),
+    };
+  }
+  const timeoutBudget = input['timeout_budget_ms'] === undefined
+    ? undefined : integer(input['timeout_budget_ms'], 'audio timeout budget');
+  return {
+    identity: audioIdentity(input['identity']),
+    owner: audioOwner(input['owner']),
+    ...(initiator === undefined ? {} : { initiator }),
+    ...(timeoutBudget === undefined ? {} : { timeout_budget_ms: timeoutBudget }),
+    max_payload_bytes: integer(input['max_payload_bytes'], 'audio payload bound'),
+    operation: audioOperation(input['operation']),
+  };
+}
+
+function audioOperation(value: unknown): AudioOperationRequestDto['operation'] {
+  const input = object(value, 'audio operation');
+  const type = string(input['type'], 'audio operation type');
+  switch (type) {
+    case 'start_recording':
+      exactKeys(input, ['type', 'sample_rate_hz', 'format'], 'audio operation');
+      return {
+        type,
+        sample_rate_hz: integer(input['sample_rate_hz'], 'audio sample rate'),
+        format: string(input['format'], 'audio recording format'),
+      };
+    case 'stop_recording':
+      exactKeys(input, ['type', 'handle'], 'audio operation');
+      return { type, handle: string(input['handle'], 'audio recording handle') };
+    case 'listen':
+      exactKeys(input, ['type', 'language'], 'audio operation');
+      return { type, ...(input['language'] === undefined ? {} : { language: string(input['language'], 'audio language') }) };
+    case 'synthesize':
+    case 'speak':
+      exactKeys(input, ['type', 'text', 'language', 'rate', 'voice'], 'audio operation');
+      return {
+        type,
+        text: string(input['text'], 'audio speech text'),
+        ...(input['language'] === undefined ? {} : { language: string(input['language'], 'audio language') }),
+        ...(input['rate'] === undefined ? {} : {
+          rate: (() => {
+            const rate = input['rate'];
+            if (typeof rate !== 'number' || !Number.isFinite(rate)) throw new Error('invalid audio rate');
+            return rate;
+          })(),
+        }),
+        ...(input['voice'] === undefined ? {} : { voice: string(input['voice'], 'audio voice') }),
+      };
+    case 'status':
+      exactKeys(input, ['type', 'handle'], 'audio operation');
+      return { type, ...(input['handle'] === undefined ? {} : { handle: string(input['handle'], 'audio recording handle') }) };
+    case 'end_owner':
+      exactKeys(input, ['type'], 'audio operation');
+      return { type };
+    default:
+      throw new Error('invalid audio operation type');
+  }
+}
+
+function audioOperationKind(value: unknown): AudioOperationKindDto {
+  const kind = string(value, 'audio operation kind');
+  if (kind !== 'record' && kind !== 'listen' && kind !== 'synthesize' && kind !== 'speak') {
+    throw new Error('invalid audio operation kind');
+  }
+  return kind;
+}
+
+function audioReadiness(value: unknown): AudioReadinessStateDto {
+  const state = string(value, 'audio readiness');
+  if (!['ready', 'needs_permission', 'busy', 'missing_model', 'unavailable'].includes(state)) {
+    throw new Error('invalid audio readiness');
+  }
+  return state as AudioReadinessStateDto;
+}
+
+function audioCapabilities(value: unknown): AudioCapabilitySnapshotDto {
+  const input = object(value, 'audio capability snapshot');
+  exactKeys(input, ['service_epoch', 'support_revision', 'supported_operations', 'readiness', 'max_payload_bytes'], 'audio capability snapshot');
+  if (!Array.isArray(input['supported_operations']) || !Array.isArray(input['readiness'])) {
+    throw new Error('invalid audio capability entries');
+  }
+  const readiness: AudioOperationReadinessDto[] = input['readiness'].map((value) => {
+    const row = object(value, 'audio readiness entry');
+    exactKeys(row, ['operation', 'state'], 'audio readiness entry');
+    return { operation: audioOperationKind(row['operation']), state: audioReadiness(row['state']) };
+  });
+  return {
+    service_epoch: integer(input['service_epoch'], 'audio service epoch'),
+    support_revision: integer(input['support_revision'], 'audio support revision'),
+    supported_operations: input['supported_operations'].map(audioOperationKind),
+    readiness,
+    max_payload_bytes: integer(input['max_payload_bytes'], 'audio payload bound'),
+  };
 }
 
 function verificationStatus(value: unknown, name: string): LocalAppVerificationStatusDto {
@@ -517,6 +662,15 @@ export function validateClientEvent(value: unknown): ClientEvent {
       }
       if (input['next_offset'] !== undefined) integer(input['next_offset'], 'next_offset');
       return input as ClientEvent;
+    case 'audio_request':
+      exactKeys(input, ['type', 'request'], 'client event');
+      return { type, request: audioOperationRequest(input['request']) };
+    case 'audio_cancel':
+      exactKeys(input, ['type', 'identity'], 'client event');
+      return { type, identity: audioIdentity(input['identity']) };
+    case 'audio_capabilities_changed':
+      exactKeys(input, ['type', 'capabilities'], 'client event');
+      return { type, capabilities: audioCapabilities(input['capabilities']) };
   }
   return input as ClientEvent;
 }
@@ -527,7 +681,7 @@ export function validateServerHello(value: unknown): ServerHello {
   const capabilities = object(input['capabilities'], 'ServerHello capabilities');
   exactKeys(
     capabilities,
-    ['supports_streaming', 'supports_tools', 'supports_skills', 'supports_commands', 'client_protocol_version'],
+    ['supports_streaming', 'supports_tools', 'supports_skills', 'supports_commands', 'client_protocol_version', 'audio'],
     'ServerHello capabilities',
   );
   return {
@@ -539,6 +693,7 @@ export function validateServerHello(value: unknown): ServerHello {
       supports_skills: boolean(capabilities['supports_skills'], 'supports_skills'),
       supports_commands: boolean(capabilities['supports_commands'], 'supports_commands'),
       client_protocol_version: string(capabilities['client_protocol_version'], 'client_protocol_version'),
+      ...(capabilities['audio'] === undefined ? {} : { audio: audioCapabilities(capabilities['audio']) }),
     },
   };
 }

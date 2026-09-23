@@ -1,102 +1,70 @@
 package com.lingxi.code.voice.offline
 
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioTrack
+import com.lingxi.code.voice.audio.AudioDriverException
+import com.lingxi.code.voice.audio.DeviceAudioError
+import com.lingxi.code.voice.audio.DeviceAudioErrorKind
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
 
 /**
- * On-device text-to-speech via sherpa-onnx (offline pack). Wraps OfflineTts
- * (config mirrors ~/lingxi/android's RealSherpaOnnxEngine) and streams the
- * generated PCM-float samples straight to an [AudioTrack] as they arrive.
+ * On-device text-to-speech via sherpa-onnx (offline pack). Returns bounded
+ * PCM16 to the app-scoped audio service; this class never owns playback.
  */
 class SherpaTts private constructor(
     private val tts: OfflineTts,
     private val sampleRateHz: Int,
 ) {
-    @Volatile private var track: AudioTrack? = null
-    @Volatile private var stopped = false
-
     suspend fun renderToPcm(
         text: String,
         sid: Int = 0,
         speed: Float = 1.0f,
+        maxPcmBytes: Int,
     ): Pair<ByteArray, Int> = withContext(Dispatchers.IO) {
+        require(maxPcmBytes >= 0) { "audio payload limit must not be negative" }
         if (text.isBlank()) return@withContext ByteArray(0) to sampleRateHz
-        stopped = false
         val pcm = ByteArrayOutputStream()
+        var collectedBytes = 0L
+        val tooLarge = AtomicBoolean(false)
+        val interrupted = AtomicBoolean(false)
+        val operationJob = coroutineContext[Job]
         tts.generateWithCallback(text = text, sid = sid, speed = speed) { samples ->
-            if (stopped) {
+            if (operationJob?.isActive == false) {
+                interrupted.set(true)
+                0
+            } else if (tooLarge.get() || interrupted.get()) {
                 0
             } else {
-                coroutineContext.ensureActive()
-                pcm.write(samples.toPcm16Bytes())
-                1
-            }
-        }
-        pcm.toByteArray() to sampleRateHz
-    }
-
-    /** Synthesize [text] and play it. [sid] selects the voice (0 = first). Blocks until done. */
-    suspend fun speak(text: String, sid: Int = 0, speed: Float = 1.0f) = withContext(Dispatchers.IO) {
-        if (text.isBlank()) return@withContext
-        stopped = false
-        val at = AudioTrack(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build(),
-            AudioFormat.Builder()
-                .setSampleRate(sampleRateHz)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                .build(),
-            maxOf(
-                AudioTrack.getMinBufferSize(sampleRateHz, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT),
-                sampleRateHz * 4,
-            ),
-            AudioTrack.MODE_STREAM,
-            AudioManager.AUDIO_SESSION_ID_GENERATE,
-        )
-        track = at
-        try {
-            at.play()
-            // sherpa callback returns 1 to continue, 0 to stop.
-            tts.generateWithCallback(text = text, sid = sid, speed = speed) { samples ->
-                if (stopped) 0 else {
-                    at.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
+                val chunkBytes = samples.size.toLong() * 2L
+                if (collectedBytes + chunkBytes > maxPcmBytes.toLong()) {
+                    tooLarge.set(true)
+                    0
+                } else {
+                    pcm.write(samples.toPcm16Bytes())
+                    collectedBytes += chunkBytes
                     1
                 }
             }
-        } catch (_: Throwable) {
-            // best-effort playback
-        } finally {
-            try { at.stop() } catch (_: Throwable) {}
-            at.release()
-            track = null
         }
+        if (interrupted.get() || operationJob?.isActive == false) {
+            throw kotlinx.coroutines.CancellationException("offline speech synthesis was cancelled")
+        }
+        if (tooLarge.get()) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.MediaTooLarge, "synthesized audio exceeds the payload limit"))
+        }
+        pcm.toByteArray() to sampleRateHz
     }
-
-    /** Abort any in-flight playback (barge-in). */
-    fun stop() {
-        stopped = true
-        track?.let { try { it.pause(); it.flush() } catch (_: Throwable) {} }
-    }
-
-    fun close() { stop(); tts.release() }
 
     private fun FloatArray.toPcm16Bytes(): ByteArray {
         val bytes = ByteArray(size * 2)

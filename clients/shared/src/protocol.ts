@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '16.0.0';
+export const CLIENT_PROTOCOL_VERSION = '17.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -137,38 +137,90 @@ export type WritableScopeDto = 'user' | 'project' | 'local';
 export type PermissionBehaviorDto = 'allow' | 'deny' | 'ask';
 
 /**
- * Coarse, branchable failure class for {@link AudioResultDto}'s `failed`
- * variant — the union of `SttError`/`VoiceError`/`TtsError`'s failure modes,
- * collapsed to a shared tag so a caller can branch on the same kind whichever
- * trait produced it (commands.rs `AudioErrorKindDto`). A bare wire string.
- * `#[non_exhaustive]` on the Rust side ⇒ a future kind is additive.
+ * Device AudioService operation identity. IDs are unique UUIDs, while the two
+ * monotonic counters prevent stale callbacks from changing a newer lease.
  */
-export type AudioErrorKindDto =
-  | 'permission_denied'
-  | 'no_speech'
-  | 'not_recording'
-  | 'unavailable'
-  | 'busy'
-  | 'retriable'
-  | 'synthesis_failed'
-  | 'other';
+export interface AudioOperationIdDto {
+  id: string;
+  generation: number;
+  service_epoch: number;
+}
 
-/**
- * A finished microphone/speaker operation, or a typed failure — the wire
- * lowering of `VoiceRecording`/`SttTranscript`/`TtsAudio` plus the unioned
- * failure kind from `SttError`/`VoiceError`/`TtsError` (commands.rs
- * `AudioResultDto`). Carried by {@link ClientCommand} `audio_response`.
- * Internally tagged on `type`, `snake_case`. Binary payloads travel as
- * base64 strings, the same convention as {@link ImageRefDto}.
- * `#[non_exhaustive]` on the Rust side ⇒ a future outcome is additive.
- */
-export type AudioResultDto =
-  | { type: 'ok' }
-  | { type: 'recording_state'; recording: boolean }
+/** Trusted host context; model arguments never supply this identity. */
+export type AudioOwnerDto =
+  | { type: 'session'; session_id: string }
+  | { type: 'local_app'; app_id: string; runtime_generation: number }
+  | { type: 'ui'; instance_id: string }
+  | { type: 'system'; instance_id: string };
+
+export interface AudioInitiatorDto {
+  agent_id?: string;
+  tool_use_id?: string;
+  request_id?: string;
+}
+
+/** A single immutable audio intent and its host-owned operation context. */
+export interface AudioOperationRequestDto {
+  identity: AudioOperationIdDto;
+  owner: AudioOwnerDto;
+  initiator?: AudioInitiatorDto;
+  timeout_budget_ms?: number;
+  max_payload_bytes: number;
+  operation: AudioOperationDto;
+}
+
+/** Operation variants shared by engine requests and device-local services. */
+export type AudioOperationDto =
+  | { type: 'start_recording'; sample_rate_hz: number; format: string }
+  | { type: 'stop_recording'; handle: string }
+  | { type: 'listen'; language?: string }
+  | { type: 'synthesize'; text: string; language?: string; rate?: number; voice?: string }
+  | { type: 'speak'; text: string; language?: string; rate?: number; voice?: string }
+  | { type: 'status'; handle?: string }
+  | { type: 'end_owner' };
+
+export type AudioErrorKindDto =
+  | 'permission_denied' | 'busy' | 'cancelled' | 'timeout' | 'no_speech' | 'not_recording'
+  | 'unavailable' | 'unsupported' | 'model_missing' | 'voice_missing' | 'invalid_request'
+  | 'synthesis_failed' | 'native_failure' | 'media_too_large';
+
+export interface AudioErrorDto {
+  kind: AudioErrorKindDto;
+  message: string;
+}
+
+export interface AudioStatusDto {
+  recording: boolean;
+  playing: boolean;
+}
+
+/** Successful service outcomes or one structured terminal failure. */
+export type AudioOperationResultDto =
+  | { type: 'recording_started'; handle: string }
   | { type: 'recording'; audio_base64: string; mime_type: string }
   | { type: 'transcript'; text: string; language?: string; confidence?: number }
-  | { type: 'audio'; pcm_base64: string; sample_rate_hz: number }
-  | { type: 'failed'; kind: AudioErrorKindDto; message: string };
+  | { type: 'synthesized'; pcm_base64: string; sample_rate_hz: number }
+  | { type: 'playback_completed'; duration_ms: number }
+  | { type: 'status'; status: AudioStatusDto }
+  | { type: 'owner_ended' }
+  | { type: 'failed'; error: AudioErrorDto };
+
+export type AudioOperationKindDto = 'record' | 'listen' | 'synthesize' | 'speak';
+
+export type AudioReadinessStateDto = 'ready' | 'needs_permission' | 'busy' | 'missing_model' | 'unavailable';
+
+export interface AudioOperationReadinessDto {
+  operation: AudioOperationKindDto;
+  state: AudioReadinessStateDto;
+}
+
+export interface AudioCapabilitySnapshotDto {
+  service_epoch: number;
+  support_revision: number;
+  supported_operations: AudioOperationKindDto[];
+  readiness: AudioOperationReadinessDto[];
+  max_payload_bytes: number;
+}
 
 /**
  * The inbound command envelope a client sends to the engine
@@ -418,14 +470,9 @@ export type ClientCommand =
   | { type: 'mcp_admin'; command: McpAdminCommandDto }
   | { type: 'plugin_admin'; command: PluginAdminCommandDto }
   | { type: 'hook_admin'; command: HookAdminCommandDto }
-  // ── Audio (engine -> client mic/speaker requests) ─────────────────────────────
-  /**
-   * Answer to an engine `audio_request`, correlated by `request_id`. Mirrors
-   * the {@link ComputerAccessRequestDto} engine->client request/response
-   * shape, but as a single typed reply rather than an approve/deny split
-   * (commands.rs `ClientCommand::AudioResponse`).
-   */
-  | { type: 'audio_response'; request_id: number; result: AudioResultDto };
+  // ── AudioService (engine -> device operations and capability publication) ──
+  | { type: 'audio_response'; identity: AudioOperationIdDto; result: AudioOperationResultDto }
+  | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_display.rs — the pre-derived render model for one tool call
@@ -1990,18 +2037,6 @@ export interface CostDto {
 }
 
 /**
- * One audio operation the engine asks a client to perform on its device
- * microphone/speaker (events.rs `AudioOpDto`). Carried by {@link ClientEvent}
- * `audio_request`. Internally tagged on `type`, `snake_case`.
- * `#[non_exhaustive]` on the Rust side ⇒ a future op is additive.
- */
-export type AudioOpDto =
-  | { type: 'start_recording'; sample_rate_hz: number; format: string }
-  | { type: 'stop_recording' }
-  | { type: 'is_recording' }
-  | { type: 'transcribe'; language?: string }
-  | { type: 'synthesize'; text: string; voice?: string };
-
 /**
  * Outbound events the engine streams to a client (events.rs `ClientEvent`).
  * Internally tagged on `type`, `snake_case`.
@@ -2303,15 +2338,10 @@ export type ClientEvent =
       max_retries: number;
       delay_ms: number;
     }
-  // ── Audio (engine -> client mic/speaker requests) ─────────────────────────────
-  /**
-   * Ask a client to perform one microphone/speaker operation. Mirrors the
-   * {@link ComputerAccessRequestDto} engine->client request/response shape:
-   * correlated by `request_id`, and the client's outcome round-trips back as
-   * an {@link AudioResultDto} on {@link ClientCommand} `audio_response`
-   * (events.rs `ClientEvent::AudioRequest`).
-   */
-  | { type: 'audio_request'; request_id: number; op: AudioOpDto };
+  // ── AudioService (engine -> device operations/cancellation/capabilities) ──
+  | { type: 'audio_request'; request: AudioOperationRequestDto }
+  | { type: 'audio_cancel'; identity: AudioOperationIdDto }
+  | { type: 'audio_capabilities_changed'; capabilities: AudioCapabilitySnapshotDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // error.rs
@@ -2336,6 +2366,8 @@ export interface Capabilities {
   supports_skills: boolean;
   supports_commands: boolean;
   client_protocol_version: string;
+  /** Device audio is unknown until the client publishes its initial snapshot. */
+  audio?: AudioCapabilitySnapshotDto;
 }
 
 /** Client → server opening handshake (wire.rs `ClientHello`). */

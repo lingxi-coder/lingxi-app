@@ -99,6 +99,12 @@ export interface PersistedSettings {
   /** Voice recognition/synthesis preferences — see `shared/voicePreferences.ts`.
    * Omitted (not defaulted) until the first `SettingsStore.update({ voice })` call. */
   voice?: VoicePreferences;
+  /** Original pre-v3 audio value retained privately for support and recovery. */
+  audioConfigRecovery?: unknown;
+  /** Set atomically with the first successful write of the migrated v3 value. */
+  audioConfigMigrationComplete?: true;
+  /** Durable optimistic-concurrency revision for the device-local audio config. */
+  audioConfigurationRevision?: number;
   /** OS-notification preferences — see `shared/notificationPreferences.ts`.
    * Omitted (not defaulted) until the first
    * `SettingsStore.update({ notifications })` call. */
@@ -182,6 +188,21 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
   if (value['voice'] !== undefined) {
     settings.voice = parseVoicePreferences(value['voice']);
+    if (value['audioConfigRecovery'] !== undefined) {
+      settings.audioConfigRecovery = value['audioConfigRecovery'];
+    } else if (value['voice'] !== null && (!isPlainObject(value['voice']) || value['voice']['schemaVersion'] !== 3)) {
+      // Keep the user’s exact legacy selection until the first v3 write has
+      // reached disk. Parsing alone does not mark migration complete.
+      try {
+        const encoded = JSON.stringify(value['voice']);
+        if (encoded.length <= 16 * 1024) settings.audioConfigRecovery = JSON.parse(encoded) as unknown;
+      } catch { /* JSON-backed settings are serializable; ignore malformed recovery only. */ }
+    }
+    if (value['audioConfigMigrationComplete'] === true) settings.audioConfigMigrationComplete = true;
+    const revision = value['audioConfigurationRevision'];
+    if (typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0) {
+      settings.audioConfigurationRevision = revision;
+    }
   }
   if (value['notifications'] !== undefined) {
     settings.notifications = parseNotificationPreferences(value['notifications']);
@@ -272,7 +293,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
     ...(typeof collapseThoughtsByDefault === 'boolean' ? { collapseThoughtsByDefault } : {}),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
-    ...(voice ? { voice: { ...voice } } : {}),
+    ...(voice ? { voice: parseVoicePreferences(voice) } : {}),
     ...(notifications ? { notifications: { ...notifications } } : {}),
     ...(modelPickerVisibility ? { modelPickerVisibility: cloneModelPickerVisibility(modelPickerVisibility) } : {}),
     ...(sidebar ? { sidebar: cloneSidebarPreferences(sidebar) } : {}),

@@ -1,6 +1,6 @@
 //! The desktop audio capability seam, both halves of it.
 //!
-//! `DesktopConfig::audio` → the tool context's `voice` / `stt` / `tts` → whether
+//! `DesktopConfig::audio` → the shared `AudioService` tool context → whether
 //! the `voice` and `speech` tools are registered at all. Two properties are
 //! pinned here, and the second one is the reason this file exists:
 //!
@@ -27,43 +27,44 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use engine_desktop::{build, desktop_tool_registry, DesktopAudio, DesktopConfig};
+use platform_api::audio::{
+    AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
+    AudioOperationKind, AudioOperationSuccess, AudioService,
+};
 use platform_api::process::ProcessOutput;
-use platform_api::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
-use platform_api::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
-use platform_api::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 use tool_api::BuiltinToolContext;
 
-/// A stand-in for `bridge_server::audio_bridge::AudioBridge`: ONE object
-/// implementing all three audio traits, which is what the desktop actually
-/// injects. Nothing here is ever called — these tests ask what the composition
+/// A stand-in for `bridge_server::audio_bridge::AudioBridge`. Nothing here is
+/// ever called — these tests ask what the composition
 /// root does with a capability, not what the capability does — but it has to be
 /// a real implementation for the root to accept it.
-struct StubAudio;
+struct StubAudio(Vec<AudioOperationKind>);
 
 #[async_trait]
-impl SpeechToText for StubAudio {
-    async fn transcribe(&self, _opts: SttOpts) -> Result<SttTranscript, SttError> {
-        Err(SttError::Unavailable)
+impl AudioService for StubAudio {
+    fn capabilities(&self) -> AudioCapabilitySnapshot {
+        AudioCapabilitySnapshot {
+            service_epoch: 1,
+            support_revision: 1,
+            supported_operations: self.0.clone(),
+            readiness: Vec::new(),
+            max_payload_bytes: 1024,
+        }
     }
-}
 
-#[async_trait]
-impl TextToSpeech for StubAudio {
-    async fn synthesize(&self, _opts: TtsOpts) -> Result<TtsAudio, TtsError> {
-        Err(TtsError::Unavailable)
+    async fn execute(
+        &self,
+        _context: AudioOperationContext,
+        _operation: AudioOperation,
+    ) -> Result<AudioOperationSuccess, AudioError> {
+        Err(AudioError::new(AudioErrorKind::Unavailable, "test stub"))
     }
-}
 
-#[async_trait]
-impl VoiceRecorder for StubAudio {
-    async fn start_recording(&self, _opts: VoiceRecordingOpts) -> Result<(), VoiceError> {
-        Err(VoiceError::Busy)
-    }
-    async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
-        Err(VoiceError::NotRecording)
-    }
-    async fn is_recording(&self) -> bool {
-        false
+    async fn cancel(
+        &self,
+        _identity: platform_api::audio::AudioOperationId,
+    ) -> Result<(), AudioError> {
+        Ok(())
     }
 }
 
@@ -101,11 +102,13 @@ fn without_an_audio_capability_the_desktop_registers_neither_audio_tool() {
 
 #[test]
 fn with_an_audio_capability_the_desktop_registers_speech_and_voice() {
-    let audio = DesktopAudio::from_single(Arc::new(StubAudio));
+    let audio = DesktopAudio::from_single(Arc::new(StubAudio(vec![
+        AudioOperationKind::Record,
+        AudioOperationKind::Listen,
+        AudioOperationKind::Speak,
+    ])));
     let ctx = BuiltinToolContext {
-        voice: Some(audio.voice.clone()),
-        stt: Some(audio.stt.clone()),
-        tts: Some(audio.tts.clone()),
+        audio: Some(audio.service.clone()),
         ..stub_ctx()
     };
     let names = registered_tool_names(ctx);
@@ -123,7 +126,7 @@ fn with_an_audio_capability_the_desktop_registers_speech_and_voice() {
 #[test]
 fn a_recorder_alone_registers_voice_but_not_speech() {
     let ctx = BuiltinToolContext {
-        voice: Some(Arc::new(StubAudio) as Arc<dyn VoiceRecorder>),
+        audio: Some(Arc::new(StubAudio(vec![AudioOperationKind::Record]))),
         ..stub_ctx()
     };
     let names = registered_tool_names(ctx);
@@ -141,7 +144,7 @@ fn a_recorder_alone_registers_voice_but_not_speech() {
 #[test]
 fn a_recognizer_alone_registers_speech_but_not_voice() {
     let ctx = BuiltinToolContext {
-        stt: Some(Arc::new(StubAudio) as Arc<dyn SpeechToText>),
+        audio: Some(Arc::new(StubAudio(vec![AudioOperationKind::Listen]))),
         ..stub_ctx()
     };
     let names = registered_tool_names(ctx);
@@ -220,7 +223,11 @@ async fn a_build_with_no_audio_config_advertises_no_audio_tools() {
 
 #[tokio::test]
 async fn a_build_with_an_audio_config_advertises_both_audio_tools() {
-    let (_tmp, cfg) = sandbox_config(Some(DesktopAudio::from_single(Arc::new(StubAudio))));
+    let (_tmp, cfg) = sandbox_config(Some(DesktopAudio::from_single(Arc::new(StubAudio(vec![
+        AudioOperationKind::Record,
+        AudioOperationKind::Listen,
+        AudioOperationKind::Speak,
+    ])))));
     let runtime = Box::pin(run_build(cfg)).await;
     assert!(
         runtime.has_audio(),
@@ -228,8 +235,8 @@ async fn a_build_with_an_audio_config_advertises_both_audio_tools() {
     );
     // The registry is the proof that the capability reached the TOOL CONTEXT,
     // and it is a SEPARATE observation from `has_audio` above (which reads the
-    // capability itself). Registration is gated on `ctx.voice` / `ctx.stt` /
-    // `ctx.tts`, so a build that carried the config field onto the runtime but
+    // capability itself). Registration is gated on supported AudioService
+    // operations, so a build that carried the config field onto the runtime but
     // dropped it on the way to the context passes the first assertion and fails
     // these two.
     let names = runtime.registered_tool_names();

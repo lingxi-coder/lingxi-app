@@ -105,8 +105,8 @@ class SystemSpeechRecognizerStt(private val context: Context) : SttProvider {
         language: String?,
         callbacks: RealtimeSpeechCallbacks,
     ): RealtimeSpeechSession = runOnMainThreadBlocking {
-        check(SpeechRecognizer.isRecognitionAvailable(context)) {
-            "Device has no SpeechRecognizer service installed."
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "Device has no SpeechRecognizer service installed.")
         }
         val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {

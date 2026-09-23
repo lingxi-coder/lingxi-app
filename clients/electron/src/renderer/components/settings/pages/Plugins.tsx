@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { Icon } from '../../Icon';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { objectFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
+import { ExtensionHubTabs, extensionHubStyle, useExtensionHubDialogFocus } from './ExtensionHub';
 import {
   adminRecordCommand,
   asRecord,
@@ -11,18 +13,12 @@ import {
   DomainOperationBanner,
   EmptyDetail,
   Field,
-  managerDetailStyle,
-  managerShellStyle,
-  managerSidebarStyle,
   nextConfigurationOperationId,
   noteStyle,
   parseEventEnvelope,
   prettyJson,
   searchInputStyle,
   secondaryMetaStyle,
-  sidebarButtonStyle,
-  sidebarListStyle,
-  sidebarSectionTitleStyle,
   SourcePill,
   textareaStyle,
 } from './configurationAdmin';
@@ -60,6 +56,7 @@ interface PluginCatalogEnvelope {
 }
 
 type PluginSelection =
+  | { kind: 'list' }
   | { kind: 'plugin'; id: string }
   | { kind: 'available'; id: string }
   | { kind: 'marketplace'; name: string }
@@ -98,7 +95,7 @@ function editableMarketplaces(snapshot: PageContentProps['snapshot'], editingLay
   return objectFromLayer(snapshot, editingLayer, 'additionalMarketplaces');
 }
 
-export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
+export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { pluginAdmin?: unknown }).pluginAdmin === 'function';
   const catalog = useMemo(() => parseEventEnvelope<PluginCatalogEnvelope>(bridge.pluginCatalogEvent?.catalog_json, { installed: [], revisions: {} }), [bridge.pluginCatalogEvent?.catalog_json]);
@@ -111,7 +108,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
   const availablePlugins = catalog.available ?? [];
   const marketplaceNames = [...new Set([...Object.keys(marketplaces), ...(catalog.marketplaces ?? []).map((entry) => entry.name)])].sort();
 
-  const [selection, setSelection] = useState<PluginSelection>(pluginIds[0] ? { kind: 'plugin', id: pluginIds[0] } : { kind: 'policies' });
+  const [selection, setSelection] = useState<PluginSelection>({ kind: 'list' });
   const [search, setSearch] = useState('');
   const [draftEnabled, setDraftEnabled] = useState(enabledPlugins);
   const [draftConfigs, setDraftConfigs] = useState(pluginConfigs);
@@ -124,6 +121,9 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
   const [secretNotice, setSecretNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showAvailable, setShowAvailable] = useState(false);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [pendingHubPage, setPendingHubPage] = useState<string | null>(null);
 
   useEffect(() => {
     if (adminAvailable) void callPluginAdmin(bridge, adminRecordCommand('get_catalog'));
@@ -150,7 +150,40 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
     || JSON.stringify(draftConfigs) !== JSON.stringify(pluginConfigs)
     || JSON.stringify(draftMarketplaces) !== JSON.stringify(marketplaces);
 
-  const filteredPlugins = search.trim() ? pluginIds.filter((id) => id.toLowerCase().includes(search.trim().toLowerCase())) : pluginIds;
+  const requestHubNavigation = (pageId: string) => {
+    if (dirty) {
+      setPendingHubPage(pageId);
+      return;
+    }
+    onNavigate(pageId);
+  };
+  const discardAndNavigate = () => {
+    if (!pendingHubPage) return;
+    setDraftEnabled(enabledPlugins);
+    setDraftConfigs(pluginConfigs);
+    setDraftMarketplaces(marketplaces);
+    setPreparedOperation(null);
+    setPendingSelection(null);
+    setSelection({ kind: 'list' });
+    onNavigate(pendingHubPage);
+    setPendingHubPage(null);
+  };
+  const navigationPrompt = pendingHubPage && (
+    <div role="alert" style={noteStyle(t, 'warn')}>
+      Unsaved plugin changes. Discard them before switching tabs?
+      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        <button type="button" onClick={discardAndNavigate} style={ghostButtonStyle(t)}>Discard and switch</button>
+        <button type="button" onClick={() => setPendingHubPage(null)} style={ghostButtonStyle(t, false, true)}>Continue editing</button>
+      </div>
+    </div>
+  );
+
+  const filteredPlugins = search.trim()
+    ? pluginIds.filter((id) => {
+      const entry = (catalog.installed ?? []).find((candidate) => (candidate.id || candidate.name) === id);
+      return `${id} ${entry?.display_name ?? ''} ${entry?.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase());
+    })
+    : pluginIds;
   const filteredAvailable = search.trim()
     ? availablePlugins.filter((entry) => `${entry.id} ${entry.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase()))
     : availablePlugins;
@@ -170,7 +203,10 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
     }
     setPreparedOperation(null);
     setSelection(next);
+    setAddMenuOpen(false);
   };
+
+  const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list', () => requestSelection({ kind: 'list' }));
 
   const preview = () => {
     setPageError(null);
@@ -266,51 +302,132 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
 
   return (
     <>
-      <Card title="Plugins">
-        <div style={managerShellStyle(t)}>
-          <div style={managerSidebarStyle(t)}>
-            <div style={{ display: 'grid', gap: 10 }}>
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索插件或市场" aria-label="搜索插件与市场" style={searchInputStyle(t)} />
-              <div style={noteStyle(t, 'warn')} data-testid="plugin-dependency-caveat">{pluginDependencyCaveat()}</div>
-            </div>
-            <div style={sidebarListStyle()}>
-              <div style={sidebarSectionTitleStyle(t)}>Plugins</div>
-              {filteredPlugins.map((id) => (
-                <button key={id} type="button" onClick={() => requestSelection({ kind: 'plugin', id })} style={sidebarButtonStyle(t, selection.kind === 'plugin' && selection.id === id)}>
-                  <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 13, fontWeight: 600 }}>{(catalog.installed ?? []).find((entry) => (entry.id || entry.name) === id)?.display_name ?? id}</span>
-                    {draftEnabled[id] !== false && <SourcePill t={t} label="on" tone="success" />}
-                  </span>
-                  <span className="mono" style={{ fontSize: 11.5, color: t.text4 }}>{id}</span>
-                </button>
-              ))}
-              <div style={sidebarSectionTitleStyle(t)}>Available / Updates</div>
-              {filteredAvailable.map((entry) => (
-                <button key={entry.id} type="button" onClick={() => requestSelection({ kind: 'available', id: entry.id })} style={sidebarButtonStyle(t, selection.kind === 'available' && selection.id === entry.id)}>
-                  <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 13, fontWeight: 600 }}>{entry.name}</span>
-                    {entry.upgrade_available && <SourcePill t={t} label="update" tone="warn" />}
-                    {!entry.installed && <SourcePill t={t} label="available" />}
-                  </span>
-                  <span className="mono" style={{ fontSize: 11.5, color: t.text4 }}>{entry.id}</span>
-                </button>
-              ))}
-              <div style={sidebarSectionTitleStyle(t)}>Marketplaces</div>
-              {filteredMarketplaces.map((name) => (
-                <button key={name} type="button" onClick={() => requestSelection({ kind: 'marketplace', name })} style={sidebarButtonStyle(t, selection.kind === 'marketplace' && selection.name === name)}>
-                  <span style={{ fontSize: 13, fontWeight: 600 }}>{name}</span>
-                  <span className="mono" style={{ fontSize: 11.5, color: t.text4 }}>{asString(asRecord(draftMarketplaces[name]).source, 'source?')}</span>
-                </button>
-              ))}
-              <button type="button" onClick={() => requestSelection({ kind: 'marketplace-add' })} style={sidebarButtonStyle(t, selection.kind === 'marketplace-add')}>
-                <span style={{ fontSize: 13, fontWeight: 600 }}>＋ 添加 Marketplace</span>
-              </button>
-              <button type="button" onClick={() => requestSelection({ kind: 'policies' })} style={sidebarButtonStyle(t, selection.kind === 'policies')}>
-                <span style={{ fontSize: 13, fontWeight: 600 }}>Policies</span>
-              </button>
+      <div className="extension-hub-page" style={extensionHubStyle(t)}>
+        <ExtensionHubTabs bridge={bridge} active="plugins" onNavigate={requestHubNavigation} />
+        <div className="extension-hub-toolbar">
+          <input className="extension-hub-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search plugins" aria-label="搜索插件与市场" style={searchInputStyle(t)} />
+          <div className="extension-hub-toolbar-actions">
+            <button type="button" onClick={() => setShowAvailable((value) => !value)} style={ghostButtonStyle(t)}>Browse directory</button>
+            <div className="extension-hub-menu">
+              <button type="button" onClick={() => setAddMenuOpen((value) => !value)} aria-expanded={addMenuOpen} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>Add <Icon name="chevron" size={12} /></button>
+              {addMenuOpen && <div className="extension-hub-menu-popover">
+                <button type="button" onClick={() => { setShowAvailable(true); setAddMenuOpen(false); }}>Browse available plugins</button>
+                <button type="button" onClick={() => requestSelection({ kind: 'marketplace-add' })}>Add a marketplace</button>
+                <button type="button" onClick={() => requestSelection({ kind: 'policies' })}>View policies</button>
+              </div>}
             </div>
           </div>
-          <div style={managerDetailStyle()}>
+        </div>
+
+        {selection.kind === 'list' && navigationPrompt}
+
+        {selection.kind === 'list' && <>
+          <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel="Plugins" />
+          {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+          {secretNotice && <div role="status" style={noteStyle(t, secretNotice.includes('重启') ? 'warn' : 'neutral')}>{secretNotice}</div>}
+          {preparedOperation && (
+            <div style={noteStyle(t, 'warn')}>
+              <div>{preparedOperation.summary}</div>
+              {preparedOperation.payload.action !== 'save_config' && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button type="button" disabled={busy} onClick={confirmLifecycle} style={ghostButtonStyle(t, busy)}>确认执行</button>
+                  <button type="button" disabled={busy} onClick={() => setPreparedOperation(null)} style={ghostButtonStyle(t, busy, true)}>取消</button>
+                </div>
+              )}
+            </div>
+          )}
+        </>}
+
+        <details className="extension-hub-caveat" data-testid="plugin-dependency-caveat">
+          <summary>Before changing plugin status</summary>
+          <div style={{ ...noteStyle(t, 'warn'), marginTop: 8 }}>{pluginDependencyCaveat()}</div>
+        </details>
+
+        <div className="extension-hub-group-title">Installed plugins</div>
+        <div className="extension-hub-list">
+          {filteredPlugins.map((id) => {
+            const entry = (catalog.installed ?? []).find((candidate) => (candidate.id || candidate.name) === id);
+            const enabled = draftEnabled[id] !== false;
+            return (
+              <div key={id} className="extension-hub-row configuration-entry">
+                <span className="extension-hub-icon" style={{ '--hub-icon-bg': t.surfaceHover } as CSSProperties}><Icon name="puzzle" size={19} color={t.text3} /></span>
+                <button type="button" className="extension-hub-row-copy extension-hub-row-open" onClick={() => requestSelection({ kind: 'plugin', id })}>
+                  <span className="extension-hub-row-title">{entry?.display_name ?? id}</span>
+                  <span className="extension-hub-row-description">{entry?.description ?? id}</span>
+                </button>
+                <div className="extension-hub-row-side">
+                  <span className="extension-hub-row-scope">{editingLayer === 'user' ? 'Personal' : editingLayer === 'project' ? 'Project' : 'Local'}</span>
+                  <button
+                    type="button"
+                    className="extension-hub-toggle"
+                    role="switch"
+                    aria-checked={enabled}
+                    aria-label={`${enabled ? 'Disable' : 'Enable'} ${entry?.display_name ?? id}`}
+                    disabled={busy}
+                    onClick={() => previewLifecycle({ action: enabled ? 'disable' : 'enable', plugin: id, scope: editingLayer })}
+                  />
+                  <button type="button" className="extension-hub-icon-button" aria-label={`Configure ${entry?.display_name ?? id}`} onClick={() => requestSelection({ kind: 'plugin', id })}>
+                    <Icon name="more" size={16} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {filteredPlugins.length === 0 && <div style={{ padding: '24px 18px', color: t.text3, fontSize: 13 }}>No installed plugins match this search.</div>}
+        </div>
+
+        {showAvailable && <>
+          <div className="extension-hub-group-title">Available and updates</div>
+          <div className="extension-hub-list">
+            {filteredAvailable.map((entry) => (
+              <button key={entry.id} type="button" className="extension-hub-row extension-hub-row-open" onClick={() => requestSelection({ kind: 'available', id: entry.id })}>
+                <span className="extension-hub-icon"><Icon name="puzzle" size={19} color={t.text3} /></span>
+                <span className="extension-hub-row-copy">
+                  <span className="extension-hub-row-title">{entry.name}</span>
+                  <span className="extension-hub-row-description">{entry.description ?? entry.id}</span>
+                </span>
+                <span className="extension-hub-row-side">{entry.upgrade_available ? 'Update available' : entry.installed ? 'Installed' : entry.marketplace}</span>
+              </button>
+            ))}
+            {filteredAvailable.length === 0 && <div style={{ padding: '20px 18px', color: t.text3, fontSize: 13 }}>No available plugins match this search.</div>}
+          </div>
+        </>}
+
+        {marketplaceNames.length > 0 && <details className="extension-hub-marketplaces">
+          <summary>Marketplaces · {marketplaceNames.length}</summary>
+          <div className="extension-hub-list">
+            {filteredMarketplaces.map((name) => (
+              <button key={name} type="button" className="extension-hub-row extension-hub-row-open" onClick={() => requestSelection({ kind: 'marketplace', name })}>
+                <span className="extension-hub-icon"><Icon name="box" size={18} color={t.text3} /></span>
+                <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{name}</span><span className="extension-hub-row-description">{asString(asRecord(draftMarketplaces[name]).source, 'Marketplace source')}</span></span>
+              </button>
+            ))}
+          </div>
+        </details>}
+
+        {selection.kind !== 'list' && <div className="extension-detail-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) requestSelection({ kind: 'list' }); }}>
+          <section ref={dialogRef} tabIndex={-1} className="extension-detail-dialog" role="dialog" aria-modal="true" aria-label="Plugin details" style={extensionHubStyle(t)}>
+            <header className="extension-detail-head">
+              <span className="extension-hub-icon"><Icon name="puzzle" size={20} color={t.text3} /></span>
+              <div className="extension-detail-head-copy">
+                <div className="extension-detail-title-line">
+                  <span className="extension-detail-title">{selectedPlugin ? manifest?.display_name ?? selectedPlugin : selectedAvailable?.name ?? selectedMarketplace ?? (selection.kind === 'marketplace-add' ? 'Add marketplace' : 'Plugin policies')}</span>
+                  <span className="extension-detail-kind">{selection.kind === 'plugin' ? 'Plugin' : selection.kind === 'available' ? 'Directory' : 'Settings'}</span>
+                </div>
+              </div>
+              {selectedPlugin && <button
+                type="button"
+                className="extension-hub-toggle"
+                role="switch"
+                aria-checked={draftEnabled[selectedPlugin] !== false}
+                aria-label={`${draftEnabled[selectedPlugin] !== false ? 'Disable' : 'Enable'} ${manifest?.display_name ?? selectedPlugin}`}
+                disabled={busy}
+                onClick={() => previewLifecycle({ action: draftEnabled[selectedPlugin] !== false ? 'disable' : 'enable', plugin: selectedPlugin, scope: editingLayer })}
+              />}
+              <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label="Close details" onClick={() => requestSelection({ kind: 'list' })}><Icon name="x" size={17} /></button>
+            </header>
+            <div className="extension-detail-content">
+            {navigationPrompt}
             <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel="Plugins" />
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
             {secretNotice && <div role="status" style={noteStyle(t, secretNotice.includes('重启') ? 'warn' : 'neutral')}>{secretNotice}</div>}
@@ -338,7 +455,6 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
               <>
                 <div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{manifest?.display_name ?? selectedPlugin}</div>
                     <SourcePill t={t} label={editingLayer} />
                     {manifest?.version && <SourcePill t={t} label={manifest.version} />}
                   </div>
@@ -510,17 +626,21 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
               <button type="button" disabled={!dirty || busy} onClick={save} style={ghostButtonStyle(t, !dirty || busy)}>保存配置</button>
               <button type="button" disabled={!dirty || busy} onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); }} style={ghostButtonStyle(t, !dirty || busy, true)}>取消修改</button>
             </div>
-          </div>
-        </div>
-      </Card>
+            </div>
+          </section>
+        </div>}
+      </div>
 
-      <Card title="来源说明">
-        <FieldProvenanceNotice snapshot={snapshot} fieldKey="enabledPlugins" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        <FieldProvenanceNotice snapshot={snapshot} fieldKey="pluginConfigs" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-        <div style={{ padding: '12px 18px', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
-          非敏感配置写入当前层的 pluginConfigs；敏感字段仅通过系统 Credential Broker 保存，catalog 只返回 configured 状态。管理员市场策略只读。
-        </div>
-      </Card>
+      <details className="extension-hub-page extension-hub-secondary-settings" style={extensionHubStyle(t)}>
+        <summary>Settings data sources</summary>
+        <Card title="来源说明">
+          <FieldProvenanceNotice snapshot={snapshot} fieldKey="enabledPlugins" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+          <FieldProvenanceNotice snapshot={snapshot} fieldKey="pluginConfigs" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+          <div style={{ padding: '12px 18px', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
+            非敏感配置写入当前层的 pluginConfigs；敏感字段仅通过系统 Credential Broker 保存，catalog 只返回 configured 状态。管理员市场策略只读。
+          </div>
+        </Card>
+      </details>
     </>
   );
 }

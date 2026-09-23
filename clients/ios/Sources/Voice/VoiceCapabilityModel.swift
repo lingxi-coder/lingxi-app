@@ -3,15 +3,67 @@ import Observation
 import Speech
 
 enum VoiceRecognitionMode: String, CaseIterable, Identifiable {
-    case onDevice = "localOnly"
     case automatic
+    case system
+    case onDevice = "offline"
 
     var id: String { rawValue }
-    var title: String { self == .onDevice ? String(localized: "voice_mode_on_device_title") : String(localized: "voice_mode_automatic_title") }
+    var source: AudioSource {
+        switch self {
+        case .automatic: .automatic
+        case .system: .system
+        case .onDevice: .offline
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .automatic: String(localized: "voice_mode_automatic_title")
+        case .system: "System"
+        case .onDevice: String(localized: "voice_mode_on_device_title")
+        }
+    }
+
     var detail: String {
-        self == .onDevice
-            ? String(localized: "voice_mode_on_device_detail")
-            : String(localized: "voice_mode_automatic_detail")
+        switch self {
+        case .automatic: String(localized: "voice_mode_automatic_detail")
+        case .system: "Use Apple Speech recognition on this device."
+        case .onDevice: String(localized: "voice_mode_on_device_detail")
+        }
+    }
+
+    init?(source: AudioSource) {
+        switch source {
+        case .automatic: self = .automatic
+        case .system: self = .system
+        case .offline: self = .onDevice
+        default: return nil
+        }
+    }
+}
+
+enum VoiceSpeechMode: String, CaseIterable, Identifiable {
+    case automatic
+    case system
+    case offline
+
+    var id: String { rawValue }
+    var source: AudioSource { AudioSource(rawValue: rawValue) }
+    var title: String {
+        switch self {
+        case .automatic: String(localized: "voice_mode_automatic_title")
+        case .system: "System"
+        case .offline: String(localized: "voice_mode_on_device_title")
+        }
+    }
+
+    init?(source: AudioSource) {
+        switch source {
+        case .automatic: self = .automatic
+        case .system: self = .system
+        case .offline: self = .offline
+        default: return nil
+        }
     }
 }
 
@@ -115,15 +167,18 @@ struct VoiceConfigurationReadiness: Equatable {
 final class VoiceCapabilityModel {
     nonisolated static let automaticLanguageIdentifier = "auto"
 
-    private let defaults: UserDefaults
+    private let configurationStore: AudioConfigurationStore
     private let previewPlayback: VoicePreviewPlayback
     private let modelStore: VoiceModelStore
 
     var language: String
     var mode: VoiceRecognitionMode
+    var speechMode: VoiceSpeechMode
     var voiceIdentifier: String
     var speed: Double
     var autoPlay: Bool
+    private var unsupportedRecognitionSource: AudioSource?
+    private var unsupportedSpeechSource: AudioSource?
     private(set) var speechConfigurationConfirmed = true
     private(set) var ttsConfigurationConfirmed = true
     private(set) var speechAuthorization: SFSpeechRecognizerAuthorizationStatus
@@ -139,17 +194,27 @@ final class VoiceCapabilityModel {
     init(
         defaults: UserDefaults = .standard,
         previewPlayback: VoicePreviewPlayback? = nil,
-        modelStore: VoiceModelStore? = nil
+        modelStore: VoiceModelStore? = nil,
+        store: AudioConfigurationStore? = nil
     ) {
-        self.defaults = defaults
+        let configurationStore = store
+            ?? (defaults === UserDefaults.standard ? .shared : AudioConfigurationStore(defaults: defaults))
+        self.configurationStore = configurationStore
         self.previewPlayback = previewPlayback ?? .shared
         self.modelStore = modelStore ?? .shared
-        let preferences = VoicePreferencesSnapshot.load(defaults: defaults)
-        language = preferences.language
-        mode = preferences.recognitionMode
-        voiceIdentifier = preferences.voiceSelection
-        speed = preferences.rate
-        autoPlay = preferences.autoPlayReplies
+        let configuration = configurationStore.configuration
+        language = configuration.language
+        mode = VoiceRecognitionMode(source: configuration.recognition.source) ?? .automatic
+        speechMode = VoiceSpeechMode(source: configuration.speech.source) ?? .automatic
+        unsupportedRecognitionSource = VoiceRecognitionMode(source: configuration.recognition.source) == nil
+            ? configuration.recognition.source
+            : nil
+        unsupportedSpeechSource = VoiceSpeechMode(source: configuration.speech.source) == nil
+            ? configuration.speech.source
+            : nil
+        voiceIdentifier = Self.legacyVoiceIdentifier(configuration.speech.voice) ?? "auto"
+        speed = configuration.rate
+        autoPlay = configuration.autoPlayReplies
         speechAuthorization = SFSpeechRecognizer.authorizationStatus()
         microphonePermissionStatus = Self.resolveMicrophonePermissionStatus()
         microphoneGranted = microphonePermissionStatus == .granted
@@ -187,41 +252,119 @@ final class VoiceCapabilityModel {
         Self.displayName(for: effectiveLanguageIdentifier)
     }
 
-    var effectiveRecognitionStatus: VoiceEffectiveRecognitionStatus {
-        let route = VoiceRuntimeResolver.recognitionRoute(
-            preferences: preferencesSnapshot,
-            systemRecognizerAvailable: VoiceRuntimeResolver.systemRecognitionAvailable(
-                serviceAvailable: recognizerAvailable,
-                authorization: speechAuthorization
-            )
+    var configurationRevision: UInt64 { configurationStore.revision }
+
+    var configurationSnapshot: AudioConfigurationSnapshot { configurationStore.snapshot }
+
+    var recognitionRoutePreview: AudioRouteResolution {
+        let configuration = configurationStore.configuration
+        return resolveAudioRoute(AudioRouteRequest(
+            kind: .recognition,
+            preference: configuration.recognition,
+            language: effectiveLanguageIdentifier,
+            systemStatus: recognitionSystemStatus,
+            offlineModels: availableOfflineModels
+        ))
+    }
+
+    var speechRoutePreview: AudioRouteResolution {
+        let configuration = configurationStore.configuration
+        let selection = Self.audioVoiceSelection(from: voiceIdentifier)
+        let preference = AudioSpeechPreference(
+            source: unsupportedSpeechSource ?? speechMode.source,
+            offlineModelId: configuration.speech.offlineModelId,
+            voice: selection
         )
-        switch route {
-        case let .system(languageIdentifier):
+        return resolveAudioRoute(AudioRouteRequest(
+            kind: .speech,
+            preference: preference,
+            language: effectiveLanguageIdentifier,
+            systemStatus: systemVoiceIDs.isEmpty
+                ? (AVSpeechSynthesisVoice(language: effectiveLanguageIdentifier) == nil ? .unavailable : .available)
+                : .available,
+            offlineModels: availableOfflineModels,
+            systemVoiceIds: systemVoiceIDs
+        ))
+    }
+
+    private var recognitionSystemStatus: AudioReadiness {
+        guard recognizerAvailable else { return .unavailable }
+        switch speechAuthorization {
+        case .authorized: return .available
+        case .notDetermined: return .permissionRequired
+        case .denied, .restricted: return .denied
+        @unknown default: return .unavailable
+        }
+    }
+
+    private var systemVoiceIDs: [String] {
+        AVSpeechSynthesisVoice.speechVoices().map(\.identifier)
+    }
+
+    private var availableOfflineModels: [AudioOfflineModelAvailability] {
+        GeneratedVoiceModelCatalog.all.compactMap { model in
+            switch model.kind {
+            case .stt:
+                AudioOfflineModelAvailability(
+                    id: model.id,
+                    kind: .recognition,
+                    languages: model.languages,
+                    installed: modelStore.state(for: model.id).isReady
+                )
+            case .tts:
+                AudioOfflineModelAvailability(
+                    id: model.id,
+                    kind: .speech,
+                    languages: model.languages,
+                    installed: modelStore.state(for: model.id).isReady,
+                    voiceIds: model.voices.map(\.id)
+                )
+            default:
+                nil
+            }
+        }
+    }
+
+    var effectiveRecognitionStatus: VoiceEffectiveRecognitionStatus {
+        let resolution = recognitionRoutePreview
+        let languageIdentifier = effectiveLanguageIdentifier
+        guard let effective = resolution.effective else {
             return VoiceEffectiveRecognitionStatus(
                 effectiveLanguageIdentifier: languageIdentifier,
                 effectiveLanguageLabel: Self.displayName(for: languageIdentifier),
-                modeLabel: String(localized: "voice_mode_automatic_title"),
-                detail: onDeviceAvailable
-                    ? String(localized: "voice_automatic_supports_on_device")
-                    : String(localized: "voice_automatic_uses_online"),
-                fallbackReason: nil
+                modeLabel: String(localized: "voice_temporarily_unavailable"),
+                detail: resolution.reason,
+                fallbackReason: resolution.fallbackReason ?? resolution.reason
             )
-        case let .sherpa(languageIdentifier, modelID, _):
+        }
+        switch effective.source {
+        case .system:
+            return VoiceEffectiveRecognitionStatus(
+                effectiveLanguageIdentifier: languageIdentifier,
+                effectiveLanguageLabel: Self.displayName(for: languageIdentifier),
+                modeLabel: mode.title,
+                detail: resolution.status == .permissionRequired
+                    ? speechPermission.detail
+                    : String(localized: "voice_automatic_uses_online"),
+                fallbackReason: resolution.fallbackReason
+            )
+        case .offline:
+            let modelID = effective.modelId ?? ""
             let modelName = GeneratedVoiceModelCatalog.byID(modelID)?.displayName["en"] ?? modelID
             return VoiceEffectiveRecognitionStatus(
                 effectiveLanguageIdentifier: languageIdentifier,
                 effectiveLanguageLabel: Self.displayName(for: languageIdentifier),
                 modeLabel: String(localized: "voice_on_device_recognition_title"),
                 detail: "Sherpa · \(modelName) · on-device",
-                fallbackReason: mode == .automatic ? "System recognizer unavailable; using Sherpa offline." : nil
+                fallbackReason: resolution.fallbackReason
             )
-        case let .unavailable(reason):
+        default:
             return VoiceEffectiveRecognitionStatus(
-                effectiveLanguageIdentifier: effectiveLanguageIdentifier,
-                effectiveLanguageLabel: effectiveLanguageLabel,
+                effectiveLanguageIdentifier: languageIdentifier,
+                effectiveLanguageLabel: Self.displayName(for: languageIdentifier),
                 modeLabel: String(localized: "voice_temporarily_unavailable"),
-                detail: reason,
-                fallbackReason: reason
+                detail: resolution.reason,
+                fallbackReason: resolution.reason
             )
         }
     }
@@ -231,24 +374,37 @@ final class VoiceCapabilityModel {
     }
 
     var selectedVoice: SystemVoiceOption? {
-        voices.first { $0.id == voiceIdentifier && voiceSupportsEffectiveLanguage($0) }
-            ?? sherpaFamilyFallbackVoice
-            ?? voices.first {
-                $0.source == .system && voiceSupportsEffectiveLanguage($0)
+        guard let effective = speechRoutePreview.effective else { return nil }
+        switch effective.source {
+        case .system:
+            guard let voiceID = effective.voiceId else {
+                return voices.first { $0.id == VoicePreferencesSnapshot.defaultVoiceSelection }
             }
-            ?? voices.first
+            return voices.first { $0.source == .system && Self.rawVoiceID($0.id) == voiceID }
+        case .offline:
+            guard let modelID = effective.modelId, let voiceID = effective.voiceId else { return nil }
+            return voices.first { $0.source == .sherpa(modelID: modelID, voiceID: voiceID) }
+        default:
+            return nil
+        }
     }
 
     var configuredVoice: SystemVoiceOption? {
-        guard !voiceIdentifier.isEmpty,
-              voiceIdentifier != VoicePreferencesSnapshot.defaultVoiceSelection
-        else { return nil }
-        return voices.first { $0.id == voiceIdentifier }
+        guard let selection = Self.audioVoiceSelection(from: voiceIdentifier) else { return nil }
+        switch selection.source {
+        case .system:
+            return voices.first { $0.source == .system && Self.rawVoiceID($0.id) == selection.id }
+        case .offline:
+            guard let modelID = selection.modelId else { return nil }
+            return voices.first { $0.source == .sherpa(modelID: modelID, voiceID: selection.id) }
+        default:
+            return nil
+        }
     }
 
     var requestedVoiceLabel: String {
-        if voiceIdentifier == VoicePreferencesSnapshot.defaultVoiceSelection {
-            return String(localized: "settings_voice_default_ios")
+        if voiceIdentifier == "auto" {
+            return String(localized: "voice_mode_automatic_title")
         }
         return configuredVoice.map(Self.voiceLabel(for:)) ?? voiceIdentifier
     }
@@ -260,7 +416,7 @@ final class VoiceCapabilityModel {
 
     var voiceSummaryLabel: String {
         guard let configuredVoice else {
-            return voiceIdentifier == VoicePreferencesSnapshot.defaultVoiceSelection
+            return voiceIdentifier == "auto"
                 ? effectiveVoiceLabel
                 : "\(requestedVoiceLabel) → \(effectiveVoiceLabel)"
         }
@@ -268,28 +424,6 @@ final class VoiceCapabilityModel {
             return configuredVoice.name
         }
         return "\(configuredVoice.name) → \(selectedVoice.name)"
-    }
-
-    private var sherpaFamilyFallbackVoice: SystemVoiceOption? {
-        guard let selection = VoiceRuntimeResolver.parseSherpaVoice(voiceIdentifier) else { return nil }
-        return voices.first { option in
-            guard case let .sherpa(modelID, _) = option.source else { return false }
-            return modelID == selection.modelID
-                && voiceSupportsEffectiveLanguage(option)
-        } ?? voices.first { option in
-            guard case let .sherpa(modelID, _) = option.source else { return false }
-            return modelID == selection.modelID
-        }
-    }
-
-    private func voiceSupportsEffectiveLanguage(_ option: SystemVoiceOption) -> Bool {
-        let target = languageBase(effectiveLanguageIdentifier)
-        switch option.source {
-        case .system:
-            return languageBase(option.language) == target
-        case let .sherpa(modelID, _):
-            return GeneratedVoiceModelCatalog.byID(modelID)?.languages.contains(target) == true
-        }
     }
 
     var configurationReadiness: VoiceConfigurationReadiness {
@@ -301,47 +435,37 @@ final class VoiceCapabilityModel {
                 message: microphonePermission.detail
             ))
         }
-        let route = VoiceRuntimeResolver.recognitionRoute(
-            preferences: preferencesSnapshot,
-            systemRecognizerAvailable: VoiceRuntimeResolver.systemRecognitionAvailable(
-                serviceAvailable: recognizerAvailable,
-                authorization: speechAuthorization
-            )
-        )
-        if mode == .automatic, speechAuthorization != .authorized {
-            if case .sherpa = route {
-                // The local fallback does not require Speech.framework access.
-            } else {
-                issues.append(.init(
-                    component: .speech,
-                    kind: speechAuthorization == .denied ? .permissionDenied : .permissionUndetermined,
-                    message: speechPermission.detail
-                ))
-            }
+        let recognition = recognitionRoutePreview
+        if recognition.effective?.source == .system,
+           speechAuthorization != .authorized {
+            issues.append(.init(
+                component: .speech,
+                kind: speechAuthorization == .denied ? .permissionDenied : .permissionUndetermined,
+                message: speechPermission.detail
+            ))
         }
-        if case let .unavailable(reason) = route {
-            issues.append(.init(component: .speech, kind: .unavailable, message: reason))
+        if recognition.effective == nil {
+            issues.append(.init(
+                component: .speech,
+                kind: .unavailable,
+                message: recognition.reason
+            ))
         }
-        let hasConcretePlaybackVoice = voices.contains {
-            $0.id != VoicePreferencesSnapshot.defaultVoiceSelection
-        } || AVSpeechSynthesisVoice(language: effectiveLanguageIdentifier) != nil
-        if !hasConcretePlaybackVoice {
+        let speech = speechRoutePreview
+        if speech.status != .ready {
             issues.append(.init(
                 component: .tts,
                 kind: .unavailable,
-                message: String(localized: "voice_no_playback_voice_available")
+                message: speech.reason
             ))
         }
-        let speechReady = microphonePermissionStatus == .granted && {
-            if case .unavailable = route { return false }
-            if case .system = route { return speechAuthorization == .authorized }
-            return true
-        }()
         return VoiceConfigurationReadiness(
-            speechConfigured: true,
-            ttsConfigured: true,
-            speechReady: speechReady,
-            ttsReady: hasConcretePlaybackVoice,
+            speechConfigured: unsupportedRecognitionSource == nil,
+            ttsConfigured: unsupportedSpeechSource == nil,
+            speechReady: microphonePermissionStatus == .granted
+                && recognition.status == .ready
+                && (recognition.effective?.source != .system || speechAuthorization == .authorized),
+            ttsReady: speech.status == .ready,
             issues: issues
         )
     }
@@ -368,6 +492,16 @@ final class VoiceCapabilityModel {
     func setMode(_ value: VoiceRecognitionMode) {
         guard mode != value else { return }
         mode = value
+        unsupportedRecognitionSource = nil
+        persistPreferences()
+        refreshCapabilities()
+    }
+
+    func setSpeechMode(_ value: VoiceSpeechMode) {
+        guard speechMode != value || unsupportedSpeechSource != nil else { return }
+        speechMode = value
+        unsupportedSpeechSource = nil
+        voiceIdentifier = "auto"
         persistPreferences()
         refreshCapabilities()
     }
@@ -375,7 +509,13 @@ final class VoiceCapabilityModel {
     func setVoice(_ identifier: String) {
         guard voiceIdentifier != identifier else { return }
         voiceIdentifier = identifier
+        if let selection = Self.audioVoiceSelection(from: identifier),
+           let selectedMode = VoiceSpeechMode(source: selection.source) {
+            speechMode = selectedMode
+            unsupportedSpeechSource = nil
+        }
         persistPreferences()
+        refreshCapabilities()
     }
 
     func setSpeed(_ value: Double) {
@@ -394,18 +534,14 @@ final class VoiceCapabilityModel {
     /// Re-reads user choices and confirmation markers after returning from a
     /// settings surface, then refreshes permission and hardware availability.
     func reloadFromDefaults() {
-        let preferences = VoicePreferencesSnapshot.load(defaults: defaults)
-        language = preferences.language
-        mode = preferences.recognitionMode
-        voiceIdentifier = preferences.voiceSelection
-        speed = preferences.rate
-        autoPlay = preferences.autoPlayReplies
+        configurationStore.reload()
+        load(configurationStore.configuration)
         modelStore.reconcileFromDisk()
         refreshCapabilities()
     }
 
-    /// Persists default-valued choices as explicit user decisions. TTS is only
-    /// confirmed when a concrete system voice can be persisted.
+    /// Saves only device-local audio preferences; operation readiness is
+    /// reported separately from the desired settings.
     @discardableResult
     func saveConfiguration() -> VoiceConfigurationReadiness {
         persistPreferences()
@@ -426,6 +562,13 @@ final class VoiceCapabilityModel {
             name: String(localized: "settings_voice_default_ios"),
             language: effectiveLanguageIdentifier,
             quality: .enhanced,
+            source: .system
+        )
+        let automaticVoice = SystemVoiceOption(
+            id: "auto",
+            name: String(localized: "voice_mode_automatic_title"),
+            language: effectiveLanguageIdentifier,
+            quality: .default,
             source: .system
         )
         let discoveredSystemVoices = AVSpeechSynthesisVoice.speechVoices()
@@ -465,12 +608,13 @@ final class VoiceCapabilityModel {
                     )
                 }
             }
-        voices = systemVoices + offlineVoices
-        errorMessage = permissionMessage
+        voices = [automaticVoice] + systemVoices + offlineVoices
+        errorMessage = configurationStore.lastError?.localizedDescription ?? permissionMessage
+        IOSAudioService.shared.publishCapabilitySnapshot()
     }
 
     func requestPermissions() async {
-        if mode == .automatic {
+        if mode != .onDevice {
             speechAuthorization = await withCheckedContinuation { continuation in
                 SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
             }
@@ -495,7 +639,10 @@ final class VoiceCapabilityModel {
                 text: text,
                 voiceIdentifier: voice.id,
                 languageIdentifier: effectiveLanguageIdentifier,
-                speed: speed
+                speed: speed,
+                route: speechRoutePreview,
+                maxPayloadBytes: IOSAudioService.shared.maximumPayloadBytes,
+                configurationRevision: configurationStore.revision
             )
             let outcome = try await previewPlayback.play(request)
             if outcome == .interrupted {
@@ -531,24 +678,87 @@ final class VoiceCapabilityModel {
         }
     }
 
-    private var preferencesSnapshot: VoicePreferencesSnapshot {
-        VoicePreferencesSnapshot(
-            schemaVersion: VoicePreferencesSnapshot.currentSchemaVersion,
-            recognitionMode: mode,
+    private func persistPreferences() {
+        let current = configurationStore.configuration
+        let voice = Self.audioVoiceSelection(from: voiceIdentifier)
+        let speechSource = unsupportedSpeechSource ?? speechMode.source
+        let offlineModelID: String?
+        if speechSource != .offline {
+            offlineModelID = nil
+        } else if voice?.source == .offline {
+            offlineModelID = voice?.modelId
+        } else if current.speech.source == .offline {
+            offlineModelID = current.speech.offlineModelId
+        } else {
+            offlineModelID = nil
+        }
+        let requested = AudioConfigurationV3(
+            recognition: AudioRecognitionPreference(
+                source: unsupportedRecognitionSource ?? mode.source,
+                offlineModelId: current.recognition.offlineModelId
+            ),
+            speech: AudioSpeechPreference(
+                source: speechSource,
+                offlineModelId: offlineModelID,
+                voice: voice
+            ),
             language: language,
-            voiceSelection: voiceIdentifier,
             rate: speed,
             autoPlayReplies: autoPlay
         )
+        do {
+            _ = try configurationStore.save(requested, expectedRevision: configurationStore.revision)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+            load(configurationStore.configuration)
+        }
     }
 
-    private func persistPreferences() {
-        preferencesSnapshot.persist(defaults: defaults)
-        defaults.set(mode.rawValue, forKey: VoicePreferencesSnapshot.Keys.legacyRecognitionMode)
-        defaults.set(language, forKey: VoicePreferencesSnapshot.Keys.legacyLanguage)
-        defaults.set(voiceIdentifier, forKey: VoicePreferencesSnapshot.Keys.legacySystemVoice)
-        defaults.set(speed, forKey: VoicePreferencesSnapshot.Keys.legacyRate)
-        defaults.set(autoPlay, forKey: VoicePreferencesSnapshot.Keys.legacyAutoPlay)
+    private func load(_ configuration: AudioConfigurationV3) {
+        language = configuration.language
+        mode = VoiceRecognitionMode(source: configuration.recognition.source) ?? .automatic
+        speechMode = VoiceSpeechMode(source: configuration.speech.source) ?? .automatic
+        unsupportedRecognitionSource = VoiceRecognitionMode(source: configuration.recognition.source) == nil
+            ? configuration.recognition.source
+            : nil
+        unsupportedSpeechSource = VoiceSpeechMode(source: configuration.speech.source) == nil
+            ? configuration.speech.source
+            : nil
+        voiceIdentifier = Self.legacyVoiceIdentifier(configuration.speech.voice) ?? "auto"
+        speed = configuration.rate
+        autoPlay = configuration.autoPlayReplies
+    }
+
+    private nonisolated static func audioVoiceSelection(from value: String?) -> AudioVoiceSelection? {
+        let text = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !text.isEmpty, text != "auto" else { return nil }
+        if text.hasPrefix("system:") {
+            return AudioVoiceSelection(source: .system, id: String(text.dropFirst("system:".count)))
+        }
+        if let offline = VoiceRuntimeResolver.parseSherpaVoice(text) {
+            return AudioVoiceSelection(source: .offline, id: offline.voiceID, modelId: offline.modelID)
+        }
+        return AudioVoiceSelection(source: .system, id: text)
+    }
+
+    private nonisolated static func legacyVoiceIdentifier(_ selection: AudioVoiceSelection?) -> String? {
+        guard let selection else { return nil }
+        switch selection.source {
+        case .system:
+            return "system:\(selection.id)"
+        case .offline:
+            guard let modelId = selection.modelId else { return "sherpa:unknown:\(selection.id)" }
+            return "sherpa:\(modelId):\(selection.id)"
+        default:
+            return "\(selection.source.rawValue):\(selection.id)"
+        }
+    }
+
+    private nonisolated static func rawVoiceID(_ optionID: String) -> String {
+        optionID.hasPrefix("system:")
+            ? String(optionID.dropFirst("system:".count))
+            : optionID
     }
 
     private func syncModelStatesUntilSettled() {
@@ -589,27 +799,12 @@ final class VoiceCapabilityModel {
     }
 
     private var permissionMessage: String? {
-        let route = VoiceRuntimeResolver.recognitionRoute(
-            preferences: preferencesSnapshot,
-            systemRecognizerAvailable: VoiceRuntimeResolver.systemRecognitionAvailable(
-                serviceAvailable: recognizerAvailable,
-                authorization: speechAuthorization
-            )
-        )
-        if mode == .automatic, speechAuthorization != .authorized {
-            if case .sherpa = route {
-                // Keep the denied system permission visible in Access without
-                // presenting it as a blocker for the active local fallback.
-            } else {
-                return speechPermission.detail
-            }
-        }
         if microphonePermissionStatus != .granted { return microphonePermission.detail }
-        if let fallbackReason = effectiveRecognitionStatus.fallbackReason,
-           mode == .onDevice {
-            return fallbackReason
+        let route = recognitionRoutePreview
+        if route.effective?.source == .system, speechAuthorization != .authorized {
+            return speechPermission.detail
         }
-        return nil
+        return route.fallbackReason ?? (route.effective == nil ? route.reason : nil)
     }
 
     nonisolated static func normalizedLocaleIdentifier(_ identifier: String) -> String {
@@ -676,6 +871,12 @@ final class VoiceCapabilityModel {
             } else {
                 detail = String(localized: "voice_automatic_uses_online")
             }
+        case .system:
+            fallbackReason = nil
+            modeLabel = String(localized: "voice_mode_automatic_title")
+            detail = recognizerAvailable
+                ? String(localized: "voice_automatic_uses_online")
+                : String(localized: "voice_recognizer_unavailable_retry")
         case .onDevice:
             if permissionBlocked {
                 fallbackReason = String(localized: "voice_permission_not_met")

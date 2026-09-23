@@ -106,7 +106,10 @@ pub(crate) struct PlanApproval {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlanApprovalSlot {
     Approved(PlanApproval),
-    Rejected { session_uuid: String, reason: String },
+    Rejected {
+        session_uuid: String,
+        reason: String,
+    },
 }
 
 /// Per-plan-path slot for the most recently observed plan exit.
@@ -150,9 +153,7 @@ impl PlanApprovalLog {
             PlanApprovalSlot::Rejected {
                 session_uuid: recorded,
                 reason,
-            } if recorded == session_uuid => {
-                Err(format!("plan_approval_invalid: {reason}"))
-            }
+            } if recorded == session_uuid => Err(format!("plan_approval_invalid: {reason}")),
             PlanApprovalSlot::Rejected { .. } => Err(foreign()),
             PlanApprovalSlot::Approved(approval) => {
                 if approval.session_uuid != session_uuid {
@@ -247,10 +248,7 @@ impl ClientEventListener for PlanApprovalWatcher {
 /// Returns `None` when the payload is not a main-session plan exit we can bind
 /// (a subagent plan, or a payload with no plan-file identity), which is not an
 /// error — most plans in the product are not Local App plans.
-fn parse_plan_result(
-    result_json: &str,
-    session_uuid: &str,
-) -> Option<(String, PlanApprovalSlot)> {
+fn parse_plan_result(result_json: &str, session_uuid: &str) -> Option<(String, PlanApprovalSlot)> {
     let value: serde_json::Value = serde_json::from_str(result_json).ok()?;
     // A subagent's plan is approved by its parent, not by the user.
     if value.get("isAgent").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -468,10 +466,7 @@ mod tests {
 
     #[test]
     fn an_ignored_fence_does_not_shadow_the_authoring_block() {
-        let plan = format!(
-            "```json\n{{ \"notes\": true }}\n```\n\n{}",
-            good_plan()
-        );
+        let plan = format!("```json\n{{ \"notes\": true }}\n```\n\n{}", good_plan());
         let block = parse_authoring_block(&plan)
             .expect("block parses")
             .expect("block present");
@@ -519,9 +514,14 @@ mod tests {
 
         // Another conversation cannot spend it, even knowing the plan path.
         let error = log.claim("/tmp/p.md", "s2", "app-a").expect_err("foreign");
-        assert!(error.contains("no plan approved in THIS conversation"), "{error}");
+        assert!(
+            error.contains("no plan approved in THIS conversation"),
+            "{error}"
+        );
         // A different plan path in the right conversation is also refused.
-        let error = log.claim("/tmp/other.md", "s1", "app-a").expect_err("unknown plan");
+        let error = log
+            .claim("/tmp/other.md", "s1", "app-a")
+            .expect_err("unknown plan");
         assert!(error.contains("no plan approved"), "{error}");
 
         let approval = log.claim("/tmp/p.md", "s1", "app-a").expect("first spend");
@@ -529,8 +529,13 @@ mod tests {
         // The same app retrying is not a second spend.
         log.claim("/tmp/p.md", "s1", "app-a").expect("retry");
         // A second empty shell in the same conversation is a second spend.
-        let error = log.claim("/tmp/p.md", "s1", "app-b").expect_err("second app");
-        assert!(error.contains("already prepared a different app"), "{error}");
+        let error = log
+            .claim("/tmp/p.md", "s1", "app-b")
+            .expect_err("second app");
+        assert!(
+            error.contains("already prepared a different app"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -589,11 +594,15 @@ mod tests {
             "spec": spec_json(),
             "unexpected": 1,
         }));
-        let (_, slot) = parse_plan_result(&exit_result(&plan, "/tmp/p.md"), "s1").expect("observed");
+        let (_, slot) =
+            parse_plan_result(&exit_result(&plan, "/tmp/p.md"), "s1").expect("observed");
         let PlanApprovalSlot::Rejected { reason, .. } = slot else {
             panic!("a closed block may not be honoured");
         };
-        assert!(reason.contains("not valid JSON"), "unexpected reason: {reason}");
+        assert!(
+            reason.contains("not valid JSON"),
+            "unexpected reason: {reason}"
+        );
     }
 
     #[test]
@@ -637,11 +646,8 @@ mod tests {
         let path = dir.path().join("plan.md");
         let plan = good_plan();
         std::fs::write(&path, &plan).expect("write plan");
-        let (_, slot) = parse_plan_result(
-            &exit_result(&plan, &path.to_string_lossy()),
-            "s1",
-        )
-        .expect("ok");
+        let (_, slot) =
+            parse_plan_result(&exit_result(&plan, &path.to_string_lossy()), "s1").expect("ok");
         let PlanApprovalSlot::Approved(approval) = slot else {
             panic!("expected an approval");
         };
@@ -674,11 +680,7 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let log = Arc::new(PlanApprovalLog::default());
         let session = Arc::new(Mutex::new("s1".to_string()));
-        let watcher = PlanApprovalWatcher::new(
-            recorder.clone(),
-            log.clone(),
-            session,
-        );
+        let watcher = PlanApprovalWatcher::new(recorder.clone(), log.clone(), session);
 
         let plan = good_plan();
         watcher

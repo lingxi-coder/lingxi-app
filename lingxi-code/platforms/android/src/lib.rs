@@ -43,12 +43,11 @@ pub use receipt::AndroidSandboxReceipt;
 pub use sandbox::AndroidMinijailSandbox;
 
 use platform_api::{
-    AndroidUiAutomation, CalendarProvider, CameraControl, Clipboard, Clock, ContactsProvider,
-    DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService, HttpTransport,
-    LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec,
-    NotificationService, Platform, ProcessRunner, Sandbox, SandboxBackend, SandboxError,
-    SecureStorage, SharingService, SpeechToText, TextToSpeech, UnavailableMobileLinuxRuntime,
-    VoiceRecorder, WorktreeManager,
+    AndroidUiAutomation, AudioService, CalendarProvider, CameraControl, Clipboard, Clock,
+    ContactsProvider, DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService,
+    HttpTransport, LocationProvider, MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose,
+    MountSpec, NotificationService, Platform, ProcessRunner, Sandbox, SandboxBackend, SandboxError,
+    SecureStorage, SharingService, UnavailableMobileLinuxRuntime, WorktreeManager,
 };
 use platform_common::{MobileLinuxProcessRunner, MobileLinuxSandbox};
 use std::path::PathBuf;
@@ -64,17 +63,12 @@ pub struct AndroidPlatformInputs {
     pub app_files_root: PathBuf,
     /// Native camera (Kotlin impl).
     pub camera: Arc<dyn CameraControl>,
-    /// Native microphone recorder (Kotlin impl).
-    pub voice: Arc<dyn VoiceRecorder>,
+    /// Unified app-scoped device audio service (Kotlin impl).
+    pub audio: Arc<dyn AudioService>,
     /// Native one-shot location provider (Kotlin impl), when wired.
     pub location: Option<Arc<dyn LocationProvider>>,
     /// Native share sheet (Kotlin impl).
     pub share: Arc<dyn SharingService>,
-    /// Native speech-to-text (Kotlin impl), when wired. `None` keeps the
-    /// pre-speech behavior (the `speech` tool reports "unavailable").
-    pub stt: Option<Arc<dyn SpeechToText>>,
-    /// Native text-to-speech (Kotlin impl), when wired.
-    pub tts: Option<Arc<dyn TextToSpeech>>,
     /// Native system notifications (Kotlin impl), when wired. `None` keeps the
     /// `notification` tool reporting "unavailable".
     pub notifications: Option<Arc<dyn NotificationService>>,
@@ -121,11 +115,9 @@ pub struct AndroidPlatform {
     sandbox: Arc<dyn Sandbox>,
     worktree: Arc<dyn WorktreeManager>,
     camera: Arc<dyn CameraControl>,
-    voice: Arc<dyn VoiceRecorder>,
+    audio: Arc<dyn AudioService>,
     location: Option<Arc<dyn LocationProvider>>,
     share: Arc<dyn SharingService>,
-    stt: Option<Arc<dyn SpeechToText>>,
-    tts: Option<Arc<dyn TextToSpeech>>,
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
     device_status: Option<Arc<dyn DeviceStatusProvider>>,
@@ -272,11 +264,9 @@ impl AndroidPlatform {
             sandbox,
             worktree: Arc::new(PosixWorktree::new()),
             camera: inputs.camera,
-            voice: inputs.voice,
+            audio: inputs.audio,
             location: inputs.location,
             share: inputs.share,
-            stt: inputs.stt,
-            tts: inputs.tts,
             notifications: inputs.notifications,
             clipboard: inputs.clipboard,
             device_status: inputs.device_status,
@@ -381,20 +371,14 @@ impl Platform for AndroidPlatform {
     fn camera(&self) -> Option<Arc<dyn CameraControl>> {
         Some(self.camera.clone())
     }
-    fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
-        Some(self.voice.clone())
+    fn audio_service(&self) -> Option<Arc<dyn AudioService>> {
+        Some(self.audio.clone())
     }
     fn location(&self) -> Option<Arc<dyn LocationProvider>> {
         self.location.clone()
     }
     fn share(&self) -> Option<Arc<dyn SharingService>> {
         Some(self.share.clone())
-    }
-    fn stt(&self) -> Option<Arc<dyn SpeechToText>> {
-        self.stt.clone()
-    }
-    fn tts(&self) -> Option<Arc<dyn TextToSpeech>> {
-        self.tts.clone()
     }
     fn notifications(&self) -> Option<Arc<dyn NotificationService>> {
         self.notifications.clone()
@@ -436,8 +420,7 @@ mod tests {
     use platform_api::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, LocationError, LocationFix,
         Platform, SandboxBackend, ShareError, SharePayload, ShareResult, SharingService,
-        UnavailableMobileLinuxRuntime, VoiceError, VoiceRecorder, VoiceRecording,
-        VoiceRecordingOpts,
+        UnavailableMobileLinuxRuntime,
     };
 
     struct NoCam;
@@ -450,17 +433,33 @@ mod tests {
             Err(CameraError::DeviceUnavailable)
         }
     }
-    struct NoVoice;
+    struct NoAudio;
     #[async_trait]
-    impl VoiceRecorder for NoVoice {
-        async fn start_recording(&self, _: VoiceRecordingOpts) -> Result<(), VoiceError> {
-            Err(VoiceError::NotRecording)
+    impl AudioService for NoAudio {
+        fn capabilities(&self) -> platform_api::AudioCapabilitySnapshot {
+            platform_api::AudioCapabilitySnapshot {
+                service_epoch: 0,
+                support_revision: 0,
+                supported_operations: Vec::new(),
+                readiness: Vec::new(),
+                max_payload_bytes: 0,
+            }
         }
-        async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
-            Err(VoiceError::NotRecording)
+        async fn execute(
+            &self,
+            _context: platform_api::AudioOperationContext,
+            _operation: platform_api::AudioOperation,
+        ) -> Result<platform_api::AudioOperationSuccess, platform_api::AudioError> {
+            Err(platform_api::AudioError::new(
+                platform_api::AudioErrorKind::Unavailable,
+                "audio service not wired",
+            ))
         }
-        async fn is_recording(&self) -> bool {
-            false
+        async fn cancel(
+            &self,
+            _identity: platform_api::AudioOperationId,
+        ) -> Result<(), platform_api::AudioError> {
+            Ok(())
         }
     }
     struct NoLocation;
@@ -482,11 +481,9 @@ mod tests {
         AndroidPlatformInputs {
             app_files_root: std::env::temp_dir(),
             camera: std::sync::Arc::new(NoCam),
-            voice: std::sync::Arc::new(NoVoice),
+            audio: std::sync::Arc::new(NoAudio),
             location: None,
             share: std::sync::Arc::new(NoShare),
-            stt: None,
-            tts: None,
             notifications: None,
             clipboard: None,
             device_status: None,

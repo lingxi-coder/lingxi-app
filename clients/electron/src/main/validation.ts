@@ -1,6 +1,4 @@
 import type {
-  AudioErrorKindDto,
-  AudioResultDto,
   ClientCommand,
   ComputerAccessResponseDto,
   HookAdminCommandDto,
@@ -14,13 +12,6 @@ import type {
 import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
 import { ALLOWED_CLIENT_COMMAND_TYPES, ALLOWED_REFRESH_LISTING_KINDS } from '../shared/clientCommands.js';
 import { isBase64 } from '../shared/base64.js';
-import {
-  isSendableAudioBase64,
-  isSendableAudioSampleRate,
-  isSendableAudioText,
-  MAX_AUDIO_FAILURE_MESSAGE_LENGTH,
-  MAX_AUDIO_MIME_TYPE_LENGTH,
-} from '../shared/audioResponse.js';
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
@@ -29,29 +20,9 @@ const MAX_ADMIN_JSON_PAYLOAD_LENGTH = 768 * 1024;
 const MAX_LIST_ITEMS = 128;
 const MAX_RULE_LENGTH = 4096;
 const MAX_PATH_LENGTH = 4096;
-const MAX_AUDIO_TRANSCRIPT_LENGTH = 256 * 1024;
 const SETTINGS_DESTINATIONS = ['user', 'project', 'local'] as const;
 const PERMISSION_BEHAVIORS = ['allow', 'deny', 'ask'] as const;
 const MCP_SCOPES = ['user', 'local', 'project'] as const;
-/**
- * Every failure class `AudioResultDto`'s `failed` variant may carry. Listed
- * in full, not narrowed: the kinds exist precisely so `permission_denied` /
- * `unavailable` / `not_recording` stay distinguishable end to end
- * (`audio_bridge.rs`'s `voice_error`/`stt_error`/`tts_error` branch on each),
- * and a kind dropped here does not degrade to `other` — it makes the engine
- * wait out its deadline instead.
- */
-const AUDIO_ERROR_KINDS: readonly AudioErrorKindDto[] = [
-  'permission_denied',
-  'no_speech',
-  'not_recording',
-  'unavailable',
-  'busy',
-  'retriable',
-  'synthesis_failed',
-  'other',
-];
-
 
 /**
  * The runtime membership check for the Desktop command surface, built from
@@ -193,107 +164,6 @@ function decodeImageBase64(value: unknown): Uint8Array {
     throw new Error('invalid image base64');
   }
   return new Uint8Array(bytes);
-}
-
-/**
- * A base64 audio payload. Unlike {@link decodeImageBase64} this deliberately
- * ACCEPTS the empty string and does not decode-and-re-encode:
- *
- * - `''` is the desktop's "already played in place" synthesis answer
- *   (`renderer/audio/synthesis.ts`; pinned on the Rust side by
- *   `audio_bridge.rs`'s `synthesize_treats_empty_pcm_as_played_in_place_not_a_failure`).
- *   `string()` rejects empty strings, so this cannot reuse it.
- * - A clip may be tens of megabytes; round-tripping it through `Buffer` just
- *   to compare it with itself would double the copy for no extra safety.
- *
- * The RULE itself lives in `shared/audioResponse.ts`, because the renderer
- * has to obey the same one — see that file's header for why a second
- * statement of it here would reintroduce a stall rather than a validation
- * error. Same for {@link audioText} and {@link audioSampleRate} below.
- */
-function audioBase64(value: unknown, name: string): string {
-  if (!isSendableAudioBase64(value)) throw new Error(`invalid ${name}`);
-  return value;
-}
-
-/** A wire string field of an audio result. */
-function audioText(value: unknown, maxLength: number, name: string): string {
-  if (!isSendableAudioText(value, maxLength)) throw new Error(`invalid ${name}`);
-  return value;
-}
-
-/** A sample rate. `0` is legal — it is half of the played-in-place pair. */
-function audioSampleRate(value: unknown): number {
-  if (!isSendableAudioSampleRate(value)) throw new Error('invalid audio sample rate');
-  return value;
-}
-
-/**
- * One `AudioResultDto`, bounded to what the desktop host may truthfully send.
- *
- * `transcript` is now a real path: the host-native audio executor can return
- * local speech recognition text, and that answer still needs the same local
- * gate every other audio result goes through so an invalid payload becomes an
- * immediate renderer failure instead of a parked engine request.
- */
-function validateAudioResult(value: unknown): AudioResultDto {
-  const input = object(value);
-  const type = string(input['type'], 'audio result type', 64);
-  switch (type) {
-    case 'ok':
-      exactKeys(input, ['type']);
-      return { type };
-    case 'recording_state':
-      exactKeys(input, ['type', 'recording']);
-      if (typeof input['recording'] !== 'boolean') throw new Error('invalid audio recording state');
-      return { type, recording: input['recording'] };
-    case 'recording':
-      exactKeys(input, ['type', 'audio_base64', 'mime_type']);
-      return {
-        type,
-        audio_base64: audioBase64(input['audio_base64'], 'audio base64'),
-        // The mime type the recorder actually used. It travels verbatim into
-        // `VoiceRecording.mime_type`, so a wrong value is a lie that reaches
-        // whatever decodes the bytes — bounded here, never rewritten.
-        mime_type: audioText(input['mime_type'], MAX_AUDIO_MIME_TYPE_LENGTH, 'audio mime type'),
-      };
-    case 'audio':
-      exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz']);
-      return {
-        type,
-        pcm_base64: audioBase64(input['pcm_base64'], 'audio pcm base64'),
-        // `0` is legal, and required: it is half of the played-in-place pair.
-        sample_rate_hz: audioSampleRate(input['sample_rate_hz']),
-      };
-    case 'transcript': {
-      exactKeys(input, ['type', 'text', 'language', 'confidence']);
-      const rawConfidence = input['confidence'];
-      if (
-        rawConfidence !== undefined
-        && (typeof rawConfidence !== 'number' || !Number.isFinite(rawConfidence) || rawConfidence < 0 || rawConfidence > 1)
-      ) {
-        throw new Error('invalid audio transcript confidence');
-      }
-      const confidence = typeof rawConfidence === 'number' ? rawConfidence : undefined;
-      return {
-        type,
-        text: audioText(input['text'], MAX_AUDIO_TRANSCRIPT_LENGTH, 'audio transcript text'),
-        ...(input['language'] === undefined
-          ? {}
-          : { language: audioText(input['language'], 64, 'audio transcript language') }),
-        ...(confidence === undefined ? {} : { confidence }),
-      };
-    }
-    case 'failed':
-      exactKeys(input, ['type', 'kind', 'message']);
-      return {
-        type,
-        kind: enumValue(input['kind'], 'audio error kind', AUDIO_ERROR_KINDS),
-        message: audioText(input['message'], MAX_AUDIO_FAILURE_MESSAGE_LENGTH, 'audio error message'),
-      };
-    default:
-      throw new Error('invalid audio result');
-  }
 }
 
 export function validateImageRefs(value: unknown): ImageRefDto[] {
@@ -619,13 +489,6 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       return { type, command: validateAdminCommand<HookAdminCommandDto>(
         input['command'], 'hook admin', ['get_document'], ['save_document'], [], ['validate_document'],
       ) };
-    case 'audio_response':
-      exactKeys(input, ['type', 'request_id', 'result']);
-      return {
-        type,
-        request_id: integer(input['request_id'], 'audio request id', 0),
-        result: validateAudioResult(input['result']),
-      };
     default:
       throw new Error('command is not allowed');
   }

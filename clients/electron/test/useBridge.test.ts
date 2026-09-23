@@ -14,10 +14,7 @@ import {
   completeTrackedTurn,
   createDesktopTurnToken,
   dequeueTrackedTurn,
-  discardAudioBindings,
   enqueueTrackedTurn,
-  pruneAudioBindings,
-  sessionAudioBindings,
   displayedSession,
   isLatestOperation,
   isLatestProjectCatalogRequest,
@@ -39,7 +36,6 @@ import {
   shouldReleaseSlashTurn,
   shouldResetBridgeRuntime,
 } from '../src/renderer/bridge/useBridge';
-import type { AudioRequestDeps } from '../src/renderer/audio/requests';
 import { emptyConversation } from '../src/renderer/bridge/conversation';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
 
@@ -693,83 +689,4 @@ test('dialog focus helper wraps both directions and captures focus that escaped'
   assert.equal(dialogFocusTarget(focusable, 'outside', true), 'last');
   assert.equal(dialogFocusTarget(focusable, 'middle', false), undefined);
   assert.equal(dialogFocusTarget([], null, false), undefined);
-});
-
-// ---------------------------------------------------------------------------
-// The microphone belongs to a SESSION, not to the hook.
-//
-// `useBridge()` is instantiated once (App.tsx) while `SessionRuntimeManager`
-// runs a Map of concurrent runtimes, each with its own engine, its own
-// `AudioBridge` and its own registered `voice` tool. One recorder shared across
-// all of them is not a tidiness problem: it hands one session's captured audio
-// to a different session's model.
-// ---------------------------------------------------------------------------
-
-function fakeRecorder(): AudioRequestDeps['recorder'] & { stopped: number } {
-  let recording = false;
-  return {
-    stopped: 0,
-    isRecording: () => recording,
-    async start() { recording = true; },
-    async stop() {
-      recording = false;
-      (this as { stopped: number }).stopped += 1;
-      return { audioBase64: '', mimeType: 'audio/webm' };
-    },
-  };
-}
-
-function fakeBindings(): AudioRequestDeps {
-  return {
-    recorder: fakeRecorder(),
-    async synthesize() { return { pcmBase64: '', sampleRateHz: 0 }; },
-    playback: () => ({ voiceSelection: 'system:default', rate: 1 }),
-  };
-}
-
-test('each session gets its own recorder, so one session cannot answer with another session\'s audio', () => {
-  const bindings = new Map<string, AudioRequestDeps>();
-  const a = sessionAudioBindings(bindings, 'session-a', fakeBindings);
-  const b = sessionAudioBindings(bindings, 'session-b', fakeBindings);
-
-  assert.notEqual(
-    a.recorder,
-    b.recorder,
-    'two concurrent sessions sharing one recorder means B\'s stop_recording finalizes A\'s clip into B\'s transcript',
-  );
-
-  void a.recorder.start({ sampleRateHz: 16000, format: 'webm' });
-  assert.equal(a.recorder.isRecording(), true);
-  assert.equal(
-    b.recorder.isRecording(),
-    false,
-    'a session that never started a capture must answer is_recording with false',
-  );
-
-  assert.equal(
-    sessionAudioBindings(bindings, 'session-a', fakeBindings),
-    a,
-    'a start/stop PAIR spans two engine requests, so one session must keep one recorder',
-  );
-});
-
-test('discarding a session releases a microphone it was still holding', async () => {
-  const bindings = new Map<string, AudioRequestDeps>();
-  const deps = sessionAudioBindings(bindings, 'session-a', fakeBindings);
-  await deps.recorder.start({ sampleRateHz: 16000, format: 'webm' });
-
-  discardAudioBindings(bindings, 'session-a');
-
-  assert.equal(bindings.has('session-a'), false);
-  assert.equal(deps.recorder.isRecording(), false, 'nothing else holds this recorder, so the mic would stay open');
-});
-
-test('an authoritative runtime snapshot prunes the audio bindings of sessions that are gone', () => {
-  const bindings = new Map<string, AudioRequestDeps>();
-  sessionAudioBindings(bindings, 'live', fakeBindings);
-  sessionAudioBindings(bindings, 'gone', fakeBindings);
-
-  pruneAudioBindings(bindings, ['live']);
-
-  assert.deepEqual([...bindings.keys()], ['live']);
 });

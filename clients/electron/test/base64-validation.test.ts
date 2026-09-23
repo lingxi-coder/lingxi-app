@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { isBase64 } from '../src/shared/base64';
-import { validateClientCommand, validateImageRefs } from '../src/main/validation';
+import { validateImageRefs } from '../src/main/validation';
+import { validateNativeAudioOperationResult } from '../src/shared/nativeAudio';
 
 /**
  * The base64 validator used to be
@@ -15,15 +16,8 @@ import { validateClientCommand, validateImageRefs } from '../src/main/validation
  * fixtures were `'AAEC'` and a payload rejected for length before the pattern
  * ever ran.
  *
- * The consequence was two live defects, both reproduced against real code
- * before this file existed:
- *
- * - `validateClientCommand` on a ~6 MB recording (a few minutes of speech,
- *   well inside the 24 MiB cap) threw instead of validating. The response
- *   never reached the engine and `stop_recording` parked for its full
- *   30-second deadline.
- * - `validateImageRefs` on a ~6 MB pasted image (well inside the 20 MiB cap)
- *   threw the same way, failing the prompt rather than the image.
+ * `validateImageRefs` and the native-audio operation result validator both
+ * scan such payloads without calling a regex path that recurses per group.
  *
  * `isBase64` scans a character class instead of repeating a group, which V8
  * compiles to a loop with no per-iteration frame.
@@ -32,12 +26,10 @@ import { validateClientCommand, validateImageRefs } from '../src/main/validation
 /** ~6 MB of base64: ~4.5 MB of Opus, or a 4.5 MB PNG. Both are ordinary sizes. */
 const SIX_MB = 'A'.repeat(6_000_000);
 
-test('a recording far larger than the old stack limit validates instead of throwing', () => {
-  assert.doesNotThrow(() => validateClientCommand({
-    type: 'audio_response',
-    request_id: 1,
-    result: { type: 'recording', audio_base64: SIX_MB, mime_type: 'audio/webm' },
-  }), 'a few minutes of speech must not blow the validator stack; that is a 30-second engine stall');
+test('a bounded native recording far larger than the old stack limit validates without stack recursion', () => {
+  assert.doesNotThrow(() => validateNativeAudioOperationResult({
+    type: 'recording', audio_base64: SIX_MB, mime_type: 'audio/webm',
+  }), 'a few minutes of speech must pass the production native-result validator without stack recursion');
 });
 
 test('an image far larger than the old stack limit validates instead of throwing', () => {

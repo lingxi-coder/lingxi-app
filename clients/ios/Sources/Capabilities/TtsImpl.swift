@@ -1,12 +1,11 @@
 // TtsImpl.swift — iOS native text-to-speech capability (parity with Android
 // SystemTextToSpeechTts.kt).
 //
-// Conforms to the generated `IosTts` UniFFI callback interface. The engine
-// (tool-speech) calls `synthesize(text:voice:)` and expects PCM16 mono audio +
-// its sample rate back as a `TtsAudioFfi`. We render with `AVSpeechSynthesizer`'s
+// Silent renderer used by the app-scoped AudioService. It returns PCM16 mono
+// audio and the actual sample rate using `AVSpeechSynthesizer`'s
 // buffer-callback API (`write(_:toBufferCallback:)`, iOS 13+), convert each
 // produced `AVAudioPCMBuffer` to 16-bit signed little-endian mono, and return
-// the concatenated frames. Errors map onto the generated `SpeechFfiError`.
+// the concatenated frames. Errors remain in the local audio error domain.
 
 import Foundation
 
@@ -14,80 +13,131 @@ import Foundation
     import AVFoundation
 
     /// Native TTS over `AVSpeechSynthesizer`, rendering to PCM16 mono.
-    final class TtsImpl: IosTts, @unchecked Sendable {
+    final class TtsImpl: @unchecked Sendable {
         // Held strongly for the duration of a synthesis so the callback fires.
         private let synthesizer = AVSpeechSynthesizer()
 
-        func synthesize(text: String, voice: String?) async throws -> TtsAudioFfi {
-            let preferences = VoicePreferencesSnapshot.load()
-            if let voice {
-                let selection = VoicePreferencesSnapshot.normalizeVoiceSelection(voice)
-                if selection.hasPrefix("sherpa:") {
-                    guard let parsed = VoiceRuntimeResolver.parseSherpaVoice(selection),
-                          let model = GeneratedVoiceModelCatalog.byID(parsed.modelID),
-                          model.voices.contains(where: { $0.id == parsed.voiceID }),
-                          VoiceModelFiles.modelRoot(for: model) != nil
-                    else { throw SpeechFfiError.Unavailable }
-                }
+        func render(
+            text: String,
+            configuration: AudioConfigurationV3,
+            route: AudioRouteResolution,
+            maxPayloadBytes: UInt64
+        ) async throws -> AudioPcmOutput {
+            let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { throw AudioServiceFailure.invalidRequest }
+            guard route.status == .ready, let effective = route.effective else {
+                throw AudioServiceFailure.unavailable
             }
-            let route = VoiceRuntimeResolver.speechRoute(
-                preferences: preferences,
-                voiceOverride: voice
+            guard maxPayloadBytes > 0, maxPayloadBytes <= UInt64(Int.max) else {
+                throw AudioServiceFailure.invalidRequest
+            }
+            let maximumBytes = Int(maxPayloadBytes)
+            let language = resolveAudioLanguageForNativeDevice(
+                configured: configuration.language,
+                deviceLocale: Locale.autoupdatingCurrent.identifier
             )
-            if let voice {
-                let selection = VoicePreferencesSnapshot.normalizeVoiceSelection(voice)
-                if selection.hasPrefix("sherpa:") {
-                    guard case .sherpa = route else { throw SpeechFfiError.Unavailable }
+
+            switch effective.source {
+            case .offline:
+                guard let modelID = effective.modelId,
+                      let model = GeneratedVoiceModelCatalog.byID(modelID),
+                      model.kind == .tts,
+                      let directory = VoiceModelFiles.modelRoot(for: model)
+                else { throw AudioServiceFailure.modelMissing }
+                let voiceID = effective.voiceId ?? model.voices.first?.id
+                guard let voiceID,
+                      let voiceIndex = model.voices.firstIndex(where: { $0.id == voiceID })
+                else { throw AudioServiceFailure.voiceMissing }
+                let rendered: (pcm: Data, sampleRate: UInt32)
+                do {
+                    rendered = try await SherpaSpeechRenderer.render(
+                        text: text,
+                        modelID: modelID,
+                        modelDirectory: directory,
+                        speakerID: Int32(voiceIndex),
+                        speed: configuration.rate,
+                        maximumBytes: maxPayloadBytes
+                    )
+                } catch {
+                    if error is CancellationError || error is AudioServiceFailure { throw error }
+                    throw AudioServiceFailure.synthesisFailed(error.localizedDescription, operationStarted: false)
                 }
-            }
-            if case let .sherpa(_, modelID, _, speakerID, modelDirectory) = route {
-                let rendered = try await SherpaSpeechRenderer.render(
+                let output = AudioPcmOutput(pcm: rendered.pcm, sampleRateHz: rendered.sampleRate)
+                try validate(output, maximumBytes: maximumBytes)
+                return output
+            case .system:
+                return try await renderSystem(
                     text: text,
-                    modelID: modelID,
-                    modelDirectory: modelDirectory,
-                    speakerID: speakerID,
-                    speed: preferences.rate
+                    language: language,
+                    voiceID: effective.voiceId,
+                    rate: configuration.rate,
+                    maximumBytes: maximumBytes
                 )
-                return TtsAudioFfi(pcm: rendered.pcm, sampleRateHz: rendered.sampleRate)
+            default:
+                throw AudioServiceFailure.unavailable
             }
+        }
 
+        private func renderSystem(
+            text: String,
+            language: String,
+            voiceID: String?,
+            rate: Double,
+            maximumBytes: Int
+        ) async throws -> AudioPcmOutput {
             let utterance = AVSpeechUtterance(string: text)
-            guard case let .system(configuredLanguage, configuredVoice) = route else {
-                throw SpeechFfiError.Unavailable
+            if let voiceID, voiceID != "default" {
+                guard let voice = AVSpeechSynthesisVoice(identifier: voiceID),
+                      Self.languageBase(voice.language) == Self.languageBase(language)
+                else { throw AudioServiceFailure.voiceMissing }
+                utterance.voice = voice
+            } else {
+                utterance.voice = AVSpeechSynthesisVoice(language: language)
             }
-            let explicitSystemVoice = voice.map {
-                VoicePreferencesSnapshot.normalizeVoiceSelection($0).hasPrefix("system:")
-            } == true
-            if let identifier = configuredVoice,
-               identifier != "default",
-               let v = AVSpeechSynthesisVoice(identifier: identifier),
-               VoiceCapabilityModel.normalizedLocaleIdentifier(v.language)
-                .split(separator: "-").first.map(String.init)?.lowercased()
-                == VoiceCapabilityModel.normalizedLocaleIdentifier(configuredLanguage)
-                .split(separator: "-").first.map(String.init)?.lowercased() {
-                utterance.voice = v
-            } else if explicitSystemVoice {
-                throw SpeechFfiError.Unavailable
-            } else if let v = AVSpeechSynthesisVoice(language: configuredLanguage) {
-                utterance.voice = v
-            }
-            utterance.rate = VoiceCapabilityModel.utteranceRate(from: preferences.rate)
+            utterance.rate = VoiceCapabilityModel.utteranceRate(from: rate)
 
-            return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<TtsAudioFfi, Error>) in
-                let collector = PcmCollector()
-                self.synthesizer.write(utterance) { buffer in
-                    guard let pcm = buffer as? AVAudioPCMBuffer else {
-                        // A zero-length buffer signals end-of-stream.
-                        collector.finish(cont)
-                        return
+            let collector = PcmCollector(maximumBytes: maximumBytes)
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<AudioPcmOutput, Error>) in
+                    collector.install(cont)
+                    self.synthesizer.write(utterance) { buffer in
+                        guard let pcm = buffer as? AVAudioPCMBuffer else {
+                            // A zero-length buffer signals end-of-stream.
+                            collector.finish()
+                            return
+                        }
+                        if pcm.frameLength == 0 {
+                            collector.finish()
+                            return
+                        }
+                        if !collector.append(pcm) {
+                            Task { @MainActor in
+                                _ = self.synthesizer.stopSpeaking(at: .immediate)
+                            }
+                        }
                     }
-                    if pcm.frameLength == 0 {
-                        collector.finish(cont)
-                        return
-                    }
-                    collector.append(pcm)
+                }
+            } onCancel: {
+                collector.cancel()
+                Task { @MainActor in
+                    _ = self.synthesizer.stopSpeaking(at: .immediate)
                 }
             }
+        }
+
+        private func validate(_ output: AudioPcmOutput, maximumBytes: Int) throws {
+            guard !output.pcm.isEmpty, output.pcm.count.isMultiple(of: MemoryLayout<Int16>.size),
+                  output.sampleRateHz > 0
+            else { throw AudioServiceFailure.synthesisFailed("provider returned invalid PCM", operationStarted: false) }
+            guard output.pcm.count <= maximumBytes else { throw AudioServiceFailure.mediaTooLarge }
+        }
+
+        private static func languageBase(_ identifier: String) -> String {
+            identifier.replacingOccurrences(of: "_", with: "-")
+                .split(separator: "-")
+                .first
+                .map(String.init)?
+                .lowercased() ?? ""
         }
     }
 
@@ -95,15 +145,44 @@ import Foundation
     /// and resolves the continuation once on end-of-stream.
     private final class PcmCollector: @unchecked Sendable {
         private let lock = NSLock()
+        private let maximumBytes: Int
         private var pcm = Data()
         private var sampleRate: UInt32 = 16000
-        private var done = false
+        private var continuation: CheckedContinuation<AudioPcmOutput, Error>?
+        private var result: Result<AudioPcmOutput, Error>?
 
-        func append(_ buffer: AVAudioPCMBuffer) {
-            lock.lock(); defer { lock.unlock() }
+        init(maximumBytes: Int) {
+            self.maximumBytes = maximumBytes
+        }
+
+        func install(_ continuation: CheckedContinuation<AudioPcmOutput, Error>) {
+            lock.lock()
+            if let result {
+                lock.unlock()
+                continuation.resume(with: result)
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+        }
+
+        func append(_ buffer: AVAudioPCMBuffer) -> Bool {
+            lock.lock()
+            guard result == nil else {
+                lock.unlock()
+                return false
+            }
             sampleRate = UInt32(buffer.format.sampleRate)
             let frames = Int(buffer.frameLength)
-            guard frames > 0 else { return }
+            guard frames > 0 else {
+                lock.unlock()
+                return true
+            }
+            guard frames <= (maximumBytes - pcm.count) / MemoryLayout<Int16>.size else {
+                lock.unlock()
+                complete { _, _ in .failure(AudioServiceFailure.mediaTooLarge) }
+                return false
+            }
 
             if let int16 = buffer.int16ChannelData {
                 // Already PCM16 — take channel 0 as little-endian bytes.
@@ -122,17 +201,37 @@ import Foundation
                 }
                 pcm.append(contentsOf: out)
             }
+            lock.unlock()
+            return true
         }
 
-        func finish(_ cont: CheckedContinuation<TtsAudioFfi, Error>) {
-            lock.lock(); defer { lock.unlock() }
-            if done { return }
-            done = true
-            if pcm.isEmpty {
-                cont.resume(throwing: SpeechFfiError.Unavailable)
-            } else {
-                cont.resume(returning: TtsAudioFfi(pcm: pcm, sampleRateHz: sampleRate))
+        func finish() {
+            complete { pcm, sampleRate in
+                guard !pcm.isEmpty, sampleRate > 0, pcm.count.isMultiple(of: MemoryLayout<Int16>.size) else {
+                    return .failure(AudioServiceFailure.synthesisFailed("system provider returned no PCM", operationStarted: false))
+                }
+                return .success(AudioPcmOutput(pcm: pcm, sampleRateHz: sampleRate))
             }
+        }
+
+        func cancel() {
+            complete { _, _ in .failure(CancellationError()) }
+        }
+
+        private func complete(
+            _ makeResult: (Data, UInt32) -> Result<AudioPcmOutput, Error>
+        ) {
+            lock.lock()
+            guard result == nil else {
+                lock.unlock()
+                return
+            }
+            let terminalResult = makeResult(pcm, sampleRate)
+            result = terminalResult
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(with: terminalResult)
         }
     }
 #endif

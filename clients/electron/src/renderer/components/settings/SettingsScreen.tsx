@@ -641,6 +641,8 @@ export function SettingsScreen({
       : <PagePlaceholder page={activePage} kind="not-wired" />;
   }
   const showLayerSwitcher = activePage.layered && canWriteHere;
+  const isExtensionHubPage = ['plugins', 'mcp', 'skills'].includes(activePage.id);
+  const pageTitle = isExtensionHubPage ? 'Plugins' : activePage.label;
 
   return (
     <div
@@ -737,8 +739,11 @@ export function SettingsScreen({
 
         <div className="settings-content-scroll" style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: 0 }}>
           <div style={{ padding: '20px 32px 40px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
-              <div style={{ fontSize: 18, fontWeight: 600 }}>{activePage.label}</div>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+              <div>
+                <div style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
+                {isExtensionHubPage && <div style={{ marginTop: 5, fontSize: 13.5, color: t.text3 }}>Manage plugins, skills, and MCPs</div>}
+              </div>
               {showLayerSwitcher && (
                 <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
               )}

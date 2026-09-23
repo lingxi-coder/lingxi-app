@@ -19,6 +19,21 @@ protocol VoiceBargeInSession: AnyObject {
 @MainActor
 protocol VoiceBargeInRecognizing: AnyObject {
     func start(language: String?, prefersOnDevice: Bool) async throws -> any VoiceBargeInSession
+    func start(
+        language: String?,
+        prefersOnDevice: Bool,
+        configurationSnapshot: AudioConfigurationSnapshot
+    ) async throws -> any VoiceBargeInSession
+}
+
+extension VoiceBargeInRecognizing {
+    func start(
+        language: String?,
+        prefersOnDevice: Bool,
+        configurationSnapshot _: AudioConfigurationSnapshot
+    ) async throws -> any VoiceBargeInSession {
+        try await start(language: language, prefersOnDevice: prefersOnDevice)
+    }
 }
 
 enum VoiceBargeInError: LocalizedError {
@@ -43,67 +58,148 @@ enum VoiceBargeInError: LocalizedError {
 /// short pre-roll and does not submit synthesized app speech to Speech.framework.
 @MainActor
 final class VoiceBargeInRecognizer: VoiceBargeInRecognizing {
+    private var activeSessions: [UUID: any VoiceBargeInSession] = [:]
+    private let coordinator: VoiceAudioSessionCoordinator
+    var onSessionsChanged: (@MainActor () -> Void)?
+
+    var activeSessionCount: Int { activeSessions.count }
+
+    init(coordinator: VoiceAudioSessionCoordinator? = nil) {
+        self.coordinator = coordinator ?? .shared
+    }
+
     func start(language: String?, prefersOnDevice: Bool) async throws -> any VoiceBargeInSession {
-        let preferences = VoicePreferencesSnapshot.load()
-        let identifier = VoiceCapabilityModel.resolvedRecognitionLocaleIdentifier(
-            configuredLanguage: language ?? preferences.language,
-            currentLocale: .autoupdatingCurrent
+        let snapshot = AudioConfigurationRuntime.snapshot()
+        return try await start(
+            language: language,
+            prefersOnDevice: prefersOnDevice,
+            configurationSnapshot: snapshot
+        )
+    }
+
+    func start(
+        language: String?,
+        prefersOnDevice: Bool,
+        configurationSnapshot: AudioConfigurationSnapshot
+    ) async throws -> any VoiceBargeInSession {
+        let identifier = resolveAudioLanguageForNativeDevice(
+            configured: language ?? configurationSnapshot.configuration.language,
+            deviceLocale: Locale.autoupdatingCurrent.identifier
         )
         let recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier))
-        let route = VoiceRuntimeResolver.recognitionRoute(
-            preferences: preferences,
-            languageOverride: language,
-            systemRecognizerAvailable: VoiceRuntimeResolver.systemRecognitionAvailable(
-                serviceAvailable: recognizer?.isAvailable == true,
-                authorization: SFSpeechRecognizer.authorizationStatus()
-            )
+        let route = AudioConfigurationRuntime.route(
+            kind: .recognition,
+            snapshot: configurationSnapshot,
+            languageOverride: language
         )
-        if case .sherpa = route {
+        guard route.status == .ready || route.status == .permissionRequired,
+              let effective = route.effective else { throw VoiceBargeInError.unavailable }
+        if effective.source == .offline {
             guard AVAudioApplication.shared.recordPermission == .granted else {
                 throw VoiceBargeInError.permissionDenied
             }
-            return SherpaVoiceBargeInSession(language: language)
+            guard let modelID = effective.modelId,
+                  let model = GeneratedVoiceModelCatalog.byID(modelID),
+                  model.kind == .stt,
+                  VoiceModelFiles.modelRoot(for: model) != nil
+            else { throw VoiceBargeInError.unavailable }
+            return track(SherpaVoiceBargeInSession(
+                language: language,
+                configurationSnapshot: configurationSnapshot,
+                route: route
+            ))
         }
-        guard case .system = route, let recognizer, recognizer.isAvailable else {
+        guard effective.source == .system, let recognizer, recognizer.isAvailable else {
             throw VoiceBargeInError.unavailable
         }
         guard SFSpeechRecognizer.authorizationStatus() == .authorized,
               AVAudioApplication.shared.recordPermission == .granted
         else { throw VoiceBargeInError.permissionDenied }
 
-        let lease = try await VoiceAudioSessionCoordinator.shared.acquire(.flowDuplex)
+        let lease = try await coordinator.acquire(.flowDuplex)
         do {
             let operation = try VoiceBargeInOperation(
                 recognizer: recognizer,
                 prefersOnDevice: prefersOnDevice,
-                lease: lease
+                lease: lease,
+                coordinator: coordinator
             )
-            return SystemVoiceBargeInSession(operation: operation)
+            return track(SystemVoiceBargeInSession(operation: operation))
         } catch {
-            await VoiceAudioSessionCoordinator.shared.release(lease)
+            await coordinator.release(lease)
             throw error
         }
+    }
+
+    func stopAll() async {
+        let sessions = Array(activeSessions.values)
+        for session in sessions { await session.stop() }
+        activeSessions.removeAll()
+        onSessionsChanged?()
+    }
+
+    private func track(_ session: any VoiceBargeInSession) -> any VoiceBargeInSession {
+        let id = UUID()
+        activeSessions[id] = session
+        onSessionsChanged?()
+        return TrackedVoiceBargeInSession(session: session) { [weak self] in
+            self?.activeSessions.removeValue(forKey: id)
+            self?.onSessionsChanged?()
+        }
+    }
+}
+
+@MainActor
+private final class TrackedVoiceBargeInSession: VoiceBargeInSession {
+    let events: AsyncStream<VoiceBargeInEvent>
+    private let session: any VoiceBargeInSession
+    private let onStop: @MainActor () -> Void
+    private var isStopped = false
+
+    init(session: any VoiceBargeInSession, onStop: @escaping @MainActor () -> Void) {
+        self.session = session
+        self.events = session.events
+        self.onStop = onStop
+    }
+
+    func stop() async {
+        guard !isStopped else { return }
+        isStopped = true
+        await session.stop()
+        onStop()
     }
 }
 
 @MainActor
 private final class SherpaVoiceBargeInSession: VoiceBargeInSession {
     let events: AsyncStream<VoiceBargeInEvent>
-    private let recognizer = SttImpl()
+    private let language: String?
+    private let configurationSnapshot: AudioConfigurationSnapshot
+    private let route: AudioRouteResolution
     private var continuation: AsyncStream<VoiceBargeInEvent>.Continuation?
     private var task: Task<Void, Never>?
 
-    init(language: String?) {
+    init(
+        language: String?,
+        configurationSnapshot: AudioConfigurationSnapshot,
+        route: AudioRouteResolution
+    ) {
+        self.language = language
+        self.configurationSnapshot = configurationSnapshot
+        self.route = route
         var captured: AsyncStream<VoiceBargeInEvent>.Continuation?
         events = AsyncStream { captured = $0 }
         continuation = captured
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                let transcript = try await recognizer.transcribe(
-                    language: language,
+                let rawTranscript = try await IOSAudioService.shared.transcribeForBargeIn(
+                    language: self.language,
+                    configurationSnapshot: self.configurationSnapshot,
+                    route: self.route,
                     automaticEndpointAfterSilence: .milliseconds(800)
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+                let transcript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !Task.isCancelled else { return }
                 if transcript.isEmpty {
                     continuation?.yield(.empty)
@@ -124,7 +220,7 @@ private final class SherpaVoiceBargeInSession: VoiceBargeInSession {
     }
 
     func stop() async {
-        recognizer.cancelRecognition()
+        await IOSAudioService.shared.cancelTranscription(owner: .ui(instanceID: "flow-barge-in"))
         task?.cancel()
         task = nil
         continuation?.finish()
@@ -156,6 +252,7 @@ private final class VoiceBargeInOperation: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let recognizer: SFSpeechRecognizer
     private let prefersOnDevice: Bool
+    private let coordinator: VoiceAudioSessionCoordinator
     private let audioEngine = AVAudioEngine()
     private let clock = ContinuousClock()
     private var continuation: AsyncStream<VoiceBargeInEvent>.Continuation?
@@ -181,10 +278,12 @@ private final class VoiceBargeInOperation: @unchecked Sendable {
     init(
         recognizer: SFSpeechRecognizer,
         prefersOnDevice: Bool,
-        lease: VoiceAudioSessionCoordinator.Lease
+        lease: VoiceAudioSessionCoordinator.Lease,
+        coordinator: VoiceAudioSessionCoordinator
     ) throws {
         self.recognizer = recognizer
         self.prefersOnDevice = prefersOnDevice
+        self.coordinator = coordinator
         self.lease = lease
         var captured: AsyncStream<VoiceBargeInEvent>.Continuation?
         events = AsyncStream { captured = $0 }
@@ -216,7 +315,8 @@ private final class VoiceBargeInOperation: @unchecked Sendable {
         endpointTask?.cancel()
         timeoutTask?.cancel()
         if let lease {
-            Task { await VoiceAudioSessionCoordinator.shared.release(lease) }
+            let coordinator = self.coordinator
+            Task { await coordinator.release(lease) }
         }
     }
 
@@ -230,7 +330,7 @@ private final class VoiceBargeInOperation: @unchecked Sendable {
         cleanup.timeout?.cancel()
         cleanup.recognition?.cancel()
         if let lease = cleanup.lease {
-            await VoiceAudioSessionCoordinator.shared.release(lease)
+            await coordinator.release(lease)
         }
         cleanup.continuation?.finish()
         markCleanupFinished()
@@ -429,7 +529,7 @@ private final class VoiceBargeInOperation: @unchecked Sendable {
         cleanup.recognition?.cancel()
         Task { [cleanup] in
             if let lease = cleanup.lease {
-                await VoiceAudioSessionCoordinator.shared.release(lease)
+                await coordinator.release(lease)
             }
             cleanup.continuation?.yield(event)
             cleanup.continuation?.finish()

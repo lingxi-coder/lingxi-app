@@ -6,9 +6,11 @@ import { BetaComposer } from '../../src/renderer/components/BetaDesktop';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import { emptyRuntimeCenterState } from '../../src/renderer/bridge/runtimeCenterState';
+import type { AudioOperationDto, AudioOperationResultDto } from '@lingxi/bridge-client';
 import {
   defaultNativeAudioSnapshot,
   type NativeAudioCommand,
+  type NativeAudioOperationResponse,
   type NativeAudioResponse,
 } from '../../src/shared/nativeAudio';
 
@@ -20,6 +22,40 @@ let cancelCount = 0;
 let modelRefreshCount = 0;
 const slashCommands: string[] = [];
 const audioRequests: NativeAudioCommand[] = [];
+const audioOperationTypes: AudioOperationDto['type'][] = [];
+let settlePendingAudioListen: ((result: AudioOperationResultDto) => void) | undefined;
+let audioCancelCount = 0;
+let audioFinishCount = 0;
+
+function executeAudioOperation(operation: AudioOperationDto): Promise<NativeAudioOperationResponse> {
+  audioOperationTypes.push(operation.type);
+  if (operation.type === 'listen') {
+    return new Promise((resolve) => {
+      settlePendingAudioListen = (result) => {
+        settlePendingAudioListen = undefined;
+        resolve({ snapshot: defaultNativeAudioSnapshot(), result });
+      };
+    });
+  }
+  const result: AudioOperationResultDto = operation.type === 'speak'
+    ? { type: 'playback_completed' }
+    : operation.type === 'synthesize'
+      ? { type: 'synthesized', pcm_base64: 'AQI=', sample_rate_hz: 24_000 }
+      : { type: 'failed', error: { kind: 'unsupported', message: 'fixture operation is unsupported' } };
+  return Promise.resolve({ snapshot: defaultNativeAudioSnapshot(), result });
+}
+
+function cancelAudioOperation(): Promise<void> {
+  audioCancelCount += 1;
+  settlePendingAudioListen?.({ type: 'failed', error: { kind: 'cancelled', message: 'fixture audio was cancelled' } });
+  return Promise.resolve();
+}
+
+function finishAudioListen(): Promise<void> {
+  audioFinishCount += 1;
+  settlePendingAudioListen?.({ type: 'transcript', text: 'dictated text', language: 'en-US' });
+  return Promise.resolve();
+}
 
 /** The catalog the engine's `model_list` normally fills in. */
 const ALL_MODELS = [
@@ -72,6 +108,8 @@ if (!window.lingxi) (window as unknown as { lingxi: { audio: unknown } }).lingxi
       audioRequests.push(command);
       return audioResponse(command);
     },
+    execute: executeAudioOperation,
+    cancel: cancelAudioOperation,
     onEvent: () => () => undefined,
   },
 };
@@ -84,6 +122,10 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
     loading: false,
     connected,
     sessionLoading: false,
+    audioSnapshot: defaultNativeAudioSnapshot(),
+    audioExecute: executeAudioOperation,
+    audioCancel: cancelAudioOperation,
+    audioFinishListen: finishAudioListen,
     activeSession: { projectPath, sessionId },
     bootstrap: {
       revision: 1,
@@ -178,8 +220,11 @@ function Fixture() {
       sendPending: () => sendPending,
       lastSentPrompt: () => lastSentPrompt,
       resolveSend: () => resolvePendingSend?.(),
-      clearAudioRequests: () => { audioRequests.length = 0; },
+      clearAudioRequests: () => { audioRequests.length = 0; audioOperationTypes.length = 0; },
       audioRequestTypes: () => audioRequests.map((request) => request.type),
+      audioOperationTypes: () => [...audioOperationTypes],
+      audioCancelCount: () => audioCancelCount,
+      audioFinishCount: () => audioFinishCount,
       setModels: (next) => setModels(next === 'all' ? ALL_MODELS : next),
       modelRefreshCount: () => modelRefreshCount,
       setReady,
@@ -229,6 +274,9 @@ declare global {
       resolveSend(): void;
       clearAudioRequests(): void;
       audioRequestTypes(): string[];
+      audioOperationTypes(): AudioOperationDto['type'][];
+      audioCancelCount(): number;
+      audioFinishCount(): number;
       setModels(models: string[] | 'all'): void;
       modelRefreshCount(): number;
       setReady(ready: boolean): void;

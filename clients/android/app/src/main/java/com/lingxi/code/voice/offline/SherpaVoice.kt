@@ -1,8 +1,11 @@
 package com.lingxi.code.voice.offline
 
-import android.util.Log
+import com.lingxi.code.voice.audio.AudioDriverException
+import com.lingxi.code.voice.audio.DeviceAudioError
+import com.lingxi.code.voice.audio.DeviceAudioErrorKind
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
+import kotlinx.coroutines.CancellationException
 
 /**
  * Facade over the offline sherpa-onnx STT/TTS for a chosen language pack. The
@@ -12,9 +15,8 @@ import com.lingxi.code.voice.audio.RealtimeSpeechSession
  * is swallowed → the caller falls back to the system voice.
  */
 object SherpaVoice {
-    private const val TAG = "SherpaVoice"
-    private val sttCache = mutableMapOf<String, SherpaStt?>()
-    private val ttsCache = mutableMapOf<String, SherpaTts?>()
+    private val sttCache = mutableMapOf<String, SherpaStt>()
+    private val ttsCache = mutableMapOf<String, SherpaTts>()
     private val cacheLock = Any()
 
     private fun sttEntry(lang: String): OfflineModelEntry? =
@@ -33,36 +35,36 @@ object SherpaVoice {
     fun ttsReady(lang: String, modelId: String? = null): Boolean =
         ttsEntry(lang, modelId)?.let { VoiceModelDownloader.isReady(it) } == true
 
-    /** Record one utterance and transcribe it offline. Returns null if unavailable. */
-    suspend fun transcribe(lang: String): String? {
-        val entry = sttEntry(lang) ?: return null
-        if (!VoiceModelDownloader.isReady(entry)) return null
-        val rec = synchronized(cacheLock) {
-            sttCache.getOrPut(entry.id) {
-                runCatching { SherpaStt.load(entry, VoiceModelDownloader.modelDir(entry.id)) }
-                    .onFailure { Log.w(TAG, "STT load failed for ${entry.id}: ${it.message}") }
-                    .getOrNull()
-            }
-        } ?: return null
-        return runCatching { rec.transcribeOnce() }.getOrNull()
+    /** Record one live utterance with the selected offline model; null means no speech was decoded. */
+    suspend fun transcribe(lang: String, modelId: String? = null): String? {
+        val entry = modelId?.let(OfflineModelCatalog::byId)?.takeIf { it.kind == ModelKind.Stt }
+            ?: sttEntry(lang)?.takeIf { modelId == null }
+            ?: throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.ModelMissing, "selected offline speech model is unavailable"))
+        if (entry.languages.none { it.equals(lang, ignoreCase = true) }) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.Unsupported, "selected offline model does not support the language"))
+        }
+        if (!VoiceModelDownloader.isReady(entry)) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.ModelMissing, "selected offline speech model is not installed"))
+        }
+        val recognizer = loadStt(entry)
+        return recognizer.transcribeOnce()
     }
 
     fun openRealtimeSession(
         lang: String,
+        modelId: String? = null,
         callbacks: RealtimeSpeechCallbacks,
     ): RealtimeSpeechSession {
-        val entry = checkNotNull(sttEntry(lang)) { "No offline speech model matches $lang" }
-        check(VoiceModelDownloader.isReady(entry)) { "Offline speech model for $lang is unavailable." }
-        val recognizer = synchronized(cacheLock) {
-            sttCache.getOrPut(entry.id) {
-                runCatching { SherpaStt.load(entry, VoiceModelDownloader.modelDir(entry.id)) }
-                    .onFailure { Log.w(TAG, "STT load failed for ${entry.id}: ${it.message}") }
-                    .getOrNull()
-            }
-        } ?: error("Offline speech model for $lang is unavailable.")
-        return checkNotNull(recognizer) {
-            "Offline speech model for $lang is unavailable."
-        }.openRealtimeSession(callbacks)
+        val entry = modelId?.let(OfflineModelCatalog::byId)?.takeIf { it.kind == ModelKind.Stt }
+            ?: sttEntry(lang)?.takeIf { modelId == null }
+            ?: throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.ModelMissing, "No offline speech model matches $lang"))
+        if (entry.languages.none { it.equals(lang, ignoreCase = true) }) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.Unsupported, "offline speech model does not match $lang"))
+        }
+        if (!VoiceModelDownloader.isReady(entry)) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.ModelMissing, "offline speech model for $lang is unavailable"))
+        }
+        return loadStt(entry).openRealtimeSession(callbacks)
     }
 
     suspend fun renderToPcm(
@@ -71,33 +73,35 @@ object SherpaVoice {
         voiceId: String? = null,
         text: String,
         speed: Float = 1.0f,
+        maxPcmBytes: Int,
     ): Pair<ByteArray, Int>? {
-        val entry = ttsEntry(language, modelId) ?: return null
-        if (!VoiceModelDownloader.isReady(entry)) return null
-        val tts = synchronized(cacheLock) {
-            ttsCache.getOrPut(entry.id) {
-                runCatching { SherpaTts.load(entry, VoiceModelDownloader.modelDir(entry.id)) }
-                    .onFailure { Log.w(TAG, "TTS load failed for ${entry.id}: ${it.message}") }
-                    .getOrNull()
-            }
-        } ?: return null
+        val entry = ttsEntry(language, modelId)
+            ?: throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.ModelMissing, "selected offline speech model is unavailable"))
+        if (!VoiceModelDownloader.isReady(entry)) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.ModelMissing, "selected offline speech model is not installed"))
+        }
+        val tts = loadTts(entry)
         val sid = entry.voices.indexOfFirst { it.id == voiceId }.takeIf { it != null && it >= 0 } ?: 0
-        return runCatching { tts.renderToPcm(text, sid = sid, speed = speed) }.getOrNull()
+        return tts.renderToPcm(text, sid = sid, speed = speed, maxPcmBytes = maxPcmBytes)
     }
 
-    /** Speak [text] offline. No-op if the pack is unavailable. */
-    suspend fun speak(lang: String, text: String) {
-        val entry = ttsEntry(lang) ?: return
-        if (!VoiceModelDownloader.isReady(entry)) return
-        val tts = synchronized(cacheLock) {
-            ttsCache.getOrPut(entry.id) {
-                runCatching { SherpaTts.load(entry, VoiceModelDownloader.modelDir(entry.id)) }
-                    .onFailure { Log.w(TAG, "TTS load failed for ${entry.id}: ${it.message}") }
-                    .getOrNull()
-            }
-        } ?: return
-        runCatching { tts.speak(text) }
+    private fun loadStt(entry: OfflineModelEntry): SherpaStt = synchronized(cacheLock) {
+        sttCache[entry.id] ?: try {
+            SherpaStt.load(entry, VoiceModelDownloader.modelDir(entry.id)).also { sttCache[entry.id] = it }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.NativeFailure, error.message ?: "offline speech model could not be loaded"))
+        }
     }
 
-    fun stopSpeak() { ttsCache.values.forEach { it?.stop() } }
+    private fun loadTts(entry: OfflineModelEntry): SherpaTts = synchronized(cacheLock) {
+        ttsCache[entry.id] ?: try {
+            SherpaTts.load(entry, VoiceModelDownloader.modelDir(entry.id)).also { ttsCache[entry.id] = it }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.NativeFailure, error.message ?: "offline speech model could not be loaded"))
+        }
+    }
 }

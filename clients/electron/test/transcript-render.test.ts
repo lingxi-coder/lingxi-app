@@ -461,7 +461,8 @@ test('Stage omits transcript cost footer and left gutter markers', () => {
 test('Stage uses compact responsive message gutters', () => {
   const html = renderStage({ type: 'narration', id: 'n1', role: 'assistant', text: 'Compact gutter.' });
   assert.match(html, /max-width:var\(--conversation-width, 860px\)/);
-  assert.match(html, /padding-inline:var\(--conversation-gutter, 24px\)/);
+  assert.match(html, /padding-inline-start:var\(--conversation-gutter, 24px\)/);
+  assert.match(html, /padding-inline-end:calc\(var\(--conversation-gutter, 24px\) \+ var\(--runtime-summary-scroll-overhang, 0px\)\)/);
 });
 
 // ── Tool defaults and icon vocabulary ────────────────────────────────────────

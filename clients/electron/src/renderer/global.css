@@ -1856,6 +1856,13 @@ body {
   background: var(--desktop-accent, #4d98f7);
   pointer-events: none;
 }
+.sidebar-session-drag-overlay {
+  pointer-events: none !important;
+}
+.sidebar-session-drag-preview {
+  overflow: hidden;
+  opacity: .98;
+}
 .sidebar-resize-handle {
   position: absolute;
   z-index: 3;

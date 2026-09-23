@@ -330,7 +330,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         data-session-project-path={projectPath}
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
-          padding: pinnedSection ? '6px 92px 6px 10px' : '6px 64px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
+          padding: pinnedSection ? '6px 64px 6px 10px' : '6px 64px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
           touchAction: 'none', userSelect: 'none',
           background: active ? t.surfaceActive : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
@@ -350,11 +350,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
           {metadata ?? formatSessionMetadata(session.modified_rfc3339, session.message_count)}
         </span>
       </button>
-      {pinnedSection && <button type="button" className="sidebar-row-action" aria-label={`Rename ${session.title}`} title="Rename chat" onClick={onRename} disabled={opening}
-        style={{ position: 'absolute', right: 60, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
-        <Icon name="pencil" size={13} stroke={1.8} />
-      </button>}
-      <button type="button" className="sidebar-row-action" data-visible={pinnedSection || undefined} aria-label={`${pinned ? 'Unpin' : 'Pin'} ${session.title || 'Untitled session'}`}
+      <button type="button" className="sidebar-row-action" aria-label={`${pinned ? 'Unpin' : 'Pin'} ${session.title || 'Untitled session'}`}
         title={pinned ? 'Unpin session' : 'Pin session'} onClick={onPin} disabled={opening}
         style={{ position: 'absolute', right: 32, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: pinned ? t.accent : t.text3, cursor: 'pointer' }}>
         <Icon name="pin" size={13} stroke={1.8} />

@@ -1829,8 +1829,7 @@ body {
 .sidebar-row-action[data-visible='true'] { opacity: 1; }
 /* The session-error mark shares the trailing slot with those actions, so it
    yields whenever they are revealed — the same hover/focus conditions, inverted.
-   A pinned row keeps its action visible permanently, which is why the pinned
-   LIST marks its errors inline instead of here. */
+   Pinned rows mark errors inline instead of using this slot. */
 .sidebar-session-error { opacity: 1; transition: opacity 110ms ease; }
 .sidebar-tree-row:hover > .sidebar-session-error,
 .sidebar-tree-row:focus-within > .sidebar-session-error,

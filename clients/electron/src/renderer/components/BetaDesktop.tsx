@@ -1,5 +1,4 @@
 import { createPortal } from 'react-dom';
-import { ShellIcon } from './TerminalPanel';
 import { ContextWindow } from './ContextWindow';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type {
@@ -1295,8 +1294,8 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         data-active={runtimeCenterOpen ? 'true' : undefined}
         onClick={onToggleRuntimeCenter}
         style={topbarActionTokens}
-      ><Icon name="summary-list" size={20} /></button>
-      <button type="button" className="no-drag desktop-topbar-action" aria-label="Toggle terminal" title="Toggle terminal (Ctrl+`)" aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><ShellIcon /></button>
+      ><Icon name="topbar-summary" size={20} stroke={1.75} /></button>
+      <button type="button" className="no-drag desktop-topbar-action" aria-label="Toggle terminal" title="Toggle terminal (Ctrl+`)" aria-controls="desktop-terminal" aria-expanded={terminalOpen} aria-pressed={terminalOpen} disabled={!terminalAvailable} data-active={terminalOpen ? 'true' : undefined} onClick={onToggleTerminal} style={topbarActionTokens}><Icon name="topbar-terminal" size={20} stroke={1.75} /></button>
       <button
         className="no-drag desktop-topbar-action desktop-inspector-trigger"
         type="button"
@@ -1316,7 +1315,7 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
           });
         }}
         style={topbarActionTokens}
-      ><Icon name={inspectorOpen ? 'panel-right' : 'panel-right-hidden'} size={20} /></button>
+      ><Icon name={inspectorOpen ? 'topbar-inspector-open' : 'topbar-inspector-closed'} size={20} stroke={1.75} /></button>
     </header>
   );
 }

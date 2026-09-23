@@ -307,7 +307,10 @@ export function RuntimeCenterOverview({ bridge }: { bridge: UseBridge }) {
     if (!center.overviewOpen || !isOverlayLayout) return undefined;
     const closeOnOutsidePointerDown = (event: PointerEvent) => {
       if (!(event.target instanceof Node) || ref.current?.contains(event.target)) return;
-      if (event.target instanceof Element && event.target.closest('[data-runtime-summary-owned="true"]')) return;
+      if (event.target instanceof Element && (
+        event.target.closest('[data-runtime-summary-owned="true"]')
+        || event.target.closest('[data-runtime-center-trigger="true"]')
+      )) return;
       closeOverview(false);
     };
     document.addEventListener('pointerdown', closeOnOutsidePointerDown, true);

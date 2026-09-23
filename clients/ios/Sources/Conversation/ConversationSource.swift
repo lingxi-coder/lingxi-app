@@ -3548,7 +3548,7 @@ final class MockConversationSource: ConversationSource {
                 // events (zero rows ⇒ zero events). Best-effort — unlike the
                 // model/session listings above, the panel is not worth
                 // failing the whole handle over (it self-heals on pushes).
-                try? await handle.submit(command: .taskList(statusFilter: nil))
+                try? await handle.submit(command: .taskList(statusFilter: nil, requestId: nil))
                 return handle
             }
             handleBuildTask = buildTask
@@ -3645,7 +3645,7 @@ final class MockConversationSource: ConversationSource {
             Task { [weak self] in
                 guard let self else { return }
                 // Best-effort: the panel self-heals on the next status push.
-                try? await self.submitCommand(.taskList(statusFilter: nil))
+                try? await self.submitCommand(.taskList(statusFilter: nil, requestId: nil))
             }
         }
 

@@ -1703,7 +1703,7 @@ class EngineConversationSource private constructor(
     }
 
     override suspend fun refreshExecutionStatus() {
-        handle.submit(ClientCommand.TaskList(null))
+        handle.submit(ClientCommand.TaskList(statusFilter = null, requestId = null))
         handle.submit(ClientCommand.ListSessionAgents)
     }
 
@@ -2187,7 +2187,7 @@ class EngineConversationSource private constructor(
                 // after lifecycle resume. Task rows and session-agent rows are
                 // independent listing replies and may arrive in either order.
                 try {
-                    handle.submit(ClientCommand.TaskList(statusFilter = null))
+                    handle.submit(ClientCommand.TaskList(statusFilter = null, requestId = null))
                     handle.submit(ClientCommand.ListSessionAgents)
                 } catch (_: Throwable) {
                     // Status is best-effort; a later foreground refresh retries.

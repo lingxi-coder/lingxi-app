@@ -1,21 +1,30 @@
 /** Preserve complete unified hunks, including their file headers, for Git apply. */
-export interface ReviewHunk { heading: string; lines: string[]; patch: string; oldStart: number; newStart: number }
+export interface ReviewHunk { heading: string; lines: string[]; patch: string; oldStart: number; newStart: number; filePath: string }
 export function reviewHunks(patch: string): ReviewHunk[] {
   const lines = patch.split('\n');
   const result: ReviewHunk[] = [];
   let header: string[] = [];
   let current: ReviewHunk | undefined;
+  let oldPath = '';
+  let newPath = '';
   for (const line of lines) {
-    if (line.startsWith('diff --git ')) { header = [line]; current = undefined; }
+    if (line.startsWith('diff --git ')) { header = [line]; current = undefined; oldPath = ''; newPath = ''; }
+    else if (!current && line.startsWith('--- ')) oldPath = reviewFilePath(line.slice(4), 'a/');
+    else if (!current && line.startsWith('+++ ')) newPath = reviewFilePath(line.slice(4), 'b/');
     else if (line.startsWith('@@ ')) {
       const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      current = { heading: line, lines: [], patch: [...header, line].join('\n') + '\n', oldStart: Number(match?.[1] ?? 0), newStart: Number(match?.[2] ?? 0) };
+      current = { heading: line, lines: [], patch: [...header, line].join('\n') + '\n', oldStart: Number(match?.[1] ?? 0), newStart: Number(match?.[2] ?? 0), filePath: newPath && newPath !== '/dev/null' ? newPath : oldPath };
       result.push(current);
     } else if (current && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' ') || line.startsWith('\\'))) {
       current.lines.push(line); current.patch += line + '\n';
     } else if (!current && line) header.push(line);
   }
   return result;
+}
+function reviewFilePath(value: string, prefix: string): string {
+  const path = value.trim();
+  const unquoted = path.startsWith('"') && path.endsWith('"') ? path.slice(1, -1) : path;
+  return unquoted.startsWith(prefix) ? unquoted.slice(prefix.length) : unquoted;
 }
 export interface ReviewLine { old?: number; next?: number; text: string; kind: 'add' | 'remove' | 'context' | 'note' }
 export function reviewLines(hunk: ReviewHunk): ReviewLine[] {

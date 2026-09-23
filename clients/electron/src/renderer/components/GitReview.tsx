@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import type { GitApi, GitBranch, GitCommit, GitConflict, GitDiff, GitFile, GitRequest, GitResult, GitScope, GitStash, GitStatus } from '../../shared/git';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
+import { EXPLICIT_HIGHLIGHT_MAX_CHARS, highlightCodeForDisplay } from './CodeBlock';
 import { reviewHunks, reviewLines, splitReviewLines, type ReviewLine } from './gitDiff';
 
 type Mode = 'working' | 'staged' | 'branch' | 'commit' | 'stash';
@@ -109,7 +110,7 @@ function Confirm({ title, description, paths, onConfirm, onClose }: { title: str
   const [busy, setBusy] = useState(false);
   return <Dialog title={title} onClose={onClose}><p>{description}</p>{paths && <ul className="git-confirm-paths">{paths.map((path) => <li key={path}>{path}</li>)}</ul>}<footer><button onClick={onClose} disabled={busy}>Cancel</button><button className="git-danger" disabled={busy} onClick={async () => { setBusy(true); await onConfirm(); onClose(); }}>{busy ? 'Working…' : title}</button></footer></Dialog>;
 }
-function themeStyle(t: ReturnType<typeof useT>): CSSProperties { return { '--git-bg': t.surface, '--git-fg': t.text, '--git-muted': t.text3, '--git-border': t.border, '--git-hover': t.surfaceHover, '--git-accent': t.accent, '--git-danger': t.danger, '--git-add': t.dark ? 'rgba(74, 190, 110, .13)' : 'rgba(49, 160, 80, .09)', '--git-remove': t.dark ? 'rgba(230, 83, 100, .13)' : 'rgba(220, 65, 85, .09)', color: t.text } as CSSProperties; }
+function themeStyle(t: ReturnType<typeof useT>): CSSProperties { return { '--git-bg': t.surface, '--git-fg': t.text, '--git-muted': t.text3, '--git-border': t.border, '--git-hover': t.surfaceHover, '--git-accent': t.accent, '--git-danger': t.danger, '--git-add': t.dark ? 'rgba(74, 190, 110, .13)' : 'rgba(49, 160, 80, .09)', '--git-remove': t.dark ? 'rgba(230, 83, 100, .13)' : 'rgba(220, 65, 85, .09)', ...Object.fromEntries(Object.entries(t.syntax).map(([syntaxClass, color]) => [`--git-syntax-${syntaxClass}`, color])), color: t.text } as CSSProperties; }
 export function GitReview() {
   const git = useContext(GitContext);
   return <GitReviewContent key={`${git?.scope?.projectPath ?? ''}\0${git?.scope?.sessionId ?? ''}`}/>;
@@ -178,9 +179,40 @@ function DirectoryFiles({ files, tree, renderFile }: { files: GitFile[]; tree: b
 }
 function Diff({ diff, mode, path, refreshing }: { diff: GitDiff; mode: Mode; path: string; refreshing: boolean }) {
   const git = useGit(); const hunks = useMemo(() => reviewHunks(diff.patch), [diff.patch]);
-  return <div className="git-diff" aria-label="File diff"><div className="git-diff-title">{path || 'All file changes'}</div>{diff.truncated && <div className="git-message">Preview truncated. Open the file or terminal to inspect the complete diff. Hunk actions are disabled.</div>}{diff.binary ? <div className="git-empty">Binary file changed. No text preview.</div> : hunks.length ? hunks.map((hunk, index) => { const lines = reviewLines(hunk); return <section className="git-hunk" key={`${hunk.heading}-${index}`}><header><code>{hunk.heading}</code>{(mode === 'working' || mode === 'staged') && <button disabled={git.busy || refreshing || diff.token !== git.status?.token || diff.truncated} onClick={() => void git.run({ kind: mode === 'staged' ? 'unstage' : 'stage', patch: hunk.patch, token: diff.token })}>{mode === 'staged' ? 'Unstage hunk' : 'Stage hunk'}</button>}</header>{git.view.split ? <div className="git-split-diff">{splitReviewLines(lines).map(([left, right], i) => <div className="git-split-row" key={i}><DiffCell line={left} side="old"/><DiffCell line={right} side="next"/></div>)}</div> : <div>{lines.map((line, i) => <div className={`git-diff-line ${line.kind}`} key={i}><span className="git-line-number">{line.old}</span><span className="git-line-number">{line.next}</span><code>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}{line.text}</code></div>)}</div>}</section>; }) : diff.patch ? <pre className="git-raw-diff">{diff.patch}</pre> : <div className="git-empty">No changes in this comparison.</div>}</div>;
+  return <div className="git-diff" aria-label="File diff">
+    <div className="git-diff-title">{path || 'All file changes'}</div>
+    {diff.truncated && <div className="git-message">Preview truncated. Open the file or terminal to inspect the complete diff. Hunk actions are disabled.</div>}
+    {diff.binary ? <div className="git-empty">Binary file changed. No text preview.</div> : hunks.length ? hunks.map((hunk, index) => {
+      const lines = reviewLines(hunk);
+      // Match CodeBlock's size limit so large diffs do not trigger thousands
+      // of small syntax-highlighting passes while the review pane renders.
+      const language = diff.patch.length <= EXPLICIT_HIGHLIGHT_MAX_CHARS ? reviewLanguage(path || hunk.filePath) : undefined;
+      return <section className="git-hunk" key={`${hunk.heading}-${index}`}>
+        <header><code>{hunk.heading}</code>{(mode === 'working' || mode === 'staged') && <button disabled={git.busy || refreshing || diff.token !== git.status?.token || diff.truncated} onClick={() => void git.run({ kind: mode === 'staged' ? 'unstage' : 'stage', patch: hunk.patch, token: diff.token })}>{mode === 'staged' ? 'Unstage hunk' : 'Stage hunk'}</button>}</header>
+        {git.view.split
+          ? <div className="git-split-diff">{splitReviewLines(lines).map(([left, right], i) => <div className="git-split-row" key={i}><DiffCell line={left} side="old" language={language}/><DiffCell line={right} side="next" language={language}/></div>)}</div>
+          : <div>{lines.map((line, i) => <div className={`git-diff-line ${line.kind}`} key={i}><span className="git-line-number">{line.old}</span><span className="git-line-number">{line.next}</span><code>{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}<DiffCode text={line.text} language={line.kind === 'note' ? undefined : language}/></code></div>)}</div>}
+      </section>;
+    }) : diff.patch ? <pre className="git-raw-diff">{diff.patch}</pre> : <div className="git-empty">No changes in this comparison.</div>}
+  </div>;
 }
-function DiffCell({ line, side }: { line?: ReviewLine; side: 'old' | 'next' }) { return <div className={`git-diff-line ${line?.kind ?? 'blank'}`}><span className="git-line-number">{line?.[side]}</span><code>{line?.text ?? ''}</code></div>; }
+const REVIEW_LANGUAGES: Readonly<Record<string, string>> = {
+  bash: 'bash', c: 'c', cc: 'cpp', cjs: 'javascript', cpp: 'cpp', cs: 'csharp', cts: 'typescript', css: 'css', go: 'go', graphql: 'graphql', h: 'c', hpp: 'cpp', htm: 'xml', html: 'xml', java: 'java', js: 'javascript', json: 'json', jsonc: 'json', kt: 'kotlin', kts: 'kotlin', less: 'less', lua: 'lua', md: 'markdown', mjs: 'javascript', mm: 'objectivec', mts: 'typescript', objc: 'objectivec', php: 'php', pl: 'perl', py: 'python', rb: 'ruby', rs: 'rust', sass: 'scss', scala: 'scala', scss: 'scss', sh: 'bash', sql: 'sql', swift: 'swift', ts: 'typescript', tsx: 'typescript', vb: 'vbnet', xml: 'xml', yaml: 'yaml', yml: 'yaml', zsh: 'bash',
+};
+function reviewLanguage(path: string): string | undefined {
+  const name = path.replace(/\\/g, '/').split('/').at(-1)?.replace(/^"|"$/g, '').toLowerCase() ?? '';
+  if (name === 'makefile' || name === 'gnumakefile') return 'makefile';
+  if (name === 'dockerfile') return 'dockerfile';
+  const extension = /\.([^./"]+)"?$/.exec(name)?.[1];
+  const language = extension ? REVIEW_LANGUAGES[extension] : undefined;
+  return language;
+}
+function DiffCode({ text, language }: { text: string; language?: string }) {
+  const html = useMemo(() => language ? highlightCodeForDisplay(text, language, true).html : undefined, [language, text]);
+  // highlight.js escapes source text while generating its own span markup.
+  return html === undefined ? <>{text}</> : <span className="git-highlighted hljs" dangerouslySetInnerHTML={{ __html: html }}/>;
+}
+function DiffCell({ line, side, language }: { line?: ReviewLine; side: 'old' | 'next'; language?: string }) { return <div className={`git-diff-line ${line?.kind ?? 'blank'}`}><span className="git-line-number">{line?.[side]}</span><code>{line && <DiffCode text={line.text} language={line.kind === 'note' ? undefined : language}/>}</code></div>; }
 function Commit() {
   const git = useGit(); const status = git.status!; const staged = status.files.filter((f) => !f.conflict && !f.untracked && f.index !== ' ' && f.index !== '.');
   return <div className="git-form"><h2>Commit staged changes</h2><p className="git-caption">{staged.length} staged files · {status.branch || 'detached HEAD'}</p><div className="git-commit-files">{staged.map((file) => <button key={file.path} onClick={() => { git.update({ page: 'changes', mode: 'staged', path: file.path }); }}>{file.path}<span className="git-stats"><i>+{file.additions}</i> <b>−{file.deletions}</b></span></button>)}</div><label>Commit message<textarea aria-label="Commit message" rows={7} placeholder="Describe why this change is needed…" value={git.view.message} onChange={(e) => git.update({ message: e.target.value })}/></label><p className="git-caption">Only staged changes will be committed. Git hooks and signing settings apply.</p><div className="git-actions"><button className="git-primary" disabled={git.busy || !staged.length || !git.view.message.trim() || status.files.some((f) => f.conflict)} onClick={async () => { if (await git.run({ kind: 'commit', message: git.view.message, token: status.token })) git.update({ message: '' }); }}>Commit</button><button onClick={() => git.update({ page: 'sync' })}>Push / sync</button><button onClick={() => git.update({ page: 'changes' })}>Review changes</button></div></div>;

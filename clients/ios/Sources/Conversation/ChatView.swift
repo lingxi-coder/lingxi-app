@@ -441,6 +441,7 @@ struct ChatView: View {
             focused: showsSelectedAgent ? false : composerFocused,
             accessibilityIdentifier: showsSelectedAgent ? "conversation.agent-message-list" : "conversation.message-list",
             maxContentWidth: 860,
+            scrollScope: "\(session.id):\(showsSelectedAgent ? convo.selectedAgentID : ConversationModel.mainAgentID)",
             alignShortContentToTop: true
         ) {
             if !showsSelectedAgent {

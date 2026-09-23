@@ -27,6 +27,7 @@ struct ConversationTimelineView: View {
                     .padding(.top, index == 0 ? 0 : Self.spacing(before: segments[index - 1], current: segment))
             }
         }
+        .scrollTargetLayout()
     }
 
     /// Desktop separates narration/activity rows by 18pt, while adjacent tool

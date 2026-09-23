@@ -38,107 +38,99 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// default; the desktop-style conversation opts into its wider column.
     var maxContentWidth: CGFloat = 720
 
+    /// Session plus transcript identity. A new transcript must not inherit an
+    /// anchor from a previous one that happens to reuse the same row id.
+    let scrollScope: String
+
     /// Desktop's short conversations begin at the top of the stage. Keep this
     /// opt-in so other transcript clients retain their existing anchor.
     var alignShortContentToTop = false
 
     @ViewBuilder var content: () -> Content
 
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
+
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                // NOT a LazyVStack. This stack has two children — the caller's
-                // content and the bottom anchor — so it provides no laziness of
-                // its own (`ConversationTimelineView` owns the real LazyVStack).
-                // What it did provide was a single child of unknown height for
-                // `.defaultScrollAnchor(.bottom)` to measure, which is how the
-                // transcript came up blank.
-                VStack(alignment: .leading, spacing: 0) {
-                    content()
-                    Color.clear
-                        .frame(height: 1)
-                        .id(Self.bottomAnchor)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                content()
+            }
+            .frame(maxWidth: maxContentWidth)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
+        }
+        // New conversations begin at the newest message.
+        .defaultScrollAnchor(.bottom)
+        // Keep the identity of the top visible timeline row while detached so
+        // rotation or sheet resizing does not send the reader to the tail. At
+        // the tail, the bottom-most row remains the anchor instead.
+        .scrollPosition($scrollPosition, anchor: followsLatest ? .bottom : .top)
+        .modifier(ShortTranscriptAlignmentModifier(enabled: alignShortContentToTop))
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+        // The reader's position is measured, not inferred. The previous
+        // implementation read it from a 1pt marker's onAppear/onDisappear
+        // inside a lazy stack — which fire on cell creation and recycling, out
+        // of order during layout — plus the sign of a drag translation.
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            TranscriptScrollFollowState.isAtBottom(
+                contentSize: geometry.contentSize.height,
+                visibleMaxY: geometry.visibleRect.maxY,
+                slack: TranscriptScrollFollowState.bottomSlack
+            )
+        } action: { _, isAtBottom in
+            followsLatest = isAtBottom
+        }
+        .modifier(OptionalAccessibilityIdentifier(identifier: accessibilityIdentifier))
+        .onAppear {
+            // A modal can temporarily recreate this surface. Restore the
+            // bottom only when the reader was already following the latest
+            // message; otherwise preserve the user's reading position.
+            scrollToLatest(animated: false, requiresFollow: true)
+        }
+        .onChange(of: follow) { _, _ in
+            // Unanimated on purpose. A streamed turn changes `follow` tens of
+            // times per second; a 200ms animation per change is always
+            // interrupted by the next one, and the pile-up reads as jitter.
+            scrollToLatest(animated: false, requiresFollow: true)
+        }
+        .onChange(of: scrollScope) { _, _ in
+            // Message and tool row ids can be reused between sessions. Drop the
+            // prior anchor and start the new transcript at its tail.
+            scrollPosition = ScrollPosition(idType: String.self)
+            scrollToLatest(animated: false, requiresFollow: false)
+        }
+        .onChange(of: focused) { _, isFocused in
+            // Respects the reader now: the keyboard must not pull someone who
+            // scrolled up away from what they are reading.
+            guard isFocused else { return }
+            scrollToLatest(animated: true, requiresFollow: true)
+        }
+        // The way back for a reader who scrolled up: it re-arms the follow and
+        // scrolls, which a bare re-arm would not do on its own — the `follow`
+        // signal did not change, so `onChange` would not fire.
+        .overlay(alignment: .bottomTrailing) {
+            if !followsLatest {
+                Button {
+                    followsLatest = true
+                    scrollToLatest(animated: true, requiresFollow: false)
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 32, height: 32)
+                        .background(.regularMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.08)))
                 }
-                .frame(maxWidth: maxContentWidth)
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
-            }
-            // Chat content is newest-at-the-bottom. Keep that as the default
-            // anchor when SwiftUI re-lays out the container (for example when
-            // a sheet changes the available presentation size) instead of
-            // falling back to the first row.
-            //
-            // Still unconditional: neither `.bottom` nor `nil` expresses "keep
-            // the offset the reader is at", so making it conditional trades a
-            // bottom re-anchor for a top one. Preserving a detached reader's
-            // place needs an explicit offset restore, which is not implemented.
-            .defaultScrollAnchor(.bottom)
-            .modifier(ShortTranscriptAlignmentModifier(enabled: alignShortContentToTop))
-            .scrollIndicators(.hidden)
-            .scrollDismissesKeyboard(.interactively)
-            // The reader's position is measured, not inferred. The previous
-            // implementation read it from a 1pt marker's onAppear/onDisappear
-            // inside a lazy stack — which fire on cell creation and recycling,
-            // out of order during layout — plus the sign of a drag translation.
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                TranscriptScrollFollowState.isAtBottom(
-                    contentSize: geometry.contentSize.height,
-                    visibleMaxY: geometry.visibleRect.maxY,
-                    slack: TranscriptScrollFollowState.bottomSlack
-                )
-            } action: { _, isAtBottom in
-                followsLatest = isAtBottom
-            }
-            .modifier(OptionalAccessibilityIdentifier(identifier: accessibilityIdentifier))
-            .onAppear {
-                // A modal can temporarily recreate this surface. Restore the
-                // bottom only when the reader was already following the latest
-                // message; otherwise preserve the user's reading position.
-                scrollToLatest(using: proxy, animated: false, requiresFollow: true)
-            }
-            .onChange(of: follow) { _, _ in
-                // Unanimated on purpose. A streamed turn changes `follow` tens
-                // of times per second; a 200ms animation per change is always
-                // interrupted by the next one, and the pile-up is what reads as
-                // the transcript jittering.
-                scrollToLatest(using: proxy, animated: false, requiresFollow: true)
-            }
-            .onChange(of: focused) { _, isFocused in
-                // Respects the reader now: the keyboard must not pull someone
-                // who scrolled up away from what they are reading.
-                guard isFocused else { return }
-                scrollToLatest(using: proxy, animated: true, requiresFollow: true)
-            }
-            // The way back for a reader who scrolled up: it re-arms the follow
-            // and scrolls, which a bare re-arm would not do on its own — the
-            // `follow` signal did not change, so `onChange` would not fire.
-            .overlay(alignment: .bottomTrailing) {
-                if !followsLatest {
-                    Button {
-                        followsLatest = true
-                        scrollToLatest(using: proxy, animated: true, requiresFollow: false)
-                    } label: {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(width: 32, height: 32)
-                            .background(.regularMaterial, in: Circle())
-                            .overlay(Circle().strokeBorder(Color.primary.opacity(0.08)))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 12)
-                    .accessibilityLabel("chat_jump_to_latest")
-                    .accessibilityIdentifier("conversation.jump-to-latest")
-                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 16)
+                .padding(.bottom, 12)
+                .accessibilityLabel("chat_jump_to_latest")
+                .accessibilityIdentifier("conversation.jump-to-latest")
             }
         }
     }
 
-    private func scrollToLatest(
-        using proxy: ScrollViewProxy,
-        animated: Bool,
-        requiresFollow: Bool
-    ) {
+    private func scrollToLatest(animated: Bool, requiresFollow: Bool) {
         // Decide BEFORE yielding. The geometry observer writes `followsLatest`
         // from the very layout this scroll is waiting for: content growing by
         // more than `bottomSlack` moves the offset out of the bottom band for
@@ -153,18 +145,13 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             await Task.yield()
             if animated {
                 withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                    scrollPosition.scrollTo(edge: .bottom)
                 }
             } else {
-                proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                scrollPosition.scrollTo(edge: .bottom)
             }
         }
     }
-
-    /// Stable id of the zero-height view pinned below the content. Scrolling to
-    /// a marker rather than to the last item keeps the behaviour correct when
-    /// the last item is itself growing (a streaming block).
-    static var bottomAnchor: String { "bottom" }
 }
 
 private struct ShortTranscriptAlignmentModifier: ViewModifier {

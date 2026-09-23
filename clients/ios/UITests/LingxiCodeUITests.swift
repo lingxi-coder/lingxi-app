@@ -108,6 +108,40 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertEqual(input.value as? String, "keyboard draft")
     }
 
+    func testDetachedTranscriptStaysDetachedWhenViewportResizes() {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        app.terminate()
+        app.launchEnvironment["LINGXI_UI_TEST_MULTI_AGENT"] = "1"
+        app.launch()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
+
+        let inlineChild = app.buttons["conversation.agent-row.ui-child"]
+        XCTAssertTrue(inlineChild.waitForExistence(timeout: 8), app.debugDescription)
+        inlineChild.tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["conversation.agent-detail-sheet"].waitForExistence(timeout: 8),
+            app.debugDescription
+        )
+
+        let transcript = app.scrollViews["conversation.agent-message-list"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5), app.debugDescription)
+        let expandPrompt = app.buttons["conversation.message.user.toggle"]
+        XCTAssertTrue(expandPrompt.waitForExistence(timeout: 5), app.debugDescription)
+        expandPrompt.tap()
+
+        // The expanded child prompt makes this transcript scrollable. Move into
+        // its history, then verify a rotation keeps it detached from the tail.
+        transcript.swipeDown()
+        let jump = app.buttons["conversation.jump-to-latest"]
+        XCTAssertTrue(jump.waitForExistence(timeout: 5), app.debugDescription)
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(jump.waitForExistence(timeout: 5), app.debugDescription)
+
+        jump.tap()
+        XCTAssertTrue(waitUntilGone(jump, timeout: 5), app.debugDescription)
+    }
+
     func testVoiceTapRequestsPermissionThenOpensListeningAndSettings() {
         app.terminate()
         app.resetAuthorizationStatus(for: .microphone)

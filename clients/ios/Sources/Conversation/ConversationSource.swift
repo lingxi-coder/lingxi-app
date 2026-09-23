@@ -1545,7 +1545,7 @@ final class MockConversationSource: ConversationSource {
                     role: .user,
                     text: String(
                         repeating: "Inspect the workspace and report every mismatch you find. ",
-                        count: 16
+                        count: 80
                     )
                 )
                 let childMessage = Message(role: .ai, text: "Child agent completed the requested check.")

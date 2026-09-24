@@ -11,7 +11,9 @@ export class StreamingSpeechSegmenter {
   private pendingText = '';
   private emittedText = '';
   private markdownCarry = '';
+  private linkCarry = '';
   private insideFencedCode = false;
+  private inlineCodeDelimiterLength: number | null = null;
   private finished = false;
 
   constructor(options: {
@@ -35,18 +37,12 @@ export class StreamingSpeechSegmenter {
     if (this.finished) return [];
     this.finished = true;
     const spokenFinal = sanitizeSpeakableText(finalText);
-    const spokenPrefix = this.emittedText.replace(/\s+/g, ' ').trim();
-    const bufferedText = [this.emittedText, this.pendingText].join('').replace(/\s+/g, ' ').trim();
-
-    if (!bufferedText && spokenFinal) {
-      this.pendingText = spokenFinal;
-    } else if (spokenFinal && spokenFinal.startsWith(bufferedText)) {
-      this.pendingText += spokenFinal.slice(bufferedText.length);
-    } else if (spokenFinal && spokenPrefix && spokenFinal.startsWith(spokenPrefix)) {
-      this.pendingText = spokenFinal.slice(spokenPrefix.length);
-    } else {
-      this.pendingText = spokenFinal;
-    }
+    // Compare the same spoken representation used for both streaming and final
+    // output; raw Markdown delimiters must not make an emitted prefix differ.
+    const spokenPrefix = sanitizeSpeakableText(this.emittedText);
+    this.pendingText = spokenFinal.startsWith(spokenPrefix)
+      ? spokenFinal.slice(spokenPrefix.length)
+      : spokenFinal;
     this.markdownCarry = '';
     this.insideFencedCode = false;
 
@@ -75,14 +71,46 @@ export class StreamingSpeechSegmenter {
           this.markdownCarry = '`'.repeat(count);
           break;
         }
-        if (count >= 3) this.insideFencedCode = !this.insideFencedCode;
+        if (this.inlineCodeDelimiterLength !== null) {
+          if (count === this.inlineCodeDelimiterLength) this.inlineCodeDelimiterLength = null;
+        } else if (count >= 3) {
+          this.insideFencedCode = !this.insideFencedCode;
+        } else if (!this.insideFencedCode) {
+          this.inlineCodeDelimiterLength = count;
+          output += ' ';
+        }
         index = runEnd - 1;
         continue;
       }
-      if (!this.insideFencedCode) output += character;
+      if (!this.insideFencedCode && this.inlineCodeDelimiterLength === null) output += character;
     }
 
     if (isFinal && this.markdownCarry && !this.insideFencedCode) this.markdownCarry = '';
+    return this.consumeLinks(output);
+  }
+
+  private consumeLinks(text: string): string {
+    let remaining = this.linkCarry + text;
+    this.linkCarry = '';
+    let output = '';
+    while (remaining) {
+      const start = remaining.indexOf('[');
+      if (start < 0) return output + remaining;
+      output += remaining.slice(0, start);
+      remaining = remaining.slice(start);
+      const labelEnd = remaining.indexOf(']');
+      if (labelEnd < 0 || labelEnd + 1 === remaining.length) break;
+      if (remaining[labelEnd + 1] !== '(') {
+        output += remaining.slice(0, labelEnd + 1);
+        remaining = remaining.slice(labelEnd + 1);
+        continue;
+      }
+      const urlEnd = remaining.indexOf(')', labelEnd + 2);
+      if (urlEnd < 0) break;
+      output += remaining.slice(1, labelEnd);
+      remaining = remaining.slice(urlEnd + 1);
+    }
+    this.linkCarry = remaining;
     return output;
   }
 
@@ -91,12 +119,12 @@ export class StreamingSpeechSegmenter {
     for (;;) {
       const length = this.nextBoundaryLength();
       if (length === null) return segments;
-      const segment = this.pendingText.slice(0, length).trim();
-      this.pendingText = this.pendingText.slice(length);
-      if (segment) {
-        segments.push(segment);
-        this.emittedText += segment;
-      }
+      const characters = [...this.pendingText];
+      const rawSegment = characters.slice(0, length).join('');
+      this.pendingText = characters.slice(length).join('');
+      this.emittedText += rawSegment;
+      const segment = sanitizeSpeakableText(rawSegment);
+      if (segment) segments.push(segment);
     }
   }
 
@@ -131,7 +159,7 @@ export class StreamingSpeechSegmenter {
 export function sanitizeSpeakableText(markdown: string): string {
   return markdown
     .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`[^`]*`/g, ' ')
+    .replace(/(`{1,2})(?!`)[\s\S]*?\1(?!`)/g, ' ')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
     .replace(/^[#>*-]+\s*/gm, '')
     .replace(/[*_~]/g, ' ')

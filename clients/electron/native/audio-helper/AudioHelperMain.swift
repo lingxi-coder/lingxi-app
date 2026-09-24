@@ -670,6 +670,20 @@ func finalizeStoppedRecording<Value>(
     return try finalize()
 }
 
+func recordingStatus(
+    ownsRecording: Bool,
+    recordingFailure: HelperError?,
+    leaseIsActive: Bool,
+    releaseTerminatedRecording: () -> Void
+) -> Bool {
+    guard ownsRecording else { return false }
+    if recordingFailure != nil {
+        releaseTerminatedRecording()
+        return false
+    }
+    return leaseIsActive
+}
+
 func validateRecordingStart(recordingFailure: HelperError?, leaseIsActive: Bool) throws {
     if let recordingFailure { throw recordingFailure }
     guard leaseIsActive else {
@@ -775,13 +789,17 @@ func recordingPayload(samples: [Float], sampleRate: Int, format: String, maximum
             AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: 1,
         ]
-        let file = try AVAudioFile(
-            forWriting: url,
-            settings: settings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: false
-        )
-        try file.write(from: buffer)
+        // Release the writer before reading: AAC packets and container metadata
+        // are finalized when AVAudioFile closes.
+        try autoreleasepool {
+            let file = try AVAudioFile(
+                forWriting: url,
+                settings: settings,
+                commonFormat: .pcmFormatFloat32,
+                interleaved: false
+            )
+            try file.write(from: buffer)
+        }
         let metadata = try FileManager.default.attributesOfItem(atPath: url.path)
         guard let fileSize = (metadata[.size] as? NSNumber)?.intValue, fileSize <= maximumPayloadBytes else {
             throw HelperError.mediaTooLarge("recording audio exceeds the configured payload limit")
@@ -1883,6 +1901,7 @@ actor ModelStore {
     private let root: URL
     private let writer: LineWriter
     private let snapshotProvider: @Sendable () async -> HelperSnapshot
+    private let downloadSession: URLSession
     private let downloadOverride: (@Sendable (GeneratedOfflineModelEntry, URL) async throws -> Void)?
     private var states: [String: HelperModelSnapshot] = [:]
     private var tasks: [String: ActiveInstall] = [:]
@@ -1893,10 +1912,12 @@ actor ModelStore {
         root: URL,
         writer: LineWriter,
         downloadOverride: (@Sendable (GeneratedOfflineModelEntry, URL) async throws -> Void)? = nil,
+        downloadSession: URLSession = .shared,
         snapshotProvider: @escaping @Sendable () async -> HelperSnapshot
     ) {
         self.root = root
         self.writer = writer
+        self.downloadSession = downloadSession
         self.downloadOverride = downloadOverride
         self.snapshotProvider = snapshotProvider
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1937,7 +1958,7 @@ actor ModelStore {
         referenceCounts.values.reduce(0, +)
     }
 
-    func reconcile() {
+    func reconcile(modelID: String? = nil) {
         var next: [String: HelperModelSnapshot] = [:]
         for model in GeneratedVoiceModelCatalog.all {
             let ready = SherpaRuntime.modelDirectory(for: model, root: root) != nil
@@ -1946,7 +1967,11 @@ actor ModelStore {
                 state: ready ? .ready : .notInstalled
             )
         }
-        states = next
+        if let modelID {
+            states[modelID] = next[modelID]
+        } else {
+            states = next
+        }
     }
 
     func install(modelID: String) async throws {
@@ -1974,7 +1999,7 @@ actor ModelStore {
             await install.task.value
             clearTask(modelID, token: install.token, allowDuringQuiescing: true)
         }
-        reconcile()
+        reconcile(modelID: modelID)
         await publishModel(modelID)
     }
 
@@ -1996,7 +2021,7 @@ actor ModelStore {
         try? FileManager.default.removeItem(at: root.appending(path: modelID, directoryHint: .isDirectory))
         try? FileManager.default.removeItem(at: root.appending(path: ".download-\(modelID).part"))
         try? FileManager.default.removeItem(at: metadataURL(for: modelID))
-        reconcile()
+        reconcile(modelID: modelID)
         await publishModel(modelID)
     }
 
@@ -2015,6 +2040,7 @@ actor ModelStore {
             let digest = try await ModelStore.sha256(of: archive)
             try checkInstallActive(modelID, token: token)
             if digest != model.sha256 {
+                try discardPartialDownload(modelID: modelID, archive: archive)
                 throw HelperError.checksum("the downloaded model failed checksum verification")
             }
             try await updateState(modelID, state: .extracting, token: token)
@@ -2053,7 +2079,7 @@ actor ModelStore {
             try FileManager.default.moveItem(at: activation, to: final)
             try? FileManager.default.removeItem(at: archive)
             try? FileManager.default.removeItem(at: metadataURL(for: modelID))
-            reconcile()
+            reconcile(modelID: modelID)
             await publishModel(modelID)
             try checkInstallActive(modelID, token: token)
             await writer.writeEnvelope(OutputEnvelope(
@@ -2154,7 +2180,7 @@ actor ModelStore {
             return
         }
         guard let url = URL(string: model.sourceURL) else { throw HelperError.download("the model URL is invalid") }
-        let existingBytes = (try? FileManager.default.attributesOfItem(atPath: archive.path)[.size] as? NSNumber)?.int64Value ?? 0
+        var existingBytes = (try? FileManager.default.attributesOfItem(atPath: archive.path)[.size] as? NSNumber)?.int64Value ?? 0
         let existingMetadata = loadPartialMetadata(for: model.id)
         var request = URLRequest(url: url)
         if existingBytes > 0 {
@@ -2163,15 +2189,20 @@ actor ModelStore {
                 request.setValue(ifRange, forHTTPHeaderField: "If-Range")
             }
         }
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await downloadSession.bytes(for: request)
         guard let response = response as? HTTPURLResponse else {
             throw HelperError.download("the model download failed")
         }
-        let restartDownload = existingBytes > 0 && response.statusCode == 200
-        if restartDownload {
-            try? FileManager.default.removeItem(at: archive)
-            try? FileManager.default.removeItem(at: metadataURL(for: model.id))
+        if existingBytes > 0 && response.statusCode == 416 {
+            // The retained archive may already be complete, or its range may
+            // be invalid. Restart once from zero instead of retaining a retry loop.
+            try checkInstallActive(model.id, token: token)
+            try discardPartialDownload(modelID: model.id, archive: archive)
             return try await download(model: model, archive: archive, token: token)
+        }
+        if existingBytes > 0 && response.statusCode == 200 {
+            // The server ignored Range; consume its full body without appending.
+            existingBytes = 0
         }
         guard response.statusCode == 200 || response.statusCode == 206 else {
             throw HelperError.download("the model download failed")
@@ -2221,6 +2252,14 @@ actor ModelStore {
         try await updateState(model.id, state: .downloading(receivedBytes: writtenBytes, totalBytes: expectedBytes), token: token)
     }
 
+    private func discardPartialDownload(modelID: String, archive: URL) throws {
+        for url in [archive, metadataURL(for: modelID)] {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+    }
+
     private func loadPartialMetadata(for modelID: String) -> PartialDownloadMetadata? {
         let url = metadataURL(for: modelID)
         guard let data = try? Data(contentsOf: url) else { return nil }
@@ -2268,6 +2307,10 @@ actor ModelStore {
 }
 
 typealias HelperAudioOperationExecutor = @Sendable (_ operation: String, _ cancellation: AudioCancellationFlag) async throws -> HelperEngineResult?
+
+func allowsAutomaticSpeechFallback(_ route: AudioRouteResolution) -> Bool {
+    route.requested.source == .automatic && route.requested.voice == nil
+}
 
 actor HelperStateStore {
     private let storageRoot: URL
@@ -2605,12 +2648,15 @@ actor HelperStateStore {
         }
         if speechIdentity == identity {
             speechTask?.cancel()
-            if let activeSpeech { await MainActor.run { activeSpeech.stop() } }
-            self.activeSpeech = nil
-            self.speechIdentity = nil
-            if self.owner == activeOperations[key]?.owner.helperOwner {
-                self.owner = nil
-                self.activity = "idle"
+            let cancelledSpeech = activeSpeech
+            if let cancelledSpeech { await MainActor.run { cancelledSpeech.stop() } }
+            if speechIdentity == identity, activeSpeech === cancelledSpeech {
+                self.activeSpeech = nil
+                self.speechIdentity = nil
+                if self.owner == activeOperations[key]?.owner.helperOwner {
+                    self.owner = nil
+                    self.activity = "idle"
+                }
             }
         }
         if activeRequestIdentity == identity {
@@ -3017,7 +3063,15 @@ actor HelperStateStore {
                recordingHandle != handle || recordingOwner.map(helperAudioOwnerKey) != helperAudioOwnerKey(requestOwner) {
                 throw HelperError.notRecording("the recording handle is not active for this owner")
             }
-            return .status(recording: recordingHandle != nil && recordingOwner.map(helperAudioOwnerKey) == helperAudioOwnerKey(requestOwner),
+            let recording = recordingStatus(
+                ownsRecording: recordingHandle != nil && recordingOwner.map(helperAudioOwnerKey) == helperAudioOwnerKey(requestOwner),
+                recordingFailure: recordingFailure,
+                leaseIsActive: listeningIdentity == recordingOriginIdentity && activeSession != nil,
+                releaseTerminatedRecording: {
+                    if let origin = self.recordingOriginIdentity { self.clearRecordingLease(identity: origin) }
+                }
+            )
+            return .status(recording: recording,
                            playing: activeSpeech != nil && speechRenderOwner.map(helperAudioOwnerKey) == helperAudioOwnerKey(requestOwner))
         case "end_owner":
             try await endAudioOwner(identity: identity, owner: requestOwner)
@@ -3675,7 +3729,7 @@ actor HelperStateStore {
         configuration: AudioConfigurationV3,
         language: String
     ) async -> AudioRouteResolution? {
-        guard configuration.speech.source == .automatic, configuration.speech.voice == nil else { return nil }
+        guard allowsAutomaticSpeechFallback(requestedRoute) else { return nil }
         let fallbackPreference = AudioSpeechPreference(
             source: .offline,
             offlineModelId: configuration.speech.offlineModelId,
@@ -3971,7 +4025,9 @@ actor HelperStateStore {
             reservedPhysicalIdentity = nil
             reservedPhysicalOwner = nil
         }
-        if owner == recordingOwner?.helperOwner {
+        if owner == recordingOwner?.helperOwner,
+           reservedPhysicalIdentity == nil, listeningIdentity == nil,
+           speechIdentity == nil, systemRenderIdentity == nil {
             owner = nil
             activity = "idle"
         }
@@ -4010,10 +4066,10 @@ actor HelperStateStore {
     }
 
     private func clearPhysicalLease(identity: HelperAudioOperationIdentity) {
-        let expectedOwner = reservedPhysicalOwner
+        guard reservedPhysicalIdentity == identity || speechIdentity == identity || speechRenderIdentity == identity else { return }
+        let expectedOwner = (reservedPhysicalIdentity == identity ? reservedPhysicalOwner : nil)
+            ?? (speechRenderIdentity == identity ? speechRenderOwner?.helperOwner : nil)
             ?? activeOperations[helperAudioIdentityKey(identity)]?.owner.helperOwner
-            ?? listeningOwner
-            ?? speechRenderOwner?.helperOwner
         if speechIdentity == identity {
             speechIdentity = nil
             activeSpeech = nil
@@ -4026,7 +4082,8 @@ actor HelperStateStore {
             speechRenderIdentity = nil
             speechRenderOwner = nil
         }
-        if expectedOwner != nil, owner == expectedOwner {
+        if expectedOwner != nil, owner == expectedOwner,
+           reservedPhysicalIdentity == nil, listeningIdentity == nil, speechIdentity == nil {
             owner = nil
             activity = "idle"
         } else if owner == nil, reservedPhysicalIdentity == nil, listeningIdentity == nil, speechIdentity == nil {

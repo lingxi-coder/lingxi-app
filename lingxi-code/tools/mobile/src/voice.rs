@@ -403,9 +403,9 @@ impl Tool for VoiceTool {
                         handle: handle.clone(),
                     },
                 )
-                .await?
+                .await
                 {
-                    AudioOperationSuccess::Status { status } => {
+                    Ok(AudioOperationSuccess::Status { status }) => {
                         let mut handles = self.ctx.audio_recording_handles.lock().await;
                         if !status.recording
                             && handle
@@ -416,7 +416,18 @@ impl Tool for VoiceTool {
                         }
                         json!({ "recording": status.recording })
                     }
-                    _ => {
+                    Err(ToolError::Internal(message)) if message.starts_with("not_recording:") => {
+                        let mut handles = self.ctx.audio_recording_handles.lock().await;
+                        if handle
+                            .as_ref()
+                            .is_some_and(|handle| handles.get(&owner) == Some(handle))
+                        {
+                            handles.remove(&owner);
+                        }
+                        json!({ "recording": false })
+                    }
+                    Err(error) => return Err(error),
+                    Ok(_) => {
                         return Err(ToolError::Internal(
                             "audio service returned an invalid status result".into(),
                         ))
@@ -521,7 +532,13 @@ mod tests {
                     }
                     let active = self.active.lock().unwrap();
                     let recording = match handle {
-                        Some(handle) => active.get(&context.owner) == Some(&handle),
+                        Some(handle) if active.get(&context.owner) != Some(&handle) => {
+                            return Err(AudioError::new(
+                                AudioErrorKind::NotRecording,
+                                "stale recording handle",
+                            ));
+                        }
+                        Some(_) => true,
                         None => active.contains_key(&context.owner),
                     };
                     Ok(AudioOperationSuccess::Status {
@@ -882,6 +899,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stopped.data["recording"], false);
+    }
+
+    #[tokio::test]
+    async fn stale_status_clears_handle_and_allows_new_recording() {
+        let audio = Arc::new(FakeAudio {
+            active: Mutex::new(HashMap::new()),
+            operations: Mutex::new(Vec::new()),
+            cancelled: Mutex::new(Vec::new()),
+            fail_status: false,
+        });
+        let builtin = context(audio.clone());
+        let registry = builtin.audio_recording_handles.clone();
+        let tool = VoiceTool::new(builtin);
+        let session = protocol::SessionId::new();
+        tool.call(
+            json!({ "action": "start_recording" }),
+            use_context(session),
+            tool_api::test_support::fresh_tx(),
+        )
+        .await
+        .unwrap();
+        audio.active.lock().unwrap().clear();
+        let status = tool
+            .call(
+                json!({ "action": "is_recording" }),
+                use_context(session),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.data["recording"], false);
+        assert!(registry.lock().await.is_empty());
+        let restarted = tool
+            .call(
+                json!({ "action": "start_recording" }),
+                use_context(session),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restarted.data["recording"], true);
     }
 
     #[tokio::test]

@@ -289,3 +289,110 @@ test('interrupting cancels current UI audio and sends only the replacement promp
   assert.ok(audio.cancellations.length > 0);
   controller.dispose();
 });
+
+test('old reply completion does not start another listen during interruption', async () => {
+  const audio = new FakeAudio();
+  const bridge = new FakeBridge();
+  const timers = new FakeTimers();
+  const interruption = deferred<AudioOperationResultDto>();
+  audio.queue(
+    { type: 'transcript', text: '原问题' },
+    { type: 'playback_completed', duration_ms: 500 },
+    interruption.promise,
+  );
+  const controller = new VoiceFlowController({ audio, bridge, timers, getPreferences: () => preferences(1), onStateChange: () => {} });
+  await controller.start();
+  const token = bridge.sent[0]!.token;
+  bridge.emit(token, { type: 'delta', text: '这句话已经说完了。', turnId: 91 });
+  await flush();
+  const interrupt = controller.orb();
+  await flush();
+  bridge.emit(token, { type: 'completion', text: '这句话已经说完了。', turnId: 91 });
+  timers.advance(350);
+  await flush();
+  assert.deepEqual(audio.operations.map(({ operation }) => operation.type), ['listen', 'speak', 'listen']);
+  assert.equal(controller.getState().phase, 'interrupting');
+  interruption.resolve({ type: 'transcript', text: '替代问题' });
+  await interrupt;
+  assert.deepEqual(bridge.sent.map(({ text }) => text), ['原问题', '替代问题']);
+  assert.deepEqual(bridge.cancelCalls, [91]);
+  controller.dispose();
+});
+
+test('a delayed stop cannot pause a restarted Flow or discard its result', async () => {
+  const audio = new FakeAudio(), bridge = new FakeBridge(), timers = new FakeTimers();
+  const cancellation = deferred<void>();
+  audio.cancel = () => cancellation.promise;
+  const previous = deferred<AudioOperationResultDto>();
+  const current = deferred<AudioOperationResultDto>();
+  audio.queue(previous.promise, current.promise);
+  const controller = new VoiceFlowController({ audio, bridge, timers, getPreferences: () => preferences(1), onStateChange: () => {} });
+  const oldStart = controller.start();
+  const stopped = controller.stop();
+  const newStart = controller.start();
+  cancellation.resolve();
+  await stopped;
+  assert.equal(controller.getState().phase, 'listening');
+  previous.resolve({ type: 'failed', error: { kind: 'cancelled', message: 'stopped' } });
+  current.resolve({ type: 'transcript', text: 'new question' });
+  await Promise.all([oldStart, newStart]);
+  assert.deepEqual(bridge.sent.map(({ text }) => text), ['new question']);
+  assert.equal(controller.getState().phase, 'thinking');
+  controller.dispose();
+});
+
+for (const failure of ['native_failure', 'model_missing', 'invalid_result', 'exception'] as const) {
+  test(`Flow stays stopped after ${failure} until explicit retry`, async () => {
+    const audio = new FakeAudio();
+    const bridge = new FakeBridge();
+    const timers = new FakeTimers();
+    audio.queue({ type: 'transcript', text: 'first question' });
+    const controller = new VoiceFlowController({ audio, bridge, timers, getPreferences: () => preferences(1), onStateChange: () => {} });
+    await controller.start();
+    const oldToken = bridge.sent[0]!.token;
+    audio.queue(failure === 'exception'
+      ? Promise.reject(new Error('playback rejected'))
+      : failure === 'invalid_result'
+        ? { type: 'transcript', text: 'unexpected' }
+        : { type: 'failed', error: { kind: failure, message: 'playback failed' } });
+    bridge.emit(oldToken, { type: 'delta', text: '这是回复第一句。这是已经排队的第二句。', turnId: 91 });
+    await flush();
+    const failedState = controller.getState();
+    assert.equal(failedState.phase, failure === 'model_missing' ? 'configurationRequired' : 'failed');
+    bridge.emit(oldToken, { type: 'delta', text: '这是迟到的第三句。', turnId: 91 });
+    bridge.emit(oldToken, { type: 'completion', text: '这是回复第一句。这是已经排队的第二句。这是迟到的第三句。', turnId: 91 });
+    timers.advance(1000);
+    await flush();
+    assert.deepEqual(audio.operations.map(({ operation }) => operation.type), ['listen', 'speak']);
+    assert.deepEqual(controller.getState(), failedState);
+
+    audio.queue({ type: 'transcript', text: 'retry question' }, { type: 'playback_completed', duration_ms: 1 });
+    await controller.retry();
+    bridge.emit(oldToken, { type: 'delta', text: '重试后的旧回复。', turnId: 91 });
+    bridge.emit(bridge.sent[1]!.token, { type: 'delta', text: '这是重试后的新回复。', turnId: 92 });
+    await flush();
+    assert.deepEqual(audio.operations.map(({ operation }) => operation.type), ['listen', 'speak', 'listen', 'speak']);
+    assert.deepEqual(bridge.sent.map(({ text }) => text), ['first question', 'retry question']);
+    assert.equal(controller.getState().phase, 'thinking');
+    controller.dispose();
+  });
+}
+
+test('interrupt cancels a turn whose identity arrives during replacement listening', async () => {
+  const audio = new FakeAudio();
+  const bridge = new FakeBridge();
+  const replacement = deferred<AudioOperationResultDto>();
+  audio.queue({ type: 'transcript', text: 'first' }, replacement.promise);
+  const controller = new VoiceFlowController({ audio, bridge, getPreferences: () => preferences(0),
+    timers: new FakeTimers(), onStateChange: () => {} });
+  await controller.start();
+  const token = bridge.sent[0]!.token;
+  const interruption = controller.orb();
+  await flush();
+  bridge.emit(token, { type: 'delta', text: '原回答现在才开始。', turnId: 77 });
+  replacement.resolve({ type: 'transcript', text: 'replacement' });
+  await interruption;
+  assert.deepEqual(bridge.cancelCalls, [77]);
+  assert.deepEqual(bridge.sent.map(({ text }) => text), ['first', 'replacement']);
+  controller.dispose();
+});

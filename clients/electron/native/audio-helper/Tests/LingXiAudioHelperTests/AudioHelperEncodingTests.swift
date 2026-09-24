@@ -16,6 +16,22 @@ private final class AudioHelperOutputProbe: @unchecked Sendable {
     }
 }
 
+private final class ModelRetryURLProtocol: URLProtocol, @unchecked Sendable {
+    static let requests = AudioHelperOutputProbe()
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let range = request.value(forHTTPHeaderField: "Range")
+        Self.requests.append(Data((range ?? "full").utf8))
+        let response = HTTPURLResponse(url: request.url!, statusCode: range == nil ? 200 : 416,
+                                       httpVersion: "HTTP/1.1", headerFields: ["ETag": "retry-test"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if range == nil { client?.urlProtocol(self, didLoad: Data("invalid archive".utf8)) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 private final class AudioOperationCallCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = 0
@@ -127,6 +143,18 @@ struct AudioHelperEncodingTests {
         let m4aData = try #require(Data(base64Encoded: m4a.audioBase64))
         #expect(m4a.mimeType == "audio/mp4")
         #expect(String(data: m4aData.subdata(in: 4..<8), encoding: .ascii) == "ftyp")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("audio-roundtrip-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try m4aData.write(to: url)
+        let decoded = try AVAudioFile(forReading: url)
+        #expect(decoded.processingFormat.sampleRate == 16_000)
+        #expect(decoded.processingFormat.channelCount == 1)
+        let decodedBuffer = try #require(AVAudioPCMBuffer(pcmFormat: decoded.processingFormat, frameCapacity: 4_096))
+        try decoded.read(into: decodedBuffer)
+        #expect(decodedBuffer.frameLength >= samples.count)
+        #expect(throws: HelperError.self) {
+            try recordingPayload(samples: samples, sampleRate: 16_000, format: "m4a", maximumPayloadBytes: m4aData.count - 1)
+        }
     }
 
     @Test
@@ -545,6 +573,38 @@ struct AudioHelperEncodingTests {
             against: voices
         )
         #expect(unresolved?.id == "Alex")
+    }
+
+    @Test
+    func modelRetryRestartsUnsatisfiableRangeAndDiscardsBadChecksum() async throws {
+        let model = try #require(GeneratedVoiceModelCatalog.all.first)
+        let root = FileManager.default.temporaryDirectory.appending(path: "lingxi-model-retry-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ModelRetryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let store = ModelStore(root: root, writer: LineWriter(emit: { _ in }), downloadSession: session) { emptyHelperSnapshot() }
+        let archive = root.appending(path: ".download-\(model.id).part")
+        let metadata = root.appending(path: ".download-\(model.id).json")
+        try Data("retained".utf8).write(to: archive)
+        try Data("{\"etag\":\"old\"}".utf8).write(to: metadata)
+        for attempt in 0..<2 {
+            try await store.install(modelID: model.id)
+            var failed = false
+            for _ in 0..<200 {
+                if case .failed = await store.snapshots().first(where: { $0.modelId == model.id })?.state {
+                    failed = true
+                    break
+                }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            #expect(failed, "attempt \(attempt) must settle without a retry loop")
+            await store.cancel(modelID: model.id)
+            #expect(!FileManager.default.fileExists(atPath: archive.path))
+            #expect(!FileManager.default.fileExists(atPath: metadata.path))
+        }
+        #expect(ModelRetryURLProtocol.requests.values.map { String(decoding: $0, as: UTF8.self) } == ["bytes=8-", "full", "full"])
     }
 
     @Test
@@ -1152,4 +1212,72 @@ struct AudioHelperEncodingTests {
         #expect(received.contains("cancelled"))
         signalContinuation.finish()
     }
+}
+
+@Test func automaticSpeechFallbackRespectsPerRequestVoice() {
+    let preference = AudioSpeechPreference(source: .automatic, offlineModelId: nil, voice: nil)
+    for explicitVoice in [false, true] {
+        let route = resolveAudioRoute(AudioRouteRequest(
+            kind: .speech, preference: preference, language: "en-US",
+            systemStatus: .available, offlineModels: [], systemVoiceIds: ["test-voice"],
+            voiceOverride: explicitVoice ? AudioVoiceSelection(source: .system, id: "test-voice", modelId: nil) : nil
+        ))
+        #expect(route.status == .ready)
+        #expect(allowsAutomaticSpeechFallback(route) == !explicitVoice)
+    }
+}
+
+@Test func cancellingOneModelPreservesAnotherActiveInstall() async throws {
+    let first = try #require(GeneratedVoiceModelCatalog.all.first)
+    let second = try #require(GeneratedVoiceModelCatalog.all.last)
+    #expect(first.id != second.id)
+    let root = FileManager.default.temporaryDirectory.appending(path: "lingxi-model-parallel-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let firstBarrier = ModelInstallTestBarrier()
+    let secondBarrier = ModelInstallTestBarrier()
+    let store = ModelStore(root: root, writer: LineWriter(emit: { _ in }), downloadOverride: { model, _ in
+        if model.id == first.id { await firstBarrier.pause() }
+        else { await secondBarrier.pause() }
+        try Task.checkCancellation()
+    }) { emptyHelperSnapshot() }
+    try await store.install(modelID: first.id)
+    try await store.install(modelID: second.id)
+    await firstBarrier.waitForCallCount(1)
+    await secondBarrier.waitForCallCount(1)
+    let before = await store.snapshots().first { $0.modelId == second.id }?.state
+    let cancelFirst = Task { await store.cancel(modelID: first.id) }
+    await firstBarrier.releaseOne()
+    await cancelFirst.value
+    #expect(await store.snapshots().first { $0.modelId == second.id }?.state == before)
+    try await store.remove(modelID: first.id)
+    #expect(await store.snapshots().first { $0.modelId == second.id }?.state == before)
+    let cancelSecond = Task { await store.cancel(modelID: second.id) }
+    await secondBarrier.releaseOne()
+    await cancelSecond.value
+    #expect(await store.snapshots().first { $0.modelId == second.id }?.state == .notInstalled)
+}
+
+@Test func recordingStatusReleasesTerminatedHandleAndAllowsRestart() throws {
+    var handle: String? = "terminated"
+    var hasOrigin = true
+    let recording = recordingStatus(
+        ownsRecording: true,
+        recordingFailure: .mediaTooLarge("payload limit reached"),
+        leaseIsActive: false,
+        releaseTerminatedRecording: { handle = nil; hasOrigin = false }
+    )
+    #expect(!recording)
+    #expect(handle == nil)
+    try validateRecordingStartAvailability(existingHandle: handle, hasRecordingOrigin: hasOrigin, physicalAudioBusy: false)
+}
+
+@Test func recordingStatusPreservesActiveAndOtherOwnerLeases() {
+    var releases = 0
+    #expect(recordingStatus(ownsRecording: true, recordingFailure: nil, leaseIsActive: true,
+                            releaseTerminatedRecording: { releases += 1 }))
+    #expect(!recordingStatus(ownsRecording: false, recordingFailure: .mediaTooLarge("limit"), leaseIsActive: false,
+                             releaseTerminatedRecording: { releases += 1 }))
+    #expect(!recordingStatus(ownsRecording: true, recordingFailure: nil, leaseIsActive: false,
+                             releaseTerminatedRecording: { releases += 1 }))
+    #expect(releases == 0)
 }

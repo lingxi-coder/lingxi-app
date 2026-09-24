@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import com.lingxi.code.voice.resolveSpeechVoiceOverride
 import com.lingxi.code.settings.VersionedAudioConfiguration
 import com.lingxi.code.bindings.AudioOperationResultDto
 import org.junit.Assert.assertEquals
@@ -20,6 +21,80 @@ import org.junit.Test
 class AndroidAudioServiceCoreTest {
     private val epoch = 17L
     private val owner = AudioOwnerKey.session("session-a")
+
+    @Test
+    fun recordingLimitReleasesCaptureAndStatusAllowsRestart() = runTest {
+        val driver = FakeDriver().apply { blockNativeStop = true }
+        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+        val started = service.execute(request("limit-start", DeviceAudioOperation.StartRecording(16_000, "audio/m4a"))) as DeviceAudioResult.RecordingStarted
+        val oldTermination = driver.recordingTermination!!
+        oldTermination(DeviceAudioError(DeviceAudioErrorKind.MediaTooLarge, "limit reached"))
+        // Native cleanup starts without a Status/Stop request.
+        driver.nativeStopStarted.await()
+        driver.nativeStopGate.complete(Unit)
+        // Status also waits for native resource release, independent of callback scheduling.
+        val status = service.execute(request("limit-status", DeviceAudioOperation.Status(started.handle))) as DeviceAudioResult.Status
+        assertFalse(status.recording)
+        val next = service.execute(request("after-limit", DeviceAudioOperation.StartRecording(16_000, "audio/m4a"))) as DeviceAudioResult.RecordingStarted
+        oldTermination(DeviceAudioError(DeviceAudioErrorKind.MediaTooLarge, "late duplicate"))
+        assertTrue((service.execute(request("new-status", DeviceAudioOperation.Status(next.handle))) as DeviceAudioResult.Status).recording)
+        service.execute(request("new-stop", DeviceAudioOperation.StopRecording(next.handle)))
+    }
+
+    @Test
+    fun recordingLimitPreservesFailureForStop() = runTest {
+        val driver = FakeDriver()
+        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+        val started = service.execute(request("failure-start", DeviceAudioOperation.StartRecording(16_000, "audio/m4a"))) as DeviceAudioResult.RecordingStarted
+        driver.recordingTermination!!(DeviceAudioError(DeviceAudioErrorKind.MediaTooLarge, "limit reached"))
+        val stopped = service.execute(request("failure-stop", DeviceAudioOperation.StopRecording(started.handle))) as DeviceAudioResult.Failed
+        assertEquals(DeviceAudioErrorKind.MediaTooLarge, stopped.error.kind)
+        assertFalse((service.execute(request("failure-status", DeviceAudioOperation.Status(null))) as DeviceAudioResult.Status).recording)
+    }
+
+    @Test
+    fun identityHistoryIsBoundedWhileRecentRequestsRemainProtected() = runTest {
+        val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), maxPayloadBytes = 64, initialEpoch = epoch)
+        repeat(4_097) { index ->
+            assertTrue(service.execute(request("history-$index", DeviceAudioOperation.Status(null))) is DeviceAudioResult.Status)
+        }
+        val recent = service.execute(request("history-4096", DeviceAudioOperation.Status(null))) as DeviceAudioResult.Failed
+        assertEquals(DeviceAudioErrorKind.InvalidRequest, recent.error.kind)
+        assertTrue(service.execute(request("history-0", DeviceAudioOperation.Status(null))) is DeviceAudioResult.Status)
+    }
+
+    @Test
+    fun replayedEndOwnerCannotStopANewRecording() = runTest {
+        val driver = FakeDriver()
+        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+        val end = request("end-once", DeviceAudioOperation.EndOwner)
+        assertEquals(DeviceAudioResult.OwnerEnded, service.execute(end))
+        val started = service.execute(request("new-recording", DeviceAudioOperation.StartRecording(16_000, "audio/m4a"))) as DeviceAudioResult.RecordingStarted
+
+        val replay = service.execute(end) as DeviceAudioResult.Failed
+        assertEquals(DeviceAudioErrorKind.InvalidRequest, replay.error.kind)
+        assertEquals(0, driver.recordingStops)
+        service.execute(request("stop-new-recording", DeviceAudioOperation.StopRecording(started.handle)))
+    }
+
+    @Test
+    fun completedIdentityCannotBeReusedForRealtimeListening() = runTest {
+        val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), maxPayloadBytes = 64, initialEpoch = epoch)
+        service.execute(request("used", DeviceAudioOperation.Status(null)))
+        val callbacks = object : RealtimeSpeechCallbacks {
+            override fun onPartial(text: String) = Unit
+            override fun onFinal(text: String) = Unit
+            override fun onError(code: String, message: String, retriable: Boolean) = Unit
+        }
+        var rejected = false
+        try {
+            service.openRealtimeListen(request("used", DeviceAudioOperation.Listen(null)), callbacks)
+        } catch (_: kotlinx.coroutines.CancellationException) {
+            rejected = true
+        }
+        assertTrue("realtime admission shares completed identity protection", rejected)
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
 
     @Test
     fun busySpeakReturnsImmediatelyWhileAnotherPlaybackIsActive() = runTest {
@@ -359,6 +434,28 @@ class AndroidAudioServiceCoreTest {
     }
 
     @Test
+    fun defaultVoiceOverridesPermitAutomaticFallbackEvenWithASavedVoice() = runTest {
+        for (saved in listOf(null, AudioVoiceSelection(AudioSource.SYSTEM, "saved-voice"))) {
+            for (override in listOf("default", "auto", " DEFAULT ", "Auto")) {
+                val runtime = FakeRuntime(failSystemRender = true, savedVoice = saved)
+                val service = AndroidAudioServiceCore(runtime, FakeDriver(), maxPayloadBytes = 64, initialEpoch = epoch)
+                val result = service.execute(request("fallback-$override", DeviceAudioOperation.Synthesize(text = "hello", language = null, rate = null, voice = override)))
+                assertTrue("override $override must clear saved voice $saved", result is DeviceAudioResult.Synthesized)
+                assertEquals("offline", service.diagnostics().recentOperations.last().effectiveSource)
+                assertEquals(0, service.diagnostics().activeLeaseCount)
+            }
+        }
+    }
+
+    @Test
+    fun explicitVoiceStillPreventsAutomaticFallback() = runTest {
+        val service = AndroidAudioServiceCore(FakeRuntime(failSystemRender = true), FakeDriver(), maxPayloadBytes = 64, initialEpoch = epoch)
+        val result = service.execute(request("fixed-voice", DeviceAudioOperation.Synthesize(text = "hello", language = null, rate = null, voice = "system:chosen"))) as DeviceAudioResult.Failed
+        assertEquals(DeviceAudioErrorKind.Unavailable, result.error.kind)
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
+
+    @Test
     fun diagnosticsRecordPinnedRevisionAndEffectiveAutomaticFallbackWithoutPayloads() = runTest {
         val runtime = FakeRuntime(snapshotRevision = 23L, failSystemRender = true)
         val service = AndroidAudioServiceCore(runtime, FakeDriver(), maxPayloadBytes = 64, initialEpoch = epoch)
@@ -508,7 +605,7 @@ class AndroidAudioServiceCoreTest {
         service.execute(request("new-media", DeviceAudioOperation.OffloadMediaPlay("same", "/music/new.mp3")))
         val newLeaseId = driver.mediaCompletions.keys.maxOrNull()!!
         assertTrue(newLeaseId != oldLeaseId)
-        assertTrue(driver.completeMedia(oldLeaseId))
+        assertTrue(driver.completeMedia(oldLeaseId, DeviceAudioError(DeviceAudioErrorKind.NativeFailure, "late old media error")))
         awaitMediaCallbacks(service)
 
         assertEquals(1, service.diagnostics().activeLeaseCount)
@@ -520,6 +617,29 @@ class AndroidAudioServiceCoreTest {
         assertTrue(driver.completeMedia(newLeaseId))
         awaitMediaCallbacks(service)
         assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
+
+    @Test
+    fun mediaPlaybackFailureIsReportedToTheOwnerInsteadOfLookingLikeNormalCompletion() = runTest {
+        val driver = FakeDriver()
+        val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
+        service.execute(request("failed-media", DeviceAudioOperation.OffloadMediaPlay("music", "/music/broken.mp3")))
+        val leaseId = driver.mediaCompletions.keys.single()
+        val failure = DeviceAudioError(DeviceAudioErrorKind.NativeFailure, "media decoder failed")
+
+        assertTrue(driver.completeMedia(leaseId, failure))
+        awaitMediaCallbacks(service)
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+        val status = service.execute(
+            request("failed-media-status", DeviceAudioOperation.OffloadMediaControl("music", OffloadMediaCommand.STATUS)),
+        ) as DeviceAudioResult.Failed
+        assertEquals(failure, status.error)
+
+        service.execute(request("replacement-media", DeviceAudioOperation.OffloadMediaPlay("music", "/music/good.mp3")))
+        val replacementStatus = service.execute(
+            request("replacement-media-status", DeviceAudioOperation.OffloadMediaControl("music", OffloadMediaCommand.STATUS)),
+        ) as DeviceAudioResult.OffloadMedia
+        assertTrue(replacementStatus.state.playing)
     }
 
     private suspend fun awaitMediaCallbacks(service: AndroidAudioServiceCore) = withContext(Dispatchers.IO) {
@@ -547,6 +667,7 @@ class AndroidAudioServiceCoreTest {
         private val events: MutableList<String> = mutableListOf(),
         private val snapshotRevision: Long = 0L,
         private val failSystemRender: Boolean = false,
+        private val savedVoice: AudioVoiceSelection? = null,
         private val failSystemListen: Boolean = false,
         private val renderSampleRateHz: Int = 24_000,
         private val systemListenErrorCode: String? = null,
@@ -557,7 +678,9 @@ class AndroidAudioServiceCoreTest {
         val renderCleanupGate = CompletableDeferred<Unit>()
         var blockRender = false
 
-        override fun configuration() = AudioConfigurationNormalizer.defaults
+        override fun configuration() = AudioConfigurationNormalizer.defaults.let {
+            it.copy(speech = it.speech.copy(voice = savedVoice))
+        }
         override fun configurationSnapshot() = VersionedAudioConfiguration(configuration(), snapshotRevision)
         override fun microphonePermissionGranted() = true
         override fun resolveRecognition(
@@ -614,7 +737,8 @@ class AndroidAudioServiceCoreTest {
             rate: Float?,
             systemStatusOverride: AudioReadiness?,
         ): AudioRouteResolution {
-            val requested = RequestedAudioRoute(configuration.speech.source, configuration.speech.offlineModelId, configuration.speech.voice)
+            val resolved = resolveSpeechVoiceOverride(voice, configuration)
+            val requested = RequestedAudioRoute(resolved.preference.source, resolved.preference.offlineModelId, resolved.voiceOverride ?: resolved.preference.voice)
             if (configuration.speech.source == AudioSource.AUTOMATIC && systemStatusOverride == AudioReadiness.UNAVAILABLE) {
                 return AudioRouteResolution(
                     requested = requested,
@@ -684,11 +808,12 @@ class AndroidAudioServiceCoreTest {
         var failNativeStops = 0
         var nativeStopAttempts = 0
         var captureStarted = false
+        var recordingTermination: ((DeviceAudioError) -> Unit)? = null
         var recordingStops = 0
         var recordingBytes = byteArrayOf(9, 8)
         private var playbackStop: CompletableDeferred<Unit>? = null
         private var mayStartAfterPermission: (() -> Boolean)? = null
-        val mediaCompletions = ConcurrentHashMap<Long, () -> Unit>()
+        val mediaCompletions = ConcurrentHashMap<Long, (DeviceAudioError?) -> Unit>()
         private val mediaStates = ConcurrentHashMap<Long, DeviceMediaPlaybackState>()
         val mediaTargets = ConcurrentHashMap<Long, String>()
 
@@ -697,6 +822,7 @@ class AndroidAudioServiceCoreTest {
             sampleRateHz: Int,
             format: String,
             maxPayloadBytes: Int,
+            onTerminated: (DeviceAudioError) -> Unit,
             mayStart: () -> Boolean,
         ): String {
             if (waitForPermissionGrant) {
@@ -708,6 +834,7 @@ class AndroidAudioServiceCoreTest {
                 events += "late-start-rejected"
                 throw kotlinx.coroutines.CancellationException("stale microphone start")
             }
+            recordingTermination = onTerminated
             captureStarted = true
             return "handle-${lease.leaseId}"
         }
@@ -733,12 +860,12 @@ class AndroidAudioServiceCoreTest {
             lease: AudioLease,
             target: String,
             mayStart: () -> Boolean,
-            onCompleted: () -> Unit,
+            onTerminal: (DeviceAudioError?) -> Unit,
         ): DeviceMediaPlaybackState {
             if (!mayStart()) throw kotlinx.coroutines.CancellationException("stale media start")
             mediaTargets[lease.leaseId] = target
             mediaStates[lease.leaseId] = DeviceMediaPlaybackState(true, positionMs = 0, durationMs = 321)
-            mediaCompletions[lease.leaseId] = onCompleted
+            mediaCompletions[lease.leaseId] = onTerminal
             events += "media-start:${lease.leaseId}"
             return mediaStates.getValue(lease.leaseId)
         }
@@ -776,8 +903,8 @@ class AndroidAudioServiceCoreTest {
             else events += "late-start-rejected"
         }
 
-        fun completeMedia(leaseId: Long): Boolean = mediaCompletions[leaseId]?.let { callback ->
-            callback()
+        fun completeMedia(leaseId: Long, error: DeviceAudioError? = null): Boolean = mediaCompletions[leaseId]?.let { callback ->
+            callback(error)
             true
         } ?: false
     }

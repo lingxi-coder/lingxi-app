@@ -76,12 +76,13 @@ internal class AndroidAudioDeviceDriverImpl(
     private class MediaPlaybackState(
         val lease: AudioLease,
         val player: MediaPlayer,
-        private val onCompleted: () -> Unit,
+        private val onTerminal: (DeviceAudioError?) -> Unit,
     ) {
         val stopped = AtomicBoolean(false)
         val released = AtomicBoolean(false)
         val prepared = CompletableDeferred<Unit>()
         private val completionSent = AtomicBoolean(false)
+        @Volatile var terminalError: DeviceAudioError? = null
 
         fun snapshot(): DeviceMediaPlaybackState {
             if (released.get()) return DeviceMediaPlaybackState(false, 0, 0)
@@ -92,8 +93,11 @@ internal class AndroidAudioDeviceDriverImpl(
             )
         }
 
-        fun complete() {
-            if (!stopped.get() && completionSent.compareAndSet(false, true)) onCompleted()
+        fun complete(error: DeviceAudioError? = null) {
+            if (!stopped.get() && completionSent.compareAndSet(false, true)) {
+                terminalError = error
+                onTerminal(error)
+            }
         }
 
         @Synchronized fun stopNative() {
@@ -131,6 +135,7 @@ internal class AndroidAudioDeviceDriverImpl(
         sampleRateHz: Int,
         format: String,
         maxPayloadBytes: Int,
+        onTerminated: (DeviceAudioError) -> Unit,
         mayStart: () -> Boolean,
     ): String = recorderLock.withLock {
         if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -157,7 +162,10 @@ internal class AndroidAudioDeviceDriverImpl(
             recorder.setOutputFile(output.absolutePath)
             val state = RecordingState(lease, handle, recorder, output, maxPayloadBytes.toLong())
             recorder.setOnInfoListener { _, what, _ ->
-                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED) state.tooLarge.set(true)
+                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED && state.tooLarge.compareAndSet(false, true)) {
+                    state.stopped.set(true) // MediaRecorder has already stopped itself.
+                    onTerminated(DeviceAudioError(DeviceAudioErrorKind.MediaTooLarge, "recording exceeds the payload limit"))
+                }
             }
             recorder.prepare()
             if (!mayStart()) throw CancellationException("recording was cancelled before device start")
@@ -307,12 +315,12 @@ internal class AndroidAudioDeviceDriverImpl(
         lease: AudioLease,
         target: String,
         mayStart: () -> Boolean,
-        onCompleted: () -> Unit,
+        onTerminal: (DeviceAudioError?) -> Unit,
     ): DeviceMediaPlaybackState {
         if (!mayStart()) throw CancellationException("media playback was cancelled before device start")
         val state = withContext(Dispatchers.Main.immediate) {
             val player = MediaPlayer()
-            val candidate = MediaPlaybackState(lease, player, onCompleted)
+            val candidate = MediaPlaybackState(lease, player, onTerminal)
             if (mediaPlayback.putIfAbsent(lease.leaseId, candidate) != null) {
                 runCatching { player.release() }
                 throw AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.Busy, "media playback is already active"))
@@ -333,13 +341,14 @@ internal class AndroidAudioDeviceDriverImpl(
                 }
                 player.setOnPreparedListener { state.prepared.complete(Unit) }
                 player.setOnCompletionListener { state.complete() }
-                player.setOnErrorListener { _, _, _ ->
+                player.setOnErrorListener { _, what, extra ->
+                    val error = DeviceAudioError(DeviceAudioErrorKind.NativeFailure, "Android media playback failed ($what/$extra)")
                     if (!state.prepared.isCompleted) {
                         state.prepared.completeExceptionally(
                             AudioDriverException(DeviceAudioError(DeviceAudioErrorKind.Unavailable, "Android media could not be prepared")),
                         )
                     }
-                    state.complete()
+                    state.complete(error)
                     true
                 }
                 if (!mayStart()) throw CancellationException("media playback was cancelled before preparation")
@@ -349,6 +358,7 @@ internal class AndroidAudioDeviceDriverImpl(
             currentCoroutineContext().ensureActive()
             if (!mayStart()) throw CancellationException("media playback was cancelled before output began")
             withContext(Dispatchers.Main.immediate) { state.player.start() }
+            state.terminalError?.let { throw AudioDriverException(it) }
             if (!mayStart()) throw CancellationException("media playback was cancelled during start")
             state.snapshot()
         } catch (error: Throwable) {

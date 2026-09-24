@@ -136,7 +136,7 @@ export class VoiceFlowController {
   }
 
   async stop(): Promise<void> {
-    this.bumpGeneration();
+    const generation = this.bumpGeneration();
     const turnId = this.currentTurnId;
     this.clearTimers();
     this.cleanupTrackedSpeech();
@@ -145,6 +145,7 @@ export class VoiceFlowController {
     if (turnId !== undefined) {
       try { await this.options.bridge.cancel(turnId); } catch { /* the runtime may already be closed */ }
     }
+    if (!this.isCurrent(generation)) return;
     this.resetTurnState();
     this.update({ phase: 'paused', detail: '轻点 Orb 开始聆听' });
   }
@@ -210,7 +211,7 @@ export class VoiceFlowController {
       if (!this.isCurrent(generation)) return;
       this.listeningActive = false;
       this.listeningFinalizeRequested = false;
-      this.update({ phase: 'failed', detail: cause instanceof Error ? cause.message : '本机语音识别失败。' });
+      this.fail(cause instanceof Error ? cause.message : '本机语音识别失败。');
       return;
     }
     if (!this.isCurrent(generation)) return;
@@ -222,7 +223,7 @@ export class VoiceFlowController {
       return;
     }
     if (result.type !== 'transcript') {
-      this.update({ phase: 'failed', detail: '本机语音服务返回了无效的识别结果。' });
+      this.fail('本机语音服务返回了无效的识别结果。');
       return;
     }
     const transcript = result.text.trim();
@@ -266,7 +267,7 @@ export class VoiceFlowController {
     this.currentTurnId = undefined;
     const tracked = this.options.bridge.sendTrackedPrompt(text, [], [], [], { purpose: 'flow' });
     if (!tracked) {
-      this.update({ phase: 'failed', detail: '无法发送当前心流问题。' });
+      this.fail('无法发送当前心流问题。');
       return;
     }
     this.currentToken = tracked.token;
@@ -277,7 +278,7 @@ export class VoiceFlowController {
     });
     void tracked.queued.catch((cause: unknown) => {
       if (!this.isCurrent(generation)) return;
-      this.update({ phase: 'failed', detail: cause instanceof Error ? cause.message : '心流问题发送失败。' });
+      this.fail(cause instanceof Error ? cause.message : '心流问题发送失败。');
     });
   }
 
@@ -295,7 +296,7 @@ export class VoiceFlowController {
     if (segments.length > 0) {
       this.speechQueue.push(...segments);
       void this.maybeStartSpeaking(generation);
-    } else if (event.type === 'completion' && !this.speechInFlight) {
+    } else if (event.type === 'completion' && !this.speechInFlight && !this.interruptContext) {
       this.scheduleRelisten();
     }
   }
@@ -327,7 +328,7 @@ export class VoiceFlowController {
       if (result.type !== 'playback_completed') {
         this.speechInFlight = false;
         this.currentSpeechSegment = null;
-        this.update({ phase: 'failed', detail: '本机语音服务未确认播放完成。' });
+        this.fail('本机语音服务未确认播放完成。');
         return;
       }
       this.speechInFlight = false;
@@ -340,7 +341,7 @@ export class VoiceFlowController {
       if (!this.isCurrent(generation)) return;
       this.speechInFlight = false;
       this.currentSpeechSegment = null;
-      this.update({ phase: 'failed', detail: cause instanceof Error ? cause.message : '语音播放失败。' });
+      this.fail(cause instanceof Error ? cause.message : '语音播放失败。');
     }
   }
 
@@ -367,7 +368,7 @@ export class VoiceFlowController {
   }
 
   private async commitInterrupt(transcript: string): Promise<void> {
-    const turnId = this.interruptContext?.turnId;
+    const turnId = this.currentTurnId ?? this.interruptContext?.turnId;
     const replacementPreferences = this.turnPreferences;
     this.interruptContext = null;
     this.cleanupTrackedSpeech();
@@ -409,7 +410,23 @@ export class VoiceFlowController {
   }
 
   private handleFailure(result: AudioOperationResultDto, detail: string): void {
-    this.update({ phase: requiresConfiguration(result) ? 'configurationRequired' : 'failed', detail });
+    this.fail(detail, requiresConfiguration(result) ? 'configurationRequired' : 'failed');
+  }
+
+  private fail(detail: string, phase: 'failed' | 'configurationRequired' = 'failed'): void {
+    this.bumpGeneration();
+    this.clearTimers();
+    this.cleanupTrackedSpeech();
+    this.segmenter = null;
+    this.speechQueue = [];
+    this.currentSpeechSegment = null;
+    this.speechInFlight = false;
+    this.streamComplete = false;
+    this.interruptContext = null;
+    this.listeningActive = false;
+    this.listeningFinalizeRequested = false;
+    this.turnPreferences = null;
+    this.update({ phase, detail });
   }
 
   private resetTurnState(): void {

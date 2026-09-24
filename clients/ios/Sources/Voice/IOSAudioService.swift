@@ -38,6 +38,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     private var capabilityObservers: [NSObjectProtocol] = []
     private var pending: [IOSAudioOperationIdentity: PendingOperation] = [:]
     private var seenIdentities: Set<IOSAudioOperationIdentity> = []
+    private var seenIdentityOrder: [IOSAudioOperationIdentity] = []
     private var retiredIdentities: [IOSAudioOperationIdentity: ContinuousClock.Instant] = [:]
     private var retiredIdentityOrder: [IOSAudioOperationIdentity] = []
     private var endingOwners: Set<IOSAudioOwner> = []
@@ -298,7 +299,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     ) async -> IOSAudioOperationResult {
         if Task.isCancelled {
             if Self.isValidIdentity(request.identity), request.identity.serviceEpoch == serviceEpoch {
-                seenIdentities.insert(request.identity)
+                _ = rememberSeenIdentity(request.identity)
                 retire(request.identity)
             }
             return .failed(.init(kind: .cancelled, message: "The audio operation was cancelled before admission."))
@@ -312,11 +313,11 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         }
         pruneRetiredIdentities()
         if retiredIdentities[request.identity] != nil {
-            seenIdentities.insert(request.identity)
+            _ = rememberSeenIdentity(request.identity)
             clearRetired(request.identity)
             return .failed(.init(kind: .cancelled, message: "The audio operation was cancelled before admission."))
         }
-        guard seenIdentities.insert(request.identity).inserted else {
+        guard rememberSeenIdentity(request.identity) else {
             return .failed(.init(kind: .invalidRequest, message: "Audio operation identity was already used."))
         }
         if let timeout = request.timeoutBudgetMs, timeout == 0 {
@@ -1081,6 +1082,19 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         guard var diagnostic = lastOperationDiagnostics, diagnostic.identity == identity else { return }
         diagnostic.phase = phase
         lastOperationDiagnostics = diagnostic
+    }
+
+    private func rememberSeenIdentity(_ identity: IOSAudioOperationIdentity) -> Bool {
+        guard !seenIdentities.contains(identity),
+              pending[identity] == nil,
+              !recordings.values.contains(where: { $0.startIdentity == identity })
+        else { return false }
+        seenIdentities.insert(identity)
+        seenIdentityOrder.append(identity)
+        if seenIdentityOrder.count > 4_096 {
+            seenIdentities.remove(seenIdentityOrder.removeFirst())
+        }
+        return true
     }
 
     private func retire(_ identity: IOSAudioOperationIdentity) {

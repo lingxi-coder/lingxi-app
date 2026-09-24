@@ -15,6 +15,77 @@ import java.util.ArrayDeque
 
 class VoiceModelDownloaderTest {
     @Test
+    fun cancellingDuringExtractionDoesNotPublishOrLeaveStaging() {
+        val root = Files.createTempDirectory("voice-extract-cancel").toFile()
+        val model = OfflineModelCatalog.all.first()
+        val archive = root.resolve("model.tar.bz2")
+        val destination = root.resolve(model.id)
+        val staging = root.resolve(".${model.id}.installing")
+        val job = kotlinx.coroutines.Job()
+        try {
+            val payload = ByteArray(192 * 1024) { (it % 127).toByte() }
+            org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream(archive.outputStream()).use { bz ->
+                org.apache.commons.compress.archivers.tar.TarArchiveOutputStream(bz).use { tar ->
+                    val entry = org.apache.commons.compress.archivers.tar.TarArchiveEntry("wrapper/${model.files.first()}")
+                    entry.size = payload.size.toLong()
+                    tar.putArchiveEntry(entry)
+                    tar.write(payload)
+                    tar.closeArchiveEntry()
+                }
+            }
+            destination.mkdirs()
+            destination.resolve("old-model").writeText("preserve")
+            var interrupted = false
+            val failure = runCatching {
+                VoiceModelDownloader.install(archive, model, destination) {
+                    if (staging.resolve(model.files.first()).length() > 0) {
+                        interrupted = true
+                        job.cancel()
+                    }
+                    if (!job.isActive) throw kotlinx.coroutines.CancellationException("cancelled during copy")
+                }
+            }.exceptionOrNull()
+            assertTrue(interrupted)
+            assertTrue(failure is kotlinx.coroutines.CancellationException)
+            assertEquals("preserve", destination.resolve("old-model").readText())
+            assertTrue(!staging.exists())
+            assertTrue(archive.exists())
+        } finally {
+            job.cancel()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun activityReattachPreservesActiveInstallationStaging() {
+        val root = Files.createTempDirectory("voice-reattach").toFile()
+        val context = object : android.content.ContextWrapper(null) {
+            override fun getApplicationContext(): android.content.Context = this
+            override fun getFilesDir(): java.io.File = root.resolve("files")
+            override fun getCacheDir(): java.io.File = root.resolve("cache")
+        }
+        val contextField = VoiceModelDownloader::class.java.getDeclaredField("appContext").apply { isAccessible = true }
+        val previous = contextField.get(VoiceModelDownloader)
+        contextField.set(VoiceModelDownloader, null)
+        try {
+            val model = OfflineModelCatalog.all.first()
+            val staging = root.resolve("files/voice_models/.${model.id}.installing")
+            staging.mkdirs()
+            staging.resolve("stale").writeText("interrupted")
+            VoiceModelDownloader.attach(context)
+            assertTrue(!staging.exists())
+            staging.mkdirs()
+            val activeFile = staging.resolve("active-model")
+            activeFile.writeText("extracted data")
+            VoiceModelDownloader.attach(context)
+            assertEquals("extracted data", activeFile.readText())
+        } finally {
+            contextField.set(VoiceModelDownloader, previous)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun interrupted_transfer_retries_from_preserved_byte_offset() = runTest {
         val payload = "abcdefghij".toByteArray()
         val first = FakeConnection(

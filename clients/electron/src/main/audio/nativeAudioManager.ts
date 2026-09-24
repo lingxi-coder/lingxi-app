@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -661,7 +662,8 @@ export class NativeAudioManager {
         this.activeRecordingOrigins.set(key, { owner: request.owner, configurationRevision: operationConfigurationRevision });
       } else if (
         result.type !== 'failed'
-        && (request.operation.type === 'stop_recording' || request.operation.type === 'end_owner')
+        && (request.operation.type === 'stop_recording' || request.operation.type === 'end_owner'
+          || (request.operation.type === 'status' && result.type === 'status' && !result.status.recording))
       ) {
         const ownerKey = audioOwnerKey(request.owner);
         for (const [identity, recording] of this.activeRecordingOrigins) {
@@ -856,10 +858,18 @@ export class NativeAudioManager {
 
   async cancelUiAudioOperations(instanceId: string, releaseConfigurationPin = false): Promise<void> {
     if (!instanceId || instanceId.length > 128) return;
-    for (const operation of this.uiOperationsByInstance.get(instanceId) ?? []) operation.cancelled = true;
+    const uiOperations = this.uiOperationsByInstance.get(instanceId);
+    const ownerKey = `ui:${instanceId}`;
+    const hasActiveOwner = (this.snapshot.owner?.kind === 'ui' && this.snapshot.owner.id === instanceId)
+      || (this.snapshot.currentOperation?.owner.type === 'ui' && this.snapshot.currentOperation.owner.instance_id === instanceId)
+      || [...this.pendingAudioRequests.values()].some((pending) => audioOwnerKey(pending.request.owner) === ownerKey)
+      || [...this.activeRecordingOrigins.values()].some((recording) => audioOwnerKey(recording.owner) === ownerKey);
+    for (const operation of uiOperations ?? []) operation.cancelled = true;
     this.uiListenOperations.delete(instanceId);
     try {
-      await this.endAudioOwner({ type: 'ui', instance_id: instanceId });
+      if (uiOperations?.size || hasActiveOwner) {
+        await this.endAudioOwner({ type: 'ui', instance_id: instanceId });
+      }
     } finally {
       if (releaseConfigurationPin) this.uiConfigurationPins.delete(instanceId);
     }
@@ -1211,6 +1221,20 @@ export class NativeAudioManager {
   }
 
   private async ensureCapabilities(timeoutMs = REQUEST_TIMEOUT_MS): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('native audio capability initialization timed out')), Math.max(0, timeoutMs));
+    });
+    try {
+      // The shared refresh has its own lifetime. A caller timing out must not
+      // cancel it or inherit another caller's deadline.
+      await Promise.race([this.initializeHelperCapabilities(), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async initializeHelperCapabilities(): Promise<void> {
     if (!this.helperPath) return;
     await this.ensureHelper();
     const helper = this.helper;
@@ -1220,14 +1244,14 @@ export class NativeAudioManager {
       try {
         await this.capabilityInitialization;
       } catch (error) {
-        if (this.helper !== helper) return this.ensureCapabilities(timeoutMs);
+        if (this.helper !== helper) return this.initializeHelperCapabilities();
         throw error;
       }
-      if (this.helper !== helper) return this.ensureCapabilities(timeoutMs);
+      if (this.helper !== helper) return this.initializeHelperCapabilities();
       if (this.capabilitiesHelper === helper) return;
     }
     const initialization = (async () => {
-      const snapshot = await this.refreshHelperSnapshot(Math.min(REQUEST_TIMEOUT_MS, Math.max(1, Math.floor(timeoutMs))));
+      const snapshot = await this.refreshHelperSnapshot(REQUEST_TIMEOUT_MS);
       if (this.helper !== helper) throw new Error('native audio helper restarted while refreshing capabilities');
       if (!snapshot.capabilities) throw new Error('native audio helper did not return its capabilities');
       this.capabilitiesHelper = helper;
@@ -1303,39 +1327,69 @@ export class NativeAudioManager {
 
   private async startHelper(): Promise<void> {
     this.setHelperState('starting');
-    this.verifyHelper();
-    const env = {
-      PATH: process.env['PATH'],
-      TMPDIR: process.env['TMPDIR'],
-      TMP: process.env['TMP'],
-      TEMP: process.env['TEMP'],
-      LANG: process.env['LANG'],
-      LC_ALL: process.env['LC_ALL'],
-      LINGXI_AUDIO_MODELS_ROOT: this.storageRoot,
-    };
-    const child = this.spawnHelper(this.helperPath!, ['--jsonl'], env);
-    if (!child.stdin || !child.stdout || !child.stderr) {
-      throw new Error('native audio helper stdio is unavailable');
+    let child: HelperProcess;
+    try {
+      this.verifyHelper();
+      const env = {
+        PATH: process.env['PATH'],
+        TMPDIR: process.env['TMPDIR'],
+        TMP: process.env['TMP'],
+        TEMP: process.env['TEMP'],
+        LANG: process.env['LANG'],
+        LC_ALL: process.env['LC_ALL'],
+        LINGXI_AUDIO_MODELS_ROOT: this.storageRoot,
+      };
+      child = this.spawnHelper(this.helperPath!, ['--jsonl'], env);
+      if (!child.stdin || !child.stdout || !child.stderr) {
+        child.kill();
+        throw new Error('native audio helper stdio is unavailable');
+      }
+    } catch (error) {
+      this.setHelperState('failed', error instanceof Error ? error.message : String(error));
+      throw error;
     }
     this.helper = child;
+    const stdoutDecoder = new StringDecoder('utf8');
     child.stdout.on('data', (chunk: Buffer | string) => {
-      this.helperStdoutBuffer += chunk.toString();
-      this.drainStdout();
+      if (this.helper !== child) return;
+      this.helperStdoutBuffer += typeof chunk === 'string' ? chunk : stdoutDecoder.write(chunk);
+      this.drainStdout(child);
     });
     child.stderr.on('data', (chunk: Buffer | string) => {
       this.opts.diagnostics.add('warn', 'host', `audio-helper: ${chunk.toString().trim()}`);
     });
+    child.stdin.on('error', (error: Error) => {
+      this.failHelper(child, `native audio helper input failed: ${error.message}`);
+    });
+    child.once('error', (error: Error) => {
+      this.failHelper(child, `native audio helper failed: ${error.message}`);
+    });
     child.once('exit', (code, signal) => {
+      if (this.helper !== child) return;
       const detail = `native audio helper exited (code=${String(code)} signal=${String(signal)})`;
       const suspended = this.suspendedHelpers.has(child as object);
       this.helper = null;
       if (this.capabilitiesHelper === child) this.capabilitiesHelper = null;
       this.helperStdoutBuffer = '';
+      this.activeRecordingOrigins.clear();
       this.failPending(detail);
       this.releaseOwner();
       this.setHelperState(suspended || code === 0 ? 'stopped' : 'failed', detail);
     });
     this.setHelperState('running');
+  }
+
+  private failHelper(child: HelperProcess, detail: string): void {
+    if (this.helper !== child) return;
+    const suspended = this.suspendedHelpers.has(child as object);
+    this.helper = null;
+    if (this.capabilitiesHelper === child) this.capabilitiesHelper = null;
+    this.helperStdoutBuffer = '';
+    this.activeRecordingOrigins.clear();
+    this.failPending(detail);
+    this.releaseOwner();
+    this.setHelperState(suspended ? 'stopped' : 'failed', detail);
+    child.kill();
   }
 
   private verifyHelper(): void {
@@ -1362,7 +1416,7 @@ export class NativeAudioManager {
     }
   }
 
-  private drainStdout(): void {
+  private drainStdout(child: HelperProcess): void {
     for (;;) {
       const newline = this.helperStdoutBuffer.indexOf('\n');
       if (newline < 0) return;
@@ -1376,7 +1430,12 @@ export class NativeAudioManager {
         this.opts.diagnostics.add('warn', 'host', `native audio helper emitted invalid JSON: ${String(error)}`);
         continue;
       }
-      this.handleHelperEnvelope(payload);
+      try {
+        this.handleHelperEnvelope(payload);
+      } catch (error) {
+        this.failHelper(child, `native audio helper emitted an invalid envelope: ${String(error)}`);
+        return;
+      }
     }
   }
 
@@ -1393,17 +1452,20 @@ export class NativeAudioManager {
     if (!pending) return;
     clearTimeout(pending.timer);
     this.pending.delete(envelope.id);
-    if (envelope.type === 'error') {
-      const response = this.errorResponse('native-error', envelope.error.message);
-      if (pending.kind === 'command') pending.resolve(response);
-      else pending.resolve({
-        type: 'engine_result',
-        snapshot: this.getSnapshot(),
-        result: failedAudio('native_failure', envelope.error.message),
-      });
-      return;
-    }
     try {
+      if (envelope.type === 'error') {
+        if (typeof envelope.error?.message !== 'string' || !envelope.error.message.trim()) {
+          throw new Error('native audio helper returned an invalid error response');
+        }
+        const response = this.errorResponse('native-error', envelope.error.message);
+        if (pending.kind === 'command') pending.resolve(response);
+        else pending.resolve({
+          type: 'engine_result',
+          snapshot: this.getSnapshot(),
+          result: failedAudio('native_failure', envelope.error.message),
+        });
+        return;
+      }
       if ((envelope.result as { type?: string }).type === 'engine_result') {
         const response = validateNativeAudioEngineResponse(envelope.result);
         if (pending.kind === 'command') pending.resolve(this.normalizeCommandResponse({ type: 'get_snapshot' }, response));
@@ -1439,7 +1501,8 @@ export class NativeAudioManager {
     owner: NativeAudioOwner | null,
     timeoutMs = REQUEST_TIMEOUT_MS,
   ): Promise<NativeAudioResponse | NativeAudioEngineResponse> {
-    if (!this.helper?.stdin?.writable) throw new Error('native audio helper is not writable');
+    const helper = this.helper;
+    if (!helper?.stdin?.writable) throw new Error('native audio helper is not writable');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(envelope.id);
@@ -1461,11 +1524,11 @@ export class NativeAudioManager {
             timer,
           });
       try {
-        this.helper!.stdin!.write(`${JSON.stringify(envelope)}\n`);
+        helper.stdin.write(`${JSON.stringify(envelope)}\n`, (error) => {
+          if (error) this.failHelper(helper, `native audio helper input failed: ${error.message}`);
+        });
       } catch (error) {
-        clearTimeout(timer);
-        this.pending.delete(envelope.id);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        this.failHelper(helper, `native audio helper input failed: ${String(error)}`);
       }
     });
   }

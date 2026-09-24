@@ -596,6 +596,32 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertEqual(session.cancelCalls, 1)
     }
 
+    func testBackgroundDuringBargeInTeardownDoesNotRestartCapture() async {
+        let first = ControllerVoiceSession(transcript: "question", automaticallyFinishesWhenEndpointingEnabled: true)
+        let second = ControllerVoiceSession(transcript: "must stay paused")
+        let monitor = ControllerBargeInSession()
+        monitor.holdStop = true
+        let player = RecordingStreamingSpeechPlayer()
+        let source = ControllerConversationSource()
+        let controller = makeController(sessions: [first, second], player: player,
+                                        bargeInRecognizer: ControllerBargeInRecognizer(sessions: [monitor]))
+        controller.startFlow(source: source)
+        await settle(30)
+        let token = try! XCTUnwrap(source.lastToken)
+        controller.handleTurnSpeechUpdate(.init(token: token, sequence: 1, delta: "这是已经完成的回复。"))
+        await settle(30)
+        source.complete(token: token, text: "这是已经完成的回复。")
+        controller.handleTurnCompletion(try! XCTUnwrap(source.model.turnCompletion))
+        await settle(30)
+        XCTAssertGreaterThan(monitor.stopCalls, 0, "completion must be waiting for monitor teardown")
+        controller.handleBackground()
+        monitor.releaseStop()
+        await settle(50)
+        XCTAssertEqual(controller.phase, .paused)
+        XCTAssertEqual(second.transcribeCalls, 0)
+        controller.close()
+    }
+
     func testBackgroundedFlowTurnStopsAudioButCompletesSilentlyUntilTapResumesListening() async {
         let firstCapture = ControllerVoiceSession(
             transcript: "keep working",
@@ -1180,6 +1206,15 @@ private final class ControllerBargeInSession: VoiceBargeInSession {
     let events: AsyncStream<VoiceBargeInEvent>
     private let continuation: AsyncStream<VoiceBargeInEvent>.Continuation
     private(set) var stopCalls = 0
+    var holdStop = false
+    private var stopWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func releaseStop() {
+        holdStop = false
+        let waiters = stopWaiters
+        stopWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
 
     init() {
         var captured: AsyncStream<VoiceBargeInEvent>.Continuation?
@@ -1193,6 +1228,7 @@ private final class ControllerBargeInSession: VoiceBargeInSession {
 
     func stop() async {
         stopCalls += 1
+        if holdStop { await withCheckedContinuation { stopWaiters.append($0) } }
         continuation.finish()
     }
 }

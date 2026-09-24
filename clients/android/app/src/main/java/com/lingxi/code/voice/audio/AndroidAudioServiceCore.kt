@@ -115,6 +115,7 @@ internal interface AndroidAudioDeviceDriver {
         sampleRateHz: Int,
         format: String,
         maxPayloadBytes: Int,
+        onTerminated: (DeviceAudioError) -> Unit,
         mayStart: () -> Boolean,
     ): String
 
@@ -124,7 +125,7 @@ internal interface AndroidAudioDeviceDriver {
         lease: AudioLease,
         target: String,
         mayStart: () -> Boolean,
-        onCompleted: () -> Unit,
+        onTerminal: (DeviceAudioError?) -> Unit,
     ): DeviceMediaPlaybackState
     suspend fun controlMedia(lease: AudioLease, command: OffloadMediaCommand): DeviceMediaPlaybackState
     suspend fun stop(lease: AudioLease)
@@ -265,6 +266,8 @@ internal class AndroidAudioServiceCore(
     ) {
         val stopMutex = Mutex()
         var finalizedCapture: DeviceAudioCapture? = null
+        val started = CompletableDeferred<Unit>()
+        @Volatile var failure: DeviceAudioError? = null
     }
 
     private data class OffloadMediaKey(val owner: AudioOwnerKey, val label: String)
@@ -288,11 +291,14 @@ internal class AndroidAudioServiceCore(
     private val cancelledOperations = ConcurrentHashMap.newKeySet<AudioOperationIdentity>()
     private val cancelledOperationOrder = ConcurrentLinkedDeque<AudioOperationIdentity>()
     private val cancellationLock = Any()
+    private val seenOperations = LinkedHashSet<AudioOperationIdentity>()
     private val operationDiagnostics = ConcurrentLinkedDeque<DeviceAudioOperationDiagnostic>()
     private val recordingSessions = ConcurrentHashMap<String, RecordingSession>()
     private val leaseOperations = ConcurrentHashMap<Long, OperationState>()
     private val playbackByOwner = ConcurrentHashMap<AudioOwnerKey, AudioLease>()
     private val offloadMedia = ConcurrentHashMap<OffloadMediaKey, OffloadMediaSession>()
+    private val offloadMediaFailures = ConcurrentHashMap<OffloadMediaKey, DeviceAudioError>()
+    private val offloadMediaFailureOrder = ConcurrentLinkedDeque<OffloadMediaKey>()
     private val nativeStopCompletion = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
     private val stopInProgress = ConcurrentHashMap.newKeySet<Long>()
     private val pendingMediaCompletions = AtomicLong(0L)
@@ -332,13 +338,7 @@ internal class AndroidAudioServiceCore(
             when {
                 invalidating || request.identity.serviceEpoch != epoch -> false
                 request.operation != DeviceAudioOperation.EndOwner && request.owner in endingOwners -> false
-                else -> synchronized(cancellationLock) {
-                    if (request.identity in cancelledOperations || operations.putIfAbsent(request.identity, state) != null) {
-                        false
-                    } else {
-                        true
-                    }
-                }
+                else -> registerOperation(state)
             }
         }
         if (!registered) {
@@ -347,7 +347,7 @@ internal class AndroidAudioServiceCore(
                 invalidating || request.identity.serviceEpoch != epoch -> failure(DeviceAudioErrorKind.Cancelled, "audio service instance has changed")
                 request.operation != DeviceAudioOperation.EndOwner && request.owner in endingOwners -> failure(DeviceAudioErrorKind.Cancelled, "audio owner is ending")
                 request.identity in cancelledOperations -> failure(DeviceAudioErrorKind.Cancelled, "audio operation was cancelled before admission")
-                else -> failure(DeviceAudioErrorKind.InvalidRequest, "audio operation identity is already active")
+                else -> failure(DeviceAudioErrorKind.InvalidRequest, "audio operation identity has already been used")
             }
         }
         recordDiagnostic(state, "started")
@@ -539,13 +539,7 @@ internal class AndroidAudioServiceCore(
             when {
                 invalidating || request.identity.serviceEpoch != epoch -> false
                 request.owner in endingOwners -> false
-                else -> synchronized(cancellationLock) {
-                    if (request.identity in cancelledOperations || operations.putIfAbsent(request.identity, state) != null) {
-                        false
-                    } else {
-                        true
-                    }
-                }
+                else -> registerOperation(state)
             }
         }
         if (!registered) {
@@ -656,6 +650,10 @@ internal class AndroidAudioServiceCore(
                 session.started.complete(Unit)
                 offloadMedia.remove(session.key, session)
             }
+            synchronized(offloadMediaFailureOrder) {
+                offloadMediaFailures.clear()
+                offloadMediaFailureOrder.clear()
+            }
             leaseOperations.clear()
             nativeStopCompletion.clear()
             epoch = nextEpoch
@@ -696,16 +694,29 @@ internal class AndroidAudioServiceCore(
     ): DeviceAudioResult {
         validateCaptureRequest(operation.sampleRateHz, operation.format)
         requireMicrophonePermission()
+        recordingSessions.entries.filter { it.value.owner == state.request.owner && it.value.failure != null }
+            .forEach { retireTerminatedRecording(it.key, it.value) }
         val lease = acquire(state, AudioResource.Capture)
+        val session = RecordingSession(state.request.owner, epoch, state.request.identity, lease)
         try {
             state.job.ensureActive()
             requireLive(state)
             val limit = payloadLimitInt(state.request.maxPayloadBytes)
-            val handle = driver.startRecording(lease, operation.sampleRateHz, "audio/m4a", limit) { state.isLive() && coordinator.isActive(lease) }
+            val handle = driver.startRecording(lease, operation.sampleRateHz, "audio/m4a", limit, onTerminated = { error ->
+                session.failure = error
+                serviceOperationScope.launch {
+                    session.started.await()
+                    session.stopMutex.withLock {
+                        // Keep a failed lease addressable if native cleanup needs retrying.
+                        runCatching { releaseAfterStop(lease) }
+                    }
+                }
+            }) { state.isLive() && coordinator.isActive(lease) }
+            session.failure?.let { throw AudioOperationException(it.kind, it.message) }
             requireLive(state)
             if (requestEpochIsCurrent(state) && recordings.lookup(handle, state.request.owner, epoch) is RecordingLookup.NotFound) {
                 recordings.register(handle, state.request.owner, epoch)
-                recordingSessions[handle] = RecordingSession(state.request.owner, epoch, state.request.identity, lease)
+                recordingSessions[handle] = session
                 // A recording deliberately outlives the completed start operation.
                 state.lease = null
                 leaseOperations.remove(lease.leaseId, state)
@@ -716,6 +727,18 @@ internal class AndroidAudioServiceCore(
             runCatching { driver.stop(lease) }
             releaseAfterStop(lease)
             throw error
+        } finally {
+            session.started.complete(Unit)
+        }
+    }
+
+    private suspend fun retireTerminatedRecording(handle: String, session: RecordingSession) {
+        session.started.await()
+        session.stopMutex.withLock {
+            if (session.failure == null) return@withLock
+            releaseAfterStop(session.lease)
+            recordingSessions.remove(handle, session)
+            recordings.remove(handle, session.owner, session.epoch)
         }
     }
 
@@ -730,6 +753,10 @@ internal class AndroidAudioServiceCore(
         }
         val session = recordingSessions[operation.handle]
             ?: throw AudioOperationException(DeviceAudioErrorKind.NotRecording, "recording handle is no longer active")
+        session.failure?.let { failure ->
+            retireTerminatedRecording(operation.handle, session)
+            throw AudioOperationException(failure.kind, failure.message)
+        }
         if (session.owner != state.request.owner || session.epoch != epoch || !coordinator.isActive(session.lease)) {
             throw AudioOperationException(DeviceAudioErrorKind.NotRecording, "recording handle is stale")
         }
@@ -920,6 +947,7 @@ internal class AndroidAudioServiceCore(
         requireMediaArguments(operation.label, operation.target)
         val key = OffloadMediaKey(state.request.owner, operation.label)
         offloadMedia[key]?.let { previous -> stopOffloadMedia(previous) }
+        clearOffloadMediaFailure(key)
         requireLive(state)
         val lease = acquire(state, AudioResource.Playback)
         val session = OffloadMediaSession(key, lease)
@@ -932,7 +960,7 @@ internal class AndroidAudioServiceCore(
                 lease = lease,
                 target = operation.target,
                 mayStart = { state.isLive() && coordinator.isActive(lease) },
-                onCompleted = { dispatchOffloadMediaCompletion(session) },
+                onTerminal = { error -> dispatchOffloadMediaCompletion(session, error) },
             )
             requireLive(state)
             if (!coordinator.isActive(lease) || offloadMedia[key] !== session) {
@@ -962,6 +990,10 @@ internal class AndroidAudioServiceCore(
         val key = OffloadMediaKey(state.request.owner, operation.label)
         val session = offloadMedia[key]
         if (session == null) {
+            if (operation.command != OffloadMediaCommand.STOP) {
+                offloadMediaFailures[key]?.let { throw AudioOperationException(it.kind, it.message) }
+            }
+            clearOffloadMediaFailure(key)
             return if (operation.command == OffloadMediaCommand.STOP) {
                 DeviceAudioResult.OffloadMedia(DeviceMediaPlaybackState(false, 0, 0))
             } else {
@@ -987,29 +1019,48 @@ internal class AndroidAudioServiceCore(
         releaseOffloadMedia(session)
     }
 
-    private suspend fun completeOffloadMedia(session: OffloadMediaSession) {
+    private suspend fun completeOffloadMedia(session: OffloadMediaSession, error: DeviceAudioError?) {
         session.started.await()
-        releaseOffloadMedia(session)
+        releaseOffloadMedia(session, error)
     }
 
-    private suspend fun releaseOffloadMedia(session: OffloadMediaSession) {
+    private suspend fun releaseOffloadMedia(session: OffloadMediaSession, error: DeviceAudioError? = null) {
         session.stopMutex.withLock {
             if (session.terminal.get() || offloadMedia[session.key] !== session) return@withLock
             // Keep the session addressable if the native stop fails, so STOP or
             // EndOwner can retry the same lease.
+            if (error != null) rememberOffloadMediaFailure(session.key, error)
             releaseAfterStop(session.lease)
             session.terminal.set(true)
             offloadMedia.remove(session.key, session)
         }
     }
 
-    private fun dispatchOffloadMediaCompletion(session: OffloadMediaSession) {
+    private fun dispatchOffloadMediaCompletion(session: OffloadMediaSession, error: DeviceAudioError?) {
         pendingMediaCompletions.incrementAndGet()
         serviceOperationScope.launch {
             try {
-                completeOffloadMedia(session)
+                completeOffloadMedia(session, error)
             } finally {
                 pendingMediaCompletions.decrementAndGet()
+            }
+        }
+    }
+
+    private fun clearOffloadMediaFailure(key: OffloadMediaKey) {
+        synchronized(offloadMediaFailureOrder) {
+            offloadMediaFailures.remove(key)
+            offloadMediaFailureOrder.remove(key)
+        }
+    }
+
+    private fun rememberOffloadMediaFailure(key: OffloadMediaKey, error: DeviceAudioError) {
+        synchronized(offloadMediaFailureOrder) {
+            offloadMediaFailureOrder.remove(key)
+            offloadMediaFailures[key] = error
+            offloadMediaFailureOrder.addLast(key)
+            while (offloadMediaFailureOrder.size > 64) {
+                offloadMediaFailureOrder.pollFirst()?.let(offloadMediaFailures::remove)
             }
         }
     }
@@ -1046,7 +1097,7 @@ internal class AndroidAudioServiceCore(
             return RenderedSpeech(pcm, sampleRateHz, initialLease)
         } catch (unavailable: AudioOperationException) {
             val automaticWithoutFixedVoice =
-                configuration.speech.source == AudioSource.AUTOMATIC && configuration.speech.voice == null && voice == null
+                initialRoute.requested.source == AudioSource.AUTOMATIC && initialRoute.requested.voice == null
             if (unavailable.kind != DeviceAudioErrorKind.Unavailable ||
                 initialRoute.effective?.source != AudioSource.SYSTEM || !automaticWithoutFixedVoice ||
                 !isAudioFallbackAllowed(AudioFallbackFailure.UNAVAILABLE, operationStarted = false)
@@ -1101,6 +1152,10 @@ internal class AndroidAudioServiceCore(
     }
 
     private suspend fun status(state: OperationState, operation: DeviceAudioOperation.Status): DeviceAudioResult {
+        recordingSessions.entries.filter {
+            it.value.owner == state.request.owner && it.value.epoch == epoch && it.value.failure != null
+                && (operation.handle == null || operation.handle == it.key)
+        }.forEach { retireTerminatedRecording(it.key, it.value) }
         val recording = operation.handle?.let { handle ->
             when (val lookup = recordings.lookup(handle, state.request.owner, epoch)) {
                 is RecordingLookup.Found -> true
@@ -1141,6 +1196,12 @@ internal class AndroidAudioServiceCore(
                 session.terminal.set(true)
                 session.started.complete(Unit)
                 offloadMedia.remove(session.key, session)
+            }
+            synchronized(offloadMediaFailureOrder) {
+                offloadMediaFailureOrder.filter { it.owner == owner }.forEach { key ->
+                    offloadMediaFailures.remove(key)
+                    offloadMediaFailureOrder.remove(key)
+                }
             }
             return DeviceAudioResult.OwnerEnded
         } finally {
@@ -1318,6 +1379,20 @@ internal class AndroidAudioServiceCore(
         while (operationDiagnostics.size > DIAGNOSTIC_HISTORY_LIMIT) operationDiagnostics.pollFirst()
     }
 
+    private fun registerOperation(state: OperationState): Boolean = synchronized(cancellationLock) {
+        val identity = state.request.identity
+        if (identity in cancelledOperations || identity in seenOperations
+            || operations.putIfAbsent(identity, state) != null
+        ) return@synchronized false
+        seenOperations.add(identity)
+        while (seenOperations.size > SEEN_IDENTITY_HISTORY_LIMIT) {
+            val oldest = seenOperations.iterator()
+            oldest.next()
+            oldest.remove()
+        }
+        true
+    }
+
     private fun rememberCancelled(identity: AudioOperationIdentity) = synchronized(cancellationLock) {
         if (!cancelledOperations.add(identity)) return@synchronized
         cancelledOperationOrder.addLast(identity)
@@ -1368,6 +1443,7 @@ internal class AndroidAudioServiceCore(
         const val MAX_AUDIO_SAMPLE_RATE_HZ = 768_000
         const val MAX_SAFE_INTEGER = 9_007_199_254_740_991L
         const val DIAGNOSTIC_HISTORY_LIMIT = 64
+        const val SEEN_IDENTITY_HISTORY_LIMIT = 4_096
         const val CANCELLED_IDENTITY_HISTORY_LIMIT = 2_048
         const val MAX_MEDIA_LABEL_LENGTH = 256
         const val MAX_MEDIA_TARGET_LENGTH = 4_096

@@ -15,6 +15,25 @@ final class IOSAudioServiceTests: XCTestCase {
         )
     }
 
+    func testCompletedOperationIdentityHistoryIsBounded() async {
+        let service = IOSAudioService(serviceEpoch: 91, onInvalidation: { _ in })
+        let owner = IOSAudioOwner.session(sessionID: "identity-history")
+        let firstIdentity = identity(generation: 1, epoch: 91)
+        let first = await service.execute(request(identity: firstIdentity, owner: owner, operation: .status(handle: nil)))
+        guard case .status = first else { return XCTFail("initial status should succeed") }
+
+        for generation in 2 ... 4_097 {
+            let result = await service.execute(request(
+                identity: identity(generation: UInt64(generation), epoch: 91),
+                owner: owner,
+                operation: .status(handle: nil)
+            ))
+            guard case .status = result else { return XCTFail("status should succeed while history rotates") }
+        }
+        let recycled = await service.execute(request(identity: firstIdentity, owner: owner, operation: .status(handle: nil)))
+        guard case .status = recycled else { return XCTFail("completed identities must leave the bounded history") }
+    }
+
     func testEndOwnerAllowsFreshLowerGenerationForSameStableOwner() async {
         let service = IOSAudioService(serviceEpoch: 41, onInvalidation: { _ in })
         let owner = IOSAudioOwner.session(sessionID: "stable-session")

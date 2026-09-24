@@ -155,6 +155,142 @@ test('snapshot requests start the helper and return its real capabilities', asyn
   }
 });
 
+for (const failure of ['verification', 'spawn'] as const) {
+  test(`synchronous helper ${failure} failure leaves a failed snapshot and permits retry`, async () => {
+    const helper = new FakeHelperProcess();
+    let shouldFail = true;
+    const manager = new NativeAudioManager({
+      isPackaged: true,
+      resourcesPath: '/resources',
+      userDataPath: '/tmp/lingxi-audio-tests',
+      helperPath: '/tmp/LingXiAudioHelper',
+      diagnostics: new DiagnosticBuffer(),
+      verifyPackagedHelper: () => {
+        if (shouldFail && failure === 'verification') throw new Error('bad signature');
+      },
+      spawnHelper: () => {
+        if (shouldFail && failure === 'spawn') throw new Error('spawn failed');
+        return helper as any;
+      },
+    });
+    try {
+      assert.equal((await manager.request({ type: 'get_snapshot' })).type, 'error');
+      assert.equal(manager.getSnapshot().helper.state, 'failed');
+      shouldFail = false;
+      const retry = manager.request({ type: 'get_snapshot' });
+      const envelope = await nextEnvelope(helper);
+      helper.stdout.write(`${JSON.stringify({ id: envelope.id, type: 'response', result: { type: 'snapshot', snapshot: snapshot() } })}\n`);
+      assert.equal((await retry).type, 'snapshot');
+    } finally {
+      await manager.dispose();
+      helper.stdin.end();
+      helper.stdout.end();
+      helper.stderr.end();
+    }
+  });
+}
+
+for (const failure of ['exit', 'input-error'] as const) {
+  test(`helper ${failure} clears recording ownership so UI cleanup does not restart it`, async () => {
+    const helper = new FakeHelperProcess();
+    let spawnCount = 0;
+    const manager = new NativeAudioManager({
+      isPackaged: false,
+      resourcesPath: '/resources',
+      userDataPath: '/tmp/lingxi-audio-tests',
+      helperPath: '/tmp/LingXiAudioHelper',
+      diagnostics: new DiagnosticBuffer(),
+      spawnHelper: () => { spawnCount += 1; return helper as any; },
+    });
+    try {
+      await primeEngineCapabilities(manager, helper);
+      const owner = { type: 'ui', instance_id: 'voice-panel' } as const;
+      const identity = { id: '00000000-0000-4000-8000-000000000042', generation: 1, service_epoch: 9 };
+      const started = manager.executeAudioRequest({
+        identity, owner, max_payload_bytes: 8_000_000,
+        operation: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' },
+      });
+      const envelope = await envelopeAt(helper, 1);
+      helper.stdout.write(`${JSON.stringify({
+        id: envelope.id, type: 'response', result: {
+          type: 'engine_result', result: { type: 'recording_started', handle: 'recording' },
+          snapshot: snapshot({ owner: { kind: 'ui', id: 'voice-panel' }, activity: 'listening', capabilities: AUDIO_CAPABILITIES, currentOperation: { identity, owner } }),
+        },
+      })}\n`);
+      assert.equal((await started).type, 'recording_started');
+      if (failure === 'exit') helper.emit('exit', 1, null);
+      else helper.stdin.emit('error', new Error('write EPIPE'));
+      await manager.cancelUiAudioOperations('voice-panel');
+      assert.equal(spawnCount, 1);
+      assert.equal(manager.getSnapshot().helper.state, 'failed');
+    } finally {
+      await manager.dispose();
+      helper.stdin.end();
+      helper.stdout.end();
+      helper.stderr.end();
+    }
+  });
+}
+
+test('a broken audio helper input pipe rejects requests without crashing the host', async () => {
+  const helper = new FakeHelperProcess();
+  helper.stdin.write = ((chunk: string | Uint8Array, encodingOrCallback?: unknown) => {
+    helper.writes.push(Buffer.from(chunk).toString('utf8'));
+    queueMicrotask(() => {
+      const error = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+      if (typeof encodingOrCallback === 'function') encodingOrCallback(error);
+      helper.stdin.emit('error', error);
+    });
+    return false;
+  }) as typeof helper.stdin.write;
+  const manager = new NativeAudioManager({
+    isPackaged: false,
+    resourcesPath: '/resources',
+    userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/tmp/LingXiAudioHelper',
+    diagnostics: new DiagnosticBuffer(),
+    spawnHelper: () => helper as any,
+  });
+  try {
+    const response = await manager.request({ type: 'get_snapshot' });
+    assert.equal(response.type, 'error');
+    if (response.type === 'error') assert.match(response.error.message, /EPIPE/);
+    assert.equal(helper.killCount, 1);
+    assert.equal(manager.getSnapshot().helper.state, 'failed');
+  } finally {
+    await manager.dispose();
+    helper.stdin.end();
+    helper.stdout.end();
+    helper.stderr.end();
+  }
+});
+
+test('an invalid audio helper envelope fails the helper instead of escaping its stdout handler', async () => {
+  const helper = new FakeHelperProcess();
+  const manager = new NativeAudioManager({
+    isPackaged: false,
+    resourcesPath: '/resources',
+    userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/tmp/LingXiAudioHelper',
+    diagnostics: new DiagnosticBuffer(),
+    spawnHelper: () => helper as any,
+  });
+  try {
+    const responsePromise = manager.request({ type: 'get_snapshot' });
+    await nextEnvelope(helper);
+    assert.doesNotThrow(() => helper.stdout.write('{"type":"event","event":{}}\n'));
+    const response = await responsePromise;
+    assert.equal(response.type, 'error');
+    assert.equal(helper.killCount, 1);
+    assert.equal(manager.getSnapshot().helper.state, 'failed');
+  } finally {
+    await manager.dispose();
+    helper.stdin.end();
+    helper.stdout.end();
+    helper.stderr.end();
+  }
+});
+
 test('audio operation telemetry preserves bounded payload-free trace and resource counts', () => {
   const trace = {
     identity: { id: '00000000-0000-4000-8000-000000000001', generation: 4, service_epoch: 7 },
@@ -799,6 +935,32 @@ test('UI cancellation during initial capability refresh prevents later operation
   }
 });
 
+test('cancelling idle UI audio does not start the helper', async () => {
+  const helper = new FakeHelperProcess();
+  let spawnCount = 0;
+  const manager = new NativeAudioManager({
+    isPackaged: false,
+    resourcesPath: '/resources',
+    userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/tmp/LingXiAudioHelper',
+    diagnostics: new DiagnosticBuffer(),
+    spawnHelper: () => {
+      spawnCount += 1;
+      return helper as any;
+    },
+  });
+  try {
+    await manager.cancelUiAudioOperations('voice-panel');
+    assert.equal(spawnCount, 0);
+    assert.equal(helper.writes.length, 0);
+  } finally {
+    await manager.dispose();
+    helper.stdin.end();
+    helper.stdout.end();
+    helper.stderr.end();
+  }
+});
+
 test('engine cancellation during initial capability refresh tombstones identity before native admission', async () => {
   const helper = new FakeHelperProcess();
   const manager = new NativeAudioManager({
@@ -1363,6 +1525,7 @@ test('helper restart refreshes capabilities and rejects a request carrying the o
     const freshOperation = manager.executeUiAudioOperation({ type: 'synthesize', text: 'fresh epoch' }, 'voice-panel');
     const restartedCapabilities = await envelopeAt(restartedHelper, 0);
     assert.equal(restartedCapabilities.command?.type, 'get_snapshot');
+    firstHelper.stdout.write('{"type":"event","event":');
     restartedHelper.stdout.write(`${JSON.stringify({
       id: restartedCapabilities.id,
       type: 'response',
@@ -1392,6 +1555,11 @@ test('helper restart refreshes capabilities and rejects a request carrying the o
       },
     })}\n`);
     assert.equal((await freshOperation).result.type, 'synthesized');
+    firstHelper.stdout.write(`${JSON.stringify({
+      type: 'event',
+      event: { type: 'snapshot_changed', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) },
+    })}\n`);
+    assert.equal(manager.getCapabilities().service_epoch, nextCapabilities.service_epoch);
 
     const staleOperation = manager.executeAudioRequest({
       identity: { id: '00000000-0000-4000-8000-000000000017', generation: 1, service_epoch: 9 },
@@ -2359,4 +2527,82 @@ test('renderer-visible native audio snapshots reject path-bearing fields', () =>
     ...snapshot(),
     models: [{ modelId: 'sherpa.moonshine-tiny-en', state: { type: 'ready', rootPath: '/tmp/model' } }],
   }), /invalid audio model state/);
+});
+
+for (const error of [undefined, null, {}, { message: 7 }]) {
+  test(`invalid helper error settles the request: ${JSON.stringify(error)}`, { timeout: 1_000 }, async () => {
+    const helper = new FakeHelperProcess();
+    const manager = new NativeAudioManager({
+      isPackaged: false, resourcesPath: '/resources', userDataPath: '/tmp/lingxi-audio-tests',
+      helperPath: '/tmp/helper', diagnostics: new DiagnosticBuffer(), spawnHelper: () => helper as any,
+    });
+    try {
+      const pending = manager.request({ type: 'get_snapshot' });
+      const envelope = await nextEnvelope(helper);
+      helper.stdout.write(`${JSON.stringify({ id: envelope.id, type: 'error', error })}\n`);
+      const response = await pending;
+      assert.equal(response.type, 'error');
+      if (response.type === 'error') assert.match(response.error.message, /invalid error response/);
+    } finally {
+      await manager.dispose();
+      helper.stdin.end(); helper.stdout.end(); helper.stderr.end();
+    }
+  });
+}
+
+for (const budgets of [[1000, 10], [10, 1000]]) {
+  test(`capability waiters keep independent deadlines: ${budgets}`, async () => {
+    const helper = new FakeHelperProcess();
+    const manager = new NativeAudioManager({
+      isPackaged: false, resourcesPath: '/resources', userDataPath: '/tmp/lingxi-audio-tests',
+      helperPath: '/tmp/helper', diagnostics: new DiagnosticBuffer(), spawnHelper: () => helper as any,
+    });
+    const request = (index: number) => ({
+      identity: { id: `00000000-0000-4000-8000-00000000008${index}`, generation: 1, service_epoch: 9 },
+      owner: { type: 'session', session_id: 'test' }, max_payload_bytes: 8_000_000,
+      timeout_budget_ms: budgets[index], operation: { type: 'status' },
+    });
+    try {
+      const first = manager.executeAudioRequest(request(0));
+      const capability = await nextEnvelope(helper);
+      const second = manager.executeAudioRequest(request(1));
+      const [short, long] = budgets[0] === 10 ? [first, second] : [second, first];
+      let longSettled = false;
+      void long.then(() => { longSettled = true; });
+      const shortResult = await short;
+      assert.equal(shortResult.type, 'failed');
+      if (shortResult.type === 'failed') assert.equal(shortResult.error.kind, 'timeout');
+      assert.equal(longSettled, false);
+      assert.equal(helper.writes.length, 1);
+      helper.stdout.write(`${JSON.stringify({ id: capability.id, type: 'response', result: { type: 'snapshot', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }) } })}\n`);
+      const admitted = await envelopeAt(helper, 1);
+      helper.stdout.write(`${JSON.stringify({ id: admitted.id, type: 'response', result: {
+        type: 'engine_result', snapshot: snapshot({ capabilities: AUDIO_CAPABILITIES }), result: { type: 'status', status: { recording: false, playing: false } },
+      } })}\n`);
+      assert.equal((await long).type, 'status');
+    } finally {
+      await manager.dispose(); helper.stdin.end(); helper.stdout.end(); helper.stderr.end();
+    }
+  });
+}
+
+test('helper stdout preserves UTF-8 characters split across byte chunks', async () => {
+  const helper = new FakeHelperProcess();
+  const manager = new NativeAudioManager({
+    isPackaged: false, resourcesPath: '/resources', userDataPath: '/tmp/lingxi-audio-tests',
+    helperPath: '/tmp/LingXiAudioHelper', diagnostics: new DiagnosticBuffer(), spawnHelper: () => helper as any,
+  });
+  try {
+    const responsePromise = manager.request({ type: 'get_snapshot' });
+    const envelope = await nextEnvelope(helper);
+    const message = '中文正常 😀 café';
+    const bytes = Buffer.from(JSON.stringify({ id: envelope.id, type: 'response',
+      result: { type: 'snapshot', snapshot: snapshot({ helper: { state: 'running', message } }) },
+    }) + '\n');
+    for (const byte of bytes) helper.stdout.write(Buffer.from([byte]));
+    assert.equal((await responsePromise).snapshot.helper.message, message);
+  } finally {
+    await manager.dispose();
+    helper.stdin.end(); helper.stdout.end(); helper.stderr.end();
+  }
 });

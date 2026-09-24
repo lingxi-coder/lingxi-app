@@ -1553,6 +1553,11 @@ final class VoiceInteractionController {
                   self.mode == .flow
             else { return }
             await context.bargeInSession?.stop()
+            guard !Task.isCancelled,
+                  self.generation == context.operation,
+                  self.flowContext === context,
+                  self.mode == .flow
+            else { return }
             self.bargeInEventTask?.cancel()
             self.bargeInEventTask = nil
             self.flowContext = nil

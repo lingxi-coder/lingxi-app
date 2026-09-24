@@ -232,7 +232,11 @@ object VoiceModelDownloader {
     private val _states = MutableStateFlow<Map<String, ModelState>>(emptyMap())
     val states: StateFlow<Map<String, ModelState>> = _states.asStateFlow()
 
+    @Synchronized
     fun attach(context: Context) {
+        // Recovery is process initialization, not Activity initialization.
+        // A recreated Activity must not remove an active installation staging directory.
+        if (appContext != null) return
         appContext = context.applicationContext
         reconcileFromDisk()
     }
@@ -278,6 +282,7 @@ object VoiceModelDownloader {
     }
 
     /** Start (or resume) downloading every model in a language pack. */
+    @Synchronized
     fun startPack(language: String) {
         val entries = OfflineModelCatalog.packFor(language)
         if (entries.isEmpty()) return
@@ -308,9 +313,15 @@ object VoiceModelDownloader {
                 }
             } finally {
                 pending.forEach { entry ->
-                    coroutineContext[Job]?.let { currentJob -> jobs.remove(entry.id, currentJob) }
-                    if (_states.value[entry.id] is ModelState.Queued) {
-                        set(entry.id, ModelState.NotInstalled)
+                    synchronized(this@VoiceModelDownloader) {
+                        if (jobs.remove(entry.id, coroutineContext[Job])) {
+                            when (_states.value[entry.id]) {
+                                is ModelState.Queued, is ModelState.Downloading,
+                                is ModelState.Verifying, is ModelState.Extracting ->
+                                    set(entry.id, if (isReady(entry)) ModelState.Ready else ModelState.NotInstalled)
+                                else -> {}
+                            }
+                        }
                     }
                 }
             }
@@ -319,6 +330,7 @@ object VoiceModelDownloader {
         job.start()
     }
 
+    @Synchronized
     fun start(entry: OfflineModelEntry) {
         when (_states.value[entry.id]) {
             is ModelState.Ready, is ModelState.Queued, is ModelState.Downloading,
@@ -346,12 +358,18 @@ object VoiceModelDownloader {
         job.start()
     }
 
+    @Synchronized
     fun cancel(entry: OfflineModelEntry) {
         jobs.remove(entry.id)?.cancel()
         set(entry.id, if (isReady(entry)) ModelState.Ready else ModelState.NotInstalled)
     }
 
     private fun set(id: String, state: ModelState) = _states.update { it + (id to state) }
+
+    @Synchronized
+    private fun setForJob(id: String, job: Job, state: ModelState) {
+        if (jobs[id] === job && job.isActive) set(id, state)
+    }
 
     private fun markQueued(entry: OfflineModelEntry) {
         val ctx = appContext ?: return
@@ -363,12 +381,13 @@ object VoiceModelDownloader {
         downloadSlot.withPermit {
             val ctx = appContext ?: return@withPermit
             val partial = File(ctx.cacheDir, "voice_dl/${entry.id}.tar.bz2").takeIf { it.isFile }?.length() ?: 0L
-            set(entry.id, ModelState.Downloading(partial, entry.approxSizeBytes.coerceAtLeast(partial)))
+            setForJob(entry.id, coroutineContext[Job]!!, ModelState.Downloading(partial, entry.approxSizeBytes.coerceAtLeast(partial)))
             runDownload(entry)
         }
     }
 
     private suspend fun runDownload(entry: OfflineModelEntry) {
+        val job = coroutineContext[Job]!!
         val ctx = appContext ?: return
         val tmp = File(ctx.cacheDir, "voice_dl/${entry.id}.tar.bz2")
         try {
@@ -379,27 +398,26 @@ object VoiceModelDownloader {
                 fallbackTotal = entry.approxSizeBytes,
                 context = ctx,
             ) { bytes, total ->
-                set(entry.id, ModelState.Downloading(bytes, total))
+                setForJob(entry.id, job, ModelState.Downloading(bytes, total))
             }
-            set(entry.id, ModelState.Verifying)
+            setForJob(entry.id, job, ModelState.Verifying)
             val hex = sha256(tmp)
             if (!hex.equals(entry.sha256, ignoreCase = true)) {
                 tmp.delete()
-                set(entry.id, ModelState.Failed(ctx.getString(R.string.voice_download_checksum_mismatch)))
+                setForJob(entry.id, job, ModelState.Failed(ctx.getString(R.string.voice_download_checksum_mismatch)))
                 return
             }
-            set(entry.id, ModelState.Extracting)
-            install(tmp, entry, modelDir(entry.id))
+            setForJob(entry.id, job, ModelState.Extracting)
+            install(tmp, entry, modelDir(entry.id)) { job.ensureActive() }
             tmp.delete()
-            set(
-                entry.id,
+            setForJob(
+                entry.id, job,
                 if (isReady(entry)) ModelState.Ready else ModelState.Failed(ctx.getString(R.string.voice_download_extracted_files_missing)),
             )
         } catch (ce: CancellationException) {
-            set(entry.id, ModelState.NotInstalled)
             throw ce
         } catch (e: Throwable) {
-            set(entry.id, ModelState.Failed(failureMessage(e, tmp.length())))
+            setForJob(entry.id, job, ModelState.Failed(failureMessage(e, tmp.length())))
         }
     }
 
@@ -440,11 +458,17 @@ object VoiceModelDownloader {
         }
     }
 
-    private fun install(archive: File, entry: OfflineModelEntry, destDir: File) {
+    internal fun install(archive: File, entry: OfflineModelEntry, destDir: File, checkCancellation: () -> Unit) {
         val ctx = appContext
         val staging = File(destDir.parentFile, ".${entry.id}.installing")
         staging.deleteRecursively()
-        extract(archive, entry, staging)
+        try {
+            extract(archive, entry, staging, checkCancellation)
+            checkCancellation()
+        } catch (error: Throwable) {
+            staging.deleteRecursively()
+            throw error
+        }
         if (
             !entry.files.all { File(staging, it).isFile } ||
             !entry.requiredDirectories.all { File(staging, it).isDirectory }
@@ -456,14 +480,18 @@ object VoiceModelDownloader {
         backup.deleteRecursively()
         var published = false
         try {
-            if (destDir.exists()) moveDirectory(destDir, backup)
-            moveDirectory(staging, destDir)
-            published = true
+            synchronized(this) {
+                checkCancellation()
+                if (destDir.exists()) moveDirectory(destDir, backup)
+                moveDirectory(staging, destDir)
+                published = true
+            }
             backup.deleteRecursively()
         } catch (error: Exception) {
             if (published && destDir.exists()) destDir.deleteRecursively()
             if (backup.exists()) runCatching { moveDirectory(backup, destDir) }
             staging.deleteRecursively()
+            if (error is CancellationException) throw error
             throw IOException(
                 ctx?.getString(R.string.voice_download_activate_failed) ?: "无法激活语音模型",
                 error,
@@ -493,7 +521,7 @@ object VoiceModelDownloader {
      * attribution files. Large alternate-precision models and sample WAVs are
      * intentionally left out to avoid doubling the installed size.
      */
-    private fun extract(archive: File, entry: OfflineModelEntry, destDir: File) {
+    private fun extract(archive: File, entry: OfflineModelEntry, destDir: File, checkCancellation: () -> Unit) {
         val ctx = appContext
         val root = destDir.canonicalFile
         root.mkdirs()
@@ -507,8 +535,10 @@ object VoiceModelDownloader {
 
         BZip2CompressorInputStream(BufferedInputStream(archive.inputStream())).use { bz ->
             TarArchiveInputStream(bz).use { tar ->
+                checkCancellation()
                 var e = tar.nextEntry
                 while (e != null) {
+                    checkCancellation()
                     // Drop the first path segment (the wrapper dir), keep the rest.
                     val rel = e.name.substringAfter('/', e.name).trimStart('/')
                     val out = File(root, rel).canonicalFile
@@ -517,7 +547,15 @@ object VoiceModelDownloader {
                             e.isDirectory && shouldInstall(rel) -> out.mkdirs()
                             e.isFile && shouldInstall(rel) -> {
                                 out.parentFile?.mkdirs()
-                                out.outputStream().use { tar.copyTo(it) }
+                                out.outputStream().use { output ->
+                                    val buffer = ByteArray(64 * 1024)
+                                    while (true) {
+                                        checkCancellation()
+                                        val count = tar.read(buffer)
+                                        if (count < 0) break
+                                        output.write(buffer, 0, count)
+                                    }
+                                }
                             }
                             !e.isDirectory && !e.isFile -> {
                                 throw IOException(
@@ -528,6 +566,7 @@ object VoiceModelDownloader {
                     } else if (rel.isNotBlank()) {
                         throw IOException(ctx?.getString(R.string.voice_download_path_traversal) ?: "语音模型归档路径越界")
                     }
+                    checkCancellation()
                     e = tar.nextEntry
                 }
             }

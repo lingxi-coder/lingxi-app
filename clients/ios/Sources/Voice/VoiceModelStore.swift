@@ -72,9 +72,12 @@ final class VoiceModelStore {
         }
     }
     private var tasks: [String: Task<Void, Never>] = [:]
+    private var downloadIDs: [String: UUID] = [:]
+    private let downloadOverride: ((GeneratedOfflineModelEntry) async throws -> Void)?
     private var audioReferences: [UUID: String] = [:]
 
-    init() {
+    init(downloadOverride: ((GeneratedOfflineModelEntry) async throws -> Void)? = nil) {
+        self.downloadOverride = downloadOverride
         prepareRootDirectory()
         reconcileFromDisk()
     }
@@ -105,17 +108,23 @@ final class VoiceModelStore {
     }
 
     func download(_ entry: GeneratedOfflineModelEntry) {
-        guard tasks[entry.id] == nil, !state(for: entry.id).isReady else { return }
+        guard tasks[entry.id] == nil || tasks[entry.id]?.isCancelled == true,
+              !state(for: entry.id).isReady else { return }
+        let previous = tasks[entry.id]
+        let downloadID = UUID()
+        downloadIDs[entry.id] = downloadID
         states[entry.id] = .queued
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.performDownload(entry)
+            // Archive and resume paths are shared: wait for cancelled IO to finish.
+            await previous?.value
+            await self.performDownload(entry, downloadID: downloadID)
         }
         tasks[entry.id] = task
     }
 
     func cancel(_ modelID: String) {
-        tasks.removeValue(forKey: modelID)?.cancel()
+        tasks[modelID]?.cancel()
         if !(states[modelID]?.isReady ?? false) {
             states[modelID] = .notInstalled
         }
@@ -158,13 +167,30 @@ final class VoiceModelStore {
         })
     }
 
-    private func performDownload(_ entry: GeneratedOfflineModelEntry) async {
-        defer { tasks[entry.id] = nil }
+    private func updateDownloadState(_ state: VoiceModelState, modelID: String, downloadID: UUID) {
+        guard downloadIDs[modelID] == downloadID, tasks[modelID]?.isCancelled == false else { return }
+        states[modelID] = state
+    }
+
+    private func performDownload(_ entry: GeneratedOfflineModelEntry, downloadID: UUID) async {
+        defer {
+            if downloadIDs[entry.id] == downloadID {
+                tasks[entry.id] = nil
+                downloadIDs[entry.id] = nil
+            }
+        }
         do {
+            try Task.checkCancellation()
+            if let downloadOverride {
+                try await downloadOverride(entry)
+                try Task.checkCancellation()
+                updateDownloadState(.ready, modelID: entry.id, downloadID: downloadID)
+                return
+            }
             guard let sourceURL = URL(string: entry.sourceURL) else {
                 throw VoiceModelInstallError.invalidURL
             }
-            states[entry.id] = .downloading(receivedBytes: 0, totalBytes: entry.approxSizeBytes)
+            updateDownloadState(.downloading(receivedBytes: 0, totalBytes: entry.approxSizeBytes), modelID: entry.id, downloadID: downloadID)
             let archiveURL = VoiceModelFiles.rootDirectory.appending(
                 path: ".download-\(entry.id).tar.bz2"
             )
@@ -176,10 +202,10 @@ final class VoiceModelStore {
                 resumeDataURL: resumeDataURL
             ) { [weak self] received, total in
                 Task { @MainActor [weak self] in
-                    self?.states[entry.id] = .downloading(
+                    self?.updateDownloadState(.downloading(
                         receivedBytes: received,
                         totalBytes: max(total, entry.approxSizeBytes)
-                    )
+                    ), modelID: entry.id, downloadID: downloadID)
                 }
             }
             let (temporaryURL, response) = try await downloader.run(url: sourceURL)
@@ -187,11 +213,11 @@ final class VoiceModelStore {
             guard let response = response as? HTTPURLResponse, 200 ..< 300 ~= response.statusCode else {
                 throw VoiceModelInstallError.downloadFailed
             }
-            states[entry.id] = .verifying
+            updateDownloadState(.verifying, modelID: entry.id, downloadID: downloadID)
             let digest = try await Self.sha256(of: temporaryURL)
             guard digest == entry.sha256 else { throw VoiceModelInstallError.checksumMismatch }
             try Task.checkCancellation()
-            states[entry.id] = .extracting
+            updateDownloadState(.extracting, modelID: entry.id, downloadID: downloadID)
             let staging = VoiceModelFiles.rootDirectory.appending(
                 path: ".stage-\(entry.id)-\(UUID().uuidString)",
                 directoryHint: .isDirectory
@@ -224,15 +250,15 @@ final class VoiceModelStore {
                 try FileManager.default.moveItem(at: activationURL, to: finalURL)
             }
             guard VoiceModelFiles.isReady(entry) else { throw VoiceModelInstallError.invalidArchive }
-            states[entry.id] = .ready
+            updateDownloadState(.ready, modelID: entry.id, downloadID: downloadID)
             try? FileManager.default.removeItem(at: archiveURL)
             try? FileManager.default.removeItem(at: resumeDataURL)
         } catch is CancellationError {
-            states[entry.id] = .notInstalled
+            updateDownloadState(.notInstalled, modelID: entry.id, downloadID: downloadID)
         } catch let error as URLError where error.code == .cancelled {
-            states[entry.id] = .notInstalled
+            updateDownloadState(.notInstalled, modelID: entry.id, downloadID: downloadID)
         } catch {
-            states[entry.id] = .failed(error.localizedDescription)
+            updateDownloadState(.failed(error.localizedDescription), modelID: entry.id, downloadID: downloadID)
         }
     }
 
@@ -315,7 +341,7 @@ private final class ResumableVoiceModelDownload: NSObject, URLSessionDownloadDel
                     ?? session.downloadTask(with: url)
                 self.task = task
                 lock.unlock()
-                task.resume()
+                if Task.isCancelled { task.cancel() } else { task.resume() }
             }
         } onCancel: {
             cancel()
@@ -370,11 +396,10 @@ private final class ResumableVoiceModelDownload: NSObject, URLSessionDownloadDel
         lock.lock()
         let task = task
         lock.unlock()
-        task?.cancel(byProducingResumeData: { [resumeDataURL] resumeData in
-            if let resumeData {
-                try? resumeData.write(to: resumeDataURL, options: .atomic)
-            }
-        })
+        // Persist resume data only in didCompleteWithError, before resuming the
+        // awaiting task. A separate cancellation callback can outlive that task
+        // and overwrite a retry's resume file.
+        task?.cancel()
     }
 
     private func finish(_ result: Result<(URL, URLResponse), Error>) {

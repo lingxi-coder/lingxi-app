@@ -1,0 +1,49 @@
+.command-identity-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--command-icon-size);
+  height: var(--command-icon-size);
+  border-radius: calc(var(--command-icon-size) * .3);
+  background: color-mix(in srgb, var(--command-identity-color) 11%, var(--command-identity-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--command-identity-color) 9%, transparent);
+  vertical-align: middle;
+}
+.command-identity { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; vertical-align: middle; }
+.command-identity .command-identity-label { min-width: 0; color: var(--command-identity-color); font-size: inherit; font-weight: 600; line-height: 1.45; letter-spacing: -.01em; overflow-wrap: anywhere; }
+
+.user-slash-command { min-width: 0; overflow-wrap: anywhere; }
+.user-slash-command-arguments { margin-left: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.user-slash-command-mentions { margin-top: 6px; }
+
+.composer-input-view { position: relative; }
+.composer-command-marker { position: absolute; top: 13px; left: 18px; pointer-events: none; }
+.composer-command-mirror { position: absolute; inset: 0; pointer-events: none; user-select: none; }
+.composer-command-mirror::-webkit-scrollbar-thumb { background: transparent; }
+.composer-command-prefix {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--command-identity-color) 9%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--command-identity-color) 9%, transparent);
+  color: var(--command-identity-color);
+}
+.beta-rich-prompt[data-command-decorated='true']::selection,
+.beta-rich-prompt[data-command-decorated='true'] *::selection { color: transparent; }
+
+.command-result-heading > .command-result-name { color: var(--command-identity-color); overflow-wrap: anywhere; }
+.command-result-heading strong[data-error='true'],
+.command-utility-heading h2[data-error='true'] { display: flex; align-items: center; gap: 6px; color: var(--command-danger); }
+.command-result-heading strong[data-error='true'] > svg,
+.command-utility-heading h2[data-error='true'] > svg { flex: 0 0 auto; }
+.command-result-body .command-help-grid,
+.command-utility-content .command-help-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); }
+.command-help-grid .command-help-entry { grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); align-items: center; padding-block: 9px; }
+
+@media (prefers-contrast: more) {
+  .command-identity-icon { box-shadow: inset 0 0 0 1px var(--command-identity-color); }
+}
+@media (forced-colors: active) {
+  .composer-command-mirror { display: none; }
+  .beta-rich-prompt[data-command-decorated='true'] { color: CanvasText !important; }
+  .beta-rich-prompt[data-command-decorated='true']::selection,
+  .beta-rich-prompt[data-command-decorated='true'] *::selection { color: HighlightText; }
+}

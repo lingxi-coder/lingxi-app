@@ -11,6 +11,8 @@ import {
 } from '../model/runItem';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
+import { CommandIcon, CommandIdentity } from './CommandIdentity';
+import { commandPaletteColor } from './commandPaletteIcons';
 
 function PlainBody({ item }: { item: CommandRunItem }) {
   return <pre className="command-result-pre mono">{item.output}</pre>;
@@ -23,7 +25,7 @@ function HelpBody({ item }: { item: CommandRunItem }) {
     <div className="command-help-grid" role="list" aria-label="Available slash commands">
       {entries.map((entry) => (
         <div className="command-help-entry" role="listitem" key={entry.name}>
-          <code className="mono">{entry.name}</code>
+          <CommandIdentity command={entry.name} iconSize={22} showSlash />
           <span>{entry.description}</span>
         </div>
       ))}
@@ -111,17 +113,11 @@ export const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen
   const presentation = commandPresentation(item);
   const collapsible = commandShouldCollapse(item);
   const expanded = !collapsible || open;
-  const accent = presentation.tone === 'danger'
-    ? t.danger
-    : presentation.tone === 'warning'
-      ? t.warn
-      : presentation.tone === 'success'
-        ? t.ok
-        : presentation.tone === 'accent'
-          ? t.accent
-          : t.text3;
+  const commandColor = commandPaletteColor(item.name, t.dark);
+  const accent = item.isError ? t.danger : commandColor;
   const style = {
     '--command-accent': accent,
+    '--command-identity-color': commandColor,
     '--command-surface': t.surface,
     '--command-surface-muted': t.surfaceHover,
     '--command-ring': t.border,
@@ -139,12 +135,12 @@ export const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen
       style={style}
     >
       <div className="command-result-header">
-        <span className="command-result-icon" aria-hidden="true">
-          <Icon name={presentation.icon} size={15} stroke={1.75} />
-        </span>
+        <CommandIcon command={item.name} size={30} />
         <div className="command-result-heading">
-          <strong>{presentation.title}</strong>
-          <span className="mono">{label}</span>
+          <strong data-error={item.isError || undefined}>
+            {item.isError && <Icon name="shieldAlert" size={14} />}{presentation.title}
+          </strong>
+          <span className="command-result-name mono">{label}</span>
         </div>
         {collapsible && (
           <button

@@ -36,7 +36,7 @@ test('the composer owns the only command popup', () => {
 
   assert.doesNotMatch(app, /DesktopCommandPalette|commandPaletteOpen|isCommandPaletteShortcut/);
   assert.equal(existsSync(join(process.cwd(), 'src/renderer/components/DesktopCommandPalette.tsx')), false);
-  assert.match(composer, /commandPaletteIcon\(entry\.name\)/);
+  assert.match(composer, /<CommandIcon command=\{entry\.name\}/);
   assert.match(composer, /className="slash-command-row"/);
 });
 

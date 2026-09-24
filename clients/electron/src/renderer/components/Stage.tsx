@@ -20,7 +20,7 @@ import { transcriptRows } from './transcriptRows';
 import { ToolGroup } from './ToolGroup';
 import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
-import { commandPaletteIcon } from './commandPaletteIcons';
+import { CommandIdentity } from './CommandIdentity';
 import { parseSlashCommandMessage } from './slashCommandMessage';
 import { formatClockTime } from '../bridge/sessionPresentation';
 import { promptWithMentionLinks } from '../bridge/composerMentions';
@@ -40,7 +40,6 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   const expanded = !collapsible || open;
   const contentId = `narration-content-${item.id}`;
   const slashCommand = user ? parseSlashCommandMessage(item.text) : null;
-  const slashIcon = slashCommand ? commandPaletteIcon(slashCommand.name) : null;
   return (
     // `data-tone` is what lets the stylesheet reach INSIDE the markdown body:
     // `.markdown-content` hard-sets `color: var(--text)`, so the colour computed
@@ -90,25 +89,17 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
           textWrap: 'pretty',
         }}
       >
-        {slashCommand && slashIcon ? (
+        {slashCommand ? (
           <div
             className="user-slash-command"
             data-command-name={slashCommand.name}
             aria-label={item.text.trim()}
-            style={{ display: 'flex', alignItems: 'center', gap: 7, minHeight: 23 }}
           >
-            <span
-              data-command-icon={slashIcon}
-              aria-hidden="true"
-              style={{ width: 19, height: 22, flexShrink: 0, display: 'grid', placeItems: 'center', color: t.text2 }}
-            >
-              <Icon name={slashIcon} size={17} stroke={1.75} />
-            </span>
-            <span style={{ fontWeight: 650, letterSpacing: '-.015em' }}>{slashCommand.name}</span>
+            <CommandIdentity command={slashCommand.name} />
             {slashCommand.arguments && (
               slashCommand.arguments.includes('](lingxi-mention://')
-                ? <MarkdownContent text={slashCommand.arguments} />
-                : <span style={{ color: t.text2, fontWeight: 450, whiteSpace: 'pre-wrap' }}>{slashCommand.arguments}</span>
+                ? <div className="user-slash-command-mentions"><MarkdownContent text={slashCommand.arguments} /></div>
+                : <span className="user-slash-command-arguments" style={{ color: t.text2 }}>{slashCommand.arguments}</span>
             )}
           </div>
         ) : (

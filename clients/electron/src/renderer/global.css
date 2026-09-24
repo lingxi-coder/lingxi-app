@@ -1,5 +1,6 @@
 @import "./components/settings/pages/ConfigurationPage.css";
 @import './components/TurnFileSummary.css';
+@import './components/CommandIdentity.css';
 @import './components/SlashCommandMenu.css';
 @import './components/MentionMenu.css';
 @import './components/settings/pages/McpServers.css';

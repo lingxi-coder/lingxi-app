@@ -307,7 +307,7 @@ test('slash command message parsing is strict and keeps command arguments', () =
   assert.deepEqual(parseSlashCommandMessage('/cron list'), { name: 'cron', arguments: 'list' });
   assert.deepEqual(parseSlashCommandMessage('  /code-review --fix  '), { name: 'code-review', arguments: '--fix' });
   assert.equal(parseSlashCommandMessage('/path/to/file'), null);
-  assert.equal(parseSlashCommandMessage('/cron\nlist'), null);
+  assert.deepEqual(parseSlashCommandMessage('/cron\nlist'), { name: 'cron', arguments: 'list' });
   assert.equal(parseSlashCommandMessage('please run /cron list'), null);
 });
 

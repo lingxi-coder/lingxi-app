@@ -62,7 +62,9 @@ import { ArchiveChatDialog } from './ArchiveChatDialog';
 import { RenameSessionDialog } from './RenameSessionDialog';
 import type { ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
-import { commandPaletteIcon } from './commandPaletteIcons';
+import { commandPaletteColor } from './commandPaletteIcons';
+import { CommandIcon } from './CommandIdentity';
+import { parseSlashCommandPrefix } from './slashCommandMessage';
 import { MentionMenu, commandMenuStyle } from './MentionMenu';
 import { FileMentionPreview } from './FileMentionPreview';
 import {
@@ -1631,6 +1633,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 }) {
   const t = useT();
   const [text, setText] = useState('');
+  const [promptComposing, setPromptComposing] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);
   const [modelQuery, setModelQuery] = useState('');
@@ -1652,6 +1655,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [flowState, setFlowState] = useState<VoiceFlowState>(DEFAULT_VOICE_FLOW_STATE);
   const [slashResultIndex, setSlashResultIndex] = useState(0);
   const input = useRef<HTMLDivElement>(null);
+  const commandMirror = useRef<HTMLDivElement>(null);
   const fileControl = useRef<HTMLDivElement>(null);
   const fileButton = useRef<HTMLButtonElement>(null);
   const fileSearchInput = useRef<HTMLInputElement>(null);
@@ -2874,6 +2878,31 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           ? 'LingXi is working — draft your next message…'
           : 'Do anything';
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
+  const draftCommand = parseSlashCommandPrefix(text);
+  const hasMentionTokens = selectedFiles.length > 0 || Boolean(input.current?.querySelector('[data-context-mention]'));
+  const decorateCommand = Boolean(draftCommand && !promptComposing && !hasMentionTokens);
+  const promptTextStyle: CSSProperties = {
+    display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto',
+    border: 0, outline: 0, background: 'transparent', lineHeight: 1.5, fontSize: 15,
+    padding: draftCommand ? '16px 18px 8px 56px' : '16px 18px 8px',
+    fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+  };
+  const copyDecoratedPrompt = (event: ClipboardEvent<HTMLDivElement>) => {
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || selection.isCollapsed
+      || !event.currentTarget.contains(selection.getRangeAt(0).commonAncestorContainer)) return;
+    // The editor's ink is hidden behind a visual layer. Copy plain source text
+    // so a rich-text destination never inherits that transparent styling.
+    event.clipboardData.setData('text/plain', selection.toString());
+    event.preventDefault();
+    if (event.type === 'cut') document.execCommand('delete');
+  };
+  useLayoutEffect(() => {
+    if (commandMirror.current && input.current) {
+      commandMirror.current.scrollTop = input.current.scrollTop;
+      commandMirror.current.scrollLeft = input.current.scrollLeft;
+    }
+  }, [text, decorateCommand]);
   const canStop = bridge.running || runningSubagentIds(bridge.runtimeCenter).length > 0;
   const stopTurnButton = (
     <button
@@ -2927,50 +2956,71 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           </div>
         )}
         {imageNotice && <div role="status" style={{ padding: '0 18px 9px', color: t.warn, fontSize: 10.5 }}>{imageNotice}</div>}
-        <div
-          ref={input}
-          className="beta-rich-prompt"
-          role="textbox"
-          contentEditable
-          suppressContentEditableWarning
-          spellCheck
-          data-placeholder={promptPlaceholder}
-          data-empty={!hasPrompt ? 'true' : 'false'}
-          onInput={() => { mentionDismissed.current = false; slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
-          onFocus={() => { slashDismissed.current = false; savePromptSelection(); updateActiveCompletions(); }}
-          onBlur={savePromptSelection}
-          onKeyUp={keyUp}
-          onMouseUp={updateActiveCompletions}
-          onKeyDown={keyDown}
-          onPaste={pastePlainText}
-          onCopy={copyPromptReferences}
-          onCut={copyPromptReferences}
-          onClick={(event) => {
-            const token = (event.target as HTMLElement).closest<HTMLElement>('[data-context-mention], [data-file-mention]');
-            if (!token) return;
-            event.preventDefault();
-            const mention = parseContextMentionHref(token.dataset.contextMention ?? '');
-            if (mention) onOpenSettingsPage(mention.kind === 'skill' ? 'skills' : 'plugins');
-            else if (token.dataset.fileMention) {
-              setFilePicker(null);
-              setSlashQuery(null);
-              setPreviewPath(token.dataset.fileMention);
-            }
-          }}
-          aria-label="Prompt"
-          aria-multiline="true"
-          aria-disabled={false}
-          aria-autocomplete="list"
-          aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'mention-results' : undefined}
-          aria-describedby={slashMenuOpen ? 'slash-command-hint' : fileMenuOpen ? 'mention-hint' : undefined}
-          aria-expanded={slashMenuOpen || (fileMenuOpen && filePicker?.source === 'mention')}
-          aria-activedescendant={slashMenuOpen && slashCommands[slashResultIndex]
-            ? `slash-command-result-${slashResultIndex}`
-            : fileMenuOpen && filePicker?.source === 'mention' && mentionEntries[fileResultIndex]
-              ? `mention-result-${fileResultIndex}`
-              : undefined}
-          style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 15, padding: '16px 18px 8px', fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: 'text' }}
-        />
+        <div className="composer-input-view">
+          <div
+            ref={input}
+            className="beta-rich-prompt"
+            role="textbox"
+            contentEditable
+            suppressContentEditableWarning
+            spellCheck
+            data-placeholder={promptPlaceholder}
+            data-empty={!hasPrompt ? 'true' : 'false'}
+            data-command-decorated={decorateCommand || undefined}
+            onInput={() => { mentionDismissed.current = false; slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
+            onFocus={() => { slashDismissed.current = false; savePromptSelection(); updateActiveCompletions(); }}
+            onBlur={savePromptSelection}
+            onKeyUp={keyUp}
+            onMouseUp={updateActiveCompletions}
+            onKeyDown={keyDown}
+            onPaste={pastePlainText}
+            onCopy={(event) => { copyPromptReferences(event); if (!event.defaultPrevented && decorateCommand) copyDecoratedPrompt(event); }}
+            onCut={(event) => { copyPromptReferences(event); if (!event.defaultPrevented && decorateCommand) copyDecoratedPrompt(event); }}
+            onClick={(event) => {
+              const token = (event.target as HTMLElement).closest<HTMLElement>('[data-context-mention], [data-file-mention]');
+              if (!token) return;
+              event.preventDefault();
+              const mention = parseContextMentionHref(token.dataset.contextMention ?? '');
+              if (mention) onOpenSettingsPage(mention.kind === 'skill' ? 'skills' : 'plugins');
+              else if (token.dataset.fileMention) {
+                setFilePicker(null);
+                setSlashQuery(null);
+                setPreviewPath(token.dataset.fileMention);
+              }
+            }}
+            onCompositionStart={() => setPromptComposing(true)}
+            onCompositionEnd={() => { setPromptComposing(false); syncPromptState(); updateActiveCompletions(); }}
+            onScroll={(event) => {
+              if (!commandMirror.current) return;
+              commandMirror.current.scrollTop = event.currentTarget.scrollTop;
+              commandMirror.current.scrollLeft = event.currentTarget.scrollLeft;
+            }}
+            aria-label="Prompt"
+            aria-multiline="true"
+            aria-disabled={false}
+            aria-autocomplete="list"
+            aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'mention-results' : undefined}
+            aria-describedby={slashMenuOpen ? 'slash-command-hint' : fileMenuOpen ? 'mention-hint' : undefined}
+            aria-expanded={slashMenuOpen || (fileMenuOpen && filePicker?.source === 'mention')}
+            aria-activedescendant={slashMenuOpen && slashCommands[slashResultIndex]
+              ? `slash-command-result-${slashResultIndex}`
+              : fileMenuOpen && filePicker?.source === 'mention' && mentionEntries[fileResultIndex]
+                ? `mention-result-${fileResultIndex}`
+                : undefined}
+            style={{ ...promptTextStyle, color: decorateCommand ? 'transparent' : t.text, caretColor: t.text, cursor: 'text' }}
+          />
+          {draftCommand && (
+            <span className="composer-command-marker"><CommandIcon command={draftCommand.name} size={28} /></span>
+          )}
+          {draftCommand && decorateCommand && (
+            <div ref={commandMirror} className="composer-command-mirror" aria-hidden="true" style={{
+              ...promptTextStyle, color: t.text,
+              '--command-identity-color': commandPaletteColor(draftCommand.name, t.dark),
+            } as CSSProperties}>
+              <span className="composer-command-prefix">{draftCommand.prefix}</span>{draftCommand.rest}
+            </div>
+          )}
+        </div>
         {previewPath && <FileMentionPreview key={`${activeSessionId}:${previewPath}`} path={previewPath} bridge={bridge} onClose={() => { setPreviewPath(null); focusPrompt(); }} />}
         {slashMenuOpen && (
           <div ref={slashControl} className="slash-command-menu" style={commandMenuStyle(t)}>
@@ -3004,9 +3054,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                     onFocus={() => setSlashResultIndex(index)}
                     onClick={() => chooseSlashCommand(entry.name)}
                   >
-                    <span className="slash-command-icon" aria-hidden="true" style={{ '--slash-command-color': t.text2 } as CSSProperties}>
-                      <Icon name={commandPaletteIcon(entry.name)} size={18} stroke={1.7} />
-                    </span>
+                    <CommandIcon command={entry.name} size={32} />
                     <span className="slash-command-copy">
                       <span className="slash-command-heading">
                         <span className="slash-command-name">{entry.name}</span>

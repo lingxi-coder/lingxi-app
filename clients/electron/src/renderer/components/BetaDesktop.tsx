@@ -1345,10 +1345,12 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
         data-active={inspectorOpen ? 'true' : undefined}
         onClick={() => {
           bridge.setRuntimeInspectorOpen(!inspectorOpen);
+          // The inspector is still sliding in; focusing must not scroll its
+          // clipped container and jump the panel straight to its resting position.
           if (!inspectorOpen) window.requestAnimationFrame(() => {
             (document.querySelector<HTMLElement>('[data-runtime-inspector-active="true"]')
               ?? document.querySelector<HTMLElement>('.runtime-inspector-landing button')
-              ?? document.querySelector<HTMLElement>('.runtime-panel-hide'))?.focus();
+              ?? document.querySelector<HTMLElement>('.runtime-panel-hide'))?.focus({ preventScroll: true });
           });
         }}
         style={topbarActionTokens}

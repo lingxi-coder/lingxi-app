@@ -6,27 +6,35 @@ export interface ActiveFileMention {
 
 /** Locate the `@fragment` currently being edited at the rich-text caret. */
 export function activeFileMention(text: string, cursor: number): ActiveFileMention | null {
-  const caret = Math.max(0, Math.min(cursor, text.length));
-  const quotedStart = text.lastIndexOf('@"', caret);
-  if (
-    quotedStart >= 0
-    && (quotedStart === 0 || /\s/.test(text[quotedStart - 1]!))
-    && !text.slice(quotedStart + 2, caret).includes('"')
-  ) {
-    const closingQuote = text.indexOf('"', caret);
-    return {
-      start: quotedStart,
-      end: closingQuote >= 0 ? closingQuote + 1 : caret,
-      query: text.slice(quotedStart + 2, caret),
-    };
+  if (!Number.isInteger(cursor) || cursor < 0 || cursor > text.length) return null;
+  const boundary = /[\s\u200b([{]/;
+  let start = cursor;
+  while (start > 0) {
+    start -= 1;
+    if (text[start] !== '@' || (start > 0 && !boundary.test(text[start - 1]!))) continue;
+    if (text[start + 1] === '"') {
+      let query = '';
+      let index = start + 2;
+      while (index < cursor) {
+        const character = text[index++]!;
+        if (character === '"' || character === '\n' || character === '\r') return null;
+        if (character === '\\' && index < cursor) query += text[index++]!;
+        else query += character;
+      }
+      let end = cursor;
+      while (end < text.length && text[end] !== '\n' && text[end] !== '\r') {
+        if (text[end] === '\\') { end += 2; continue; }
+        if (text[end++] === '"') return { start, end, query };
+      }
+      return { start, end: cursor, query };
+    }
+    const query = text.slice(start + 1, cursor);
+    if (/[\s\u200b"@]/.test(query)) return null;
+    let end = cursor;
+    while (end < text.length && !/[\s\u200b)\]}]/.test(text[end]!)) end += 1;
+    return { start, end, query };
   }
-
-  let start = caret;
-  while (start > 0 && !/\s/.test(text[start - 1]!)) start -= 1;
-  if (start >= caret || text[start] !== '@') return null;
-  let end = caret;
-  while (end < text.length && !/\s/.test(text[end]!)) end += 1;
-  return { start, end, query: text.slice(start + 1, caret) };
+  return null;
 }
 
 /** Encode paths with whitespace as a quoted mention while keeping ordinary paths compact. */

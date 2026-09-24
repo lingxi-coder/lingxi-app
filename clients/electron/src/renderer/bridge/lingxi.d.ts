@@ -103,7 +103,7 @@ export interface BootstrapState {
   /** The three numbers the About page shows. `engine` is absent until a bridge runtime has connected at least once. */
   versions: { app: string; electron: string; engine?: { serverName: string; serverProtocol: string; clientProtocol: string } };
 }
-export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
+export interface WorkspaceFileSearchResult { files: string[]; directories?: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
 export interface NativeAudioApi {
   request(command: NativeAudioCommand): Promise<NativeAudioResponse>;

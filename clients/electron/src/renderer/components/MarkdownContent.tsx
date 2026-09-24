@@ -1,6 +1,7 @@
 import { createContext, memo, useContext, useId, useMemo, type CSSProperties, type ReactNode } from 'react';
 import type { Element } from 'hast';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import { openContextMention, parseContextMentionHref } from '../bridge/composerMentions';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
@@ -112,6 +113,8 @@ const components = {
         return <span id={props.id} className="markdown-link-disabled">{children}</span>;
       }
       const fragment = safeHref.startsWith('#');
+      const mention = parseContextMentionHref(safeHref);
+      if (mention) return <a {...props} href={safeHref} title={mention.target} onClick={(event) => { event.preventDefault(); openContextMention(mention); }}><InsideMarkdownLink.Provider value={true}>{children}</InsideMarkdownLink.Provider></a>;
       return <a {...props} href={safeHref} target={fragment ? undefined : '_blank'} rel={fragment ? undefined : 'noreferrer'}><InsideMarkdownLink.Provider value={true}>{children}</InsideMarkdownLink.Provider></a>;
     },
     img: function MarkdownImage({ src, alt, id }: MarkdownComponentProps) {
@@ -159,6 +162,7 @@ export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
       components={variant === 'plan' ? planComponents : components}
+      urlTransform={(url) => parseContextMentionHref(url) ? url : defaultUrlTransform(url)}
     />
   ), [parsed.source, rehypePlugins, variant]);
   const variables = {

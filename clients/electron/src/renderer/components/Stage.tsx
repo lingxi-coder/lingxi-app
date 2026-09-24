@@ -23,6 +23,7 @@ import { MarkdownContent } from './MarkdownContent';
 import { commandPaletteIcon } from './commandPaletteIcons';
 import { parseSlashCommandMessage } from './slashCommandMessage';
 import { formatClockTime } from '../bridge/sessionPresentation';
+import { promptWithMentionLinks } from '../bridge/composerMentions';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
 const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
@@ -105,11 +106,13 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
             </span>
             <span style={{ fontWeight: 650, letterSpacing: '-.015em' }}>{slashCommand.name}</span>
             {slashCommand.arguments && (
-              <span style={{ color: t.text2, fontWeight: 450, whiteSpace: 'pre-wrap' }}>{slashCommand.arguments}</span>
+              slashCommand.arguments.includes('](lingxi-mention://')
+                ? <MarkdownContent text={slashCommand.arguments} />
+                : <span style={{ color: t.text2, fontWeight: 450, whiteSpace: 'pre-wrap' }}>{slashCommand.arguments}</span>
             )}
           </div>
         ) : (
-          <MarkdownContent text={item.text} />
+          <MarkdownContent text={user ? promptWithMentionLinks(item.text) : item.text} />
         )}
       </div>
       {collapsible && (

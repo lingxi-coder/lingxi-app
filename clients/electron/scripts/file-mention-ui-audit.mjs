@@ -134,7 +134,9 @@ try {
   })()`);
 
   const openPicker = async () => {
-    await evaluate(page, `document.querySelector('button[aria-label="Search workspace files"]')?.click()`);
+    await evaluate(page, `document.querySelector('button[aria-label="Add context"]')?.click()`);
+    await waitFor(() => evaluate(page, `Boolean(document.querySelector('#mention-results'))`), 'context menu');
+    await evaluate(page, `[...document.querySelectorAll('#mention-results [role="option"]')].find((row) => row.textContent.includes('Files and folders'))?.click()`);
     await waitFor(
       () => evaluate(page, `Boolean(document.querySelector('[role="dialog"][aria-label="Search workspace files"] input[aria-label="File search query"]'))`),
       'file search dialog',
@@ -168,7 +170,7 @@ try {
   assert.equal(filtered.query, auditQuery);
   assert(filtered.options.some((text) => text.toLocaleLowerCase().includes(auditQuery.toLocaleLowerCase())), `typed file query must filter to ${auditQuery}`);
 
-  await evaluate(page, `document.querySelector('button[aria-label="Clear file search"]')?.click()`);
+  await evaluate(page, `document.querySelector('button[aria-label="Clear mention search"]')?.click()`);
   await waitFor(
     () => evaluate(page, `document.querySelector('input[aria-label="File search query"]')?.value === '' && document.querySelectorAll('[role="listbox"][aria-label="Workspace files"] [role="option"]').length > 1`),
     'cleared file search',
@@ -246,7 +248,7 @@ try {
     editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
   })()`);
   await openPicker();
-  await evaluate(page, `document.querySelector('button[aria-label="Close file search"]')?.click()`);
+  await evaluate(page, `document.querySelector('button[aria-label="Close mentions"]')?.click()`);
   const closeButton = await waitFor(
     () => evaluate(page, `!document.querySelector('[role="dialog"][aria-label="Search workspace files"]')`),
     'close button dismissal',
@@ -279,11 +281,11 @@ try {
     editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '@tech' }));
   })()`);
   const mentionQuery = await waitFor(
-    () => evaluate(page, `document.querySelector('input[aria-label="File search query"]')?.value === 'tech' ? 'tech' : ''`),
+    () => evaluate(page, `document.querySelector('input[aria-label="Search mentions"]')?.value === 'tech' ? 'tech' : ''`),
     'direct @ mention query synchronization',
   );
   await waitFor(
-    () => evaluate(page, `document.querySelectorAll('[role="listbox"][aria-label="Workspace files"] [role="option"]').length > 0`),
+    () => evaluate(page, `document.querySelectorAll('#mention-results [role="option"]').length > 0`),
     'direct @ mention search results',
   );
   await evaluate(page, `document.querySelector('[role="textbox"][aria-label="Prompt"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);

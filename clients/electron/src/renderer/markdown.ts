@@ -4,6 +4,7 @@ import type { Paragraph, PhrasingContent, Root, RootContent } from 'mdast';
 import type { Element, Root as HtmlRoot } from 'hast';
 import type { Plugin } from 'unified';
 import type {} from 'remark-parse';
+import { parseContextMentionHref } from './bridge/composerMentions';
 
 export type ParsedMarkdown = {
   source: string;
@@ -207,6 +208,7 @@ export const rehypeMarkdownAnchors: Plugin<[string], HtmlRoot> = function (names
 
 /** Keep only trusted URL schemes for rendered links. */
 export function sanitizeMarkdownHref(raw: string): string | undefined {
+  if (parseContextMentionHref(raw)) return raw;
   if (/^(#|\/|\.\/|\.{2}\/|\?)/.test(raw)) return raw;
   try {
     const url = new URL(raw);
@@ -257,7 +259,7 @@ export function sanitizeMarkdownHtml(_trusted = false): Schema {
     },
     protocols: {
       ...defaultSchema.protocols,
-      href: ['https', 'http', 'mailto', ''],
+      href: ['https', 'http', 'mailto', 'lingxi-mention', ''],
       src: ['https', 'http'],
     },
   };

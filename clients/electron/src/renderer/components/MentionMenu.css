@@ -1,0 +1,12 @@
+/* Geometry, rows, focus, animation and responsive layout come from SlashCommandMenu.css. */
+.mention-menu-search { flex: 1; width: 0; min-width: 35px; height: 24px; padding: 0 3px; border: 0; outline: 0; background: transparent; color: var(--slash-text); font: inherit; font-size: 12px; }
+.mention-menu-search::placeholder { color: var(--slash-muted); }
+.mention-menu-search:focus-visible { box-shadow: 0 1px var(--slash-focus); }
+.mention-menu-control { display: grid; place-items: center; flex: 0 0 auto; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--slash-muted); cursor: pointer; }
+.mention-menu-control:hover { background: var(--slash-hover); color: var(--slash-text); }
+.mention-menu-control:focus-visible { outline: 2px solid var(--slash-focus); }
+.mention-menu-group { padding: 9px 12px 5px; color: var(--slash-muted); font-size: 11px; font-weight: 550; }
+.mention-command-menu .slash-command-row[aria-disabled='true'] { opacity: .5; cursor: default; }
+.beta-rich-prompt a.beta-file-mention { cursor: pointer; text-decoration: none; }
+.beta-rich-prompt a.beta-file-mention:hover { text-decoration: underline; text-underline-offset: 3px; }
+.beta-rich-prompt a.beta-file-mention:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; border-radius: 4px; }

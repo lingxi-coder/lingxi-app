@@ -63,6 +63,13 @@ import { RenameSessionDialog } from './RenameSessionDialog';
 import type { ScheduledCronJob } from '../bridge/scheduledTaskDraft';
 import { Icon } from './Icon';
 import { commandPaletteIcon } from './commandPaletteIcons';
+import { MentionMenu, commandMenuStyle } from './MentionMenu';
+import { FileMentionPreview } from './FileMentionPreview';
+import {
+  contextMentionHref, contextMentionMarkdown, mentionCatalog, mentionMenuEntries,
+  OPEN_CONTEXT_MENTION_EVENT, parseContextMentionHref,
+  type ContextMention, type MentionMenuEntry,
+} from '../bridge/composerMentions';
 import { MarkdownContent } from './MarkdownContent';
 import { VoiceFlowPanel } from './voice/VoiceFlowPanel';
 import { providerById } from '../../shared/providers';
@@ -1504,6 +1511,7 @@ function modelSupportsFastMode(detail?: ModelDetailsDto): boolean {
 type FilePickerState = {
   source: 'mention' | 'button';
   query: string;
+  view: 'all' | 'files';
 };
 
 type ModelPickerSubmenu = 'model' | 'effort' | 'speed' | null;
@@ -1524,6 +1532,10 @@ const ZERO_WIDTH_SPACE = '\u200b';
 
 function richPromptText(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) return (node.nodeValue ?? '').split(ZERO_WIDTH_SPACE).join('');
+  if (node instanceof HTMLElement && node.dataset.contextMention) {
+    const mention = parseContextMentionHref(node.dataset.contextMention);
+    return mention ? contextMentionMarkdown(mention) : node.textContent ?? '';
+  }
   if (node instanceof HTMLElement && node.matches(FILE_MENTION_SELECTOR)) return '';
   if (node instanceof HTMLBRElement) return '\n';
 
@@ -1576,12 +1588,13 @@ function applyEditorSelection(range: Range): void {
 }
 
 function createFileMention(path: string, color: string): HTMLElement {
-  const token = document.createElement('span');
+  const token = document.createElement('a');
+  token.href = contextMentionHref({ kind: path.endsWith('/') ? 'folder' : 'file', target: path, name: basename(path.replace(/\/$/, '')) });
   token.className = 'beta-file-mention';
   token.dataset.fileMention = path;
   token.contentEditable = 'false';
   token.title = path;
-  token.setAttribute('aria-label', `File mention: ${path}`);
+  token.setAttribute('aria-label', `${path.endsWith('/') ? 'Folder' : 'File'} mention: ${path}`);
   token.style.color = color;
 
   const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1603,7 +1616,7 @@ function createFileMention(path: string, color: string): HTMLElement {
   icon.append(circle, file);
 
   const label = document.createElement('span');
-  label.textContent = basename(path);
+  label.textContent = basename(path.replace(/\/$/, ''));
   token.append(icon, label);
   return token;
 }
@@ -1629,6 +1642,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [fileResultsTruncated, setFileResultsTruncated] = useState(false);
   const [fileSearchStatus, setFileSearchStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [fileResultIndex, setFileResultIndex] = useState(0);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
   const [imageNotice, setImageNotice] = useState<string | null>(null);
@@ -1639,6 +1653,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [slashResultIndex, setSlashResultIndex] = useState(0);
   const input = useRef<HTMLDivElement>(null);
   const fileControl = useRef<HTMLDivElement>(null);
+  const fileButton = useRef<HTMLButtonElement>(null);
   const fileSearchInput = useRef<HTMLInputElement>(null);
   const imageFileInput = useRef<HTMLInputElement>(null);
   const permissionControl = useRef<HTMLDivElement>(null);
@@ -1652,6 +1667,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const fileSearchRequest = useRef(0);
   const savedEditorSelection = useRef<Range | null>(null);
   const activeMentionRange = useRef<Range | null>(null);
+  const mentionDismissed = useRef(false);
   const activeSlashRange = useRef<Range | null>(null);
   const activeSlashQuery = useRef<string | null>(null);
   const slashDismissed = useRef(false);
@@ -1679,6 +1695,18 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
     [bridge.desktop.slashCommands, slashQuery],
   );
+  const contextCatalog = useMemo(() => mentionCatalog({
+    skills: bridge.skillsEvent?.skills,
+    skillCatalog: bridge.skillCatalogEvent?.catalog_json,
+    pluginCatalog: bridge.pluginCatalogEvent?.catalog_json,
+    effectiveSettings: bridge.settingsSnapshotEvent?.effective_json,
+  }), [bridge.skillsEvent, bridge.skillCatalogEvent, bridge.pluginCatalogEvent, bridge.settingsSnapshotEvent]);
+  const mentionEntries = useMemo(() => mentionMenuEntries({
+    query: filePicker?.query ?? '', filesOnly: filePicker?.view === 'files', files: fileResults,
+    catalog: contextCatalog, running: bridge.running, planActive: bridge.desktop.permissionMode === 'plan',
+    goalAvailable: bridge.desktop.slashCommands.some((entry) => entry.name === 'goal' && !entry.hidden),
+    goalHasAttachments: selectedFiles.length > 0 || imageAttachments.length > 0,
+  }), [filePicker?.query, filePicker?.view, fileResults, contextCatalog, bridge.running, bridge.desktop.permissionMode, bridge.desktop.slashCommands, selectedFiles.length, imageAttachments.length]);
   const visibleModelReferences = useMemo(
     () => filterVisibleModelReferences(
       bridge.desktop.models,
@@ -1861,7 +1889,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   }, [slashMenuOpen, slashResultIndex]);
 
   useEffect(() => {
-    if (!fileMenuOpen || !filePicker) {
+    if (!fileMenuOpen || !filePicker || (filePicker.view === 'all' && !filePicker.query.trim())) {
       fileSearchRequest.current += 1;
       setFileSearchStatus('idle');
       setFileResults([]);
@@ -1871,11 +1899,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     const request = ++fileSearchRequest.current;
     setFileSearchStatus('loading');
+    setFileResults([]);
+    setFileResultsTruncated(false);
     const timer = window.setTimeout(() => {
       void bridge.searchWorkspaceFiles(filePicker.query)
         .then((result) => {
           if (fileSearchRequest.current !== request) return;
-          setFileResults(result.files);
+          setFileResults([...result.files, ...(result.directories ?? []).map((path) => `${path}/`)]);
           setFileResultsTruncated(result.truncated);
           setFileResultIndex(0);
           setFileSearchStatus('ready');
@@ -1888,19 +1918,47 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           setFileSearchStatus('error');
         });
     }, 90);
-    return () => window.clearTimeout(timer);
-  }, [bridge.searchWorkspaceFiles, fileMenuOpen, filePicker?.query]);
+    return () => { window.clearTimeout(timer); fileSearchRequest.current += 1; };
+  }, [bridge.searchWorkspaceFiles, activeSessionId, fileMenuOpen, filePicker?.query, filePicker?.view]);
+
+  useEffect(() => {
+    setFileResultIndex(0);
+  }, [filePicker?.query, filePicker?.view]);
+
+  useEffect(() => {
+    setFileResultIndex((index) => Math.min(index, Math.max(0, mentionEntries.length - 1)));
+  }, [mentionEntries.length]);
+
+  useEffect(() => {
+    if (!fileMenuOpen) return;
+    void Promise.allSettled([
+      bridge.refreshSkills?.(), bridge.skillAdmin?.({ action: 'get_catalog' }),
+      bridge.pluginAdmin?.({ action: 'get_catalog' }), bridge.refreshSlashCommands(),
+    ]);
+  }, [fileMenuOpen, activeSessionId, bridge.refreshSkills, bridge.skillAdmin, bridge.pluginAdmin, bridge.refreshSlashCommands]);
+
+  useEffect(() => {
+    const open = (event: Event) => {
+      const mention = (event as CustomEvent<ContextMention>).detail;
+      if (mention?.kind === 'skill' || mention?.kind === 'plugin') onOpenSettingsPage(mention.kind === 'skill' ? 'skills' : 'plugins');
+      else if (mention?.kind === 'file' || mention?.kind === 'folder') { setPreviewPath(mention.target); setFilePicker(null); setSlashQuery(null); }
+    };
+    window.addEventListener(OPEN_CONTEXT_MENTION_EVENT, open);
+    return () => window.removeEventListener(OPEN_CONTEXT_MENTION_EVENT, open);
+  }, [onOpenSettingsPage]);
 
   useEffect(() => {
     if (!fileMenuOpen) return;
     const pointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && !fileControl.current?.contains(event.target)) {
+      if (event.target instanceof Node && !fileControl.current?.contains(event.target) && !fileButton.current?.contains(event.target) && !input.current?.contains(event.target)) {
+        mentionDismissed.current = true;
         setFilePicker(null);
       }
     };
     const escape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
+      mentionDismissed.current = true;
       setFilePicker(null);
       if (document.activeElement === fileSearchInput.current) input.current?.focus();
     };
@@ -2029,6 +2087,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     setImageAttachments(images);
     setImageNotice(null);
     setFilePicker(null);
+    setPreviewPath(null);
+    mentionDismissed.current = false;
+    savedEditorSelection.current = null;
     setSlashQuery(null);
     activeMentionRange.current = null;
     activeSlashRange.current = null;
@@ -2049,10 +2110,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     savedEditorSelection.current = selection.getRangeAt(0).cloneRange();
 
     const node = selection.focusNode;
-    const mention = node?.nodeType === Node.TEXT_NODE
+    const mention = selection.isCollapsed && node?.nodeType === Node.TEXT_NODE
+      && !node.parentElement?.closest('[contenteditable="false"]')
       ? activeFileMention(node.nodeValue ?? '', selection.focusOffset)
       : null;
     if (mention && node) {
+      if (mentionDismissed.current) return;
       const range = document.createRange();
       range.setStart(node, mention.start);
       range.setEnd(node, mention.end);
@@ -2060,14 +2123,19 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       setFilePicker((current) => (
         current?.source === 'mention' && current.query === mention.query
           ? current
-          : { source: 'mention', query: mention.query }
+          : { source: 'mention', query: mention.query, view: current?.source === 'mention' ? current.view : 'all' }
       ));
+      setModelOpen(false);
+      setModelSubmenu(null);
+      setPermissionOpen(false);
+      setPreviewPath(null);
       setSlashQuery(null);
       activeSlashRange.current = null;
       activeSlashQuery.current = null;
       return;
     }
     activeMentionRange.current = null;
+    mentionDismissed.current = false;
     setFilePicker((current) => current?.source === 'mention' ? null : current);
 
     const slash = node?.nodeType === Node.TEXT_NODE
@@ -2397,6 +2465,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       return;
     }
     input.current?.replaceChildren();
+    savedEditorSelection.current = null;
+    activeMentionRange.current = null;
     setText('');
     setSelectedFiles([]);
     setImageAttachments((current) => {
@@ -2570,9 +2640,80 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     applyEditorSelection(caret);
     savedEditorSelection.current = caret.cloneRange();
     activeMentionRange.current = null;
+    mentionDismissed.current = true;
     syncPromptState();
     setFilePicker(null);
     setFileResults([]);
+    focusPrompt(caret);
+  };
+
+  const dismissMentions = () => {
+    mentionDismissed.current = true;
+    setFilePicker(null);
+    focusPrompt();
+  };
+
+  const consumeMentionQuery = (): Range | null => {
+    const editor = input.current;
+    if (!editor) return null;
+    const range = (filePicker?.source === 'mention' ? activeMentionRange.current : savedEditorSelection.current)?.cloneRange()
+      ?? editorSelection(editor);
+    if (filePicker?.source === 'mention') range.deleteContents();
+    range.collapse(true);
+    savedEditorSelection.current = range.cloneRange();
+    activeMentionRange.current = null;
+    mentionDismissed.current = true;
+    setFilePicker(null);
+    return range;
+  };
+
+  const chooseMention = (entry: MentionMenuEntry) => {
+    if (entry.disabled) return;
+    if (entry.path !== undefined) { chooseFile(entry.path); return; }
+    if (entry.action === 'files') {
+      setFilePicker((current) => current ? { ...current, query: '', view: 'files' } : current);
+      window.requestAnimationFrame(() => fileSearchInput.current?.focus());
+      return;
+    }
+    const caret = consumeMentionQuery();
+    if (!caret) return;
+    if (entry.mention && input.current) {
+      const href = contextMentionHref(entry.mention);
+      const duplicate = [...input.current.querySelectorAll<HTMLElement>('[data-context-mention]')]
+        .some((token) => token.dataset.contextMention === href);
+      if (!duplicate) {
+        const token = createFileMention(entry.mention.target, t.accent);
+        delete token.dataset.fileMention;
+        token.dataset.contextMention = href;
+        token.setAttribute('href', href);
+        token.setAttribute('aria-label', `${entry.mention.kind}: ${entry.mention.name}`);
+        token.querySelector('svg')?.replaceWith(document.createTextNode('@'));
+        token.querySelector('span')!.textContent = entry.mention.name;
+        const spacer = document.createTextNode(ZERO_WIDTH_SPACE);
+        const fragment = document.createDocumentFragment();
+        fragment.append(token, spacer);
+        caret.insertNode(fragment);
+        caret.setStart(spacer, 1);
+        caret.collapse(true);
+      }
+    } else if (entry.action === 'goal' && input.current) {
+      // Goal has arguments; prepare the command and leave submission to the user.
+      // Keep any existing draft, attachments and references intact.
+      const start = document.createRange();
+      start.selectNodeContents(input.current);
+      start.collapse(true);
+      const prefix = document.createTextNode('/goal ');
+      start.insertNode(prefix);
+      caret.selectNodeContents(input.current);
+      caret.collapse(false);
+      slashDismissed.current = true;
+    } else if (entry.action === 'plan') {
+      void bridge.setPermissionMode('plan').catch(() => setImageNotice('Could not enable Plan mode.'));
+    } else if (entry.action === 'attach') {
+      imageFileInput.current?.click();
+    }
+    savedEditorSelection.current = caret.cloneRange();
+    syncPromptState();
     focusPrompt(caret);
   };
 
@@ -2584,35 +2725,36 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     setSlashQuery(null);
     activeSlashRange.current = null;
-    setFilePicker({ source: 'button', query: '' });
+    mentionDismissed.current = false;
+    setPreviewPath(null);
+    setFilePicker({ source: 'button', query: '', view: 'all' });
     setModelOpen(false);
     setModelSubmenu(null);
     setPermissionOpen(false);
   };
 
   const filePickerKeyDown = (event: KeyboardEvent<HTMLInputElement | HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (fileMenuOpen) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
-        setFileResultIndex((index) => fileResults.length ? (index + 1) % fileResults.length : 0);
+        setFileResultIndex((index) => moveSlashSelectionIndex(index, 'next', mentionEntries.length));
         return;
       }
       if (event.key === 'ArrowUp') {
         event.preventDefault();
-        setFileResultIndex((index) => fileResults.length ? (index - 1 + fileResults.length) % fileResults.length : 0);
+        setFileResultIndex((index) => moveSlashSelectionIndex(index, 'previous', mentionEntries.length));
         return;
       }
       if (event.key === 'Escape') {
         event.preventDefault();
-        setFilePicker(null);
-        input.current?.focus();
+        dismissMentions();
         return;
       }
       if (event.key === 'Enter' || event.key === 'Tab') {
         event.preventDefault();
-        const selected = fileResults[fileResultIndex];
-        if (selected) chooseFile(selected);
-        else setFilePicker(null);
+        const selected = mentionEntries[fileResultIndex];
+        if (selected) chooseMention(selected);
         return;
       }
     }
@@ -2644,6 +2786,14 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
   };
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    // Enter on a focused reference follows the link instead of submitting the draft.
+    const reference = event.target instanceof Element
+      ? event.target.closest<HTMLElement>('[data-context-mention], [data-file-mention]') : null;
+    if (reference) {
+      if (event.key === 'Enter') { event.preventDefault(); reference.click(); }
+      return;
+    }
     filePickerKeyDown(event);
     if (slashMenuOpen) {
       slashPickerKeyDown(event);
@@ -2660,7 +2810,27 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     // detection on the matching keyup can reconcile against stale query state
     // and overwrite the index selected during keydown.
     if (slashMenuOpen && slashNavigationDirection(event.key)) return;
+    if (fileMenuOpen && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) return;
     updateActiveCompletions();
+  };
+
+  const copyPromptReferences = (event: ClipboardEvent<HTMLDivElement>) => {
+    const editor = input.current;
+    const selection = window.getSelection();
+    if (!editor || !selection?.rangeCount || selection.isCollapsed) return;
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.commonAncestorContainer)) return;
+    const fragment = document.createElement('div');
+    fragment.append(range.cloneContents());
+    if (!fragment.querySelector('[data-context-mention], [data-file-mention]')) return;
+    const snapshot = richPromptSnapshot(fragment);
+    event.preventDefault();
+    event.clipboardData.setData('text/plain', promptWithFileMentions(snapshot.text, snapshot.files));
+    if (event.type === 'cut') {
+      range.deleteContents();
+      syncPromptState();
+      updateActiveCompletions();
+    }
   };
 
   const pastePlainText = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -2766,75 +2936,106 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           spellCheck
           data-placeholder={promptPlaceholder}
           data-empty={!hasPrompt ? 'true' : 'false'}
-          onInput={() => { slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
+          onInput={() => { mentionDismissed.current = false; slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
           onFocus={() => { slashDismissed.current = false; savePromptSelection(); updateActiveCompletions(); }}
           onBlur={savePromptSelection}
           onKeyUp={keyUp}
           onMouseUp={updateActiveCompletions}
           onKeyDown={keyDown}
           onPaste={pastePlainText}
+          onCopy={copyPromptReferences}
+          onCut={copyPromptReferences}
+          onClick={(event) => {
+            const token = (event.target as HTMLElement).closest<HTMLElement>('[data-context-mention], [data-file-mention]');
+            if (!token) return;
+            event.preventDefault();
+            const mention = parseContextMentionHref(token.dataset.contextMention ?? '');
+            if (mention) onOpenSettingsPage(mention.kind === 'skill' ? 'skills' : 'plugins');
+            else if (token.dataset.fileMention) {
+              setFilePicker(null);
+              setSlashQuery(null);
+              setPreviewPath(token.dataset.fileMention);
+            }
+          }}
           aria-label="Prompt"
           aria-multiline="true"
           aria-disabled={false}
           aria-autocomplete="list"
-          aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'workspace-file-results' : undefined}
+          aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'mention-results' : undefined}
+          aria-describedby={slashMenuOpen ? 'slash-command-hint' : fileMenuOpen ? 'mention-hint' : undefined}
           aria-expanded={slashMenuOpen || (fileMenuOpen && filePicker?.source === 'mention')}
           aria-activedescendant={slashMenuOpen && slashCommands[slashResultIndex]
             ? `slash-command-result-${slashResultIndex}`
-            : fileMenuOpen && filePicker?.source === 'mention' && fileResults[fileResultIndex]
-              ? `workspace-file-result-${fileResultIndex}`
+            : fileMenuOpen && filePicker?.source === 'mention' && mentionEntries[fileResultIndex]
+              ? `mention-result-${fileResultIndex}`
               : undefined}
           style={{ display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 15, padding: '16px 18px 8px', fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: 'text' }}
         />
+        {previewPath && <FileMentionPreview key={`${activeSessionId}:${previewPath}`} path={previewPath} bridge={bridge} onClose={() => { setPreviewPath(null); focusPrompt(); }} />}
         {slashMenuOpen && (
-          <div ref={slashControl} id="slash-command-results" role="listbox" aria-label="Slash commands" style={{ ...composerMenuStyle(t, 'left'), width: 820, maxWidth: 'min(820px, calc(100vw - 44px))', maxHeight: 'min(420px, calc(100vh - 190px))', overflowY: 'auto', padding: 7 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 9px 7px', borderBottom: `0.5px solid ${t.border}`, color: t.text3, fontSize: 10.5 }}>
-              <strong style={{ color: t.text2, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>Commands</strong>
-              <span className="mono" style={{ color: t.accent }}>/{slashQuery}</span>
-              <span style={{ marginLeft: 'auto', color: t.text4 }}>{slashCommands.length} match{slashCommands.length === 1 ? '' : 'es'}</span>
+          <div ref={slashControl} className="slash-command-menu" style={commandMenuStyle(t)}>
+            <div className="slash-command-header">
+              <span className="slash-command-header-mark" aria-hidden="true">/</span>
+              <strong>Commands</strong>
+              {slashQuery && <span className="slash-command-query mono">/{slashQuery}</span>}
+              <span className="slash-command-count">{slashCommands.length} match{slashCommands.length === 1 ? '' : 'es'}</span>
             </div>
-            {slashCommands.length === 0 && (
-              <div role="status" style={{ padding: '16px 10px', color: t.text3, fontSize: 11.5 }}>
-                No matching commands. Press Esc to keep the text as a prompt.
-              </div>
-            )}
-            {slashCommands.map((entry, index) => {
-              const selected = index === slashResultIndex;
-              const description = slashMenuLabel(entry);
-              return (
-                <button
-                  id={`slash-command-result-${index}`}
-                  data-slash-index={index}
-                  className="slash-command-row"
-                  key={entry.name}
-                  type="button"
-                  role="option"
-                  aria-selected={selected}
-                  title={description}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onMouseEnter={() => setSlashResultIndex(index)}
-                  onFocus={() => setSlashResultIndex(index)}
-                  onClick={() => chooseSlashCommand(entry.name)}
-                  style={{ width: '100%', minHeight: 44, display: 'grid', gridTemplateColumns: '26px minmax(0, 1fr)', gap: 10, alignItems: 'center', padding: '7px 10px', border: 0, borderRadius: 9, background: selected ? t.surfaceHover : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
-                >
-                  <span aria-hidden="true" style={{ width: 26, height: 26, display: 'grid', placeItems: 'center', color: t.text2 }}>
-                    <Icon name={commandPaletteIcon(entry.name)} size={18} stroke={1.7} />
-                  </span>
-                  <span style={{ minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 10, overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                    <span className="slash-command-name" style={{ flexShrink: 0, color: t.text, fontWeight: 500, fontSize: 14.5, letterSpacing: '-.01em' }}>
-                      {entry.name}
+            <div id="slash-command-results" className="slash-command-list" role="listbox" aria-label="Slash commands">
+              {slashCommands.length === 0 && (
+                <div className="slash-command-empty" role="status">
+                  No matching commands. Press Esc to keep the text as a prompt.
+                </div>
+              )}
+              {slashCommands.map((entry, index) => {
+                const selected = index === slashResultIndex;
+                const description = slashMenuLabel(entry);
+                return (
+                  <button
+                    id={`slash-command-result-${index}`}
+                    data-slash-index={index}
+                    className="slash-command-row"
+                    key={entry.name}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    title={`${slashCommandText(entry.name)}${entry.argument_hint ? ` ${entry.argument_hint}` : ''}\n${description}`}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseEnter={() => setSlashResultIndex(index)}
+                    onFocus={() => setSlashResultIndex(index)}
+                    onClick={() => chooseSlashCommand(entry.name)}
+                  >
+                    <span className="slash-command-icon" aria-hidden="true" style={{ '--slash-command-color': t.text2 } as CSSProperties}>
+                      <Icon name={commandPaletteIcon(entry.name)} size={18} stroke={1.7} />
                     </span>
-                    {entry.argument_hint ? <span style={{ flexShrink: 0, color: t.text4, fontSize: 12.5 }}>{entry.argument_hint}</span> : null}
-                    <span className="slash-command-description" style={{ minWidth: 0, overflow: 'hidden', color: t.text3, fontSize: 13.5, lineHeight: 1.35, textOverflow: 'ellipsis' }}>{description}</span>
-                  </span>
-                </button>
-              );
-            })}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 26, padding: '5px 9px 2px', borderTop: `0.5px solid ${t.border}`, color: t.text4, fontSize: 9.5 }}>
-              <span>↑↓ Navigate</span><span>Enter / Tab Complete</span><span>Esc Close</span>
+                    <span className="slash-command-copy">
+                      <span className="slash-command-heading">
+                        <span className="slash-command-name">{entry.name}</span>
+                        {entry.argument_hint ? <span className="slash-command-argument mono">{entry.argument_hint}</span> : null}
+                      </span>
+                      <span className="slash-command-description">{description}</span>
+                    </span>
+                    <kbd className="slash-command-complete" aria-hidden="true">↵</kbd>
+                  </button>
+                );
+              })}
+            </div>
+            <div id="slash-command-hint" className="slash-command-footer">
+              <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
+              <span><kbd>↵</kbd><kbd>Tab</kbd> Complete</span>
+              <span><kbd>esc</kbd> Close</span>
             </div>
           </div>
         )}
+        <div ref={fileControl}>
+          {fileMenuOpen && <MentionMenu
+            entries={mentionEntries} selectedIndex={fileResultIndex} query={filePicker?.query ?? ''}
+            filesOnly={filePicker?.view === 'files'} searchInput={fileSearchInput}
+            status={fileSearchStatus} truncated={fileResultsTruncated}
+            onQuery={(query) => setFilePicker((current) => current ? { ...current, query } : current)}
+            onSelectIndex={setFileResultIndex} onChoose={chooseMention} onKeyDown={filePickerKeyDown}
+            onClose={dismissMentions} onBack={() => setFilePicker((current) => current ? { ...current, view: 'all', query: '' } : current)}
+          />}
+        </div>
         {voiceState === 'listening' && !flowMode ? (
           <DictationRecorderBar
             audio={audio}
@@ -2846,65 +3047,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         <div className="composer-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 48, padding: '0 8px 8px' }}>
           <input ref={imageFileInput} type="file" multiple onChange={(event) => { void addFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
           <button type="button" disabled={!ready} className="composer-icon-action" aria-label="Attach files" title="Attach files or images" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
-          <div ref={fileControl}>
-            <button type="button" disabled={!ready} className="composer-icon-action" aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
-            {fileMenuOpen && (
-              <div role="dialog" aria-label="Search workspace files" style={{ ...composerMenuStyle(t, 'left'), width: 560, maxWidth: 'min(560px, calc(100vw - 44px))', padding: 7, overflow: 'hidden' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '3px 4px 7px', borderBottom: `0.5px solid ${t.border}` }}>
-                  <Icon name="search" size={14} color={t.text3} />
-                  <input
-                    ref={fileSearchInput}
-                    type="text"
-                    role="searchbox"
-                    value={filePicker?.query ?? ''}
-                    onChange={(event) => setFilePicker((current) => current ? { ...current, query: event.target.value } : current)}
-                    onKeyDown={filePickerKeyDown}
-                    placeholder="Search workspace files"
-                    aria-label="File search query"
-                    aria-controls="workspace-file-results"
-                    aria-activedescendant={fileResults[fileResultIndex] ? `workspace-file-result-${fileResultIndex}` : undefined}
-                    style={{ minWidth: 0, flex: 1, height: 30, padding: '0 3px', border: 0, outline: 0, background: 'transparent', color: t.text, font: 'inherit', fontSize: 12.5 }}
-                  />
-                  <span className="mono" style={{ color: t.text4, fontSize: 9.5 }}>@ file</span>
-                  {filePicker?.query && <button type="button" aria-label="Clear file search" title="Clear search" onClick={() => { setFilePicker((current) => current ? { ...current, query: '' } : current); fileSearchInput.current?.focus(); }} style={{ width: 26, height: 26, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="x" size={11} /></button>}
-                  <button type="button" aria-label="Close file search" title="Close" onClick={() => { setFilePicker(null); input.current?.focus(); }} style={{ width: 26, height: 26, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 6, background: t.surfaceHover, color: t.text2, cursor: 'pointer' }}><Icon name="x" size={13} /></button>
-                </div>
-                <div id="workspace-file-results" role="listbox" aria-label="Workspace files" style={{ maxHeight: 310, overflowY: 'auto', padding: '5px 0' }}>
-                  {fileSearchStatus === 'loading' && <div role="status" style={{ padding: '14px 10px', color: t.text3, fontSize: 11.5 }}>Searching workspace…</div>}
-                  {fileSearchStatus === 'error' && <div role="alert" style={{ padding: '14px 10px', color: t.danger, fontSize: 11.5 }}>Could not search this workspace.</div>}
-                  {fileSearchStatus === 'ready' && fileResults.length === 0 && <div role="status" style={{ padding: '14px 10px', color: t.text3, fontSize: 11.5 }}>No matching files.</div>}
-                  {fileResults.map((path, index) => {
-                    const slash = path.lastIndexOf('/');
-                    const directory = slash >= 0 ? path.slice(0, slash) : 'workspace root';
-                    const selected = index === fileResultIndex;
-                    return (
-                      <button
-                        id={`workspace-file-result-${index}`}
-                        key={path}
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onMouseEnter={() => setFileResultIndex(index)}
-                        onClick={() => chooseFile(path)}
-                        style={{ width: '100%', display: 'grid', gridTemplateColumns: '24px minmax(0, 1fr)', gap: 8, alignItems: 'center', padding: '7px 9px', border: 0, borderRadius: 7, background: selected ? t.accentBg : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit' }}
-                      >
-                        <Icon name="file" size={15} color={selected ? t.accent : t.text3} />
-                        <span style={{ minWidth: 0 }}>
-                          <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: 570 }}>{basename(path)}</span>
-                          <span className="mono" style={{ display: 'block', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 9.5 }}>{directory}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 30, padding: '5px 9px 2px', borderTop: `0.5px solid ${t.border}`, color: t.text4, fontSize: 9.5 }}>
-                  <span>↑↓ Navigate</span><span>Enter / Tab Add</span><span>Esc Close</span>
-                  {fileResultsTruncated && <span style={{ marginLeft: 'auto' }}>More matches available — keep typing</span>}
-                </div>
-              </div>
-            )}
-          </div>
+          <button ref={fileButton} type="button" disabled={!ready} className="composer-icon-action" aria-label="Add context" aria-expanded={fileMenuOpen} title="Add context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
           <div ref={permissionControl} style={{ position: 'relative' }}>
             <button
               ref={permissionButton}

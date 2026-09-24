@@ -304,7 +304,7 @@ test('a running turn keeps drafting and local composer controls interactive', ()
 
   assert.match(promptTag, /contentEditable="true"/i);
   assert.match(promptTag, /aria-disabled="false"/);
-  for (const marker of ['aria-label="Attach files"', 'aria-label="Search workspace files"', 'aria-label="Start ordinary recording"']) {
+  for (const marker of ['aria-label="Attach files"', 'aria-label="Add context"', 'aria-label="Start ordinary recording"']) {
     assert.doesNotMatch(openingTag(markup, marker), /\bdisabled\b/, `${marker} must remain interactive`);
   }
   assert.doesNotMatch(markup, /aria-label="Goal active"/);

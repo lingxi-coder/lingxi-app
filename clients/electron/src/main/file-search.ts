@@ -33,12 +33,14 @@ const SKIPPED_DIRECTORIES = new Set([
 
 export interface WorkspaceFileSearchResult {
   files: string[];
+  directories?: string[];
   truncated: boolean;
 }
 
 interface WorkspaceFileIndex {
   workspace: string;
   files: string[];
+  directories: string[];
   truncated: boolean;
   expiresAt: number;
 }
@@ -159,6 +161,7 @@ async function buildWorkspaceFileIndex(workspace: string): Promise<WorkspaceFile
   return {
     workspace: canonical,
     files,
+    directories: directories.slice(1).map((entry) => entry.relative),
     truncated,
     expiresAt: Date.now() + FILE_INDEX_TTL_MS,
   };
@@ -202,10 +205,15 @@ export class WorkspaceFileSearch {
       .map((path) => ({ path, score: scorePath(path, normalizedQuery) }))
       .filter((entry): entry is { path: string; score: number } => entry.score !== undefined)
       .sort((left, right) => left.score - right.score || left.path.localeCompare(right.path));
+    const directoryMatches = index.directories
+      .map((path) => ({ path, score: scorePath(path, normalizedQuery.replace(/\/$/, '')) }))
+      .filter((entry): entry is { path: string; score: number } => entry.score !== undefined)
+      .sort((left, right) => left.score - right.score || left.path.localeCompare(right.path));
 
     return {
       files: matches.slice(0, boundedLimit).map((entry) => entry.path),
-      truncated: index.truncated || matches.length > boundedLimit,
+      directories: directoryMatches.slice(0, boundedLimit).map((entry) => entry.path),
+      truncated: index.truncated || matches.length > boundedLimit || directoryMatches.length > boundedLimit,
     };
   }
 }

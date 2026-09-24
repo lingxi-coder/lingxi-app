@@ -105,3 +105,16 @@ test('workspace file search rejects unbounded or NUL-bearing queries', async () 
   await assert.rejects(() => search.search(root, 'x'.repeat(MAX_FILE_SEARCH_QUERY_LENGTH + 1)), /invalid workspace file query/);
   await assert.rejects(() => search.search(root, 'bad\0query'), /invalid workspace file query/);
 });
+
+test('folder mentions include empty directories, respect exclusions, and do not follow links', async () => {
+  const root = workspace();
+  const outside = workspace();
+  mkdirSync(join(root, 'Empty Folder'));
+  mkdirSync(join(root, 'node_modules', 'hidden'), { recursive: true });
+  symlinkSync(outside, join(root, 'outside'));
+  file(root, 'src/nested/main.ts');
+  const search = new WorkspaceFileSearch();
+  assert.deepEqual((await search.search(root, 'Empty Folder')).directories, ['Empty Folder']);
+  assert.deepEqual((await search.search(root, '')).directories, ['src', 'Empty Folder', 'src/nested']);
+  assert.deepEqual((await search.search(root, 'src/')).files, ['src/nested/main.ts']);
+});

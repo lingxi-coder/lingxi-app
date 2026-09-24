@@ -152,7 +152,7 @@ export interface BootstrapState {
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
 }
-export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
+export interface WorkspaceFileSearchResult { files: string[]; directories?: string[]; truncated: boolean }
 
 export type Unsubscribe = () => void;
 export interface NativeAudioApi {

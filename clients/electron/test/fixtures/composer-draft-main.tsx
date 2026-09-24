@@ -15,6 +15,13 @@ import {
 } from '../../src/shared/nativeAudio';
 
 const projectPath = '/tmp/composer-draft-project';
+const mentionsFixture = new URLSearchParams(location.search).has('mentions');
+const openedSettings: string[] = [];
+const permissionChanges: string[] = [];
+const mentionSearch = async (query: string) => {
+  if (query === 'slow') await new Promise((resolve) => setTimeout(resolve, 250));
+  return { files: ['src/main.ts', 'My Files/read me.md'].filter((path) => !query || path.toLowerCase().includes(query.toLowerCase())), directories: ['src', 'My Files'].filter((path) => !query || path.toLowerCase().includes(query.replace(/\/$/, '').toLowerCase())), truncated: false };
+};
 let resolvePendingSend: (() => void) | undefined;
 let sendPending = false;
 let lastSentPrompt = '';
@@ -161,7 +168,7 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
       conversationControls: null,
       fastMode: false,
       permissionMode: 'default',
-      slashCommands: [],
+      slashCommands: mentionsFixture ? [{ name: 'goal', description: 'Set a goal to keep pursuing', source: 'builtin', aliases: [], hidden: false }, { name: 'plan', description: 'Turn plan mode on', source: 'builtin', aliases: [], hidden: false }] : [],
       tasks: {},
       taskOutput: {},
       status: null,
@@ -175,13 +182,22 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
         reviewer: { agent_id: 'reviewer', name: 'code-review', agent_type: 'general-purpose', status: backgroundStatus },
       } : {},
     },
-    searchWorkspaceFiles: async () => ({ files: [], truncated: false }),
+    ...(mentionsFixture ? {
+      skillsEvent: { skills: [{ name: 'review', source_dir: '/skills/review' }, { name: '设计规范', source_dir: '/skills/设计规范' }] },
+      pluginCatalogEvent: { catalog_json: JSON.stringify({ installed: [{ id: 'browser@local', name: 'Browser', description: 'Control the in-app browser' }] }) },
+      skillCatalogEvent: { catalog_json: JSON.stringify({ entries: [{ directory: '/skills/review', description: 'Review code changes' }] }) },
+    } : {}),
+    refreshSkills: async () => undefined,
+    skillAdmin: async () => undefined,
+    pluginAdmin: async () => undefined,
+    searchWorkspaceFiles: mentionsFixture ? mentionSearch : async () => ({ files: [], truncated: false }),
+    previewWorkspaceFile: async (path: string) => ({ kind: 'text', path, size: 20, content: 'export const value = 42;', truncated: false }),
     refreshModelPicker: async () => { modelRefreshCount += 1; },
     refreshSlashCommands: async () => undefined,
     setModel: async () => undefined,
     setReasoningSelection: async () => undefined,
     setFastMode: async () => undefined,
-    setPermissionMode: async () => undefined,
+    setPermissionMode: async (mode: string) => { permissionChanges.push(mode); },
     emitCommandOutput: () => undefined,
     beginLocalCommand: () => undefined,
     runSlashCommand: async (command: string) => { slashCommands.push(command); },
@@ -207,6 +223,7 @@ function Fixture() {
   const [models, setModels] = useState<string[]>(ALL_MODELS);
   const [ready, setReady] = useState(true);
   const [connected, setConnected] = useState(true);
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
   useEffect(() => {
     window.__composerDraftTest = {
@@ -229,12 +246,15 @@ function Fixture() {
       modelRefreshCount: () => modelRefreshCount,
       setReady,
       setConnected,
+      setTheme,
+      openedSettings: () => [...openedSettings],
+      permissionChanges: () => [...permissionChanges],
     };
     return () => { delete window.__composerDraftTest; };
   }, []);
 
   return (
-    <Theme.Provider value={tokens('dark')}>
+    <Theme.Provider value={tokens(theme === 'dark')}>
       {/*
         The shell around the composer is what makes composer overlays land or
         get cut: `.desktop-workspace-upper` clips at `overflow: hidden`, and it
@@ -242,14 +262,14 @@ function Fixture() {
         out further than that gap fails the way it fails in the app instead of
         merely hanging off an unclipped body.
       */}
-      <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden', background: tokens(theme === 'dark').windowBg }}>
         <aside data-testid="fixture-sidebar" style={{ width: sidebarWidth, flexShrink: 0, background: '#101014' }} />
         <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
           <BetaComposer
             bridge={bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false, models, connected) as never}
             ready={ready}
             onOpenSettings={() => undefined}
-            onOpenSettingsPage={() => undefined}
+            onOpenSettingsPage={(page) => openedSettings.push(page)}
             onSetTheme={() => undefined}
             onOpenProviderSettings={() => undefined}
           />
@@ -263,6 +283,9 @@ declare global {
   interface Window {
     __composerDraftTest?: {
       switchSession(sessionId: string): void;
+      setTheme(theme: 'dark' | 'light'): void;
+      openedSettings(): string[];
+      permissionChanges(): string[];
       setSidebarWidth(width: number): void;
       setRunning(running: boolean): void;
       setBackgroundStatus(sessionId: string, status: string | undefined): void;

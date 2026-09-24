@@ -40,11 +40,12 @@ test('the composer owns the only command popup', () => {
   assert.match(composer, /className="slash-command-row"/);
 });
 
-test('slash command rows use Codex-style neutral labels without a visible slash prefix', () => {
+test('slash command rows keep neutral labels and a visible selection without a slash prefix', () => {
   const composer = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+  const styles = readFileSync(join(process.cwd(), 'src/renderer/components/SlashCommandMenu.css'), 'utf8');
 
   assert.doesNotMatch(composer, /\/{entry\.name}/);
   assert.match(composer, /className="slash-command-name"/);
   assert.match(composer, /className="slash-command-description"/);
-  assert.match(composer, /background: selected \? t\.surfaceHover : 'transparent'/);
+  assert.match(styles, /\.slash-command-row\[aria-selected='true'\] \{ background: var\(--slash-hover\); \}/);
 });

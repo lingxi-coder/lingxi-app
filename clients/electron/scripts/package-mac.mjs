@@ -4,7 +4,6 @@ import { chmodSync, copyFileSync, cpSync, mkdirSync, readdirSync, rmSync, writeF
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-import { createPackage } from '@electron/asar';
 
 import {
   APP_NAME,
@@ -14,6 +13,7 @@ import {
   commandAvailable,
   copyElectronApp,
   copyProductionDependencies,
+  createAsarArchive,
   createDeterministicZip,
   formatError,
   normalizeTimestamp,
@@ -242,7 +242,7 @@ async function main() {
   writeJson(join(packagedApp, 'package.json'), runtimeMetadata);
   copyProductionDependencies(metadata.dependencies, packageRoot, join(packagedApp, 'node_modules'));
   const asarPath = join(resources, 'app.asar');
-  await createPackage(packagedApp, asarPath);
+  await createAsarArchive(packagedApp, asarPath);
   rmSync(packagedApp, { recursive: true, force: true });
   const binDir = join(resources, 'bin');
   mkdirSync(binDir, { recursive: true });

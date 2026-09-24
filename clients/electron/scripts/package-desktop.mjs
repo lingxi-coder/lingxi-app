@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { createPackage } from '@electron/asar';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
@@ -23,6 +22,7 @@ import {
   commandAvailable,
   copyElectronApp,
   copyProductionDependencies,
+  createAsarArchive,
   createDeterministicZip,
   desktopArtifactPaths,
   formatError,
@@ -116,7 +116,7 @@ async function createRuntimeAsar(resources, metadata) {
     dependencies,
   });
   copyProductionDependencies(metadata.dependencies, packageRoot, join(unpacked, 'node_modules'));
-  await createPackage(unpacked, join(resources, 'app.asar'));
+  await createAsarArchive(unpacked, join(resources, 'app.asar'));
   rmSync(unpacked, { recursive: true, force: true });
 }
 

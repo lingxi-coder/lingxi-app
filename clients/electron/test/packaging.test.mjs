@@ -1,3 +1,4 @@
+import { extractFile } from '@electron/asar';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
@@ -11,6 +12,7 @@ import {
   artifactPaths,
   assertArm64Architecture,
   copyProductionDependencies,
+  createAsarArchive,
   normalizeTimestamp,
   repoRoot,
   rewriteInfoPlist,
@@ -470,5 +472,24 @@ test('the rewritten outer app Info.plist declares real native voice usage', () =
     assert.equal('NSCameraUsageDescription' in plist, false);
   } finally {
     rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('ASAR is fully readable immediately before synchronous signing or archiving', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-asar-flush-'));
+  try {
+    const source = join(root, 'source');
+    mkdirSync(source);
+    const payload = Buffer.alloc(256 * 1024 + 113, 0x61);
+    const manifest = JSON.stringify({ main: 'index.js' });
+    writeFileSync(join(source, 'index.js'), payload);
+    writeFileSync(join(source, 'package.json'), manifest);
+    const archive = join(root, 'app.asar');
+    await createAsarArchive(source, archive);
+    // No event-loop yield: signing and ZIP creation also read synchronously.
+    assert.deepEqual(extractFile(archive, 'index.js'), payload);
+    assert.equal(extractFile(archive, 'package.json').toString(), manifest);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

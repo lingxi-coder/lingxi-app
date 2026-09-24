@@ -1,3 +1,5 @@
+import { createPackage } from '@electron/asar';
+import { finished } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -508,4 +510,11 @@ export function copyElectronApp(source, destination) {
 
 export function formatError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** ASAR 3 resolves with a WriteStream before its final bytes reach disk. */
+export async function createAsarArchive(source, destination) {
+  const output = await createPackage(source, destination);
+  // Newer ASAR releases may await completion themselves and return void.
+  if (output) await finished(output);
 }

@@ -27,49 +27,38 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsBackgroundTest)');
     await webContents.executeJavaScript('window.__settingsBackgroundTest.setOpen(true)');
-    await waitFor(webContents, 'document.querySelector(\'.ask-user-dialog\') && document.querySelector(\'[aria-hidden="true"]\')');
+    await waitFor(webContents, 'document.querySelector(\'.ask-user-question-inline\') && document.querySelector(\'[aria-hidden="true"]\')');
     const open = await webContents.executeJavaScript(`(() => {
-      const background = document.querySelector('[aria-hidden="true"]');
       const button = document.querySelector('#background-button');
+      const background = button.parentElement;
+      const input = document.querySelector('.ask-user-question-inline input[type="radio"]');
       button.focus();
-      const input = document.querySelector('.ask-user-dialog input[type="radio"]');
-      const rect = input.getBoundingClientRect();
-      const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      const backgroundFocusable = document.activeElement === button;
+      input.focus();
       return {
         inert: background?.hasAttribute('inert') === true,
         ariaHidden: background?.getAttribute('aria-hidden') ?? null,
-        backgroundFocusable: document.activeElement === button,
-        promptOutsideInert: !input.closest('[inert]'),
-        promptHit: hit === input,
+        backgroundFocusable,
+        promptInsideInert: Boolean(input.closest('[inert]')),
+        promptFocusable: document.activeElement === input,
       };
     })()`);
-    const inputPoint = await webContents.executeJavaScript(`(() => {
-      const input = document.querySelector('.ask-user-dialog input[type="radio"]');
-      const rect = input.getBoundingClientRect();
-      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
-    })()`);
-    window.show();
-    window.focus();
-    webContents.sendInputEvent({ type: 'mouseMove', ...inputPoint });
-    webContents.sendInputEvent({ type: 'mouseDown', ...inputPoint, button: 'left', clickCount: 1 });
-    webContents.sendInputEvent({ type: 'mouseUp', ...inputPoint, button: 'left', clickCount: 1 });
-    await waitFor(webContents, 'document.querySelector(\'.ask-user-dialog input[type="radio"]\')?.checked === true');
-    const promptClick = await webContents.executeJavaScript(`({
-      selected: document.querySelector('.ask-user-dialog input[type="radio"]')?.checked === true,
-      settingsViewStillVisible: document.querySelector('#settings-view') !== null,
-    })`);
     await webContents.executeJavaScript('window.__settingsBackgroundTest.setOpen(false)');
-    await waitFor(webContents, '!document.querySelector(\'.ask-user-dialog\') && !document.querySelector(\'[inert]\')');
+    await waitFor(webContents, '!document.querySelector(\'[inert]\') && !document.querySelector(\'#settings-view\')');
     const closed = await webContents.executeJavaScript(`(() => {
-      const background = document.querySelector('#background-button');
-      background.focus();
+      const button = document.querySelector('#background-button');
+      const input = document.querySelector('.ask-user-question-inline input[type="radio"]');
+      button.focus();
+      const backgroundFocusable = document.activeElement === button;
+      input.focus();
       return {
         inert: Boolean(document.querySelector('[inert]')),
-        ariaHidden: document.querySelector('[aria-hidden]')?.getAttribute('aria-hidden') ?? null,
-        backgroundFocusable: document.activeElement === background,
+        ariaHidden: button.parentElement.getAttribute('aria-hidden'),
+        backgroundFocusable,
+        promptFocusable: document.activeElement === input,
       };
     })()`);
-    process.stdout.write(`${JSON.stringify({ open, promptClick, closed })}\n`);
+    process.stdout.write(`${JSON.stringify({ open, closed })}\n`);
   } finally {
     if (!window.isDestroyed()) window.destroy();
     if (app.isReady()) await app.quit();

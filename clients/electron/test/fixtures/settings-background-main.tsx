@@ -36,13 +36,11 @@ function Fixture() {
       <SettingsBackground active={settingsOpen}>
         <button type="button" id="background-button">Background action</button>
         <main id="background-main">Background content</main>
-        {settingsOpen && (
-          <AskUserQuestionPrompt
-            request={questionRequest}
-            onSubmit={() => undefined}
-            onCancel={() => undefined}
-          />
-        )}
+        <AskUserQuestionPrompt
+          request={questionRequest}
+          onSubmit={() => undefined}
+          onCancel={() => undefined}
+        />
       </SettingsBackground>
       {settingsOpen && (
         <div

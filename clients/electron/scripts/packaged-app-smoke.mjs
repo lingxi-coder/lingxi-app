@@ -818,7 +818,13 @@ async function assertDesktopGit(page, workspace, tempRoot) {
   await evaluate(page, `document.querySelector('[aria-label="Toggle pinned summary"]').click()`);
   await waitFor(() => evaluate(page, `document.querySelector('#runtime-center-overview')?.textContent.includes('desktop-review-smoke')`), { label: 'summary environment shows current branch' });
   await evaluate(page, `document.querySelector('#runtime-center-overview [data-git-branch-trigger]').click()`);
-  await waitFor(() => evaluate(page, `document.querySelector('.git-branch-row[aria-current="true"]')?.textContent.includes('Uncommitted: 1 files')`), { label: 'current branch and uncommitted count' });
+  await waitFor(() => evaluate(page, `(() => {
+    const current = document.querySelector('.git-branch-row[aria-current="true"]');
+    const warning = document.querySelector('.git-branch-warning');
+    return current?.textContent.includes('desktop-review-smoke')
+      && current?.textContent.includes('Current')
+      && warning?.textContent.includes('1 file has changes');
+  })()`), { label: 'current branch and uncommitted change warning' });
   const environmentScreenshot = await page.send('Page.captureScreenshot', { format: 'png' });
   writeFileSync(join(tmpdir(), 'lingxi-git-environment-packaged.png'), Buffer.from(environmentScreenshot.data, 'base64'));
   await evaluate(page, `document.querySelector('dialog[open] [aria-label="Close dialog"]').click()`);

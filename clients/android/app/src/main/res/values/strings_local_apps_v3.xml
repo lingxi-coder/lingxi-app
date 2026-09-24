@@ -36,6 +36,8 @@
     <!-- New: interactive AskUserQuestion card. -->
     <string name="chat_question_card_title">助手想确认几个问题</string>
     <string name="chat_question_progress">第 %1$d/%2$d 题</string>
+    <string name="chat_question_answered_progress">已回答 %1$d/%2$d</string>
+    <string name="chat_question_tap_to_answer">选择一个答案</string>
     <string name="chat_question_previous">上一题</string>
     <string name="chat_question_next">下一题</string>
     <string name="chat_question_other_placeholder">其他</string>

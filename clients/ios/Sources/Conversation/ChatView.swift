@@ -174,19 +174,6 @@ struct ChatView: View {
                 }
             }
 
-            #if canImport(engine_mobileFFI)
-                if !convo.pendingPermissions.isEmpty {
-                    EnginePermissionPromptHost(
-                        model: convo,
-                        placement: .inChat,
-                        onApprove: { source.approvePermission($0, $1) },
-                        onDeny: { source.denyPermission($0) }
-                    )
-                    .environment(\.theme, t)
-                    .transition(.opacity)
-                }
-            #endif
-
         }
         .environment(\.theme, t)
         .tint(t.accent)
@@ -212,6 +199,17 @@ struct ChatView: View {
         }
         .onChange(of: summaryCategory) { _, _ in
             #if canImport(engine_mobileFFI)
+                NotificationCenter.default.post(
+                    name: .lingxiPermissionPresentationContextChanged,
+                    object: nil
+                )
+            #endif
+        }
+        .onChange(of: convo.pendingQuestions.map(\.requestId)) { _, _ in
+            #if canImport(engine_mobileFFI)
+                // The root permission-sheet fallback needs a presentation
+                // context update if a permission arrives while this question
+                // sheet is already above the chat view.
                 NotificationCenter.default.post(
                     name: .lingxiPermissionPresentationContextChanged,
                     object: nil

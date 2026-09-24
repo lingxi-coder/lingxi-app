@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'settings-background-electron.mjs');
 
-test('SettingsBackground makes the real background inert while open and restores it on close', async () => {
+test('SettingsBackground makes inline prompts inert while settings is open and restores them on close', async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-settings-background-vite-'));
   const vite = await createServer({
     root: fixtureRoot,
@@ -69,17 +69,14 @@ test('SettingsBackground makes the real background inert while open and restores
       inert: true,
       ariaHidden: 'true',
       backgroundFocusable: false,
-      promptOutsideInert: true,
-      promptHit: true,
-    });
-    assert.deepEqual(result.promptClick, {
-      selected: true,
-      settingsViewStillVisible: true,
+      promptInsideInert: true,
+      promptFocusable: false,
     });
     assert.deepEqual(result.closed, {
       inert: false,
       ariaHidden: null,
       backgroundFocusable: true,
+      promptFocusable: true,
     });
   } finally {
     if (child && child.exitCode === null) {

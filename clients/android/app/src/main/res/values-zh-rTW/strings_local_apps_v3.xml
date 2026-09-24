@@ -12,6 +12,8 @@
     <string name="local_apps_session_meta">%1$s · %2$d 則訊息</string>
     <string name="chat_question_card_title">助手想確認幾個問題</string>
     <string name="chat_question_progress">第 %1$d/%2$d 題</string>
+    <string name="chat_question_answered_progress">已回答 %1$d/%2$d</string>
+    <string name="chat_question_tap_to_answer">選擇一個答案</string>
     <string name="chat_question_previous">上一題</string>
     <string name="chat_question_next">下一題</string>
     <string name="chat_question_other_placeholder">其他</string>

@@ -12,6 +12,8 @@
     <string name="local_apps_session_meta">%1$s・%2$d 件のメッセージ</string>
     <string name="chat_question_card_title">アシスタントがいくつか確認したいことがあります</string>
     <string name="chat_question_progress">第 %1$d/%2$d 問</string>
+    <string name="chat_question_answered_progress">回答済み %1$d/%2$d</string>
+    <string name="chat_question_tap_to_answer">回答を選択</string>
     <string name="chat_question_previous">前へ</string>
     <string name="chat_question_next">次へ</string>
     <string name="chat_question_other_placeholder">その他</string>

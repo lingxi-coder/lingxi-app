@@ -141,6 +141,16 @@ export function App() {
                   sessionKey={bridge.conversation.sessionKey}
                   foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
                 />
+                <PermissionPrompt
+                  request={bridge.sessionLoading ? null : bridge.pendingPermission}
+                  onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
+                  onDeny={(requestId) => { void bridge.deny(requestId).catch(() => undefined); }}
+                />
+                <AskUserQuestionPrompt
+                  request={bridge.sessionLoading ? null : bridge.pendingAskUserQuestion}
+                  onSubmit={(requestId, answers) => { void bridge.answerAskUserQuestion(requestId, answers).catch(() => undefined); }}
+                  onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
+                />
                 <BetaComposer
                   bridge={bridge}
                   ready={ready}
@@ -169,12 +179,6 @@ export function App() {
               onClose={bridge.dismissCommandResult}
             />
           )}
-          <PermissionPrompt
-            request={bridge.sessionLoading ? null : bridge.pendingPermission}
-            onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
-            onDeny={(requestId) => { void bridge.deny(requestId).catch(() => undefined); }}
-          />
-
           <ComputerAccessPrompt
             request={bridge.sessionLoading ? null : bridge.pendingComputerAccess}
             onSubmit={(requestId, response) => { void bridge.approveComputerAccess(requestId, response).catch(() => undefined); }}
@@ -182,11 +186,6 @@ export function App() {
             onOpenSystemSettings={(pane) => { void bridge.openSystemSettings(pane).catch(() => undefined); }}
           />
 
-          <AskUserQuestionPrompt
-            request={bridge.sessionLoading ? null : bridge.pendingAskUserQuestion}
-            onSubmit={(requestId, answers) => { void bridge.answerAskUserQuestion(requestId, answers).catch(() => undefined); }}
-            onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
-          />
           </main>
           {page === 'chat' && !bridge.sessionLoading && <RuntimeCenterInspector bridge={planBridge} />}
           </div>

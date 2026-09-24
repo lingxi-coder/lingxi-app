@@ -668,7 +668,7 @@ test('the permission dialog renders the FULL command it asks you to approve', ()
   assert.match(redacted, /\[REDACTED\]/);
 });
 
-test('the permission dialog keeps the compact macOS hierarchy without changing its actions', () => {
+test('the inline permission card keeps the request hierarchy and actions', () => {
   const request: PermissionRequest = {
     request_id: 9,
     kind: {
@@ -682,13 +682,14 @@ test('the permission dialog keeps the compact macOS hierarchy without changing i
     React.createElement(PermissionPrompt, { request, onApprove: () => {}, onDeny: () => {} }),
   );
 
-  assert.match(html, /aria-labelledby="lingxi-permission-title"/);
-  assert.match(html, /<h2[^>]*id="lingxi-permission-title"[^>]*>Allow WebFetch\?<\/h2>/);
-  assert.match(html, /class="desktop-dialog-header"/);
-  assert.match(html, /class="desktop-dialog-body"/);
+  assert.match(html, /aria-labelledby="lingxi-permission-heading"/);
+  assert.match(html, /<h2[^>]*id="lingxi-permission-heading"[^>]*>Permission request<\/h2>/);
+  assert.match(html, /<h3[^>]*id="lingxi-permission-title"[^>]*>Allow WebFetch\?<\/h3>/);
+  assert.match(html, /class="inline-interaction-header"/);
+  assert.match(html, /class="inline-interaction-body"/);
+  assert.doesNotMatch(html, /class="desktop-dialog-overlay"/);
   assert.match(html, /class="permission-prompt-request-card"/);
   assert.match(html, /id="lingxi-permission-risk"/);
-  assert.doesNotMatch(html, />Permission request</);
   assert.doesNotMatch(html, />Requested input</);
   assert.match(
     html,
@@ -696,7 +697,7 @@ test('the permission dialog keeps the compact macOS hierarchy without changing i
   );
 });
 
-test('session prompts are non-modal and do not install a global Tab trap', () => {
+test('session interaction prompts stay inline where requested and do not install a global Tab trap', () => {
   const permission: PermissionRequest = {
     request_id: 21,
     kind: { type: 'tool_use_confirm', tool_name: 'Read', tool_input_json: '{"path":"/tmp"}', default_allow: false },
@@ -720,42 +721,47 @@ test('session prompts are non-modal and do not install a global Tab trap', () =>
     }],
   };
 
-  const rendered = [
-    render(React.createElement(PermissionPrompt, { request: permission, onApprove: () => {}, onDeny: () => {} })),
-    render(React.createElement(ComputerAccessPrompt, { request: computer, onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {} })),
-    render(React.createElement(AskUserQuestionPrompt, { request: question, onSubmit: () => {}, onCancel: () => {} })),
-  ];
-  for (const html of rendered) {
-    assert.match(html, /role="dialog"/);
-    assert.match(html, /class="desktop-dialog-overlay"/);
-    assert.match(html, /class="desktop-dialog-panel desktop-dialog-panel--/);
+  const permissionHtml = render(React.createElement(PermissionPrompt, { request: permission, onApprove: () => {}, onDeny: () => {} }));
+  const computerHtml = render(React.createElement(ComputerAccessPrompt, { request: computer, onSubmit: () => {}, onDeny: () => {}, onOpenSystemSettings: () => {} }));
+  const questionHtml = render(React.createElement(AskUserQuestionPrompt, { request: question, onSubmit: () => {}, onCancel: () => {} }));
+  for (const html of [permissionHtml, questionHtml]) {
+    assert.match(html, /role="region"/);
+    assert.match(html, /class="inline-interaction-card/);
+    assert.doesNotMatch(html, /class="desktop-dialog-overlay"/);
     assert.match(html, /class="desktop-dialog-actions"/);
-    assert.doesNotMatch(html, /aria-modal=/);
   }
+  assert.match(computerHtml, /role="dialog"/);
+  assert.match(computerHtml, /class="desktop-dialog-overlay"/);
+  assert.match(computerHtml, /class="desktop-dialog-panel desktop-dialog-panel--/);
+  assert.doesNotMatch(computerHtml, /aria-modal=/);
 
   for (const filename of ['PermissionPrompt.tsx', 'ComputerAccessPrompt.tsx', 'AskUserQuestionPrompt.tsx']) {
     const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
     assert.doesNotMatch(source, /document\.addEventListener\(['"]keydown['"]/);
     assert.doesNotMatch(source, /event\.key !== ['"]Tab['"]/);
-    assert.match(source, /<DesktopDialog/);
-    assert.match(source, /onEscape=/);
   }
+  for (const filename of ['PermissionPrompt.tsx', 'AskUserQuestionPrompt.tsx']) {
+    const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
+    assert.match(source, /inline-interaction-card/);
+    assert.match(source, /onKeyDown=/);
+  }
+  const computerSource = readFileSync(new URL('../src/renderer/components/ComputerAccessPrompt.tsx', import.meta.url), 'utf8');
+  assert.match(computerSource, /<DesktopDialog/);
+  assert.match(computerSource, /onEscape=/);
   const dialogSource = readFileSync(new URL('../src/renderer/components/DesktopDialog.tsx', import.meta.url), 'utf8');
   assert.match(dialogSource, /onKeyDown=/);
 });
 
-test('session interaction prompts share the global Desktop dialog shell', () => {
+test('the system-access prompt shares the global Desktop dialog shell', () => {
   const shell = readFileSync(new URL('../src/renderer/components/DesktopDialog.tsx', import.meta.url), 'utf8');
   assert.match(shell, /desktop-dialog-overlay/);
   assert.match(shell, /desktop-dialog-panel/);
   assert.match(shell, /desktop-dialog-footer/);
   assert.match(shell, /desktop-dialog-action--/);
 
-  for (const filename of ['PermissionPrompt.tsx', 'ComputerAccessPrompt.tsx', 'AskUserQuestionPrompt.tsx']) {
-    const source = readFileSync(new URL(`../src/renderer/components/${filename}`, import.meta.url), 'utf8');
-    assert.match(source, /DesktopDialogActions/);
-    assert.match(source, /DesktopDialogButton/);
-  }
+  const source = readFileSync(new URL('../src/renderer/components/ComputerAccessPrompt.tsx', import.meta.url), 'utf8');
+  assert.match(source, /DesktopDialogActions/);
+  assert.match(source, /DesktopDialogButton/);
 });
 
 // ── Defect 5: one probed key can hide the command being authorized ──────────

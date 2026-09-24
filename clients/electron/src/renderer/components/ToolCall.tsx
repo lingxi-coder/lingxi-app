@@ -33,6 +33,7 @@ import { ltrAnchored } from './bidi';
 import { CodeBlock } from './CodeBlock';
 import { DiffView } from './DiffView';
 import { Disclosure } from './Disclosure';
+import { Icon } from './Icon';
 import { ToolActivityIcon } from './ToolActivityIcon';
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
@@ -105,7 +106,7 @@ export function toolIconName(verb: string, tool?: string, icon?: ToolIconDto): s
   return 'box';
 }
 
-function ToolGlyph({ item }: { item: ToolRunItem }) {
+function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionRequest: boolean }) {
   return (
     <span
       className="tool-row-icon"
@@ -116,7 +117,9 @@ function ToolGlyph({ item }: { item: ToolRunItem }) {
         color: 'var(--tool-icon-color)',
       }}
     >
-      <ToolActivityIcon name={toolIconName(item.view.verb, item.tool, item.view.icon)} />
+      {permissionRequest
+        ? <Icon name="hand" size={18} stroke={1.7} />
+        : <ToolActivityIcon name={toolIconName(item.view.verb, item.tool, item.view.icon)} />}
     </span>
   );
 }
@@ -125,6 +128,7 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
   const t = useT();
   const { result } = item;
   const view = toolDisplayHeader(item);
+  const permissionRequest = /permission/i.test(`${item.tool} ${view.label} ${view.title}`);
   const expandable = toolHasBody(item);
   const isOpen = open ?? false;
 
@@ -154,15 +158,33 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
   const response = [headline, truncationNotice ? '(truncated)' : undefined]
     .filter(Boolean)
     .join(' ');
+  const permissionStatusText = headline ?? '';
+  const permissionStatusInBody = permissionRequest && expandable && Boolean(permissionStatusText);
+  const summaryResponse = permissionStatusInBody
+    ? (truncationNotice ? '(truncated)' : '')
+    : response;
+  const permissionStatusTone = /denied|rejected|failed|cancel/i.test(permissionStatusText)
+    ? 'danger'
+    : /accepted|approved|granted|allowed/i.test(permissionStatusText)
+      ? 'success'
+      : 'neutral';
+  const permissionStatusIcon = permissionStatusTone === 'success'
+    ? 'check'
+    : permissionStatusTone === 'danger'
+      ? 'x'
+      : 'info';
 
   const summary = (
     <span className="tool-call-summary">
-      <ToolGlyph item={item} />
+      <ToolGlyph item={item} permissionRequest={permissionRequest} />
       <span
         className={item.status === 'running' ? 'tool-row-title running-sweep' : 'tool-row-title'}
         style={{
           flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap', fontSize: 13, lineHeight: 1.4, fontWeight: 500,
+          whiteSpace: 'nowrap',
+          fontSize: permissionRequest ? 14 : 13,
+          lineHeight: permissionRequest ? 1.35 : 1.4,
+          fontWeight: permissionRequest ? 620 : 500,
         }}
       >
         {title}
@@ -171,7 +193,7 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
             {' · '}{view.sub_line.prefix}{view.sub_line.text}
           </span>
         )}
-        {response && <span>{' · '}{response}</span>}
+        {summaryResponse && <span>{' · '}{summaryResponse}</span>}
       </span>
     </span>
   );
@@ -180,17 +202,25 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
     <div
       className="transcript-tool-row"
       data-status={item.status}
+      data-kind={permissionRequest ? 'permission' : undefined}
       style={{
         maxWidth: 760,
         display: 'flex', flexDirection: 'column', gap: 4,
         padding: '2px 0', position: 'relative',
-        '--tool-label-color': item.status === 'error' ? t.danger : t.text3,
+        '--tool-label-color': item.status === 'error' ? t.danger : permissionRequest ? t.text2 : t.text3,
         '--tool-hover-background': t.surfaceHover,
         '--tool-hover-color': item.status === 'error' ? t.danger : t.text,
         '--tool-focus-color': item.status === 'error' ? t.danger : t.text,
-        '--tool-icon-color': item.status === 'error' ? t.danger : t.text3,
+        '--tool-icon-color': item.status === 'error' ? t.danger : permissionRequest ? t.accent : t.text3,
+        '--permission-text': t.text2,
+        '--permission-muted': t.text3,
         '--sweep-base': item.status === 'error' ? t.danger : t.text3,
         '--sweep-highlight': item.status === 'error' ? t.danger : t.text,
+        '--permission-accent': t.accent,
+        '--permission-surface': t.surface,
+        '--permission-border': t.border,
+        '--permission-success': t.ok,
+        '--permission-danger': t.danger,
       } as CSSProperties}
     >
       {/* The call and its response share one Thought-like disclosure row. */}
@@ -202,7 +232,9 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
           summary={summary}
           buttonClassName="tool-disclosure-trigger"
           buttonStyle={{ width: '100%', maxWidth: '100%', minHeight: 40, margin: 0, padding: '2px 0', borderRadius: 7 }}
-          bodyStyle={{ marginLeft: 29 }}
+          bodyStyle={permissionRequest
+            ? { marginLeft: 0, padding: '0 14px 14px 56px' }
+            : { marginLeft: 29 }}
         >
             {diff && (
               <div style={{ marginTop: 6 }}>
@@ -210,7 +242,9 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
               </div>
             )}
             {body !== undefined && (
-              jsonBody !== undefined ? (
+              permissionRequest && jsonBody === undefined ? (
+                <div className="permission-tool-message">{body}</div>
+              ) : jsonBody !== undefined ? (
                 <div style={{ marginTop: 6 }}>
                   <CodeBlock code={jsonBody} language="json" variant="tool" />
                 </div>
@@ -228,6 +262,12 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
                   {body}
                 </pre>
               )
+            )}
+            {permissionStatusInBody && (
+              <div className="permission-tool-status" data-tone={permissionStatusTone} role="status">
+                <Icon name={permissionStatusIcon} size={14} stroke={2} />
+                <span>{permissionStatusText}</span>
+              </div>
             )}
             {/* The engine clamped the body; say so where the shortfall is
                 actually visible, not only on the collapsed label. */}

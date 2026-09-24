@@ -12,6 +12,8 @@
     <string name="local_apps_session_meta">%1$s · 메시지 %2$d개</string>
     <string name="chat_question_card_title">어시스턴트가 몇 가지 확인하고 싶은 것이 있습니다</string>
     <string name="chat_question_progress">%1$d/%2$d번째 질문</string>
+    <string name="chat_question_answered_progress">답변 %1$d/%2$d</string>
+    <string name="chat_question_tap_to_answer">답변을 선택하세요</string>
     <string name="chat_question_previous">이전</string>
     <string name="chat_question_next">다음</string>
     <string name="chat_question_other_placeholder">기타</string>

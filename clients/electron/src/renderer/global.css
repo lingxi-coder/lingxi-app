@@ -968,6 +968,95 @@ body {
   padding: 10px 32px 20px;
 }
 
+/* Non-blocking question and permission cards live directly above the composer. */
+.inline-interaction-card {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: calc(100% - var(--conversation-gutter) - var(--conversation-gutter));
+  max-width: var(--conversation-width);
+  max-height: min(54vh, 520px);
+  margin: 8px auto 0;
+  overflow: hidden;
+  border-radius: 16px;
+  background: color-mix(in oklab, var(--dialog-window) 96%, transparent);
+  color: var(--dialog-text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--dialog-border) 64%, transparent),
+    0 8px 24px -18px rgba(0, 0, 0, .28);
+}
+.inline-interaction-header {
+  min-height: 54px;
+  padding: 9px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+.inline-interaction-heading-icon {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--dialog-accent) 9%, var(--dialog-surface));
+  color: var(--dialog-accent);
+}
+.inline-interaction-header h2 {
+  min-width: 0;
+  margin: 0;
+  color: var(--dialog-text-2);
+  font-size: 14px;
+  font-weight: 620;
+  line-height: 1.3;
+  letter-spacing: -.01em;
+}
+.inline-interaction-close {
+  width: 40px;
+  height: 40px;
+  margin-left: auto;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--dialog-text-3);
+  cursor: pointer;
+  transition-property: background-color, color, scale;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(.2, 0, 0, 1);
+}
+.inline-interaction-close:hover {
+  background: var(--dialog-surface-hover);
+  color: var(--dialog-text);
+}
+.inline-interaction-close:active { scale: .96; }
+.inline-interaction-close:focus-visible {
+  outline: 2px solid var(--dialog-accent);
+  outline-offset: 2px;
+}
+.inline-interaction-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 18px 14px;
+  overscroll-behavior: contain;
+}
+.inline-interaction-footer {
+  flex: 0 0 auto;
+  padding: 10px 18px 14px;
+  border-top: 1px solid color-mix(in oklab, var(--dialog-border) 58%, transparent);
+}
+.inline-interaction-footer .desktop-dialog-actions { gap: 8px; }
+.inline-interaction-footer .desktop-dialog-action { min-height: 40px; border-radius: 10px; }
+.ask-user-question-inline .inline-interaction-header h2 { flex: 1; }
+.ask-user-question-inline .desktop-dialog-action--primary { color: var(--dialog-window); }
+
 /* Permission request content ------------------------------------------- */
 .permission-prompt-request-card {
   min-height: 0;
@@ -1148,116 +1237,267 @@ body {
 .desktop-dialog-action:active {
   scale: .96;
 }
-.ask-dialog-eyebrow-copy {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-/* Question prompts use the app's neutral foreground as their action color. */
-.ask-user-dialog {
-  --dialog-accent: var(--dialog-text);
-  --dialog-accent-border: var(--dialog-border-strong);
-  border-radius: 20px;
-}
-.ask-user-dialog:focus-visible { outline: 2px solid var(--dialog-border-strong); outline-offset: 2px; }
-.ask-user-dialog .desktop-dialog-header { align-items: flex-start; padding: 24px 26px 18px; }
-.ask-user-dialog .desktop-dialog-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: var(--dialog-surface-hover);
-}
-.ask-user-dialog .desktop-dialog-icon svg { width: 18px; height: 18px; }
-.ask-user-dialog .desktop-dialog-heading-copy { gap: 10px; }
-.ask-user-dialog .desktop-dialog-eyebrow { color: var(--dialog-text-2); font-weight: 600; }
-.ask-dialog-eyebrow-copy { align-items: center; min-height: 24px; }
+.ask-user-question-inline { --dialog-accent: var(--dialog-text); --dialog-accent-border: var(--dialog-border-strong); }
+.ask-user-question-inline .inline-interaction-heading-icon { background: var(--dialog-surface-hover); }
+.ask-user-question-inline .inline-interaction-header { gap: 10px; }
 .ask-dialog-progress {
-  padding: 4px 8px;
-  border-radius: 6px;
+  padding: 5px 9px;
+  border-radius: 8px;
   background: var(--dialog-surface-hover);
   color: var(--dialog-text-3);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
+  white-space: nowrap;
 }
-.ask-user-dialog .desktop-dialog-header h2 { font-size: 19px; line-height: 1.4; text-wrap: pretty; }
-.ask-user-dialog .desktop-dialog-summary { font-size: 12px; }
-.ask-user-dialog .desktop-dialog-body { padding: 0 26px 22px; }
-.ask-dialog-options { display: grid; gap: 8px; border: 0; margin: 0; padding: 0; min-width: 0; }
-.ask-dialog-legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.ask-dialog-option {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  align-items: start;
-  gap: 10px;
-  padding: 13px 14px;
-  border: 1px solid var(--dialog-border);
-  border-radius: 12px;
-  background: var(--dialog-surface);
-  cursor: pointer;
-  transition: background-color 140ms ease, border-color 140ms ease;
+.ask-dialog-body { display: flex; flex-direction: column; gap: 10px; }
+.ask-dialog-instructions {
+  margin: 0;
+  color: var(--dialog-text-2);
+  font-size: 13px;
+  line-height: 1.5;
+  text-wrap: pretty;
 }
-.ask-dialog-option:hover { background: var(--dialog-surface-hover); border-color: var(--dialog-border-strong); }
-.ask-dialog-option:has(input:checked) {
-  border-color: var(--dialog-text-2);
-  background: color-mix(in oklab, var(--dialog-text) 5%, var(--dialog-surface));
-}
-.ask-dialog-option input[type='radio'],
-.ask-dialog-option input[type='checkbox'] {
-  appearance: none;
-  width: 16px;
-  height: 16px;
-  margin: 2px 0 0;
-  border: 1.5px solid var(--dialog-text-3);
-  border-radius: 50%;
-  background: var(--dialog-surface);
-  display: grid;
-  place-content: center;
-  cursor: pointer;
-}
-.ask-dialog-option input[type='checkbox'] { border-radius: 4px; }
-.ask-dialog-option input:checked { border-color: var(--dialog-text); background: var(--dialog-text); }
-.ask-dialog-option input[type='radio']:checked::after {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--dialog-surface);
-}
-.ask-dialog-option input[type='checkbox']:checked::after {
-  content: '';
-  width: 7px;
-  height: 4px;
-  border: solid var(--dialog-surface);
-  border-width: 0 0 2px 2px;
-  transform: translateY(-1px) rotate(-45deg);
-}
-.ask-dialog-option input:focus-visible { outline: 2px solid var(--dialog-text-2); outline-offset: 3px; }
-.ask-dialog-option-title { display: block; font-size: 13px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
-.ask-dialog-option-description { display: block; margin-top: 3px; color: var(--dialog-text-2); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
-.ask-dialog-option-preview { display: block; margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: var(--dialog-surface-hover); color: var(--dialog-text-3); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.ask-dialog-other { display: block; cursor: default; }
-.ask-dialog-other-choice { display: flex; gap: 10px; cursor: pointer; }
-.ask-dialog-other-input {
-  box-sizing: border-box;
-  width: calc(100% - 26px);
-  margin: 10px 0 0 26px;
-  padding: 9px 10px;
+.ask-dialog-timeout {
+  width: fit-content;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
   border-radius: 7px;
-  border: 1px solid var(--dialog-border-strong);
+  background: color-mix(in oklab, var(--dialog-accent) 6%, var(--dialog-surface));
+  color: var(--dialog-text-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.ask-dialog-question-list { display: grid; gap: 9px; min-width: 0; }
+.ask-dialog-question-card {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--dialog-surface) 88%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-border) 66%, transparent);
+}
+.ask-dialog-question-card[data-expanded='true'] {
   background: var(--dialog-surface);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--dialog-border-strong) 76%, transparent),
+    0 3px 9px -7px rgba(0, 0, 0, .22);
+}
+.ask-dialog-question-trigger {
+  width: 100%;
+  min-height: 62px;
+  padding: 11px 13px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 11px;
+  border: 0;
+  background: transparent;
   color: var(--dialog-text);
   font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition-property: background-color;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(.2, 0, 0, 1);
+}
+.ask-dialog-question-trigger:hover { background: color-mix(in oklab, var(--dialog-text) 4%, transparent); }
+.ask-dialog-question-trigger:active { background: color-mix(in oklab, var(--dialog-text) 7%, transparent); }
+.ask-dialog-question-trigger:focus-visible { outline: 2px solid var(--dialog-accent); outline-offset: -3px; }
+.ask-dialog-question-index {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--dialog-text) 5%, var(--dialog-surface));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-border) 70%, transparent);
+  color: var(--dialog-text-3);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.ask-dialog-question-card[data-answered='true'] .ask-dialog-question-index {
+  background: color-mix(in oklab, var(--dialog-text) 8%, var(--dialog-surface));
+  color: var(--dialog-text-2);
+}
+.ask-dialog-question-copy { min-width: 0; display: grid; gap: 3px; }
+.ask-dialog-question-header {
+  color: var(--dialog-text-3);
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+}
+.ask-dialog-question-title {
+  color: var(--dialog-text);
+  font-size: 14px;
+  font-weight: 570;
+  line-height: 1.4;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+.ask-dialog-answer-summary {
+  overflow: hidden;
+  color: var(--dialog-text-2);
   font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ask-dialog-answer-summary[data-empty='true'] { color: var(--dialog-text-3); }
+.ask-dialog-question-trailing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--dialog-text-3);
+}
+.ask-dialog-question-card[data-answered='true'] .ask-dialog-question-trailing > svg:first-child { color: var(--dialog-text-2); }
+.ask-dialog-question-card[data-expanded='true'] .ask-dialog-question-trigger { border-bottom: 1px solid color-mix(in oklab, var(--dialog-border) 65%, transparent); }
+.ask-dialog-options {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 11px;
+  border: 0;
+}
+.ask-dialog-legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.ask-dialog-option {
+  position: relative;
+  min-width: 0;
+  min-height: 52px;
+  padding: 9px 11px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--dialog-surface) 76%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-border) 66%, transparent);
+  cursor: pointer;
+  transition-property: background-color, box-shadow, scale;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(.2, 0, 0, 1);
+}
+.ask-dialog-option:hover { background: var(--dialog-surface-hover); box-shadow: 0 0 0 1px var(--dialog-border-strong); }
+.ask-dialog-option:active { scale: .99; }
+.ask-dialog-option:has(input:checked) {
+  background: color-mix(in oklab, var(--dialog-text) 5%, var(--dialog-surface));
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-text-2) 56%, var(--dialog-border));
+}
+.ask-dialog-option:has(input:focus-visible) { outline: 2px solid var(--dialog-accent); outline-offset: 2px; }
+.ask-dialog-option input[type='radio'],
+.ask-dialog-option input[type='checkbox'],
+.ask-dialog-other-choice input[type='radio'],
+.ask-dialog-other-choice input[type='checkbox'] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+}
+.ask-dialog-option-index {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--dialog-text) 5%, var(--dialog-surface));
+  color: var(--dialog-text-3);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-border) 62%, transparent);
+}
+.ask-dialog-option:has(input:checked) .ask-dialog-option-index {
+  background: var(--dialog-text);
+  color: var(--dialog-window);
+  box-shadow: 0 0 0 1px var(--dialog-text);
+}
+.ask-dialog-option-copy { min-width: 0; display: grid; gap: 2px; }
+.ask-dialog-option-title { display: block; color: var(--dialog-text); font-size: 13.5px; font-weight: 590; line-height: 1.4; overflow-wrap: anywhere; }
+.ask-dialog-option-description { display: block; color: var(--dialog-text-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; text-wrap: pretty; }
+.ask-dialog-option-preview { display: block; margin-top: 6px; padding: 7px 9px; border-radius: 7px; background: var(--dialog-surface-hover); color: var(--dialog-text-2); font-size: 11px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-dialog-other {
+  min-width: 0;
+  padding: 9px 11px 10px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px 10px;
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--dialog-surface) 72%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-border) 66%, transparent);
+}
+.ask-dialog-other[data-selected='true'] { box-shadow: 0 0 0 1px color-mix(in oklab, var(--dialog-text-2) 56%, var(--dialog-border)); }
+.ask-dialog-other-choice { position: relative; min-height: 32px; grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.ask-dialog-other-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--dialog-text) 5%, var(--dialog-surface));
+  color: var(--dialog-text-3);
+  flex: 0 0 auto;
+}
+.ask-dialog-other-choice:has(input:checked) .ask-dialog-other-icon { background: var(--dialog-text); color: var(--dialog-window); }
+.ask-dialog-other-choice:has(input:focus-visible) .ask-dialog-other-icon { outline: 2px solid var(--dialog-accent); outline-offset: 2px; }
+.ask-dialog-other-input {
+  box-sizing: border-box;
+  width: 100%;
+  grid-column: 2;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--dialog-border);
+  border-radius: 9px;
+  background: var(--dialog-window);
+  color: var(--dialog-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  transition-property: border-color, box-shadow, background-color;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(.2, 0, 0, 1);
 }
 .ask-dialog-other-input::placeholder { color: var(--dialog-text-3); }
-.ask-dialog-error { color: var(--dialog-danger); font-size: 12px; line-height: 1.5; }
-.ask-user-dialog .desktop-dialog-footer { padding: 16px 26px 20px; border-top: 1px solid var(--dialog-border); }
-.ask-user-dialog .desktop-dialog-action { border-radius: 9px; min-height: 36px; }
-.ask-user-dialog .desktop-dialog-action--cancel { margin-right: auto; background: transparent; box-shadow: none; color: var(--dialog-text-2); }
-.ask-user-dialog .desktop-dialog-action--cancel:hover { background: var(--dialog-surface-hover); }
-.ask-user-dialog .desktop-dialog-action--primary { color: var(--dialog-window); }
-@media (prefers-reduced-motion: reduce) { .ask-dialog-option { transition: none; } }
+.ask-dialog-other-input:focus-visible { outline: none; border-color: var(--dialog-border-strong); box-shadow: 0 0 0 3px color-mix(in oklab, var(--dialog-accent) 14%, transparent); }
+.ask-dialog-error {
+  padding: 9px 11px;
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--dialog-danger) 8%, var(--dialog-surface));
+  color: var(--dialog-danger);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ask-dialog-footer .desktop-dialog-actions { display: flex; justify-content: space-between; }
+.ask-dialog-footer .desktop-dialog-action--cancel { margin-right: auto; background: transparent; box-shadow: none; color: var(--dialog-text-2); }
+.ask-dialog-footer .desktop-dialog-action--cancel:hover { background: var(--dialog-surface-hover); }
+.ask-dialog-footer .desktop-dialog-action--primary { min-width: 90px; }
+
+.permission-prompt-inline .inline-interaction-heading-icon { background: color-mix(in oklab, var(--dialog-accent) 10%, var(--dialog-surface)); }
+.permission-prompt-inline .inline-interaction-body { padding-top: 1px; }
+.permission-prompt-title { margin: 0; color: var(--dialog-text); font-size: 17px; font-weight: 620; line-height: 1.35; letter-spacing: -.015em; text-wrap: pretty; }
+.permission-prompt-summary { margin: 5px 0 0; color: var(--dialog-text-2); font-size: 13px; line-height: 1.5; text-wrap: pretty; }
+.permission-prompt-inline .permission-prompt-request-card { margin-top: 13px; border-radius: 12px; }
+.permission-prompt-inline .permission-prompt-detail { max-height: min(22vh, 180px); padding: 11px 14px 13px 62px; }
+.permission-prompt-inline .permission-prompt-risk { margin-top: 12px; }
+.permission-prompt-inline .desktop-dialog-actions { display: flex; flex-wrap: wrap; }
+.permission-prompt-inline .desktop-dialog-action--primary { color: #fff; background: color-mix(in srgb, var(--dialog-accent) 85%, #000); box-shadow: 0 0 0 1px var(--dialog-accent-border); }
+.permission-prompt-inline .desktop-dialog-action--primary:hover { filter: brightness(1.04); }
+.permission-prompt-inline .desktop-dialog-action--cancel { margin-right: auto; background: transparent; box-shadow: none; color: var(--dialog-text-2); }
+.permission-prompt-inline .desktop-dialog-action--cancel:hover { background: var(--dialog-surface-hover); }
+
+@media (prefers-reduced-motion: reduce) {
+  .inline-interaction-close,
+  .ask-dialog-question-trigger,
+  .ask-dialog-option,
+  .ask-dialog-other-input { transition: none; }
+}
 
 @media (max-width: 620px) {
   .desktop-dialog-overlay { padding: 16px; }
@@ -1265,6 +1505,15 @@ body {
   .desktop-dialog-header { padding: 24px 22px 10px; }
   .desktop-dialog-body { padding: 10px 22px 18px; }
   .desktop-dialog-footer { padding: 0 22px 22px; }
+  .inline-interaction-card { max-height: min(58vh, 520px); margin: 6px auto 0; border-radius: 14px; }
+  .inline-interaction-header { min-height: 48px; padding: 7px 10px; }
+  .inline-interaction-body { padding: 0 12px 12px; }
+  .inline-interaction-footer { padding: 8px 12px 12px; }
+  .ask-dialog-question-trigger { grid-template-columns: 30px minmax(0, 1fr) 28px; gap: 8px; padding: 9px; }
+  .ask-dialog-question-index { width: 30px; height: 30px; }
+  .ask-dialog-options { padding: 8px; }
+  .ask-dialog-option { grid-template-columns: 30px minmax(0, 1fr); gap: 8px; padding: 8px; }
+  .ask-dialog-option-index { width: 30px; height: 30px; }
   .permission-prompt-detail { padding-left: 16px; }
   .permission-prompt-worker { display: none; }
 }
@@ -1499,6 +1748,73 @@ body {
 .tool-disclosure-trigger:hover,
 .tool-disclosure-trigger:focus-visible { color: var(--tool-focus-color) !important; }
 .tool-disclosure-trigger:active { scale: 0.96; }
+
+/* Permission results read as a small, calm message inside the transcript. */
+.transcript-tool-row[data-kind='permission'] {
+  margin: 3px 0;
+  overflow: hidden;
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--permission-surface) 62%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--permission-border) 72%, transparent),
+    0 1px 2px -1px color-mix(in oklab, #000 9%, transparent);
+  transition-property: background-color, box-shadow;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(.2, 0, 0, 1);
+}
+.transcript-tool-row[data-kind='permission']:hover,
+.transcript-tool-row[data-kind='permission']:focus-within {
+  background: color-mix(in oklab, var(--permission-surface) 90%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--permission-accent) 24%, var(--permission-border)),
+    0 3px 8px -5px color-mix(in oklab, #000 16%, transparent);
+}
+.transcript-tool-row[data-kind='permission'] .tool-disclosure-trigger,
+.transcript-tool-row[data-kind='permission'] .tool-call-line {
+  min-height: 48px !important;
+  padding: 8px 14px !important;
+  border-radius: 13px;
+}
+.transcript-tool-row[data-kind='permission'] .tool-call-summary { gap: 10px; }
+.transcript-tool-row[data-kind='permission'] .tool-row-icon {
+  width: 30px !important;
+  height: 30px !important;
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--permission-accent) 10%, var(--permission-surface));
+}
+.transcript-tool-row[data-kind='permission'] .tool-row-title {
+  letter-spacing: -.01em;
+}
+.permission-tool-message {
+  color: var(--permission-text);
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+.permission-tool-status {
+  width: fit-content;
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--permission-muted) 8%, var(--permission-surface));
+  color: var(--permission-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.permission-tool-status[data-tone='success'] {
+  background: color-mix(in oklab, var(--permission-success) 10%, var(--permission-surface));
+  color: var(--permission-success);
+}
+.permission-tool-status[data-tone='danger'] {
+  background: color-mix(in oklab, var(--permission-danger) 10%, var(--permission-surface));
+  color: var(--permission-danger);
+}
 .transcript-disclosure-chevron {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1950,6 +2266,7 @@ textarea, input { font-family: inherit; }
   .sidebar-project-menu button,
   .sidebar-row-action,
   .sidebar-resize-handle::after { transition-duration: 0ms; }
+  .transcript-tool-row[data-kind='permission'] { transition-duration: 0ms; }
   .running-sweep {
     animation: none;
     background-image: none;

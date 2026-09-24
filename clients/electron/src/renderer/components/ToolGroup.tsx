@@ -21,6 +21,15 @@ export function ToolGroup({ group, open, toolOpen, onSetOpen }: ToolGroupProps) 
       {active.map((tool) => <ToolCall key={tool.id} item={tool} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
     </div>;
   }
+  const singleTool = group.tools.length === 1 ? group.tools[0] : undefined;
+  if (singleTool) {
+    const singleView = toolDisplayHeader(singleTool);
+    if (/permission/i.test(`${singleTool.tool} ${singleView.label} ${singleView.title}`)) {
+      return <div className="transcript-tool-group">
+        <ToolCall item={singleTool} open={toolOpen(singleTool.id)} onSetOpen={onSetOpen} />
+      </div>;
+    }
+  }
   const failed = group.tools.filter((tool) => tool.status === 'error').length;
   const lastTool = group.tools.at(-1);
   if (!lastTool) return null;

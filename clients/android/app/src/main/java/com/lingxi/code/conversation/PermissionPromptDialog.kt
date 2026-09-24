@@ -2,8 +2,8 @@ package com.lingxi.code.conversation
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -14,14 +14,22 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Security
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,27 +39,17 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogProperties
 import com.lingxi.code.R
 import com.lingxi.code.bindings.AutoModePromptDto
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.components.UiTags
 
 /**
- * The Android permission-prompt modal — the allow/deny surface for an
- * engine-parked tool request (SHIP-BLOCKER #3). Mirrors the Electron
- * `PermissionPrompt`: a Material 3 alert with the request title + a tool-input
- * preview and actions — 拒绝 / 始终允许 / 自动模式 / 允许一次 — wired to
- * [onApprove] ([PermissionResponseDto.ALLOW_ONCE] /
- * [PermissionResponseDto.ALLOW_ALWAYS] / [PermissionResponseDto.ALLOW_AUTO])
- * and [onDeny]. When the engine marks a request as requiring a fresh human
- * decision, the persistent actions are omitted. Renders nothing when [state]
- * is `null`.
- *
- * The state shape + the request→prompt mapping ([permissionRequestToPrompt]) are
- * the unit-tested seam; this composable is the thin render layer (covered by the
- * on-device UI build).
+ * The Android permission sheet for an engine-parked tool request. The engine
+ * request mapping and approve/deny callbacks are unchanged; this surface keeps
+ * the requested details readable and the one-time approval visually primary.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PermissionPromptDialog(
     state: PermissionPromptState?,
@@ -61,31 +59,83 @@ fun PermissionPromptDialog(
 ) {
     if (state == null) return
     val colors = MaterialTheme.colorScheme
+    val bypassDetail = stringResource(R.string.permission_bypass_confirmation_detail)
+    val isBypass = !state.isPlan && state.toolName == null && state.detail == bypassDetail
+    val summary = when {
+        state.isPlan -> stringResource(R.string.permission_prompt_plan_summary)
+        state.toolName != null -> stringResource(R.string.permission_prompt_tool_summary, state.toolName)
+        else -> stringResource(R.string.permission_prompt_general_summary)
+    }
+    val riskCopy = when {
+        isBypass -> stringResource(R.string.permission_prompt_bypass_risk)
+        state.autoModePrompt != null && !state.suppressAlwaysAllowRule ->
+            stringResource(R.string.permission_prompt_auto_risk)
+        !state.suppressAlwaysAllowRule -> stringResource(R.string.permission_prompt_rule_risk)
+        else -> stringResource(R.string.permission_prompt_once_risk)
+    }
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { target -> target != SheetValue.Hidden },
+    )
 
-    AlertDialog(
+    ModalBottomSheet(
         modifier = modifier.testTag(UiTags.PERMISSION_PROMPT),
         onDismissRequest = {},
-        properties = DialogProperties(
-            dismissOnBackPress = false,
-            dismissOnClickOutside = false,
-        ),
-        icon = {
-            Icon(
-                imageVector = Icons.Rounded.Security,
-                contentDescription = null,
-                tint = colors.primary,
-            )
-        },
-        title = {
+        sheetState = sheetState,
+    ) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .padding(bottom = 24.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    modifier = Modifier.size(40.dp),
+                    shape = CircleShape,
+                    color = colors.primaryContainer,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Security,
+                        contentDescription = null,
+                        tint = colors.onPrimaryContainer,
+                        modifier = Modifier.padding(9.dp),
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.permission_request_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = colors.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f).padding(start = 12.dp),
+                )
+                IconButton(onClick = { onDeny(state.requestId) }) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = stringResource(R.string.permission_deny),
+                        tint = colors.onSurfaceVariant,
+                    )
+                }
+            }
+
             Text(
                 text = state.title,
                 style = MaterialTheme.typography.headlineSmall,
+                color = colors.onSurface,
             )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                state.worker?.let { w ->
-                    val dot = runCatching { Color(android.graphics.Color.parseColor(w.color)) }
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+            )
+
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+            ) {
+                state.worker?.let { worker ->
+                    val dot = runCatching { Color(android.graphics.Color.parseColor(worker.color)) }
                         .getOrDefault(colors.onSurfaceVariant)
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -98,21 +148,20 @@ fun PermissionPromptDialog(
                             content = {},
                         )
                         Text(
-                            text = if (w.team != null) "${w.name} · ${w.team}" else w.name,
+                            text = if (worker.team != null) "${worker.name} · ${worker.team}" else worker.name,
                             color = dot,
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold,
                         )
                     }
                 }
+
                 if (state.isPlan && state.detail.isNotBlank()) {
                     PlanDocumentCard(state.detail, writing = false)
                 } else if (state.detail.isNotEmpty()) {
                     Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 240.dp),
-                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp),
+                        shape = RoundedCornerShape(14.dp),
                         color = colors.surfaceContainerHighest,
                     ) {
                         SelectionContainer {
@@ -128,46 +177,66 @@ fun PermissionPromptDialog(
                         }
                     }
                 }
+
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (isBypass) colors.errorContainer else colors.surfaceContainerHigh,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.Top,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Info,
+                            contentDescription = null,
+                            tint = if (isBypass) colors.onErrorContainer else colors.onSurfaceVariant,
+                            modifier = Modifier.size(17.dp),
+                        )
+                        Text(
+                            text = riskCopy,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isBypass) colors.onErrorContainer else colors.onSurfaceVariant,
+                        )
+                    }
+                }
             }
-        },
-        confirmButton = {
-            FlowRow(horizontalArrangement = Arrangement.End) {
-                if (!state.suppressAlwaysAllowRule && state.autoModePrompt == null) {
-                    TextButton(
-                        onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ALWAYS) },
-                        modifier = Modifier.testTag(UiTags.PERMISSION_ALLOW_ALWAYS),
-                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
-                    ) {
-                        Text(stringResource(R.string.permission_allow_always))
-                    }
+
+            if (!state.suppressAlwaysAllowRule && state.autoModePrompt == null) {
+                OutlinedButton(
+                    onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ALWAYS) },
+                    modifier = Modifier.fillMaxWidth().testTag(UiTags.PERMISSION_ALLOW_ALWAYS),
+                ) {
+                    Text(stringResource(R.string.permission_allow_always))
                 }
-                if (!state.suppressAlwaysAllowRule && state.autoModePrompt != null) {
-                    TextButton(
-                        onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_AUTO) },
-                        modifier = Modifier.testTag(UiTags.PERMISSION_ALLOW_AUTO),
-                        colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant),
-                    ) {
-                        Text(autoModeApprovalLabel(state.autoModePrompt))
-                    }
+            }
+            if (!state.suppressAlwaysAllowRule && state.autoModePrompt != null) {
+                OutlinedButton(
+                    onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_AUTO) },
+                    modifier = Modifier.fillMaxWidth().testTag(UiTags.PERMISSION_ALLOW_AUTO),
+                ) {
+                    Text(autoModeApprovalLabel(state.autoModePrompt))
                 }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(
+                    onClick = { onDeny(state.requestId) },
+                    modifier = Modifier.testTag(UiTags.PERMISSION_DENY),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
+                ) {
+                    Text(stringResource(R.string.permission_deny))
+                }
+                Spacer(Modifier.weight(1f))
+                Button(
                     onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ONCE) },
                     modifier = Modifier.testTag(UiTags.PERMISSION_ALLOW_ONCE),
                 ) {
                     Text(stringResource(R.string.permission_allow_once))
                 }
             }
-        },
-        dismissButton = {
-            TextButton(
-                onClick = { onDeny(state.requestId) },
-                modifier = Modifier.testTag(UiTags.PERMISSION_DENY),
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
-            ) {
-                Text(stringResource(R.string.permission_deny))
-            }
-        },
-    )
+        }
+    }
 }
 
 private fun autoModeApprovalLabel(prompt: AutoModePromptDto): String =

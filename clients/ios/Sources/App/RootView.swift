@@ -443,13 +443,10 @@ struct RootView: View {
             }
 
             #if canImport(engine_mobileFFI)
-                // The ChatView shell owns the normal non-modal prompt. Keep a
-                // root-mounted UIKit fallback dormant until UIKit reports an
-                // external sheet/cover above the chat; this also catches sheets
-                // owned by ChatView or Composer, whose state is local to them.
+                // Keep one root-mounted native sheet presenter so permission
+                // requests work over both the chat and any active SwiftUI sheet.
                 EnginePermissionPromptHost(
                     model: source.model,
-                    placement: .presentedFallback,
                     onApprove: { source.approvePermission($0, $1) },
                     onDeny: { source.denyPermission($0) }
                 )

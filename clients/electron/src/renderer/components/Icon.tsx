@@ -122,6 +122,7 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'compact': return <svg {...p}><path d="M7 3h7l4 4v8a4 4 0 0 1-4 4H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M14 3v5h5M8 11h6M8 15h3" /><circle cx="16.5" cy="17.5" r="2.5" /></svg>;
     case 'summary': return <svg {...p}><rect x="4" y="3" width="16" height="18" rx="3" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>;
     case 'info': return <svg {...p}><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7.5v.01" /></svg>;
+    case 'question': return <svg {...p}><path d="M20 11.5A7.5 7.5 0 0 1 12.5 19H7l-3 2v-5.5A7.5 7.5 0 1 1 20 11.5Z" /><path d="M9.75 9a2.25 2.25 0 1 1 3.9 1.53c-.74.78-1.65 1.1-1.65 2.47M12 16.5v.01" /></svg>;
     default: return null;
   }
 }

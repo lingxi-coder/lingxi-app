@@ -1,36 +1,39 @@
 import SwiftUI
 
-/// The interactive `AskUserQuestion` questionnaire rendered in a native sheet
-/// while a request is pending. 1–4 questions behind a
-/// stepper, option chips per question (single or multi select), an automatic
-/// 「其他」free-text row, 提交/取消.
-///
-/// Stores/sources reach this view as plain properties — never via
-/// `@Environment(SomeType.self)` (only AppState/LocalizationManager are
-/// injected; anything else force-unwraps and traps).
+/// The interactive AskUserQuestion form shown in a native sheet. All questions
+/// stay in view as an accordion: answered rows retain the question and answer,
+/// while one row at a time shows its options and custom response field.
 struct AskUserQuestionCard: View {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let question: ConversationPendingQuestion
-    /// Returns whether the answer command was submitted; `false` re-enables
-    /// the card for a retry.
+    /// Returns whether the answer command was submitted; false enables retry.
     let onSubmit: ([String: String]) async -> Bool
     let onCancel: () async -> Bool
 
-    @State private var step = 0
+    @State private var expandedQuestion: Int? = 0
     /// Selected option labels per question index, in tap order.
     @State private var selected: [Int: [String]] = [:]
-    /// The 「其他」free-text answer per question index.
+    /// The free-text answer per question index.
     @State private var custom: [Int: String] = [:]
     @State private var submitting = false
-    @FocusState private var customFocused: Bool
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @FocusState private var focusedQuestionIndex: Int?
 
-    // MARK: pure answer logic (unit-tested)
+    private var questions: [ConversationAskQuestion] { question.questions }
 
-    /// Toggle `label` in the running selection. Single-select replaces the
-    /// selection; multi-select toggles membership preserving tap order.
+    private var answeredCount: Int {
+        questions.indices.filter { isAnswered(at: $0) }.count
+    }
+
+    private var canSubmit: Bool {
+        Self.isComplete(questions: questions, selected: selected, custom: custom)
+    }
+
+    // MARK: answer logic
+
+    /// Toggle an option. Single-select replaces the selection; multi-select
+    /// toggles membership while preserving tap order.
     static func toggled(_ label: String, in current: [String], multiSelect: Bool) -> [String] {
         if let index = current.firstIndex(of: label) {
             var copy = current
@@ -40,9 +43,7 @@ struct AskUserQuestionCard: View {
         return multiSelect ? current + [label] : [label]
     }
 
-    /// The wire answer map: question text → chosen label(s) comma-joined,
-    /// with a non-empty free-text answer appended as one more value.
-    /// Unanswered questions are omitted.
+    /// Build the wire answer map, joining selected options and custom text.
     static func answers(
         questions: [ConversationAskQuestion],
         selected: [Int: [String]],
@@ -59,7 +60,7 @@ struct AskUserQuestionCard: View {
         return out
     }
 
-    /// Every question needs an answer (a chip or free text) before 提交.
+    /// Every question needs at least one selected option or custom answer.
     static func isComplete(
         questions: [ConversationAskQuestion],
         selected: [Int: [String]],
@@ -68,201 +69,172 @@ struct AskUserQuestionCard: View {
         answers(questions: questions, selected: selected, custom: custom).count == questions.count
     }
 
-    private var questions: [ConversationAskQuestion] { question.questions }
-    private var currentQuestion: ConversationAskQuestion? {
-        questions.indices.contains(step) ? questions[step] : nil
-    }
-
-    private var canSubmit: Bool {
-        Self.isComplete(questions: questions, selected: selected, custom: custom)
-    }
-
     var body: some View {
-        // The presenting sheet IS the container: the questionnaire draws no
-        // card of its own. It used to carry the surface/stroke/rounded-corner
-        // chrome it needed when it lived at the tail of the transcript, which
-        // read as a card nested inside the sheet once it moved into one.
-        //
-        // Header and actions are pinned outside the scroll area so a
-        // wire-maximum request (4 questions x 4 described options) can never
-        // push 取消/下一题/提交 below the sheet's visible height.
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
             header
-                .padding(.horizontal, 24)
-                .padding(.top, 28)
-                .padding(.bottom, 20)
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
 
             ScrollView {
-                if let current = currentQuestion {
-                    questionBody(current)
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 16)
+                VStack(spacing: 10) {
+                    ForEach(questions.indices, id: \.self) { index in
+                        questionRow(questions[index], at: index)
+                    }
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
             }
             .scrollBounceBehavior(.basedOnSize)
             .scrollDismissesKeyboard(.interactively)
 
-            actions
-                .padding(.horizontal, 24)
-                .padding(.vertical, 16)
-                .background(.regularMaterial)
+            Divider().overlay(t.border)
+            submitAction
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                .background(t.surface)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: 640, maxHeight: .infinity, alignment: .top)
         .background(t.surface)
-        // `.accessibilityIdentifier` on a container REPLACES every descendant's
-        // identifier unless the container is declared a containing element, so
-        // without `children: .contain` the card id swallowed
-        // `chat.ask.cancel` / `chat.ask.submit` / `chat.ask.other.N` and
-        // nothing inside the questionnaire was addressable.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat.ask.card.\(question.requestId)")
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                Image(systemName: "questionmark.bubble.fill")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(t.accent)
-                    .frame(width: 44, height: 44)
-                    .background(t.accent.opacity(0.1), in: .rect(cornerRadius: 14))
-                    .accessibilityHidden(true)
-                Text("chat_ask_user_question_title")
-                    .font(.headline)
-                    .foregroundStyle(t.text)
-                Spacer(minLength: 0)
-                if questions.count > 1 {
-                    Text("chat_ask_progress \(step + 1) \(questions.count)")
-                        .font(.subheadline.monospacedDigit())
-                        .foregroundStyle(t.text3)
-                        .fixedSize()
-                }
-            }
-            if questions.count > 1 {
-                HStack(spacing: 6) {
-                    ForEach(questions.indices, id: \.self) { index in
-                        Capsule()
-                            .fill(index <= step ? t.accent : t.border)
-                            .frame(height: 3)
-                    }
-                }
+        HStack(spacing: 11) {
+            Image(systemName: "questionmark.bubble")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(t.text2)
+                .frame(width: 34, height: 34)
+                .background(t.surfaceActive, in: Circle())
                 .accessibilityHidden(true)
+            Text("chat_ask_user_question_title")
+                .font(.headline)
+                .foregroundStyle(t.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer(minLength: 0)
+            if questions.count > 1 {
+                Text("\(answeredCount)/\(questions.count)")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(t.text3)
+                    .accessibilityLabel("\(answeredCount) of \(questions.count) answered")
             }
+            Button {
+                resolve { await onCancel() }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(t.text3)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(submitting)
+            .accessibilityLabel(String(localized: "common_cancel"))
+            .accessibilityIdentifier("chat.ask.cancel")
         }
     }
 
-    private func questionBody(_ current: ConversationAskQuestion) -> some View {
-        VStack(alignment: .leading, spacing: 20) {
+    private func questionRow(_ current: ConversationAskQuestion, at index: Int) -> some View {
+        let answer = answerSummary(at: index)
+        let expanded = expandedQuestion == index
+        let rowShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                guard !submitting else { return }
+                focusedQuestionIndex = nil
+                withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88)) {
+                    expandedQuestion = expanded ? nil : index
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Text("\(index + 1)")
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(answer == nil ? t.text3 : t.text2)
+                        .frame(width: 38, height: 38)
+                        .background(t.surfaceActive, in: Circle())
+                        .overlay(Circle().stroke(t.border, lineWidth: 0.8))
+                    VStack(alignment: .leading, spacing: answer == nil ? 0 : 3) {
+                        Text(current.question)
+                            .font(.body.weight(expanded ? .medium : .regular))
+                            .foregroundStyle(t.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let answer {
+                            Text(answer)
+                                .font(.subheadline)
+                                .foregroundStyle(t.text3)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(t.text3)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .contentShape(rowShape)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("chat.ask.question.\(index)")
+
+            if expanded {
+                questionOptions(current, at: index)
+                    .padding(.leading, 62)
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 14)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .background(expanded ? t.surfaceActive.opacity(0.42) : t.surface, in: rowShape)
+        .overlay { rowShape.stroke(t.border.opacity(expanded ? 0.95 : 0.65), lineWidth: 0.8) }
+        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88), value: expanded)
+    }
+
+    @ViewBuilder
+    private func questionOptions(_ current: ConversationAskQuestion, at index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
             if !current.header.isEmpty {
                 Text(current.header)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(t.text3)
                     .textCase(.uppercase)
             }
-            Text(current.question)
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(t.text)
-                .fixedSize(horizontal: false, vertical: true)
-
-            optionChips(for: current)
-
-            // The automatic 「其他」 free-text row — every question
-            // offers it, mirroring the oracle client's synthesized
-            // Other row.
-            VStack(alignment: .leading, spacing: 8) {
-                Text("chat_ask_other_option")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(t.text3)
-                TextField(
-                    String(localized: "chat_ask_other_placeholder"),
-                    text: Binding(
-                        get: { custom[step] ?? "" },
-                        set: { custom[step] = $0 }
-                    ),
-                    axis: .vertical
-                )
-                .font(.body)
-                .textFieldStyle(.plain)
-                .lineLimit(2 ... 5)
-                .padding(16)
-                .background(t.surfaceActive.opacity(0.6), in: .rect(cornerRadius: 16))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(customFocused ? t.accent : t.border, lineWidth: 1)
-                }
-                .focused($customFocused)
-                .disabled(submitting)
-                .accessibilityIdentifier("chat.ask.other.\(step)")
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var actions: some View {
-        let layout = dynamicTypeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
-            : AnyLayout(HStackLayout(spacing: 12))
-        return layout {
-            Button("common_cancel") {
-                resolve { await onCancel() }
-            }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("chat.ask.cancel")
-            if !dynamicTypeSize.isAccessibilitySize { Spacer() }
-            if step > 0 {
-                Button("chat_ask_prev") { changeStep(by: -1) }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("chat.ask.prev")
-            }
-            if step < questions.count - 1 {
-                Button("chat_ask_next") { changeStep(by: 1) }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("chat.ask.next")
-            } else {
-                Button {
-                    let answers = Self.answers(questions: questions, selected: selected, custom: custom)
-                    resolve { await onSubmit(answers) }
-                } label: {
-                    if submitting {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text("local_apps_submit")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!canSubmit || submitting)
-                .accessibilityIdentifier("chat.ask.submit")
-            }
-        }
-        .controlSize(.large)
-        .disabled(submitting)
-    }
-
-    @ViewBuilder
-    private func optionChips(for current: ConversationAskQuestion) -> some View {
-        let currentSelection = selected[step] ?? []
-        VStack(spacing: 10) {
-            ForEach(current.options.indices, id: \.self) { index in
-                let option = current.options[index]
-                let active = currentSelection.contains(option.label)
+            ForEach(current.options.indices, id: \.self) { optionIndex in
+                let option = current.options[optionIndex]
+                let active = (selected[index] ?? []).contains(option.label)
                 Button {
                     guard !submitting else { return }
-                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1)) {
-                        selected[step] = Self.toggled(
-                            option.label, in: currentSelection, multiSelect: current.multiSelect
-                        )
+                    let next = Self.toggled(
+                        option.label,
+                        in: selected[index] ?? [],
+                        multiSelect: current.multiSelect
+                    )
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.9)) {
+                        selected[index] = next
+                    }
+                    if current.multiSelect {
+                        expandedQuestion = index
+                    } else if !next.isEmpty {
+                        expandedQuestion = questions.indices.first(where: { candidate in
+                            candidate != index && !isAnswered(at: candidate)
+                        })
                     }
                 } label: {
-                    HStack(alignment: .top, spacing: 12) {
+                    HStack(alignment: .top, spacing: 11) {
                         Image(systemName: current.multiSelect
                             ? (active ? "checkmark.square.fill" : "square")
                             : (active ? "checkmark.circle.fill" : "circle"))
                             .font(.title3)
                             .foregroundStyle(active ? t.accent : t.text3)
                             .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 5) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(option.label)
-                                .font(.body.weight(.semibold))
+                                .font(.body.weight(.medium))
                                 .foregroundStyle(t.text)
                             if !option.description.isEmpty {
                                 Text(option.description)
@@ -270,31 +242,80 @@ struct AskUserQuestionCard: View {
                                     .foregroundStyle(t.text3)
                             }
                         }
-                        .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .multilineTextAlignment(.leading)
-                    .padding(16)
-                    .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-                    .background(active ? t.accent.opacity(0.1) : t.surfaceActive.opacity(0.5),
-                                in: .rect(cornerRadius: 18))
+                    .padding(13)
+                    .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                    .background(active ? t.accent.opacity(0.1) : t.surface, in: .rect(cornerRadius: 15))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 18)
-                            .stroke(active ? t.accent : t.border, lineWidth: active ? 1.5 : 1)
+                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                            .stroke(active ? t.accent : t.border, lineWidth: active ? 1.4 : 0.8)
                     }
-                    .contentShape(.rect(cornerRadius: 18))
+                    .contentShape(.rect(cornerRadius: 15))
                 }
                 .buttonStyle(.plain)
                 .disabled(submitting)
                 .accessibilityAddTraits(active ? [.isSelected] : [])
-                .accessibilityIdentifier("chat.ask.option.\(step).\(index)")
+                .accessibilityIdentifier("chat.ask.option.\(index).\(optionIndex)")
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("chat_ask_other_option")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(t.text3)
+                TextField(
+                    String(localized: "chat_ask_other_placeholder"),
+                    text: Binding(
+                        get: { custom[index] ?? "" },
+                        set: { custom[index] = $0 }
+                    ),
+                    axis: .vertical
+                )
+                .font(.body)
+                .textFieldStyle(.plain)
+                .lineLimit(2 ... 5)
+                .padding(14)
+                .background(t.surface, in: .rect(cornerRadius: 15))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .stroke(focusedQuestionIndex == index ? t.accent : t.border, lineWidth: 0.8)
+                }
+                .focused($focusedQuestionIndex, equals: index)
+                .disabled(submitting)
+                .accessibilityIdentifier("chat.ask.other.\(index)")
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func changeStep(by offset: Int) {
-        customFocused = false
-        step += offset
+    private var submitAction: some View {
+        Button {
+            let answers = Self.answers(questions: questions, selected: selected, custom: custom)
+            resolve { await onSubmit(answers) }
+        } label: {
+            HStack(spacing: 8) {
+                if submitting { ProgressView().controlSize(.small) }
+                Text("local_apps_submit")
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(!canSubmit || submitting)
+        .accessibilityIdentifier("chat.ask.submit")
+    }
+
+    private func answerSummary(at index: Int) -> String? {
+        var labels = selected[index] ?? []
+        let free = (custom[index] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !free.isEmpty { labels.append(free) }
+        guard !labels.isEmpty else { return nil }
+        return labels.joined(separator: ", ")
+    }
+
+    private func isAnswered(at index: Int) -> Bool {
+        answerSummary(at: index) != nil
     }
 
     private func resolve(_ action: @escaping () async -> Bool) {
@@ -302,9 +323,8 @@ struct AskUserQuestionCard: View {
         submitting = true
         Task {
             let accepted = await action()
-            // The card itself disappears when the engine confirms with
-            // `askUserQuestionResolved`; on a failed submit re-enable for a
-            // retry instead of leaving a dead card.
+            // The view disappears when the engine confirms. A failed submit
+            // remains actionable so the user can retry.
             if !accepted { submitting = false }
         }
     }

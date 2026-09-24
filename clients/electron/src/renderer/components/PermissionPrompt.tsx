@@ -13,12 +13,12 @@
  * request is pending.
  */
 
-import { useEffect, useRef } from 'react';
+import type { CSSProperties } from 'react';
 import type { PermissionRequest } from '@lingxi/bridge-client';
 // Subpath, not the barrel — see the note in `bridge/conversation.ts`.
 import { redactSensitiveText } from '@lingxi/bridge-client/toolview';
 import { useT } from '../theme/ThemeContext';
-import { DesktopDialog, DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
+import { DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
 import { Icon } from './Icon';
 
 /**
@@ -151,18 +151,6 @@ export interface PermissionPromptProps {
 
 export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromptProps) {
   const t = useT();
-  const primaryRef = useRef<HTMLButtonElement>(null);
-  const promptHasFocus = useRef(false);
-  useEffect(() => {
-    if (!request) return;
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    primaryRef.current?.focus();
-    return () => {
-      // Do not steal focus back after the user has moved into the global
-      // Sidebar while this session prompt is still visible.
-      if (promptHasFocus.current) previouslyFocused?.focus();
-    };
-  }, [request]);
   if (!request) return null;
 
   const description = describe(request);
@@ -179,89 +167,107 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
         ? '“Allow matching actions” saves a rule for this workspace. Use it only when you trust future matching requests.'
         : 'This decision applies only to the current request.';
 
+  const dialogVariables = {
+    '--dialog-window': t.windowBg,
+    '--dialog-surface': t.surface,
+    '--dialog-surface-hover': t.surfaceHover,
+    '--dialog-border': t.border,
+    '--dialog-border-strong': t.borderStrong,
+    '--dialog-text': t.text,
+    '--dialog-text-2': t.text2,
+    '--dialog-text-3': t.text3,
+    '--dialog-accent': elevatedRisk ? t.danger : t.accent,
+    '--dialog-accent-border': elevatedRisk ? t.danger : t.accentBorder,
+    '--dialog-danger': t.danger,
+  } as CSSProperties;
+
   return (
-    <DesktopDialog
-      title={title}
-      summary={summary}
-      icon={elevatedRisk ? 'shieldAlert' : 'hand'}
-      size="wide"
-      tone={elevatedRisk ? 'danger' : 'default'}
-      titleId="lingxi-permission-title"
-      summaryId="lingxi-permission-summary"
-      ariaLabelledBy="lingxi-permission-title"
-      ariaDescribedBy={`lingxi-permission-summary${detail ? ' lingxi-permission-detail' : ''} lingxi-permission-risk`}
-      className="permission-prompt-panel"
-      onFocusCapture={() => { promptHasFocus.current = true; }}
-      onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
-      onEscape={() => onDeny(request.request_id)}
-      footer={(
+    <section
+      className="inline-interaction-card permission-prompt-inline"
+      style={dialogVariables}
+      role="region"
+      aria-labelledby="lingxi-permission-heading"
+      aria-describedby="lingxi-permission-summary lingxi-permission-risk"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          onDeny(request.request_id);
+        }
+      }}
+    >
+      <header className="inline-interaction-header">
+        <span className="inline-interaction-heading-icon" aria-hidden="true">
+          <Icon name={elevatedRisk ? 'shieldAlert' : 'hand'} size={19} stroke={1.7} />
+        </span>
+        <h2 id="lingxi-permission-heading">Permission request</h2>
+        <button
+          type="button"
+          className="inline-interaction-close"
+          aria-label="Deny permission request"
+          title="Deny"
+          onClick={() => onDeny(request.request_id)}
+        >
+          <Icon name="x" size={17} stroke={1.8} />
+        </button>
+      </header>
+
+      <div className="inline-interaction-body">
+        <h3 id="lingxi-permission-title" className="permission-prompt-title">{title}</h3>
+        <p id="lingxi-permission-summary" className="permission-prompt-summary">{summary}</p>
+
+        <div className="permission-prompt-request-card">
+          <div className="permission-prompt-request-heading">
+            <span className="permission-prompt-request-icon" aria-hidden="true">
+              <Icon name={requestIcon(request)} size={20} stroke={1.7} />
+            </span>
+            <span className="permission-prompt-request-copy">
+              <strong>{detailLabel}</strong>
+              <small>{detailCaption}</small>
+            </span>
+            {worker && (
+              <span className="permission-prompt-worker" style={{ color: worker.color || t.text3 }}>
+                <span style={{ background: worker.color || t.text3 }} />
+                {worker.name}
+                {worker.team ? ` · ${worker.team}` : ''}
+              </span>
+            )}
+          </div>
+
+          {detail && (
+            <div id="lingxi-permission-detail" className="permission-prompt-detail mono">
+              {detail}
+            </div>
+          )}
+        </div>
+
+        <p id="lingxi-permission-risk" className="permission-prompt-risk">
+          <Icon name="info" size={16} stroke={1.7} />
+          <span>{riskCopy}</span>
+        </p>
+      </div>
+
+      <footer className="inline-interaction-footer">
         <DesktopDialogActions>
-          <DesktopDialogButton
-            variant="cancel"
-            onClick={() => onDeny(request.request_id)}
-          >
+          <DesktopDialogButton variant="cancel" onClick={() => onDeny(request.request_id)}>
             Deny
           </DesktopDialogButton>
           {showPersistentRule && (
-            <DesktopDialogButton
-              variant="secondary"
-              onClick={() => onApprove(request.request_id, { type: 'allow_always' })}
-            >
+            <DesktopDialogButton variant="secondary" onClick={() => onApprove(request.request_id, { type: 'allow_always' })}>
               Allow matching actions
             </DesktopDialogButton>
           )}
           {showAutoMode && (
-            <DesktopDialogButton
-              variant="secondary"
-              onClick={() => onApprove(request.request_id, { type: 'allow_auto' })}
-            >
+            <DesktopDialogButton variant="secondary" onClick={() => onApprove(request.request_id, { type: 'allow_auto' })}>
               {request.auto_mode_prompt === 'workflow_bash'
                 ? 'Yes, and switch to auto mode'
                 : 'Yes, and use auto mode'}
             </DesktopDialogButton>
           )}
-          <DesktopDialogButton
-            ref={primaryRef}
-            variant="primary"
-            onClick={() => onApprove(request.request_id, { type: 'allow_once' })}
-          >
+          <DesktopDialogButton variant="primary" onClick={() => onApprove(request.request_id, { type: 'allow_once' })}>
             Allow once
           </DesktopDialogButton>
         </DesktopDialogActions>
-      )}
-    >
-      <div className="permission-prompt-request-card">
-        <div className="permission-prompt-request-heading">
-          <span className="permission-prompt-request-icon" aria-hidden="true">
-            <Icon name={requestIcon(request)} size={20} stroke={1.7} />
-          </span>
-          <span className="permission-prompt-request-copy">
-            <strong>{detailLabel}</strong>
-            <small>{detailCaption}</small>
-          </span>
-          {worker && (
-            <span className="permission-prompt-worker" style={{ color: worker.color || t.text3 }}>
-              <span style={{ background: worker.color || t.text3 }} />
-              {worker.name}
-              {worker.team ? ` · ${worker.team}` : ''}
-            </span>
-          )}
-        </div>
-
-        {detail && (
-          <div
-            id="lingxi-permission-detail"
-            className="permission-prompt-detail mono"
-          >
-            {detail}
-          </div>
-        )}
-      </div>
-
-      <p id="lingxi-permission-risk" className="permission-prompt-risk">
-        <Icon name="info" size={16} stroke={1.7} />
-        <span>{riskCopy}</span>
-      </p>
-    </DesktopDialog>
+      </footer>
+    </section>
   );
 }

@@ -1,14 +1,14 @@
 // PermissionPrompt.swift — SHIP-BLOCKER #3.
 //
-// The SwiftUI allow/deny surface for engine-parked permission requests, the iOS
+// The SwiftUI sheet for engine-parked permission requests, the iOS
 // mirror of the Electron renderer's `PermissionPrompt.tsx` (7.3).
 //
 // The engine's adapter permission gate emits a `PermissionRequest` whenever a
 // tool needs approval (e.g. a Write/Bash invocation) and parks the turn on a
 // oneshot until the user answers. `EnginePermissionSink` forwards each request
 // onto `ConversationModel.pendingPermissions`; the app-level host presents the
-// head above the current UIKit surface with actions — Deny / Allow always /
-// Allow once — each resolving
+// head as a native sheet above the current chat surface with actions — Deny /
+// Allow always / Allow once — each resolving
 // the park by submitting `ClientCommand.approvePermission` / `denyPermission`
 // (correlated by `requestId`) back through the `MobileEngineHandle`.
 //
@@ -21,9 +21,8 @@ import UIKit
 #if canImport(engine_mobileFFI)
 
     extension Notification.Name {
-        /// Posted by SwiftUI-owned sheets whose presentation state is local to
-        /// ChatView/Composer. The root fallback observes it because those
-        /// sheets are above the in-chat prompt but do not change RootView state.
+        /// Posted by SwiftUI-owned sheets so the root permission-sheet host can
+        /// retry after UIKit attaches the active presenter.
         static let lingxiPermissionPresentationContextChanged = Notification.Name(
             "LingxiPermissionPresentationContextChanged"
         )
@@ -38,83 +37,37 @@ import UIKit
         }
     }
 
-    enum PermissionPromptHostPlacement {
-        /// The normal path: a non-modal panel attached to the chat surface.
-        case inChat
-        /// A reachability fallback used while a root-owned sheet or cover is up.
-        /// The fallback keeps the existing UIKit bridge so a queued engine request
-        /// cannot disappear behind an unrelated presentation.
-        case fallback
-        /// A root-mounted fallback that stays dormant until UIKit reports an
-        /// external presentation above the chat surface.
-        case presentedFallback
-    }
-
-    /// Observes the engine-scoped queue and renders its head. Chat surfaces use a
-    /// native SwiftUI overlay; RootView mounts a dormant UIKit fallback that
-    /// activates only while another controller is above the chat surface.
+    /// Observes the engine-scoped queue and presents its head as a sheet.
+    /// The root-mounted host presents it over whichever native surface is active.
     struct EnginePermissionPromptHost: View {
         @ObservedObject var model: ConversationModel
         @Environment(\.theme) private var theme
         @Environment(\.locale) private var locale
 
-        let placement: PermissionPromptHostPlacement
         let onApprove: (UInt64, PermissionResponseDto) -> Void
         let onDeny: (UInt64) -> Void
 
         init(
             model: ConversationModel,
-            placement: PermissionPromptHostPlacement = .fallback,
             onApprove: @escaping (UInt64, PermissionResponseDto) -> Void,
             onDeny: @escaping (UInt64) -> Void
         ) {
             self.model = model
-            self.placement = placement
             self.onApprove = onApprove
             self.onDeny = onDeny
         }
 
-        @ViewBuilder
         var body: some View {
-            switch placement {
-            case .inChat:
-                if let pending = model.pendingPermissions.first {
-                    PermissionPrompt(
-                        pending: pending,
-                        onApprove: onApprove,
-                        onDeny: onDeny
-                    )
-                    .environment(\.theme, theme)
-                    .environment(\.locale, locale)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .zIndex(100)
-                    .transition(.opacity)
-                }
-            case .fallback:
-                PermissionPromptPresentationBridge(
-                    pending: model.pendingPermissions.first,
-                    theme: theme,
-                    locale: locale,
-                    onlyWhenExternalPresentation: false,
-                    onApprove: onApprove,
-                    onDeny: onDeny
-                )
-                .frame(width: 0, height: 0)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            case .presentedFallback:
-                PermissionPromptPresentationBridge(
-                    pending: model.pendingPermissions.first,
-                    theme: theme,
-                    locale: locale,
-                    onlyWhenExternalPresentation: true,
-                    onApprove: onApprove,
-                    onDeny: onDeny
-                )
-                .frame(width: 0, height: 0)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            }
+            PermissionPromptPresentationBridge(
+                pending: model.pendingPermissions.first,
+                theme: theme,
+                locale: locale,
+                onApprove: onApprove,
+                onDeny: onDeny
+            )
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
     }
 
@@ -125,7 +78,6 @@ import UIKit
         let pending: PendingPermission?
         let theme: Palette
         let locale: Locale
-        let onlyWhenExternalPresentation: Bool
         let onApprove: (UInt64, PermissionResponseDto) -> Void
         let onDeny: (UInt64) -> Void
 
@@ -144,7 +96,6 @@ import UIKit
                 pending: pending,
                 theme: theme,
                 locale: locale,
-                onlyWhenExternalPresentation: onlyWhenExternalPresentation,
                 fallbackPresenter: controller,
                 onApprove: onApprove,
                 onDeny: onDeny
@@ -167,7 +118,6 @@ import UIKit
             private var presentationGeneration = 0
             private var retryScheduled = false
             private var consumedRunLoopRetryGeneration: Int?
-            private var onlyWhenExternalPresentation = false
 
             override init() {
                 super.init()
@@ -205,7 +155,6 @@ import UIKit
                 pending: PendingPermission?,
                 theme: Palette,
                 locale: Locale,
-                onlyWhenExternalPresentation: Bool,
                 fallbackPresenter: UIViewController,
                 onApprove: @escaping (UInt64, PermissionResponseDto) -> Void,
                 onDeny: @escaping (UInt64) -> Void
@@ -227,7 +176,6 @@ import UIKit
 
                 deferredContent = content
                 self.fallbackPresenter = fallbackPresenter
-                self.onlyWhenExternalPresentation = onlyWhenExternalPresentation
 
                 if let hostingController {
                     hostingController.rootView = content
@@ -238,17 +186,6 @@ import UIKit
                 }
 
                 attemptPresentation()
-                if onlyWhenExternalPresentation {
-                    // Root-owned covers update their binding before UIKit has
-                    // attached the controller. Give that transition two bounded
-                    // main-queue opportunities without starting a poll loop.
-                    DispatchQueue.main.async { [weak self] in
-                        self?.attemptPresentation()
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                        self?.attemptPresentation()
-                    }
-                }
             }
 
             func dismiss(animated: Bool) {
@@ -291,34 +228,19 @@ import UIKit
                     scheduleRetry()
                     return
                 }
-                guard !onlyWhenExternalPresentation || hasExternalPresentationContext() else {
-                    return
-                }
-
                 let host = UIHostingController(rootView: deferredContent)
                 host.view.backgroundColor = .clear
-                host.modalPresentationStyle = .overFullScreen
-                host.modalTransitionStyle = .crossDissolve
+                host.modalPresentationStyle = .pageSheet
+                host.isModalInPresentation = true
+                host.sheetPresentationController?.detents = [.large()]
+                host.sheetPresentationController?.prefersGrabberVisible = true
+                host.sheetPresentationController?.preferredCornerRadius = 28
 
                 presentationGeneration &+= 1
                 let generation = presentationGeneration
                 hostingController = host
                 presentationInFlight = true
                 present(host, from: presenter, generation: generation)
-            }
-
-            private func hasExternalPresentationContext() -> Bool {
-                let fallbackScene = fallbackPresenter?.viewIfLoaded?.window?.windowScene
-                let sceneTop = fallbackScene.flatMap { topViewController(in: $0) }
-                guard let top = sceneTop ?? Presenter.topViewController(),
-                      let scene = top.viewIfLoaded?.window?.windowScene,
-                      scene.activationState == .foregroundActive
-                else { return false }
-                // The root host is the window's root controller. A non-nil
-                // presenter means UIKit has placed a sheet/cover above it.
-                // The permission host itself is excluded because this check
-                // runs only before creating a new hostingController.
-                return top.presentingViewController != nil
             }
 
             private func topViewController(in scene: UIWindowScene) -> UIViewController? {
@@ -347,12 +269,12 @@ import UIKit
                 let fallbackScene = fallback?.viewIfLoaded?.window?.windowScene
                 let presenter: UIViewController?
                 let scene: UIWindowScene?
-                if onlyWhenExternalPresentation,
-                   let top = fallbackScene.flatMap({ topViewController(in: $0) }) ?? Presenter.topViewController(),
-                   let topScene = top.viewIfLoaded?.window?.windowScene
+                if let fallbackScene,
+                   fallbackScene.activationState == .foregroundActive,
+                   let top = topViewController(in: fallbackScene)
                 {
                     presenter = top
-                    scene = topScene
+                    scene = fallbackScene
                 } else if let fallback,
                    let fallbackScene,
                    fallbackScene.activationState == .foregroundActive {
@@ -442,8 +364,8 @@ import UIKit
         }
     }
 
-    /// The Desktop-style panel for one engine-parked permission request (the
-    /// head of the queue). Renders nothing when there is no pending request.
+    /// The sheet content for one engine-parked permission request (the head of
+    /// the queue). Renders nothing when there is no pending request.
     struct PermissionPrompt: View {
         @Environment(\.theme) private var t
 
@@ -458,49 +380,75 @@ import UIKit
             if let pending {
                 let copy = Self.describe(pending.kind)
                 VStack(spacing: 0) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Label {
+                    HStack(spacing: 10) {
+                        Image(systemName: Self.isElevatedRisk(pending) ? "shield.lefthalf.filled" : "hand.raised.fill")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(Self.isElevatedRisk(pending) ? t.danger : t.text2)
+                            .frame(width: 34, height: 34)
+                            .background(t.surfaceActive, in: Circle())
+                            .accessibilityHidden(true)
+                        Text(String(localized: "permission_request_title"))
+                            .font(.headline)
+                            .foregroundStyle(t.text)
+                        Spacer(minLength: 0)
+                        Button {
+                            onDeny(pending.requestId)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(t.text3)
+                                .frame(width: 36, height: 36)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(String(localized: "permission_deny"))
+                        .accessibilityIdentifier("permission.deny.close")
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 18)
+                    .padding(.bottom, 12)
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
                             Text(copy.title)
-                                .font(.headline)
+                                .font(.title2.weight(.semibold))
                                 .foregroundStyle(t.text)
                                 .fixedSize(horizontal: false, vertical: true)
-                        } icon: {
-                            Image(systemName: Self.isElevatedRisk(pending) ? "shield.lefthalf.filled" : "hand.raised.fill")
-                                .foregroundStyle(Self.isElevatedRisk(pending) ? t.danger : t.accent)
-                        }
-                        Text(copy.summary)
-                            .font(.subheadline)
-                            .foregroundStyle(t.text2)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(copy.detailLabel)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(t.text)
-                            Text(copy.detailCaption)
-                                .font(.caption)
-                                .foregroundStyle(t.text3)
-                        }
-                        if let worker = pending.worker {
-                            workerChip(worker)
-                        }
-                        if !copy.detail.isEmpty {
-                            if case .exitPlanMode = pending.kind {
-                                PlanDocumentCard(document: PlanDocument(markdown: copy.detail, isWriting: false))
-                            } else {
-                                detailBlock(copy.detail)
+                            Text(copy.summary)
+                                .font(.subheadline)
+                                .foregroundStyle(t.text2)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(copy.detailLabel)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(t.text)
+                                Text(copy.detailCaption)
+                                    .font(.caption)
+                                    .foregroundStyle(t.text3)
                             }
+                            if let worker = pending.worker {
+                                workerChip(worker)
+                            }
+                            if !copy.detail.isEmpty {
+                                if case .exitPlanMode = pending.kind {
+                                    PlanDocumentCard(document: PlanDocument(markdown: copy.detail, isWriting: false))
+                                } else {
+                                    detailBlock(copy.detail)
+                                }
+                            }
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "info.circle")
+                                Text(Self.riskCopy(for: pending))
+                            }
+                            .font(.caption)
+                            .foregroundStyle(t.text3)
                         }
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "info.circle")
-                            Text(Self.riskCopy(for: pending))
-                        }
-                        .font(.caption)
-                        .foregroundStyle(t.text3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 18)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 20)
-                    .padding(.bottom, 20)
+                    .scrollIndicators(.visible)
+                    .scrollBounceBehavior(.basedOnSize)
 
                     Divider().overlay(t.border)
 
@@ -509,17 +457,12 @@ import UIKit
                         suppressAlwaysAllowRule: pending.suppressAlwaysAllowRule,
                         autoModePrompt: pending.autoModePrompt
                     )
-                    .padding(20)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
                 }
                 .frame(maxWidth: 560)
-                .background(.regularMaterial, in: .rect(cornerRadius: 24))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 24)
-                        .stroke(t.border.opacity(0.7), lineWidth: 0.5)
-                }
-                .shadow(color: .black.opacity(0.28), radius: 28, y: 16)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .background(t.windowBg)
                 .accessibilityElement(children: .contain)
             }
         }

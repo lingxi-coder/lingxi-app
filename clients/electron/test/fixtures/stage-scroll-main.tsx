@@ -6,6 +6,7 @@ import type { RunItem } from '../../src/renderer/model/runItem';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';
+import '../../src/renderer/components/RuntimeCenter.css';
 
 // A stub for the one preload call this fixture exercises: without it the copy
 // handler would fall through to `navigator.clipboard`, which a hidden test
@@ -31,6 +32,7 @@ const initialItems: RunItem[] = [
   { type: 'thinking', id: 'thinking-tail', text: 'Working', streamed: true },
 ];
 function Fixture() {
+  const [inspector, setInspector] = useState(false);
   const [items, setItems] = useState(initialItems);
   const [thinkingVisible, setThinkingVisible] = useState(true);
   // Rows a closed `/loop` fold hides, driven by the fold probe below.
@@ -44,6 +46,11 @@ function Fixture() {
   const [ancestorHeight, setAncestorHeight] = useState(300);
   Object.assign(window, { stageScrollFixture: {
     thinking(visible: boolean) { flushSync(() => setThinkingVisible(visible)); },
+    readingWithInspector() { flushSync(() => {
+      setInspector(true);
+      setViewport({ width: 0, height: 560 });
+      setItems([{ type: 'narration', id: 'long-reading', role: 'assistant', streamed: true, text: Array.from({ length: 300 }, (_, i) => `Reading segment ${i}: preserve these words across window resizing.`).join(' ') }, ...initialItems]);
+    }); },
     longList() { flushSync(() => setItems(initialItems)); },
     setViewport(width: number, height: number) { flushSync(() => setViewport({ width, height })); },
     setAncestorHeight(height: number) { flushSync(() => setAncestorHeight(height)); },
@@ -101,8 +108,11 @@ function Fixture() {
   } });
   return <Theme.Provider value={tokens(false)}>
     <div id="scroll-ancestor" style={{ height: ancestorHeight, overflowY: 'auto' }}>
-      <div style={{ width: viewport.width || undefined, height: viewport.height, display: 'flex', flexDirection: 'column' }}>
-        <Stage pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" foldedItemIds={foldedItems} />
+      <div style={{ display: 'flex' }}>
+        <div style={{ flex: viewport.width ? 'none' : 1, minWidth: 0, width: viewport.width || undefined, height: viewport.height, display: 'flex', flexDirection: 'column' }}>
+          <Stage pendingActivity={thinkingVisible ? undefined : 'Working'} liveItems={thinkingVisible ? items : items.filter(item => item.type !== 'thinking')} running={items[0]?.id !== 'delivery-message'} sessionKey="scroll-fixture" foldedItemIds={foldedItems} />
+        </div>
+        {inspector && <aside className="runtime-inspector" style={{ width: 390 }}>Inspector</aside>}
       </div>
       <div style={{ height: 300 }} />
     </div>

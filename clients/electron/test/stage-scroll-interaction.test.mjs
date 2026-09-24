@@ -156,6 +156,10 @@ test('Stage keeps the actual bottom stable during streaming and respects manual 
       `the reading offset survives a resize: ${result.anchorBeforeResize.offset} -> ${result.anchorAfterResize.offset}`,
     );
 
+    for (const offset of result.textResizeOffsets) {
+      assert.ok(Math.abs(offset - result.textResizeOffsets[0]) <= 1, `reading text moved during inspector resize: ${result.textResizeOffsets}`);
+    }
+
     // A closed `/loop` fold hides a run of rows that can include the reader's own
     // prompt. Reading "the newest visible prompt" would then walk back to an
     // OLDER prompt id, look like a prompt the reader just sent, and drag them to

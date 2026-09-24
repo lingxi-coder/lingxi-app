@@ -1,3 +1,4 @@
+import { readingTextAnchor } from './transcriptReadingAnchor';
 import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
@@ -266,7 +267,8 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
    * Element identity survives reflow, and `isConnected` retires an anchor whose
    * row was unmounted — an index would quietly point at a different message.
    */
-  const anchor = useRef<{ node: Element; offset: number } | null>(null);
+  const anchor = useRef<{ node: Element; text?: Range; offset: number } | null>(null);
+  const compensatedScroll = useRef<number | null>(null);
   const scrollSession = useRef(sessionKey);
   /** The newest prompt seen, so a freshly sent one can re-arm the tail. */
   const lastPromptId = useRef<string | null>(null);
@@ -388,7 +390,8 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
     }
     if (first === -1) { anchor.current = null; return; }
     const element = rows[first]!;
-    anchor.current = { node: element, offset: element.getBoundingClientRect().top - containerTop };
+    const text = readingTextAnchor(element, containerTop);
+    anchor.current = { node: element, text, offset: (text ?? element).getBoundingClientRect().top - containerTop };
   }, []);
 
   /**
@@ -396,10 +399,8 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
    * rather than in a following animation frame, is what keeps the correction
    * out of the painted frame.
    *
-   * The anchor is a whole row, so this pins that row's top edge and nothing
-   * finer: for a row taller than the scrollport — a long message or a code
-   * block — a width change still moves the text inside it while the row's own
-   * offset holds.
+   * Inside a long message, pin the visible character instead of the row top:
+   * inspector/window resizing can rewrap the text above the reading position.
    */
   const restoreAnchor = useCallback(() => {
     const node = stageRef.current;
@@ -410,10 +411,14 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
     // movement arrived, so the offset it recorded already includes it.
     if (performance.now() < snapMutedUntil.current) return;
     if (!held.node.isConnected) { anchor.current = null; return; }
-    const offset = held.node.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    const target = held.text ?? held.node;
+    const offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
     const delta = offset - held.offset;
-    if (Math.abs(delta) > 0.5) node.scrollTop += delta;
-    held.offset = held.node.getBoundingClientRect().top - node.getBoundingClientRect().top;
+    if (Math.abs(delta) > 0.5) {
+      node.scrollTop += delta;
+      compensatedScroll.current = node.scrollTop;
+    }
+    held.offset = target.getBoundingClientRect().top - node.getBoundingClientRect().top;
   }, []);
 
   /**
@@ -441,6 +446,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
   useLayoutEffect(() => {
     if (scrollSession.current !== sessionKey) {
       scrollSession.current = sessionKey;
+      compensatedScroll.current = null;
       followTail.current = true;
       setAtTail(true);
       anchor.current = null;
@@ -453,7 +459,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
       restoreAnchor();
     }
     syncTail();
-    captureAnchor();
+    if (!anchor.current) captureAnchor();
   });
   useLayoutEffect(() => {
     const node = stageRef.current;
@@ -504,6 +510,10 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
         syncTail();
       }, 160);
     }} onScroll={() => {
+      // A layout correction is not a new reading position. Keep its character
+      // anchor across successive resize frames instead of choosing another line.
+      if (stageRef.current?.scrollTop === compensatedScroll.current) return;
+      compensatedScroll.current = null;
       measureFollow();
       captureAnchor();
     }} style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', paddingInlineStart: 'var(--conversation-gutter, 24px)', paddingInlineEnd: 'calc(var(--conversation-gutter, 24px) + var(--runtime-summary-scroll-overhang, 0px))', background: t.transcriptBg, position: 'relative' }}>

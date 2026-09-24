@@ -242,6 +242,36 @@ async function main() {
     await settle();
     result.anchorAfterResize = await run(anchorProbe);
 
+    await run('window.stageScrollFixture.readingWithInspector()');
+    window.setSize(1400, 800);
+    await settle();
+    await run(`(() => {
+      const stage = document.querySelector('.desktop-stage');
+      const walker = document.createTreeWalker(document.querySelector('.desktop-stage-feed'), NodeFilter.SHOW_TEXT);
+      let text;
+      while ((text = walker.nextNode()) && !text.textContent.startsWith('Reading segment')) {}
+      const range = document.createRange();
+      range.setStart(text, 3500); range.setEnd(text, 3501);
+      const lineTop = range.getBoundingClientRect().top;
+      let start = 3500;
+      while (start > 0) {
+        range.setStart(text, start - 1); range.setEnd(text, start);
+        if (range.getBoundingClientRect().top < lineTop) break;
+        start -= 1;
+      }
+      range.setStart(text, start); range.setEnd(text, start + 1);
+      stage.scrollTop += range.getBoundingClientRect().top - stage.getBoundingClientRect().top + 4;
+      window.readingRange = range;
+    })()`);
+    await settle();
+    const readingOffset = `window.readingRange.getBoundingClientRect().top - document.querySelector('.desktop-stage').getBoundingClientRect().top`;
+    result.textResizeOffsets = [await run(readingOffset)];
+    for (const width of [1200, 1101, 1099, 900, 1400]) {
+      window.setSize(width, 800);
+      await settle();
+      result.textResizeOffsets.push(await run(readingOffset));
+    }
+
     // ── A closed `/loop` fold must not read as a new prompt ───────────────
     await run('window.stageScrollFixture.foldSetup()');
     await settle();

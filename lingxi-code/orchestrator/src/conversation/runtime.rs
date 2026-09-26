@@ -6,7 +6,7 @@ use super::*;
 pub(crate) struct TranscriptStore {
     /// Per-session provider recovery ownership, replaced when switching sessions.
     pub(crate) thinking_recovery:
-        std::sync::RwLock<llm_client::thinking_scope::ThinkingRecoveryScope>,
+        std::sync::RwLock<llm_runtime::thinking_scope::ThinkingRecoveryScope>,
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
     /// tests; `Some` when the CLI binary wires `~/.lingxi/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
@@ -1189,14 +1189,14 @@ pub(crate) struct ModelRuntime {
     /// return a retry-safe rewriter so reconnect/fallback/PTL paths keep the
     /// same transformed request without mutating `session.history`.
     pub(crate) model_call_preparer: Option<Arc<dyn ModelCallPreparer>>,
-    /// Task 8 (llm-client future-work batch 3): the last rate-limit snapshot
+    /// Task 8 (llm-runtime future-work batch 3): the last rate-limit snapshot
     /// forwarded to [`platform_api::OutputStream::emit_rate_limit`], for the
     /// emit-on-change dedup in [`Self::emit_rate_limit_if_changed`]. Lives on
     /// the orchestrator (not per-turn loop state) so the dedup spans turns —
     /// an identical snapshot across two `run_turn` calls emits exactly once.
     /// `None` until the first emission.
     pub(crate) last_emitted_rate_limit: Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
-    /// Task 2 (llm-client future-work batch 5): the last RAW per-window
+    /// Task 2 (llm-runtime future-work batch 5): the last RAW per-window
     /// utilization snapshot forwarded to
     /// [`platform_api::OutputStream::emit_raw_utilization`], for the
     /// emit-on-change dedup in [`Self::emit_raw_utilization_if_changed`].

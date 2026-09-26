@@ -977,7 +977,7 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     # `authoring-spec` block that `LocalAppPrepare` reads, which
     # `validate_create_flow_contract` pins instead.
     local_apps_host_path = (
-        repo / "lingxi-code" / "apps" / "engine-mobile" / "src" / "local_apps_host.rs"
+        repo / "lingxi-code" / "harness-runtime" / "src" / "mobile" / "local_apps_host.rs"
     )
     try:
         local_apps_host = local_apps_host_path.read_text(encoding="utf-8")
@@ -1199,7 +1199,7 @@ def runtime_profile_template_root(repo: pathlib.Path) -> pathlib.Path:
 
 # The bytes this verifier attests are read from `runtime_profile_template_root`,
 # but the bytes the product SHIPS are the ones `profile_file!` in
-# lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs pulls in with
+# lingxi-code/harness-runtime/src/mobile/local_app_runtime_profiles.rs pulls in with
 # `include_bytes!` from a SECOND on-disk copy under the plugin tree. An
 # attestation over a tree the binary does not compile is worth nothing the
 # moment the two copies drift, so the two roots are compared byte for byte and
@@ -1207,12 +1207,12 @@ def runtime_profile_template_root(repo: pathlib.Path) -> pathlib.Path:
 # guessed.
 COMPILED_PROFILE_MACRO_SOURCE = (
     "lingxi-code",
-    "apps",
-    "engine-mobile",
+    "harness-runtime",
     "src",
+    "mobile",
     "local_app_runtime_profiles.rs",
 )
-COMPILED_PROFILE_ROOT_LITERAL = "/../../plugins/lingxi-local-app/assets/templates/"
+COMPILED_PROFILE_ROOT_LITERAL = "/../plugins/lingxi-local-app/assets/templates/"
 # The five families embed more than 100 distinct files. The floor exists so a
 # regex that silently stops matching cannot report "0 files compared, all clear"
 # -- a zero-hit scan is not evidence.

@@ -45,7 +45,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use tokio::sync::oneshot;
-use tui_core::ask_user_question_bridge::{
+use tool_api::ask_user_question::{
     join_answer_labels, AskQuestion, AskUserQuestionExchange, ASK_MIDDOT,
 };
 use unicode_width::UnicodeWidthStr;
@@ -648,7 +648,7 @@ impl BottomPaneView for AskUserQuestionView {
 mod tests {
     use crossterm::event::KeyModifiers;
     use ratatui::layout::Position;
-    use tui_core::ask_user_question_bridge::{AskOption, AskQuestion};
+    use tool_api::ask_user_question::{AskOption, AskQuestion};
 
     use super::*;
 

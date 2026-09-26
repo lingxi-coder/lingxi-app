@@ -13,7 +13,7 @@ use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::streaming_executor::StreamingToolExecutor;
 use futures::stream::{BoxStream, StreamExt};
-use llm_client::{LlmError, LlmEvent, TokenUsage, Usage as LlmUsage};
+use llm_runtime::{LlmError, LlmEvent, TokenUsage, Usage as LlmUsage};
 use platform_api::OutputStream;
 use protocol::{ContentBlock, MessageId, ToolUseId};
 use serde_json::Value;
@@ -63,10 +63,13 @@ pub struct PumpedTurn {
     /// Used by `try_run_turn_streaming` to record into `CostTracker`
     /// (mirrors the non-streaming path in `turn_loop.rs`).
     pub usage: Option<LlmUsage>,
+    /// Client estimate frozen from the completed physical stream, when all
+    /// billed buckets and execution facts were available.
+    pub cost_quote: Option<llm_runtime::CostEstimate>,
     /// Refusal `stop_details` (`{category, explanation}`) from the final
     /// `message_delta` — drives the terminal refusal message's cyber/bio
     /// variant. `None` for non-refusal turns.
-    pub stop_details: Option<llm_client::StopDetails>,
+    pub stop_details: Option<llm_runtime::StopDetails>,
 }
 
 /// Merge a `MessageDelta` usage snapshot into the `MessageStart` seed.
@@ -117,6 +120,10 @@ fn merge_usage(seed: &LlmUsage, delta: &LlmUsage) -> LlmUsage {
         } else {
             delta.provider_metadata.clone()
         },
+        cost_estimate: delta
+            .cost_estimate
+            .clone()
+            .or_else(|| seed.cost_estimate.clone()),
     }
 }
 
@@ -223,12 +230,12 @@ impl PartialFinalizeCause {
 pub(crate) fn partial_finalize_cause(error: &OrchestratorError) -> Option<PartialFinalizeCause> {
     match error {
         OrchestratorError::Streaming(e)
-            if llm_client::model::stream_watchdog::is_stream_suspended(e) =>
+            if llm_runtime::model::stream_watchdog::is_stream_suspended(e) =>
         {
             Some(PartialFinalizeCause::StreamSuspended)
         }
         OrchestratorError::Streaming(e)
-            if llm_client::model::stream_watchdog::is_stream_idle_timeout(e) =>
+            if llm_runtime::model::stream_watchdog::is_stream_idle_timeout(e) =>
         {
             Some(PartialFinalizeCause::Watchdog)
         }
@@ -303,7 +310,7 @@ fn build_failure(
 /// for the streaming-request retry (cc 2.1.198 mid-response transient retry):
 /// a transport-layer drop (ECONNRESET / "connection closed" / reset / EPIPE /
 /// timeout — surfaced as [`LlmError::Transport`]) or a watchdog idle-timeout
-/// abort ([`llm_client::model::stream_watchdog::is_stream_idle_timeout`]).
+/// abort ([`llm_runtime::model::stream_watchdog::is_stream_idle_timeout`]).
 ///
 /// `ProviderInternal` / `Overloaded` are deliberately EXCLUDED here — those
 /// keep their dedicated non-streaming fallback arm.
@@ -311,7 +318,7 @@ pub(crate) fn is_transient_mid_stream(error: &OrchestratorError) -> bool {
     match error {
         OrchestratorError::Streaming(e) | OrchestratorError::ApiCall(e) => {
             matches!(e, LlmError::Transport { .. })
-                || llm_client::model::stream_watchdog::is_stream_idle_timeout(e)
+                || llm_runtime::model::stream_watchdog::is_stream_idle_timeout(e)
         }
         _ => false,
     }
@@ -332,7 +339,7 @@ pub(crate) fn mid_stream_retry_cap(error: &OrchestratorError) -> u32 {
     let is_idle = matches!(
         error,
         OrchestratorError::Streaming(e) | OrchestratorError::ApiCall(e)
-            if llm_client::model::stream_watchdog::is_stream_idle_timeout(e)
+            if llm_runtime::model::stream_watchdog::is_stream_idle_timeout(e)
     );
     if is_idle {
         MID_STREAM_IDLE_TIMEOUT_MAX_RETRIES
@@ -423,6 +430,7 @@ async fn pump_stream_inner(
     // `pump_stream` test helper defaults to `false` = live streaming).
     let suppress_live_text = pump.as_ref().map(|p| p.suppress_live_text).unwrap_or(false);
     let mut turn = PumpedTurn::default();
+    let mut assistant_block_indices: Vec<(u32, bool)> = Vec::new();
     // Mirrors the binary's `Hr`: set true the moment a non-thinking content
     // block STARTS (text / tool_use / etc.). Gates the caller's mid-stream
     // transient retry — see [`PumpFailure`].
@@ -454,7 +462,7 @@ async fn pump_stream_inner(
             stream.next().await
         };
         let Some(item) = item else { break };
-        let event = match item {
+        let mut event = match item {
             Ok(ev) => ev,
             Err(e) => {
                 return Err(build_failure(
@@ -466,6 +474,14 @@ async fn pump_stream_inner(
                 ));
             }
         };
+        if let LlmEvent::MessageDelta {
+            usage: Some(usage), ..
+        } = &mut event
+        {
+            if let Some(quote) = usage.cost_estimate.take() {
+                turn.cost_quote = Some(quote);
+            }
+        }
         // Capture MessageStart usage before dispatching (dispatch consumes the event).
         if let LlmEvent::MessageStart { ref response } = event {
             message_start_usage = Some(response.usage.clone());
@@ -478,12 +494,16 @@ async fn pump_stream_inner(
         {
             if !matches!(
                 content_block,
-                llm_client::ContentBlock::Reasoning { .. }
-                    | llm_client::ContentBlock::RedactedThinking { .. }
+                llm_runtime::ContentBlock::Reasoning { .. }
+                    | llm_runtime::ContentBlock::RedactedThinking { .. }
             ) {
                 real_content_started = true;
             }
         }
+        let completed_block_index = match &event {
+            LlmEvent::ContentBlockStop { index } => Some(*index),
+            _ => None,
+        };
         let action = match dispatch_event(event, &mut acc, output, suppress_live_text).await {
             Ok(a) => a,
             Err(e) => {
@@ -502,7 +522,12 @@ async fn pump_stream_inner(
                 if let ContentBlock::RedactedThinking { data } = &block {
                     output.emit_redacted_thinking(data).await;
                 }
-                turn.assistant_blocks.push(block);
+                let key = llm_runtime::stream_content_order(
+                    completed_block_index.expect("completed block action has an index"),
+                );
+                let position = assistant_block_indices.partition_point(|existing| existing <= &key);
+                assistant_block_indices.insert(position, key);
+                turn.assistant_blocks.insert(position, block);
             }
             RouterAction::DispatchToolUse {
                 id,
@@ -597,11 +622,46 @@ mod tests {
         message_start, message_start_with_usage, message_stop, text_delta, thinking_delta,
     };
     use futures::stream;
-    use llm_client::TokenUsage;
+    use llm_runtime::TokenUsage;
     use protocol::ToolUseId;
 
     fn boxed(events: Vec<LlmEvent>) -> BoxStream<'static, Result<LlmEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    #[tokio::test]
+    async fn stream_pump_extracts_frozen_quote_without_serializing_it() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let mut estimate = llm_runtime::CostEstimate::unestimated(llm_runtime::PricingModelRef {
+            pricing_provider_id: llm_runtime::ProviderId::OpenAICompatible {
+                name: "deepseek".into(),
+            },
+            billing_model: "deepseek-flash".into(),
+            request_model: "deepseek-flash".into(),
+            display_model: "deepseek-flash".into(),
+        });
+        estimate.estimated = true;
+        estimate.total_cost_usd = Some(0.00075);
+        let mut usage = llm_runtime::Usage::default();
+        usage.billable_tokens.input = 1_000;
+        usage.cost_estimate = Some(estimate);
+        let turn = pump_stream(
+            boxed(vec![
+                message_start("m", "deepseek-flash"),
+                message_delta_stop_with_usage("end_turn", usage),
+                message_stop(),
+            ]),
+            &out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(turn.cost_quote.unwrap().total_cost_usd, Some(0.00075));
+        let usage = turn.usage.unwrap();
+        assert!(usage.cost_estimate.is_none());
+        assert!(serde_json::to_value(usage)
+            .unwrap()
+            .get("cost_estimate")
+            .is_none());
     }
 
     /// 2.1.263 src_160988549.js @4784072 has-output notices + `tee` cause names.
@@ -635,7 +695,7 @@ mod tests {
 
     #[test]
     fn partial_finalize_cause_classifies_suspend_before_idle() {
-        let suspend = llm_client::model::stream_watchdog::watchdog_abort_error(
+        let suspend = llm_runtime::model::stream_watchdog::watchdog_abort_error(
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(5),
         );
@@ -643,13 +703,43 @@ mod tests {
             partial_finalize_cause(&OrchestratorError::Streaming(suspend)),
             Some(PartialFinalizeCause::StreamSuspended)
         );
-        let idle = llm_client::model::stream_watchdog::idle_timeout_error(
+        let idle = llm_runtime::model::stream_watchdog::idle_timeout_error(
             std::time::Duration::from_secs(1),
         );
         assert_eq!(
             partial_finalize_cause(&OrchestratorError::Streaming(idle)),
             Some(PartialFinalizeCause::Watchdog)
         );
+    }
+
+    #[tokio::test]
+    async fn late_native_content_keeps_provider_order_in_the_transcript() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let native = serde_json::json!({"type":"reasoning","encrypted_content":"opaque"});
+        let events = vec![
+            message_start("m", "model"),
+            content_block_start_text(1),
+            text_delta(1, "answer"),
+            content_block_stop(1),
+            LlmEvent::ContentBlockStart {
+                index: 0x8000_0000,
+                content_block: llm_runtime::ContentBlock::ProviderContent {
+                    protocol: "open_ai_responses".into(),
+                    value: native.clone(),
+                },
+            },
+            content_block_stop(0x8000_0000),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ];
+        let turn = pump_stream(boxed(events), &out).await.unwrap();
+        assert!(
+            matches!(&turn.assistant_blocks[0],ContentBlock::ProviderContent { value, .. } if value == &native)
+        );
+        assert!(
+            matches!(&turn.assistant_blocks[1],ContentBlock::Text { text } if text == "answer")
+        );
+        assert!(turn.tool_uses.is_empty());
     }
 
     #[tokio::test]
@@ -734,7 +824,7 @@ mod tests {
     #[tokio::test]
     async fn thinking_and_usage_deltas_emit_to_output() {
         use crate::test_support::MockOutputStream;
-        use llm_client::Usage;
+        use llm_runtime::Usage;
         use platform_api::OutputEvent;
 
         let mock = Arc::new(MockOutputStream::new());
@@ -753,7 +843,7 @@ mod tests {
             message_delta_stop_with_usage(
                 "end_turn",
                 Usage {
-                    billable_tokens: llm_client::TokenUsage {
+                    billable_tokens: llm_runtime::TokenUsage {
                         input: 120,
                         output: 35,
                         cache_write: 10,

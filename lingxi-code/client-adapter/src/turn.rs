@@ -153,7 +153,7 @@ pub fn lower_content_block_with(
             let tool = paired.map_or(String::new(), |(tool, _)| tool.to_string());
             let input = paired.map(|(_, input)| input);
             let (old_string, new_string, file_path) = input.map_or((None, None, None), |input| {
-                tui_core::active_turn::diff_inputs_for(&tool, input)
+                client_presentation::tool_display::diff_inputs_for(&tool, input)
             });
             // `content` is the already-stringified tool output. Lower it through
             // the same JSON-String boundary as `ToolUseResult.result_json` so the
@@ -185,7 +185,8 @@ pub fn lower_content_block_with(
         | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
         | ContentBlock::AdvisorToolResult { .. }
-        | ContentBlock::MediaAnalysis { .. } => None,
+        | ContentBlock::MediaAnalysis { .. }
+        | ContentBlock::ProviderContent { .. } => None,
     }
 }
 
@@ -238,7 +239,7 @@ pub fn turn_started_event(turn_id: Option<u64>) -> ClientEvent {
 #[must_use]
 pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
     match err {
-        // Task 6 (llm-client future-work batch 5): the terminal-429 limits
+        // Task 6 (llm-runtime future-work batch 5): the terminal-429 limits
         // copy ("You've hit your … limit · resets …") — an API-side failure,
         // same coarse class as the `ApiCall` it replaces.
         OrchestratorError::Streaming(_)
@@ -335,10 +336,10 @@ mod tests {
 
     /// Construct an `LlmError` for the transport-class table rows.
     ///
-    /// `OrchestratorError::Streaming` and `::ApiCall` both wrap `llm_client::LlmError`
+    /// `OrchestratorError::Streaming` and `::ApiCall` both wrap `llm_runtime::LlmError`
     /// (retyped in 3a Task 5, commit 5f8b3e35).
-    fn api_error() -> llm_client::LlmError {
-        llm_client::LlmError::Transport {
+    fn api_error() -> llm_runtime::LlmError {
+        llm_runtime::LlmError::Transport {
             message: "nope".into(),
         }
     }
@@ -462,6 +463,7 @@ mod tests {
             tool_uses: Vec::new(),
             stop_reason: Some("end_turn".into()),
             usage: None,
+            cost_quote: None,
         };
 
         match message_complete_event(&turn) {
@@ -509,6 +511,7 @@ mod tests {
             tool_uses: Vec::new(),
             stop_reason: None,
             usage: None,
+            cost_quote: None,
         };
         let msg = synthesize_message(&turn);
         assert_eq!(
@@ -588,6 +591,7 @@ mod tests {
             tool_uses: Vec::new(),
             stop_reason: Some("end_turn".into()),
             usage: None,
+            cost_quote: None,
         };
         wrapper.complete(Ok(turn)).await;
 

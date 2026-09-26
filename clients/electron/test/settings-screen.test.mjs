@@ -348,3 +348,13 @@ test('the layer switcher names the project the ENGINE reported, and switching it
     for (const [name, passed] of Object.entries(checks)) assert.equal(passed, true, `${page}: ${name}`);
   }
 });
+
+
+test('provider region saves a layer and applies only through reconnect', async () => {
+  const result = await runScenario('provider-region');
+  assert.equal(result.initial, true);
+  assert.equal(result.saved.destination, 'user');
+  assert.deepEqual(result.saved.patch, { providerRegion: 'china_mainland' });
+  assert.equal(result.pending, true);
+  assert.equal(result.restarted, true);
+});

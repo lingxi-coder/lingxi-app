@@ -6,6 +6,8 @@
 @import './components/settings/pages/McpServers.css';
 @import './components/settings/pages/ExtensionHub.css';
 @import './components/settings/pages/Hooks.css';
+@import './components/ErrorBanner.css';
+@import './components/settings/pages/Notifications.css';
 
 :root {
   --conversation-width: 860px;
@@ -2514,3 +2516,27 @@ textarea, input { font-family: inherit; }
   pointer-events: none;
 }
 .context-window-heading { color: #a3a3a3; }
+
+/* Goal surfaces share the composer's quiet, neutral hierarchy. */
+.goal-message-objective { white-space: pre-wrap; overflow-wrap: anywhere; }
+.goal-message-caption { display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding: 6px 4px 0; font-size: 12px; line-height: 1.5; }
+.goal-status { position: relative; max-width: calc(var(--conversation-width) - 24px); margin: 0 auto -14px; padding: 7px 10px 21px; border: 1px solid var(--goal-border); border-radius: 18px 18px 0 0; background: var(--goal-surface); color: var(--goal-muted); font-size: 13px; line-height: 1.5; }
+.goal-status-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.goal-status-row > svg { flex-shrink: 0; margin-left: 3px; }
+.goal-status-label { flex-shrink: 0; color: var(--goal-text); font-weight: 500; }
+.goal-status-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-status button { display: grid; place-items: center; flex-shrink: 0; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--goal-muted); cursor: pointer; transition: background-color 120ms ease, color 120ms ease, transform 120ms ease; }
+.goal-status button:hover { background: var(--goal-hover); color: var(--goal-text); }
+.goal-status button:active { transform: scale(.94); }
+.goal-status button:focus-visible { outline: 2px solid var(--goal-focus); outline-offset: 2px; }
+.goal-status button:disabled { opacity: .4; cursor: default; transform: none; }
+.goal-status-detail { padding: 10px 6px 4px 28px; color: var(--goal-text); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow-y: auto; }
+.goal-status-error { margin: 7px 6px 0 28px; }
+@media (max-width: 520px) { .goal-status { max-width: calc(100% - 12px); } .goal-status-row { gap: 6px; } }
+@media (prefers-reduced-motion: reduce) { .goal-status button { transition: none; } .goal-status button:active { transform: none; } }
+@media (prefers-contrast: more) { .goal-status { border-color: var(--goal-text); color: var(--goal-text); } }
+.command-result-card[data-command-name="goal"] { border-radius: 14px; box-shadow: none; background: var(--command-surface); }
+.command-result-card[data-command-name="goal"] .command-result-header { gap: 10px; }
+.command-result-card[data-command-name="goal"] .command-result-name { display: none; }
+.command-result-card[data-command-name="goal"] .command-result-pre { background: transparent; border: 0; padding: 0; font-family: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.command-result-card[data-command-name="goal"] .command-result-body { background: transparent; box-shadow: none; border-radius: 0; padding: 0 0 4px 30px; }

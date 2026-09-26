@@ -38,9 +38,9 @@ async function main() {
     await click('[aria-label="Hide terminal panel"]');
     await run(`window.terminalFixture.output('${first}', '\\r\\nhidden output\\r\\n')`);
     await wait('window.terminalFixture.state().acks.some(item => item.sequence === 3)');
-    result.hiddenShellRetained = (await state()).count === 1 && await run('document.querySelector("#desktop-terminal").hidden');
+    result.hiddenShellRetained = (await state()).count === 1 && await run('document.querySelector("#desktop-terminal").inert');
     await run('window.dispatchEvent(new KeyboardEvent("keydown", {ctrlKey:true, code:"Backquote", bubbles:true, cancelable:true}))');
-    await wait('!document.querySelector("#desktop-terminal").hidden'); result.shortcutWorks = true;
+    await wait('!document.querySelector("#desktop-terminal").inert'); result.shortcutWorks = true;
     await click('[aria-label="New terminal"]'); await wait(`window.terminalFixture.state().count === 2 && window.terminalFixture.state().selected !== '${first}'`);
     const second = (await state()).selected;
     await run('document.querySelector("#composer").focus(); window.terminalFixture.session("session-b")'); await delay(80);

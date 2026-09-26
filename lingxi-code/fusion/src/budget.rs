@@ -14,7 +14,7 @@
 //! returning any usage) — is estimated from what IS known (the prompt sent,
 //! or the task + successful panel reports a judge call read) using main's
 //! real character-based approximation
-//! (`llm_client::model::count_tokens::approximate_tokens_for_bytes`, the
+//! (`llm_runtime::model::count_tokens::approximate_tokens_for_bytes`, the
 //! same formula `count_tokens::approximate_tokens`'s documented fallback
 //! uses), then priced through the SAME [`FusionPriceBook`] as real usage —
 //! `estimated = true` either way, so neither case is ever passed off as
@@ -34,7 +34,7 @@ use std::sync::Arc;
 /// reservation quote (`quote()`'s peak is pure configured token counts, see
 /// the module doc above) and not in the settlement fallback either (T1,
 /// user-directed policy: a component with genuinely no usage is estimated
-/// via `llm_client::model::count_tokens::approximate_tokens_for_bytes`,
+/// via `llm_runtime::model::count_tokens::approximate_tokens_for_bytes`,
 /// main's real character-based approximation — see
 /// `panel::estimate_in_flight_usage` / `orchestrator::judge_input_token_estimate`
 /// — never 1-byte-equals-1-token).
@@ -94,7 +94,7 @@ pub struct ModelRates {
     /// Round-7 finding [1], the half the rate alone cannot express: Fusion
     /// carries ONE flattened `cache_write_tokens` total, but with the
     /// `ENABLE_PROMPT_CACHING_1H` opt-in armed a session writes its system
-    /// cache blocks with a 1-hour TTL (`llm_client::service`'s `ttl_1h`)
+    /// cache blocks with a 1-hour TTL (`llm_runtime::service`'s `ttl_1h`)
     /// while the residual last-message breakpoint stays 5-minute
     /// (`CacheControl::Ephemeral`). Whichever single rate the price book
     /// picks is therefore right for most of the bucket and wrong for the
@@ -549,7 +549,7 @@ mod tests {
     /// `panel::estimate_in_flight_usage` /
     /// `orchestrator::judge_input_token_estimate`, and it uses main's real
     /// character-based approximation
-    /// (`llm_client::model::count_tokens::approximate_tokens_for_bytes`),
+    /// (`llm_runtime::model::count_tokens::approximate_tokens_for_bytes`),
     /// never this byte-equals-token formula. `include_str!` self-reads this
     /// very file below, so the banned phrase is split across two literals
     /// here (never joined in the SOURCE TEXT) to avoid this doc comment

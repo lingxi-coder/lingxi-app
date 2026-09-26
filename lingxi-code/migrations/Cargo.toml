@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 # SubscriptionType for the subscriber-gated migrations' fail-closed context.
-llm-client = { path = "../llm-client" }
+llm-runtime = { path = "../llm-runtime" }
 protocol = { path = "../protocol" }
 telemetry = { path = "../telemetry" }
 branding.workspace = true

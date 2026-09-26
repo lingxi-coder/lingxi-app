@@ -43,11 +43,11 @@ import XCTest
 // The per-namespace FFI clang module is provided by LingxiCodeFFI.xcframework,
 // which this test target also links — mirroring the app's `canImport` guard so
 // the suite degrades to a skip if the engine bindings are not present.
-#if canImport(engine_mobileFFI)
-    import engine_mobileFFI
+#if canImport(harness_runtimeFFI)
+    import harness_runtimeFFI
 #endif
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
 
     /// A test `IosEventListener` that records every inbound `ClientEvent` and
     /// fulfils an expectation when a terminal event (`error` or `turnEnded`)
@@ -489,7 +489,7 @@ import XCTest
     /// If the engine bindings are not linked, fail loudly — P4 requires them.
     final class EngineRoundtripTests: XCTestCase {
         func testEngineBindingsMustBeLinked() {
-            XCTFail("engine_mobileFFI not importable — run scripts/build-xcframework.sh before testing")
+            XCTFail("harness_runtimeFFI not importable — run scripts/build-xcframework.sh before testing")
         }
     }
 

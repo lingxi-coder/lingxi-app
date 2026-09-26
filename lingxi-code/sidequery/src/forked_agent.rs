@@ -128,7 +128,7 @@ pub struct ForkedAgentRunner {
     /// the summarizer call @216945141). Wired by the composition root for the
     /// COMPACTION runner via [`Self::with_session_thinking`]; `None` (default
     /// — memory extraction, tests) keeps the legacy no-`thinking` wire.
-    session_thinking: Option<llm_client::model::thinking::ThinkingConfig>,
+    session_thinking: Option<llm_runtime::model::thinking::ThinkingConfig>,
 }
 
 impl Default for ForkedAgentRunner {
@@ -179,7 +179,7 @@ impl ForkedAgentRunner {
     #[must_use]
     pub fn with_session_thinking(
         mut self,
-        thinking: llm_client::model::thinking::ThinkingConfig,
+        thinking: llm_runtime::model::thinking::ThinkingConfig,
     ) -> Self {
         self.session_thinking = Some(thinking);
         self
@@ -251,7 +251,7 @@ impl ForkedAgentRunner {
         let max_tokens = req.max_output_tokens.unwrap_or_else(|| {
             if req.query_source == QuerySource::Compaction {
                 u32::try_from(
-                    llm_client::model::context_window::default_output_tokens_for_model(&model),
+                    llm_runtime::model::context_window::default_output_tokens_for_model(&model),
                 )
                 .unwrap_or(u32::MAX)
             } else {
@@ -575,13 +575,13 @@ mod tests {
         });
         let runner = ForkedAgentRunner::new()
             .with_side_query_client(client.clone(), "claude-opus-4-6".into())
-            .with_session_thinking(llm_client::model::thinking::ThinkingConfig::default());
+            .with_session_thinking(llm_runtime::model::thinking::ThinkingConfig::default());
         let req = request_with(vec![], vec![user_msg("PROMPT")], Some(512));
         runner.run(req).await.expect("wired run succeeds");
         let sent = client.seen.lock().unwrap().clone().expect("client called");
         assert_eq!(
             sent.thinking,
-            Some(llm_client::model::thinking::ThinkingConfig::Adaptive),
+            Some(llm_runtime::model::thinking::ThinkingConfig::Adaptive),
             "the compaction fork inherits the session thinking config"
         );
 
@@ -623,9 +623,9 @@ mod tests {
     #[tokio::test]
     async fn run_with_client_preserves_compaction_api_error_types() {
         for expected in [
-            llm_client::LlmError::ContextOverflow { token_gap: 12_345 },
-            llm_client::LlmError::RequestTooLarge,
-            llm_client::LlmError::InvalidRequest {
+            llm_runtime::LlmError::ContextOverflow { token_gap: 12_345 },
+            llm_runtime::LlmError::RequestTooLarge,
+            llm_runtime::LlmError::InvalidRequest {
                 message: "image exceeds 5 MB maximum".into(),
             },
         ] {
@@ -669,7 +669,7 @@ mod tests {
             assert_eq!(sent.model, expected_model);
             assert_eq!(
                 u64::from(sent.max_tokens),
-                llm_client::model::context_window::default_output_tokens_for_model(expected_model),
+                llm_runtime::model::context_window::default_output_tokens_for_model(expected_model),
                 "compaction must inherit the ordinary request budget for {expected_model}"
             );
         }

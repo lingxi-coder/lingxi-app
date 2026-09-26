@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use llm_client::LlmError;
+use llm_runtime::LlmError;
 use protocol::{ContentBlock, ConversationMessage, MediaAnalysis, MessageId, MessageRole};
 use sidequery::{
     filter_messages_to_fingerprints, prepare_media_for_nonvision, PreparedDelegation, VisionPacket,
@@ -566,7 +566,7 @@ mod tests {
 
     struct VisionAwareMockApiClient {
         inner: MockApiClient,
-        route: llm_client::MediaRoute,
+        route: llm_runtime::MediaRoute,
         result: std::sync::Mutex<Option<VisionDelegationResult>>,
         packets: std::sync::Mutex<Vec<VisionPacket>>,
         block_delegation: bool,
@@ -574,8 +574,8 @@ mod tests {
 
     impl VisionAwareMockApiClient {
         fn new(
-            responses: Vec<llm_client::LlmResponse>,
-            route: llm_client::MediaRoute,
+            responses: Vec<llm_runtime::LlmResponse>,
+            route: llm_runtime::MediaRoute,
             result: VisionDelegationResult,
         ) -> Self {
             Self {
@@ -587,7 +587,7 @@ mod tests {
             }
         }
 
-        fn blocking(route: llm_client::MediaRoute) -> Self {
+        fn blocking(route: llm_runtime::MediaRoute) -> Self {
             Self {
                 inner: MockApiClient::new(vec![]),
                 route,
@@ -625,7 +625,7 @@ mod tests {
             system: Option<&str>,
             msgs: Vec<ConversationMessage>,
             tools: Vec<serde_json::Value>,
-        ) -> Result<llm_client::LlmResponse, LlmError> {
+        ) -> Result<llm_runtime::LlmResponse, LlmError> {
             self.inner
                 .messages_create(model, profile, system, msgs, tools)
                 .await
@@ -635,7 +635,7 @@ mod tests {
             &self,
             _model: &str,
             _profile: Option<&str>,
-        ) -> Result<llm_client::MediaRoute, LlmError> {
+        ) -> Result<llm_runtime::MediaRoute, LlmError> {
             Ok(self.route.clone())
         }
 
@@ -657,24 +657,24 @@ mod tests {
         }
     }
 
-    fn media_route() -> llm_client::MediaRoute {
-        llm_client::MediaRoute {
-            main: llm_client::ResolvedRoute {
-                provider_id: llm_client::ProviderId::OpenAICompatible {
+    fn media_route() -> llm_runtime::MediaRoute {
+        llm_runtime::MediaRoute {
+            main: llm_runtime::ResolvedRoute {
+                provider_id: llm_runtime::ProviderId::OpenAICompatible {
                     name: "test".to_string(),
                 },
                 profile_name: "test".to_string(),
                 request_model: "text-only".to_string(),
                 display_model: "text-only".to_string(),
-                pricing_model: llm_client::PricingModelRef {
-                    pricing_provider_id: llm_client::ProviderId::OpenAICompatible {
+                pricing_model: llm_runtime::PricingModelRef {
+                    pricing_provider_id: llm_runtime::ProviderId::OpenAICompatible {
                         name: "test".to_string(),
                     },
                     billing_model: "text-only".to_string(),
                     request_model: "text-only".to_string(),
                     display_model: "text-only".to_string(),
                 },
-                capabilities: llm_client::Capabilities {
+                capabilities: llm_runtime::Capabilities {
                     streaming: true,
                     tools: true,
                     vision: false,
@@ -685,22 +685,22 @@ mod tests {
                 connection_chain: Vec::new(),
                 failover: Default::default(),
             },
-            vision_delegate: Some(llm_client::ResolvedRoute {
-                provider_id: llm_client::ProviderId::OpenAICompatible {
+            vision_delegate: Some(llm_runtime::ResolvedRoute {
+                provider_id: llm_runtime::ProviderId::OpenAICompatible {
                     name: "test".to_string(),
                 },
                 profile_name: "test".to_string(),
                 request_model: "vision".to_string(),
                 display_model: "vision".to_string(),
-                pricing_model: llm_client::PricingModelRef {
-                    pricing_provider_id: llm_client::ProviderId::OpenAICompatible {
+                pricing_model: llm_runtime::PricingModelRef {
+                    pricing_provider_id: llm_runtime::ProviderId::OpenAICompatible {
                         name: "test".to_string(),
                     },
                     billing_model: "vision".to_string(),
                     request_model: "vision".to_string(),
                     display_model: "vision".to_string(),
                 },
-                capabilities: llm_client::Capabilities {
+                capabilities: llm_runtime::Capabilities {
                     streaming: true,
                     tools: false,
                     vision: true,
@@ -814,7 +814,7 @@ mod tests {
             .remove(0);
         let api = Arc::new(VisionAwareMockApiClient::new(
             vec![mock_message_response(
-                vec![llm_client::ContentBlock::Text {
+                vec![llm_runtime::ContentBlock::Text {
                     text: "ok".to_string(),
                     cache_control: None,
                 }],

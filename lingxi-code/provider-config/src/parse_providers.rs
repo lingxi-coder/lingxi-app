@@ -1,14 +1,14 @@
 //! Compatibility wrapper for parsing `settings.providers`.
 //!
-//! Provider semantics live in `llm-client`; this crate keeps the historical
+//! Provider semantics live in `llm-runtime`; this crate keeps the historical
 //! tolerant API used by provider-config assembly and tests.
 
 use std::collections::BTreeMap;
 
-use llm_client::{parse_provider_profiles_lenient, ProviderCredentialMode, ProviderParseOptions};
+use llm_runtime::{parse_provider_profiles_lenient, ProviderCredentialMode, ProviderParseOptions};
 use serde_json::Value;
 
-pub use llm_client::ParsedUserProvider;
+pub use llm_runtime::ParsedUserProvider;
 
 /// Parse `settings.providers` into profiles + warnings (spec section 5.1).
 ///
@@ -31,7 +31,7 @@ pub fn parse_user_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::{AuthStrategy, CredentialConfig, ProtocolFamily, ProviderId};
+    use llm_runtime::{AuthStrategy, CredentialConfig, ProtocolFamily, ProviderId};
     use serde_json::json;
 
     fn one(name: &str, value: Value) -> BTreeMap<String, Value> {
@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_accepts_all_provider_kinds_with_llm_client_identities() {
+    fn wrapper_accepts_all_provider_kinds_with_llm_runtime_identities() {
         let raw: BTreeMap<String, Value> = serde_json::from_value(json!({
             "openai_chat": {
                 "type": "openai",

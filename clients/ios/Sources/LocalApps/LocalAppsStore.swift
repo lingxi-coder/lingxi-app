@@ -9,7 +9,7 @@ final class LocalAppsStore {
     private static let maxQueuedPermissions = 8
 
     private enum PendingPermissionSource {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             case ui(AppUiRequestDto)
             case capability(appID: String, kind: AppCapabilityKindDto)
         #endif
@@ -183,7 +183,7 @@ final class LocalAppsStore {
     /// `AppSessionsChanged` event does not echo the requested offset.
     @ObservationIgnored private var pendingSessionRequestOffsets: [String: UInt64] = [:]
     @ObservationIgnored private var pendingPermissionSource: PendingPermissionSource?
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         /// One page can raise several capability requests in a single tick (two
         /// `fetch()` calls to two unauthorized domains). Each one is waiting on
         /// its own 5-minute approval timeout, so a second request must queue
@@ -213,7 +213,7 @@ final class LocalAppsStore {
         LocalAppWidgetSnapshotStore.publish($0)
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
         @ObservationIgnored private var submitManagedMcpCommand:
             ((LocalAppManagedMcpCommand) async -> Bool)?
@@ -316,7 +316,7 @@ final class LocalAppsStore {
         pendingManagedMcpAppIDs.contains(appID)
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         func configure(submit: @escaping (ClientCommand) async throws -> Void) {
             submitCommand = submit
         }
@@ -609,7 +609,7 @@ final class LocalAppsStore {
         }
     #endif
 
-    #if !canImport(engine_mobileFFI)
+    #if !canImport(harness_runtimeFFI)
         func refreshManagedMcpInventory() async {}
 
         func startManagedMcpAuthoring(appID: String, userGoal: String) async -> Bool {
@@ -766,7 +766,7 @@ final class LocalAppsStore {
     }
 
     private func performRefresh() async {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             guard let submitCommand else {
                 errorMessage = String(localized: "local_apps_error_engine_not_connected")
                 return
@@ -834,7 +834,7 @@ final class LocalAppsStore {
                 clearPinWaitTimeout()
                 reportCreationResultUnknown = true
             }
-            #if canImport(engine_mobileFFI)
+            #if canImport(harness_runtimeFFI)
                 // A pending (or queued) approval sheet is a promise to resolve
                 // ITS request against the source that is about to be torn
                 // down. Dropped outright rather than routed through
@@ -945,7 +945,7 @@ final class LocalAppsStore {
             errorMessage = String(localized: "local_apps_error_create_in_progress")
             return false
         }
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             let requestID = UUID().uuidString
             // Armed BEFORE the command goes out: `send` awaits the engine, and
             // the engine can emit `AppCreated` from inside that call. Arming
@@ -1162,7 +1162,7 @@ final class LocalAppsStore {
     }
 
     func getDetails(appID: String) async {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             if let detailsTask = detailsTasks[appID] {
                 await detailsTask.value
                 return
@@ -1181,7 +1181,7 @@ final class LocalAppsStore {
     /// `nil`/0 replaces the cached page; a later offset appends to it. The
     /// reply arrives out-of-band as `AppSessionsChanged`.
     func listSessions(appID: String, offset: UInt64? = nil, limit: UInt32? = nil) async {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             let normalizedOffset = offset ?? 0
             if pendingSessionRequestOffsets[appID] == normalizedOffset { return }
             pendingSessionRequestOffsets[appID] = normalizedOffset
@@ -1198,7 +1198,7 @@ final class LocalAppsStore {
     }
 
     func start(appID: String) async {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             switch runtimes[appID] {
             case .running:
                 return
@@ -1222,19 +1222,19 @@ final class LocalAppsStore {
     }
 
     func stop(appID: String) async {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             _ = await send(.stopApp(appId: appID))
         #endif
     }
 
     func restart(appID: String) async {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             _ = await send(.restartApp(appId: appID))
         #endif
     }
 
     func executeBridge(_ request: LocalAppBridgeRequest) async {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             runtimeLastUsedAt[request.appID] = .now
             let operation: AppBridgeOperationDto?
             switch (request.namespace, request.operation) {
@@ -1321,7 +1321,7 @@ final class LocalAppsStore {
         pendingPermission = nil
         pendingPermissionSource = nil
 
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             // However this one resolves — including the early return on a denied
             // UI request — the next queued request has to reach the sheet.
             defer { presentNextPermission() }
@@ -1370,7 +1370,7 @@ final class LocalAppsStore {
     func resolvePendingDependencyChangeConfirmation(_ approved: Bool) async {
         guard let prompt = pendingDependencyChangeConfirmation else { return }
         pendingDependencyChangeConfirmation = nil
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             defer { presentNextDependencyChangeConfirmation() }
             _ = await send(
                 .resolveAppDependencyChangeConfirmation(
@@ -1382,7 +1382,7 @@ final class LocalAppsStore {
     }
 
     func resetPermissions(appID: String) async -> Bool {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             approvedUIAutomation[appID] = nil
             return await send(.resetAppPermissions(appId: appID))
         #else
@@ -1391,13 +1391,13 @@ final class LocalAppsStore {
     }
 
     func listCheckpoints(appID: String) async {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             _ = await send(.listAppCheckpoints(appId: appID))
         #endif
     }
 
     func restore(appID: String, checkpointID: String) async -> Bool {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             return await send(.restoreAppCheckpoint(appId: appID, checkpointId: checkpointID))
         #else
             return false
@@ -1405,7 +1405,7 @@ final class LocalAppsStore {
     }
 
     func delete(appID: String) async -> Bool {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             // Journal first: if the process dies after Rust removes the app but
             // before WebKit finishes, the next authoritative apps snapshot will
             // retry the exact identified data-store removal.
@@ -1465,7 +1465,7 @@ final class LocalAppsStore {
         mutation(&apps[index])
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         private func hydratedSummary(for record: AppRecordDto) -> LocalAppSummary {
             var summary = LocalAppsProtocolAdapter.app(record)
             summary.runtimeProfileStatus = runtimeProfileStatuses[record.id]
@@ -1496,7 +1496,7 @@ final class LocalAppsStore {
         }
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         private func handleAppEvent(_ event: AppEventDto) {
             switch event {
             case let .appCreated(record, requestId):
@@ -2095,7 +2095,7 @@ final class LocalAppsStore {
         }
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         private func send(_ command: ClientCommand) async -> Bool {
             guard let submitCommand else {
                 errorMessage = String(localized: "local_apps_error_engine_not_connected")

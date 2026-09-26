@@ -30,12 +30,12 @@ use telemetry::pii::Verified;
 use telemetry::tengu::mcp::CommandInlinePayload;
 // Only the `cfg(test)` recorder below names this constant. Imported behind
 // `cfg(test)` so the lib target carries no unused import for it.
+use permission::computer_access::ComputerAccessExchange;
 #[cfg(test)]
 use telemetry::tengu::mcp::COMMAND_INLINE;
 use tokio_util::sync::CancellationToken;
+use tool_api::ask_user_question::AskUserQuestionExchange;
 use tool_workflow::{UltracodeGate, WorkflowSizeGuideline};
-use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
-use tui_core::computer_access_bridge::ComputerAccessExchange;
 use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::{RunningAgentStatus, TurnEvent};
@@ -161,7 +161,7 @@ pub enum ChatOutcome {
     /// `TurnEvent::SystemNotice` — mirroring claude-code's `refreshActivePlugins`.
     ReloadPlugins,
     /// The user submitted a `!`-prefixed bash-mode command. The caller runs it
-    /// through the sandboxed [`tui_core::bash_runner::BashRunner`] (no LLM
+    /// through the sandboxed [`tool_api::bash_runner::BashRunner`] (no LLM
     /// turn) and folds the captured output back through
     /// `TurnEvent::BashOutput`.
     RunBash(String),
@@ -9211,7 +9211,7 @@ mod tests {
     /// shape a background `/fusion` panel's ask carries in production —
     /// `RegistryToolInvoker::with_background_owned(true)` is the only thing
     /// that sets `background_owned` on a dispatch
-    /// (`apps/engine-desktop/src/lib.rs`'s `fusion_invoker` wiring), and it
+    /// (`harness-runtime/src/desktop/mod.rs`'s `fusion_invoker` wiring), and it
     /// carries no `worker` attribution: `worker` comes from
     /// `ctx.can_show_permission_prompts` (tool_invoker_impl.rs), which is
     /// `false` for every pool-spawned one-shot subagent — Fusion panels
@@ -9248,12 +9248,12 @@ mod tests {
         let (resp_tx, resp_rx) = oneshot::channel();
         (
             AskUserQuestionExchange {
-                questions: vec![tui_core::ask_user_question_bridge::AskQuestion {
+                questions: vec![tool_api::ask_user_question::AskQuestion {
                     question: "Pick one?".to_string(),
                     header: "Choice".to_string(),
                     options: vec![
-                        tui_core::ask_user_question_bridge::AskOption::new("Alpha", "first"),
-                        tui_core::ask_user_question_bridge::AskOption::new("Beta", "second"),
+                        tool_api::ask_user_question::AskOption::new("Alpha", "first"),
+                        tool_api::ask_user_question::AskOption::new("Beta", "second"),
                     ],
                     multi_select: false,
                 }],
@@ -9266,17 +9266,17 @@ mod tests {
 
     fn computer_access_exchange() -> (
         ComputerAccessExchange,
-        oneshot::Receiver<tui_core::computer_access_bridge::ComputerAccessResponse>,
+        oneshot::Receiver<permission::computer_access::ComputerAccessResponse>,
     ) {
         let (resp_tx, resp_rx) = oneshot::channel();
         (
             ComputerAccessExchange {
-                request: tui_core::computer_access_bridge::ComputerAccessRequest {
+                request: permission::computer_access::ComputerAccessRequest {
                     reason: "automate chat".to_string(),
-                    apps: vec![tui_core::computer_access_bridge::RequestedApp {
+                    apps: vec![permission::computer_access::RequestedApp {
                         label: "com.example.app".to_string(),
                     }],
-                    tier: tui_core::computer_access_bridge::AccessTier::Full,
+                    tier: permission::computer_access::AccessTier::Full,
                     clipboard_read: false,
                     clipboard_write: false,
                     system_key_combos: false,

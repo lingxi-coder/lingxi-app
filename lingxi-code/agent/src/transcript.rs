@@ -191,7 +191,7 @@ impl AgentTranscriptWriter {
 /// appended after earlier rejections and do not depend on row ordering.
 pub(crate) fn restore_thinking_recovery(
     history: &mut Vec<ConversationMessage>,
-    scope: &llm_client::thinking_scope::ThinkingRecoveryScope,
+    scope: &llm_runtime::thinking_scope::ThinkingRecoveryScope,
 ) {
     history.retain(|message| {
         if let ConversationMessage::System {
@@ -260,12 +260,12 @@ mod tests {
                     .message
             })
             .collect();
-        let scope = llm_client::thinking_scope::ThinkingRecoveryScope::default();
+        let scope = llm_runtime::thinking_scope::ThinkingRecoveryScope::default();
         restore_thinking_recovery(&mut history, &scope);
         assert_eq!(history.len(), 2);
         assert_eq!(scope.messages().get(&old.id()), Some(&1));
         assert!(!scope.messages().contains_key(&fresh.id()));
-        llm_client::model::thinking_signature::strip_marked_conversation_thinking(
+        llm_runtime::model::thinking_signature::strip_marked_conversation_thinking(
             &mut history,
             &scope.messages(),
         );

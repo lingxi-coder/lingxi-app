@@ -95,7 +95,7 @@ impl FileSystem for InMemoryFs {
 /// terminates and the persistent runner parks for the next message. An
 /// `Err` entry surfaces as an API error (driving the runner to `Failed`).
 struct ScriptedApiClient {
-    responses: StdMutex<VecDeque<Result<llm_client::LlmResponse, String>>>,
+    responses: StdMutex<VecDeque<Result<llm_runtime::LlmResponse, String>>>,
     calls: AtomicUsize,
 }
 
@@ -127,7 +127,7 @@ impl SubagentApiClient for GatedApiClient {
         _system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.histories.lock().unwrap().push(messages);
         if call == 0 {
@@ -169,28 +169,28 @@ impl SubagentApiClient for ScriptedApiClient {
         _system: Option<&str>,
         _messages: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let next = self.responses.lock().unwrap().pop_front();
         match next {
             Some(Ok(resp)) => Ok(resp),
-            Some(Err(msg)) => Err(llm_client::LlmError::InvalidRequest { message: msg }),
+            Some(Err(msg)) => Err(llm_runtime::LlmError::InvalidRequest { message: msg }),
             None => Ok(text_response("(idle)")),
         }
     }
 }
 
-fn text_response(text: &str) -> llm_client::LlmResponse {
-    llm_client::LlmResponse {
+fn text_response(text: &str) -> llm_runtime::LlmResponse {
+    llm_runtime::LlmResponse {
         id: "mock".into(),
         model: "mock".into(),
-        content: vec![llm_client::ContentBlock::Text {
+        content: vec![llm_runtime::ContentBlock::Text {
             text: text.into(),
             cache_control: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
-        usage: llm_client::Usage::default(),
+        usage: llm_runtime::Usage::default(),
         cost: None,
         provider_metadata: serde_json::Value::Null,
     }
@@ -2350,10 +2350,7 @@ async fn teammate_plan_file_comes_from_the_published_identity() {
         .unwrap();
     api.first_started.acquire().await.unwrap().forget();
     let requester = platform_api::teammate_plan::requester(&agent_id).unwrap();
-    let expected = plans_dir.join(format!(
-        "brave-quiet-otter-agent-{}.md",
-        agent_id.as_uuid()
-    ));
+    let expected = plans_dir.join(format!("brave-quiet-otter-agent-{}.md", agent_id.as_uuid()));
     assert_eq!(
         requester.writable_plan_path(),
         Some(expected.to_str().unwrap())

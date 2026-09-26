@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+client-presentation = { path = "../../client-presentation" }
 tool-api = { path = "../../tool-api" }
-tui-core = { path = "../../tui-core" }
 platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }

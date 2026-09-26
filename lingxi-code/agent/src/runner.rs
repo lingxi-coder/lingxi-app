@@ -22,7 +22,7 @@
 
 use crate::context::SubagentContext;
 use futures::StreamExt;
-use llm_client::{LlmError, LlmEvent};
+use llm_runtime::{LlmError, LlmEvent};
 use platform_api::WorkflowQueryWatchdog;
 use protocol::{AgentId, ConversationMessage, MessageId};
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,7 @@ pub enum SubagentEvent {
         /// Wire usage from the FINAL model response (the spawner translates this
         /// into `platform_api::SubagentUsage` + the result-level token total). The
         /// legacy stub path has no real round-trips and emits `Usage::default()`.
-        usage: llm_client::Usage,
+        usage: llm_runtime::Usage,
         /// Number of tool-use blocks executed across the run (claude
         /// `totalToolUseCount`). `0` on the stub path.
         total_tool_use_count: u64,
@@ -68,7 +68,7 @@ pub enum SubagentEvent {
         last_request_id: Option<String>,
         /// Cross-turn summed usage. Distinct from [`Self::Completed::usage`].
         #[serde(default)]
-        cumulative_usage: llm_client::Usage,
+        cumulative_usage: llm_runtime::Usage,
         /// `false` only on the CC 2.1.207 `api_error_partial` SALVAGE path
         /// (Finding [9]): a mid-stream provider error whose already-produced
         /// text is recovered as a `Completed` result instead of discarding
@@ -97,7 +97,7 @@ pub enum SubagentEvent {
         /// every path that made no real round-trip (spawn-time failure, the
         /// legacy stub).
         #[serde(default)]
-        cumulative_usage: llm_client::Usage,
+        cumulative_usage: llm_runtime::Usage,
     },
     /// Agent was cancelled by the host.
     Killed {
@@ -315,10 +315,10 @@ pub async fn run_subagent(
         .agent_definition
         .cache_ttl
         .is_some_and(crate::definition::AgentCacheTtl::wants_1h);
-    llm_client::scope_agent_cache_ttl(
+    llm_runtime::scope_agent_cache_ttl(
         wants_1h_cache,
-        llm_client::thinking_scope::scope_thinking_recovery(
-            llm_client::thinking_scope::ThinkingRecoveryScope::default(),
+        llm_runtime::thinking_scope::scope_thinking_recovery(
+            llm_runtime::thinking_scope::ThinkingRecoveryScope::default(),
             platform_api::session_flags::scope_non_interactive_session(
                 non_interactive,
                 run_subagent_inner(ctx, event_rx, out_tx),
@@ -691,7 +691,7 @@ fn build_completed_result(
 }
 
 /// CC 2.1.207 subagent api-error classification (`CTy` / `zho`
-/// `AgentApiErrorTerminationError`). Maps an [`llm_client::LlmError`] surfaced by
+/// `AgentApiErrorTerminationError`). Maps an [`llm_runtime::LlmError`] surfaced by
 /// a mid-stream round-trip to `(errorKind, api_error_text)` when it is an API
 /// TERMINATION whose kind is in `CTy = {rate_limit, overloaded, server_error}` —
 /// the only kinds CC recovers as `api_error_partial` (every other kind rethrows
@@ -703,8 +703,8 @@ fn build_completed_result(
 /// here (it lives in the orchestrator's `errors.ts` port, which the agent crate
 /// cannot depend on); a mid-stream 429 is surfaced with the server-error text,
 /// which is what the finalize path yields.
-fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &'static str)> {
-    use llm_client::LlmError;
+fn classify_api_termination(e: &llm_runtime::LlmError) -> Option<(&'static str, &'static str)> {
+    use llm_runtime::LlmError;
     match e {
         LlmError::Overloaded { .. } => Some((
             "overloaded",
@@ -750,9 +750,9 @@ fn classify_api_termination(e: &llm_client::LlmError) -> Option<(&'static str, &
         // guessing.
         LlmError::StreamInterrupted { message }
             if message
-                .starts_with(llm_client::model::stream_watchdog::STREAM_IDLE_TIMEOUT_PREFIX)
+                .starts_with(llm_runtime::model::stream_watchdog::STREAM_IDLE_TIMEOUT_PREFIX)
                 || message
-                    .starts_with(llm_client::model::stream_watchdog::STREAM_SUSPENDED_PREFIX) =>
+                    .starts_with(llm_runtime::model::stream_watchdog::STREAM_SUSPENDED_PREFIX) =>
         {
             None
         }
@@ -931,24 +931,26 @@ async fn build_preload_messages(
     Ok(out)
 }
 
-/// Translate llm-client content blocks into protocol content blocks.
+/// Translate llm-runtime content blocks into protocol content blocks.
 ///
 /// Mirrors the orchestrator's `translate_response_blocks`: `Text` /
 /// `ToolCall` / `Reasoning` map through; server-side and other variants
 /// are dropped.
-fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protocol::ContentBlock> {
+fn translate_response_blocks(content: &[llm_runtime::ContentBlock]) -> Vec<protocol::ContentBlock> {
     content
         .iter()
         .filter_map(|b| match b {
-            llm_client::ContentBlock::Text { text, .. }
-            | llm_client::ContentBlock::TextJsUtf16 { text, .. } => {
+            llm_runtime::ContentBlock::ProviderContent { protocol, value } => Some(protocol::ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
+
+            llm_runtime::ContentBlock::Text { text, .. }
+            | llm_runtime::ContentBlock::TextJsUtf16 { text, .. } => {
                 Some(protocol::ContentBlock::Text { text: text.clone() })
             }
-            llm_client::ContentBlock::ToolCall { id, name, input } => {
+            llm_runtime::ContentBlock::ToolCall { id, name, input } => {
                 // (cc 2.1.218 `jYd`) Same literal-`\uXXXX` repair the orchestrator
                 // applies — a subagent's tool inputs must be normalized too.
                 let (input, _stats) =
-                    llm_client::unicode_repair::repair_tool_input(name, input);
+                    llm_runtime::unicode_repair::repair_tool_input(name, input);
                 Some(protocol::ContentBlock::ToolUse {
                     // The provider-issued id IS the canonical ToolUseId (byte
                     // parity with claude-code); the provider_id sidecar stays None.
@@ -958,7 +960,7 @@ fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protoc
                     provider_id: None,
                 })
             }
-            llm_client::ContentBlock::Reasoning { text, signature } => {
+            llm_runtime::ContentBlock::Reasoning { text, signature } => {
                 Some(protocol::ContentBlock::Thinking {
                     thinking: text.clone(),
                     signature: signature.clone(),
@@ -966,24 +968,24 @@ fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protoc
             }
             // Low-frequency server-side blocks: PRESERVED verbatim for resume/replay
             // byte parity (matches orchestrator::turn_loop::translate_response_blocks).
-            llm_client::ContentBlock::RedactedThinking { data } => {
+            llm_runtime::ContentBlock::RedactedThinking { data } => {
                 Some(protocol::ContentBlock::RedactedThinking { data: data.clone() })
             }
-            llm_client::ContentBlock::ServerToolUse { id, name, input } => {
+            llm_runtime::ContentBlock::ServerToolUse { id, name, input } => {
                 Some(protocol::ContentBlock::ServerToolUse {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
                 })
             }
-            llm_client::ContentBlock::ConnectorText {
+            llm_runtime::ContentBlock::ConnectorText {
                 connector_text,
                 signature,
             } => Some(protocol::ContentBlock::ConnectorText {
                 connector_text: connector_text.clone(),
                 signature: signature.clone(),
             }),
-            llm_client::ContentBlock::AdvisorToolResult {
+            llm_runtime::ContentBlock::AdvisorToolResult {
                 tool_use_id,
                 content,
                 is_error,
@@ -993,12 +995,12 @@ fn translate_response_blocks(content: &[llm_client::ContentBlock]) -> Vec<protoc
                 is_error: *is_error,
             }),
             // Input-only / non-output variants remain dropped on the response path.
-            llm_client::ContentBlock::Image { .. }
-            | llm_client::ContentBlock::ImageUrl { .. }
-            | llm_client::ContentBlock::Document { .. }
-            | llm_client::ContentBlock::ToolResult { .. }
+            llm_runtime::ContentBlock::Image { .. }
+            | llm_runtime::ContentBlock::ImageUrl { .. }
+            | llm_runtime::ContentBlock::Document { .. }
+            | llm_runtime::ContentBlock::ToolResult { .. }
             // cache_edits is a request-only directive — never in a response.
-            | llm_client::ContentBlock::CacheEdits { .. } => None,
+            | llm_runtime::ContentBlock::CacheEdits { .. } => None,
         })
         .collect()
 }
@@ -1073,7 +1075,7 @@ async fn flush_transcript(
 fn publish_prompt_hook_transcript(
     ctx: &SubagentContext,
     history: &[protocol::ConversationMessage],
-    usage: &llm_client::Usage,
+    usage: &llm_runtime::Usage,
 ) {
     if let Some(executor) = &ctx.hook_executor {
         executor.publish_agent_prompt_transcript(
@@ -1103,7 +1105,7 @@ async fn emit_failed(
     written: &mut usize,
     agent_id: AgentId,
     error: String,
-    cumulative_usage: llm_client::Usage,
+    cumulative_usage: llm_runtime::Usage,
 ) {
     flush_transcript(transcript, history, written).await;
     if let Some(writer) = transcript {
@@ -1337,7 +1339,7 @@ async fn run_subagent_loop(
     let history = &mut live_hook_transcript.messages;
     if let Some(resumed) = &ctx.resumed_history {
         history.extend(resumed.iter().cloned());
-        if let Some(scope) = llm_client::thinking_scope::current() {
+        if let Some(scope) = llm_runtime::thinking_scope::current() {
             crate::transcript::restore_thinking_recovery(history, &scope);
         }
     } else {
@@ -1395,7 +1397,7 @@ async fn run_subagent_loop(
                     .send(SubagentEvent::Failed {
                         agent_id,
                         error: format!("Could not preload agent skills: {error}"),
-                        cumulative_usage: llm_client::Usage::default(),
+                        cumulative_usage: llm_runtime::Usage::default(),
                     })
                     .await;
                 return;
@@ -1428,7 +1430,7 @@ async fn run_subagent_loop(
         .with_correlation_id(ctx.correlation_id.clone())
     });
     if let (Some(writer), Some(scope)) =
-        (transcript.as_ref(), llm_client::thinking_scope::current())
+        (transcript.as_ref(), llm_runtime::thinking_scope::current())
     {
         let writer = writer.clone();
         scope.set_recorder(std::sync::Arc::new(move |messages| {
@@ -1492,8 +1494,8 @@ async fn run_subagent_loop(
     // is overwritten — never accumulated — each turn.
     let run_start = std::time::Instant::now();
     let mut total_tool_use_count: u64 = 0;
-    let mut last_usage = llm_client::Usage::default();
-    let mut cumulative_usage = llm_client::Usage::default();
+    let mut last_usage = llm_runtime::Usage::default();
+    let mut cumulative_usage = llm_runtime::Usage::default();
     let mut usage_complete = true;
     // claude `agentMessages.length` — assistant turns produced across the run
     // (one per round-trip) — and the FINAL turn's provider request id (claude
@@ -1761,13 +1763,13 @@ async fn run_subagent_loop(
                         let retryable_body = retryable_body.clone();
                         move |event| {
                             if retry_response_body {
-                                let local_content = |block: &llm_client::ContentBlock| {
+                                let local_content = |block: &llm_runtime::ContentBlock| {
                                     matches!(
                                         block,
-                                        llm_client::ContentBlock::Text { .. }
-                                            | llm_client::ContentBlock::Reasoning { .. }
-                                            | llm_client::ContentBlock::RedactedThinking { .. }
-                                            | llm_client::ContentBlock::ToolCall { .. }
+                                        llm_runtime::ContentBlock::Text { .. }
+                                            | llm_runtime::ContentBlock::Reasoning { .. }
+                                            | llm_runtime::ContentBlock::RedactedThinking { .. }
+                                            | llm_runtime::ContentBlock::ToolCall { .. }
                                     )
                                 };
                                 let has_server_content = match event {
@@ -2898,7 +2900,7 @@ async fn run_subagent_loop(
 async fn park_foreground_owner(
     ctx: &SubagentContext,
     result: &serde_json::Value,
-    usage: &llm_client::Usage,
+    usage: &llm_runtime::Usage,
     tool_uses: u64,
     duration_ms: u64,
 ) -> bool {
@@ -3053,12 +3055,12 @@ async fn run_subagent_stub(
                             result: serde_json::json!({ "reason": reason }),
                             // Stub path makes no real round-trips: no usage / no
                             // tool-use count / no measured duration.
-                            usage: llm_client::Usage::default(),
+                            usage: llm_runtime::Usage::default(),
                             total_tool_use_count: 0,
                             total_duration_ms: 0,
                             assistant_message_count: 0,
                             last_request_id: None,
-                            cumulative_usage: llm_client::Usage::default(),
+                            cumulative_usage: llm_runtime::Usage::default(),
                             usage_complete: true,
                         })
                         .await;
@@ -3078,12 +3080,12 @@ async fn run_subagent_stub(
                 agent_id,
                 result: serde_json::json!({ "reason": "eof_graceful" }),
                 // Stub path makes no real round-trips.
-                usage: llm_client::Usage::default(),
+                usage: llm_runtime::Usage::default(),
                 total_tool_use_count: 0,
                 total_duration_ms: 0,
                 assistant_message_count: 0,
                 last_request_id: None,
-                cumulative_usage: llm_client::Usage::default(),
+                cumulative_usage: llm_runtime::Usage::default(),
                 usage_complete: true,
             })
             .await;
@@ -3092,13 +3094,13 @@ async fn run_subagent_stub(
             .send(SubagentEvent::Failed {
                 agent_id,
                 error: "run_subagent: event channel closed without terminal state".into(),
-                cumulative_usage: llm_client::Usage::default(),
+                cumulative_usage: llm_runtime::Usage::default(),
             })
             .await;
     }
 }
 
-fn accumulate_usage(acc: &mut llm_client::Usage, turn: &llm_client::Usage) {
+fn accumulate_usage(acc: &mut llm_runtime::Usage, turn: &llm_runtime::Usage) {
     acc.billable_tokens.input = acc
         .billable_tokens
         .input

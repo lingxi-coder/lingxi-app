@@ -113,7 +113,8 @@ export const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen
   const presentation = commandPresentation(item);
   const collapsible = commandShouldCollapse(item);
   const expanded = !collapsible || open;
-  const commandColor = commandPaletteColor(item.name, t.dark);
+  const isGoal = commandName(item) === 'goal';
+  const commandColor = isGoal ? t.text3 : commandPaletteColor(item.name, t.dark);
   const accent = item.isError ? t.danger : commandColor;
   const style = {
     '--command-accent': accent,
@@ -135,10 +136,10 @@ export const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen
       style={style}
     >
       <div className="command-result-header">
-        <CommandIcon command={item.name} size={30} />
+        {isGoal ? <Icon name="goal" size={20} color={accent} /> : <CommandIcon command={item.name} size={30} />}
         <div className="command-result-heading">
           <strong data-error={item.isError || undefined}>
-            {item.isError && <Icon name="shieldAlert" size={14} />}{presentation.title}
+            {item.isError && <Icon name="shieldAlert" size={14} />}{isGoal ? (item.isError ? 'Goal unavailable' : 'Goal') : presentation.title}
           </strong>
           <span className="command-result-name mono">{label}</span>
         </div>

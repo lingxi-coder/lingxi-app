@@ -2593,10 +2593,10 @@ pub trait OrchestratorHandle: Send + Sync {
     /// it is parity with what the desktop's own sibling slash commands
     /// currently scan: `SkillsHandler` (`/skills`) is constructed with
     /// `additional_skill_dirs: Vec::new()` HARDCODED
-    /// (`apps/engine-desktop/src/lib.rs:3351-3354`), and its
+    /// (`harness-runtime/src/desktop/mod.rs:3351-3354`), and its
     /// `ReloadSkillsHandler` counterpart (`/reload-skills`) is wired to
     /// `DesktopRepoRootReloader.registered_roots`
-    /// (`apps/engine-desktop/src/lib.rs:4919`, `:4964-4977`), which starts
+    /// (`harness-runtime/src/desktop/mod.rs:4919`, `:4964-4977`), which starts
     /// empty and has no desktop-side call site that ever grows it. If either
     /// of those two construction sites starts supplying real roots, this
     /// method's tiers must be revisited alongside them — until then, do NOT
@@ -2769,7 +2769,7 @@ pub trait OrchestratorHandle: Send + Sync {
     async fn list_available_models(&self) -> Vec<String>;
 
     /// Richer model listing for the grouped `/model` picker (display name +
-    /// provider label + wire id), sourced from the llm-client catalog. The
+    /// provider label + wire id), sourced from the llm-runtime catalog. The
     /// DEFAULT returns empty so existing impls/mocks compile unchanged; only the
     /// live `ConversationOrchestrator` overrides it.
     async fn list_model_listings(&self) -> Vec<ModelListing> {
@@ -3215,7 +3215,7 @@ pub enum OutputEvent {
     },
     /// The latest unified rate-limit header snapshot, forwarded by the
     /// orchestrator after a completed API call ONLY when it differs from the
-    /// previously emitted snapshot (emit-on-change). (llm-client future-work
+    /// previously emitted snapshot (emit-on-change). (llm-runtime future-work
     /// batch 3, Task 8.) Each field is parsed from an
     /// `anthropic-ratelimit-unified-*` response header (claude-code
     /// `claudeAiLimits.ts`); `None` means the provider did not send that
@@ -3264,7 +3264,7 @@ pub enum OutputEvent {
     /// response (unlike the warning-gated [`Self::RateLimit`] fields) and
     /// consumed by the statusline command input (`StatusLine.tsx:50-65`). A
     /// window is `None` when the response lacked either of its two headers.
-    /// (llm-client future-work batch 5, Task 1.)
+    /// (llm-runtime future-work batch 5, Task 1.)
     RawUtilization {
         /// `anthropic-ratelimit-unified-5h-utilization` (0-1 fraction).
         five_hour_utilization: Option<f64>,
@@ -3586,7 +3586,7 @@ pub trait OutputStream: Send + Sync {
 
     /// Emit the latest unified rate-limit header snapshot.
     ///
-    /// Added by llm-client future-work batch 3 (Task 8). Called by the
+    /// Added by llm-runtime future-work batch 3 (Task 8). Called by the
     /// orchestrator turn drivers after each completed API call whose
     /// rate-limit snapshot DIFFERS from the previously emitted one — the
     /// orchestrator dedupes, so sinks only ever see changes. The first nine
@@ -3649,7 +3649,7 @@ pub trait OutputStream: Send + Sync {
 
     /// Push a raw-utilization snapshot.
     ///
-    /// Added by llm-client future-work batch 5 (Task 1). Called by the
+    /// Added by llm-runtime future-work batch 5 (Task 1). Called by the
     /// orchestrator turn drivers after every completed API call — unlike the
     /// deduped, warning-gated [`Self::emit_rate_limit`], this mirrors
     /// claude-code's `rawUtilization` tracking (`claudeAiLimits.ts:145-179`),

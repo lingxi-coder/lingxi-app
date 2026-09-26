@@ -10,6 +10,7 @@ import {
   selectedModelIdsForPickerSettings,
 } from '../../../bridge/modelCatalog';
 import { ghostButtonStyle } from './ghostButton';
+import { ProviderRegion } from './ProviderRegion';
 
 /**
  * The nine provider `type` values `settings.providers` accepts. Read from
@@ -298,6 +299,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
 
   return (
     <>
+      {!editorOpen && !importOpen && <ProviderRegion bridge={bridge} snapshot={snapshot} editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} onLayerLockChange={onLayerLockChange} />}
       {(editorOpen || importOpen) && <button disabled={busy} style={{ ...ghostButtonStyle(t), marginBottom: 16 }} onClick={() => { resetForm(); setImportOpen(false); setImportText(''); setEntries(null); setImportError(null); }}>← 返回 Provider 列表</button>}
       {!editorOpen && !importOpen && <Card title="自定义 Provider">
         {providersRowState?.kind === 'merged' && (

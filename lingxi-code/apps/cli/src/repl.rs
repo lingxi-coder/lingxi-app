@@ -43,8 +43,10 @@ impl TaskNotificationWake for ReplTaskWake {
             .map_err(|error| error.to_string())
     }
     async fn user_interrupt(&self) {
-        engine_desktop::loop_tools::cancel_dynamic_loop_on_user_abort(&self.loop_host.scheduler)
-            .await;
+        harness_runtime::desktop::loop_tools::cancel_dynamic_loop_on_user_abort(
+            &self.loop_host.scheduler,
+        )
+        .await;
     }
     async fn wait(&self) {
         // Subscribe before checking; a completion already pending at prompt
@@ -455,7 +457,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     // `screens/REPL.tsx:3930-3940`). Resolve the cheap registration gate ONCE
     // at startup — when no `Notification` hook subscribes, the notifier's timer
     // is gated off (`arm_timer() == None`) so the repl input loop never arms a
-    // useless timer (mirrors the `ConfigChange` watcher gate in engine-desktop).
+    // useless timer (mirrors the `ConfigChange` watcher gate in harness-runtime::desktop).
     // The concrete `Arc<ConversationOrchestrator>` is required for
     // `fire_notification` (the `OrchestratorHandle` trait does not expose it),
     // and it is in scope here exactly like the `SessionEnd` fire below.
@@ -580,7 +582,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     loop_output.abort();
 
     // hooks (session lifecycle): fire `SessionEnd` at the CLI session-end seam,
-    // mirroring how `engine_desktop::build` fires `fire_session_start("startup")`
+    // mirroring how `harness_runtime::desktop::build` fires `fire_session_start("startup")`
     // at boot. `orch` is the CONCRETE `Arc<ConversationOrchestrator>` (the
     // `OrchestratorHandle` trait does NOT expose `fire_session_end`), so we fire
     // here where the concrete type is still in scope, AFTER the repl loop breaks.

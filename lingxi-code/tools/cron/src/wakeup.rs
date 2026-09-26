@@ -85,7 +85,7 @@ pub trait WakeupScheduler: Send + Sync {
 
 /// Shared, set-once handle to the live [`WakeupScheduler`].
 ///
-/// The `ScheduleWakeupTool` is constructed deep inside `engine_desktop::build`
+/// The `ScheduleWakeupTool` is constructed deep inside `harness_runtime::desktop::build`
 /// (via `tool_cron::register_all_with_auth`), BEFORE the per-connection
 /// `MessageQueueManager` + `RuntimeSpawner` exist at `boot::assemble`. So the
 /// tool holds an empty cell whose clone is surfaced on `DesktopRuntime`; the

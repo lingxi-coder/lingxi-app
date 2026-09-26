@@ -17,6 +17,7 @@ import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguratio
 import { TerminalManager } from './terminal.js';
 import { HostController } from './host.js';
 import { HostNotifier } from './notifications.js';
+import { notificationPresentation } from './notificationPresentation.js';
 import { DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic } from './host-utils.js';
 import { SettingsStore } from './settings.js';
 import { requestMicrophoneAccess } from './microphoneAccess.js';
@@ -215,7 +216,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
    */
   const showNotification = (title: string, body: string, ref?: SessionRef): void => {
     if (!Notification.isSupported()) return;
-    const notification = new Notification({ title, body });
+    const notification = new Notification(notificationPresentation(title, body, ref));
     notification.on('click', () => {
       if (ref) void host?.restoreProjectSession(ref.projectPath, ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error)));
       const window = BrowserWindow.getAllWindows()[0];

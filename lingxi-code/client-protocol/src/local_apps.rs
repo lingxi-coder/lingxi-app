@@ -1027,7 +1027,7 @@ pub enum AppAuthorizationDecisionDto {
 //     — but then only PUSHES the entry when `active` is true. An explicitly
 //     disabled plugin is dropped from the returned vec entirely.
 //   * The boot path (`engine-desktop::discover_plugin_set`,
-//     `apps/engine-desktop/src/lib.rs:4854`) feeds exactly that vec to
+//     `harness-runtime/src/desktop/mod.rs:4854`) feeds exactly that vec to
 //     `PluginManager::enable`, so a plugin resolved to `false` is never
 //     inserted into the manager's map at all.
 //   * `PluginState::Disabled` is constructed at exactly ONE site,
@@ -1207,7 +1207,7 @@ pub enum LocalAppVerificationStatusDto {
     // history now, and this paragraph must not be read as saying the variant
     // is unreachable. It has exactly one producer:
     //
-    //   `apps/engine-mobile/src/local_apps_host.rs:2016-2036` -- the
+    //   `harness-runtime/src/mobile/local_apps_host.rs:2016-2036` -- the
     //   managed-MCP inventory loop (which also feeds
     //   `VerificationSummaryChanged`) marks ONE app `Failed` with
     //   `code: Some("active_state_corrupt")` when its active catalog's

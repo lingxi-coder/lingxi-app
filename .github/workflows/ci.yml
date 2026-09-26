@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
       - name: Zero-OS-deps check
@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - name: cargo check (the build iOS and Android actually need)
         working-directory: lingxi-code
         run: cargo check -p client-protocol --features uniffi
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - name: cargo test
         working-directory: lingxi-code
         # `--no-fail-fast` is load-bearing, not tidiness. Without it cargo stops
@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - name: Exercise real Linux PTY and process groups
         working-directory: lingxi-code
         env:
@@ -100,7 +100,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - name: Exercise real ConPTY and kill-on-close Job Object
         working-directory: lingxi-code
         env:
@@ -111,7 +111,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
       - name: cargo fmt
@@ -132,7 +132,7 @@ jobs:
           - x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
       - name: Install cross
@@ -156,7 +156,7 @@ jobs:
           - aarch64-apple-ios
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
       - name: Install cross
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: x86_64-unknown-linux-musl
       - name: Install musl-tools
@@ -197,13 +197,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # cargo-deny's metadata pass must PARSE every manifest in the lock,
-      # including the WASI-only `wit-bindgen 0.57.x` whose manifest declares
-      # `edition = "2024"` — unparseable by the workspace MSRV (1.82). Pin a
-      # newer toolchain for THIS job only (the workspace still BUILDS on 1.82
-      # because that WASI branch never compiles for the host target). See the
-      # TOOLCHAIN NOTE header in lingxi-code/deny.toml (M10 F3-00).
-      - uses: dtolnay/rust-toolchain@1.85.0
+      # Use the workspace toolchain for both builds and dependency metadata.
+      - uses: dtolnay/rust-toolchain@1.94.0
       - name: Install cargo-deny
         # >= 0.19 required so the bundled `rustsec` parser understands the
         # CVSS-4.0 advisory entries now present in the live RUSTSEC DB.
@@ -215,7 +210,7 @@ jobs:
       - name: cargo deny check
         working-directory: lingxi-code
         # Uses lingxi-code/deny.toml for license/advisory/duplicate-version
-        # policy. Runs under the 1.85.0 toolchain pinned above so the metadata
+        # policy. Runs under the workspace toolchain so the metadata
         # pass can parse the edition2024 WASI manifest. The architectural
         # dependency-graph rules (design §8.1) are a separate step below.
         run: cargo deny check
@@ -238,7 +233,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - name: cargo test parity_* drivers
         working-directory: lingxi-code
         run: |

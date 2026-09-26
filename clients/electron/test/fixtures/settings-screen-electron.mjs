@@ -20,6 +20,25 @@ async function waitFor(webContents, expression, timeout = 8000) {
   throw new Error(`timed out waiting for: ${expression}`);
 }
 
+async function runProviderRegionScenario(window, webContents) {
+  const run = (expression) => webContents.executeJavaScript(expression);
+  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{},project:{},local:{}},{providerRegion:"international"})');
+  await run('window.__settingsScreenTest.selectPage("custom-providers")');
+  await waitFor(webContents, `Boolean(document.querySelector('[aria-label="模型使用区域"]'))`);
+  const initial = await run('document.body.textContent.includes("当前运行：国际") && !document.body.textContent.includes("应用并重新连接")');
+  await run(`(() => { const select=document.querySelector('[aria-label="模型使用区域"]'); select.value='china_mainland'; select.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+  await waitFor(webContents, 'window.__settingsScreenTest.state().lastEngineSettingsPatch?.patch.providerRegion === "china_mainland"');
+  const saved = await run('window.__settingsScreenTest.state().lastEngineSettingsPatch');
+  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{providerRegion:"china_mainland"},project:{},local:{}},{providerRegion:"international"})');
+  await waitFor(webContents, 'document.body.textContent.includes("应用并重新连接")');
+  const pending = await run('document.body.textContent.includes("当前运行：国际")');
+  const folder=process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+  if(folder){window.showInactive(); await delay(350); mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'provider-region.png'),(await window.capturePage()).toPNG()); window.hide();}
+  await run(`[...document.querySelectorAll('button')].find(b=>b.textContent==='应用并重新连接').click()`);
+  await waitFor(webContents, 'window.__settingsScreenTest.state().navCalls.includes("restart")');
+  return {initial,saved,pending,restarted:true};
+}
+
 async function runLayerSwitcherScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("permissions")');
   const permissions = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
@@ -713,7 +732,8 @@ async function main() {
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
-    const result = scenario === 'configuration-navigation' ? await runConfigurationNavigation(window, webContents)
+    const result = scenario === 'provider-region' ? await runProviderRegionScenario(window, webContents)
+      : scenario === 'configuration-navigation' ? await runConfigurationNavigation(window, webContents)
       : scenario === 'provider-session-isolation' ? await runProviderSessionIsolation(webContents)
       : scenario === 'custom-providers' ? await runCustomProvidersScenario(window, webContents)
       : scenario === 'visual-admin' ? await runVisualAdminScenario(window, webContents)

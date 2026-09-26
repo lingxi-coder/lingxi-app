@@ -6,6 +6,10 @@ import com.lingxi.code.R
 
 @Composable
 internal fun settingsLabel(text: String): String = when (text) {
+    "Model region" -> stringResource(R.string.settings_provider_region)
+    "International" -> stringResource(R.string.settings_provider_region_international)
+    "China mainland" -> stringResource(R.string.settings_provider_region_china)
+    "Defaults to international. Apply saved settings when idle to change the running region." -> stringResource(R.string.settings_provider_region_help)
     "Personal" -> stringResource(R.string.settings_parity_personal)
     "Models & services" -> stringResource(R.string.settings_parity_models_services)
     "Coding" -> stringResource(R.string.settings_parity_coding)

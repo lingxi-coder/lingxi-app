@@ -477,7 +477,7 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
         return finish_print_branch(runtime, argv.max_budget_usd, sink, code).await;
     }
 
-    // Structured-output branch (`--json-schema`): `engine_desktop::build` wires
+    // Structured-output branch (`--json-schema`): `harness_runtime::desktop::build` wires
     // the StructuredOutput tool and requests forced tool choice. Providers that
     // reject that request still receive an explicit prompt requirement here. We
     // validate the captured result against the schema and retry. Only active when
@@ -703,8 +703,8 @@ async fn run_stream_json_print_inner(
     // list_agents already sorts; no re-sort needed.
 
     // Plugins: no clean surface from the CLI Runtime — the PluginManager is
-    // local to engine-desktop and not re-exported. Stays [] with this note.
-    // The plugin name/path/source would need engine_desktop::DesktopRuntime
+    // local to harness-runtime::desktop and not re-exported. Stays [] with this note.
+    // The plugin name/path/source would need harness_runtime::desktop::DesktopRuntime
     // to expose a `loaded_plugins()` accessor (follow-up).
     let plugins: Vec<(String, String, String)> = vec![];
 
@@ -1390,11 +1390,11 @@ async fn dispatch_control_request(
                 return;
             }
             let thinking = match max_tokens {
-                Some(0) => llm_client::model::thinking::ThinkingConfig::Disabled,
+                Some(0) => llm_runtime::model::thinking::ThinkingConfig::Disabled,
                 Some(budget_tokens) => {
-                    llm_client::model::thinking::ThinkingConfig::Enabled { budget_tokens }
+                    llm_runtime::model::thinking::ThinkingConfig::Enabled { budget_tokens }
                 }
-                None => llm_client::model::thinking::ThinkingConfig::Adaptive,
+                None => llm_runtime::model::thinking::ThinkingConfig::Adaptive,
             };
             orchestrator.set_thinking_config(thinking);
             orchestrator.set_thinking_display(field("thinking_display").and_then(Value::as_str));
@@ -3235,7 +3235,7 @@ async fn run_slash_command_with_budget(
 }
 
 /// Extract a `local_fusion` task id from `/fusion`'s `Handled` display text
-/// (`"{task_id}  {preset}  {scope}"`, `apps/engine-desktop/src/
+/// (`"{task_id}  {preset}  {scope}"`, `harness-runtime/src/desktop/
 /// fusion_command.rs`), if the display looks like one. `local_fusion` ids
 /// are `'f'` + 8 lowercase-base36 chars (`tasks::id::TaskType::id_prefix`) —
 /// unique among every other task-id prefix in the workspace.
@@ -4950,7 +4950,7 @@ fn recover_from_failed_switch(current: Option<uuid::Uuid>) -> SwitchRecovery {
 /// Seed an already-built orchestrator's in-memory [`lingxi_core::SessionState`] from
 /// a resumed transcript.
 ///
-/// The fresh-mount path builds the orchestrator via `engine_desktop::build`,
+/// The fresh-mount path builds the orchestrator via `harness_runtime::desktop::build`,
 /// which hands back an `Arc<ConversationOrchestrator>` with a fresh, empty
 /// session — it has no resume parameter. Rather than introduce a second,
 /// divergent resumed-orchestrator construction path, we rebuild the

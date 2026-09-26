@@ -21,9 +21,9 @@
 //!   proxy: each device operation becomes one identity-scoped
 //!   [`client_protocol::events::ClientEvent::AudioRequest`] awaiting the client's
 //!   `AudioResponse` (the microphone/speaker live in Electron, not in the engine).
-//! - [`boot`] — S2: env/argv → [`engine_desktop::DesktopConfig`] resolution and
+//! - [`boot`] — S2: env/argv → [`harness_runtime::desktop::DesktopConfig`] resolution and
 //!   the assembly of a fully-bound [`server::BridgeConnection`] from a real
-//!   [`engine_desktop::DesktopRuntime`], shared by the binary and its tests.
+//!   [`harness_runtime::desktop::DesktopRuntime`], shared by the binary and its tests.
 
 #![forbid(unsafe_code)]
 // Documentation debt, not a decision that docs do not matter: this crate had

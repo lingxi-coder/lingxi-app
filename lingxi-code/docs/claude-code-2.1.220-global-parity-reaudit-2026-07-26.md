@@ -139,7 +139,7 @@ LingXi 的主 assembler 仍按 Claude Code 2.1.183 的完整模板锁定：
 Claude Code 2.1.219 已把 `claude-opus-5` 加为默认 Opus，支持 1M context 和 fast mode。LingXi 当前：
 
 - `orchestrator/src/config.rs:21-25`：默认仍是 `claude-opus-4-8`
-- `llm-client/src/provider_settings.rs:718-734`：模型表没有 `claude-opus-5`
+- `llm-runtime/src/provider_settings.rs:718-734`：模型表没有 `claude-opus-5`
 - `apps/cli/src/run.rs:1462-1479`：capability 分支没有 Opus 5
 - `orchestrator/src/prompt/env_meta.rs:29-45`：marketing name 没有 Opus 5
 - `orchestrator/src/prompt/env_meta.rs:118-138`：knowledge cutoff 没有 Opus 5
@@ -248,7 +248,7 @@ LingXi：
 
 **结论：Confirmed / Medium**
 
-`llm-client/src/prompt_format.rs:29-36` 明确记录：`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 虽已实现，但 LingXi assembler 从未输出它。因此 global static/dynamic cache path 总是退回 org default。
+`llm-runtime/src/prompt_format.rs:29-36` 明确记录：`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 虽已实现，但 LingXi assembler 从未输出它。因此 global static/dynamic cache path 总是退回 org default。
 
 影响：
 
@@ -317,7 +317,7 @@ LingXi `mcp/src/enterprise_policy.rs:188-191` 仍直接使用通用 process-env 
 
 OAuth 底层注释称浏览器打开失败时 CLI 可打印 URL fallback：
 
-- `llm-client/src/oauth/anthropic/handle.rs:310-325`
+- `llm-runtime/src/oauth/anthropic/handle.rs:310-325`
 
 但顶层命令只打印 “Opening browser to sign in…” 并把 OAuth error 直接变成 login failure：
 
@@ -369,7 +369,7 @@ LingXi `tui/src/bottom_pane/mod.rs:1303-1317` 的 Left 分支只移动 composer 
 
 - `apps/engine-desktop/src/lib.rs:2983-2984`：FD-inherited key 和 managed-context OAuth forcing 未进入 `DesktopConfig`
 - `apps/engine-desktop/src/lib.rs:4913-4919`：build hot path 的 enterprise state 先固定为 false
-- `llm-client/src/service.rs:835-849`：后续通过 shared snapshot 部分补偿
+- `llm-runtime/src/service.rs:835-849`：后续通过 shared snapshot 部分补偿
 
 这不是“完全没实现”，但最早请求和特殊认证来源仍可能与 2.1.220 不一致。
 

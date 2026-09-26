@@ -19,7 +19,7 @@
 //! `LINGXI_*` spelling is read first and the upstream `CLAUDE_CODE_*` spelling
 //! is honored as a fallback so existing corporate configs keep working.
 //! `NODE_EXTRA_CA_CERTS` is a Node/OpenSSL standard variable and is kept
-//! verbatim (matching `sandbox-runtime`'s `CA_TRUST_VARS` and `llm-client`'s
+//! verbatim (matching `sandbox-runtime`'s `CA_TRUST_VARS` and `llm-runtime`'s
 //! SSL hint copy).
 //!
 //! ## Node → rustls translation

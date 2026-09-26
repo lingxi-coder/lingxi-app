@@ -5,7 +5,7 @@ use cost::{
     CostSessionScope, CostState, CostTracker, PricingCatalog, ProviderId,
     TokenUsage as CostTokenUsage, Usage as CostUsage,
 };
-use llm_client::{
+use llm_runtime::{
     Capabilities, ContentBlock as LlmContentBlock, LlmError, MediaRoute, ProviderId as LlmProvider,
     ResolvedRoute, TokenUsage as LlmTokenUsage, Usage as LlmUsage,
 };
@@ -122,8 +122,10 @@ impl crate::conversation::StreamingApiClient for PatchBarrierStream {
         _: Option<&str>,
         _: Vec<ConversationMessage>,
         _: Vec<serde_json::Value>,
-    ) -> Result<futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, LlmError>>, LlmError>
-    {
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, LlmError>>,
+        LlmError,
+    > {
         use crate::test_support_stream::{content_block_start_tool_use, input_json_delta};
         use futures::StreamExt;
         let call = self.calls.fetch_add(1, Ordering::AcqRel);
@@ -535,7 +537,7 @@ async fn abort_at_owned_cost_wait<T>(
     );
 }
 
-fn batched_orchestrator(response: llm_client::LlmResponse) -> ConversationOrchestrator {
+fn batched_orchestrator(response: llm_runtime::LlmResponse) -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![response])),
@@ -695,7 +697,7 @@ impl OrchestratorApiClient for VisionApi {
         _system: Option<&str>,
         _msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_client::LlmResponse, LlmError> {
+    ) -> Result<llm_runtime::LlmResponse, LlmError> {
         Err(LlmError::Transport {
             message: "main request must not run before vision cancellation".into(),
         })
@@ -730,7 +732,7 @@ fn vision_route() -> MediaRoute {
         profile_name: "anthropic".into(),
         request_model: model.into(),
         display_model: model.into(),
-        pricing_model: llm_client::PricingModelRef {
+        pricing_model: llm_runtime::PricingModelRef {
             pricing_provider_id: LlmProvider::AnthropicFirstParty,
             billing_model: model.into(),
             request_model: model.into(),
@@ -977,7 +979,7 @@ fn refusing_durability(session_id: SessionId) -> Arc<CostTracker> {
     )
 }
 
-fn answer_response(text: &str) -> llm_client::LlmResponse {
+fn answer_response(text: &str) -> llm_runtime::LlmResponse {
     let mut response = mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.into(),
@@ -1096,7 +1098,7 @@ impl OrchestratorApiClient for BlockingVisionApi {
         _system: Option<&str>,
         _msgs: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_client::LlmResponse, LlmError> {
+    ) -> Result<llm_runtime::LlmResponse, LlmError> {
         Err(LlmError::Transport {
             message: "the main request must not run: vision is cancelled first".into(),
         })

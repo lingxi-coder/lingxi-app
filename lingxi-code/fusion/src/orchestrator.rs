@@ -3490,7 +3490,7 @@ pub(crate) fn judge_input_token_estimate(prompt: &str, panels: &[PanelInternal])
             );
         }
     }
-    llm_client::model::count_tokens::approximate_tokens_for_bytes(bytes)
+    llm_runtime::model::count_tokens::approximate_tokens_for_bytes(bytes)
 }
 
 fn add_cost_usage(acc: &mut FusionUsage, usage: &cost::Usage, calls: u32) {

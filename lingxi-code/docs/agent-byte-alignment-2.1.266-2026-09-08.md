@@ -465,7 +465,7 @@ subsystem port in its own right rather than a gap in this one.
 checked against `k_e`) onto the definition. The port has no prompt-cache TTL
 concept ANYWHERE: no request-side `cache_control` breakpoint selection, no
 `1h`/`5m` ephemeral setting — the `cache_control` occurrences in
-`llm-client/src/stream_accumulator.rs` are response parsing. Adding the field
+`llm-runtime/src/stream_accumulator.rs` are response parsing. Adding the field
 costs an edit to all 74 `AgentDefinition` literals and produces a value nothing
 can ever read, which is the "named, computed, never wired" shape this audit
 exists to find, not to create. It becomes worth porting the moment a cache-TTL

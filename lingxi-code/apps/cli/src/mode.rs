@@ -122,8 +122,9 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
             .any(|c| c.source == msgqueue::QueueSource::PromptInput && !c.is_meta)
         {
             if let Some(host) = self.state.loop_host.get() {
-                host.state
-                    .veto_tick(engine_desktop::loop_tools::LoopFoldVeto::ForeignUserInput);
+                host.state.veto_tick(
+                    harness_runtime::desktop::loop_tools::LoopFoldVeto::ForeignUserInput,
+                );
                 host.state.invalidate_noop_streak();
             }
         }
@@ -1672,13 +1673,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // write) and the OAuth/Copilot device-flow are async, so the action is
     // spawned back onto the captured runtime handle. Results land in the
     // transcript via `TurnEvent::SystemNotice` on the shared `turn_tx`.
+    let connect_catalog_registry = tui_build.runtime.catalog_registry.clone();
     let on_connect_action = move |action: tui::bottom_pane::ConnectAction| {
         let key_store = connect_key_store.clone();
+        let catalog_registry = connect_catalog_registry.clone();
         let oauth = connect_oauth.clone();
         let copilot = connect_copilot.clone();
         let tx = connect_turn_tx.clone();
         connect_handle.spawn(async move {
-            run_connect_action(action, key_store, oauth, copilot, tx).await;
+            run_connect_action(catalog_registry, action, key_store, oauth, copilot, tx).await;
         });
     };
     // (/permissions async effect) The editor returns a `PermissionAction`
@@ -2537,8 +2540,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
         Arc::new(move || {
             let host = host.clone();
             runtime.spawn(async move {
-                engine_desktop::loop_tools::cancel_dynamic_loop_on_user_abort(&host.scheduler)
-                    .await;
+                harness_runtime::desktop::loop_tools::cancel_dynamic_loop_on_user_abort(
+                    &host.scheduler,
+                )
+                .await;
             });
         }) as Arc<dyn Fn() + Send + Sync>
     };
@@ -2950,7 +2955,7 @@ fn reload_plural(count: usize, noun: &str) -> String {
 /// `/plugin` (`N error(s) during load. Run /plugin for details.`) — a prior
 /// port revision misrouted this to `/doctor`, which has no plugin-load detail
 /// to show.
-fn reload_summary_body(c: &engine_desktop::PluginRefreshCounts) -> String {
+fn reload_summary_body(c: &harness_runtime::desktop::PluginRefreshCounts) -> String {
     // claude-code labels plugin COMMANDS "skills" in this line
     // (`n(command_count, 'skill')`); `agent_count`/hooks/MCP/LSP mirror the
     // same result struct.
@@ -2973,7 +2978,7 @@ fn reload_summary_body(c: &engine_desktop::PluginRefreshCounts) -> String {
 }
 
 /// (`/reload-plugins`) Apply pending plugin enable/disable changes to the LIVE
-/// session: [`engine_desktop::PluginRuntime::refresh`] re-reads the on-disk
+/// session: [`harness_runtime::desktop::PluginRuntime::refresh`] re-reads the on-disk
 /// enabled set and reconciles it into the engine's retained registries
 /// (commands/hooks/agents/MCP/LSP swap in place), then this reports the component
 /// tallies via `TurnEvent::SystemNotice`. Mirrors claude-code's
@@ -2981,7 +2986,7 @@ fn reload_summary_body(c: &engine_desktop::PluginRefreshCounts) -> String {
 /// `Reloaded: N plugins · N skills · …`). A `None` runtime means plugins are
 /// disabled for the session (safe mode / `--bare`).
 async fn run_reload_plugins(
-    plugin_runtime: Option<std::sync::Arc<engine_desktop::PluginRuntime>>,
+    plugin_runtime: Option<std::sync::Arc<harness_runtime::desktop::PluginRuntime>>,
     command_registry: std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
 ) {
@@ -3785,10 +3790,11 @@ fn finish_stored_key_connect(
             ),
             is_error: false,
         });
-        engine_desktop::spawn_fusion_catalog_refresh();
     } else {
         let _ = turn_tx.send(TurnEvent::SystemNotice {
-            body: engine_desktop::fusion_credential_restart_required_message(credential_id),
+            body: harness_runtime::desktop::fusion_credential_restart_required_message(
+                credential_id,
+            ),
             is_error: true,
         });
     }
@@ -3802,6 +3808,7 @@ fn finish_stored_key_connect(
 /// blocking ratatui loop; this async tail does the real persistence/network
 /// work off the render thread.
 pub(crate) async fn run_connect_action(
+    catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
     action: tui::bottom_pane::ConnectAction,
     key_store: Arc<secret::CredentialManager>,
     oauth: Arc<dyn command_core::OAuthConnectDriver>,
@@ -3837,13 +3844,19 @@ pub(crate) async fn run_connect_action(
                     } else {
                         provider_id.as_str()
                     };
-                    let routable =
-                        engine_desktop::publish_fusion_catalog_credential(credential_id).await;
+                    let routable = harness_runtime::desktop::publish_fusion_catalog_credential(
+                        &catalog_registry,
+                        credential_id,
+                    )
+                    .await;
                     // A false result means the credential was persisted, but
                     // this process was assembled with an incompatible fixed
                     // auth route. The helper deliberately omits both the
                     // readiness event and the otherwise-useful detached scan.
                     finish_stored_key_connect(&provider_id, credential_id, routable, &turn_tx);
+                    if routable {
+                        harness_runtime::desktop::spawn_fusion_catalog_refresh(&catalog_registry);
+                    }
                 }
                 Err(e) => notice(format!("✗ Failed to store key: {e}"), true),
             }
@@ -3919,14 +3932,14 @@ pub(crate) async fn run_connect_action(
 /// polling.
 fn forward_desktop_workflow_event(
     turn_tx: &tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
-    event: engine_desktop::DesktopWorkflowEvent,
+    event: harness_runtime::desktop::DesktopWorkflowEvent,
     status_run_id: Option<String>,
 ) {
     use tui_core::multiagent::{MultiAgentEvent, WorkflowProgressEvent};
     use tui_core::orchestrator_bridge::TurnEvent;
 
     match event {
-        engine_desktop::DesktopWorkflowEvent::Progress {
+        harness_runtime::desktop::DesktopWorkflowEvent::Progress {
             task_id,
             run_id,
             progress,
@@ -3949,7 +3962,7 @@ fn forward_desktop_workflow_event(
                 },
             )));
         }
-        engine_desktop::DesktopWorkflowEvent::Status { task_id, status } => {
+        harness_runtime::desktop::DesktopWorkflowEvent::Status { task_id, status } => {
             let _ = turn_tx.send(TurnEvent::MultiAgent(
                 MultiAgentEvent::WorkflowStatusChanged {
                     task_id,
@@ -3971,7 +3984,7 @@ fn forward_desktop_workflow_event(
 }
 
 fn spawn_workflow_event_forwarder(
-    mut src: tokio::sync::mpsc::UnboundedReceiver<engine_desktop::DesktopWorkflowEvent>,
+    mut src: tokio::sync::mpsc::UnboundedReceiver<harness_runtime::desktop::DesktopWorkflowEvent>,
     registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
 ) {
@@ -3981,16 +3994,18 @@ fn spawn_workflow_event_forwarder(
 
     tokio::spawn(async move {
         let mut known_runs: HashMap<String, String> = HashMap::new();
-        let mut pending_events: HashMap<String, Vec<engine_desktop::DesktopWorkflowEvent>> =
-            HashMap::new();
+        let mut pending_events: HashMap<
+            String,
+            Vec<harness_runtime::desktop::DesktopWorkflowEvent>,
+        > = HashMap::new();
         while let Some(event) = src.recv().await {
             match event {
-                engine_desktop::DesktopWorkflowEvent::Progress {
+                harness_runtime::desktop::DesktopWorkflowEvent::Progress {
                     task_id,
                     run_id,
                     progress,
                 } => {
-                    let current = engine_desktop::DesktopWorkflowEvent::Progress {
+                    let current = harness_runtime::desktop::DesktopWorkflowEvent::Progress {
                         task_id: task_id.clone(),
                         run_id: run_id.clone(),
                         progress,
@@ -4025,17 +4040,20 @@ fn spawn_workflow_event_forwarder(
                     }
                     forward_desktop_workflow_event(&turn_tx, current, None);
                 }
-                engine_desktop::DesktopWorkflowEvent::Status { task_id, status } => {
+                harness_runtime::desktop::DesktopWorkflowEvent::Status { task_id, status } => {
                     if known_runs.contains_key(&task_id) {
                         let status_run_id = known_runs.get(&task_id).cloned();
                         forward_desktop_workflow_event(
                             &turn_tx,
-                            engine_desktop::DesktopWorkflowEvent::Status { task_id, status },
+                            harness_runtime::desktop::DesktopWorkflowEvent::Status {
+                                task_id,
+                                status,
+                            },
                             status_run_id,
                         );
                         continue;
                     }
-                    let current = engine_desktop::DesktopWorkflowEvent::Status {
+                    let current = harness_runtime::desktop::DesktopWorkflowEvent::Status {
                         task_id: task_id.clone(),
                         status,
                     };
@@ -4149,11 +4167,9 @@ fn spawn_status_permission_forwarder(
 }
 
 fn spawn_status_ask_user_question_forwarder(
-    mut src: tokio::sync::mpsc::Receiver<
-        tui_core::ask_user_question_bridge::AskUserQuestionExchange,
-    >,
+    mut src: tokio::sync::mpsc::Receiver<tool_api::ask_user_question::AskUserQuestionExchange>,
     reg: Arc<crate::agents_registry::SessionRegistration>,
-) -> tokio::sync::mpsc::Receiver<tui_core::ask_user_question_bridge::AskUserQuestionExchange> {
+) -> tokio::sync::mpsc::Receiver<tool_api::ask_user_question::AskUserQuestionExchange> {
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
         while let Some(mut exchange) = src.recv().await {
@@ -4177,9 +4193,9 @@ fn spawn_status_ask_user_question_forwarder(
 }
 
 fn spawn_status_computer_access_forwarder(
-    mut src: tokio::sync::mpsc::Receiver<tui_core::computer_access_bridge::ComputerAccessExchange>,
+    mut src: tokio::sync::mpsc::Receiver<permission::computer_access::ComputerAccessExchange>,
     reg: Arc<crate::agents_registry::SessionRegistration>,
-) -> tokio::sync::mpsc::Receiver<tui_core::computer_access_bridge::ComputerAccessExchange> {
+) -> tokio::sync::mpsc::Receiver<permission::computer_access::ComputerAccessExchange> {
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
         while let Some(mut exchange) = src.recv().await {
@@ -4355,7 +4371,8 @@ async fn build_session_info(
     // Managed `availableModels` allowlist for the `/model` picker filter (parity
     // 2.1.207 H-BIN-08): reads the same policy tier the boot default-model
     // constraint uses. `None` (default install) leaves the picker unfiltered.
-    let (model_allowlist, model_overrides) = engine_desktop::managed_model_allowlist().await;
+    let (model_allowlist, model_overrides) =
+        harness_runtime::desktop::managed_model_allowlist().await;
 
     SessionInfo {
         doctor: DoctorInfo::capture(mcp_configured, mcp_connected),
@@ -4599,7 +4616,8 @@ async fn read_status_line_configs(
     source_scope: (bool, bool, bool),
 ) -> ResolvedStatusLineConfigs {
     let (lingxi_home, project_dir) = settings_dirs();
-    let managed_tiers = engine_desktop::settings_watch::managed_settings_raw_tiers().await;
+    let managed_tiers =
+        harness_runtime::desktop::settings_watch::managed_settings_raw_tiers().await;
     let global_config_path = migrations::global_config::global_config_path();
     let workspace_trusted = workspace_is_trusted(global_config_path.as_deref(), &project_dir);
     read_status_line_configs_from(
@@ -5457,7 +5475,7 @@ mod tests {
     /// detail.
     #[test]
     fn reload_summary_routes_load_errors_to_plugin_not_doctor() {
-        let counts = engine_desktop::PluginRefreshCounts {
+        let counts = harness_runtime::desktop::PluginRefreshCounts {
             enabled: 2,
             commands: 3,
             agents: 1,
@@ -5479,7 +5497,7 @@ mod tests {
 
     #[test]
     fn reload_summary_omits_the_error_line_when_nothing_failed() {
-        let counts = engine_desktop::PluginRefreshCounts {
+        let counts = harness_runtime::desktop::PluginRefreshCounts {
             enabled: 1,
             ..Default::default()
         };
@@ -5848,8 +5866,10 @@ mod tests {
         let mut boot = std::collections::BTreeMap::new();
         boot.insert("openrouter".to_string(), false);
         let availability = Arc::new(std::sync::RwLock::new(boot));
-        engine_desktop::register_fusion_catalog_refresher(
-            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+        let catalog_registry = harness_runtime::desktop::FusionCatalogRegistry::default();
+        harness_runtime::desktop::register_fusion_catalog_refresher(
+            &catalog_registry,
+            harness_runtime::desktop::FusionCatalogRefresher::for_keychain_profiles(
                 availability.clone(),
                 credentials.clone(),
                 &["openrouter"],
@@ -5858,6 +5878,7 @@ mod tests {
 
         let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel();
         run_connect_action(
+            catalog_registry.clone(),
             ConnectAction::StoreKey {
                 provider_id: "openrouter".to_string(),
                 key: "sk-or-test-789".to_string(),
@@ -5952,7 +5973,7 @@ filter in THIS process — /model and the turn loop already route it"
                 self.reads_while_stalled.fetch_add(1, Ordering::SeqCst);
                 // Safety valve: never park longer than the test could
                 // possibly need, so a failing assertion cannot wedge the
-                // process-wide refresher registry for sibling tests.
+                // scoped refresher registry after this test.
                 for _ in 0..400 {
                     if self.released.load(Ordering::SeqCst) {
                         return;
@@ -6095,8 +6116,10 @@ filter in THIS process — /model and the turn loop already route it"
         let mut boot = std::collections::BTreeMap::new();
         boot.insert(PROVIDER.to_string(), false);
         let availability = Arc::new(std::sync::RwLock::new(boot));
-        engine_desktop::register_fusion_catalog_refresher(
-            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+        let catalog_registry = harness_runtime::desktop::FusionCatalogRegistry::default();
+        harness_runtime::desktop::register_fusion_catalog_refresher(
+            &catalog_registry,
+            harness_runtime::desktop::FusionCatalogRefresher::for_keychain_profiles(
                 availability.clone(),
                 credentials.clone(),
                 &[PROVIDER],
@@ -6106,6 +6129,7 @@ filter in THIS process — /model and the turn loop already route it"
         // --- arm 1: ConnectAction::StoreKey -------------------------------
         let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut store_key = tokio::spawn(run_connect_action(
+            catalog_registry.clone(),
             ConnectAction::StoreKey {
                 provider_id: PROVIDER.to_string(),
                 key: "sk-stalled-broker".to_string(),
@@ -6158,6 +6182,7 @@ provider to Fusion's catalog filter"
         // not start a second refresh when that wrapper returns.
         let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel();
         let oauth = tokio::spawn(run_connect_action(
+            catalog_registry.clone(),
             ConnectAction::OAuth {
                 provider_id: PROVIDER.to_string(),
             },

@@ -80,7 +80,7 @@ impl crate::api::SubagentApiClient for Api {
         _: Option<&str>,
         _: Vec<protocol::ConversationMessage>,
         _: Vec<Value>,
-    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
         self.entered.notify_one();
         if let Some(both) = &self.both {
             both.wait().await;
@@ -88,16 +88,16 @@ impl crate::api::SubagentApiClient for Api {
         if self.park {
             std::future::pending::<()>().await;
         }
-        Ok(llm_client::LlmResponse {
+        Ok(llm_runtime::LlmResponse {
             id: "admitted".into(),
             model: "mock".into(),
-            content: vec![llm_client::ContentBlock::Text {
+            content: vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_client::Usage::default(),
+            usage: llm_runtime::Usage::default(),
             cost: None,
             provider_metadata: Value::Null,
         })

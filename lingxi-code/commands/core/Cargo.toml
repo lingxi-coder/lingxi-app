@@ -53,11 +53,11 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 # Batch-1/2 tests bind handlers to a mock orchestrator handle; compact/cost
-# tests construct a bare ToolRegistry + cost/compaction/llm-client deps; the
+# tests construct a bare ToolRegistry + cost/compaction/llm-runtime deps; the
 # /init template test checks the OLD_INIT_PROMPT sha256 via sha2.
 orchestrator = { path = "../../orchestrator" }
 tool-api = { path = "../../tool-api" }
-llm-client = { path = "../../llm-client" }
+llm-runtime = { path = "../../llm-runtime" }
 compaction = { path = "../../compaction" }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

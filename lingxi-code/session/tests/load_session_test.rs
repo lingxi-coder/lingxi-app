@@ -16,7 +16,7 @@
 use platform_api::FileSystem;
 use platform_posix::fs::PosixFileSystem;
 use serde_json::json;
-use session::jsonl::{LoaderError, load_session, project_dir_name};
+use session::jsonl::{load_session, project_dir_name, LoaderError};
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -1059,9 +1059,7 @@ async fn preserved_segment_keeps_parallel_results_and_split_blocks_only_from_lat
         } else {
             assert_eq!(
                 ids,
-                [
-                    "boundary", "summary", "head", "block-a", "block-b", "result-a", "result-b"
-                ]
+                ["boundary", "summary", "head", "block-a", "block-b", "result-a", "result-b"]
             );
             for message in messages.iter().filter(|m| m.message_type == "assistant") {
                 for field in [

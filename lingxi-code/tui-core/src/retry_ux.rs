@@ -13,9 +13,9 @@
 //!   is REPLACED by the status-page link (binary `if(fe&&me)Te=D2n().trim()`,
 //!   where `D2n` → `" If it persists, check https://status.claude.com."`).
 //!
-//! The live per-attempt retry surface IS wired: `llm-client`'s retry info
+//! The live per-attempt retry surface IS wired: `llm-runtime`'s retry info
 //! reaches `OrchestratorBridge::emit_api_retry`
-//! (`apps/engine-desktop/src/lib.rs:3912`), which sends `TurnEvent::ApiRetry`
+//! (`harness-runtime/src/desktop/mod.rs:3912`), which sends `TurnEvent::ApiRetry`
 //! to the TUI. These functions are the render half of that path.
 //!
 //! (An earlier revision of this note said the surface was NOT wired, and that

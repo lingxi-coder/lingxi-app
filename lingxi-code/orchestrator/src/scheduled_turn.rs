@@ -4,7 +4,7 @@ pub(crate) struct ScheduledSettings {
     pub model: String,
     pub provider: String,
     pub reasoning: platform_api::ReasoningSelection,
-    pub thinking: llm_client::model::thinking::ThinkingConfig,
+    pub thinking: llm_runtime::model::thinking::ThinkingConfig,
     pub effort: Option<serde_json::Value>,
 }
 tokio::task_local! { pub(crate) static SETTINGS: ScheduledSettings; }

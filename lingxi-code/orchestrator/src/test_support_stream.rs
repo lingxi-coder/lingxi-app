@@ -17,7 +17,7 @@
 use crate::conversation::StreamingApiClient;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
-use llm_client::{
+use llm_runtime::{
     ContentBlock as LlmContentBlock, ContentDelta, LlmError, LlmEvent, LlmResponse,
     MessageDeltaPayload, Usage,
 };

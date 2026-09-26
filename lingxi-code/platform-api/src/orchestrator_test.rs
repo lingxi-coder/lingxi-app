@@ -311,7 +311,7 @@ mod tests {
         );
     }
 
-    // ── OutputEvent::RateLimit (llm-client future-work batch 3, Task 8) ──────
+    // ── OutputEvent::RateLimit (llm-runtime future-work batch 3, Task 8) ──────
 
     /// The additive `RateLimit` variant round-trips through the enum's
     /// default serde conventions (externally tagged, named struct fields),
@@ -404,7 +404,7 @@ mod tests {
         .await;
     }
 
-    // ── OutputEvent::RawUtilization (llm-client future-work batch 5, Task 1) ─
+    // ── OutputEvent::RawUtilization (llm-runtime future-work batch 5, Task 1) ─
 
     /// The additive `RawUtilization` variant constructs and round-trips
     /// through the enum's default serde conventions (externally tagged,

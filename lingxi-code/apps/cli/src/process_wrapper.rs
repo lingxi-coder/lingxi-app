@@ -43,7 +43,7 @@ pub(crate) async fn configure(
         Some(raw)
     } else {
         let managed_layers: Vec<lingxi_core::settings::SettingsJson> =
-            engine_desktop::settings_watch::managed_settings_raw_tiers()
+            harness_runtime::desktop::settings_watch::managed_settings_raw_tiers()
                 .await
                 .into_iter()
                 .filter_map(|raw| serde_json::from_str(&raw).ok())

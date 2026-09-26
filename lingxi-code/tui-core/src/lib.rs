@@ -16,11 +16,8 @@
 #![allow(missing_docs)]
 
 pub mod active_turn;
-pub mod ask_user_question_bridge;
 pub mod background_detach;
-pub mod bash_runner;
 pub mod collapse;
-pub mod computer_access_bridge;
 pub mod error;
 pub mod key_hint;
 pub mod left_arrow_gesture;
@@ -30,7 +27,7 @@ pub mod multiagent;
 pub mod orchestrator_bridge;
 pub mod permission_bridge;
 pub mod recent_models;
-pub mod render;
+pub use client_presentation::render;
 pub mod retry_ux;
 pub mod status_line_command;
 pub mod telemetry;
@@ -38,4 +35,4 @@ pub mod terminal_setup;
 pub mod theme;
 pub mod theme_detect;
 pub mod theme_persist;
-pub mod tool_display;
+pub use client_presentation::tool_display;

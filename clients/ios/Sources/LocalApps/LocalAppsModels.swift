@@ -138,7 +138,7 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     /// `None` arm writes `updated_at_ms`, and a record that already carries a
     /// pin is refused with `InvalidRequest` (`local-apps/src/service.rs`) —
     /// and the boot sweep `continue`s past every already-pinned record before
-    /// it would mint one (`apps/engine-mobile/src/host.rs`). So this is NOT a
+    /// it would mint one (`harness-runtime/src/mobile/host.rs`). So this is NOT a
     /// bump on every launch. It is at most ONE bump, and only for a shell
     /// whose create died before it could pin: on the next launch the backfill
     /// pins it, `updatedAt` jumps to now, and a window anchored there restarts
@@ -338,7 +338,7 @@ struct LocalAppVerificationSummary: Hashable, Sendable {
     /// The verification sentence to put on screen.
     ///
     /// The four values `code` can take are the four production emitters in
-    /// `apps/engine-mobile/src/local_apps_host.rs`: `needs_setup`,
+    /// `harness-runtime/src/mobile/local_apps_host.rs`: `needs_setup`,
     /// `needs_revalidation`, `verification_unavailable`, and NO code at all
     /// for a clean pass. The `nil` case is the one that matters most — it is
     /// the state that otherwise still renders the engine's English.

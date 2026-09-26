@@ -35,6 +35,13 @@ pub enum MessageRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
+    /// Provider-native replay data. Never executed as an application tool.
+    ProviderContent {
+        /// Communication protocol which owns this payload.
+        protocol: String,
+        /// Unmodified provider content, including signed/encrypted reasoning.
+        value: Value,
+    },
     /// Plain UTF-8 text.
     Text {
         /// The text body.
@@ -125,7 +132,7 @@ pub enum ContentBlock {
     },
     /// Anthropic server-side tool invocation (advisor / `web_search`).
     ///
-    /// Wire tag `server_tool_use`. Mirrors `llm_client::ContentBlock::ServerToolUse`
+    /// Wire tag `server_tool_use`. Mirrors `llm_runtime::ContentBlock::ServerToolUse`
     /// exactly so it round-trips back to the API on the next request.
     ServerToolUse {
         /// Server-issued tool-use identifier.
@@ -139,7 +146,7 @@ pub enum ContentBlock {
     /// Anthropic Connector-Text block.
     ///
     /// Wire tag `connector_text`. Field name `connector_text` mirrors
-    /// `llm_client::ContentBlock::ConnectorText` exactly (NOT `text`).
+    /// `llm_runtime::ContentBlock::ConnectorText` exactly (NOT `text`).
     ConnectorText {
         /// Connector-emitted text payload.
         #[serde(default)]
@@ -151,7 +158,7 @@ pub enum ContentBlock {
     /// Advisor tool result mirrored from the server.
     ///
     /// Wire tag `advisor_tool_result`. Mirrors
-    /// `llm_client::ContentBlock::AdvisorToolResult` exactly.
+    /// `llm_runtime::ContentBlock::AdvisorToolResult` exactly.
     AdvisorToolResult {
         /// Identifier of the originating `server_tool_use` block.
         tool_use_id: String,

@@ -708,7 +708,7 @@ impl ConversationOrchestrator {
     }
 
     /// Set the mid-turn input source on a SHARED orchestrator (`&self`), so the
-    /// bridge can wire its per-connection queue adapter AFTER `engine_desktop::build`
+    /// bridge can wire its per-connection queue adapter AFTER `harness_runtime::desktop::build`
     /// returns the orchestrator as an `Arc`. Set-once: a second call is ignored
     /// (the first wiring wins). See [`Self::with_mid_turn_input`].
     pub fn set_mid_turn_input(
@@ -1180,7 +1180,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
             .clone()
     }
 
-    /// Task 8 (llm-client future-work batch 3): forward the API client's
+    /// Task 8 (llm-runtime future-work batch 3): forward the API client's
     /// latest unified rate-limit header snapshot to
     /// [`platform_api::OutputStream::emit_rate_limit`], emitting ONLY when it
     /// differs from the last emitted value (emit-on-change dedup against
@@ -1224,7 +1224,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         *last = Some(info);
     }
 
-    /// Task 2 (llm-client future-work batch 5): forward the API client's
+    /// Task 2 (llm-runtime future-work batch 5): forward the API client's
     /// latest RAW per-window utilization snapshot to
     /// [`platform_api::OutputStream::emit_raw_utilization`] when it CHANGED since
     /// the last emit. The empty snapshot is significant: it clears a
@@ -1552,7 +1552,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `retractedMessageUuids` had no carrier.
             //
             // `convert_messages` drops every `System` before the wire
-            // (`llm-client/src/convert.rs`), so this is transcript + TUI only
+            // (`llm-runtime/src/convert.rs`), so this is transcript + TUI only
             // and never becomes model context.
             let notice_msg = protocol::ConversationMessage::System {
                 id: protocol::MessageId::new(),
@@ -1656,7 +1656,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         }
     }
 
-    /// Task 6 (llm-client future-work batch 5): re-map a terminal
+    /// Task 6 (llm-runtime future-work batch 5): re-map a terminal
     /// `RateLimited` error onto the limits-specific copy the API client
     /// composed from the 429's own unified headers (claude-code
     /// `errors.ts:480-524`). Applied by every public turn driver so each
@@ -1800,7 +1800,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     self.prompt_is_interactive(),
                     // Oracle: `let i = sir(e)` — the SAME normalizer the retry
                     // banner uses, so both surfaces agree.
-                    &llm_client::error_display_text(err),
+                    &llm_runtime::error_display_text(err),
                 )
             }
             LlmError::ContextOverflow { .. } => crate::api_error_copy::PROMPT_TOO_LONG.to_string(),
@@ -2039,7 +2039,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     }
 
     /// Update the thinking policy for the next API request.
-    pub fn set_thinking_config(&self, thinking: llm_client::model::thinking::ThinkingConfig) {
+    pub fn set_thinking_config(&self, thinking: llm_runtime::model::thinking::ThinkingConfig) {
         self.api.set_thinking_config(thinking);
     }
 
@@ -2084,7 +2084,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     })
                 }));
             }
-            llm_client::thinking_scope::scope_thinking_recovery(
+            llm_runtime::thinking_scope::scope_thinking_recovery(
                 scope,
                 platform_api::session_flags::scope_non_interactive_session(non_interactive, future),
             )
@@ -2270,7 +2270,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .clone()
     }
 
-    /// Project the llm-client's request-facing capability registry into the
+    /// Project the llm-runtime's request-facing capability registry into the
     /// provider-neutral controls DTO. Keeping this conversion at the
     /// orchestrator seam means the same catalog that validates/encodes a
     /// request also drives the mobile UI; unknown/custom profiles remain
@@ -2306,42 +2306,42 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         });
         let (protocol, base_url) = match inferred_provider.unwrap_or_default() {
             "anthropic" | "builtin" => (
-                llm_client::ProtocolFamily::AnthropicMessages,
+                llm_runtime::ProtocolFamily::AnthropicMessages,
                 "https://api.anthropic.com",
             ),
             "openai" => (
-                llm_client::ProtocolFamily::OpenAiResponses,
+                llm_runtime::ProtocolFamily::OpenAiResponses,
                 "https://api.openai.com/v1",
             ),
             "openai-chatgpt" => (
-                llm_client::ProtocolFamily::OpenAiResponses,
+                llm_runtime::ProtocolFamily::OpenAiResponses,
                 "https://chatgpt.com/backend-api/codex",
             ),
             "gemini" => (
-                llm_client::ProtocolFamily::GeminiGenerateContent,
+                llm_runtime::ProtocolFamily::GeminiGenerateContent,
                 "https://generativelanguage.googleapis.com/v1beta",
             ),
             "deepseek" => (
-                llm_client::ProtocolFamily::OpenAiChat,
+                llm_runtime::ProtocolFamily::OpenAiChat,
                 "https://api.deepseek.com",
             ),
             "kimi" => (
-                llm_client::ProtocolFamily::OpenAiChat,
+                llm_runtime::ProtocolFamily::OpenAiChat,
                 "https://api.moonshot.cn/v1",
             ),
             "kimi-code" => (
-                llm_client::ProtocolFamily::OpenAiChat,
+                llm_runtime::ProtocolFamily::OpenAiChat,
                 "https://api.kimi.com/coding/v1",
             ),
             "openrouter" => (
-                llm_client::ProtocolFamily::OpenAiChat,
+                llm_runtime::ProtocolFamily::OpenAiChat,
                 "https://openrouter.ai/api/v1",
             ),
             _ => return platform_api::reasoning_control_spec_for_model(model, inferred_provider),
         };
 
-        let raw = llm_client::reasoning_controls::reasoning_control_spec(
-            llm_client::reasoning_controls::ReasoningTarget {
+        let raw = llm_runtime::reasoning_controls::reasoning_control_spec(
+            llm_runtime::reasoning_controls::ReasoningTarget {
                 profile_name: inferred_provider,
                 protocol: &protocol,
                 base_url,
@@ -2352,19 +2352,19 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .mandatory_selection
             .as_ref()
             .map(|selection| match selection {
-                llm_client::reasoning_controls::ReasoningSelection::Automatic => {
+                llm_runtime::reasoning_controls::ReasoningSelection::Automatic => {
                     platform_api::ReasoningSelection::Automatic
                 }
-                llm_client::reasoning_controls::ReasoningSelection::Disabled => {
+                llm_runtime::reasoning_controls::ReasoningSelection::Disabled => {
                     platform_api::ReasoningSelection::Disabled
                 }
-                llm_client::reasoning_controls::ReasoningSelection::Enabled => {
+                llm_runtime::reasoning_controls::ReasoningSelection::Enabled => {
                     platform_api::ReasoningSelection::Enabled
                 }
-                llm_client::reasoning_controls::ReasoningSelection::Level(id) => {
+                llm_runtime::reasoning_controls::ReasoningSelection::Level(id) => {
                     platform_api::ReasoningSelection::Level { id: id.clone() }
                 }
-                llm_client::reasoning_controls::ReasoningSelection::TokenBudget(tokens) => {
+                llm_runtime::reasoning_controls::ReasoningSelection::TokenBudget(tokens) => {
                     platform_api::ReasoningSelection::TokenBudget {
                         tokens: u64::from(*tokens),
                     }
@@ -2454,11 +2454,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         selection: &platform_api::ReasoningSelection,
     ) -> (
         platform_api::ReasoningSelection,
-        llm_client::model::thinking::ThinkingConfig,
+        llm_runtime::model::thinking::ThinkingConfig,
         Option<serde_json::Value>,
         Option<String>,
     ) {
-        use llm_client::model::thinking::ThinkingConfig;
+        use llm_runtime::model::thinking::ThinkingConfig;
         let validated = self.validate_reasoning_selection(selection, model, provider_id);
         let effort_level = |id: &str| Some(serde_json::Value::String(id.to_string()));
         let legacy = |id: &str| Some(id.to_string());

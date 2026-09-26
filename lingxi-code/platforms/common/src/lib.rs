@@ -25,10 +25,10 @@ pub mod worktree_include;
 
 pub use guest_fs::GuestPathFileSystem;
 pub use http::ReqwestHttp;
-pub use llm_client::LlmTransportBridge;
 pub use llm_config::{
     apply_settings_providers, builtin_anthropic_config, parse_routing_overrides, RoutingOverrides,
 };
+pub use llm_runtime::LlmTransportBridge;
 pub use mcp_http::{connect_http, HttpConnectError};
 pub use mcp_remote::RemoteMcpTransport;
 pub use mcp_sse::{connect_sse, SseConnectError, SseEndpointMode, IDE_AUTH_HEADER};

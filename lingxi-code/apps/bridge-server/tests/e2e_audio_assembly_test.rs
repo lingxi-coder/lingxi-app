@@ -43,8 +43,8 @@ use client_protocol::audio::{
 };
 use client_protocol::commands::ClientCommand;
 use client_protocol::events::ClientEvent;
-use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
+use harness_runtime::desktop::DesktopConfig;
 use platform_api::audio::{
     AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationSuccess, AudioOwner, AudioService,
@@ -100,7 +100,7 @@ static ASSEMBLE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 ///
 /// The managed (policy) root is the fourth thing that has to be isolated and the
 /// one `cwd` / `lingxi_home` / `isolated_credential_storage` do not cover:
-/// `boot::assemble` folds `engine_desktop::managed_settings_overlay()` over the
+/// `boot::assemble` folds `harness_runtime::desktop::managed_settings_overlay()` over the
 /// file layers, and that falls back to the machine's REAL policy directory
 /// (`/Library/Application Support/LingXi/…` on macOS) unless `LINGXI_MANAGED_DIR`
 /// is set. Nothing this suite asserts reads a settings VALUE, so an installed
@@ -118,7 +118,10 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     let cwd = tmp.path().to_path_buf();
     let managed = tmp.path().join("managed");
     std::fs::create_dir_all(&managed).expect("create sandbox managed dir");
-    std::env::set_var(engine_desktop::settings_watch::MANAGED_DIR_ENV, &managed);
+    std::env::set_var(
+        harness_runtime::desktop::settings_watch::MANAGED_DIR_ENV,
+        &managed,
+    );
     let cfg = DesktopConfig {
         cwd: cwd.clone(),
         lingxi_home: cwd.join(".lingxi"),

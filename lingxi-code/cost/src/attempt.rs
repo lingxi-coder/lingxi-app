@@ -63,7 +63,9 @@ pub enum AttemptUsageContract {
 /// Host-captured immutable wire authorization. No bearer tokens are persisted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptIntent {
-    /// DTO version, currently one.
+    /// Settlement contract version: one uses fixed pinned token rates; two
+    /// requires an SDK token quote and treats pinned token rates as bounds.
+    /// Older readers must reject version two rather than misprice its bounds.
     pub schema_version: u32,
     /// Canonical session authority.
     pub session_id: SessionId,
@@ -92,6 +94,10 @@ pub struct AttemptIntent {
     /// Integer rates, effective date and original price provenance.
     /// Rates already include speed/subscription overrides; never re-resolve.
     pub pricing: ModelPricing,
+    /// Token rates are admission bounds; settlement requires the SDK's actual
+    /// per-attempt token quote. Older journals keep fixed-rate settlement.
+    #[serde(default)]
+    pub token_pricing_requires_quote: bool,
     /// Finite authorized monetary occupancy in nano-USD.
     pub authorized_nano_usd: u64,
     /// Captured prepared-request input basis, not observed token counters.
@@ -135,6 +141,10 @@ pub struct AttemptReceipt {
     pub replaces_revision: Option<u64>,
     /// Truthful observation provenance.
     pub disposition: AttemptDisposition,
+    /// SDK-estimated USD token cost, excluding host-owned non-token charges.
+    /// Only Exact observations for quote-requiring intents may carry this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_quote_nano_usd: Option<u64>,
     /// Actual known, disjoint normalized billable buckets. In particular,
     /// output excludes reasoning_output; adapters must normalize overlapping
     /// provider counters before recording. For Unknown, zero means no known
@@ -159,7 +169,8 @@ pub struct AttemptContribution {
     pub cache_read_input_tokens: u64,
     /// Explicit cache-creation counter, independent of normalized token classes.
     pub cache_creation_input_tokens: u64,
-    /// Exact pinned-price cost of the usage the provider actually reported.
+    /// Known cost under the pinned settlement contract: fixed rates or an
+    /// actual SDK token quote plus host-owned non-token charges.
     pub nano_usd: u64,
     /// Authorized-but-unaccounted remainder for an attempt whose usage report
     /// was incomplete. Disclosed beside the realized total, never inside it,
@@ -408,6 +419,7 @@ impl AttemptLedger {
             revision: 1,
             replaces_revision: None,
             disposition: AttemptDisposition::Unknown,
+            token_quote_nano_usd: None,
             usage: Usage::default(),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
@@ -595,8 +607,15 @@ impl AttemptLedger {
 }
 
 fn validate_intent(intent: &AttemptIntent, session_id: SessionId) -> Result<(), AttemptFoldError> {
-    if intent.schema_version != 1
-        || intent.session_id != session_id
+    if !matches!(
+        (intent.schema_version, intent.token_pricing_requires_quote),
+        (1, false) | (2, true)
+    ) {
+        return Err(AttemptFoldError::Invalid(
+            "unsupported intent schema or token pricing contract",
+        ));
+    }
+    if intent.session_id != session_id
         || intent.wire_ordinal == 0
         || [
             &intent.attempt_id,
@@ -642,6 +661,15 @@ pub fn calculate_pinned_attempt_cost(
     usage: &Usage,
     pricing: &ModelPricing,
 ) -> Result<u64, AttemptFoldError> {
+    calculate_pinned_token_cost(usage, pricing)?
+        .checked_add(calculate_pinned_non_token_cost(usage, pricing)?)
+        .ok_or(AttemptFoldError::Arithmetic)
+}
+
+fn calculate_pinned_token_cost(
+    usage: &Usage,
+    pricing: &ModelPricing,
+) -> Result<u64, AttemptFoldError> {
     let mut total = 0_u64;
     for class in [
         TokenClass::Input,
@@ -666,6 +694,13 @@ pub fn calculate_pinned_attempt_cost(
                 .ok_or(AttemptFoldError::Arithmetic)?;
         }
     }
+    Ok(total)
+}
+
+fn calculate_pinned_non_token_cost(
+    usage: &Usage,
+    pricing: &ModelPricing,
+) -> Result<u64, AttemptFoldError> {
     let search = usage
         .server_tool_use
         .map_or(0, |tools| tools.web_search_requests);
@@ -674,15 +709,11 @@ pub fn calculate_pinned_attempt_cost(
             .non_token_rates_nano_usd
             .get(&NonTokenBillableUnit::WebSearchRequest)
             .ok_or(AttemptFoldError::MissingPrice)?;
-        total = total
-            .checked_add(
-                u64::from(search)
-                    .checked_mul(*rate)
-                    .ok_or(AttemptFoldError::Arithmetic)?,
-            )
-            .ok_or(AttemptFoldError::Arithmetic)?;
+        return u64::from(search)
+            .checked_mul(*rate)
+            .ok_or(AttemptFoldError::Arithmetic);
     }
-    Ok(total)
+    Ok(0)
 }
 
 fn receipt_contribution(
@@ -701,6 +732,22 @@ fn receipt_contribution(
     if receipt.api_duration_without_retries_ms > receipt.api_duration_ms {
         return Err(AttemptFoldError::Invalid(
             "non-retry duration exceeds duration",
+        ));
+    }
+    if receipt.token_quote_nano_usd.is_some()
+        && (!intent.token_pricing_requires_quote
+            || receipt.disposition != AttemptDisposition::Exact)
+    {
+        return Err(AttemptFoldError::Invalid(
+            "token quote outside pinned settlement contract",
+        ));
+    }
+    if intent.token_pricing_requires_quote
+        && receipt.disposition == AttemptDisposition::Exact
+        && receipt.token_quote_nano_usd.is_none()
+    {
+        return Err(AttemptFoldError::Invalid(
+            "exact receipt requires an actual token quote",
         ));
     }
     if matches!(
@@ -731,7 +778,30 @@ fn receipt_contribution(
             ..AttemptContribution::default()
         });
     }
-    let exact_cost = calculate_pinned_attempt_cost(&receipt.usage, &intent.pricing)?;
+    let exact_cost = if intent.token_pricing_requires_quote {
+        // The pinned token rates are only a conservative authorization bound.
+        // Partial observations retain their real counters without presenting
+        // that bound as money actually spent.
+        let token_cost = if let Some(quote) = receipt.token_quote_nano_usd {
+            let bound = calculate_pinned_token_cost(&receipt.usage, &intent.pricing)?;
+            if quote > bound {
+                return Err(AttemptFoldError::Invalid(
+                    "actual token quote exceeds pinned token bound",
+                ));
+            }
+            quote
+        } else {
+            0
+        };
+        token_cost
+            .checked_add(calculate_pinned_non_token_cost(
+                &receipt.usage,
+                &intent.pricing,
+            )?)
+            .ok_or(AttemptFoldError::Arithmetic)?
+    } else {
+        calculate_pinned_attempt_cost(&receipt.usage, &intent.pricing)?
+    };
     let output_tokens = receipt
         .usage
         .tokens
@@ -958,6 +1028,7 @@ mod tests {
             model,
             route_revision: 42,
             pricing,
+            token_pricing_requires_quote: false,
             authorized_nano_usd: 1000,
             authorized_input_tokens: 100,
             authorized_output_tokens: 200,
@@ -986,6 +1057,7 @@ mod tests {
             revision: 1,
             replaces_revision: None,
             disposition,
+            token_quote_nano_usd: None,
             usage: Usage {
                 tokens: TokenUsage {
                     input: count,
@@ -1013,6 +1085,220 @@ mod tests {
             replaces_revision: Some(1),
             ..receipt(intent, AttemptDisposition::Exact, count)
         }
+    }
+
+    #[test]
+    fn actual_token_quote_corrects_unknown_and_replays_from_serialized_records() {
+        let (mut ledger, mut state, mut intent) = fixture();
+        let initial_state = state.clone();
+        intent.schema_version = 2;
+        intent.token_pricing_requires_quote = true;
+        ledger.record_intent(intent.clone()).unwrap();
+        let unknown = receipt(&intent, AttemptDisposition::Unknown, 2);
+        let first = ledger
+            .fold_receipt(&mut state, unknown.clone(), None)
+            .unwrap();
+        assert_eq!(first.contribution.nano_usd, 6, "only known host tools");
+        assert_eq!(first.contribution.unverified_nano_usd, 994);
+        assert_eq!(first.contribution.usage, unknown.usage);
+        assert_eq!(first.contribution.output_occupancy, 200);
+
+        let mut exact = correction(&intent, 4);
+        exact.token_quote_nano_usd = Some(24);
+        let last = ledger
+            .fold_receipt(&mut state, exact.clone(), first.last_usage_revision)
+            .unwrap();
+        assert_eq!(last.contribution.nano_usd, 36, "actual tokens plus tools");
+        assert_eq!(last.contribution.unverified_nano_usd, 0);
+        assert_eq!(last.contribution.usage, exact.usage);
+        assert_eq!(last.contribution.output_occupancy, 8);
+        assert_eq!(last.contribution.unknown_count, 0);
+        assert_eq!(state.total_nano_usd, 36);
+        assert_eq!(state.unverified_nano_usd, 0);
+        assert_eq!(state.last_usage, Some(exact.usage));
+        assert_eq!(ledger.model_rollups()[&intent.model].request_count, 1);
+
+        let mut replay = AttemptLedger::new(intent.session_id);
+        let mut replay_state = initial_state;
+        let encoded = serde_json::to_vec(&intent).unwrap();
+        replay
+            .record_intent(serde_json::from_slice(&encoded).unwrap())
+            .unwrap();
+        for observed in [&unknown, &exact] {
+            let encoded = serde_json::to_vec(observed).unwrap();
+            let decoded: AttemptReceipt = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(&decoded, observed);
+            let marker = replay_state.last_usage_revision;
+            replay
+                .fold_receipt(&mut replay_state, decoded, marker)
+                .unwrap();
+        }
+        assert_eq!(replay_state, state);
+        assert_eq!(replay, ledger);
+        assert_eq!(
+            replay
+                .fold_receipt(&mut replay_state, unknown, last.last_usage_revision)
+                .unwrap(),
+            first
+        );
+        assert_eq!(replay_state, state);
+    }
+
+    #[test]
+    fn old_journal_without_token_quote_contract_keeps_fixed_rate_settlement() {
+        let (mut ledger, mut state, intent) = fixture();
+        let mut encoded = serde_json::to_value(&intent).unwrap();
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("token_pricing_requires_quote");
+        let decoded: AttemptIntent = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, intent);
+        ledger.record_intent(decoded).unwrap();
+        let observed = receipt(&intent, AttemptDisposition::Exact, 1);
+        let encoded = serde_json::to_value(&observed).unwrap();
+        assert!(encoded.get("token_quote_nano_usd").is_none());
+        let decoded: AttemptReceipt = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, observed);
+        let ack = ledger.fold_receipt(&mut state, decoded, None).unwrap();
+        assert_eq!(ack.contribution.nano_usd, 15);
+        let before = ledger.clone();
+        let mut changed = intent;
+        changed.schema_version = 2;
+        changed.token_pricing_requires_quote = true;
+        assert!(ledger.record_intent(changed).is_err());
+        assert_eq!(ledger, before);
+    }
+
+    #[test]
+    fn intent_schema_versions_pin_the_token_settlement_contract() {
+        for schema_version in [0, 1, 2, 3] {
+            for requires_quote in [false, true] {
+                let (mut ledger, _, mut intent) = fixture();
+                intent.schema_version = schema_version;
+                intent.token_pricing_requires_quote = requires_quote;
+                let before = ledger.clone();
+                let result = ledger.record_intent(intent);
+                if matches!((schema_version, requires_quote), (1, false) | (2, true)) {
+                    assert_eq!(result, Ok(true));
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(AttemptFoldError::Invalid(
+                            "unsupported intent schema or token pricing contract"
+                        ))
+                    );
+                    assert_eq!(ledger, before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_token_quotes_leave_ledger_and_vector_unchanged() {
+        for (requires_quote, disposition, quote) in [
+            (true, AttemptDisposition::Exact, None),
+            (true, AttemptDisposition::Unknown, Some(0)),
+            (true, AttemptDisposition::ProvenNotSent, Some(0)),
+            (true, AttemptDisposition::NoProviderResponse, Some(0)),
+            (false, AttemptDisposition::Exact, Some(0)),
+            // The host tool charge is three; it must not increase the token
+            // bound of twelve or make this excessive quote acceptable.
+            (true, AttemptDisposition::Exact, Some(13)),
+        ] {
+            let (mut ledger, mut state, mut intent) = fixture();
+            intent.schema_version = if requires_quote { 2 } else { 1 };
+            intent.token_pricing_requires_quote = requires_quote;
+            ledger.record_intent(intent.clone()).unwrap();
+            let mut observed = receipt(&intent, disposition, 1);
+            if matches!(
+                disposition,
+                AttemptDisposition::ProvenNotSent | AttemptDisposition::NoProviderResponse
+            ) {
+                observed = ledger
+                    .recovery_receipt(&intent.attempt_id)
+                    .unwrap()
+                    .unwrap();
+                observed.disposition = disposition;
+            }
+            observed.token_quote_nano_usd = quote;
+            let before = (ledger.clone(), state.clone());
+            assert!(matches!(
+                ledger.fold_receipt(&mut state, observed, None),
+                Err(AttemptFoldError::Invalid(_))
+            ));
+            assert_eq!((ledger, state), before);
+        }
+        for quote in [0, 12] {
+            let (mut ledger, mut state, mut intent) = fixture();
+            intent.schema_version = 2;
+            intent.token_pricing_requires_quote = true;
+            ledger.record_intent(intent.clone()).unwrap();
+            let mut observed = receipt(&intent, AttemptDisposition::Exact, 1);
+            observed.token_quote_nano_usd = Some(quote);
+            let ack = ledger.fold_receipt(&mut state, observed, None).unwrap();
+            assert_eq!(ack.contribution.nano_usd, quote + 3);
+        }
+    }
+
+    #[test]
+    fn quoted_token_bounds_and_host_tool_arithmetic_fail_atomically() {
+        for overflow in 0..3 {
+            let (mut ledger, mut state, mut intent) = fixture();
+            intent.schema_version = 2;
+            intent.token_pricing_requires_quote = true;
+            let mut observed = receipt(&intent, AttemptDisposition::Exact, 0);
+            observed.token_quote_nano_usd = Some(0);
+            match overflow {
+                0 => observed.usage.tokens.input = u64::MAX,
+                1 => {
+                    intent
+                        .pricing
+                        .non_token_rates_nano_usd
+                        .insert(NonTokenBillableUnit::WebSearchRequest, u64::MAX);
+                    observed.usage.server_tool_use = Some(ServerToolUsage {
+                        web_search_requests: 2,
+                    });
+                }
+                _ => {
+                    intent.pricing.token_rates.insert(
+                        TokenClass::Input,
+                        MoneyPerToken {
+                            nano_usd_per_token: u64::MAX - 1,
+                        },
+                    );
+                    observed.usage.tokens.input = 1;
+                    observed.token_quote_nano_usd = Some(u64::MAX - 1);
+                    observed.usage.server_tool_use = Some(ServerToolUsage {
+                        web_search_requests: 1,
+                    });
+                }
+            }
+            ledger.record_intent(intent).unwrap();
+            let before = (ledger.clone(), state.clone());
+            assert_eq!(
+                ledger.fold_receipt(&mut state, observed, None),
+                Err(AttemptFoldError::Arithmetic)
+            );
+            assert_eq!((ledger, state), before);
+        }
+    }
+
+    #[test]
+    fn unknown_quote_contract_preserves_tokens_without_pricing_them_at_the_bound() {
+        let (mut ledger, mut state, mut intent) = fixture();
+        intent.schema_version = 2;
+        intent.token_pricing_requires_quote = true;
+        ledger.record_intent(intent.clone()).unwrap();
+        let mut observed = receipt(&intent, AttemptDisposition::Unknown, 0);
+        observed.usage.tokens.input = u64::MAX;
+        observed.usage.server_tool_use = Some(ServerToolUsage {
+            web_search_requests: 1,
+        });
+        let ack = ledger.fold_receipt(&mut state, observed, None).unwrap();
+        assert_eq!(ack.contribution.usage.tokens.input, u64::MAX);
+        assert_eq!(ack.contribution.nano_usd, 3);
+        assert_eq!(ack.contribution.unverified_nano_usd, 997);
     }
 
     #[test]

@@ -44,7 +44,7 @@ graph TD
 
     subgraph Layer3["Layer 3: Engine Libraries"]
         orch["orchestrator"]
-        llm["llm-client"]
+        llm["llm-runtime"]
         compact["compaction"]
         agent["agent"]
         session["session"]
@@ -328,7 +328,7 @@ flowchart LR
         ImgSrc["ImageSource<br/>{Base64, Url}"]
     end
 
-    subgraph LLM["llm-client (provider types)"]
+    subgraph LLM["llm-runtime (provider types)"]
         LlmReq["LlmRequest<br/>{model, messages, tools,<br/>stream, reasoning,<br/>response_format, ...}"]
         LlmMsg["Message<br/>{role, content: Vec<ContentBlock>}"]
         LlmCB["ContentBlock<br/>{Text, Image, ImageUrl,<br/>Document, ToolCall, ToolResult,<br/>Reasoning, RedactedThinking}"]
@@ -385,11 +385,11 @@ flowchart TD
 | `orchestrator/src/sse/event_router.rs:77` | `dispatch_event` — SSE event → RouterAction |
 | `orchestrator/src/streaming_executor.rs` | `StreamingToolExecutor` — mid-stream tool execution |
 | `orchestrator/src/provider_adapter.rs:542` | `ProviderApiAdapter::stream` — main-loop adapter |
-| `llm-client/src/service.rs:2284` | `ApiService::drive_stream` — retry loop + connect |
-| `llm-client/src/service.rs:809` | `ApiService::build_request` — message preprocessing |
-| `llm-client/src/client.rs:283` | `DefaultLlmClient::prepare_at` — resolve + validate + degrade |
-| `llm-client/src/protocol.rs:838` | `validate_capabilities` — capability enforcement |
-| `llm-client/src/convert.rs:41` | `to_llm_messages` — protocol → llm-client bridge |
+| `llm-runtime/src/service.rs:2284` | `ApiService::drive_stream` — retry loop + connect |
+| `llm-runtime/src/service.rs:809` | `ApiService::build_request` — message preprocessing |
+| `llm-runtime/src/client.rs:283` | `DefaultLlmClient::prepare_at` — resolve + validate + degrade |
+| `llm-runtime/src/protocol.rs:838` | `validate_capabilities` — capability enforcement |
+| `llm-runtime/src/convert.rs:41` | `to_llm_messages` — protocol → llm-runtime bridge |
 | `compaction/src/orchestrator.rs:185` | `process_iteration_tracked` — snip/micro/auto pipeline |
 | `compaction/src/autocompact.rs:162` | `Autocompactor::compact` — LLM summarization |
 | `compaction/src/boundary.rs:157` | `create_compact_boundary` — boundary marker |

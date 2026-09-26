@@ -2162,4 +2162,8 @@
     <string name="voice_turn_max_turns">The agent reached the maximum number of turns; please tap retry</string>
     <string name="voice_voice_name">Voice</string>
     <string name="voice_waiting_permission">Waiting for Permission</string>
+    <string name="settings_provider_region">Model region</string>
+    <string name="settings_provider_region_international">International</string>
+    <string name="settings_provider_region_china">China mainland</string>
+    <string name="settings_provider_region_help">Defaults to international. Apply saved settings when idle to change the running region.</string>
 </resources>

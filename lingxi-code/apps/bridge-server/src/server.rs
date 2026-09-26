@@ -61,10 +61,10 @@ use msgqueue::{
     join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,
     QueuedCommandContent, TelemetryQueueRecorder,
 };
+use permission::computer_access::ComputerAccessExchange;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
-use tui_core::computer_access_bridge::ComputerAccessExchange;
+use tool_api::ask_user_question::AskUserQuestionExchange;
 
 use client_adapter::AdapterPermissionGate;
 use client_adapter::BridgeComputerAccessBroker;
@@ -76,7 +76,7 @@ use crate::router::CommandRouter;
 ///
 /// Abstracting the turn entry behind a trait keeps the connection loop decoupled
 /// from HOW the orchestrator was built: the production server builds it via
-/// `engine_desktop::build`, while the F2-06 e2e test wires a
+/// `harness_runtime::desktop::build`, while the F2-06 e2e test wires a
 /// `ConversationOrchestrator` with a mock streaming client + a real tool that
 /// routes through the same `AdapterPermissionGate`. Both reach the gate the same
 /// way — through `orchestrator.perms.check()` during tool dispatch.

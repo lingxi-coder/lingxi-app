@@ -16,7 +16,6 @@ platform-api = { path = "../../platform-api" }
 permission = { path = "../../permission" }
 # `request_access`'s interactive resolver (mirrors `tool-ui`'s
 # `AskUserQuestionResolver`, which depends on `tui-core` the same way).
-tui-core = { path = "../../tui-core" }
 # Cross-session lock-file home dir resolution (parity with `tool-task`'s
 # `lingxi_config_home_dir`).
 branding.workspace = true

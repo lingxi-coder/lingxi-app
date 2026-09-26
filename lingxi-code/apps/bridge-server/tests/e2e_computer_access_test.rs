@@ -122,7 +122,7 @@ fn build_connection() -> BridgeConnection {
     let output: Arc<dyn platform_api::OutputStream> =
         Arc::new(AdapterOutputStream::new(connection.event_sink()));
 
-    // The SAME channel shape `engine_desktop::build` wires onto
+    // The SAME channel shape `harness_runtime::desktop::build` wires onto
     // `DesktopConfig::computer_access_tx`: the sender drives the generic
     // `TuiBridgeResolver`, the receiver is drained by the connection's broker.
     let (computer_access_tx, computer_access_rx) = tokio::sync::mpsc::channel(8);

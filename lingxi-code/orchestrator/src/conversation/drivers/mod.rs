@@ -1373,6 +1373,19 @@ impl ConversationOrchestrator {
         .await
     }
 
+    // Race cancellation only before execution starts. Dropping a running turn
+    // would bypass its tool-result persistence and usage settlement.
+    async fn lock_turn_unless_cancelled(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            guard = self.turn_gate.lock() => Some(guard),
+        }
+    }
+
     /// Drive one user prompt through a REPL turn until `end_turn`,
     /// `max_turns`, or the given `cancel` token fires.
     ///
@@ -1391,7 +1404,9 @@ impl ConversationOrchestrator {
         prompt: &str,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        let _turn_guard = self.turn_gate.lock().await;
+        let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
             event = orch_events::CONVERSATION_STARTED,
@@ -1593,6 +1608,9 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
         message_id: Option<MessageId>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        if cancel.is_cancelled() {
+            return Ok(TurnOutcome::Cancelled);
+        }
         // Decode the pasted PATHS into canonical sources first, then hand off to
         // the already-decoded entry below — so the path-based and bridge (inline
         // base64) flows share ONE cancel race + ONE turn core. A failed image read
@@ -1652,7 +1670,9 @@ impl ConversationOrchestrator {
         if in_human_turn {
             self.reset_goal_interruption();
         }
-        let turn_guard = self.turn_gate.lock().await;
+        let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         self.run_turn_streaming_with_origin_locked(
             &turn_guard,
             prompt,
@@ -1677,7 +1697,9 @@ impl ConversationOrchestrator {
         if inputs.iter().any(|input| !input.is_meta) {
             self.reset_goal_interruption();
         }
-        let turn_guard = self.turn_gate.lock().await;
+        let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+            return Ok(TurnOutcome::Cancelled);
+        };
         let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
         let prompt = inputs[primary].text.clone();
         let message_id = inputs[primary].message_id;
@@ -1939,6 +1961,7 @@ pub(super) fn llm_response_to_pumped_turn(resp: &LlmResponse) -> crate::streamin
         stop_reason,
         output_tokens,
         usage,
+        cost_quote: resp.cost.clone(),
         // Non-streaming fallback: carry the response's refusal stop_details so
         // the terminal refusal arm gets the cyber/bio variant.
         stop_details: resp.stop_details.clone(),
@@ -1985,4 +2008,4 @@ pub(super) fn parse_generated_session_name(raw: &str) -> Option<String> {
 // NOTE: `AnthropicProviderAdapter` and `AnthropicProviderStreamingAdapter`
 // were removed in Task 5 — they drove `api_client::AnthropicProvider` directly.
 // The live path is now `ProviderApiAdapter` (provider_adapter.rs), retargeted
-// in Task 6 to drive `llm_client::DefaultLlmClient`. (3b deletes api-client.)
+// in Task 6 to drive `llm_runtime::DefaultLlmClient`. (3b deletes api-client.)

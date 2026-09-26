@@ -8,13 +8,13 @@ use cli::run_cli;
 
 fn main() {
     #[cfg(any(unix, windows))]
-    if engine_desktop::shell_supervisor::is_supervisor_invocation() {
+    if harness_runtime::desktop::shell_supervisor::is_supervisor_invocation() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("shell supervisor runtime");
-        let result = runtime.block_on(engine_desktop::shell_supervisor::run_supervisor(
-            engine_desktop::supervisor_exit_sink,
+        let result = runtime.block_on(harness_runtime::desktop::shell_supervisor::run_supervisor(
+            harness_runtime::desktop::supervisor_exit_sink,
         ));
         if let Err(error) = result {
             eprintln!("shell supervisor: {error}");
@@ -24,7 +24,7 @@ fn main() {
     }
     #[cfg(any(unix, windows))]
     if let Ok(executable) = std::env::current_exe() {
-        engine_desktop::shell_supervisor::enable_supervisor(executable);
+        harness_runtime::desktop::shell_supervisor::enable_supervisor(executable);
     }
     // `run_cli` is intentionally broad: it owns argv dispatch plus the full
     // startup pipeline, so its async state machine is much deeper than a

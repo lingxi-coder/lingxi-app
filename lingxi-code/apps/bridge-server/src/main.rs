@@ -2,17 +2,17 @@
 //!
 //! Boots one local conversation over a loopback WebSocket for the Electron / iOS
 //! shell, wiring the proven transport ([`bridge::McpEndpoint`]) to a real desktop
-//! engine ([`engine_desktop::build`]) through the connection-scoped routing in
+//! engine ([`harness_runtime::desktop::build`]) through the connection-scoped routing in
 //! [`bridge_server`]:
 //!
 //! 1. Parse flags and resolve a deterministic
-//!    [`engine_desktop::DesktopConfig`] from env/argv ([`bridge_server::boot`]).
+//!    [`harness_runtime::desktop::DesktopConfig`] from env/argv ([`bridge_server::boot`]).
 //!    With `--api-key-stdin` or `--credential-stdin`, one bounded credential
 //!    payload is read directly from stdin and is NEVER logged or copied into
 //!    env/argv. A missing accepted credential source only warns (the server still boots for
 //!    transport testing; a live turn 401s and surfaces as a `ClientEvent::Error`).
 //! 2. Assemble a fully-bound [`bridge_server::server::BridgeConnection`] from a
-//!    real [`engine_desktop::DesktopRuntime`] (turn driver + command router +
+//!    real [`harness_runtime::desktop::DesktopRuntime`] (turn driver + command router +
 //!    connection-scoped `AdapterPermissionGate`).
 //! 3. Start [`bridge::McpEndpoint::start_on_ephemeral_port_with_pump`] on
 //!    `127.0.0.1:0`.
@@ -35,16 +35,16 @@ async fn main() -> anyhow::Result<()> {
         return bridge_server::desktop_terminal::run().await;
     }
     #[cfg(any(unix, windows))]
-    if engine_desktop::shell_supervisor::is_supervisor_invocation() {
-        return engine_desktop::shell_supervisor::run_supervisor(
-            engine_desktop::supervisor_exit_sink,
+    if harness_runtime::desktop::shell_supervisor::is_supervisor_invocation() {
+        return harness_runtime::desktop::shell_supervisor::run_supervisor(
+            harness_runtime::desktop::supervisor_exit_sink,
         )
         .await
         .map_err(Into::into);
     }
     #[cfg(any(unix, windows))]
     if let Ok(executable) = std::env::current_exe() {
-        engine_desktop::shell_supervisor::enable_supervisor(executable);
+        harness_runtime::desktop::shell_supervisor::enable_supervisor(executable);
     }
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -211,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn drain_session_lifecycle(lifecycle: &engine_desktop::DesktopSessionLifecycle) {
+async fn drain_session_lifecycle(lifecycle: &harness_runtime::desktop::DesktopSessionLifecycle) {
     let report = lifecycle.shutdown_and_drain().await;
     for error in report.errors {
         tracing::warn!(%error, "bridge-server session shutdown was not fully durable");

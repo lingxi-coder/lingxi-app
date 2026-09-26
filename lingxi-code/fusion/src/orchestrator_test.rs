@@ -878,13 +878,13 @@ fn catalog_with_route(profile: &str, model: &str) -> Vec<CatalogModel> {
 
 /// WP11: a catalog built the SAME way `desktop_fusion_catalog_row` builds it
 /// — `structured_output` read off the REAL, checked-in
-/// `llm_client::anthropic_model_profiles()` capability bit, not a hand-set
+/// `llm_runtime::anthropic_model_profiles()` capability bit, not a hand-set
 /// `true` like the `catalog()` fixture above. `catalog()`'s panelists are all
 /// `structured_output: true` by fiat, which is exactly why the desktop
 /// wiring bug (every Anthropic model capability hard-coded `false`) never
 /// showed up in any orchestrator test before WP11.
 fn anthropic_only_catalog(models: &[&str]) -> Vec<CatalogModel> {
-    let profiles = llm_client::anthropic_model_profiles();
+    let profiles = llm_runtime::anthropic_model_profiles();
     models
         .iter()
         .map(|id| {
@@ -895,7 +895,7 @@ fn anthropic_only_catalog(models: &[&str]) -> Vec<CatalogModel> {
             CatalogModel {
                 profile: "anthropic".into(),
                 model: (*id).into(),
-                hints: llm_client::hints_for("anthropic", id).unwrap_or_default(),
+                hints: llm_runtime::hints_for("anthropic", id).unwrap_or_default(),
                 structured_output: profile.capabilities.structured_output,
                 limits: crate::model_resolver::ModelLimits::from_metadata(&profile.metadata),
             }
@@ -1832,7 +1832,7 @@ impl SideQueryClient for ScriptedAnalyst {
             // Transport/4xx-shaped, never a decode failure — F004's retry
             // policy must not retry this, and the host must not label it
             // `AnalysisParseFailed`.
-            return Err(SideQueryError::Api(llm_client::LlmError::InvalidRequest {
+            return Err(SideQueryError::Api(llm_runtime::LlmError::InvalidRequest {
                 message: "synthetic 4xx".into(),
             }));
         }
@@ -3841,7 +3841,7 @@ async fn synth_failure_estimates_and_prices_its_attempted_call() {
     let side = ScriptedAnalyst::new(
         AnalystMode::Merge,
         vec![Err(SideQueryError::Api(
-            llm_client::LlmError::InvalidRequest {
+            llm_runtime::LlmError::InvalidRequest {
                 message: "synthetic 4xx".into(),
             },
         ))],
@@ -4165,7 +4165,7 @@ async fn budget_reservation_releases_on_cancel() {
     // same expected total, as the timeout test below. (It used to come from
     // a `resolve_and_reserve` latch that charged this even when no panel had
     // been dispatched at all; the floor now follows real dispatch.)
-    let per_panel_input_tokens = llm_client::model::count_tokens::approximate_tokens_for_bytes(
+    let per_panel_input_tokens = llm_runtime::model::count_tokens::approximate_tokens_for_bytes(
         crate::panel::panel_prompt("task").len() as u64,
     );
     let expected_committed = 3 * per_panel_input_tokens;
@@ -4214,7 +4214,7 @@ async fn budget_reservation_releases_on_total_timeout() {
     // `lease.commit` rather than branching on whether that total happens to
     // be zero (see `budget_reservation_releases_on_min_panels_not_met` for a
     // genuinely-zero case).
-    let per_panel_input_tokens = llm_client::model::count_tokens::approximate_tokens_for_bytes(
+    let per_panel_input_tokens = llm_runtime::model::count_tokens::approximate_tokens_for_bytes(
         crate::panel::panel_prompt("task").len() as u64,
     );
     // `priced_book()`'s rate is 1 nano-USD/token; 3 panels, all sharing the
@@ -7625,7 +7625,7 @@ fn check_panel_bar_still_reports_all_panels_failed_on_genuine_provider_failures(
 /// the spawner but not finished contributes to the settlement, at
 /// `priced_book()`'s 1 nano-USD/token unit rate.
 fn in_flight_panel_floor(prompt: &str) -> u64 {
-    llm_client::model::count_tokens::approximate_tokens_for_bytes(
+    llm_runtime::model::count_tokens::approximate_tokens_for_bytes(
         crate::panel::panel_prompt(prompt).len() as u64,
     )
 }

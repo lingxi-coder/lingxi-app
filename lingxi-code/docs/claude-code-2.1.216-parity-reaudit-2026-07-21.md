@@ -411,8 +411,8 @@ conversation streaming path 已有 reactive prompt-too-long recovery。定向测
 
 - `orchestrator/src/turn_loop.rs:336-340`
 - `orchestrator/src/conversation.rs:6181-6185`
-- `llm-client/src/convert.rs:41-42,99-166,219-403`
-- `llm-client/src/service.rs:838-844,2786-2837`
+- `llm-runtime/src/convert.rs:41-42,99-166,219-403`
+- `llm-runtime/src/service.rs:838-844,2786-2837`
 
 该项可以作为性能 profiling/benchmark 候选，但在有 flamegraph 或相同 workload 的基准对比前，不再计入 confirmed parity gap。
 
@@ -480,7 +480,7 @@ bridge production boot 确实没有连接 push channel，但 bridge 是项目特
 
 ### 8.2 构建与定向测试
 
-- `cargo check -p cli -p sandbox -p orchestrator -p llm-client -p command-core -p tool-ui -p tool-cron -p memory -p tool-web -p tool-lsp`：通过，仅有既有 warnings。
+- `cargo check -p cli -p sandbox -p orchestrator -p llm-runtime -p command-core -p tool-ui -p tool-cron -p memory -p tool-web -p tool-lsp`：通过，仅有既有 warnings。
 - `cargo check -p bridge-server -p engine-desktop -p cron -p mcp -p plugin`：通过，仅有既有 warnings。
 - `cargo test -p orchestrator --test streaming_vs_batched_equivalence_test streaming_connect_413_recovers_via_reactive_ptl`：通过，1 passed，0 failed。
 - `cargo test -p tui terminal_resize_keeps_bottom_pinned_viewport_at_new_bottom`：通过。

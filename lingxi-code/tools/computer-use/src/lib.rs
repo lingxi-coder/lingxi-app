@@ -627,14 +627,14 @@ impl ComputerTool {
         };
         let tcc_state = match self.ctx.computer_control.as_ref() {
             Some(cc) => cc.check_os_permissions().await.and_then(|(acc, rec)| {
-                (!acc || !rec).then_some(tui_core::computer_access_bridge::TccState {
+                (!acc || !rec).then_some(permission::computer_access::TccState {
                     accessibility: acc,
                     screen_recording: rec,
                 })
             }),
             None => None,
         };
-        let request = tui_core::computer_access_bridge::ComputerAccessRequest {
+        let request = permission::computer_access::ComputerAccessRequest {
             reason: input
                 .get("reason")
                 .and_then(Value::as_str)
@@ -642,7 +642,7 @@ impl ComputerTool {
                 .to_string(),
             apps: resolved_apps
                 .iter()
-                .map(|label| tui_core::computer_access_bridge::RequestedApp {
+                .map(|label| permission::computer_access::RequestedApp {
                     label: label.clone(),
                 })
                 .collect(),
@@ -1946,9 +1946,9 @@ mod integration_tests {
         impl ComputerAccessResolver for PartialGrantResolver {
             async fn resolve(
                 &self,
-                request: tui_core::computer_access_bridge::ComputerAccessRequest,
-            ) -> tui_core::computer_access_bridge::ComputerAccessResponse {
-                tui_core::computer_access_bridge::ComputerAccessResponse {
+                request: permission::computer_access::ComputerAccessRequest,
+            ) -> permission::computer_access::ComputerAccessResponse {
+                permission::computer_access::ComputerAccessResponse {
                     // Grant only the first requested app.
                     granted_apps: request.apps.into_iter().take(1).map(|a| a.label).collect(),
                     clipboard_read: false,

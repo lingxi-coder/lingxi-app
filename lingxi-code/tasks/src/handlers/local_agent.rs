@@ -1910,12 +1910,12 @@ mod tests {
         SubagentEvent::Completed {
             agent_id: AgentId::new(),
             result: json!({ "marker": marker }),
-            usage: llm_client::Usage::default(),
+            usage: llm_runtime::Usage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
             assistant_message_count: 0,
             last_request_id: None,
-            cumulative_usage: llm_client::Usage::default(),
+            cumulative_usage: llm_runtime::Usage::default(),
             usage_complete: true,
         }
     }
@@ -2009,7 +2009,7 @@ mod tests {
                 _: Option<&str>,
                 messages: Vec<protocol::ConversationMessage>,
                 _: Vec<serde_json::Value>,
-            ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+            ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
                 let registry = self.registry.get().unwrap().upgrade().unwrap();
                 let history = serde_json::to_string(&messages).unwrap();
                 let child = history.contains("nested child prompt");
@@ -2072,16 +2072,16 @@ mod tests {
                     );
                     "parent folded child"
                 };
-                Ok(llm_client::LlmResponse {
+                Ok(llm_runtime::LlmResponse {
                     id: "response".into(),
                     model: "mock".into(),
-                    content: vec![llm_client::ContentBlock::Text {
+                    content: vec![llm_runtime::ContentBlock::Text {
                         text: text.into(),
                         cache_control: None,
                     }],
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
-                    usage: llm_client::Usage::default(),
+                    usage: llm_runtime::Usage::default(),
                     cost: None,
                     provider_metadata: serde_json::Value::Null,
                 })
@@ -3541,12 +3541,12 @@ mod tests {
         tx.send(SubagentEvent::Completed {
             agent_id: AgentId::new(),
             result: json!({ "text": "rest answer" }),
-            usage: llm_client::Usage::default(),
+            usage: llm_runtime::Usage::default(),
             total_tool_use_count: 3,
             total_duration_ms: 1500,
             assistant_message_count: 0,
             last_request_id: None,
-            cumulative_usage: llm_client::Usage::default(),
+            cumulative_usage: llm_runtime::Usage::default(),
             usage_complete: true,
         })
         .await

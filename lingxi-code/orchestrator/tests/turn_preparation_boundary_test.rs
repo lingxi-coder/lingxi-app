@@ -23,7 +23,7 @@
 //! through the public entries, so they stay meaningful whether preparation lives
 //! in `turn_loop.rs` (today) or in a `BatchedRound` strategy (after PR 2).
 
-use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
     NoOpPermissionGate, StaticMemoryProvider,

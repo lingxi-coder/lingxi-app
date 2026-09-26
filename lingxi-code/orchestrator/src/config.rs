@@ -68,7 +68,7 @@ pub struct OrchestratorConfig {
     /// Opus-fallback model (claude-code `--fallback-model`). When `Some(id)`,
     /// the batched turn loop routes its primary API call through the
     /// fallback-aware path so a consecutive-529 gate on a non-custom Opus
-    /// primary model can surface `llm_client::LlmError::Overloaded` with
+    /// primary model can surface `llm_runtime::LlmError::Overloaded` with
     /// fallback triggered; the turn loop then switches the session model to
     /// `id`, warns the user, and re-issues against it
     /// (1:1 with claude-code `query.ts:894-948`).
@@ -190,7 +190,7 @@ pub struct OrchestratorConfig {
     /// `false` (the parity default) is byte-identical to the pre-wiring stub: the
     /// turn loop passed `is_subscriber = false` until OAuth subscription
     /// resolution landed. Populated at the composition root
-    /// (`engine_desktop::build`) via `anthropic_oauth::subscription_from_scopes`.
+    /// (`harness_runtime::desktop::build`) via `anthropic_oauth::subscription_from_scopes`.
     #[serde(default)]
     pub is_subscriber: bool,
 
@@ -203,7 +203,7 @@ pub struct OrchestratorConfig {
     /// seed/fallback only. The former PARITY-GAP here is closed: the profile
     /// fetch (`anthropic_oauth::fetch_profile_from_oauth_token` +
     /// `fetch_user_roles`) now runs as a background task in
-    /// `engine_desktop::build` (llm-client future-work batch 4), filling the
+    /// `harness_runtime::desktop::build` (llm-runtime future-work batch 4), filling the
     /// shared `platform_api::subscription::SharedSubscription` slot, and the
     /// provider adapter reads that live slot at drive time via
     /// `effective_subscriber()` (batch 5) — so the 429/enterprise retry gate
@@ -242,7 +242,7 @@ pub struct OrchestratorConfig {
     /// === "apiKeyHelper"`). `false` — the default — yields the /login copy,
     /// which is the right advice for a stored or OAuth credential.
     ///
-    /// Set from `llm_client::oauth::anthropic::AuthSource` at the composition
+    /// Set from `llm_runtime::oauth::anthropic::AuthSource` at the composition
     /// root. Started life as a `bool`; widened because the org-disabled copy
     /// tells an env-var user and an `apiKeyHelper` user to unset DIFFERENT
     /// things, which a single flag cannot express.

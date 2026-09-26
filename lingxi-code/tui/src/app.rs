@@ -20,12 +20,12 @@ use std::time::Duration;
 use crossterm::event::{
     self, Event, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
+use permission::computer_access::ComputerAccessExchange;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
-use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
-use tui_core::computer_access_bridge::ComputerAccessExchange;
+use tool_api::ask_user_question::AskUserQuestionExchange;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::TurnEvent;
 use tui_core::permission_bridge::PermissionExchange;

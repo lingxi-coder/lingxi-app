@@ -1,8 +1,8 @@
 import Foundation
 import XCTest
 @testable import LingxiCode
-#if canImport(engine_mobileFFI)
-import engine_mobileFFI
+#if canImport(harness_runtimeFFI)
+import harness_runtimeFFI
 #endif
 
 /// Shared projection snapshots and real permission/workflow reducer inputs, without engine startup.
@@ -64,7 +64,7 @@ final class NativeConversationParityFixtureTests: XCTestCase {
         }
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
     func testSharedPermissionRetainsCorrelatorAndSuppressedRule() throws {
         for scenario in try scenarios() {
             guard let row = scenario["permission"] as? [String: Any] else { continue }

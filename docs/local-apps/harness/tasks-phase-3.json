@@ -6,16 +6,16 @@
       "title": "Host verified Local App template catalog read surface",
       "gate": "§9.4.1 / §18 Phase 3: the Host catalog returns only available semantic template fields plus catalog_digest and never exposes family, revision, path, or asset hashes",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/local_app_template_catalog.rs",
-        "lingxi-code/apps/engine-mobile/src/host.rs",
-        "lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_template_catalog.rs",
+        "lingxi-code/harness-runtime/src/mobile/host.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_runtime_profiles.rs",
         "lingxi-code/plugins/lingxi-local-app/assets/templates/catalog.json"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -41,17 +41,17 @@
       "title": "Template-selector-only validation and anti-stale selection",
       "gate": "§9.4.1 / §9.5: only template-selector can validate a proposal; Host re-reads catalog digest and returns a display-only rejected list plus an opaque validated_selection_handle",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/local_app_template_catalog.rs",
-        "lingxi-code/apps/engine-mobile/src/host.rs",
-        "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs",
-        "lingxi-code/apps/engine-mobile/src/local_apps_tools.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_template_catalog.rs",
+        "lingxi-code/harness-runtime/src/mobile/host.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_plugin_binding.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_apps_tools.rs",
         "lingxi-code/plugins/lingxi-local-app/skills/template-selection"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -78,16 +78,16 @@
       "title": "Durable run-scoped candidate journal and handle binding",
       "gate": "§9.5 / §16.3 / §18 Phase 3: candidate journal records app_id + workflow_run_id + catalog identity and rejects forged, cross-app, cross-run, stale, and missing handles",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/local_app_template_catalog.rs",
-        "lingxi-code/apps/engine-mobile/src/local_apps_host.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_template_catalog.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_apps_host.rs",
         "lingxi-code/local-apps/src"
       ],
       "crates": [
-        "engine-mobile",
+        "harness-runtime",
         "local-apps"
       ],
       "testPackages": [
-        "engine-mobile",
+        "harness-runtime",
         "local-apps"
       ],
       "exclusive": false,
@@ -115,17 +115,17 @@
       "title": "Create-only isolated staging and dependency input digest",
       "gate": "§9.5 / §10.1 / §18 Phase 3: create can stage from Host-issued selection before Manifest/Profile persistence, while update/verify require persisted Profile and dependency_input_sha256 covers requested/effective/base-lock inputs",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/local_apps_host.rs",
-        "lingxi-code/apps/engine-mobile/src/local_apps_build.rs",
-        "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_apps_host.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_apps_build.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_plugin_binding.rs",
         "lingxi-code/local-apps/src"
       ],
       "crates": [
-        "engine-mobile",
+        "harness-runtime",
         "local-apps"
       ],
       "testPackages": [
-        "engine-mobile",
+        "harness-runtime",
         "local-apps"
       ],
       "exclusive": false,

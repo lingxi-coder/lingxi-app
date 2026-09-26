@@ -63,7 +63,7 @@ All commands completed successfully against the modified workspace:
 
 | Check | Result |
 |---|---|
-| `cargo test -p orchestrator -p llm-client -p session -p hooks -p tasks --lib -- --test-threads=1` | 3,080 passed: hooks 474, llm-client 855, orchestrator 1,095, session 264, tasks 392 |
+| `cargo test -p orchestrator -p llm-runtime -p session -p hooks -p tasks --lib -- --test-threads=1` | 3,080 passed: hooks 474, llm-runtime 855, orchestrator 1,095, session 264, tasks 392 |
 | `cargo test -p orchestrator --tests --no-fail-fast -- --test-threads=1` | 1,428 passed across 81 suites: includes the same 1,095 library tests plus 333 integration tests |
 | telemetry event-name completeness and settings-schema tests | 21 passed |
 | Clippy for the five affected crates, library + tests, `--no-deps` | No errors; warnings remain |
@@ -92,7 +92,7 @@ that assertion pass.
 - `orchestrator/src/{turn_loop,streaming_executor,resume,hook_prompt_runner,
   provider_adapter,tool_result_persistence,structured_output,schema_validation,
   stop_hook_snapshot,diagnostics}.rs`, prompt modules and regression tests.
-- Shared seams: `core/src/session.rs`, `llm-client/src/{protocol,service}.rs`
+- Shared seams: `core/src/session.rs`, `llm-runtime/src/{protocol,service}.rs`
   and thinking normalization; `session/src/jsonl/{reader,loader,writer}.rs`;
   hook request/response definitions and prompt executor; platform task/goal
   metadata and model capabilities; task idle state propagation; tool metadata.
@@ -135,7 +135,7 @@ The requested follow-up closes the previously listed non-remote gaps:
   before awaiting, preserving the default test-thread stack.
 
 Key follow-up files include `protocol/src/js_utf16.rs`,
-`llm-client/src/thinking_scope.rs`, `orchestrator/src/{structured_output,
+`llm-runtime/src/thinking_scope.rs`, `orchestrator/src/{structured_output,
 schema_validation,tool_result_persistence,turn_loop,provider_adapter}.rs`,
 `orchestrator/testdata/schema-validation-2.1.263.json`,
 `session/src/jsonl/writer.rs`, `hooks/src/{executor,prompt_executor}.rs`,
@@ -150,7 +150,7 @@ parallel implementations.
 
 | Check | Result |
 |---|---|
-| Cross-layer `--tests`: agent, llm-client, hooks, session, protocol, client-protocol, client-adapter, tool-agent, tool-ui, tool-workflow, tool-mcp | 3,414 tests; initial two missing additive contract baselines corrected and both suites rerun successfully |
+| Cross-layer `--tests`: agent, llm-runtime, hooks, session, protocol, client-protocol, client-adapter, tool-agent, tool-ui, tool-workflow, tool-mcp | 3,414 tests; initial two missing additive contract baselines corrected and both suites rerun successfully |
 | Orchestrator library and integration tests | 1,447 tests across 81 suites; six event-order assertions in five suites updated for additive identity metadata and rerun |
 | Desktop and mobile engine `cargo check --lib` | Passed |
 | Clippy for the 12 cross-layer crates, library and tests, `--no-deps` | Passed with warnings; no errors |

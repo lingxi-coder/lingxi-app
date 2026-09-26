@@ -324,7 +324,7 @@ final class LocalAppsStoreTests: XCTestCase {
 
     func testFilteringUsesLocalizedSearch() {
         let store = LocalAppsStore()
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             store.handle(event: .appsChanged(apps: [
                 appRecord(id: "tracker", name: "订单跟踪", brief: "跟踪订单状态"),
                 appRecord(id: "metrics", name: "Metrics", brief: "查看运营指标"),
@@ -536,7 +536,7 @@ final class LocalAppsStoreTests: XCTestCase {
 
     func testManagedMcpInventoryFallsBackToDefaultOffNeedsSetupState() {
         let store = LocalAppsStore()
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             store.handle(event: .appsChanged(apps: [
                 appRecord(
                     id: "tracker",
@@ -1037,7 +1037,7 @@ final class LocalAppsStoreTests: XCTestCase {
         return nil
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         func testRejectedDeleteCancelsOnlyItsUnconfirmedCleanupJournal() async throws {
             enum ExpectedFailure: Error { case rejected }
             let suiteName = "LocalAppsStoreTests.delete-rejected.\(UUID().uuidString)"
@@ -2743,7 +2743,7 @@ final class LocalAppsStoreTests: XCTestCase {
         }
     #endif
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         // ── The conversational create flow ────────────────────────────────
         //
         // The whole block these replaced was built around a create FORM: a
@@ -4710,7 +4710,7 @@ final class LocalAppsStoreTests: XCTestCase {
     ///
     /// `switchScope` is the one seam every caller funnels through, so a pin
     /// written here with no `startNew` term also rewrites the mode of an
-    /// explicit RESUME. `apps/engine-mobile/src/host.rs` rejects a cross-mode
+    /// explicit RESUME. `harness-runtime/src/mobile/host.rs` rejects a cross-mode
     /// resume outright ("session ... belongs to chat mode, but this source runs
     /// code mode") and the app's session catalog lists rows of BOTH modes, so
     /// an unconditional pin makes every pre-existing Chat-mode app session

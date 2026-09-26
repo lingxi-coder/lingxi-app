@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 # M8-P12 → M10-F3: the Android UniFFI packager crate. Wraps the SHARED session
-# host (`engine_mobile::MobileEngineHandle`, F3-04 — re-exported, not re-derived)
+# host (`harness_runtime::mobile::MobileEngineHandle`, F3-04 — re-exported, not re-derived)
 # behind the Android-specific `Platform`-construction wrapper, accepting
 # foreign-supplied (Kotlin) callback objects (camera / audio / share) to build an
 # `AndroidPlatform`.
@@ -23,11 +23,11 @@ crate-type = ["lib", "cdylib"]
 
 [features]
 # F3-04: default-on so `cargo build -p android-aar` exercises the real FFI
-# surface. It activates `engine-mobile/uniffi` (which pulls the shared session
+# surface. It activates `harness-runtime/uniffi` (which pulls the shared session
 # host + the `client-adapter`/`client-protocol` UniFFI types) and this crate's
 # own `setup_scaffolding!`. `uniffi` is offline-clear since F3-00.
 default = ["uniffi"]
-android-computer-use = ["engine-mobile/android-computer-use"]
+android-computer-use = ["harness-runtime/android-computer-use"]
 uniffi = [
     "dep:uniffi",
     "dep:async-trait",
@@ -43,11 +43,11 @@ uniffi = [
     # so the stubs are inert for Git). Gated to `uniffi` so the plain build is
     # unaffected; the probe body itself is `cfg(target_os = "android")`.
     "tool-api/test-support",
-    "engine-mobile/uniffi",
+    "harness-runtime/uniffi",
 ]
 
 [dependencies]
-engine-mobile = { path = "../engine-mobile" }
+harness-runtime = { path = "../../harness-runtime", default-features = false, features = ["mobile"] }
 skill-api = { path = "../../skill-api" }
 platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }

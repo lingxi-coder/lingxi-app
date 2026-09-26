@@ -6,7 +6,7 @@
 
 use crate::conversation::OrchestratorApiClient;
 use async_trait::async_trait;
-use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse, Usage};
 use platform_api::{CostSnapshot, OutputEvent, OutputStream};
 use protocol::ConversationMessage;
 use std::collections::VecDeque;
@@ -73,15 +73,15 @@ pub struct MockApiClient {
     close_responses_ws_count: Arc<Mutex<u32>>,
     /// Task 7: seeds passed to `messages_create_seeded`; one entry per call.
     captured_seeds: Arc<Mutex<Vec<u8>>>,
-    /// Task 8 (llm-client future-work batch 3): the FULL internal rate-limit
+    /// Task 8 (llm-runtime future-work batch 3): the FULL internal rate-limit
     /// snapshot returned by `last_rate_limit_full()`. A `std::sync::Mutex`
     /// (not tokio) because the trait accessor is a sync `fn`.
     rate_limit_full: std::sync::Mutex<Option<crate::model::rate_limit::RateLimitInfo>>,
-    /// Task 2 (llm-client future-work batch 5): the raw per-window snapshot
+    /// Task 2 (llm-runtime future-work batch 5): the raw per-window snapshot
     /// returned by `last_raw_utilization()`. Same sync-Mutex rationale as
     /// `rate_limit_full`.
     raw_utilization: std::sync::Mutex<Option<crate::model::rate_limit::RawUtilization>>,
-    /// Task 6 (llm-client future-work batch 5): when `Some`, every
+    /// Task 6 (llm-runtime future-work batch 5): when `Some`, every
     /// `messages_create` call fails with a clone of this error instead of
     /// consuming the queue — lets tests drive a terminal API failure (e.g.
     /// `LlmError::RateLimited`) through the turn loop.
@@ -609,7 +609,7 @@ impl OutputStream for MockOutputStream {
             cache_creation_tokens,
         });
     }
-    /// Task 8 (llm-client future-work batch 3): record the rate-limit
+    /// Task 8 (llm-runtime future-work batch 3): record the rate-limit
     /// emission so tests can assert the emit-on-change behaviour.
     #[allow(
         clippy::too_many_arguments,
@@ -643,7 +643,7 @@ impl OutputStream for MockOutputStream {
             credits_required,
         });
     }
-    /// Task 2 (llm-client future-work batch 5): record the raw-utilization
+    /// Task 2 (llm-runtime future-work batch 5): record the raw-utilization
     /// emission so tests can assert the emit-on-change behaviour.
     async fn emit_raw_utilization(
         &self,

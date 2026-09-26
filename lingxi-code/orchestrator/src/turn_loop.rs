@@ -8,7 +8,7 @@ use crate::test_support::{PermissionDecision, PermissionDecisionSource, Permissi
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
-use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
+use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -583,22 +583,32 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         let usage = crate::cost_wiring::llm_usage_to_cost_usage(&response.usage);
         let cache_read = response.usage.billable_tokens.cache_read;
         let cache_create = response.usage.billable_tokens.cache_write;
-        let model_ref = crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref());
+        let quote = response
+            .cost
+            .as_ref()
+            .and_then(crate::cost_wiring::frozen_cost_quote);
+        let model_ref = quote.as_ref().map_or_else(
+            || crate::cost_wiring::model_ref_from_string(&model, model_profile.as_deref()),
+            |(model_ref, _)| model_ref.clone(),
+        );
         let elapsed = api_call_started.elapsed();
         let retries = orch.api.last_retry_count();
         let scope = cost_scope
             .clone()
             .expect("a wired cost tracker captured its scope before provider dispatch");
-        let receipt = scope.submit_model_response(cost::CostModelResponse {
-            model_ref: model_ref.clone(),
-            usage,
-            duration: elapsed,
-            retries,
-            cache_read_input_tokens: cache_read,
-            cache_creation_input_tokens: cache_create,
-            is_batch_request: false,
-            bus: orch.model_runtime.analytics_bus.clone(),
-        });
+        let receipt = scope.submit_model_response_with_quote(
+            cost::CostModelResponse {
+                model_ref: model_ref.clone(),
+                usage,
+                duration: elapsed,
+                retries,
+                cache_read_input_tokens: cache_read,
+                cache_creation_input_tokens: cache_create,
+                is_batch_request: false,
+                bus: orch.model_runtime.analytics_bus.clone(),
+            },
+            quote.map(|(_, amount)| amount),
+        );
         (
             receipt,
             model_ref,
@@ -655,13 +665,13 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // turn can thread the exact bytes onto its child (cache-identical prefix).
     orch.save_current_turn_system_prompt(system).await;
 
-    // Task 8 (llm-client future-work batch 3): the call succeeded — forward
+    // Task 8 (llm-runtime future-work batch 3): the call succeeded — forward
     // the adapter's unified rate-limit snapshot to the output stream when it
     // changed since the last emission (emit-on-change; no-op for clients
     // without a snapshot). Covers the batched AND cancelable drivers (both
     // funnel through this function).
     orch.emit_rate_limit_if_changed().await;
-    // Task 2 (llm-client future-work batch 5): same seam, raw per-window
+    // Task 2 (llm-runtime future-work batch 5): same seam, raw per-window
     // utilization snapshot (emit-on-change; empty snapshot never emitted).
     orch.emit_raw_utilization_if_changed().await;
 
@@ -1401,7 +1411,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
 
     // Map `LlmError::ContextOverflow` to the PTL recovery path.
     // The `token_gap` field carries the actual-minus-limit count parsed from the
-    // provider error message by `llm_client`; the PTL truncator treats `0` as
+    // provider error message by `llm_runtime`; the PTL truncator treats `0` as
     // "unknown" and falls back to its 20% heuristic.
     let token_gap: u64 = match first {
         Ok(resp) => {
@@ -2180,7 +2190,7 @@ pub(crate) fn terminal_api_error_text(
     interactive: bool,
     stop_reason: &str,
     request_id: Option<&str>,
-    stop_details: Option<&llm_client::StopDetails>,
+    stop_details: Option<&llm_runtime::StopDetails>,
 ) -> Option<String> {
     match stop_reason {
         "max_tokens" => Some(format!(
@@ -2332,7 +2342,7 @@ fn refusal_explanation_clause(explanation: Option<&str>) -> String {
 pub(crate) async fn surface_terminal_api_error(
     orch: &ConversationOrchestrator,
     stop_reason: &str,
-    stop_details: Option<&llm_client::StopDetails>,
+    stop_details: Option<&llm_runtime::StopDetails>,
 ) -> Option<MessageId> {
     let (model, interactive) = {
         let s = orch.session.lock().await;
@@ -2883,7 +2893,7 @@ async fn handle_thinking_only(
     Ok(TurnStepOutcome::Continue)
 }
 
-/// Translate llm-client content blocks into protocol content blocks.
+/// Translate llm-runtime content blocks into protocol content blocks.
 /// Server-side variants (`RedactedThinking`, `ServerToolUse`, `ConnectorText`,
 /// `AdvisorToolResult`) are PRESERVED verbatim (not dropped) so resume/replay
 /// JSONL bytes stay intact when the protected-thinking/advisor/connector betas
@@ -2897,6 +2907,7 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
     content
         .iter()
         .filter_map(|b| match b {
+            LlmContentBlock::ProviderContent { protocol, value } => Some(ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
             LlmContentBlock::Text { text, .. }
             | LlmContentBlock::TextJsUtf16 { text, .. } => {
                 Some(ContentBlock::Text { text: text.clone() })
@@ -2913,7 +2924,7 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                 // paths don't resolve. Windows paths and genuinely-escaped
                 // sequences are left verbatim; `Workflow.script` is restored.
                 let (input, _stats) =
-                    llm_client::unicode_repair::repair_tool_input(name, input);
+                    llm_runtime::unicode_repair::repair_tool_input(name, input);
                 Some(ContentBlock::ToolUse {
                     id: ToolUseId::from(id.clone()),
                     name: name.clone(),
@@ -3321,7 +3332,7 @@ fn tool_result_size(content: &str, content_blocks: Option<&[serde_json::Value]>)
 /// string OR an array — so a substitution replaces the whole payload. LingXi
 /// splits that payload across `ContentBlock::ToolResult`'s `content` string and
 /// its `content_blocks` array, and the wire conversion prefers the array when
-/// present (`llm-client/src/convert.rs`: `content_blocks.map_or_else(|| String(content), Array)`).
+/// present (`llm-runtime/src/convert.rs`: `content_blocks.map_or_else(|| String(content), Array)`).
 /// So substituting only `content` would leave the oversized array to win at the
 /// wire: the file gets written, the telemetry fires, and the model still
 /// receives the full payload. The caller MUST clear `content_blocks` whenever
@@ -8578,7 +8589,7 @@ mod tool_result_persistence_wiring_tests {
 
     #[tokio::test]
     async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
-        use llm_client::WireCodec;
+        use llm_runtime::WireCodec;
         use protocol::{ConversationMessage, MessageId};
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("history.jsonl");
@@ -8613,13 +8624,13 @@ mod tool_result_persistence_wiring_tests {
         let history =
             crate::resume::state_from_messages(uuid::Uuid::nil(), &loaded.messages_in_order)
                 .history;
-        let request = llm_client::LlmRequest {
+        let request = llm_runtime::LlmRequest {
             model: "claude-opus-4-7".into(),
-            messages: llm_client::convert::to_llm_messages(history).unwrap(),
+            messages: llm_runtime::convert::to_llm_messages(history).unwrap(),
             ..Default::default()
         };
         let codec =
-            llm_client::AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
+            llm_runtime::AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
         for encoded in [
             codec.encode_request(&request).unwrap(),
             codec.encode_count_tokens_request(&request).unwrap(),
@@ -8805,7 +8816,7 @@ mod tool_result_persistence_wiring_tests {
     /// claude-code's `F0u` substitutes the ONE model-facing payload
     /// (`{...e, content: a}`, where `content` is a string OR an array). LingXi
     /// splits it across `content` and `content_blocks`, and the wire prefers
-    /// the array when present (`llm-client/src/convert.rs`:
+    /// the array when present (`llm-runtime/src/convert.rs`:
     /// `content_blocks.map_or_else(|| String(content), Array)`). Substituting
     /// only `content` therefore wrote the file, fired the telemetry, and still
     /// handed the model the full oversized array — the defect this pins.

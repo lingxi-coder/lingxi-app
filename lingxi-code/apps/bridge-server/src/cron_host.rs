@@ -80,7 +80,7 @@ impl cron::CronJobFirer for HostCronFirer {
         self.sink
             .emit(ClientEvent::CronRunRequested {
                 run_id: request.run_id.clone(),
-                task: engine_desktop::cron_management::task_dto(request.task.clone()),
+                task: harness_runtime::desktop::cron_management::task_dto(request.task.clone()),
             })
             .await;
         let result = tokio::time::timeout(Duration::from_secs(24 * 60 * 60), receiver).await;

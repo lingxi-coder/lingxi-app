@@ -97,7 +97,7 @@ pub fn candidates_from_rows(rows: &[crate::session::ModelRow]) -> Vec<FusionCand
                 analyst_capable: row.fusion_analyst_capable,
                 // A suggestion only. Nothing at run time reads the hint table
                 // any more; it exists to put plausible picks near the top.
-                suggested_rank: llm_client::hints_for(profile, &row.request_model)
+                suggested_rank: llm_runtime::hints_for(profile, &row.request_model)
                     .map_or(0, |hints| hints.quality_rank),
                 is_session_model: row.is_current,
             })

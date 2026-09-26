@@ -92,7 +92,7 @@ pub enum TokenClass {
     /// than the standard 5-minute cache write tier (e.g. sonnet: $6/Mtok vs $3.75/Mtok).
     ///
     /// The API field `cache_creation.ephemeral_1h_input_tokens` is retained by
-    /// the llm-client Anthropic codec and mapped to this token class by the
+    /// the llm-runtime Anthropic codec and mapped to this token class by the
     /// orchestrator cost bridge when present.
     CacheWrite1h,
 }
@@ -134,6 +134,16 @@ pub enum PricingSource {
     BuiltInReference {
         /// The provider whose builtin sheet was used.
         provider: ProviderId,
+    },
+    /// Published USD rates exist for some token classes, while other classes
+    /// have no published price. A consumed missing class uses the unknown
+    /// fallback and is marked as an estimate by the tracker.
+    PublishedPartial {
+        /// The provider that published the available rates.
+        provider: ProviderId,
+        /// A price rule or schedule needs per-attempt facts unavailable to the
+        /// static host catalog. Only a frozen SDK estimate can price it exactly.
+        conditional: bool,
     },
     /// A host-supplied override loaded from disk.
     HostOverride {
@@ -765,6 +775,15 @@ impl PricingCatalog {
                 nano_usd_per_token: 25_000,
             },
         );
+        // The cost usage shape keeps reasoning separate from visible output.
+        // Unknown models have no published reasoning discount, so retain the
+        // output rate instead of silently treating reasoning as free.
+        rates.insert(
+            TokenClass::ReasoningOutput,
+            MoneyPerToken {
+                nano_usd_per_token: 25_000,
+            },
+        );
         rates.insert(
             TokenClass::CacheWrite,
             MoneyPerToken {
@@ -1272,6 +1291,10 @@ mod tests {
         assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 5_000);
         assert_eq!(
             p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            25_000
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::ReasoningOutput].nano_usd_per_token,
             25_000
         );
         assert_eq!(

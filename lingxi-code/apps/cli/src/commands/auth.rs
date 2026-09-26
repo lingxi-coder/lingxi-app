@@ -19,9 +19,9 @@ use clap::{Args, Subcommand};
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 use lingxi_core::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin, OrgMembershipCheck};
-use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
-use llm_client::oauth::anthropic::handle::{CodeFlowIo, OAuthHandle, OAuthLoginOptions, UrlSink};
+use llm_runtime::oauth::anthropic::client::ClaudeAiOAuthClient;
+use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
+use llm_runtime::oauth::anthropic::handle::{CodeFlowIo, OAuthHandle, OAuthLoginOptions, UrlSink};
 use platform_api::AuthHandle;
 use std::path::Path;
 use std::sync::Arc;
@@ -154,7 +154,7 @@ async fn run_login(args: &LoginArgs) -> i32 {
         Some(ForceLoginMethod::Gateway) => unreachable!(),
         None => args.console,
     };
-    let org_pin = engine_desktop::managed_force_login_org_pin().await;
+    let org_pin = harness_runtime::desktop::managed_force_login_org_pin().await;
     let org_uuid = match &org_pin {
         ForceLoginOrgPin::Pinned(ids) if ids.len() == 1 => ids.first().cloned(),
         _ => None,
@@ -514,7 +514,7 @@ fn print_status_text(
 /// Open the exact credential stack used by the bridge/Desktop runtime.
 async fn build_credential_manager() -> Result<Arc<secret::CredentialManager>, anyhow::Error> {
     let lingxi_home = crate::run::lingxi_home_dir();
-    let stack = engine_desktop::build_shared_credential_stack(&lingxi_home, false)
+    let stack = harness_runtime::desktop::build_shared_credential_stack(&lingxi_home, false)
         .await
         .map_err(|e| anyhow::anyhow!("secure storage: {e}"))?;
     Ok(stack.credentials)
@@ -534,7 +534,7 @@ pub(crate) async fn build_oauth_handle(use_console: bool) -> Result<OAuthHandle,
 
 pub(crate) async fn effective_force_login_method() -> Option<ForceLoginMethod> {
     let mut method = None;
-    for raw in engine_desktop::settings_watch::managed_settings_raw_tiers().await {
+    for raw in harness_runtime::desktop::settings_watch::managed_settings_raw_tiers().await {
         let Ok(settings) =
             serde_json::from_str::<lingxi_core::settings::schema::SettingsJson>(&raw)
         else {

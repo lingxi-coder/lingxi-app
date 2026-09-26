@@ -238,11 +238,11 @@ fn push_section_separator(s: &mut String) {
     }
 }
 
-// The cache-block splitter and its supporting types live in `llm_client`
+// The cache-block splitter and its supporting types live in `llm_runtime`
 // (provider-protocol logic, not prompt content). Re-exported here so that
 // in-orchestrator callers (`crate::prompt::split_system_blocks_with`, etc.)
 // continue to resolve without any edit to their call sites.
-pub use llm_client::prompt_format::{
+pub use llm_runtime::prompt_format::{
     split_system_blocks, split_system_blocks_with, SplitOptions, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 
@@ -567,7 +567,7 @@ mod tests {
     }
 
     // ---- system-prompt cache-block split (splitSysPromptPrefix parity) ----
-    // Unit tests for split_system_blocks_with live in llm_client::prompt_format.
+    // Unit tests for split_system_blocks_with live in llm_runtime::prompt_format.
     // This end-to-end test stays here because it exercises assemble_system_prompt
     // (orchestrator) and verifies the round-trip via the re-exported splitter.
 

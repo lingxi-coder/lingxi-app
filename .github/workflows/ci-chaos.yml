@@ -23,7 +23,7 @@ jobs:
           - partial_write_settings_json          # M3-01 loader half-written file
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - name: Run chaos scenario ${{ matrix.scenario }}
         working-directory: lingxi-code
         run: |

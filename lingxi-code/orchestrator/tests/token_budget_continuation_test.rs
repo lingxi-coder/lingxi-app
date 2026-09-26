@@ -3,7 +3,7 @@
 //! AND a budget is configured, keeps nudging the model past `end_turn` until
 //! ~90% of the budget is spent — and that with the gate OFF (the parity
 //! default) the loop stops at the first `end_turn` (NO-OP).
-use llm_client::{ContentBlock as LlmContentBlock, LlmResponse, TokenUsage, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, LlmResponse, TokenUsage, Usage};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -244,7 +244,10 @@ async fn budget_on_resets_recovery_count_on_continuation() {
 // this step, and the turn stops one continuation early — a quiet off-by-one in
 // how much work the agent does, with nothing failing.
 
-fn streamed_end_turn_with_output_tokens(id: &str, output_tokens: u64) -> Vec<llm_client::LlmEvent> {
+fn streamed_end_turn_with_output_tokens(
+    id: &str,
+    output_tokens: u64,
+) -> Vec<llm_runtime::LlmEvent> {
     use orchestrator::test_support::{
         content_block_start_text, content_block_stop, message_start, message_stop, text_delta,
     };

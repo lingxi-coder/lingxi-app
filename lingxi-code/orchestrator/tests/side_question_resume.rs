@@ -40,7 +40,7 @@ impl sidequery::SideQueryClient for ErrorClient {
         _request: sidequery::SideQueryRequest,
     ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
         Err(sidequery::SideQueryError::Api(
-            llm_client::LlmError::InvalidRequest {
+            llm_runtime::LlmError::InvalidRequest {
                 message: "bad request".into(),
             },
         ))

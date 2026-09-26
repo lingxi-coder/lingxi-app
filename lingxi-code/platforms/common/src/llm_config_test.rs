@@ -1,7 +1,7 @@
 //! Extracted tests for `platforms::common::llm_config`.
 
 use super::*;
-use llm_client::{DefaultLlmClient, LlmError, PricingConfig, ProtocolFamily, ProviderId};
+use llm_runtime::{DefaultLlmClient, LlmError, PricingConfig, ProtocolFamily, ProviderId};
 
 /// Build a test config with `AuthStrategy::None` + `CredentialConfig::None`
 /// so `prepare()` never attempts a credential lookup (no env var needed).
@@ -58,7 +58,7 @@ async fn default_model_resolves() {
 
     // `prepare()` exercises registry resolution + codec encoding + auth —
     // with AuthStrategy::None it short-circuits before any network call.
-    let req = llm_client::LlmRequest::new("claude-opus-4-7");
+    let req = llm_runtime::LlmRequest::new("claude-opus-4-7");
     let result = client.prepare(&req).await;
     assert!(
         result.is_ok(),
@@ -74,7 +74,7 @@ async fn unknown_model_yields_model_unavailable() {
     let cfg = test_config("https://api.anthropic.com");
     let client = DefaultLlmClient::from_config(cfg).expect("config must be valid");
 
-    let req = llm_client::LlmRequest::new("claude-unknown-999");
+    let req = llm_runtime::LlmRequest::new("claude-unknown-999");
     let err = client
         .prepare(&req)
         .await
@@ -441,25 +441,27 @@ fn alias_unknown_target_is_error() {
 fn routing_test_cfg() -> ClientConfig {
     let mut cfg = builtin_anthropic_config("https://api.anthropic.com", false);
     // Add a second provider so we can test cross-profile fallback.
-    cfg.providers.push(llm_client::ProviderProfile {
-        provider_id: llm_client::ProviderId::OpenAICompatible {
+    cfg.providers.push(llm_runtime::ProviderProfile {
+        wire_profile: None,
+        regions: llm_runtime::Region::all(),
+        provider_id: llm_runtime::ProviderId::OpenAICompatible {
             name: "groq".to_string(),
         },
         profile_name: "groq".to_string(),
         base_url: "https://api.groq.com".to_string(),
-        protocol: llm_client::ProtocolFamily::OpenAiChat,
-        auth: llm_client::AuthStrategy::ApiKey,
-        credential: llm_client::CredentialConfig::Env {
+        protocol: llm_runtime::ProtocolFamily::OpenAiChat,
+        auth: llm_runtime::AuthStrategy::ApiKey,
+        credential: llm_runtime::CredentialConfig::Env {
             var: "GROQ_KEY".to_string(),
         },
-        models: vec![llm_client::ModelProfile {
+        models: vec![llm_runtime::ModelProfile {
             display_model: "llama-3.3-70b".to_string(),
             request_model: "llama-3.3-70b".to_string(),
             billing_model: "llama-3.3-70b".to_string(),
             aliases: vec!["llama".to_string()],
             description: None,
             metadata: Default::default(),
-            capabilities: llm_client::Capabilities {
+            capabilities: llm_runtime::Capabilities {
                 streaming: true,
                 tools: true,
                 ..Default::default()
@@ -603,7 +605,7 @@ fn parse_routing_overrides_backoff_zero_rejected() {
     .unwrap();
 
     let err = parse_routing_overrides(&routing, &cfg).expect_err("backoffMs=0 must error");
-    let llm_client::LlmError::InvalidRequest { message } = err else {
+    let llm_runtime::LlmError::InvalidRequest { message } = err else {
         panic!("expected InvalidRequest, got {err:?}");
     };
     assert!(message.contains("backoffMs must be >= 1"), "got: {message}");
@@ -923,9 +925,9 @@ async fn azure_profile_prepare_url_and_api_key_header() {
         .expect("my-azure profile must be present");
     assert_eq!(
         azure_profile.protocol,
-        llm_client::ProtocolFamily::AzureOpenAi
+        llm_runtime::ProtocolFamily::AzureOpenAi
     );
-    assert_eq!(azure_profile.auth, llm_client::AuthStrategy::AzureToken);
+    assert_eq!(azure_profile.auth, llm_runtime::AuthStrategy::AzureToken);
     assert!(
         azure_profile.azure.as_ref().map(|a| a.api_version.as_str()) == Some("2024-02-01"),
         "azure config must have apiVersion=2024-02-01"
@@ -933,7 +935,7 @@ async fn azure_profile_prepare_url_and_api_key_header() {
 
     // Build a client and prepare a request.
     let client = DefaultLlmClient::from_config(cfg).expect("client must build");
-    let req = llm_client::LlmRequest::new("gpt-4o-deployment");
+    let req = llm_runtime::LlmRequest::new("gpt-4o-deployment");
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 
     // URL check: deployment pattern.
@@ -1170,7 +1172,7 @@ fn bedrock_claude_missing_region_is_error() {
 /// Test name: `bedrock_claude_prepare_e2e_sigv4_headers`
 #[tokio::test]
 async fn bedrock_claude_prepare_e2e_sigv4_headers() {
-    use llm_client::{Credential, DefaultLlmClient, StaticCredentialProvider};
+    use llm_runtime::{Credential, DefaultLlmClient, StaticCredentialProvider};
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -1201,7 +1203,7 @@ async fn bedrock_claude_prepare_e2e_sigv4_headers() {
 
     // Fixed clock: 2024-01-15T12:34:56Z (Unix epoch 1705322096)
     let fixed_now = UNIX_EPOCH + Duration::from_secs(1_705_322_096);
-    let req = llm_client::LlmRequest::new("anthropic.claude-3-5-sonnet-20241022-v2:0");
+    let req = llm_runtime::LlmRequest::new("anthropic.claude-3-5-sonnet-20241022-v2:0");
     let prepared = client
         .prepare_at(&req, fixed_now)
         .await
@@ -1384,7 +1386,7 @@ async fn vertex_claude_prepare_e2e_bearer_header() {
     apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
     let client = DefaultLlmClient::from_config(cfg).expect("client must build");
-    let req = llm_client::LlmRequest::new("claude-sonnet-4@20250514");
+    let req = llm_runtime::LlmRequest::new("claude-sonnet-4@20250514");
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 
     // URL: non-streaming must use :rawPredict.
@@ -1502,7 +1504,7 @@ async fn vertex_gemini_prepare_e2e_bearer_header() {
     apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
     let client = DefaultLlmClient::from_config(cfg).expect("client must build");
-    let req = llm_client::LlmRequest::new("gemini-2.0-flash");
+    let req = llm_runtime::LlmRequest::new("gemini-2.0-flash");
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 
     // URL: non-streaming must use :generateContent.
@@ -1707,7 +1709,7 @@ async fn openai_responses_prepare_e2e_responses_url_and_bearer_header() {
     apply_settings_providers(&mut cfg, &providers, None).expect("must succeed");
 
     let client = DefaultLlmClient::from_config(cfg).expect("client must build");
-    let req = llm_client::LlmRequest::new("gpt-4o");
+    let req = llm_runtime::LlmRequest::new("gpt-4o");
     let prepared = client.prepare(&req).await.expect("prepare must succeed");
 
     assert_eq!(prepared.provider_request.method, "POST");

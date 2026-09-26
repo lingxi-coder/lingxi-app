@@ -14,7 +14,7 @@ three are one architectural cluster and one is blocked on a prerequisite.
 |---|---|
 | `HOOKS-ORIGIN-TRUST` (HIGH, security) | `agent/src/hooks_trust.rs` exists AND is wired at the subagent call site — `agent/src/runner.rs:150` `agent_hooks_origin_trusted(...)` with `report_untrusted_hooks(..., HooksTrustSurface::Subagent)`. |
 | `HOOK-TRUST-AGENT-FRONTMATTER-ORIGIN` (HIGH, security) | Same gate wired on the main thread — `apps/engine-desktop/src/lib.rs:8144`, `HooksTrustSurface::MainThread`. Both surfaces the audit named are covered. |
-| `tengu_repair_double_escaped_unicode` (MEDIUM) | `llm-client/src/unicode_repair.rs` — its own header names the port as claude-code `jYd` / `L6s` (2.1.218), "successor to 2.1.217's `sOo`", i.e. exactly this item. It rewrites argument values, not telemetry. |
+| `tengu_repair_double_escaped_unicode` (MEDIUM) | `llm-runtime/src/unicode_repair.rs` — its own header names the port as claude-code `jYd` / `L6s` (2.1.218), "successor to 2.1.217's `sOo`", i.e. exactly this item. It rewrites argument values, not telemetry. |
 | `canonicalModel` (LOW) | `apps/cli/src/stream_json.rs:874-908` emits `"canonicalModel"` with a `(cc 2.1.218)` provenance comment, plus a lock test at `:1504`. |
 
 ## No change required (1)

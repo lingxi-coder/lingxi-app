@@ -21,7 +21,7 @@
 //! already byte-locked in [`upsell`].
 //!
 //! Reset-time formatting REUSES
-//! [`llm_client::model::rate_limit::format_reset_time`] — the existing 1:1
+//! [`llm_runtime::model::rate_limit::format_reset_time`] — the existing 1:1
 //! port of TS `utils/format.ts` `formatResetTime` (en-US, 12-hour, minute
 //! omitted at `:00`, lowercased am/pm, `(<tz>)` suffix when requested). The
 //! old backend reached the same function through its `orchestrator` re-export.
@@ -46,7 +46,7 @@
 //! `None` for non-subscribers (TSX :26 `if (!shouldShowUpsell) return null`,
 //! with `shouldShowUpsell = isClaudeAISubscriber()` at :78).
 
-use llm_client::model::rate_limit::format_reset_time;
+use llm_runtime::model::rate_limit::format_reset_time;
 use platform_api::env::is_env_truthy;
 use platform_api::subscription::SubscriptionSnapshot;
 
@@ -1172,7 +1172,7 @@ mod tests {
 
     /// Expected `formatResetTime(ts, true)` output (showTimezone = true,
     /// showTime defaulted true) — computed through the SAME reused
-    /// llm-client port so the assertions are deterministic.
+    /// llm-runtime port so the assertions are deterministic.
     fn reset(ts: u64) -> String {
         format_reset_time(Some(i64::try_from(ts).unwrap()), true, true).unwrap()
     }

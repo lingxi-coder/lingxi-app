@@ -61,11 +61,11 @@ jobs:
             -k "$signing_keychain_password" "$signing_keychain"
           /usr/bin/security list-keychains -d user -s "$signing_keychain"
           echo "LINGXI_MAC_BROKER_PROVISIONING_PROFILE=$broker_profile_path" >> "$GITHUB_ENV"
-      - name: Install Rust 1.82 + target
+      - name: Install Rust 1.94 + target
         shell: bash
         run: |
-          rustup toolchain install 1.82.0 --profile minimal
-          rustup default 1.82.0
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
           rustup target add ${{ matrix.target }}
       - name: Install cross
         if: ${{ matrix.cross }}

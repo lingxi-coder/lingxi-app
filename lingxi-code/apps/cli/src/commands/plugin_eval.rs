@@ -2817,7 +2817,7 @@ async fn run_scaffold(script: &str, cwd: &Path) -> Result<(), String> {
     let policy = serde_json::from_value(scaffold_sandbox_policy(&canonical_cwd, &deny_read))
         .map_err(|error| format!("failed to construct scaffold sandbox policy: {error}"))?;
     #[cfg(not(windows))]
-    let runner = engine_desktop::new_live_sandbox_runner();
+    let runner = harness_runtime::desktop::new_live_sandbox_runner();
     #[cfg(not(windows))]
     let wrapped = runner
         .wrap(

@@ -44,7 +44,7 @@ impl agent::SubagentApiClient for HumanApi {
         _: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         _: Vec<serde_json::Value>,
-    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
         let history = serde_json::to_string(&messages).unwrap();
         let index = {
             let mut calls = self.calls.lock().unwrap();
@@ -96,10 +96,10 @@ impl agent::SubagentApiClient for HumanApi {
             self.call_release.notified().await;
             in_flight.finished = true;
         }
-        Ok(llm_client::LlmResponse {
+        Ok(llm_runtime::LlmResponse {
             id: "human-response".into(),
             model: "mock".into(),
-            content: vec![llm_client::ContentBlock::Text {
+            content: vec![llm_runtime::ContentBlock::Text {
                 text: if index == 0 {
                     "first answer"
                 } else {
@@ -110,7 +110,7 @@ impl agent::SubagentApiClient for HumanApi {
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_client::Usage::default(),
+            usage: llm_runtime::Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
         })

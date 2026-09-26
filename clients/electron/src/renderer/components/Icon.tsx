@@ -82,6 +82,10 @@ export function Icon({ name, size = 16, color = 'currentColor', stroke = 1.6, st
     case 'lock': return <svg {...p}><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" /></svg>;
     case 'cog': return <svg {...p}><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 21 10H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>;
     case 'arrowU': return <svg {...p} fill={color} stroke="none"><path d="M12 4l-7 8h4v8h6v-8h4z" /></svg>;
+    case 'pauseCircle': return <svg {...p}><circle cx="12" cy="12" r="8.5" /><path d="M10 9v6M14 9v6" /></svg>;
+    case 'playCircle': return <svg {...p}><circle cx="12" cy="12" r="8.5" /><path d="m10 8 6 4-6 4z" /></svg>;
+    case 'expand': return <svg {...p}><path d="M8 4H4v4M16 4h4v4M4 16v4h4M20 16v4h-4" /></svg>;
+    case 'collapse': return <svg {...p}><path d="M4 8h4V4M20 8h-4V4M8 20v-4H4M16 20v-4h4" /></svg>;
     case 'play': return <svg {...p} fill={color} stroke="none"><path d="M6 4l14 8-14 8z" /></svg>;
     case 'x': return <svg {...p}><path d="M18 6 6 18M6 6l12 12" /></svg>;
     case 'tasks': return <svg {...p}><path d="M12 2 4 9l8 7 8-7z" /><path d="m4 15 8 7 8-7" /></svg>;

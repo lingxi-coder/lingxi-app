@@ -100,7 +100,7 @@ const CHECKLIST: &[Entry] = &[
     // to the SAME `ApiService` whose `build_request` applies the session
     // `self.thinking` to every request (binary: child options carry
     // `thinkingConfig: sDi(n.options.thinkingConfig,…)` @215628753); locked by
-    // llm_client service_test::subagent_entry_point_inherits_session_thinking_
+    // llm_runtime service_test::subagent_entry_point_inherits_session_thinking_
     // config. COMPACTION: was a real gap — the fork-summarizer path
     // (`ForkedAgentRunner`→`ProviderSideQueryClient`) DROPPED thinking. Now the
     // session `ThinkingConfig` threads `with_session_thinking` (engine-desktop
@@ -162,7 +162,7 @@ const CHECKLIST: &[Entry] = &[
     // `subscribeRetryWake: V.subscribe` into the API-retry loop (@216289770)
     // so a teammate stuck in retry backoff re-issues NOW with the queued
     // message. lingxi analog: a `UserMessage` racing the in-flight round-trip
-    // (llm-client retries live inside that future) now drops it, appends the
+    // (llm-runtime retries live inside that future) now drops it, appends the
     // message to history, and re-issues immediately — previously the text was
     // silently DISCARDED. Locked by agent::runner_test::persist_mode_message_
     // wakes_stuck_round_trip_and_carries_the_text.
@@ -177,7 +177,7 @@ const CHECKLIST: &[Entry] = &[
     // frame − SAFETY_MARGIN); locked by overflow tests in markdown_table.rs +
     // tui-rata message.rs `wide_markdown_table_never_overflows_narrow_frame`.
     Entry { version: "2.1.198", item: "Markdown tables no longer overflow right border in fullscreen", disposition: Disposition::Implemented },
-    // M2 landed: llm_client::aws_auth (ZBd/gIn/t2d port: trust gate + STS
+    // M2 landed: llm_runtime::aws_auth (ZBd/gIn/t2d port: trust gate + STS
     // probe + QBd=30s cooldown + 3-min timeout) + the V_c/G_c/s_f drive-loop
     // trigger (Ygf=2) in ApiService; settings keys awsAuthRefresh /
     // awsCredentialExport / gcpAuthRefresh in engine SettingsJson.
@@ -279,9 +279,9 @@ const CHECKLIST: &[Entry] = &[
     // shows the status-page link `https://status.claude.com` (binary `zha`).
     // Wired into the tui-rata `SystemApiError` scrollback renderer; locked by
     // tui_core::retry_ux tests + tui-rata message render tests. DIVERGENCE (grep
-    // evidence): the LIVE per-attempt retry-status EVENT surface from llm-client
+    // evidence): the LIVE per-attempt retry-status EVENT surface from llm-runtime
     // (binary `onRetryStatus`) is not wired — retries are internal to
-    // `llm_client::ApiService`'s drive loop and the only `SystemApiError`
+    // `llm_runtime::ApiService`'s drive loop and the only `SystemApiError`
     // producer is a demo fixture (tui/src/state.rs:1770); the tui-rata spinner
     // has no "tip" surface to replace, so the status-page link renders in the
     // scrollback api-error line rather than the spinner tip.
@@ -315,7 +315,7 @@ const CHECKLIST: &[Entry] = &[
     // `aliases.sonnet.default` @207774{6xx}; lingxi: agent/skill sonnet-family
     // default flip + engine-desktop boot default, M1 3a730b442). NATIVE 1M:
     // registry `context:{window:1e6,native_1m:!0,native_1m_3p:{bedrock,vertex,
-    // foundry}}`; ported as llm-client `model_native_1m` (binary `Hx`
+    // foundry}}`; ported as llm-runtime `model_native_1m` (binary `Hx`
     // @208698511), locked by context_window sonnet_5_is_natively_1m_and_64k_
     // output + opus_4_7_opus_4_8_fable_5_are_natively_1m (M1b extends native
     // 1M to opus-4-7/opus-4-8/fable-5/mythos-5 per the same registry blob).
@@ -397,11 +397,11 @@ const CHECKLIST: &[Entry] = &[
     // off. Combined with the orchestrator's existing full-value
     // `emit_rate_limit_if_changed` change-gate (stricter than the binary's
     // status+overage `kqt` gate), the warning neither flickers nor re-emits an
-    // unchanged state. Locked by llm-client
+    // unchanged state. Locked by llm-runtime
     // stale_parallel_response_does_not_flip_rate_limit_warning_off +
     // equal_or_increasing_timestamps_always_record. The over-counted-telemetry
     // half is N/A: lingxi never ported `tengu_claudeai_limits_status_changed`
-    // (grep: 0 hits in telemetry/llm-client/orchestrator), so there is no
+    // (grep: 0 hits in telemetry/llm-runtime/orchestrator), so there is no
     // shared limits-status counter to over-count.
     Entry { version: "2.1.196", item: "Rate-limit warning flicker + over-counted telemetry with parallel requests", disposition: Disposition::Implemented },
     // M9 verified: cannot reproduce in lingxi's architecture. The workflow
@@ -516,7 +516,7 @@ const CHECKLIST: &[Entry] = &[
     Entry { version: "2.1.196", item: "Workers killed by daemon restart auto-resume when agents view opens", disposition: Divergence("LingXi now has durable daemon workers and manual attach/respawn, but agents-view open still does not auto-resume a worker killed by daemon restart") },
     Entry { version: "2.1.196", item: "/code-review workflow: five cleanup finders merged into one (-25% tokens)", disposition: Disposition::Implemented },
     Entry { version: "2.1.196", item: "Per-frame rendering skips no-op subtree walks during streaming", disposition: Disposition::Implemented },
-    // M12 landed: `llm_client::model::stream_watchdog` ports the binary's
+    // M12 landed: `llm_runtime::model::stream_watchdog` ports the binary's
     // default-ON idle watchdog (`jo = CLAUDE_ENABLE_STREAM_WATCHDOG ?? !0`,
     // `fzr()` = `max(env, 300000)` @208691984). `drive_stream` wraps each
     // blocking frame read in a `tokio::time::timeout` (deadline reset per event)

@@ -185,9 +185,33 @@ pub struct Attribution {
     pub pr: Option<String>,
 }
 
+/// Product usage region, independent of a cloud deployment/signing region.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderRegion {
+    /// Connections intended for mainland China.
+    ChinaMainland,
+    /// Connections intended for international use.
+    #[default]
+    International,
+}
+
+impl ProviderRegion {
+    /// Stable settings representation, shared by every client surface.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChinaMainland => "china_mainland",
+            Self::International => "international",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
+    /// Region used to list and resolve model connections. Absence means international.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_region: Option<ProviderRegion>,
     /// Terminal backend used for experimental agent-team members.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teammate_mode: Option<TeammateMode>,
@@ -487,7 +511,7 @@ pub struct SettingsJson {
     /// `false`, disables extended thinking for the session UNLESS a fixed budget
     /// is pinned via the `MAX_THINKING_TOKENS` env var or the
     /// `--max-thinking-tokens` flag (both pre-empt this). Consumed by the boot
-    /// session `ThinkingConfig` resolver (`llm_client::model::thinking::
+    /// session `ThinkingConfig` resolver (`llm_runtime::model::thinking::
     /// session_thinking_from_env`, binary `qIe()`:
     /// `if(e.alwaysThinkingEnabled===!1)return!1;return!0`). Key stays
     /// `alwaysThinkingEnabled` verbatim (config wire key).
@@ -568,7 +592,7 @@ pub struct SettingsJson {
     /// only that version), and full model IDs. If undefined, all models are
     /// available. If empty array, only the default model is available."
     /// Typically set in managed (`policySettings`) settings by enterprise
-    /// administrators. Consumed via [`llm_client::model::allowlist`] — matcher +
+    /// administrators. Consumed via [`llm_runtime::model::allowlist`] — matcher +
     /// policy-provenance for the `enforceAvailableModels` gate. Absent ⇒ None
     /// (no restriction), distinct from `Some(vec![])` (only the default model).
     /// Scalar-override merge (CC `settingsMergeCustomizer` returns the source
@@ -584,7 +608,7 @@ pub struct SettingsJson {
     /// availableModels entry instead. Has no effect when availableModels is unset
     /// or an empty array. Typically set in managed settings by enterprise
     /// administrators." The flag only binds with a POLICY-owned allowlist
-    /// (`llm_client::model::allowlist::resolve_enforcement`). Scalar-override
+    /// (`llm_runtime::model::allowlist::resolve_enforcement`). Scalar-override
     /// merge (not in `MERGE_STRATEGIES`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforce_available_models: Option<bool>,
@@ -603,8 +627,8 @@ pub struct SettingsJson {
 
     /// Scalar field (later source wins). `awsAuthRefresh`: path to a script
     /// that refreshes AWS authentication (2.1.198 settings schema: "Path to a
-    /// script that refreshes AWS authentication"). Consumed by the llm-client
-    /// AWS auth-refresh flow (`llm_client::aws_auth`, binary fn `ZBd`) when a
+    /// script that refreshes AWS authentication"). Consumed by the llm-runtime
+    /// AWS auth-refresh flow (`llm_runtime::aws_auth`, binary fn `ZBd`) when a
     /// Bedrock-style request fails with an expired-STS auth error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aws_auth_refresh: Option<String>,
@@ -780,7 +804,7 @@ pub struct SettingsJson {
     /// line of) a script whose stdout is the Anthropic auth value. CC 2.1.207
     /// zod (verbatim): `apiKeyHelper:E.string().optional().describe("Path to a
     /// script that outputs authentication values")`. Consumed by the auth
-    /// executor (`llm_client::oauth::anthropic::run_api_key_helper`, port of
+    /// executor (`llm_runtime::oauth::anthropic::run_api_key_helper`, port of
     /// binary `LTh`) with the TTL cache (`api_key_helper_ttl_ms`, port of `obc`).
     /// Scalar-override merge (not in `MERGE_STRATEGIES`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -840,7 +864,7 @@ pub struct SettingsJson {
     ///                 "capabilities": {...}? }] }`.
     ///
     /// **Wired (3c-T2):** parsed by `platform_common::apply_settings_providers`
-    /// and appended to `llm_client::ClientConfig` in `build()`.  `models` is
+    /// and appended to `llm_runtime::ClientConfig` in `build()`.  `models` is
     /// REQUIRED per entry; an absent or empty list is an error at engine startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<BTreeMap<String, Value>>,
@@ -894,7 +918,7 @@ pub enum FusionCompletionPolicy {
 /// automatic ranking any more: a checked-in hint table used to pick panels and
 /// the analyst on the operator's behalf, which meant the set of models a run
 /// actually spent money on was invisible in the settings and changed whenever
-/// the table or the live catalog did. `llm_client::fusion_hints` survives only
+/// the table or the live catalog did. `llm_runtime::fusion_hints` survives only
 /// as the SUGGESTION source the `/fusion setup` wizard sorts its candidate list
 /// by; nothing reads it at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -9,7 +9,7 @@
 //!   its last message, so the next turn's system-prompt assembly sees
 //!   the compaction transition.
 //! - Five consecutive `force_compact` calls do not panic / leak.
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 
 use compaction::CompactionOrchestrator;
 use orchestrator::test_support::{
@@ -481,7 +481,7 @@ fn history_is_valid(history: &[ConversationMessage]) -> bool {
 
 #[tokio::test]
 async fn compaction_safety_gate() {
-    use llm_client::{LlmResponse, Usage};
+    use llm_runtime::{LlmResponse, Usage};
 
     // Scripted end_turn response so the post-compaction turn can run.
     let response = LlmResponse {

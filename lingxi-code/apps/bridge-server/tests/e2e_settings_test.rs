@@ -1,7 +1,7 @@
 //! Task 21a — automating the ENGINE half of the manual settings QA checklist.
 //!
 //! Follows the `e2e_serve_test.rs` harness exactly: `bridge_server::boot::assemble`
-//! builds a real `engine_desktop::DesktopRuntime` from a deterministic
+//! builds a real `harness_runtime::desktop::DesktopRuntime` from a deterministic
 //! `DesktopConfig` rooted at a sandbox temp dir, and the resulting connection is
 //! served by the same `McpEndpoint` the production binary uses. Where
 //! `e2e_serve_test.rs` proves the turn/handshake path, this file proves the
@@ -33,8 +33,8 @@ use client_protocol::commands::{
     ClientCommand, ListingKindDto, PermissionBehaviorDto, WritableScopeDto,
 };
 use client_protocol::events::{ClientEvent, ErrorKindDto};
-use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
+use harness_runtime::desktop::DesktopConfig;
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
@@ -84,7 +84,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     std::fs::create_dir_all(managed_dir(&tmp)).expect("create sandbox managed dir");
     // The FOURTH root this harness has to isolate, and the one `cwd` /
     // `lingxi_home` / `isolated_credential_storage` do NOT cover:
-    // `boot::assemble` folds `engine_desktop::managed_settings_overlay()` on
+    // `boot::assemble` folds `harness_runtime::desktop::managed_settings_overlay()` on
     // top of the file layers, and that resolves through
     // `settings_watch::managed_settings_dir()`, which falls back to the
     // machine's REAL policy directory (`/Library/Application
@@ -112,7 +112,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     // live request path reads this variable. If any request-path code ever
     // starts reading env vars, this guard stops being sufficient.
     std::env::set_var(
-        engine_desktop::settings_watch::MANAGED_DIR_ENV,
+        harness_runtime::desktop::settings_watch::MANAGED_DIR_ENV,
         managed_dir(&tmp),
     );
     let cfg = DesktopConfig {
@@ -175,7 +175,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         restricted_tools: None,
         exclude_dynamic_system_prompt_sections: false,
         setting_source_scope: (true, true),
-        customization_gates: engine_desktop::CustomizationGates::default(),
+        customization_gates: harness_runtime::desktop::CustomizationGates::default(),
         session_persistence: true,
         cli_agents_json: None,
         cli_agent: None,

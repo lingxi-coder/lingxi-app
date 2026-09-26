@@ -7,7 +7,8 @@
 //! [`u64::checked_mul`] in their own code.
 
 use crate::pricing::{
-    first_party_name_to_canonical, ModelPricing, NonTokenBillableUnit, PricingCatalog, TokenClass,
+    first_party_name_to_canonical, ModelPricing, NonTokenBillableUnit, PricingCatalog,
+    PricingSource, TokenClass,
 };
 use crate::usage::{ApiSpeed, Usage};
 
@@ -18,6 +19,22 @@ impl CostCalculator {
     /// Total cost in nano-USD. Saturating arithmetic — no panic on overflow.
     #[must_use]
     pub fn calculate_nano_usd(usage: &Usage, pricing: &ModelPricing) -> u64 {
+        // A static host row cannot select time, context or Fast rules. A
+        // frozen SDK quote overrides this conservative fallback after dispatch.
+        if matches!(
+            pricing.source,
+            PricingSource::PublishedPartial {
+                conditional: true,
+                ..
+            }
+        ) || (matches!(pricing.source, PricingSource::PublishedPartial { .. })
+            && usage.speed == Some(ApiSpeed::Fast))
+        {
+            return Self::calculate_nano_usd(
+                usage,
+                &PricingCatalog::default_unknown_pricing(&pricing.model_ref),
+            );
+        }
         // COST.3/COST.6 — fast-mode tier overrides.
         //
         // claude-code binary `$2u` (`getModelCosts`, `utils/modelCost.ts:144-153`):
@@ -39,18 +56,77 @@ impl CostCalculator {
             total = total.saturating_add(tokens.saturating_mul(rate.nano_usd_per_token));
         }
 
-        if let Some(s) = usage.server_tool_use {
-            if let Some(per_req) = pricing
-                .non_token_rates_nano_usd
-                .get(&NonTokenBillableUnit::WebSearchRequest)
-                .copied()
-            {
-                let requests = u64::from(s.web_search_requests);
-                total = total.saturating_add(requests.saturating_mul(per_req));
+        // A partially published model keeps its real prices for known buckets.
+        // If the provider reports usage in an unpublished bucket, preserve the
+        // existing non-zero unknown-price policy for that bucket alone.
+        if matches!(pricing.source, PricingSource::PublishedPartial { .. }) {
+            let unknown = PricingCatalog::default_unknown_pricing(&pricing.model_ref);
+            for (class, rate) in &unknown.token_rates {
+                if !pricing.token_rates.contains_key(class) {
+                    total = total.saturating_add(
+                        usage
+                            .tokens_for(*class)
+                            .saturating_mul(rate.nano_usd_per_token),
+                    );
+                }
             }
         }
 
-        total
+        total.saturating_add(Self::non_token_nano_usd(usage, pricing))
+    }
+
+    /// Host-owned tool charges excluded from the client's token estimate.
+    #[must_use]
+    pub fn non_token_nano_usd(usage: &Usage, pricing: &ModelPricing) -> u64 {
+        let Some(tools) = usage.server_tool_use else {
+            return 0;
+        };
+        let published = pricing
+            .non_token_rates_nano_usd
+            .get(&NonTokenBillableUnit::WebSearchRequest)
+            .copied();
+        let fallback = matches!(pricing.source, PricingSource::PublishedPartial { .. })
+            .then(|| PricingCatalog::default_unknown_pricing(&pricing.model_ref))
+            .and_then(|unknown| {
+                unknown
+                    .non_token_rates_nano_usd
+                    .get(&NonTokenBillableUnit::WebSearchRequest)
+                    .copied()
+            });
+        published.or(fallback).map_or(0, |rate| {
+            u64::from(tools.web_search_requests).saturating_mul(rate)
+        })
+    }
+
+    /// Whether observed usage had to use an unpublished billable rate.
+    #[must_use]
+    pub fn uses_unknown_rate(usage: &Usage, pricing: &ModelPricing) -> bool {
+        matches!(pricing.source, PricingSource::PublishedPartial { .. })
+            && (matches!(
+                pricing.source,
+                PricingSource::PublishedPartial {
+                    conditional: true,
+                    ..
+                }
+            ) || usage.speed == Some(ApiSpeed::Fast)
+                || usage.server_tool_use.is_some_and(|tools| {
+                    tools.web_search_requests > 0
+                        && !pricing
+                            .non_token_rates_nano_usd
+                            .contains_key(&NonTokenBillableUnit::WebSearchRequest)
+                })
+                || [
+                    TokenClass::Input,
+                    TokenClass::Output,
+                    TokenClass::CacheWrite,
+                    TokenClass::CacheRead,
+                    TokenClass::ReasoningOutput,
+                    TokenClass::CacheWrite1h,
+                ]
+                .into_iter()
+                .any(|class| {
+                    usage.tokens_for(class) > 0 && !pricing.token_rates.contains_key(&class)
+                }))
     }
 
     /// COST.3/COST.6 — return the fast-mode pricing override for Opus models when

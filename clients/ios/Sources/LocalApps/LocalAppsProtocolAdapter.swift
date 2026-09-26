@@ -1,6 +1,6 @@
 import Foundation
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
 enum LocalAppsProtocolAdapter {
     static func collection(_ dto: AppDataCollectionDto) -> LocalAppDataCollection {
         LocalAppDataCollection(

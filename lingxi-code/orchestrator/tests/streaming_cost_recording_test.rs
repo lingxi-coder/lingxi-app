@@ -6,7 +6,7 @@
 
 use cost::pricing::PricingCatalog;
 use cost::{CostState, CostTracker};
-use llm_client::{TokenUsage, Usage};
+use llm_runtime::{TokenUsage, Usage};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -51,7 +51,7 @@ fn delta_usage_with_output(output: u64) -> Usage {
 /// scripted `MockStreamingApiClient`. Returns (orch, rx) where rx is the
 /// `CostTracker`'s persist channel.
 fn make_streaming_orch_with_tracker(
-    turns: Vec<Vec<llm_client::LlmEvent>>,
+    turns: Vec<Vec<llm_runtime::LlmEvent>>,
 ) -> (
     Arc<ConversationOrchestrator>,
     tokio::sync::mpsc::Receiver<CostState>,

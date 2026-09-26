@@ -169,7 +169,7 @@ if [[ "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" == "1" ]]; then
   for required in \
     "${GEN_DIR}/client_protocol.swift" \
     "${GEN_DIR}/client_protocolFFI.h" \
-    "${GEN_DIR}/engine_mobile.swift" \
+    "${GEN_DIR}/harness_runtime.swift" \
     "${GEN_DIR}/ios_framework.swift"; do
     [[ -f "${required}" ]] || {
       echo "ERROR: generated-binding reuse requested but file is missing: ${required}" >&2
@@ -251,9 +251,9 @@ shopt -u nullglob
 # 1b. Single-Swift-module dedup pass
 # ---------------------------------------------------------------------------
 # UniFFI 0.28 `--library` mode emits ONE self-contained `.swift` per namespace
-# (client_protocol / client_adapter / engine_mobile / ios_framework). The iOS
+# (client_protocol / client_adapter / harness_runtime / ios_framework). The iOS
 # app compiles all four into ONE Swift module — which UniFFI itself REQUIRES for
-# cross-namespace (external) type access: a throwing method in `engine_mobile`
+# cross-namespace (external) type access: a throwing method in `harness_runtime`
 # (`MobileEngineHandle.submit`) references `FfiConverterTypeClientError` /
 # `FfiConverterTypeClientCommand` that are DEFINED in `client_protocol` with no
 # explicit Swift import (UniFFI docs, types/remote_ext_types.md: "all generated
@@ -264,11 +264,11 @@ shopt -u nullglob
 # protocols, `rustCall`, `UniffiHandleMap`, `UniffiInternalError`, …) marked
 # `private`/`fileprivate` (file-scoped) so the copies don't COLLIDE in one
 # module. That compiles for every namespace in isolation, but breaks the ONE
-# cross-file reference that matters: `engine_mobile.swift` calling
+# cross-file reference that matters: `harness_runtime.swift` calling
 # `FfiConverterTypeClientError.lift` — a `public` converter type whose `lift`
 # witness comes from `client_protocol.swift`'s `private protocol
 # FfiConverterRustBuffer`, so it is "inaccessible due to 'private' protection"
-# from another file. (Swift error: engine_mobile.swift … 'lift' is inaccessible.)
+# from another file. (Swift error: harness_runtime.swift … 'lift' is inaccessible.)
 #
 # Fix (deterministic, no engine/bindgen-semantics change): keep the shared
 # scaffolding in ONE canonical file and make it module-visible; strip the

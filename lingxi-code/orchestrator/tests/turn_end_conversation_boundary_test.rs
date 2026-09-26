@@ -21,7 +21,7 @@
 //! assertion about outcomes still passes. The only thing that changes is whether
 //! a scheduled wake-up survives.
 
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     content_block_stop, input_json_delta, message_delta_stop, message_start, message_stop,
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,

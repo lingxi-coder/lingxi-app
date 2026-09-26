@@ -1,8 +1,8 @@
 import Foundation
 import XCTest
 @testable import LingxiCode
-#if canImport(engine_mobileFFI)
-import engine_mobileFFI
+#if canImport(harness_runtimeFFI)
+import harness_runtimeFFI
 
 private struct SettingsRoundtripSnapshot: Sendable {
     let effective: String
@@ -108,6 +108,6 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
 }
 #else
 final class NativeSettingsEngineRoundtripTests: XCTestCase {
-    func testSettingsRequiresRealNativeBindings() { XCTFail("Native settings roundtrip requires linked engine_mobileFFI") }
+    func testSettingsRequiresRealNativeBindings() { XCTFail("Native settings roundtrip requires linked harness_runtimeFFI") }
 }
 #endif

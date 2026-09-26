@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 # M8-P12 → M10-F3: the iOS UniFFI packager crate. Wraps the SHARED session host
-# (`engine_mobile::MobileEngineHandle`, F3-04 — re-exported, not re-derived)
+# (`harness_runtime::mobile::MobileEngineHandle`, F3-04 — re-exported, not re-derived)
 # behind the iOS-specific `Platform`-construction wrapper, accepting
 # foreign-supplied (Swift) callback objects (camera / audio / share) to build an
 # `IosPlatform`.
@@ -37,7 +37,7 @@ required-features = ["cli"]
 
 [features]
 # F3-04: default-on so `cargo build -p ios-framework` exercises the real FFI
-# surface. It activates `engine-mobile/uniffi` (which pulls the shared session
+# surface. It activates `harness-runtime/uniffi` (which pulls the shared session
 # host + the `client-adapter`/`client-protocol` UniFFI types) and this crate's
 # own `setup_scaffolding!`. `uniffi` is offline-clear since F3-00.
 default = ["uniffi"]
@@ -51,7 +51,7 @@ uniffi = [
     "dep:orchestrator",
     "dep:serde_json",
     "dep:local-apps",
-    "engine-mobile/uniffi",
+    "harness-runtime/uniffi",
 ]
 # M10-P1b: opt-in bindings-generator toolchain for the `uniffi-bindgen` bin.
 #
@@ -81,7 +81,7 @@ cli = [
 ]
 
 [dependencies]
-engine-mobile = { path = "../engine-mobile" }
+harness-runtime = { path = "../../harness-runtime", default-features = false, features = ["mobile"] }
 skill-api = { path = "../../skill-api" }
 platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }

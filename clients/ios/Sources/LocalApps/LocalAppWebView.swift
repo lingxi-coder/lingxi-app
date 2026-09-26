@@ -171,7 +171,7 @@ final class LocalAppWebViewRegistry {
         webView.evaluateJavaScript("window.lingxi?.__stream(\(json));")
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         func execute(request: AppUiRequestDto) async -> LocalAppUIExecutionResult {
             let qaExpectedURL: URL?
             switch LocalAppQaEnvelope.decode(request.value, requestID: request.requestId) {
@@ -637,7 +637,7 @@ final class LocalAppWebViewController {
         return !expectedMarker.isEmpty && expectedMarker == committedMarker
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         func execute(request: AppUiRequestDto) async -> LocalAppUIExecutionResult {
             guard request.appId == appID else {
                 return .failure(String(localized: "local_apps_error_ui_appid_mismatch"))

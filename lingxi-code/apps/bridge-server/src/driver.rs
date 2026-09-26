@@ -10,7 +10,7 @@
 //!
 //! The driver does NOT hold the [`client_adapter::AdapterOutputStream`] directly —
 //! the orchestrator already owns it as its [`platform_api::OutputStream`] (wired at
-//! construction, by `engine_desktop::build` in production or by the test harness).
+//! construction, by `harness_runtime::desktop::build` in production or by the test harness).
 //! Because that output stream lowers every callback into a
 //! [`client_protocol::events::ClientEvent`] and forwards it through the
 //! connection-scoped [`client_adapter::ClientEventSink`]
@@ -138,7 +138,7 @@ struct PendingWakeup {
 /// `isMeta: true`, and `skipSlashCommands: true`.
 ///
 /// WIRING: attached at `boot::assemble`. The `ScheduleWakeupTool` is built deep
-/// inside `engine_desktop::build` (via `tool_cron::register_all_with_auth`)
+/// inside `harness_runtime::desktop::build` (via `tool_cron::register_all_with_auth`)
 /// BEFORE the per-connection queue + spawner exist, so it holds an empty
 /// set-once `WakeupSchedulerCell` surfaced on `DesktopRuntime`; `assemble` fills
 /// that cell with this adapter once the queue + `runtime_spawner` are available.

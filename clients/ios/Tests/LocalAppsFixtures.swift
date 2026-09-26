@@ -11,7 +11,7 @@ func dataField(id: String) -> LocalAppDataField {
     LocalAppDataField(id: id, label: id, fieldType: .text, required: false, options: [])
 }
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
     /// A wire record for the general-purpose tests: a FORMED app.
     ///
     /// `scaffolded` defaults to `true` because that is what every caller of

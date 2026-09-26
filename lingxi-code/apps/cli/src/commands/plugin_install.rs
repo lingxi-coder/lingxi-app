@@ -37,7 +37,7 @@ pub async fn run_install_secure_with_bus(
         cwd,
         analytics_bus,
         || async {
-            engine_desktop::build_shared_credential_stack(home, false)
+            harness_runtime::desktop::build_shared_credential_stack(home, false)
                 .await
                 .map(|stack| stack.credentials)
                 .map_err(|error| format!("Failed to initialize plugin credential storage: {error}"))
@@ -68,7 +68,7 @@ pub async fn run_uninstall_secure(
         cwd,
         analytics_bus,
         || async {
-            engine_desktop::build_shared_credential_stack(home, false)
+            harness_runtime::desktop::build_shared_credential_stack(home, false)
                 .await
                 .map(|stack| stack.credentials)
                 .map_err(|error| format!("Failed to initialize plugin credential storage: {error}"))

@@ -2162,4 +2162,8 @@
     <string name="voice_turn_max_turns">Agent 已達到最大輪數，請輕點重試</string>
     <string name="voice_voice_name">聲音</string>
     <string name="voice_waiting_permission">等待權限</string>
+    <string name="settings_provider_region">模型區域</string>
+    <string name="settings_provider_region_international">國際</string>
+    <string name="settings_provider_region_china">中國大陸</string>
+    <string name="settings_provider_region_help">預設使用國際區域。儲存後請在任務閒置時套用設定，變更目前執行區域。</string>
 </resources>

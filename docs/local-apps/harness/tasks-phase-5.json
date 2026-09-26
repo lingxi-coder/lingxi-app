@@ -48,16 +48,16 @@
       "owns": [
         "docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md",
         "lingxi-code/local-apps/src",
-        "lingxi-code/apps/engine-mobile/src/local_apps_mcp.rs",
-        "lingxi-code/apps/engine-mobile/src/local_apps_host_llm.rs"
+        "lingxi-code/harness-runtime/src/mobile/local_apps_mcp.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_apps_host_llm.rs"
       ],
       "crates": [
         "local-apps",
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
         "local-apps",
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,

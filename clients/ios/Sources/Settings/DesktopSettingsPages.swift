@@ -527,6 +527,23 @@ struct DesktopCustomProvidersPage: View {
         VStack(alignment: .leading, spacing: 18) {
             SettingsConnectionStatus()
             SettingsLayerPicker(selection: $layer)
+            GroupBox("settings_provider_region") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("settings_provider_region", selection: Binding(
+                        get: { repository.ownValue(key: "providerRegion", layer: layer) as? String ?? "" },
+                        set: { save("providerRegion", $0.isEmpty ? NSNull() : $0 as Any) }
+                    )) {
+                        Text("settings_parity_inherit").tag("")
+                        Text("settings_provider_region_international").tag("international")
+                        Text("settings_provider_region_china").tag("china_mainland")
+                    }
+                    .disabled(!repository.canEdit(key: "providerRegion", layer: layer))
+                    .accessibilityIdentifier("settings.providers.region")
+                    Text("settings_provider_region_help").font(.caption).foregroundStyle(.secondary)
+                    Text(repository.provenanceLabel(for: "providerRegion")).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
             Text(repository.provenanceLabel(for: "providers")).font(.caption).foregroundStyle(.secondary)
             ForEach(own.keys.sorted(), id: \.self) { id in
                 HStack {

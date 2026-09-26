@@ -3,7 +3,7 @@ import OSLog
 
 // MARK: - ChatView — main conversation surface
 struct ChatView: View {
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         private static let questionLog = Logger(
             subsystem: "com.lingxi.code",
             category: "ask-user-question"
@@ -198,7 +198,7 @@ struct ChatView: View {
             summaryDetent = .medium
         }
         .onChange(of: summaryCategory) { _, _ in
-            #if canImport(engine_mobileFFI)
+            #if canImport(harness_runtimeFFI)
                 NotificationCenter.default.post(
                     name: .lingxiPermissionPresentationContextChanged,
                     object: nil
@@ -206,7 +206,7 @@ struct ChatView: View {
             #endif
         }
         .onChange(of: convo.pendingQuestions.map(\.requestId)) { _, _ in
-            #if canImport(engine_mobileFFI)
+            #if canImport(harness_runtimeFFI)
                 // The root permission-sheet fallback needs a presentation
                 // context update if a permission arrives while this question
                 // sheet is already above the chat view.
@@ -528,7 +528,7 @@ struct ChatView: View {
               !convo.isCancelling,
               !convo.hasUnresolvedTurnRecovery,
               convo.compactionStatus?.isActive != true else { return false }
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             guard convo.pendingPermissions.isEmpty else { return false }
         #endif
         return true
@@ -544,7 +544,7 @@ struct ChatView: View {
     /// engine confirms with `askUserQuestionResolved` (which removes it);
     /// returning `false` re-enables the card for a retry.
     private func answerQuestion(_ requestId: UInt64, answers: [String: String]) async -> Bool {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             do {
                 try await source.submitEngineCommand(
                     .answerAskUserQuestion(requestId: requestId, answers: answers)
@@ -565,7 +565,7 @@ struct ChatView: View {
 
     /// 取消 for a pending questionnaire.
     private func cancelQuestion(_ requestId: UInt64) async -> Bool {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             do {
                 try await source.submitEngineCommand(.cancelAskUserQuestion(requestId: requestId))
                 return true

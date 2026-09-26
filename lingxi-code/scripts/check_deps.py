@@ -20,6 +20,10 @@ LEAVES = {"app", "example"}
 # concrete `tool-shell` would defeat the whole composition-root design.
 API_CRATES = {"tool-api", "skill-api", "command-api"}
 
+# The SDK assembles existing components; components must never reach back into
+# its product profiles or depend on a concrete UI to describe an interaction.
+HARNESS_COMPONENT_CRATES = {"llm-runtime", "harness-runtime", "tool-api", "permission"}
+
 # class -> forbidden dependee classes.
 #
 # Note the broad "engine -> {platform,command,skill}" prohibition is deliberately
@@ -85,6 +89,12 @@ def main():
         c = classes[n]
         for d in ws_deps(pkgs[n]):
             dc = classes[d]
+            if n in HARNESS_COMPONENT_CRATES and d in {"tui", "tui-core"}:
+                violations.append("%s depends on UI implementation %s" % (n, d))
+                continue
+            if d == "harness-runtime" and c not in LEAVES:
+                violations.append("%s depends on the Harness composition root" % n)
+                continue
             # API-crate purity: tool-api / skill-api / command-api stay abstract.
             if n in API_CRATES and (
                 d in API_CRATES or dc in {"tool", "skill", "command", "platform", "app", "example", "monolith"}
@@ -106,6 +116,19 @@ def main():
                 violations.append(
                     "%s (%s) depends on %s (%s) — forbidden by §8.1" % (n, c, d, dc)
                 )
+
+    for root_name in sorted(HARNESS_COMPONENT_CRATES):
+        pending = [(root_name, [root_name])]
+        seen = set()
+        while pending:
+            name, path = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            if name in {"tui", "tui-core"}:
+                violations.append("Harness reaches UI implementation: " + " -> ".join(path))
+                continue
+            pending.extend((dep, path + [dep]) for dep in ws_deps(pkgs[name]))
 
     if violations:
         sys.stderr.write("[deny] dependency-graph violations (%d):\n" % len(violations))

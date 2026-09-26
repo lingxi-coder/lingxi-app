@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 scripts/check-phase2-plugin.py
 
-if ! contract_output="$(cargo test -q -p engine-mobile --features uniffi contract_digest 2>&1)"; then
+if ! contract_output="$(cargo test -q -p harness-runtime --features mobile --features uniffi contract_digest 2>&1)"; then
     printf '%s\n' "$contract_output" >&2
     echo "PHASE2-CONTRACT FAIL: runtime profile catalog must match production and the pre-release r1 golden" >&2
     exit 1

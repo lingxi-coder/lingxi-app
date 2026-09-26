@@ -381,7 +381,10 @@ test('composer hides an inactive goal and shows only an active goal status', () 
     }),
   ));
   assert.match(markup, /role="status" aria-label="Goal active"/);
-  assert.match(markup, />Goal<\/span>/);
+  assert.match(markup, />Goal ready<\/span>/);
+  assert.match(markup, /aria-label="Resume goal"/);
+  assert.match(markup, /aria-label="Expand goal"/);
+  assert.match(markup, /aria-label="Clear goal"/);
   assert.doesNotMatch(markup, /Toggle goal mode/);
 });
 

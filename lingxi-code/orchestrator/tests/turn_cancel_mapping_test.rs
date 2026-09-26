@@ -22,7 +22,7 @@
 //! assumptions.
 
 use async_trait::async_trait;
-use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
+use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use orchestrator::test_support::{
     mock_message_response, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -191,7 +191,7 @@ fn a_pre_cancelled_streaming_turn_emits_no_end_event() {
                 .build()
                 .expect("runtime")
                 .block_on(async {
-                    fn round() -> Vec<llm_client::LlmEvent> {
+                    fn round() -> Vec<llm_runtime::LlmEvent> {
                         scripted![
                             message_start("m1", "claude-opus-4-7"),
                             content_block_start_text(0),

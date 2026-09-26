@@ -24,14 +24,14 @@
 //! the post-pass then splices each group's off-chain siblings + `tool_results` in
 //! right after their on-chain anchor, never reordering the main chain.
 
-use crate::jsonl::SessionMode;
 use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::re_append::{find_last_typed_field, read_tail};
-use crate::jsonl::reader::{JsonlReader, LoadedTranscript, extract_json_string_field};
+use crate::jsonl::reader::{extract_json_string_field, JsonlReader, LoadedTranscript};
 use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::title::{
-    EMPTY_TITLE_FALLBACK, extract_title, has_autonomous_tick_prompt, truncate_title,
+    extract_title, has_autonomous_tick_prompt, truncate_title, EMPTY_TITLE_FALLBACK,
 };
+use crate::jsonl::SessionMode;
 use platform_api::{FileSystem, FileSystemCacheIdentity};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -318,7 +318,11 @@ fn git_worktree_paths(cwd: &str) -> Vec<String> {
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let paths = parse_worktree_list(&stdout);
-    if paths.len() <= 1 { Vec::new() } else { paths }
+    if paths.len() <= 1 {
+        Vec::new()
+    } else {
+        paths
+    }
 }
 
 /// claude-code's worktree dir-name match
@@ -3051,7 +3055,7 @@ mod tests {
         // `dirName === prefix` and `dirName.startsWith(prefix + '-')` match…
         assert!(worktree_dir_matches("-x-repo", "-x-repo")); // exact
         assert!(worktree_dir_matches("-x-repo-sub", "-x-repo")); // subdir (prefix + '-')
-        // …but a bare prefix-extension (no `-` boundary) must NOT match.
+                                                                 // …but a bare prefix-extension (no `-` boundary) must NOT match.
         assert!(!worktree_dir_matches("-x-repository", "-x-repo"));
         assert!(!worktree_dir_matches("-y-other", "-x-repo"));
     }
@@ -3446,11 +3450,9 @@ mod tests {
         let writer = crate::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone());
 
         // Absent transcript → None.
-        assert!(
-            read_worktree_state(&path, fs.clone(), session_id)
-                .await
-                .is_none()
-        );
+        assert!(read_worktree_state(&path, fs.clone(), session_id)
+            .await
+            .is_none());
 
         // After EnterWorktree persists an active session → Some(payload).
         let payload = serde_json::json!({

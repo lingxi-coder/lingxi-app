@@ -10,6 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+tool-api = { path = "../tool-api" }
 # The backend-neutral core extracted from `tui` during the iocraft → ratatui
 # migration. `tui` renders it with ratatui; it must never depend on iocraft.
 tui-core = { path = "../tui-core" }
@@ -21,7 +22,7 @@ platform-api = { path = "../platform-api" }
 # (fix round 1) `rate_limit_messages` reuses the existing 1:1
 # `formatResetTime` port instead of duplicating it (the old iocraft `tui`
 # reaches the SAME function through its `orchestrator` dependency).
-llm-client = { path = "../llm-client" }
+llm-runtime = { path = "../llm-runtime" }
 # Ratatui 0.29 uses crossterm 0.28 — the SAME major the workspace pins — so only
 # one crossterm version links (verified via `cargo tree -p tui -i crossterm`).
 # All three features are dependency-free cfg gates, also enabled by codex-rs/tui:

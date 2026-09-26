@@ -1,4 +1,4 @@
-//! Lower `tui_core::tool_display` derivations onto the wire DTOs.
+//! Lower `client_presentation::tool_display` derivations onto the wire DTOs.
 //!
 //! This is the seam where the ONE derivation becomes the four surfaces'
 //! shared render model. `client-adapter` is the only crate allowed to touch
@@ -10,16 +10,16 @@
 //! header, result headline, structured diff, and plan are computed here so
 //! the terminal, iOS, Android, and Electron cannot drift apart.
 
+use client_presentation::render::diff::{self, CodeSegment, LineKind, StructuredDiff};
+use client_presentation::render::syntax::SyntaxClass;
+use client_presentation::render::StyleColor;
+use client_presentation::theme::ThemeName;
+use client_presentation::tool_display as td;
 use client_protocol::tool_display::{
     CodeSegmentDto, DiffLineKindDto, DiffRowDto, HeadlineKindDto, PlanTaskDto, PlanTaskStateDto,
     StructuredDiffDto, SyntaxClassDto, ToolHeaderDto, ToolIconDto, ToolResultDisplayDto,
     ToolSubLineDto, ToolVerbDto,
 };
-use tui_core::render::diff::{self, CodeSegment, LineKind, StructuredDiff};
-use tui_core::render::syntax::SyntaxClass;
-use tui_core::render::StyleColor;
-use tui_core::theme::ThemeName;
-use tui_core::tool_display as td;
 
 /// Widen a `usize` count for the wire. Counts here are bounded by the diff row
 /// cap and by line counts, so saturation is unreachable in practice and is the
@@ -215,7 +215,7 @@ pub fn lower_tool_result_display(
     // The diff comes from the call input, which is what the terminal renders
     // too, so the headline and the diff always describe the same comparison.
     let diff = input.and_then(|input| {
-        let (old, new, file_path) = tui_core::active_turn::diff_inputs_for(tool, input);
+        let (old, new, file_path) = client_presentation::tool_display::diff_inputs_for(tool, input);
         if old.is_none() && new.is_none() {
             return None;
         }

@@ -1,5 +1,5 @@
 //! `fire_config_change` helper, the seam the desktop composition root's
-//! settings watcher (`engine_desktop::settings_watch`) calls on every detected
+//! settings watcher (`harness_runtime::desktop::settings_watch`) calls on every detected
 //! settings-file change.
 //!
 //! Byte-faithful to claude-code: the settings watcher

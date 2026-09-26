@@ -1,6 +1,6 @@
 //! `BridgeComputerAccessBroker` — the bridge-server-side sibling of
 //! [`crate::AdapterPermissionGate`] for the `computer` tool's `request_access`
-//! prompt (see `tui_core::computer_access_bridge`'s own doc comment for why
+//! prompt (see `permission::computer_access`'s own doc comment for why
 //! this round-trip bypasses the generic `PermissionGate`/`AdapterPermissionGate`
 //! path entirely: a per-app-checkbox + tier + independent-capability-flags
 //! prompt cannot be expressed by the generic title/message/options-list
@@ -12,7 +12,7 @@
 //! `AdapterPermissionGate` is *called* by `PermissionGate::check` on the engine
 //! turn task. The `computer` tool's `request_access` instead already has its own
 //! resolver seam (`tool_computer_use::access_resolver::ComputerAccessResolver`),
-//! and `engine_desktop::build` already wires the GENERIC
+//! and `harness_runtime::desktop::build` already wires the GENERIC
 //! `tool_computer_use::TuiBridgeResolver` (despite its name, just a channel
 //! sender + oneshot awaiter — see that type's doc comment) onto
 //! `DesktopConfig::computer_access_tx` whenever it is `Some`. So this broker
@@ -53,10 +53,10 @@ use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
     TccStateDto,
 };
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tui_core::computer_access_bridge::{
+use permission::computer_access::{
     AccessTier, ComputerAccessExchange, ComputerAccessResponse, RequestedApp, TccState,
 };
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Transport-supplied destination for the outbound [`ComputerAccessRequestDto`].
 ///
@@ -132,7 +132,7 @@ impl BridgeComputerAccessBroker {
 
     /// Drive the receive loop: consumes every [`ComputerAccessExchange`] the
     /// (generic) `tool_computer_use::TuiBridgeResolver` sends after
-    /// `engine_desktop::build` wires it onto `DesktopConfig::computer_access_tx`.
+    /// `harness_runtime::desktop::build` wires it onto `DesktopConfig::computer_access_tx`.
     /// Runs until `rx`'s sender side is dropped (i.e. never, for the process
     /// lifetime of a bound connection) — spawn this on its own task per
     /// connection, exactly like the connection's other background loops.
@@ -204,8 +204,8 @@ impl BridgeComputerAccessBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use permission::computer_access::{ComputerAccessRequest, TccState};
     use tokio::sync::Mutex as TokioMutex;
-    use tui_core::computer_access_bridge::{ComputerAccessRequest, TccState};
 
     /// A [`ComputerAccessRequestSink`] that captures every emitted request so a
     /// test can read back the assigned `request_id` and the lowered fields.

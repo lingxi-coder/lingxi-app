@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use permission::computer_access::{AccessTier, ComputerAccessRequest, RequestedApp};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::json;
@@ -27,7 +28,6 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 use tool_computer_use::ComputerAccessResolver;
-use tui_core::computer_access_bridge::{AccessTier, ComputerAccessRequest, RequestedApp};
 
 /// A tool whose `call()` requests access to `["Slack", "Chrome"]` at `Full`
 /// tier via the injected resolver, then reports the granted subset back as its

@@ -5,7 +5,7 @@ enum SessionMode: String, CaseIterable, Codable, Hashable, Sendable {
     case code
 }
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
     extension SessionMode {
         init(dto: SessionModeDto) {
             switch dto {

@@ -1,19 +1,19 @@
 //! Build the full orchestrator pipeline from an [`Argv`].
 //!
 //! **F2-01**: the ~270-line runtime wiring was lifted into the desktop
-//! composition root — [`engine_desktop::build`] now assembles the orchestrator
-//! pipeline from a deterministic [`engine_desktop::DesktopConfig`]. This module
+//! composition root — [`harness_runtime::desktop::build`] now assembles the orchestrator
+//! pipeline from a deterministic [`harness_runtime::desktop::DesktopConfig`]. This module
 //! keeps the *env/argv-reading* half: it resolves every `DesktopConfig` field
 //! from `Argv` + `std::env` (the bridge-server fills the same config without
 //! ever touching the process environment), then delegates the actual assembly.
 //!
-//! The wiring that now lives in `engine-desktop` (`apps/engine-desktop/src/lib.rs`):
+//! The wiring that now lives in `harness-runtime::desktop` (`harness-runtime/src/desktop/mod.rs`):
 //!
 //! 1. `platform-posix` provides `HttpTransport` + `Clock` +
 //!    `SecureStorage`.
-//! 2. The llm-client transport bridge is built from `cfg.api_base`
+//! 2. The llm-runtime transport bridge is built from `cfg.api_base`
 //!    (default `https://api.anthropic.com`) + `cfg.api_key`.
-//! 3. `llm_client::oauth::anthropic::ClaudeAiOAuthClient` wraps the credential manager so
+//! 3. `llm_runtime::oauth::anthropic::ClaudeAiOAuthClient` wraps the credential manager so
 //!    `/login` + `/logout` have a real handle.
 //! 4. `orchestrator::ConversationOrchestrator` is constructed with
 //!    `test_support` fillers for the hook/memory slots and — because the CLI
@@ -26,7 +26,7 @@ use crate::argv::Argv;
 use async_trait::async_trait;
 use client_protocol::permission::PermissionRequest as PermissionRequestDto;
 use command_api::RegistrySlashDispatcher;
-use engine_desktop::{build, DesktopConfig};
+use harness_runtime::desktop::{build, DesktopConfig};
 use orchestrator::ConversationOrchestrator;
 use platform_api::{AuthHandle, OrchestratorHandle, OutputStream};
 use std::collections::hash_map::DefaultHasher;
@@ -35,29 +35,31 @@ use std::sync::Arc;
 
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
+    pub catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
     /// Unit-test credential fixture lifetime; never compiled into a host build.
     #[cfg(test)]
     test_home: Option<tempfile::TempDir>,
     /// Session team registry and leader inbox shared with Agent/SendMessage.
-    pub coordinator: Arc<engine_desktop::TeamRegistry>,
+    pub coordinator: Arc<harness_runtime::desktop::TeamRegistry>,
     /// The fully-constructed orchestrator.
     pub orchestrator: Arc<ConversationOrchestrator>,
     /// Dynamic loop timer seam retained for the mounted terminal host.
-    pub wakeup_scheduler_cell: engine_desktop::loop_tools::WakeupSchedulerCell,
+    pub wakeup_scheduler_cell: harness_runtime::desktop::loop_tools::WakeupSchedulerCell,
     /// Host runtime used to arm cancellable loop timers.
     pub runtime_spawner: Arc<dyn platform_api::RuntimeSpawner>,
     /// Durable session coordinator retained across CLI runtime projection and
     /// remounts. Every host has one; the no-transcript mode gets a disposable
     /// ledger under a temporary home rather than no ledger.
-    pub session_state: Arc<engine_desktop::session_state::SessionStateCoordinator>,
+    pub session_state: Arc<harness_runtime::desktop::session_state::SessionStateCoordinator>,
     /// Common Fusion terminal recorder retained by the projected runtime.
     pub fusion_recorder: Arc<dyn platform_api::FusionRunRecorder>,
     /// Per-session recorder factory used to drain mounted outboxes during CLI
     /// shutdown or an in-process session remount.
-    pub fusion_recorder_factory: Arc<engine_desktop::fusion_recorder::DesktopFusionRecorderFactory>,
+    pub fusion_recorder_factory:
+        Arc<harness_runtime::desktop::fusion_recorder::DesktopFusionRecorderFactory>,
     /// Ordered producer/cost/session/outbox drain retained across the desktop
     /// runtime projection.
-    pub session_lifecycle: Arc<engine_desktop::DesktopSessionLifecycle>,
+    pub session_lifecycle: Arc<harness_runtime::desktop::DesktopSessionLifecycle>,
     /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
     /// handlers (M5-09/M5-10/M5-11).
     pub dispatcher: RegistrySlashDispatcher,
@@ -69,60 +71,62 @@ pub struct Runtime {
     pub task_registry: Arc<tasks::registry::TaskRegistry>,
     /// Event-driven workflow lifecycle/progress feed from the desktop
     /// composition root. Non-interactive hosts may drop it.
-    pub workflow_events:
-        Option<tokio::sync::mpsc::UnboundedReceiver<engine_desktop::DesktopWorkflowEvent>>,
+    pub workflow_events: Option<
+        tokio::sync::mpsc::UnboundedReceiver<harness_runtime::desktop::DesktopWorkflowEvent>,
+    >,
     /// Live settings watcher firing `ConfigChange` hooks when settings files
     /// mutate on disk. Held here purely to keep the watcher alive for the
     /// session: dropping the `Runtime` (process teardown) aborts the watch
     /// tasks (RAII). If this field were dropped at `build_runtime` exit, the
     /// watcher would stop immediately after boot — so it must live on `Runtime`.
-    pub settings_watcher: engine_desktop::settings_watch::SettingsWatcherHandle,
+    pub settings_watcher: harness_runtime::desktop::settings_watch::SettingsWatcherHandle,
     /// Live file-changed watcher firing `FileChanged` hooks when a path resolved
     /// from a `FileChanged` hook's `matcher` mutates on disk. Held here purely to
     /// keep the watcher alive for the session: dropping the `Runtime` (process
     /// teardown) aborts the watch tasks (RAII). If dropped at `build_runtime`
     /// exit, the watcher would stop immediately after boot — so it lives on
     /// `Runtime`, exactly like `settings_watcher`.
-    pub file_changed_watcher: engine_desktop::file_changed_watch::FileChangedWatcherHandle,
+    pub file_changed_watcher:
+        harness_runtime::desktop::file_changed_watch::FileChangedWatcherHandle,
     /// (B4 Task 5) Shared subscription slot, projected straight from
-    /// [`engine_desktop::DesktopRuntime::subscription`] (seeded at build,
+    /// [`harness_runtime::desktop::DesktopRuntime::subscription`] (seeded at build,
     /// refined by the background profile+roles fetch). The TUI mount threads a
     /// clone into `tui::session::Runtime::with_subscription` so the rate-limit
     /// composer reads the live snapshot.
     pub subscription: platform_api::subscription::SharedSubscription,
     /// (`/sandbox`) Shared bash-sandbox toggle cell, projected straight from
-    /// [`engine_desktop::DesktopRuntime::sandbox_toggle`] (the SAME
+    /// [`harness_runtime::desktop::DesktopRuntime::sandbox_toggle`] (the SAME
     /// `Arc<AtomicBool>` the bash tool reads). The TUI mount threads a clone
     /// into the widget so `/sandbox` flips sandboxing for the live session.
     pub sandbox_toggle: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// (`/sandbox` description) auto-allow / fallback flags projected from
-    /// [`engine_desktop::DesktopRuntime`], rendered in the dynamic `/sandbox`
+    /// [`harness_runtime::desktop::DesktopRuntime`], rendered in the dynamic `/sandbox`
     /// popup description.
     pub sandbox_desc_auto_allow: bool,
     /// See [`Self::sandbox_desc_auto_allow`].
     pub sandbox_desc_fallback: bool,
     /// (`/sandbox` description) dependency-check status projected from
-    /// [`engine_desktop::DesktopRuntime`]; `false` → the warning glyph.
+    /// [`harness_runtime::desktop::DesktopRuntime`]; `false` → the warning glyph.
     pub sandbox_desc_deps_ok: bool,
     /// (`/rewind`) Shared file-history checkpoint store, projected from
-    /// [`engine_desktop::DesktopRuntime::file_history`]. The TUI mount builds the
+    /// [`harness_runtime::desktop::DesktopRuntime::file_history`]. The TUI mount builds the
     /// `/rewind` picker rows from it, and the restore path calls its
     /// `rewind_files` on a code rewind.
     pub file_history: std::sync::Arc<session::FileHistory>,
     /// (`/reload-plugins`) Retained plugin subsystem, projected from
-    /// [`engine_desktop::DesktopRuntime::plugin_runtime`]. The TUI mount threads
+    /// [`harness_runtime::desktop::DesktopRuntime::plugin_runtime`]. The TUI mount threads
     /// it into the `on_reload_plugins` effect so the interactive command applies
     /// pending enable/disable changes to the live session. `None` when plugins
     /// are disabled.
-    pub plugin_runtime: Option<std::sync::Arc<engine_desktop::PluginRuntime>>,
+    pub plugin_runtime: Option<std::sync::Arc<harness_runtime::desktop::PluginRuntime>>,
     /// (Plan 3c §8) Per-provider availability map, projected straight from
-    /// [`engine_desktop::DesktopRuntime::provider_availability`] (computed at
+    /// [`harness_runtime::desktop::DesktopRuntime::provider_availability`] (computed at
     /// `build()` from the LIVE multi-provider config). The TUI mount threads it
     /// into `tui::session::Runtime::with_provider_availability` so the `/model`
     /// picker can badge unconfigured providers. Empty keeps every row available.
     pub provider_availability: std::collections::BTreeMap<String, bool>,
     /// (T2a) Per-provider login-method tag map, projected straight from
-    /// [`engine_desktop::DesktopRuntime::provider_auth_methods`] (derived at
+    /// [`harness_runtime::desktop::DesktopRuntime::provider_auth_methods`] (derived at
     /// `build()` from the real catalog auth strategy: `"api_key"` /
     /// `"copilot_device"` / `"oauth"`). The TUI mount threads it into
     /// `tui::session::Runtime::with_provider_auth_methods` — it IS the data-driven
@@ -130,7 +134,7 @@ pub struct Runtime {
     pub provider_auth_methods: std::collections::BTreeMap<String, String>,
     /// (Plan 3c I1/I2) Authoritative `request_model -> (profile_name,
     /// provider_label)` map, projected from
-    /// [`engine_desktop::DesktopRuntime::model_providers`]. The TUI mount threads
+    /// [`harness_runtime::desktop::DesktopRuntime::model_providers`]. The TUI mount threads
     /// it into `tui::session::Runtime::with_model_providers` so the `/model`
     /// picker can resolve a bare USER-provider model id to its own group +
     /// availability gate. Empty keeps the historical Built-in fallback.
@@ -139,7 +143,7 @@ pub struct Runtime {
     /// the initial/default `/model` row.
     pub model_provenance: platform_api::ModelProvenance,
     /// (Plan 3c C1) Shared engine credential store, projected straight from
-    /// [`engine_desktop::DesktopRuntime::credentials`]. The TUI mount threads a
+    /// [`harness_runtime::desktop::DesktopRuntime::credentials`]. The TUI mount threads a
     /// clone into `tui::session::Runtime::with_provider_key_store` so the
     /// `/connect` screen's `pump_store_provider_key` persists a collected
     /// provider key via `CredentialManager::set_provider_key`.
@@ -149,18 +153,18 @@ pub struct Runtime {
     /// Shared analytics bus projected from the desktop runtime.
     pub analytics_bus: std::sync::Arc<telemetry::AnalyticsBus>,
     /// Structured-output capture slot, projected from
-    /// [`engine_desktop::DesktopRuntime::structured_output_slot`]. `Some` only
+    /// [`harness_runtime::desktop::DesktopRuntime::structured_output_slot`]. `Some` only
     /// under `--json-schema`; the print path reads it after each turn to validate
     /// the model's `StructuredOutput` result against the schema and retry.
     pub structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot>,
     /// (`!` bash mode) The sandboxed Bash runner, projected straight from
-    /// [`engine_desktop::DesktopRuntime::bash_runner`]. Built over the SAME
+    /// [`harness_runtime::desktop::DesktopRuntime::bash_runner`]. Built over the SAME
     /// `BuiltinToolContext`/`BashTool` the model uses. The TUI mount threads a
     /// clone into `tui::session::Runtime::with_bash_runner` so a typed `!command`
     /// runs sandboxed and renders inline with no LLM turn.
-    pub bash_runner: std::sync::Arc<dyn tui_core::bash_runner::BashRunner>,
+    pub bash_runner: std::sync::Arc<dyn tool_api::bash_runner::BashRunner>,
     /// (#3 shell-expansion) The shared prompt shell-expansion provider, projected
-    /// straight from [`engine_desktop::DesktopRuntime::shell_expansion`]. The TUI
+    /// straight from [`harness_runtime::desktop::DesktopRuntime::shell_expansion`]. The TUI
     /// mount (`run_ratatui` → `run_app`) threads a clone into the `ChatWidget` so
     /// a typed `/commit` / `/commit-push-pr` / `/security-review` expands its
     /// embedded `!`git …`` bodies through the real host runner + policy-backed
@@ -168,32 +172,32 @@ pub struct Runtime {
     /// hosts. Built over the SAME `BuiltinToolContext` the model's Bash tool uses.
     pub shell_expansion: std::sync::Arc<dyn command_api::ShellExpansionProvider>,
     /// (`/connect` Copilot device-flow) GitHub-Copilot OAuth device-flow driver,
-    /// projected straight from [`engine_desktop::DesktopRuntime::connect_copilot`].
+    /// projected straight from [`harness_runtime::desktop::DesktopRuntime::connect_copilot`].
     /// The TUI mount threads a clone into
     /// `tui::session::Runtime::with_copilot_connect_driver` so picking GitHub
     /// Copilot in `/connect` runs the real web sign-in (browser open + device
     /// poll + token store) instead of an inert key field.
     pub connect_copilot: std::sync::Arc<dyn command_core::CopilotConnectDriver>,
     /// (T2b) Unified OAuth sign-in driver, projected from
-    /// [`engine_desktop::DesktopRuntime::oauth_connect_driver`]. The TUI mount
+    /// [`harness_runtime::desktop::DesktopRuntime::oauth_connect_driver`]. The TUI mount
     /// threads a clone into `tui::session::Runtime::with_oauth_connect_driver` so
     /// picking an OAuth provider (Anthropic Pro/Max, OpenAI ChatGPT) in `/connect`
     /// runs the real browser sign-in instead of the inert `Unavailable` screen.
     pub oauth_connect_driver: std::sync::Arc<dyn command_core::OAuthConnectDriver>,
     /// (P1-08 runtime `/add-dir`) The SAME live `Arc<SessionCwd>` the file tools
-    /// gate on, projected from [`engine_desktop::DesktopRuntime::session_cwd`].
+    /// gate on, projected from [`harness_runtime::desktop::DesktopRuntime::session_cwd`].
     /// The `/add-dir` off-loop effect calls `add_trusted_dir(...)` on it so a
     /// directory added mid-session is immediately accessible to the file tools.
     pub session_cwd: std::sync::Arc<tool_api::SessionCwd>,
     /// (P1-08 runtime `/add-dir`) The live MCP registry, projected from
-    /// [`engine_desktop::DesktopRuntime::mcp_registry`]. The `/add-dir` effect
+    /// [`harness_runtime::desktop::DesktopRuntime::mcp_registry`]. The `/add-dir` effect
     /// calls `add_root(...)` + `notify_roots_list_changed_all()` on it so every
     /// connected server's `roots/list` reflects the new working directory.
     pub mcp_registry: std::sync::Arc<mcp::McpRegistry>,
     /// Provider-neutral local IDE lifecycle handle projected from the desktop
     /// composition root. It owns lockfile discovery and local auth state.
     pub ide_handle: std::sync::Arc<dyn platform_api::IdeHandle>,
-    /// The ENFORCING permission gate (`engine_desktop::DesktopRuntime::
+    /// The ENFORCING permission gate (`harness_runtime::desktop::DesktopRuntime::
     /// enforcing_permission_gate`), threaded to the TUI so Shift+Tab drives live
     /// permission-mode cycling via `set_permission_mode`.
     pub enforcing_permission_gate: Option<std::sync::Arc<dyn permission::gate::PermissionGate>>,
@@ -234,8 +238,9 @@ pub struct TuiBuild {
     /// updates into `turn_tx`; this is deliberately separate from the
     /// orchestrator output receiver so workflow pushes cannot be starved by a
     /// slow transcript renderer.
-    pub workflow_events:
-        Option<tokio::sync::mpsc::UnboundedReceiver<engine_desktop::DesktopWorkflowEvent>>,
+    pub workflow_events: Option<
+        tokio::sync::mpsc::UnboundedReceiver<harness_runtime::desktop::DesktopWorkflowEvent>,
+    >,
     /// (TUI-PERM) Receiver for the injected `TuiPermissionGate`'s exchanges.
     /// Threaded into `session::Runtime::with_permission_rx` so the TUI's
     /// permission pump drives the interactive dialog.
@@ -244,11 +249,11 @@ pub struct TuiBuild {
     /// this into the dedicated bottom-pane questionnaire view instead of
     /// routing those tools through the generic permission prompt.
     pub ask_user_question_rx:
-        tokio::sync::mpsc::Receiver<tui_core::ask_user_question_bridge::AskUserQuestionExchange>,
+        tokio::sync::mpsc::Receiver<tool_api::ask_user_question::AskUserQuestionExchange>,
     /// Receiver for interactive `computer` tool `request_access` exchanges.
     /// The TUI drains this into the dedicated approval bottom-pane view.
     pub computer_access_rx:
-        tokio::sync::mpsc::Receiver<tui_core::computer_access_bridge::ComputerAccessExchange>,
+        tokio::sync::mpsc::Receiver<permission::computer_access::ComputerAccessExchange>,
     /// (/permissions) The gate's shared session-scoped allow-rule list. The
     /// `/permissions` editor pushes an ADDED allow rule here (in addition to
     /// the disk persist) so it takes effect THIS session — the same in-memory
@@ -280,8 +285,8 @@ pub struct TuiBuild {
 
 /// Errors surfaced while building a [`Runtime`].
 ///
-/// F2-01: the underlying assembly moved to [`engine_desktop::build`]; this enum
-/// is a thin projection of [`engine_desktop::BuildError`] kept for source
+/// F2-01: the underlying assembly moved to [`harness_runtime::desktop::build`]; this enum
+/// is a thin projection of [`harness_runtime::desktop::BuildError`] kept for source
 /// compatibility with the CLI's existing call sites.
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
@@ -325,21 +330,25 @@ pub enum InitError {
     InvalidCustomBetas,
 }
 
-impl From<engine_desktop::BuildError> for InitError {
-    fn from(e: engine_desktop::BuildError) -> Self {
+impl From<harness_runtime::desktop::BuildError> for InitError {
+    fn from(e: harness_runtime::desktop::BuildError) -> Self {
         match e {
-            engine_desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
-            engine_desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
-            engine_desktop::BuildError::DurableSession(m) => Self::DurableSession(m),
-            engine_desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
-            engine_desktop::BuildError::SandboxUnavailable(m) => Self::SandboxUnavailable(m),
-            engine_desktop::BuildError::WorktreeLaunch(m) => Self::WorktreeLaunch(m),
-            engine_desktop::BuildError::TmuxRequiresWorktree => Self::TmuxRequiresWorktree,
-            engine_desktop::BuildError::TmuxNotSupportedOnWindows => {
+            harness_runtime::desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
+            harness_runtime::desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
+            harness_runtime::desktop::BuildError::DurableSession(m) => Self::DurableSession(m),
+            harness_runtime::desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
+            harness_runtime::desktop::BuildError::SandboxUnavailable(m) => {
+                Self::SandboxUnavailable(m)
+            }
+            harness_runtime::desktop::BuildError::WorktreeLaunch(m) => Self::WorktreeLaunch(m),
+            harness_runtime::desktop::BuildError::TmuxRequiresWorktree => {
+                Self::TmuxRequiresWorktree
+            }
+            harness_runtime::desktop::BuildError::TmuxNotSupportedOnWindows => {
                 Self::TmuxNotSupportedOnWindows
             }
-            engine_desktop::BuildError::TmuxNotInstalled(m) => Self::TmuxNotInstalled(m),
-            engine_desktop::BuildError::InvalidCustomBetas => Self::InvalidCustomBetas,
+            harness_runtime::desktop::BuildError::TmuxNotInstalled(m) => Self::TmuxNotInstalled(m),
+            harness_runtime::desktop::BuildError::InvalidCustomBetas => Self::InvalidCustomBetas,
         }
     }
 }
@@ -347,7 +356,7 @@ impl From<engine_desktop::BuildError> for InitError {
 /// A no-op [`PermissionRequestSink`] for the CLI path.
 ///
 /// The CLI builds with `use_noop_permission_gate: true`, so
-/// [`engine_desktop::build`] binds the always-allow `NoOpPermissionGate` and
+/// [`harness_runtime::desktop::build`] binds the always-allow `NoOpPermissionGate` and
 /// NEVER constructs an `AdapterPermissionGate` — the sink is therefore never
 /// invoked. It exists only to satisfy `build`'s signature (the bridge-server
 /// passes a real WS-backed sink instead).
@@ -439,7 +448,7 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
         // every entry: they are never `.mcp.json` project-approval-gated
         // (`mcp::server_gate` only gates `ConfigScope::Settings(protocol::SettingsScope::Project)`). Precedence
         // over discovered servers is enforced by the name-merge in
-        // `engine_desktop::build`, not the scope.
+        // `harness_runtime::desktop::build`, not the scope.
         match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Dynamic) {
             Ok(cfgs) => out.extend(cfgs.into_iter().map(|mut cfg| {
                 cfg.metadata.cli_owned = true;
@@ -585,7 +594,7 @@ pub(crate) fn load_settings_ax_screen_reader(argv: &Argv) -> Option<bool> {
 /// Load the merged `settings.alwaysThinkingEnabled` (project + user + env
 /// layers) — claude-code `qIe()`'s `if(e.alwaysThinkingEnabled===!1)return!1`.
 /// Folded into the boot session `ThinkingConfig` by
-/// [`llm_client::model::thinking::session_thinking_from_env`] (a `MAX_THINKING_TOKENS`
+/// [`llm_runtime::model::thinking::session_thinking_from_env`] (a `MAX_THINKING_TOKENS`
 /// env var / `--max-thinking-tokens` flag budget pre-empts it). `None` when
 /// unset / on any load failure → the resolver keeps thinking on (adaptive).
 fn load_always_thinking_enabled(
@@ -693,7 +702,7 @@ fn load_routing(
 ///
 /// **F2-01**: this is the *only* half of the old `build_runtime` that remains
 /// in `apps/cli` — every env / argv / `dirs` read that the engine-tier
-/// `engine_desktop::build` must NOT perform (so the bridge-server can build an
+/// `harness_runtime::desktop::build` must NOT perform (so the bridge-server can build an
 /// identical runtime without touching the process environment). Each field
 /// mirrors the concrete read the pre-lift `build_runtime` made:
 ///
@@ -750,7 +759,7 @@ pub(crate) fn resolve_desktop_config_at(
     // binary's `Ql()`/`xd()` predicates: flag OR truthy env (`run_cli` exports
     // the env for children; a pre-set env also activates the mode, e.g. a
     // subagent inheriting `CLAUDE_CODE_SAFE_MODE`).
-    let gates = engine_desktop::CustomizationGates {
+    let gates = harness_runtime::desktop::CustomizationGates {
         safe_mode: argv.safe_mode
             || platform_api::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref()),
         bare: argv.bare
@@ -908,7 +917,7 @@ pub(crate) fn resolve_desktop_config_at(
         recent_models: if incl_user {
             tui_core::recent_models::load_recent_models()
                 .into_iter()
-                .map(|r| engine_desktop::RecentModelRef {
+                .map(|r| harness_runtime::desktop::RecentModelRef {
                     provider: r.provider_id,
                     model: r.request_model,
                 })
@@ -1118,7 +1127,7 @@ pub(crate) fn resolve_desktop_config_at(
         // `MAX_THINKING_TOKENS` env > `--max-thinking-tokens` flag >
         // `--thinking` > the `alwaysThinkingEnabled` setting. A fixed budget
         // pre-empts adaptive; `0`/`disabled` turns thinking off.
-        session_thinking: llm_client::model::thinking::session_thinking_from_cli(
+        session_thinking: llm_runtime::model::thinking::session_thinking_from_cli(
             argv.thinking.as_deref(),
             argv.max_thinking_tokens,
             if restricted {
@@ -1167,7 +1176,7 @@ pub(crate) fn resolve_desktop_config_at(
     }
     // NOTE: claude-code's `--add-dir` is "Additional directories to allow TOOL
     // ACCESS to" (NOT LINGXI.md search — an earlier comment here misread it). It
-    // is now wired above into `DesktopConfig.add_dir`, which `engine_desktop::
+    // is now wired above into `DesktopConfig.add_dir`, which `harness_runtime::desktop::
     // build` unions into the permission policy's working-dir set (parity with a
     // settings `permissions.additionalDirectories` entry).
 }
@@ -1248,10 +1257,10 @@ pub(crate) fn parse_flag_settings_checked(
 /// `crate::output_adapter::SinkAdapter`). M5-12 Task 9 wires this end-to-end
 /// so `--json` produces NDJSON `text` / `tool_call` / `turn_end` lines.
 ///
-/// **F2-01**: the actual assembly is delegated to [`engine_desktop::build`].
+/// **F2-01**: the actual assembly is delegated to [`harness_runtime::desktop::build`].
 /// This function only resolves a [`DesktopConfig`] from `Argv`/env
 /// ([`resolve_desktop_config`]) and projects the returned
-/// [`engine_desktop::DesktopRuntime`] into the CLI's [`Runtime`]. The CLI sets
+/// [`harness_runtime::desktop::DesktopRuntime`] into the CLI's [`Runtime`]. The CLI sets
 /// `use_noop_permission_gate: true`, so the supplied [`NoopPermissionRequestSink`]
 /// is never invoked (the no-op gate never emits a request) and the returned
 /// `permission_gate` handle is always `None`.
@@ -1380,6 +1389,7 @@ pub async fn build_runtime_from_config(
         provider_auth_methods: rt.provider_auth_methods,
         model_providers: rt.model_providers,
         model_provenance: rt.model_provenance,
+        catalog_registry: rt.catalog_registry,
         provider_key_store: rt.credentials,
         http: rt.http,
         analytics_bus: rt.analytics_bus,
@@ -1504,12 +1514,11 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     // persists to <cwd>/.lingxi/settings.local.json (via `.with_persist`).
     let (perm_tx, perm_rx) =
         tokio::sync::mpsc::channel::<tui_core::permission_bridge::PermissionExchange>(16);
-    let (ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel::<
-        tui_core::ask_user_question_bridge::AskUserQuestionExchange,
-    >(16);
+    let (ask_user_question_tx, ask_user_question_rx) =
+        tokio::sync::mpsc::channel::<tool_api::ask_user_question::AskUserQuestionExchange>(16);
     cfg.ask_user_question_tx = Some(ask_user_question_tx);
     let (computer_access_tx, computer_access_rx) =
-        tokio::sync::mpsc::channel::<tui_core::computer_access_bridge::ComputerAccessExchange>(16);
+        tokio::sync::mpsc::channel::<permission::computer_access::ComputerAccessExchange>(16);
     cfg.computer_access_tx = Some(computer_access_tx);
     let session_allow_rules = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
     // (/permissions) The interactive editor reuses BOTH the gate's live
@@ -1617,7 +1626,7 @@ mod tests {
         assert!(
             matches!(
                 on.session_composition(),
-                engine_desktop::DesktopSessionComposition::HeadlessCli
+                harness_runtime::desktop::DesktopSessionComposition::HeadlessCli
             ),
             "and that composition is the headless one"
         );
@@ -1726,7 +1735,7 @@ mod tests {
             cfg.credential_storage_policy, policy,
             "fixture isolation does not relax production policy"
         );
-        let stack = engine_desktop::build_shared_credential_stack_with_policy(
+        let stack = harness_runtime::desktop::build_shared_credential_stack_with_policy(
             &cfg.lingxi_home,
             cfg.isolated_credential_storage,
             cfg.credential_storage_policy,

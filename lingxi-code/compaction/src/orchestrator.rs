@@ -843,9 +843,9 @@ mod tests {
             // 1_000_000 − min(384_000, MAX_OUTPUT_TOKENS_FOR_SUMMARY) − buffer
             // = 1_000_000 − 32_000 − 13_000.
             const MODEL: &str = "test-model-derived-threshold";
-            llm_client::model::model_limits::register(
+            llm_runtime::model::model_limits::register(
                 MODEL,
-                llm_client::model::model_limits::ModelLimits {
+                llm_runtime::model::model_limits::ModelLimits {
                     context_window: 1_000_000,
                     max_output_tokens: 384_000,
                 },

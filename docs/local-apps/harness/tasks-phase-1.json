@@ -9,10 +9,10 @@
         "docs/local-apps/performance-baselines/local-app-plugin-v1.json"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -129,13 +129,13 @@
       "title": "Mobile atomic materialization with digest verification",
       "gate": "§19.2 a single-byte tamper fails the digest; an interrupted materialization does not replace a previous verified root",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/builtin_bundle.rs"
+        "lingxi-code/harness-runtime/src/mobile/builtin_bundle.rs"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -160,13 +160,13 @@
       "title": "Idempotent short-circuit: an unchanged digest does not unpack or re-verify file by file",
       "gate": "§19.2 marker field, missing manifest/inventory/component entry, and symlink root each have a reverse case",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/builtin_bundle.rs"
+        "lingxi-code/harness-runtime/src/mobile/builtin_bundle.rs"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -194,14 +194,14 @@
       "gate": "§19.2 mobile discovers exactly one plugin, name=lingxi-local-app, source=BuiltIn",
       "owns": [
         "lingxi-code/apps/engine-mobile/Cargo.toml",
-        "lingxi-code/apps/engine-mobile/src/lib.rs",
-        "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs"
+        "lingxi-code/harness-runtime/src/mobile/mod.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_plugin_binding.rs"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -226,14 +226,14 @@
       "title": "register_verified_builtin is called exactly once, from the composition module",
       "gate": "§19.3 planting a second call site must go red and print file:line",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/lib.rs",
+        "lingxi-code/harness-runtime/src/mobile/mod.rs",
         "lingxi-code/scripts/check_component_literals.py"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -256,14 +256,14 @@
       "title": "Wire the command/skill/agent/workflow registries to the live plugin inventory",
       "gate": "§19.2 one live registry drives both listing and invocation",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/lib.rs",
-        "lingxi-code/apps/engine-mobile/src/local_apps_host.rs"
+        "lingxi-code/harness-runtime/src/mobile/mod.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_apps_host.rs"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -286,15 +286,15 @@
       "title": "Single-plugin enable/disable/status protocol, including the bare enabledPlugins key",
       "gate": "§19.2 three-way behaviour of a bare enabledPlugins[\"lingxi-local-app\"]: explicit true + default false => Loaded; explicit false => PluginState::Disabled and PRESENT in the registry; key missing => manifest default",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/lib.rs",
+        "lingxi-code/harness-runtime/src/mobile/mod.rs",
         "lingxi-code/client-protocol/src/commands.rs"
       ],
       "crates": [
-        "engine-mobile",
+        "harness-runtime",
         "client-protocol"
       ],
       "testPackages": [
-        "engine-mobile",
+        "harness-runtime",
         "client-protocol"
       ],
       "exclusive": true,
@@ -323,15 +323,15 @@
       "title": "Wire the bundle chain: packer -> materializer -> PluginManager",
       "gate": "clean-sweep review finding, severity high",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/host.rs",
-        "lingxi-code/apps/engine-mobile/src/builtin_bundle.rs",
+        "lingxi-code/harness-runtime/src/mobile/host.rs",
+        "lingxi-code/harness-runtime/src/mobile/builtin_bundle.rs",
         "lingxi-code/local-apps/src/packer.rs"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -354,14 +354,14 @@
       "title": "Route ClientCommand::PluginCommand and emit PluginStatusChanged",
       "gate": "clean-sweep review finding, severity high",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/host.rs",
-        "lingxi-code/apps/engine-mobile/src/lib.rs"
+        "lingxi-code/harness-runtime/src/mobile/host.rs",
+        "lingxi-code/harness-runtime/src/mobile/mod.rs"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,
@@ -388,10 +388,10 @@
         "..github/workflows/ci.yml"
       ],
       "crates": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "testPackages": [
-        "engine-mobile"
+        "harness-runtime"
       ],
       "exclusive": false,
       "repeatRuns": 1,

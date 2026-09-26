@@ -60,7 +60,7 @@ events/telemetry, 238 events — remains intact underneath.
 ```bash
 cargo build --workspace --release
 
-# Run the CLI. Tool/skill/command assembly is owned by the `engine-desktop`
+# Run the CLI. Tool/skill/command assembly is owned by the `harness-runtime` (`desktop`)
 # composition root (M8); the `cli` crate just hands it the platform + config.
 ANTHROPIC_API_KEY=sk-ant-... cargo run -p cli -- \
     --model claude-opus-4-7
@@ -108,7 +108,7 @@ setup notes + the "M3 engine subsystems" section.
 | Live assistant text → markdown/syntect (#211) | Plain text (markdown wired only into secondary renderers) | M8 |
 | Advanced engine wiring (real `/compact` summary, CostTracker→AnalyticsBus, MCP auto-connect, OAuth PKCE, per-model cost) | Deferred | M8 |
 | Team / Coordinator / Swarm renderers, voice, mouse mode, inline image display | Out of scope | M8 |
-| Composable engine (`engine-desktop` / `engine-mobile` composition roots, ~73 flat crates, §8.1 dep gate) | Complete | M8 / v0.9.0 |
+| Composable engine (`harness-runtime` desktop/mobile composition profiles, ~73 flat crates, §8.1 dep gate) | Complete | M8 / v0.9.0 |
 | Mobile platform + UniFFI callbacks (`platform-ios/android`, `tool-camera/voice/share`, `ios-framework`/`android-aar` + Swift/Kotlin skeletons) | Skeleton only — full bring-up in M9 | M8 / v0.9.0 |
 | LLM Providers v1 (OpenAI-compatible + Gemini codecs, `provider/model` routing, per-provider cost) | Complete | v0.11.0 |
 | LLM Providers v2 (vision, reasoning params, Azure/Vertex/Bedrock, router: aliases/fallback/retry) | Complete | v0.12.0 |

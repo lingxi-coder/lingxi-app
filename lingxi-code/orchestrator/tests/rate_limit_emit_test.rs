@@ -1,4 +1,4 @@
-//! Task 8 (llm-client future-work batch 3): the orchestrator forwards the
+//! Task 8 (llm-runtime future-work batch 3): the orchestrator forwards the
 //! adapter's unified rate-limit header snapshot to
 //! `OutputStream::emit_rate_limit` after each completed API call, emitting
 //! ONLY when the snapshot differs from the last emitted value
@@ -8,7 +8,7 @@
 //! `MockApiClient` (extended with `set_rate_limit_full`) + the recording
 //! `MockOutputStream`.
 
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::model::rate_limit::RateLimitInfo;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
 /// A single-text `end_turn` response so each `run_turn` is exactly one API call.
-fn end_turn_response(text: &str) -> llm_client::LlmResponse {
+fn end_turn_response(text: &str) -> llm_runtime::LlmResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.into(),
@@ -247,7 +247,7 @@ async fn no_emit_when_no_snapshot() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// RawUtilization (llm-client future-work batch 5, Task 2): the orchestrator
+// RawUtilization (llm-runtime future-work batch 5, Task 2): the orchestrator
 // forwards the adapter's raw per-window utilization snapshot to
 // `OutputStream::emit_raw_utilization` next to the `emit_rate_limit` seam,
 // emitting only on change and never for the empty snapshot.
@@ -516,7 +516,7 @@ async fn streaming_turn_emits_raw_utilization() {
 // (covered in provider_adapter.rs).
 // ════════════════════════════════════════════════════════════════════════
 
-use llm_client::LlmError;
+use llm_runtime::LlmError;
 
 /// A terminal rate-limited error with a rejected snapshot (+ raw windows)
 /// cached on the API client emits exactly one `RateLimit` event (rejected)

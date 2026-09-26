@@ -112,7 +112,7 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         XCTAssertEqual(ConversationDesktopTimeline.summary(tools), "Read")
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
     @MainActor
     func testOnlySelectedSourceCanPublishOrRevokeSettings() {
         struct Offline: Error {}

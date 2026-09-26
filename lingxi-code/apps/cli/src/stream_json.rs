@@ -33,7 +33,7 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
-use llm_client::model::context_window::{context_window_for_model, max_output_tokens_for_model};
+use llm_runtime::model::context_window::{context_window_for_model, max_output_tokens_for_model};
 use platform_api::{CostSnapshot, OutputStream};
 use serde_json::{json, Value};
 use std::io::Write;
@@ -1408,7 +1408,7 @@ impl StreamJsonStream {
     /// Build the `modelUsage` sub-map keyed by `model_id` (camelCase per
     /// GROUND-TRUTH). The key is the model id AS-IS (including any `[1m]`
     /// suffix). `contextWindow` and `maxOutputTokens` are looked up from the
-    /// llm-client catalog via `betas` (so `[1m]`-capable models report 1M).
+    /// llm-runtime catalog via `betas` (so `[1m]`-capable models report 1M).
     /// Empty map when no tokens were consumed.
     fn build_model_usage_block(
         cost: &CostSnapshot,
@@ -4070,7 +4070,7 @@ mod tests {
 
     // ── P2b: modelUsage contextWindow/maxOutputTokens from catalog ────────────
 
-    /// Verify that modelUsage uses the llm-client catalog for contextWindow and
+    /// Verify that modelUsage uses the llm-runtime catalog for contextWindow and
     /// maxOutputTokens, including the [1m] suffix for 1M-context models.
     #[tokio::test]
     async fn model_usage_uses_catalog_context_window() {

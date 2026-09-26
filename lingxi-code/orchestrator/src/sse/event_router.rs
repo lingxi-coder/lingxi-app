@@ -13,7 +13,7 @@
 
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
-use llm_client::{ContentBlock as LlmContentBlock, ContentDelta, LlmEvent, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, ContentDelta, LlmEvent, Usage};
 use platform_api::OutputStream;
 use protocol::{ContentBlock, ToolUseId};
 use serde_json::{json, Value};
@@ -55,7 +55,7 @@ pub enum RouterAction {
         /// Refusal `stop_details` (`{category, explanation}`) from the delta —
         /// drives the terminal refusal message's cyber/bio variant. `None` for
         /// non-refusal deltas.
-        stop_details: Option<llm_client::StopDetails>,
+        stop_details: Option<llm_runtime::StopDetails>,
     },
     /// `message_delta` arrived with usage but NO `stop_reason` (A3). The
     /// streaming loop records `output_tokens` and continues.
@@ -149,6 +149,7 @@ pub async fn dispatch_event(
                 output.emit_stream_event(&event_json, false).await;
             }
             let kind = match &content_block {
+                LlmContentBlock::ProviderContent { protocol, value } => BlockKind::Preserved(ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
                 LlmContentBlock::Text { .. } | LlmContentBlock::TextJsUtf16 { .. } => {
                     BlockKind::Text
                 }
@@ -284,7 +285,7 @@ pub async fn dispatch_event(
                     // repaired input must land here, BEFORE the tool executes and
                     // before the block is pushed into the assistant message/JSONL.
                     let (input, _stats) =
-                        llm_client::unicode_repair::repair_tool_input(&name, &input);
+                        llm_runtime::unicode_repair::repair_tool_input(&name, &input);
                     Ok(RouterAction::DispatchToolUse {
                         id,
                         name,
@@ -378,6 +379,7 @@ pub async fn dispatch_event(
 /// (used in the `content_block_start` SSE event for P4 partial-messages).
 fn reconstruct_content_block_json(block: &LlmContentBlock) -> Value {
     match block {
+        LlmContentBlock::ProviderContent { value, .. } => value.clone(),
         LlmContentBlock::Text { .. } | LlmContentBlock::TextJsUtf16 { .. } => {
             json!({"type": "text", "text": ""})
         }
@@ -434,7 +436,7 @@ fn reconstruct_delta_json(delta: &ContentDelta) -> Value {
 /// Surface an SSE `usage` snapshot to the output sink as a live usage
 /// update (§0.7 "light up thinking/usage").
 ///
-/// Maps `llm_client::Usage` onto the four bare `u64` arguments of
+/// Maps `llm_runtime::Usage` onto the four bare `u64` arguments of
 /// [`OutputStream::emit_usage`] with the same field mapping the cost
 /// pipeline uses: `input` ← `billable_tokens.input`, `output` ←
 /// `billable_tokens.output`, `cache_read` ← `billable_tokens.cache_read`,
@@ -454,7 +456,7 @@ async fn emit_usage_if_present(output: &Arc<dyn OutputStream>, usage: &Usage) {
 mod tests {
     use super::*;
     use crate::test_support::MockOutputStream;
-    use llm_client::MessageDeltaPayload;
+    use llm_runtime::MessageDeltaPayload;
 
     #[tokio::test]
     async fn text_delta_emits_to_output_and_accumulates() {
@@ -533,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_event_ends_stream() {
-        use llm_client::{LlmResponse, Usage};
+        use llm_runtime::{LlmResponse, Usage};
         let mut acc = BlockAccumulator::new();
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();

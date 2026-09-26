@@ -12,7 +12,7 @@
 //!
 //! LINGXI DIVERGENCE: 37 further rows with no oracle counterpart, reported by
 //! [`is_divergence_tool`]. 36 are the `LocalApp*` first-party local-app host
-//! operations (`engine_mobile::local_apps_tools`) — claude-code has no
+//! operations (`harness_runtime::mobile::local_apps_tools`) — claude-code has no
 //! host-owned local-app surface. The 37th is `Workflow`: claude-code gates it
 //! behind the `WORKFLOW_SCRIPTS` feature and it is absent from external builds
 //! (see `mode_policy`'s module doc), so the M5-05 table has no row for it and
@@ -156,7 +156,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
 
     // ---- MOBILE DIVERGENCE: first-party local-app host operations ----------
     // No oracle counterpart — claude-code has no host-owned local-app surface.
-    // These are BUILTIN tools (see `engine_mobile::local_apps_tools`), not a
+    // These are BUILTIN tools (see `harness_runtime::mobile::local_apps_tools`), not a
     // user-configured MCP server; while they were spelled `mcp__local_apps__*`
     // they matched nothing here and fell through to `DenyByDefault`, so the
     // create flow prompted on every step.
@@ -313,7 +313,7 @@ pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
 /// table in any case, since `permission` depends on none of them.
 ///
 /// The consumer-side guard this exists for is
-/// `engine_mobile::local_apps_tools::tests::every_local_app_permission_row_names_a_real_tool`.
+/// `harness_runtime::mobile::local_apps_tools::tests::every_local_app_permission_row_names_a_real_tool`.
 #[must_use]
 pub fn tool_default_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = TOOL_DEFAULTS

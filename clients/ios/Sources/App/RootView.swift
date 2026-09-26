@@ -217,7 +217,7 @@ struct RootView: View {
             mobileLinux: runtime
         )
 
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             let scopes = ProjectCronScopeProvider {
                 (projects.projects, projects.activeProjectId)
             }
@@ -272,7 +272,7 @@ struct RootView: View {
         _cronRepository = State(initialValue: cron)
         let localApps = LocalAppsStore()
         let eventCenter = ClientEventCenter()
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             eventCenter.subscribe { event in providers.handle(event: event) }
             eventCenter.subscribe { event in localApps.handle(event: event) }
         #endif
@@ -442,7 +442,7 @@ struct RootView: View {
                     .transition(.opacity)
             }
 
-            #if canImport(engine_mobileFFI)
+            #if canImport(harness_runtimeFFI)
                 // Keep one root-mounted native sheet presenter so permission
                 // requests work over both the chat and any active SwiftUI sheet.
                 EnginePermissionPromptHost(
@@ -709,7 +709,7 @@ struct RootView: View {
                         _ = switchScope(to: .project(projectID))
                     },
                     onReconnectAfterSecretChange: {
-                        #if canImport(engine_mobileFFI)
+                        #if canImport(harness_runtimeFFI)
                             let hasPendingPermission = !source.model.pendingPermissions.isEmpty
                         #else
                             let hasPendingPermission = false
@@ -724,7 +724,7 @@ struct RootView: View {
                     },
                     onRefreshMcp: { source.refreshMcpServers() },
                     onRefreshSkills: {
-                        #if canImport(engine_mobileFFI)
+                        #if canImport(harness_runtimeFFI)
                             Task {
                                 try? await source.submitEngineCommand(
                                     .refreshListings(which: [.slashCommands])
@@ -737,12 +737,12 @@ struct RootView: View {
                         openCurrentWorkspaceTerminal()
                     },
                     onPermissionModeChanged: { mode in
-                        #if canImport(engine_mobileFFI)
+                        #if canImport(harness_runtimeFFI)
                             try await source.submitEngineCommand(.setPermissionMode(mode: mode))
                         #endif
                     },
                     onTypescriptLspModeChanged: { mode in
-                        #if canImport(engine_mobileFFI)
+                        #if canImport(harness_runtimeFFI)
                             try await source.submitEngineCommand(.setTypescriptLspMode(mode: mode))
                         #endif
                     },
@@ -1520,7 +1520,7 @@ struct RootView: View {
         return projectStore.projects.first(where: { $0.record.id == requestedProjectID })
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         private func installExternalEventHandler(on conversation: any ConversationSource) {
             conversation.setExternalEventHandler { event in
                 Task { @MainActor in
@@ -1584,7 +1584,7 @@ struct RootView: View {
 
     private func wireCurrentSource(preserveCatalog: Bool = false) {
         let current = source
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: current)
             localAppsStore.configure { command in
                 try await current.submitEngineCommand(command)
@@ -1726,7 +1726,7 @@ struct RootView: View {
         persistConversationScope()
         let old = source
         let replacement = makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
         #endif
         // Prepare the replacement before cancelling the current source. A
@@ -1983,7 +1983,7 @@ struct RootView: View {
                     snapshot: providerRepository.makeLaunchSnapshot(),
                     mode: targetMode
                 )
-                #if canImport(engine_mobileFFI)
+                #if canImport(harness_runtimeFFI)
                     installExternalEventHandler(on: replacement)
                 #endif
                 try await replacement.prepare()
@@ -2213,7 +2213,7 @@ struct RootView: View {
     }
 
     private func triggerPendingForkIfReady(for sessionID: String) {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             guard var pending = pendingSessionFork,
                   !pending.submitted,
                   pending.sourceScope == activeScope,
@@ -2536,7 +2536,7 @@ struct RootView: View {
     }
 
     private func handleIncomingURL(_ url: URL) {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             if url.scheme?.lowercased() == "lingxi",
                url.host?.lowercased() == "oauth",
                url.path == "/callback" {

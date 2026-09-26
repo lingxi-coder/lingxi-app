@@ -6,7 +6,7 @@
 //!   override warning and ends the turn (no infinite loop);
 //! - `preventContinuation` (`continue:false`) terminates as `StopHookPrevented`;
 //! - a `UserPromptSubmit` `Block` aborts the turn BEFORE any API call.
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
@@ -211,7 +211,7 @@ fn orch_with_output(
 /// row of that translation was unexercised: this file drove `run_turn` fifteen
 /// times and `run_turn_streaming` zero.
 fn streaming_orch(
-    streams: Vec<Vec<llm_client::LlmEvent>>,
+    streams: Vec<Vec<llm_runtime::LlmEvent>>,
     hooks: Arc<HookExecutorImpl>,
     config: OrchestratorConfig,
 ) -> Arc<ConversationOrchestrator> {
@@ -229,7 +229,7 @@ fn streaming_orch(
 }
 
 /// One streamed `end_turn` round.
-fn streamed_end_turn(text: &str) -> Vec<llm_client::LlmEvent> {
+fn streamed_end_turn(text: &str) -> Vec<llm_runtime::LlmEvent> {
     use orchestrator::test_support::{
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
         message_stop, text_delta,
@@ -244,7 +244,7 @@ fn streamed_end_turn(text: &str) -> Vec<llm_client::LlmEvent> {
     ]
 }
 
-fn end_turn(text: &str) -> llm_client::LlmResponse {
+fn end_turn(text: &str) -> llm_runtime::LlmResponse {
     mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.into(),
@@ -254,8 +254,8 @@ fn end_turn(text: &str) -> llm_client::LlmResponse {
     )
 }
 
-fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_client::LlmResponse {
-    llm_client::LlmResponse {
+fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_runtime::LlmResponse {
+    llm_runtime::LlmResponse {
         id: "msg_goal".to_string(),
         model: "claude-opus-4-6".to_string(),
         content: vec![LlmContentBlock::Text {
@@ -264,15 +264,15 @@ fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_client::LlmRe
         }],
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
-        usage: llm_client::Usage {
-            billable_tokens: llm_client::TokenUsage {
+        usage: llm_runtime::Usage {
+            billable_tokens: llm_runtime::TokenUsage {
                 input,
                 output,
                 cache_write: 0,
                 cache_read: 0,
                 reasoning_output: 0,
             },
-            ..llm_client::Usage::default()
+            ..llm_runtime::Usage::default()
         },
         cost: None,
         provider_metadata: serde_json::Value::Null,
@@ -1308,7 +1308,7 @@ impl tool_api::tool_trait::Tool for EndsTurnTool {
     }
 }
 
-fn round_calling_ends_turn() -> Vec<llm_client::LlmEvent> {
+fn round_calling_ends_turn() -> Vec<llm_runtime::LlmEvent> {
     use orchestrator::test_support::{
         content_block_stop, input_json_delta, message_delta_stop, message_start, message_stop,
     };

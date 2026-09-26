@@ -1,3 +1,4 @@
+import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
@@ -40,21 +41,22 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   const collapsible = narrationShouldCollapse(item);
   const expanded = !collapsible || open;
   const contentId = `narration-content-${item.id}`;
+  const goalObjective = user ? goalMessageObjective(item.text) : null;
   const slashCommand = user ? parseSlashCommandMessage(item.text) : null;
   return (
     // `data-tone` is what lets the stylesheet reach INSIDE the markdown body:
     // `.markdown-content` hard-sets `color: var(--text)`, so the colour computed
     // here never reached the text on its own.
-    <div className={user ? 'user-message-bubble' : undefined} data-delivery={delivery} data-tone={item.tone} style={{
+    <div className={user ? 'user-message-bubble' : undefined} data-goal={Boolean(goalObjective) || undefined} data-delivery={delivery} data-tone={item.tone} style={{
       maxWidth: user ? images.length ? 'min(430px, 100%)' : 'min(700px, 90%)' : '100%',
       minWidth: 0,
       position: user ? 'relative' : undefined,
       padding: user ? '10px 16px' : 0,
       borderRadius: user ? 18 : 0,
       border: user ? `1px ${delivery ? 'dashed' : 'solid'} ${delivery ? t.text3 : 'transparent'}` : 0,
-      background: delivery ? t.surface : user ? t.surfaceHover : 'transparent',
+      background: goalObjective && !delivery ? (t.dark ? '#ededee' : '#18181a') : delivery ? t.surface : user ? t.surfaceHover : 'transparent',
       fontSize: 14, lineHeight: 1.65, letterSpacing: 0,
-      color, fontWeight: item.strong ? 600 : 400,
+      color: goalObjective && !delivery ? (t.dark ? '#18181a' : '#fff') : color, fontWeight: item.strong ? 600 : 400,
     }}>
       {delivery && (
         <span className="message-delivery-status" role="status" title={delivery === 'pending' ? 'Pending' : 'Not sent'}
@@ -90,7 +92,9 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
           textWrap: 'pretty',
         }}
       >
-        {slashCommand ? (
+        {goalObjective ? (
+          <span className="goal-message-objective">{goalObjective}</span>
+        ) : slashCommand ? (
           <div
             className="user-slash-command"
             data-command-name={slashCommand.name}
@@ -115,7 +119,7 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
           aria-controls={contentId}
           aria-label={expanded ? 'Collapse full message' : 'Show full message'}
           onClick={() => onSetOpen(item.id, !expanded)}
-          style={{ color: user ? t.accent : t.text3 }}
+          style={{ color: goalObjective ? 'inherit' : user ? t.accent : t.text3 }}
         >
           <span>{expanded ? 'Show less' : 'Show more'}</span>
           <Icon name={expanded ? 'chevron' : 'chevronR'} size={12} stroke={2} />
@@ -606,6 +610,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
                   state — for a message nobody copied. Remounting on the session
                   key drops that state and clears its reset timer.
                 */}
+                {user && goalMessageObjective(item.text) && !item.delivery && <div className="goal-message-caption" style={{ color: t.text3 }}><Icon name="goal" size={14} /><span>Sent as goal</span></div>}
                 {user && <UserMessageActions key={sessionKey} text={item.text} sentAt={item.sentAt} />}
               </div>
             );

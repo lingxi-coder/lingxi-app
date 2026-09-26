@@ -1,0 +1,82 @@
+.desktop-notification-region {
+  position: absolute;
+  z-index: 10;
+  top: 58px;
+  right: 16px;
+  left: 16px;
+  display: flex;
+  justify-content: flex-end;
+  pointer-events: none;
+}
+
+.desktop-notification {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: min(100%, 420px);
+  padding: 15px 12px 15px 15px;
+  border: 1px solid var(--notification-border);
+  border-radius: 18px;
+  color: var(--notification-text);
+  background: color-mix(in srgb, var(--notification-surface) 94%, transparent);
+  backdrop-filter: blur(24px) saturate(1.15);
+  box-shadow: 0 12px 36px rgb(0 0 0 / .16), 0 2px 7px rgb(0 0 0 / .07), inset 0 1px rgb(255 255 255 / .06);
+  pointer-events: auto;
+  animation: desktop-notification-enter 220ms cubic-bezier(.2, .8, .2, 1) both;
+}
+
+.desktop-notification-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 34px;
+  height: 34px;
+  border-radius: 11px;
+  color: var(--notification-danger);
+  background: color-mix(in srgb, var(--notification-danger) 12%, var(--notification-surface));
+}
+.desktop-notification-content { flex: 1; min-width: 0; padding-top: 1px; }
+.desktop-notification-title { display: block; font-size: 13px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.desktop-notification-detail {
+  margin: 5px 0 0;
+  color: var(--notification-detail);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: min(12rem, 35vh);
+  overflow-y: auto;
+  border-radius: 3px;
+}
+.desktop-notification-close {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  height: 28px;
+  margin: -3px -2px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--notification-detail);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.desktop-notification-close:hover { color: var(--notification-text); background: color-mix(in srgb, var(--notification-text) 8%, transparent); }
+.desktop-notification-close:active { background: color-mix(in srgb, var(--notification-text) 14%, transparent); }
+.desktop-notification-close:focus-visible,
+.desktop-notification-detail:focus-visible { outline: 2px solid var(--notification-focus); outline-offset: 3px; }
+@keyframes desktop-notification-enter {
+  from { opacity: 0; transform: translateY(-6px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .desktop-notification { animation: none; }
+  .desktop-notification-close { transition: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .desktop-notification { background: var(--notification-surface); backdrop-filter: none; }
+}
+@media (prefers-contrast: more) {
+  .desktop-notification { background: var(--notification-surface); backdrop-filter: none; border-color: var(--notification-text); }
+  .desktop-notification-detail { color: var(--notification-text); }
+}

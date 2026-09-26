@@ -527,7 +527,7 @@ pub struct Argv {
     // WIRED: `run_cli` exports `LINGXI_SIMPLE=1` (binary
     // `process.env.CLAUDE_CODE_SIMPLE="1"` on a pre-`--` `--bare` token) and
     // threads `CustomizationGates{bare}` through `resolve_desktop_config` into
-    // `engine_desktop::build` (skips settings hooks, plugins incl. plugin LSP,
+    // `harness_runtime::desktop::build` (skips settings hooks, plugins incl. plugin LSP,
     // skill/custom-command dirs, custom agents; LINGXI.md unless `--add-dir`).
     #[arg(long = "bare")]
     pub bare: bool,
@@ -537,7 +537,7 @@ pub struct Argv {
     // WIRED: `run_cli` exports `LINGXI_SAFE_MODE=1` +
     // `LINGXI_DISABLE_LINGXI_MDS=1` (binary @223917313 `if(Ql())process.env.
     // CLAUDE_CODE_SAFE_MODE="1",process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS=
-    // "1"`) and threads `CustomizationGates{safe_mode}` into `engine_desktop::
+    // "1"`) and threads `CustomizationGates{safe_mode}` into `harness_runtime::desktop::
     // build` (disables settings hooks, plugins, skills/custom commands, custom
     // agents, discovered `.mcp.json` servers — `--mcp-config` servers survive,
     // binary `fQ`'s `L2()` — and the LINGXI.md hierarchy).
@@ -551,7 +551,7 @@ pub struct Argv {
     // string parsed downstream), not a space-separated list.
     //
     // WIRED: threads raw into `DesktopConfig.cli_agents_json`;
-    // `engine_desktop::build` parses it with the strict flag-record schema
+    // `harness_runtime::desktop::build` parses it with the strict flag-record schema
     // (`agent::parse_agents_from_flag_json_checked` at the CLI boundary;
     // invalid JSON/definitions abort before runtime construction) and
     // merges the result over dir-loaded agents (`flagSettings` precedence).
@@ -563,7 +563,7 @@ pub struct Argv {
     //
     // claude-code `--agent <agent>` takes EXACTLY ONE value.
     //
-    // WIRED: threads into `DesktopConfig.cli_agent`; `engine_desktop::build`
+    // WIRED: threads into `DesktopConfig.cli_agent`; `harness_runtime::desktop::build`
     // resolves it against the final agent catalog (binary `dts`: exact
     // agentType, else `…:{name}` FQN suffix) and logs the byte-matched
     // `Warning: agent "X" not found …` on a miss. On a HIT it APPLIES the agent
@@ -619,7 +619,7 @@ pub struct Argv {
     // @223929381 `if(a.sessionPersistence===!1&&!We)return Es("Error: --no-
     // session-persistence can only be used with --print mode.")`); the
     // accepted print case threads `DesktopConfig.session_persistence: false`
-    // so `engine_desktop::build` wires NO session `JsonlWriter`.
+    // so `harness_runtime::desktop::build` wires NO session `JsonlWriter`.
     #[arg(long = "no-session-persistence")]
     pub no_session_persistence: bool,
 
@@ -691,7 +691,7 @@ pub struct Argv {
     /// [DEPRECATED. Use --thinking instead for newer models] (hidden flag)
     //
     // Wired: `init::resolve_desktop_config` threads this into the boot session
-    // `ThinkingConfig` via `llm_client::model::thinking::session_thinking_from_env`
+    // `ThinkingConfig` via `llm_runtime::model::thinking::session_thinking_from_env`
     // as claude-code's `a.maxThinkingTokens` (the `wn` request-build arm) — used
     // when `MAX_THINKING_TOKENS` env is unset; a value `> 0` pins a fixed budget
     // (pre-empting adaptive), `0` disables thinking.

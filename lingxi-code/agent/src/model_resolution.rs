@@ -49,7 +49,7 @@
 //!   alias logic twice.
 
 use crate::definition::{AgentDefinition, AgentModel, AgentSource};
-use llm_client::model::allowlist::{self, ModelEnforcement};
+use llm_runtime::model::allowlist::{self, ModelEnforcement};
 use permission::PermissionMode;
 use platform_api::env::is_env_truthy;
 

@@ -24,7 +24,7 @@
 //! 4. A non-Agent tool never fires `SubagentStop`.
 //! 5. A `SubagentStop` hook that itself fails does NOT break the turn
 //!    (best-effort, like the `PostToolUse`/`WorktreeCreate` arms).
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};

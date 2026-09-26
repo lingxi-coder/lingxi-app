@@ -130,7 +130,7 @@ async fn orch_with_blocking_hook(
 
     // The turn aborts before any API call, but wire a response anyway.
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![llm_client::ContentBlock::Text {
+        vec![llm_runtime::ContentBlock::Text {
             text: "unreached".into(),
             cache_control: None,
         }],

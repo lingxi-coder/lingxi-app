@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use llm_client::ProviderId;
+use llm_runtime::ProviderId;
 
 use crate::CredentialSource;
 
@@ -102,7 +102,7 @@ pub async fn compute_availability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::ProviderId;
+    use llm_runtime::ProviderId;
     use std::sync::Arc;
 
     #[derive(Default)]

@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "harness-runtime",
     "branding",
     "protocol",
     "client-protocol",
     "client-adapter",
+    "client-presentation",
     "configuration-admin",
     "tool-api",
     "tools/file",
@@ -38,7 +40,7 @@ members = [
     "migrations",
     "jsonrpc",
     "mcp",
-    "llm-client",
+    "llm-runtime",
     "http-client",
     "provider-config",
     "config-requirements",
@@ -72,8 +74,6 @@ members = [
     "apps/android-aar",
     "apps/bridge-server",
     "apps/cli",
-    "apps/engine-desktop",
-    "apps/engine-mobile",
     "tui-core",
     "tui",
     "platforms/common",
@@ -95,10 +95,12 @@ members = [
 # they MUST NOT be part of the default build set — CI release jobs should
 # build only the real crates, not the integration-test fixtures.
 default-members = [
+    "harness-runtime",
     "branding",
     "protocol",
     "client-protocol",
     "client-adapter",
+    "client-presentation",
     "tool-api",
     "tools/file",
     "tools/shell",
@@ -130,7 +132,7 @@ default-members = [
     "migrations",
     "jsonrpc",
     "mcp",
-    "llm-client",
+    "llm-runtime",
     "provider-config",
     "config-requirements",
     "orchestrator",
@@ -160,7 +162,6 @@ default-members = [
     "plugin",
     "apps/bridge-server",
     "apps/cli",
-    "apps/engine-desktop",
     "tui-core",
     "tui",
     "platforms/common",
@@ -172,7 +173,7 @@ default-members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi/lingxi-code"
@@ -210,7 +211,7 @@ async-trait = "0.1"
 # async-compat (the `tokio` feature) — `uniffi_build`/`uniffi_udl`/`cargo_metadata`
 # are NOT pulled (those only matter with the `bindgen`/`cargo-metadata` default
 # feature). MSRV: 0.28.x declares no explicit `rust-version` and compiles under
-# the workspace toolchain `rust-version = "1.82"` (no bump required — verified by
+# the workspace toolchain `rust-version = "1.94"` (no bump required — verified by
 # a clean offline build). `tokio` enables the async foreign-executor scaffolding
 # needed by F3-07. `client-protocol` adds this as an OPTIONAL dep gated behind
 # its `uniffi` feature, so the default (bridge-server) build never pulls it.
@@ -237,7 +238,7 @@ tokio-stream = "0.1"
 unsafe_code = "deny"
 missing_docs = "warn"
 # `cfg(loom)` is a custom cfg name set via `RUSTFLAGS="--cfg loom"` for the
-# loom model-checker tests (e.g. `llm-client/tests/refresh_single_flight_test.rs`).
+# loom model-checker tests (e.g. `llm-runtime/tests/refresh_single_flight_test.rs`).
 # Declare it so rustc's `unexpected_cfgs` lint doesn't fire under `-D warnings`.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 

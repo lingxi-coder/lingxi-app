@@ -185,7 +185,7 @@ def normalise(text: str, cli_name: str) -> str:
     t = "\n".join(
         ln
         for ln in t.splitlines()
-        if "WARN engine_desktop" not in ln and not ln.startswith("Note: default model")
+        if "WARN harness_runtime::desktop" not in ln and not ln.startswith("Note: default model")
     )
     return t.strip()
 

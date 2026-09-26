@@ -28,10 +28,10 @@ Each confirmed at the site the audit named as missing:
 | `SED-XWU` | `permission/src/sed_validation.rs` |
 | `AUTO-03` | `permission/src/policy.rs:2945` |
 | `AUTO-07-followup` | `permission/src/denial_tracking.rs` |
-| `metadata parent_session_id` | `llm-client/src/service.rs:778-819` — now taken and emitted |
+| `metadata parent_session_id` | `llm-runtime/src/service.rs:778-819` — now taken and emitted |
 | `GATE-UPDATES-01` | `permission/src/policy_gate_test.rs:1972` |
 | `ps-acceptedits-cgs` | 42 hits for the `has_sub_expressions` / `has_script_blocks` / … predicates |
-| `H-BIN-10` | `llm-client/tests/client_auth_test.rs:928` (Azure AI Foundry Claude) |
+| `H-BIN-10` | `llm-runtime/tests/client_auth_test.rs:928` (Azure AI Foundry Claude) |
 | `P2-01` | `platforms/posix/src/mcp.rs:379`, `tools/mcp/src/mcp_tool.rs:728` |
 | `WIZARD-06` | completed 2026-07-24/25, waves 47–59 (producers, `--propose`, `/auto-mode-setup` slash surface + its runners) |
 

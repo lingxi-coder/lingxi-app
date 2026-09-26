@@ -55,7 +55,7 @@ pub struct CompactionResult {
 pub enum CompactionError {
     /// Underlying API call failed.
     #[error(transparent)]
-    Api(#[from] llm_client::LlmError),
+    Api(#[from] llm_runtime::LlmError),
     /// Exhausted PTL retries without success.
     #[error("exhausted")]
     MaxRetriesExceeded,
@@ -400,7 +400,7 @@ impl Autocompactor {
                         crate::prompt_too_long::prompt_too_long_token_gap(&result.final_text)
                     }
                     Err(sidequery::ForkError::Api(sidequery::SideQueryError::Api(
-                        llm_client::LlmError::ContextOverflow { token_gap },
+                        llm_runtime::LlmError::ContextOverflow { token_gap },
                     ))) => token_gap,
                     Err(sidequery::ForkError::Api(sidequery::SideQueryError::Api(error)))
                         if is_media_compaction_error(&error) =>
@@ -532,16 +532,16 @@ fn preserved_group_step(tokens: &[u64], gap: Option<u64>) -> usize {
     }
 }
 
-fn is_media_compaction_error(error: &llm_client::LlmError) -> bool {
+fn is_media_compaction_error(error: &llm_runtime::LlmError) -> bool {
     // Non-vision summary routes reject raw history media before sending HTTP.
     // Reuse the bounded media retry, retaining text and prior MediaAnalysis.
-    if let llm_client::LlmError::UnsupportedCapability { capability } = error {
+    if let llm_runtime::LlmError::UnsupportedCapability { capability } = error {
         return matches!(capability.as_str(), "vision" | "documents");
     }
-    if matches!(error, llm_client::LlmError::RequestTooLarge) {
+    if matches!(error, llm_runtime::LlmError::RequestTooLarge) {
         return true;
     }
-    let llm_client::LlmError::InvalidRequest { message } = error else {
+    let llm_runtime::LlmError::InvalidRequest { message } = error else {
         return false;
     };
     let message = message.to_lowercase();
@@ -667,7 +667,7 @@ mod tests {
     /// message count of every request, so the PTL retry tests can assert both the
     /// retry count and that each retry's prompt shrank.
     struct SeqMockClient {
-        texts: Mutex<VecDeque<Result<String, llm_client::LlmError>>>,
+        texts: Mutex<VecDeque<Result<String, llm_runtime::LlmError>>>,
         seen_lens: Mutex<Vec<usize>>,
         seen: Mutex<Vec<SideQueryRequest>>,
     }
@@ -1299,7 +1299,7 @@ mod tests {
         ];
         let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
         *client.texts.lock().unwrap() = VecDeque::from(vec![
-            Err(llm_client::LlmError::RequestTooLarge),
+            Err(llm_runtime::LlmError::RequestTooLarge),
             Ok("<summary>ok</summary>".into()),
         ]);
         let result = compactor
@@ -1335,7 +1335,7 @@ mod tests {
                 ];
                 let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
                 *client.texts.lock().unwrap() = VecDeque::from(vec![
-                    Err(llm_client::LlmError::UnsupportedCapability {
+                    Err(llm_runtime::LlmError::UnsupportedCapability {
                         capability: capability.into(),
                     }),
                     Ok("<summary>ok</summary>".into()),
@@ -1378,7 +1378,7 @@ mod tests {
     fn unrelated_unsupported_capabilities_do_not_trigger_media_recovery() {
         for capability in ["tools", "reasoning", "structured_output"] {
             assert!(!is_media_compaction_error(
-                &llm_client::LlmError::UnsupportedCapability {
+                &llm_runtime::LlmError::UnsupportedCapability {
                     capability: capability.into(),
                 }
             ));
@@ -1395,7 +1395,7 @@ mod tests {
         ];
         let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
         *client.texts.lock().unwrap() =
-            VecDeque::from(vec![Err(llm_client::LlmError::RequestTooLarge); 2]);
+            VecDeque::from(vec![Err(llm_runtime::LlmError::RequestTooLarge); 2]);
         let error = compactor
             .compact_manual_with_instructions(history, None)
             .await
@@ -1416,7 +1416,7 @@ mod tests {
         ];
         let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
         *client.texts.lock().unwrap() = VecDeque::from(vec![
-            Err(llm_client::LlmError::ContextOverflow { token_gap: 1 }),
+            Err(llm_runtime::LlmError::ContextOverflow { token_gap: 1 }),
             Ok("<summary>ok</summary>".into()),
         ]);
         let result = compactor

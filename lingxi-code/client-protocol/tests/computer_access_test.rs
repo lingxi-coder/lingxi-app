@@ -16,7 +16,7 @@ use client_protocol::computer_access::{
 
 /// `AccessTierDto` is a bare wire STRING (not internally tagged like this
 /// crate's other enums) — byte-identical to
-/// `tui_core::computer_access_bridge::AccessTier::as_str()`.
+/// `permission::computer_access::AccessTier::as_str()`.
 #[test]
 fn access_tier_serializes_as_bare_string() {
     let cases = [
@@ -106,7 +106,7 @@ fn request_without_tcc_state_omits_the_key() {
 }
 
 /// `ComputerAccessResponseDto` — the inbound grant. `Default` is fully denied
-/// (mirrors the source `tui_core::computer_access_bridge::ComputerAccessResponse`).
+/// (mirrors the source `permission::computer_access::ComputerAccessResponse`).
 #[test]
 fn response_default_is_fully_denied_and_round_trips() {
     let denied = ComputerAccessResponseDto::default();

@@ -278,7 +278,7 @@ fn allows_for_lease(
         return false;
     }
     // The local-app host operations are BUILTIN tools (`LocalApp*`), not an
-    // MCP server — see `engine_mobile::local_apps_tools` for why they moved.
+    // MCP server — see `harness_runtime::mobile::local_apps_tools` for why they moved.
     // The `app_id` equality check below is what keeps a lease for one app from
     // authorizing an operation aimed at a sibling.
     if tool_name.starts_with("LocalApp") {

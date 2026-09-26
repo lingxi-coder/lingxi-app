@@ -386,7 +386,7 @@ fs/net/env/进程、取消是怎么实现的。
 挂到定义上。
 
 **⛔ 决定不做，不是阻塞**：端口**根本没有 prompt-cache TTL 这个概念** —— 请求侧没有
-`cache_control` 断点选择、没有 1h/5m ephemeral 设置（`llm-client/src/stream_accumulator.rs`
+`cache_control` 断点选择、没有 1h/5m ephemeral 设置（`llm-runtime/src/stream_accumulator.rs`
 里那些 `cache_control` 是**响应解析**）。加它要动全部 **74 处** `AgentDefinition`
 字面量，产出一个没人能读的值 —— 正是本审计要找的「named, computed, never wired」形状，
 不该自己造一个。
@@ -399,10 +399,10 @@ fs/net/env/进程、取消是怎么实现的。
 
 ```
 apps/engine-desktop/src/lib.rs:4442  prompt_cache_write_ttl_1h_enabled()   env 门
-  → llm-client/src/service.rs:1095   should_1h_cache_ttl()                 ENABLE_PROMPT_CACHING_1H
-  → llm-client/src/service.rs:1219   SplitOptions{ ttl_1h }
-  → llm-client/src/prompt_format.rs:111/121  CacheControl::EphemeralScoped{ ttl_1h }
-  → llm-client/src/providers/anthropic.rs:359  上线 `ttl:"1h"`
+  → llm-runtime/src/service.rs:1095   should_1h_cache_ttl()                 ENABLE_PROMPT_CACHING_1H
+  → llm-runtime/src/service.rs:1219   SplitOptions{ ttl_1h }
+  → llm-runtime/src/prompt_format.rs:111/121  CacheControl::EphemeralScoped{ ttl_1h }
+  → llm-runtime/src/providers/anthropic.rs:359  上线 `ttl:"1h"`
 ```
 
 ⚠️ 原记录取证只看了 `stream_accumulator.rs`（**响应**解析）和 `convert.rs`，
@@ -419,10 +419,10 @@ apps/engine-desktop/src/lib.rs:4442  prompt_cache_write_ttl_1h_enabled()   env �
 | | 数量 | 说明 |
 |---|---|---|
 | `AgentDefinition {` **构造点** | **~17** | 没有 `Default` derive，没有一处用 `..Default::default()` ⇒ 加字段必须全改 |
-| `build_request(` 调用点 | **58** | 分布在 llm-client(18) / service_test(31) / tool-api(6) / web / sidequery / test-harness |
+| `build_request(` 调用点 | **58** | 分布在 llm-runtime(18) / service_test(31) / tool-api(6) / web / sidequery / test-harness |
 
 ⛔ **不能用「在 service 上加个字段」偷懒**：`ApiService` 是
-`Arc<llm_client::ApiService>` 共享的（`orchestrator/src/provider_adapter.rs:27`），
+`Arc<llm_runtime::ApiService>` 共享的（`orchestrator/src/provider_adapter.rs:27`），
 并发子代理会互相踩。必须按请求传参 —— 干净的做法是把 `build_request` 的位置参数
 收进一个 options struct（顺带解决它已经 8 个参数的问题）。
 
@@ -451,7 +451,7 @@ task-local 传播验证 + 优先级/overage 语义 + 那条端到端断言。
 ⛔ 别再引用「没有消费者」当理由——那个理由已经被推翻。
 
 **2026-09-10 复核**（因为这一整轮里「N 个调用点」这类估算我错过两次，所以实测）：
-`llm-client/src/convert.rs` 里出往 wire 的 `cache_control` **恒为 `None`**（589/597 行，
+`llm-runtime/src/convert.rs` 里出往 wire 的 `cache_control` **恒为 `None`**（589/597 行，
 外加文档表格里两行），没有断点选择、没有 TTL 字段；`AgentDefinition {` 字面量现在是
 **75** 个（原记 74）。结论不变，而且现在有据：加上去就是改 75 处去产出一个
 **没有任何消费者**的值。这是一个**已关闭的决定**，不是待办。

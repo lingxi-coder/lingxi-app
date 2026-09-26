@@ -413,10 +413,10 @@ impl crate::OrchestratorApiClient for CancelsThenAnswers {
         _system: Option<&str>,
         _msgs: Vec<protocol::ConversationMessage>,
         _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
         self.0.cancel();
         Ok(crate::test_support::mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
             }],
@@ -474,7 +474,7 @@ async fn the_two_batched_entries_supply_different_parent_aborted_flags() {
         bus,
         Arc::new(MockApiClient::new(vec![
             crate::test_support::mock_message_response(
-                vec![llm_client::ContentBlock::Text {
+                vec![llm_runtime::ContentBlock::Text {
                     text: "done".into(),
                     cache_control: None,
                 }],

@@ -580,6 +580,7 @@ mod tests {
             revision: 1,
             replaces_revision: None,
             disposition: crate::AttemptDisposition::Unknown,
+            token_quote_nano_usd: None,
             usage: crate::Usage::default(),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,

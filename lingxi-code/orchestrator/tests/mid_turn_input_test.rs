@@ -627,7 +627,7 @@ impl Tool for EndTurnTool {
     }
 }
 
-fn streaming_round_calling(tool: &str, id: ToolUseId) -> Vec<llm_client::LlmEvent> {
+fn streaming_round_calling(tool: &str, id: ToolUseId) -> Vec<llm_runtime::LlmEvent> {
     vec![
         message_start("m1", "claude-opus-4-7"),
         orchestrator::test_support_stream::content_block_start_tool_use(0, id, tool),
@@ -638,7 +638,7 @@ fn streaming_round_calling(tool: &str, id: ToolUseId) -> Vec<llm_client::LlmEven
     ]
 }
 
-fn text_round(id: &str, text: &str) -> Vec<llm_client::LlmEvent> {
+fn text_round(id: &str, text: &str) -> Vec<llm_runtime::LlmEvent> {
     vec![
         message_start(id, "claude-opus-4-7"),
         content_block_start_text(0),
@@ -726,14 +726,14 @@ async fn a_tool_requested_end_does_not_take_the_late_drain() {
 async fn the_batched_path_has_no_late_drain() {
     let api = Arc::new(MockApiClient::new(vec![
         orchestrator::test_support::mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "first answer".into(),
                 cache_control: None,
             }],
             Some("end_turn"),
         ),
         orchestrator::test_support::mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "should never be requested".into(),
                 cache_control: None,
             }],
@@ -807,7 +807,7 @@ async fn only_the_non_cancelable_batched_entry_drains_at_the_top_of_its_loop() {
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![
                 orchestrator::test_support::mock_message_response(
-                    vec![llm_client::ContentBlock::Text {
+                    vec![llm_runtime::ContentBlock::Text {
                         text: "done".into(),
                         cache_control: None,
                     }],

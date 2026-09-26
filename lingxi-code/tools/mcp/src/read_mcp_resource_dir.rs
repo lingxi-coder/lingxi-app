@@ -68,7 +68,7 @@ pub const READ_MCP_RESOURCE_DIR_TOOL_NAME: &str = "ReadMcpResourceDirTool";
 
 /// Legacy alias (`aliases:["ReadMcpResourceDir"]`). Already present in the
 /// port's alias-normalisation tables (`permission/src/rule.rs`,
-/// `llm-client/src/convert.rs`) — this is the implementation they pointed at.
+/// `llm-runtime/src/convert.rs`) — this is the implementation they pointed at.
 pub const READ_MCP_RESOURCE_DIR_ALIAS: &str = "ReadMcpResourceDir";
 
 /// The MCP-skills gate (`eA(){return it("tengu_mcp_skills",!1)}`). Default
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(DIRECTORY_MIME_TYPE, "inode/directory");
     }
 
-    /// The alias tables in `permission/src/rule.rs` and `llm-client/src/convert.rs`
+    /// The alias tables in `permission/src/rule.rs` and `llm-runtime/src/convert.rs`
     /// already normalise `ReadMcpResourceDir` onto `ReadMcpResourceDirTool`;
     /// this is the implementation they were pointing at.
     #[test]

@@ -3,7 +3,7 @@
 //! Asserts:
 //!   - both paths produce `ConversationOutcome::EndTurn { turn_count: 1, .. }`
 //!   - both paths append identical assistant message bodies to the session.
-use llm_client::{ContentBlock as LlmContentBlock, LlmResponse, Usage};
+use llm_runtime::{ContentBlock as LlmContentBlock, LlmResponse, Usage};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
@@ -631,7 +631,7 @@ fn streaming_turn_injects_new_diagnostics_reminder() {
 #[test]
 fn streaming_connect_413_recovers_via_reactive_ptl() {
     run_with_large_stack(|| async {
-        use llm_client::LlmError;
+        use llm_runtime::LlmError;
         // The stream OPEN returns a connect-phase 413/ContextOverflow once.
         let streaming_mock = Arc::new(MockStreamingApiClient::with_open_error(
             LlmError::ContextOverflow { token_gap: 100 },

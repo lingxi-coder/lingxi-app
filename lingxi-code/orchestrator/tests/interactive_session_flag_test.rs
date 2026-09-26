@@ -7,7 +7,7 @@
 //! permission requests itself). Sourcing the global from
 //! `interactive_permissions` would mark such a session non-interactive and
 //! silently change what leaf consumers see — `agent/src/runner.rs`,
-//! `tool-api/src/tool_invoker_impl.rs` and `llm-client/src/service.rs` all read
+//! `tool-api/src/tool_invoker_impl.rs` and `llm-runtime/src/service.rs` all read
 //! it through `effective_non_interactive_session()` for callers with no
 //! per-call context handle.
 //!

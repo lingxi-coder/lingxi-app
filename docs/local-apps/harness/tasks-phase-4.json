@@ -7,17 +7,17 @@
       "gate": "§7.1 / §8.3 / §11.1: namespaced local-app-build accepts only operation/app_id/spec/revision_prompt/quality_level and Host injects authoritative app, scaffold, profile, template, dependency, collections, and catalog context",
       "owns": [
         "lingxi-code/plugins/lingxi-local-app/workflows/local-app-build.js",
-        "lingxi-code/apps/engine-mobile/src/workflow_support.rs",
-        "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs",
-        "lingxi-code/apps/engine-mobile/src/local_app_template_catalog.rs",
-        "lingxi-code/apps/engine-mobile/src/host.rs"
+        "lingxi-code/harness-runtime/src/mobile/workflow_support.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_plugin_binding.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_template_catalog.rs",
+        "lingxi-code/harness-runtime/src/mobile/host.rs"
       ],
       "crates": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "testPackages": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "exclusive": false,
@@ -49,15 +49,15 @@
         "lingxi-code/plugins/lingxi-local-app/workflows/local-app-use-test.js",
         "lingxi-code/plugins/lingxi-local-app/skills/create-local-app/SKILL.md",
         "lingxi-code/plugins/lingxi-local-app/skills/local-app-test/SKILL.md",
-        "lingxi-code/apps/engine-mobile/src/workflow_support.rs",
-        "lingxi-code/apps/engine-mobile/src/host.rs"
+        "lingxi-code/harness-runtime/src/mobile/workflow_support.rs",
+        "lingxi-code/harness-runtime/src/mobile/host.rs"
       ],
       "crates": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "testPackages": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "exclusive": false,
@@ -88,15 +88,15 @@
         "lingxi-code/plugins/lingxi-local-app/workflows/local-app-use-test.js",
         "lingxi-code/plugins/lingxi-local-app/schemas/use-test-report.schema.json",
         "lingxi-code/plugins/lingxi-local-app/schemas/qa-report.schema.json",
-        "lingxi-code/apps/engine-mobile/src/workflow_support.rs",
-        "lingxi-code/apps/engine-mobile/src/host.rs"
+        "lingxi-code/harness-runtime/src/mobile/workflow_support.rs",
+        "lingxi-code/harness-runtime/src/mobile/host.rs"
       ],
       "crates": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "testPackages": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "exclusive": false,
@@ -132,14 +132,14 @@
         "lingxi-code/plugins/lingxi-local-app/agents/operator.md",
         "lingxi-code/plugins/lingxi-local-app/agents/tester.md",
         "lingxi-code/plugins/lingxi-local-app/agents/verifier.md",
-        "lingxi-code/apps/engine-mobile/src/workflow_support.rs"
+        "lingxi-code/harness-runtime/src/mobile/workflow_support.rs"
       ],
       "crates": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "testPackages": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "exclusive": false,
@@ -169,17 +169,17 @@
       "title": "Specialist routing matrix across five runtime profiles",
       "gate": "§9.3 / §11.1 / §18 Phase 4: Host-derived profile family routes to the correct specialist for all five profiles and never makes Babylon available without the catalog gate",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs",
-        "lingxi-code/apps/engine-mobile/src/host.rs",
+        "lingxi-code/harness-runtime/src/mobile/local_app_plugin_binding.rs",
+        "lingxi-code/harness-runtime/src/mobile/host.rs",
         "lingxi-code/plugins/lingxi-local-app/agents",
         "lingxi-code/plugins/lingxi-local-app/skills"
       ],
       "crates": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "testPackages": [
-        "engine-mobile",
+        "harness-runtime",
         "workflow"
       ],
       "exclusive": false,

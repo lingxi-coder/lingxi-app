@@ -115,13 +115,13 @@ impl HttpErrorFacts {
     /// the envelope arrives with an `invalid_request_error` type and no status
     /// at all (oracle `Htp`). Callers on that path fill it in themselves.
     #[must_use]
-    pub fn from_error(err: &llm_client::LlmError) -> Self {
+    pub fn from_error(err: &llm_runtime::LlmError) -> Self {
         Self {
             status: err.http_status(),
             error_type: None,
             message: err.to_string(),
             request_id: None,
-            is_overloaded: matches!(err, llm_client::LlmError::Overloaded { .. }),
+            is_overloaded: matches!(err, llm_runtime::LlmError::Overloaded { .. }),
         }
     }
 }
@@ -680,7 +680,7 @@ mod tests {
     /// separate "compact and retry" from "strip the beta".
     #[test]
     fn facts_come_back_out_of_a_real_decoded_error() {
-        let reject = llm_client::LlmError::InvalidRequest {
+        let reject = llm_runtime::LlmError::InvalidRequest {
             message: r#"422 {"type":"error","error":{"message":"context hint"}}"#.to_string(),
         };
         let facts = HttpErrorFacts::from_error(&reject);
@@ -691,7 +691,7 @@ mod tests {
         );
         assert!(!is_unsupported_beta(&facts));
 
-        let unsupported = llm_client::LlmError::InvalidRequest {
+        let unsupported = llm_runtime::LlmError::InvalidRequest {
             message: "400 Unexpected value for the anthropic-beta header".to_string(),
         };
         let facts = HttpErrorFacts::from_error(&unsupported);
@@ -703,7 +703,7 @@ mod tests {
         );
 
         // 529 has no status branch in the oracle either — it is its own predicate.
-        let overloaded = llm_client::LlmError::Overloaded { repeated: false };
+        let overloaded = llm_runtime::LlmError::Overloaded { repeated: false };
         assert!(HttpErrorFacts::from_error(&overloaded).is_overloaded);
     }
 
@@ -713,7 +713,7 @@ mod tests {
         let mut c = active_controller();
         let msgs = big_history();
         c.build_request_params(&msgs);
-        let err = llm_client::LlmError::InvalidRequest {
+        let err = llm_runtime::LlmError::InvalidRequest {
             message: r#"422 {"type":"error"}"#.to_string(),
         };
         match c.on_request_error(&HttpErrorFacts::from_error(&err), msgs) {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use llm_client::{LlmError, LlmEvent};
+use llm_runtime::{LlmError, LlmEvent};
 use protocol::{ContentBlock, ConversationMessage, MessageId};
 use tokio_util::sync::CancellationToken;
 
@@ -128,16 +128,27 @@ impl StreamingTurnDriver<'_> {
         let scope =
             cost_scope.expect("a wired cost tracker captured its scope before stream dispatch");
         let cost_usage = crate::cost_wiring::llm_usage_to_cost_usage(usage);
-        Some(scope.submit_model_response(cost::CostModelResponse {
-            model_ref: crate::cost_wiring::model_ref_from_string(model, model_profile),
-            usage: cost_usage,
-            duration,
-            retries: orch.streaming_api.last_retry_count(),
-            cache_read_input_tokens: usage.billable_tokens.cache_read,
-            cache_creation_input_tokens: usage.billable_tokens.cache_write,
-            is_batch_request: false,
-            bus: orch.model_runtime.analytics_bus.clone(),
-        }))
+        let quote = pumped
+            .cost_quote
+            .as_ref()
+            .and_then(crate::cost_wiring::frozen_cost_quote);
+        let model_ref = quote.as_ref().map_or_else(
+            || crate::cost_wiring::model_ref_from_string(model, model_profile),
+            |(model_ref, _)| model_ref.clone(),
+        );
+        Some(scope.submit_model_response_with_quote(
+            cost::CostModelResponse {
+                model_ref,
+                usage: cost_usage,
+                duration,
+                retries: orch.streaming_api.last_retry_count(),
+                cache_read_input_tokens: usage.billable_tokens.cache_read,
+                cache_creation_input_tokens: usage.billable_tokens.cache_write,
+                is_batch_request: false,
+                bus: orch.model_runtime.analytics_bus.clone(),
+            },
+            quote.map(|(_, amount)| amount),
+        ))
     }
 
     async fn prepare_iteration(
@@ -858,11 +869,11 @@ impl StreamingTurnDriver<'_> {
                         {
                             mid_stream_retries += 1;
                             // Exponential backoff + jitter (binary `sle`).
-                            let base = llm_client::model::retry::scaled_base_delay_ms(
+                            let base = llm_runtime::model::retry::scaled_base_delay_ms(
                                 mid_stream_retries - 1,
                                 None,
                             );
-                            tokio::time::sleep(llm_client::model::retry::jittered_delay(base))
+                            tokio::time::sleep(llm_runtime::model::retry::jittered_delay(base))
                                 .await;
                             tracing::warn!(
                                 attempt = mid_stream_retries,
@@ -1231,7 +1242,7 @@ impl StreamingTurnDriver<'_> {
         orch.save_cache_safe_params(system_prompt.as_deref(), &model, &wire_tools)
             .await;
 
-        // Task 8 (llm-client future-work batch 3): the streamed call (or
+        // Task 8 (llm-runtime future-work batch 3): the streamed call (or
         // its non-streaming 529 fallback) completed — forward the
         // adapter's unified rate-limit snapshot when it changed since the
         // last emission. `orch.api` is the same `ProviderApiAdapter` as

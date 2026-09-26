@@ -12,14 +12,14 @@ use std::collections::BTreeMap;
 fn inputs() -> AssembleInputs {
     AssembleInputs {
         anthropic_api_base: "https://api.anthropic.com".to_string(),
-        anthropic_models: vec![llm_client::ModelProfile {
+        anthropic_models: vec![llm_runtime::ModelProfile {
             display_model: "claude-opus-4-6".to_string(),
             request_model: "claude-opus-4-6".to_string(),
             billing_model: "claude-opus-4-6".to_string(),
             aliases: Vec::new(),
             description: None,
             metadata: Default::default(),
-            capabilities: llm_client::Capabilities::default(),
+            capabilities: llm_runtime::Capabilities::default(),
         }],
         anthropic_has_api_key: true,
         anthropic_has_oauth: false,
@@ -58,7 +58,7 @@ fn a_user_provider_named_like_a_preset_is_not_silently_dropped() {
     // The consequence, not just the count: this config is what the engine hands
     // to the client, and a repeated profile_name fails the WHOLE build — every
     // provider becomes unusable, not just this one.
-    let built = llm_client::DefaultLlmClient::from_config(out.client_config);
+    let built = llm_runtime::DefaultLlmClient::from_config(out.client_config);
     match &built {
         Ok(_) => {}
         Err(error) => println!("from_config rejected the assembled config: {error}"),

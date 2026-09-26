@@ -742,10 +742,10 @@ pub(crate) fn max_input_bytes_for_token_cap(tokens: u64) -> u64 {
         return 0;
     }
     let mut low = 0_u64;
-    let mut high = tokens.saturating_mul(llm_client::model::count_tokens::APPROX_CHARS_PER_TOKEN);
+    let mut high = tokens.saturating_mul(llm_runtime::model::count_tokens::APPROX_CHARS_PER_TOKEN);
     while low < high {
         let midpoint = low.saturating_add(high.saturating_sub(low).div_ceil(2));
-        if llm_client::model::count_tokens::approximate_tokens_for_bytes(midpoint) <= tokens {
+        if llm_runtime::model::count_tokens::approximate_tokens_for_bytes(midpoint) <= tokens {
             low = midpoint;
         } else {
             high = midpoint.saturating_sub(1);
@@ -760,10 +760,10 @@ fn panel_byte_cap_is_the_exact_safe_inverse_of_request_estimation() {
     let tokens = 32_768;
     let bytes = max_input_bytes_for_token_cap(tokens);
     assert_eq!(
-        llm_client::model::count_tokens::approximate_tokens_for_bytes(bytes),
+        llm_runtime::model::count_tokens::approximate_tokens_for_bytes(bytes),
         tokens
     );
-    assert!(llm_client::model::count_tokens::approximate_tokens_for_bytes(bytes + 1) > tokens);
+    assert!(llm_runtime::model::count_tokens::approximate_tokens_for_bytes(bytes + 1) > tokens);
 }
 
 /// `run_panels` helper: spawn every panel's subagent task onto a fresh
@@ -1877,14 +1877,14 @@ fn usage_from_subagent(
 /// still very likely spent real, already-billed tokens on at least the
 /// prompt we know we sent, so estimate from that using the SAME
 /// character-based approximation `count_tokens::approximate_tokens` uses for
-/// its own documented fallback (`llm_client::model::count_tokens`), rather
+/// its own documented fallback (`llm_runtime::model::count_tokens`), rather
 /// than inventing a second, divergent formula. Output stays `0`: unlike the
 /// input prompt, no response text is known to exist for an in-flight panel.
 /// `estimated: true` always, so this is never mistaken for an exact
 /// provider count (mirrors [`usage_from_failed_subagent`]'s same rule).
 fn estimate_in_flight_usage(spawn_prompt: &str) -> FusionUsage {
     FusionUsage {
-        input_tokens: llm_client::model::count_tokens::approximate_tokens_for_bytes(
+        input_tokens: llm_runtime::model::count_tokens::approximate_tokens_for_bytes(
             spawn_prompt.len() as u64,
         ),
         estimated: true,
@@ -2145,7 +2145,7 @@ mod missing_usage_settlement_fallback_tests {
     /// at `None`, so `price_realized_usage` silently contributed $0 for real,
     /// already-billed spend. It must instead estimate from the prompt we DO
     /// know was sent, using main's shared byte-length approximation
-    /// (`llm_client::model::count_tokens::approximate_tokens_for_bytes`), and
+    /// (`llm_runtime::model::count_tokens::approximate_tokens_for_bytes`), and
     /// keep `estimated: true` so the figure is never passed off as exact.
     #[test]
     fn total_timed_out_estimates_usage_from_the_sent_prompt() {
@@ -2167,7 +2167,7 @@ estimated usage, not None (silently under-billing real, already-spent tokens)",
             "the estimate must be flagged, never passed off as an exact provider count"
         );
         let expected =
-            llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64);
+            llm_runtime::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64);
         assert_eq!(
             usage.input_tokens, expected,
             "input estimate must equal main's shared byte-length approximation over the sent \
@@ -2194,7 +2194,7 @@ prompt, not a second, divergent formula"
         assert!(usage.estimated);
         assert_eq!(
             usage.input_tokens,
-            llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64)
+            llm_runtime::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64)
         );
     }
 
@@ -2282,7 +2282,7 @@ estimated usage, not None",
         assert!(usage.estimated, "the estimate must be flagged, never exact");
         assert_eq!(
             usage.input_tokens,
-            llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64),
+            llm_runtime::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64),
             "must reuse the same in-flight estimate formula as TotalTimedOut/Cancelled"
         );
         assert_eq!(internal.error_category.as_deref(), Some("aborted"));
@@ -2309,7 +2309,7 @@ estimated usage, not None",
         assert!(usage.estimated);
         assert_eq!(
             usage.input_tokens,
-            llm_client::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64)
+            llm_runtime::model::count_tokens::approximate_tokens_for_bytes(prompt.len() as u64)
         );
     }
 }
@@ -3828,7 +3828,7 @@ mod cancel_drain_settlement_tests {
     /// `approximate_tokens_for_bytes(prompt.len())` input tokens and ZERO
     /// output tokens, which at `UnitPrices` IS the nano-USD figure.
     fn in_flight_floor_nano_usd() -> u64 {
-        llm_client::model::count_tokens::approximate_tokens_for_bytes(
+        llm_runtime::model::count_tokens::approximate_tokens_for_bytes(
             panel_prompt("task").len() as u64
         )
     }

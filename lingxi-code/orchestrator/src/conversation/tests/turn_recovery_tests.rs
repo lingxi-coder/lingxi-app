@@ -39,7 +39,7 @@ use hooks::executor::BuiltinHookHandler;
 use hooks::registry::HookRegistry;
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use hooks::HookExecutorImpl;
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 use platform_api::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 use protocol::{HookId, HttpRequest, HttpResponse};
 use std::pin::Pin;

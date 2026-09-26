@@ -143,7 +143,7 @@ Retracted in **round 4** (Codex review; each re-verified here):
 | §18 implying the connect timeout is missing | **False.** `mcp/src/registry.rs:888-918,2219-2222` bounds connect+initialize by `MCP_TIMEOUT \|\| 30000`. Only the classification, gate/retry, and telemetry are missing. |
 | §8 "none of these strings exist" | **False.** `Plugin name cannot be empty` and `… cannot contain spaces. Use kebab-case …` are at `apps/cli/src/commands/plugin_tag.rs:95,98`; the path-separator rejection at `plugin_init.rs:363`. My own round-3 probe had already printed `plugin_tag.rs` and I misread it — the same failure as round 1. §8 rewritten. |
 | §20 heading vs body | Self-contradictory (heading asserted absence, body said "not traced"). Now **resolved**: normalization is confirmed absent, and the finding is promoted from telemetry to behaviour (§20a). |
-| §21 item 2 `listMcpResources` | **False.** `ListMcpResourcesTool` is defined, implemented, and registered behind the `resources` capability (`tools/mcp/src/mcp_tool.rs:54`, `tools/mcp/src/lib.rs:30,38`), with a legacy alias at `llm-client/src/convert.rs:292`. Item deleted. |
+| §21 item 2 `listMcpResources` | **False.** `ListMcpResourcesTool` is defined, implemented, and registered behind the `resources` capability (`tools/mcp/src/mcp_tool.rs:54`, `tools/mcp/src/lib.rs:30,38`), with a legacy alias at `llm-runtime/src/convert.rs:292`. Item deleted. |
 | §21 item 9 "no in-repo caller" | **Literally false.** `copy_into_cache` has three callers (`plugin/src/manager.rs:301,332,375`). The accurate statement is that `PluginManager::install` has no production caller. Rewritten. |
 | §19 "correct for the helper case" | **Overstated.** See §19 — the port keys on helper *presence*, and resolves the helper *before* OAuth bearer injection, so an OAuth bearer can overwrite a helper-minted `Authorization`. |
 
@@ -577,7 +577,7 @@ implementation backlog.
 2. **`listMcpResources` — CLOSED, NOT A GAP.** `ListMcpResourcesTool` is defined,
    implemented, and registered behind the `resources` capability
    (`tools/mcp/src/mcp_tool.rs:54`, `tools/mcp/src/lib.rs:30,38`), with a legacy
-   alias at `llm-client/src/convert.rs:292`.
+   alias at `llm-runtime/src/convert.rs:292`.
 3. **JSON-Schema normalization — CLOSED, CONFIRMED GAP.** Promoted to §20a.
 4. **Failed-server ToolSearch note — CLOSED, CONFIRMED PARTIAL-PORT GAP.** The
    oracle enables `tengu_surface_failed_mcp_servers` by default

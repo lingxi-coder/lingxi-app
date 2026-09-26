@@ -130,7 +130,7 @@ pub struct CostResponseObservation {
     pub model_ref: ModelRef,
     /// Exact provider usage.
     pub usage: Usage,
-    /// Price computed from the captured catalog.
+    /// Price from a frozen client quote or the captured catalog fallback.
     pub observed_nano_usd: u64,
     /// Provider wall time.
     pub duration: Duration,
@@ -387,11 +387,29 @@ impl CostSessionScope {
     /// operation after this call is task transfer; queue capacity/state locks
     /// are awaited only by the detached owner.
     pub fn submit_model_response(&self, response: CostModelResponse) -> CostResponseReceipt {
+        self.submit_model_response_with_quote(response, None)
+    }
+
+    /// Settle one response using the USD token estimate frozen by the client
+    /// for this exact physical attempt, when that estimate is available.
+    /// Unknown or incomplete SDK prices keep the catalog fallback policy.
+    pub fn submit_model_response_with_quote(
+        &self,
+        response: CostModelResponse,
+        quoted_nano_usd: Option<u64>,
+    ) -> CostResponseReceipt {
         let tracker = self.tracker.clone();
         let authority = tracker.selected_entry();
         let durability_turn = tracker.register_durable_mutation_for(&authority);
         let (pricing, _) = tracker.resolve_pricing_with_default(&response.model_ref);
-        let observed_nano_usd = CostCalculator::calculate_nano_usd(&response.usage, &pricing);
+        let quoted_nano_usd = quoted_nano_usd.map(|quoted| {
+            quoted.saturating_add(CostCalculator::non_token_nano_usd(
+                &response.usage,
+                &pricing,
+            ))
+        });
+        let observed_nano_usd = quoted_nano_usd
+            .unwrap_or_else(|| CostCalculator::calculate_nano_usd(&response.usage, &pricing));
         let gate = authority.durability_gate.clone();
         let observation = CostResponseObservation {
             model_ref: response.model_ref.clone(),
@@ -460,6 +478,7 @@ impl CostSessionScope {
                         response.cache_creation_input_tokens,
                         response.is_batch_request,
                         response.bus,
+                        quoted_nano_usd,
                         durability_turn,
                     )
                     .await
@@ -1618,9 +1637,12 @@ impl CostTracker {
         cache_creation_input_tokens: u64,
         is_batch_request: bool,
         bus: Option<Arc<AnalyticsBus>>,
+        quoted_nano_usd: Option<u64>,
         mut durability_turn: Option<CostDurabilityTurn>,
     ) -> CostResponseSettlement {
-        // Resolve pricing. On a catalog miss we do NOT bill zero: mirroring
+        // A complete frozen USD quote from the physical call is authoritative
+        // for token charges. Otherwise resolve the static catalog. On a miss
+        // we do NOT bill zero: mirroring
         // claude-code's getModelCosts (`utils/modelCost.ts:155-163`), the
         // tokens are billed at the DEFAULT_UNKNOWN_MODEL_COST tier ($5/$25,
         // COST_TIER_5_25) instead of returning 0, and the model is flagged
@@ -1633,7 +1655,8 @@ impl CostTracker {
         // surfaced there — here we guarantee the non-zero billing + the flag.
         let (pricing, resolution) = self.resolve_pricing_with_default(&model_ref);
 
-        let cost = CostCalculator::calculate_nano_usd(&usage, &pricing);
+        let cost =
+            quoted_nano_usd.unwrap_or_else(|| CostCalculator::calculate_nano_usd(&usage, &pricing));
 
         // ----- update in-memory state -----
         // Durable production callers reserve queue capacity before taking the
@@ -1704,7 +1727,21 @@ impl CostTracker {
             entry.cache_creation_input_tokens = entry
                 .cache_creation_input_tokens
                 .saturating_add(cache_creation_input_tokens);
-            if matches!(resolution, PricingResolution::UnpricedModel { .. }) {
+            let unknown_hosted_tool = usage.server_tool_use.is_some_and(|tools| {
+                tools.web_search_requests > 0
+                    && (matches!(&resolution, PricingResolution::UnpricedModel { .. })
+                        || (matches!(
+                            pricing.source,
+                            crate::PricingSource::PublishedPartial { .. }
+                        ) && !pricing
+                            .non_token_rates_nano_usd
+                            .contains_key(&crate::NonTokenBillableUnit::WebSearchRequest)))
+            });
+            if (quoted_nano_usd.is_none()
+                && (matches!(resolution, PricingResolution::UnpricedModel { .. })
+                    || CostCalculator::uses_unknown_rate(&usage, &pricing)))
+                || unknown_hosted_tool
+            {
                 staged.unpriced_models.insert(model_ref.clone());
             }
             if let Some(s) = usage.server_tool_use {
@@ -2294,6 +2331,85 @@ mod tests {
     use crate::usage::TokenUsage;
     use async_trait::async_trait;
     use platform_api::live_sessions::{SessionWriterLease, SharedSessionWriterLease};
+
+    #[tokio::test]
+    async fn frozen_client_quote_overrides_conditional_catalog_fallback() {
+        use crate::pricing::{MoneyPerToken, PricingSource, TokenClass};
+        let model_ref = ModelRef {
+            provider: ProviderId::OpenAICompatible {
+                name: "deepseek".into(),
+            },
+            model: "deepseek-flash".into(),
+        };
+        let pricing = crate::ModelPricing {
+            model_ref: model_ref.clone(),
+            token_rates: HashMap::from([
+                (
+                    TokenClass::Input,
+                    MoneyPerToken {
+                        nano_usd_per_token: 300,
+                    },
+                ),
+                (
+                    TokenClass::Output,
+                    MoneyPerToken {
+                        nano_usd_per_token: 1_200,
+                    },
+                ),
+            ]),
+            non_token_rates_nano_usd: HashMap::new(),
+            effective_from: None,
+            source: PricingSource::PublishedPartial {
+                provider: model_ref.provider.clone(),
+                conditional: true,
+            },
+        };
+        let (persist_tx, _legacy_rx) = mpsc::channel(8);
+        let session = SessionId::new();
+        let tracker = Arc::new(CostTracker::new(
+            session,
+            Arc::new(PricingCatalog::empty().with_entry(pricing)),
+            persist_tx,
+        ));
+        let response = || CostModelResponse {
+            model_ref: model_ref.clone(),
+            usage: Usage {
+                tokens: TokenUsage {
+                    input: 1_000,
+                    output: 1_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            duration: Duration::from_millis(1),
+            retries: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            is_batch_request: false,
+            bus: None,
+        };
+        let quoted = tracker
+            .session_scope(session)
+            .submit_model_response_with_quote(response(), Some(750_000))
+            .settle()
+            .await;
+        assert_eq!(quoted.observed_nano_usd(), 750_000);
+        let snapshot = tracker.snapshot().await;
+        assert_eq!(snapshot.total_nano_usd, 750_000);
+        assert!(!snapshot.unpriced_models.contains(&model_ref));
+
+        let unknown = tracker
+            .session_scope(session)
+            .submit_model_response(response())
+            .settle()
+            .await;
+        assert_eq!(unknown.observed_nano_usd(), 30_000_000);
+        assert!(tracker
+            .snapshot()
+            .await
+            .unpriced_models
+            .contains(&model_ref));
+    }
 
     struct TestLease(String);
 

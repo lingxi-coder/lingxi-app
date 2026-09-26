@@ -308,7 +308,8 @@ fn push_user_block(
         | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
         | ContentBlock::AdvisorToolResult { .. }
-        | ContentBlock::MediaAnalysis { .. } => {}
+        | ContentBlock::MediaAnalysis { .. }
+        | ContentBlock::ProviderContent { .. } => {}
     }
 }
 
@@ -360,7 +361,8 @@ fn push_assistant_block(
         | ContentBlock::ServerToolUse { .. }
         | ContentBlock::ConnectorText { .. }
         | ContentBlock::AdvisorToolResult { .. }
-        | ContentBlock::MediaAnalysis { .. } => {}
+        | ContentBlock::MediaAnalysis { .. }
+        | ContentBlock::ProviderContent { .. } => {}
     }
 }
 

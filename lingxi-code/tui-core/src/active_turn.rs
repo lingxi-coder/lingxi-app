@@ -190,34 +190,7 @@ impl ActiveTurn {
     }
 }
 
-/// Derive the diff-source fields the `UserToolResult` renderer needs from a
-/// tool-call input (mirrors the iocraft `tui::streaming::diff_inputs_for`,
-/// which stays in place until the iocraft backend is deleted).
-#[must_use]
-pub fn diff_inputs_for(
-    tool: &str,
-    input: &serde_json::Value,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let str_key = |k: &str| {
-        input
-            .get(k)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    };
-    match tool {
-        "Edit" => (
-            str_key("old_string"),
-            str_key("new_string"),
-            str_key("file_path"),
-        ),
-        "Write" => (None, str_key("content"), str_key("file_path")),
-        // MultiEdit (`edits[]`) and NotebookEdit (cell-shaped) carry no single
-        // old→new pair — surface only the path so the header renders without a
-        // (wrong) single-hunk diff.
-        "MultiEdit" | "NotebookEdit" => (None, None, str_key("file_path")),
-        _ => (None, None, None),
-    }
-}
+pub use client_presentation::tool_display::diff_inputs_for;
 
 #[cfg(test)]
 mod tests {

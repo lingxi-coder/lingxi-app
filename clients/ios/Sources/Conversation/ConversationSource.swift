@@ -33,10 +33,10 @@ extension MessageDto {
     }
 }
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
     import AuthenticationServices
     import UIKit
-    import engine_mobileFFI
+    import harness_runtimeFFI
 
     /// Capture only stable native host facts once per engine construction.
     /// Viewport, safe-area, theme, and model/provider choices are intentionally
@@ -185,7 +185,7 @@ struct ConversationTurnSpeechUpdate: Equatable, Sendable {
     let delta: String
 }
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
 
     /// One engine-parked permission request the UI must answer (SHIP-BLOCKER #3).
     ///
@@ -307,7 +307,7 @@ struct ConversationAgentTranscript: Equatable {
     var loaded = false
 }
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
     /// A live tail received while a full transcript request is in flight.
     /// The request reply is a snapshot, so these entries must be replayed after
     /// the snapshot rather than merged by text/signature alone.
@@ -371,7 +371,7 @@ final class ConversationModel: ObservableObject {
     /// state. A late task from a previous agent or session is ignored.
     private var agentTranscriptRequestKey: String?
     private var agentTranscriptGeneration: UInt64 = 0
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         private var pendingAgentMessages: [String: [ConversationPendingAgentMessage]] = [:]
     #endif
 
@@ -645,7 +645,7 @@ final class ConversationModel: ObservableObject {
     /// rows, so row-local `@State` is dropped on scroll and then reappears on
     /// whichever row happens to reuse the storage.
     @Published var expandedToolCalls: Set<String> = []
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         /// FIFO queue of engine-parked permission requests (SHIP-BLOCKER #3). The
         /// chat view renders the head (`first`) as a modal prompt; answering it pops
         /// the head and reveals the next. Engine-scoped: main-turn cancellation
@@ -836,7 +836,7 @@ final class ConversationModel: ObservableObject {
         isAgentTranscriptLoading = false
         agentTranscriptError = nil
         agentTranscriptRequestKey = nil
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             pendingAgentMessages = [:]
         #endif
     }
@@ -963,7 +963,7 @@ final class ConversationModel: ObservableObject {
         let alreadyLoaded = agentTranscripts[id]?.loaded ?? false
         isAgentTranscriptLoading = !alreadyLoaded
         agentTranscriptError = nil
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             if !alreadyLoaded {
                 let baseKey = agentRequestKey(sessionID: sessionID, agentID: id)
                 if pendingAgentMessages[baseKey] == nil {
@@ -989,7 +989,7 @@ final class ConversationModel: ObservableObject {
         agentTranscriptError = message
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         func shouldAcceptAgentMessage(
             agentID: String,
             sessionID: String,
@@ -1178,7 +1178,7 @@ protocol ConversationSource: AnyObject {
     func selectAgent(_ id: String)
     /// Load a child agent's durable transcript into the source cache.
     func loadSessionAgentTranscript(_ id: String)
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         /// Resolve a parked permission request (SHIP-BLOCKER #3): submit
         /// `ApprovePermission{requestId, response}` and pop the head of the queue.
         func approvePermission(_ requestId: UInt64, _ response: PermissionResponseDto)
@@ -1264,7 +1264,7 @@ private func uiMessageImages(from images: [MessageImageDto]) -> [MessageImage] {
     images.map { MessageImage(mediaType: $0.mediaType, url: $0.url) }
 }
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
     /// Default permission handling for sources that never park a turn on a
     /// permission gate (the mock). The engine source overrides both.
     extension ConversationSource {
@@ -1356,7 +1356,7 @@ enum ConversationSourceFactory {
                 return source
             }
         #endif
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             let env = ProcessInfo.processInfo.environment
             let isPreview = env["XCODE_RUNNING_FOR_PREVIEWS"] == "1"
             if !isPreview {
@@ -1418,7 +1418,7 @@ final class MockConversationSource: ConversationSource {
     let model = ConversationModel(messages: MockData.messagesDefault)
     let sessionMode: SessionMode
     private var cannedReplyDelay: TimeInterval = 1.1
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         private var mockProviderCatalog: [ProviderCatalogEntry] = []
     #endif
 
@@ -1601,7 +1601,7 @@ final class MockConversationSource: ConversationSource {
                 ),
                 supportsFastMode: true
             )
-            #if canImport(engine_mobileFFI)
+            #if canImport(harness_runtimeFFI)
                 var uiCatalog: [(providerID: String, modelIDs: [String])] = []
                 for reference in uiTestModelCatalog {
                     let parts = reference.split(separator: "/", maxSplits: 1).map(String.init)
@@ -1696,7 +1696,7 @@ final class MockConversationSource: ConversationSource {
         ]
     #endif
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         func providerCatalog() async throws -> [ProviderCatalogEntry] {
             mockProviderCatalog
         }
@@ -1874,7 +1874,7 @@ final class MockConversationSource: ConversationSource {
 
 // MARK: - Engine source (real, over UniFFI)
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
 
     /// Runtime config for the in-process engine. The API key comes from the
     /// environment / an app setting — never hardcoded.

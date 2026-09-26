@@ -48,7 +48,7 @@ Additional binary metadata:
 | Interrupted MCP calls return an explicit interrupted error instead of an empty success | `orchestrator::streaming_executor` and streaming driver | Ported with the binary-extracted model-facing text and MCP-specific denial classification |
 | MCP tools whose input schema is literal `{}` receive decoded JSON values instead of JSON strings | `tool-mcp::MCPTool` | Ported at the per-tool dispatch boundary; non-empty schemas and malformed JSON remain byte-stable |
 | Resuming a transcript whose latest trustworthy plan segment is open re-enters plan mode when no explicit launch mode overrides it | `orchestrator::resume`, CLI seed, bridge, mobile host | Ported using the binary's reverse-walk precedence (permission mode, `/plan`, successful Enter/ExitPlanMode, and plan attachments) |
-| Invalid persisted tool blocks do not cause a provider 400 on resume | `llm-client` request normalization | Already covered by `ensure_tool_result_pairing`; no orchestrator change required |
+| Invalid persisted tool blocks do not cause a provider 400 on resume | `llm-runtime` request normalization | Already covered by `ensure_tool_result_pairing`; no orchestrator change required |
 | User JSONL rows carry the live `permissionMode` in canonical head-field order | transcript writer and session JSONL schema | Ported so future resume can recover the latest explicit mode without parsing prompt text |
 
 The changelog's third-party `tool_use` rendering-without-id fix belongs to the

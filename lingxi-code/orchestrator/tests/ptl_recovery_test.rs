@@ -1,7 +1,7 @@
 //! Provider overflow recovery preserves original history until a real summary succeeds.
 use async_trait::async_trait;
 use compaction::CompactionOrchestrator;
-use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
+use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,

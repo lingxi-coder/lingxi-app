@@ -18,7 +18,7 @@
 //! 3. A rule/mode (non-classifier) deny fires NEITHER event; the tool is denied.
 //! 4. A `PreToolUse` hook 'allow' (which bypasses the gate) fires NEITHER event.
 //! 5. No permission hooks registered → strict no-ops; the turn completes.
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};

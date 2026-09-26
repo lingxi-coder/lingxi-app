@@ -1,8 +1,8 @@
-//! Thin orchestrator-seam adapter over [`llm_client::ApiService`].
+//! Thin orchestrator-seam adapter over [`llm_runtime::ApiService`].
 //!
 //! The provider drive loop (prepare → header injection → `transport.execute()` /
 //! `open_stream()` → `codec.decode_response()` + the retry/rate-limit/betas
-//! machinery) lives in `llm_client::ApiService`. This module holds an
+//! machinery) lives in `llm_runtime::ApiService`. This module holds an
 //! `Arc<ApiService>` and implements the orchestrator's seam traits
 //! ([`OrchestratorApiClient`], [`StreamingApiClient`], [`agent::SubagentApiClient`])
 //! by delegating each method 1:1 — the only orchestrator-domain logic kept here is
@@ -12,19 +12,19 @@ use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use crate::model::rate_limit::{RateLimitInfo, RawUtilization};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use llm_client::{LlmError, LlmEvent, LlmResponse, MediaDelegationAccounting};
+use llm_runtime::{LlmError, LlmEvent, LlmResponse, MediaDelegationAccounting};
 use protocol::ConversationMessage;
 use std::sync::Arc;
 
-/// Subscriber-state seed for [`llm_client::ApiService`]'s 429 gate. Re-exported
-/// from llm-client so existing `orchestrator::provider_adapter::SubscriberState`
+/// Subscriber-state seed for [`llm_runtime::ApiService`]'s 429 gate. Re-exported
+/// from llm-runtime so existing `orchestrator::provider_adapter::SubscriberState`
 /// import paths (the composition roots) keep resolving after the drive loop moved.
-pub use llm_client::SubscriberState;
+pub use llm_runtime::SubscriberState;
 
-/// Production adapter: a thin holder of [`llm_client::ApiService`] (which owns the
+/// Production adapter: a thin holder of [`llm_runtime::ApiService`] (which owns the
 /// provider drive loop) that implements the orchestrator's seam traits.
 pub struct ProviderApiAdapter {
-    service: Arc<llm_client::ApiService>,
+    service: Arc<llm_runtime::ApiService>,
     /// (M4 cc2.1.198) The session's initial effort level from CLI `--effort`
     /// (binary: session state `thinkingConfig: SF(a.effort)` → request
     /// `output_config.effort`). `None` (the default) keeps main-loop request
@@ -49,11 +49,11 @@ fn model_supports_fast_mode(model: &str) -> bool {
 }
 
 impl ProviderApiAdapter {
-    /// Wrap a constructed [`llm_client::ApiService`]. The composition roots build
+    /// Wrap a constructed [`llm_runtime::ApiService`]. The composition roots build
     /// the service via `ApiService::new_with_routing(...).with_*(...)` and hand the
     /// `Arc` here; every trait method delegates 1:1 to it.
     #[must_use]
-    pub fn new(service: Arc<llm_client::ApiService>) -> Self {
+    pub fn new(service: Arc<llm_runtime::ApiService>) -> Self {
         Self {
             service,
             initial_effort: std::sync::RwLock::new(None),
@@ -98,7 +98,7 @@ impl ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         max_tokens: Option<u32>,
-    ) -> Result<llm_client::LlmRequest, LlmError> {
+    ) -> Result<llm_runtime::LlmRequest, LlmError> {
         self.service.build_side_query_request_with_thinking(
             &settings.model,
             Some(&settings.provider),
@@ -176,7 +176,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.active_custom_betas().to_vec()
     }
 
-    fn set_thinking_config(&self, thinking: llm_client::model::thinking::ThinkingConfig) {
+    fn set_thinking_config(&self, thinking: llm_runtime::model::thinking::ThinkingConfig) {
         self.service.set_thinking(thinking);
     }
 
@@ -229,9 +229,9 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         let stream = self.service.stream_json_schema_with_thinking(
             model, profile, Some(system), msgs,
             serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
-            None, None, Some(llm_client::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
+            None, None, Some(llm_runtime::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
         ).await?;
-        llm_client::stream_accumulator::accumulate_stream_salvaging(stream)
+        llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream)
             .await
             .map_err(|(_, error)| error)
     }
@@ -365,7 +365,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         &self,
         model: &str,
         profile: Option<&str>,
-    ) -> Result<llm_client::MediaRoute, LlmError> {
+    ) -> Result<llm_runtime::MediaRoute, LlmError> {
         self.service.resolve_media_route(model, profile)
     }
 
@@ -461,7 +461,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.set_thinking_stripped_messages(messages);
     }
 
-    /// Task 8 (llm-client future-work batch 3): expose the FULL internal
+    /// Task 8 (llm-runtime future-work batch 3): expose the FULL internal
     /// nine-field snapshot for the turn drivers' `emit_rate_limit` seam.
     /// Delegates to the inherent [`Self::last_rate_limit_info`] (which
     /// already returns the internal `RateLimitInfo`); the trait method of
@@ -470,14 +470,14 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.last_rate_limit_info()
     }
 
-    /// Task 2 (llm-client future-work batch 5): expose the raw per-window
+    /// Task 2 (llm-runtime future-work batch 5): expose the raw per-window
     /// snapshot cached by `record_rate_limit_from_headers` for the turn
     /// drivers' `emit_raw_utilization` seam.
     fn last_raw_utilization(&self) -> Option<RawUtilization> {
         self.service.last_raw_utilization()
     }
 
-    /// Task 6 (llm-client future-work batch 5): expose the limits copy
+    /// Task 6 (llm-runtime future-work batch 5): expose the limits copy
     /// composed by `record_rate_limit_from_429` from the most recent
     /// 429 error response's unified headers, for the orchestrator's
     /// terminal-429 re-map (claude-code `errors.ts:480-524`).
@@ -514,21 +514,21 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 /// to keep the picker's Claude-first ordering for catalog-only (no live config)
 /// callers.
 fn lower_reasoning_spec(
-    raw: llm_client::ReasoningControlSpec,
+    raw: llm_runtime::ReasoningControlSpec,
 ) -> platform_api::ReasoningControlSpec {
     let mandatory = raw
         .mandatory_selection
         .as_ref()
         .map(|selection| match selection {
-            llm_client::ReasoningSelection::Automatic => {
+            llm_runtime::ReasoningSelection::Automatic => {
                 platform_api::ReasoningSelection::Automatic
             }
-            llm_client::ReasoningSelection::Disabled => platform_api::ReasoningSelection::Disabled,
-            llm_client::ReasoningSelection::Enabled => platform_api::ReasoningSelection::Enabled,
-            llm_client::ReasoningSelection::Level(id) => {
+            llm_runtime::ReasoningSelection::Disabled => platform_api::ReasoningSelection::Disabled,
+            llm_runtime::ReasoningSelection::Enabled => platform_api::ReasoningSelection::Enabled,
+            llm_runtime::ReasoningSelection::Level(id) => {
                 platform_api::ReasoningSelection::Level { id: id.clone() }
             }
-            llm_client::ReasoningSelection::TokenBudget(tokens) => {
+            llm_runtime::ReasoningSelection::TokenBudget(tokens) => {
                 platform_api::ReasoningSelection::TokenBudget {
                     tokens: u64::from(*tokens),
                 }
@@ -581,9 +581,9 @@ fn lower_reasoning_spec(
     }
 }
 
-/// Project an llm-client route listing into the provider-neutral picker type.
+/// Project an llm-runtime route listing into the provider-neutral picker type.
 #[must_use]
-pub fn lower_model_listing(listing: llm_client::ModelListing) -> platform_api::ModelListing {
+pub fn lower_model_listing(listing: llm_runtime::ModelListing) -> platform_api::ModelListing {
     let capabilities = platform_api::ModelCapabilities {
         streaming: listing.capabilities.streaming,
         tools: listing.capabilities.tools,
@@ -656,7 +656,7 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
 
     // 1. First-party Anthropic (not in the preset catalog).
     let mut listings: Vec<platform_api::orchestrator::ModelListing> =
-        llm_client::anthropic_model_profiles()
+        llm_runtime::anthropic_model_profiles()
             .into_iter()
             .map(|m| {
                 let supports_reasoning = m.capabilities.reasoning;
@@ -676,11 +676,11 @@ fn catalog_model_listings() -> Vec<platform_api::orchestrator::ModelListing> {
     //    models, gpt-3.5-turbo, gpt-5-chat-latest, the aion-labs set, ~85
     //    OpenRouter passthroughs). The agent sends tools on EVERY turn, so such a
     //    model can never complete an agentic turn — it hard-fails "unsupported
-    //    capability: tools" (llm-client `validate_capabilities`). Offering it in
+    //    capability: tools" (llm-runtime `validate_capabilities`). Offering it in
     //    the `/model` picker is offering a permanently-broken pick; it stays
     //    resolvable by explicit id for any non-agentic caller.
-    let catalog = llm_client::builtin_presets();
-    if let Ok(registry) = llm_client::ModelRegistry::from_config(llm_client::ClientConfig {
+    let catalog = llm_runtime::builtin_presets();
+    if let Ok(registry) = llm_runtime::ModelRegistry::from_config(llm_runtime::ClientConfig {
         providers: catalog.providers,
     }) {
         listings.extend(
@@ -760,6 +760,11 @@ pub(crate) fn provider_for_model(request_model: &str) -> Option<String> {
         .get(request_model)
         .cloned()
         .flatten()
+}
+
+/// Whether a catalog model has multiple possible connection profiles.
+pub(crate) fn model_has_ambiguous_profile(request_model: &str) -> bool {
+    catalog_provider_profiles().get(request_model) == Some(&None)
 }
 
 /// Known one-line description for a built-in model wire id, mirroring the
@@ -1097,9 +1102,9 @@ mod tests {
         assert_eq!(super::provider_label_owned("weird#name"), "weird#name");
     }
     use super::*;
-    use llm_client::model::user_agent::UserAgentEnv;
-    use llm_client::DefaultLlmClient;
-    use llm_client::{
+    use llm_runtime::model::user_agent::UserAgentEnv;
+    use llm_runtime::DefaultLlmClient;
+    use llm_runtime::{
         ApiService, AuthStrategy, BoxFuture, Capabilities, ClientConfig, CredentialConfig,
         LlmError, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
         ProviderRequest, ProviderResponse, StreamingResponse, Transport,
@@ -1174,7 +1179,7 @@ mod tests {
             Box::pin(async move {
                 // `InvalidRequest` (not `Transport`): `ApiService::drive_stream`'s
                 // retry classifier (`next_step_with_backoff`,
-                // `llm-client/src/model/retry.rs`) treats `Transport` as
+                // `llm-runtime/src/model/retry.rs`) treats `Transport` as
                 // retry-worthy and backs off + retries up to the configured cap
                 // — for a caller that never scripts a `StreamingResponse` (every
                 // test that only inspects `seen` / the wire request, e.g. this
@@ -1218,7 +1223,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".into(),
             provider: "anthropic".into(),
             reasoning: platform_api::ReasoningSelection::Disabled,
-            thinking: llm_client::model::thinking::ThinkingConfig::Disabled,
+            thinking: llm_runtime::model::thinking::ThinkingConfig::Disabled,
             effort: None,
         };
         let _ = crate::scheduled_turn::SETTINGS
@@ -1248,6 +1253,8 @@ mod tests {
         let client = Arc::new(
             DefaultLlmClient::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
+                    wire_profile: None,
+                    regions: llm_runtime::Region::all(),
                     provider_id: ProviderId::AnthropicFirstParty,
                     profile_name: "anthropic".to_string(),
                     base_url: "https://api.anthropic.com".to_string(),
@@ -1429,7 +1436,7 @@ mod tests {
         assert!(resumed.thinking_signature_stripped);
         assert!(!resumed.thinking_stripped_messages.is_empty());
         let mut resumed_history = resumed.history.clone();
-        llm_client::model::thinking_signature::strip_marked_conversation_thinking(
+        llm_runtime::model::thinking_signature::strip_marked_conversation_thinking(
             &mut resumed_history,
             &resumed.thinking_stripped_messages,
         );
@@ -1449,7 +1456,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_adapter_isolates_thinking_recovery_for_identical_parent_ids() {
-        use llm_client::thinking_scope::{scope_thinking_recovery, ThinkingRecoveryScope};
+        use llm_runtime::thinking_scope::{scope_thinking_recovery, ThinkingRecoveryScope};
         struct ScopedTransport {
             seen: Mutex<Vec<ProviderRequest>>,
         }
@@ -1872,7 +1879,7 @@ mod tests {
     fn make_adapter_with_estimator(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
         use crate::cost_wiring::llm_catalog_from_cost;
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_client::{CostEstimator, PricingPolicy};
+        use llm_runtime::{CostEstimator, PricingPolicy};
         #[allow(deprecated)]
         std::env::set_var("ADAPTER_TEST_KEY", "test-key");
         let cost_cat = CostCatalog::builtin_reference();
@@ -1882,6 +1889,8 @@ mod tests {
         let client = Arc::new(
             DefaultLlmClient::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
+                    wire_profile: None,
+                    regions: llm_runtime::Region::all(),
                     provider_id: ProviderId::AnthropicFirstParty,
                     profile_name: "anthropic".to_string(),
                     base_url: "https://api.anthropic.com".to_string(),
@@ -1976,7 +1985,7 @@ mod tests {
         // Build an adapter with an estimator but a billing model not in the catalog.
         use crate::cost_wiring::llm_catalog_from_cost;
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_client::{CostEstimator, PricingPolicy};
+        use llm_runtime::{CostEstimator, PricingPolicy};
         #[allow(deprecated)]
         std::env::set_var("ADAPTER_TEST_KEY2", "test-key");
         let cost_cat = CostCatalog::builtin_reference();
@@ -1986,6 +1995,8 @@ mod tests {
         let client = Arc::new(
             DefaultLlmClient::from_config(ClientConfig {
                 providers: vec![ProviderProfile {
+                    wire_profile: None,
+                    regions: llm_runtime::Region::all(),
                     provider_id: ProviderId::AnthropicFirstParty,
                     profile_name: "anthropic".to_string(),
                     base_url: "https://api.anthropic.com".to_string(),

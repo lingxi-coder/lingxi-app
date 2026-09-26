@@ -9,7 +9,7 @@ use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQu
 use client_protocol::events::ClientEvent;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
-use tui_core::ask_user_question_bridge::{AskOption, AskQuestion, AskUserQuestionExchange};
+use tool_api::ask_user_question::{AskOption, AskQuestion, AskUserQuestionExchange};
 
 use crate::ClientEventSink;
 
@@ -440,7 +440,7 @@ mod tests {
     use super::*;
     use crate::{ClientEventSink, MockSink};
     use async_trait::async_trait;
-    use tui_core::ask_user_question_bridge::{AskOption, AskQuestion};
+    use tool_api::ask_user_question::{AskOption, AskQuestion};
 
     #[derive(Default)]
     struct BarrierSink {

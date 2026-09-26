@@ -3,7 +3,7 @@
 //! Where the F2-06 suite (`e2e_permission_test.rs`) drives a hand-wired
 //! orchestrator with a MOCK streaming client, this proves the PRODUCTION boot
 //! path: `bridge_server::boot::assemble` builds a real
-//! `engine_desktop::DesktopRuntime` from a deterministic `DesktopConfig`, binds
+//! `harness_runtime::desktop::DesktopRuntime` from a deterministic `DesktopConfig`, binds
 //! the production turn driver + command router, and the resulting connection is
 //! served by the same `McpEndpoint` the binary uses.
 //!
@@ -14,7 +14,7 @@
 //! - the opening `hello` handshake replies with a `ServerHello` (compatible
 //!   versions), proving the served connection is the real F2-07 pump;
 //! - a `SendPrompt` with no credential produces a terminal `Error` event rather
-//!   than hanging — proving env-config → `engine_desktop::build` → serve is wired
+//!   than hanging — proving env-config → `harness_runtime::desktop::build` → serve is wired
 //!   and the orchestrator's output stream reaches the connection's event sink.
 
 #![allow(clippy::unwrap_used)]
@@ -28,8 +28,8 @@ use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTO
 use bridge_server::boot;
 use client_protocol::commands::ClientCommand;
 use client_protocol::events::ClientEvent;
-use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
+use harness_runtime::desktop::DesktopConfig;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -111,7 +111,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         restricted_tools: None,
         exclude_dynamic_system_prompt_sections: false,
         setting_source_scope: (true, true),
-        customization_gates: engine_desktop::CustomizationGates::default(),
+        customization_gates: harness_runtime::desktop::CustomizationGates::default(),
         session_persistence: true,
         cli_agents_json: None,
         cli_agent: None,
@@ -309,7 +309,7 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
 }
 
 /// `resolve_desktop_config` always binds the adapter gate for a transport
-/// (parity with `engine_desktop::build`'s `use_noop_permission_gate: false`
+/// (parity with `harness_runtime::desktop::build`'s `use_noop_permission_gate: false`
 /// branch), regardless of the model override.
 #[tokio::test]
 async fn resolved_config_uses_adapter_gate() {

@@ -11,7 +11,7 @@
 //!
 //! 1. [`BridgeConnection::new`] is created and its connection-scoped
 //!    `event_sink()` + `permission_sink()` are pulled.
-//! 2. `engine_desktop::build` assembles a real [`DesktopRuntime`] from the
+//! 2. `harness_runtime::desktop::build` assembles a real [`DesktopRuntime`] from the
 //!    resolved [`DesktopConfig`], wiring the orchestrator's
 //!    [`client_adapter::AdapterOutputStream`] to that event sink and binding the
 //!    connection-scoped `AdapterPermissionGate` to that permission sink
@@ -36,7 +36,7 @@ use serde::Deserialize;
 
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
-use engine_desktop::{DesktopAudio, DesktopConfig, DesktopRuntime};
+use harness_runtime::desktop::{DesktopAudio, DesktopConfig, DesktopRuntime};
 use platform_api::{
     CredentialStoragePolicy, OrchestratorHandle, OutputStream, SlashCommandDispatcher,
 };
@@ -384,22 +384,28 @@ pub fn resolve_api_base() -> String {
     std::env::var(API_BASE_ENV).unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
 }
 
-fn desktop_provider_catalog_listings(cfg: &DesktopConfig) -> Vec<platform_api::ModelListing> {
-    let assembled = provider_config::assemble(provider_config::AssembleInputs {
-        anthropic_api_base: cfg.api_base.clone(),
-        anthropic_models: desktop_provider_catalog_anthropic_models(
-            &cfg.default_model,
-            cfg.fallback_model.as_deref(),
-        ),
-        anthropic_has_api_key: false,
-        anthropic_has_oauth: false,
-        user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
-        routing: cfg.routing.clone(),
-    });
+fn desktop_provider_catalog_listings(
+    cfg: &DesktopConfig,
+    region: llm_runtime::Region,
+) -> Vec<platform_api::ModelListing> {
+    let assembled = provider_config::assemble_for_region(
+        provider_config::AssembleInputs {
+            anthropic_api_base: cfg.api_base.clone(),
+            anthropic_models: desktop_provider_catalog_anthropic_models(
+                &cfg.default_model,
+                cfg.fallback_model.as_deref(),
+            ),
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers: cfg.provider_profiles.clone().unwrap_or_default(),
+            routing: cfg.routing.clone(),
+        },
+        region,
+    );
     for warning in &assembled.warnings {
         tracing::warn!(warning = %warning, "bridge-server provider catalog assembly");
     }
-    llm_client::ModelRegistry::from_config(assembled.client_config)
+    llm_runtime::ModelRegistry::from_config(assembled.client_config)
         .map(|registry| {
             registry
                 .available_models()
@@ -413,8 +419,8 @@ fn desktop_provider_catalog_listings(cfg: &DesktopConfig) -> Vec<platform_api::M
 fn desktop_provider_catalog_anthropic_models(
     default_model: &str,
     fallback_model: Option<&str>,
-) -> Vec<llm_client::ModelProfile> {
-    let caps = llm_client::Capabilities {
+) -> Vec<llm_runtime::ModelProfile> {
+    let caps = llm_runtime::Capabilities {
         streaming: true,
         tools: true,
         vision: true,
@@ -436,7 +442,7 @@ fn desktop_provider_catalog_anthropic_models(
         "claude-fable-5-1".to_string(),
     ];
     let admit = |value: &str| -> Option<String> {
-        let (profile, bare) = llm_client::split_profile_model(value);
+        let (profile, bare) = llm_runtime::split_profile_model(value);
         (profile == "anthropic" && !bare.is_empty() && !bare.contains('/')).then_some(bare)
     };
     let fallback_models = fallback_model
@@ -462,7 +468,7 @@ fn desktop_provider_catalog_anthropic_models(
     ids.sort();
     ids.dedup();
     ids.into_iter()
-        .map(|id| llm_client::ModelProfile {
+        .map(|id| llm_runtime::ModelProfile {
             display_model: id.clone(),
             request_model: id.clone(),
             billing_model: id,
@@ -533,7 +539,7 @@ pub fn lingxi_config_home() -> Option<PathBuf> {
 ///
 /// Mirrors `apps/cli/src/init.rs`'s `resolve_desktop_config` field-for-field,
 /// with the one production difference for a transport: `use_noop_permission_gate`
-/// is `false`, so `engine_desktop::build` binds the connection-scoped
+/// is `false`, so `harness_runtime::desktop::build` binds the connection-scoped
 /// `AdapterPermissionGate` (the WS permission round-trip, F2-06).
 ///
 /// `cwd` is `std::env::current_dir()` — the caller is expected to have already
@@ -712,9 +718,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // The Electron bridge has no --safe-mode / --bare flags (CLI-only
         // reduced modes); all customizations load.
         customization_gates: if trusted {
-            engine_desktop::CustomizationGates::default()
+            harness_runtime::desktop::CustomizationGates::default()
         } else {
-            engine_desktop::CustomizationGates {
+            harness_runtime::desktop::CustomizationGates {
                 safe_mode: true,
                 bare: false,
             }
@@ -814,7 +820,7 @@ impl BoundServer {
     /// moved into the endpoint. It retains task, cost, coordinator, and outbox
     /// authorities until host teardown has drained accepted work.
     #[must_use]
-    pub fn session_lifecycle(&self) -> Arc<engine_desktop::DesktopSessionLifecycle> {
+    pub fn session_lifecycle(&self) -> Arc<harness_runtime::desktop::DesktopSessionLifecycle> {
         self.runtime.session_lifecycle.clone()
     }
 }
@@ -1020,7 +1026,7 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
 /// Enumerate the persisted session catalog without constructing an engine.
 ///
 /// This path deliberately does not call config resolution, credential loading,
-/// customization loaders, or `engine_desktop::build`; it only reads the JSONL
+/// customization loaders, or `harness_runtime::desktop::build`; it only reads the JSONL
 /// catalog rooted at `cwd` and returns the stable Desktop envelope.
 pub async fn list_sessions_json(cwd: &Path) -> Result<String, String> {
     let lingxi_home =
@@ -1095,7 +1101,7 @@ async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<Strin
 /// `CredentialSource` of each registered refresher, which bottoms out in the
 /// (on macOS, possibly brokered) keychain — the exact call the boot probe
 /// deliberately wraps in a 5s `tokio::time::timeout`
-/// (`apps/engine-desktop/src/lib.rs`, `resolve_llm_stack`) because a contended
+/// (`harness-runtime/src/desktop/mod.rs`, `resolve_llm_stack`) because a contended
 /// broker can stall it. The historical five-second budget remains a generous
 /// assertion ceiling for tests of the now-immediate publication path.
 #[cfg(test)]
@@ -1108,7 +1114,7 @@ pub(crate) const FUSION_CATALOG_REFRESH_BUDGET: std::time::Duration =
 /// Two properties this seam exists for, both of which the inline
 /// `for … { refresh(id).await }` it replaced got wrong:
 ///
-/// * **Non-blocking.** `engine_desktop::refresh_fusion_catalog_after_credential_write`
+/// * **Non-blocking.** `harness_runtime::desktop::refresh_fusion_catalog_after_credential_write`
 ///   is a keychain re-probe with no internal timeout. Awaiting it inline put an
 ///   unbounded stall on two paths that must not have one: connection assembly
 ///   (nothing serves the Electron client until `assemble_with_provider_keys`
@@ -1123,7 +1129,10 @@ pub(crate) const FUSION_CATALOG_REFRESH_BUDGET: std::time::Duration =
 /// The spawned task keeps running, so the availability map still converges once
 /// the broker answers. The caller never waits for it: readiness depends only on
 /// the cheap publication above, not on task scheduling or keychain latency.
-pub(crate) async fn refresh_fusion_catalog_bounded(provider_ids: Vec<String>) -> bool {
+pub(crate) async fn refresh_fusion_catalog_bounded(
+    catalog_registry: &harness_runtime::desktop::FusionCatalogRegistry,
+    provider_ids: Vec<String>,
+) -> bool {
     if provider_ids.is_empty() {
         return true;
     }
@@ -1139,10 +1148,14 @@ pub(crate) async fn refresh_fusion_catalog_bounded(provider_ids: Vec<String>) ->
         } else {
             provider_id.as_str()
         };
-        routable &= engine_desktop::publish_fusion_catalog_credential(mutation_id).await;
+        routable &= harness_runtime::desktop::publish_fusion_catalog_credential(
+            catalog_registry,
+            mutation_id,
+        )
+        .await;
     }
     if routable {
-        engine_desktop::spawn_fusion_catalog_refresh();
+        harness_runtime::desktop::spawn_fusion_catalog_refresh(catalog_registry);
     }
     routable
 }
@@ -1153,7 +1166,7 @@ pub(crate) async fn refresh_fusion_catalog_bounded(provider_ids: Vec<String>) ->
 ///
 /// Round 9, item 2's class sweep: these keys are seeded AFTER `build` already
 /// computed the boot `provider_availability` map and registered the
-/// process-wide `FusionCatalogRefresher`, so without the refresh Fusion's
+/// scoped `FusionCatalogRefresher`, so without the refresh Fusion's
 /// `FusionCatalogModelSource::list()` keeps filtering against a map in which the
 /// parent-supplied profile is absent/false — its rows are dropped for the whole
 /// engine process even though `/model` and the turn loop route it. An ephemeral
@@ -1168,6 +1181,7 @@ pub(crate) async fn refresh_fusion_catalog_bounded(provider_ids: Vec<String>) ->
 /// Split out of `assemble_with_provider_keys` so it is reachable from a test
 /// without a full engine build.
 pub(crate) async fn seed_parent_supplied_provider_keys(
+    catalog_registry: &harness_runtime::desktop::FusionCatalogRegistry,
     credentials: &Arc<secret::CredentialManager>,
     provider_keys: &BTreeMap<String, String>,
 ) {
@@ -1176,18 +1190,20 @@ pub(crate) async fn seed_parent_supplied_provider_keys(
             .set_provider_key_ephemeral(provider_id, secret)
             .await;
     }
-    let _ = refresh_fusion_catalog_bounded(provider_keys.keys().cloned().collect()).await;
+    let _ =
+        refresh_fusion_catalog_bounded(catalog_registry, provider_keys.keys().cloned().collect())
+            .await;
 }
 
 /// Assemble a fully-bound [`BridgeConnection`] from a resolved [`DesktopConfig`].
 ///
 /// Wires the connection-scoped sinks into a real [`DesktopRuntime`]
-/// (`engine_desktop::build`), then binds the production
+/// (`harness_runtime::desktop::build`), then binds the production
 /// [`OrchestratorTurnDriver`] (with an error sink so a turn-level failure
 /// reaches the client) and the [`EngineCommandRouter`] over the runtime handles.
 ///
 /// # Errors
-/// Returns the [`engine_desktop::BuildError`] string if the engine cannot be
+/// Returns the [`harness_runtime::desktop::BuildError`] string if the engine cannot be
 /// assembled (effectively infallible today).
 pub async fn assemble(cfg: DesktopConfig) -> Result<BoundServer, String> {
     assemble_with_provider_keys(cfg, BTreeMap::new()).await
@@ -1266,7 +1282,7 @@ pub async fn assemble_with_credentials(
         // here, and reused for both `active`'s one-time bake-in below and the
         // `managed` field every later listing re-applies to `effective` — the
         // same map both places, so the two can never drift apart.
-        let managed = engine_desktop::managed_settings_overlay().await;
+        let managed = harness_runtime::desktop::managed_settings_overlay().await;
         let active = active_settings_baseline(&paths, &managed);
         SettingsContext {
             paths,
@@ -1302,7 +1318,7 @@ pub async fn assemble_with_credentials(
     // function is entered, so the observer and engine transcript share one
     // session fence even when the host did not provide an id explicitly.
     let session_agent_observer = Arc::new(
-        engine_desktop::session_agents::DesktopSessionAgentObserver::new(
+        harness_runtime::desktop::session_agents::DesktopSessionAgentObserver::new(
             event_sink.clone(),
             cfg.session_id_override.clone().unwrap_or_default(),
         ),
@@ -1314,7 +1330,7 @@ pub async fn assemble_with_credentials(
 
     // The `computer` tool's `request_access` approval — the Electron-facing
     // sibling of the permission round-trip above. A fresh channel: the SENDER
-    // half fills `cfg.computer_access_tx`, which `engine_desktop::build` wires
+    // half fills `cfg.computer_access_tx`, which `harness_runtime::desktop::build` wires
     // into the GENERIC `tool_computer_use::TuiBridgeResolver` (the same
     // resolver the TUI host uses — see its own doc comment for why it is
     // transport-agnostic); the RECEIVER half is drained by a connection-scoped
@@ -1322,7 +1338,7 @@ pub async fn assemble_with_credentials(
     // `Frame::ComputerAccessRequest` push and parks the reply channel keyed by
     // a fresh `request_id`, exactly mirroring the permission gate's shape.
     let (computer_access_tx, computer_access_rx) =
-        tokio::sync::mpsc::channel::<tui_core::computer_access_bridge::ComputerAccessExchange>(8);
+        tokio::sync::mpsc::channel::<permission::computer_access::ComputerAccessExchange>(8);
     cfg.computer_access_tx = Some(computer_access_tx);
     let computer_access_broker = Arc::new(client_adapter::BridgeComputerAccessBroker::new(
         connection.computer_access_sink(),
@@ -1349,16 +1365,18 @@ pub async fn assemble_with_credentials(
     // calls must reach THIS one.
     let (audio_bridge, audio_responder) = new_audio_bridge(connection.audio_sink());
     cfg.audio = Some(DesktopAudio::from_single(audio_bridge.clone()));
-    let (ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel::<
-        tui_core::ask_user_question_bridge::AskUserQuestionExchange,
-    >(8);
+    let (ask_user_question_tx, ask_user_question_rx) =
+        tokio::sync::mpsc::channel::<tool_api::ask_user_question::AskUserQuestionExchange>(8);
     cfg.ask_user_question_tx = Some(ask_user_question_tx);
     let ask_user_question_broker = Arc::new(client_adapter::BridgeAskUserQuestionBroker::new(
         connection.event_sink(),
     ));
-    let provider_model_catalog_listings = desktop_provider_catalog_listings(&cfg);
+    let provider_model_catalog_listings = desktop_provider_catalog_listings(
+        &cfg,
+        harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed),
+    );
 
-    let shared = engine_desktop::build_shared_credential_stack_with_policy(
+    let shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
         &cfg.lingxi_home,
         cfg.isolated_credential_storage,
         cfg.credential_storage_policy,
@@ -1386,22 +1404,36 @@ pub async fn assemble_with_credentials(
                 sink: event_sink.clone(),
             }));
     }
-    let runtime = engine_desktop::build_with_host_automation(cfg, output, permission_sink, shared)
-        .await
-        .map_err(|e| e.to_string())?;
+    let runtime =
+        harness_runtime::desktop::build_with_host_automation(cfg, output, permission_sink, shared)
+            .await
+            .map_err(|e| e.to_string())?;
     // The runtime cloned the exact construction-only lease into its hydrated
     // coordinator. Do not let the bridge's process-registration guard pin the
     // old session through later hot clear/resume operations.
     live_session.release_writer_claim();
+    settings_context
+        .active
+        .write()
+        .map_err(|_| "settings state lock poisoned".to_owned())?
+        .insert(
+            "providerRegion".into(),
+            serde_json::to_value(runtime.provider_region).map_err(|e| e.to_string())?,
+        );
 
     // Seeds the parent-supplied keys and refreshes Fusion's catalog filter for
     // them under ONE bounded budget -- see `seed_parent_supplied_provider_keys`
     // for why both halves live there (round 9 item 2; round-10 finding N3).
-    seed_parent_supplied_provider_keys(&runtime.credentials, &provider_keys).await;
+    seed_parent_supplied_provider_keys(
+        &runtime.catalog_registry,
+        &runtime.credentials,
+        &provider_keys,
+    )
+    .await;
 
     // `use_noop_permission_gate: false` ⇒ build MUST surface the adapter gate.
     let gate = runtime.permission_gate.clone().ok_or_else(|| {
-        "engine_desktop::build did not surface an AdapterPermissionGate despite \
+        "harness_runtime::desktop::build did not surface an AdapterPermissionGate despite \
          use_noop_permission_gate=false"
             .to_string()
     })?;
@@ -1439,7 +1471,7 @@ pub async fn assemble_with_credentials(
                         scheduled_fire_id: None,
                         uuid: message.message_id,
                         content: msgqueue::QueuedCommandContent::UserInput {
-                            text: engine_desktop::teammate_message_envelope_with_summary(
+                            text: harness_runtime::desktop::teammate_message_envelope_with_summary(
                                 &message.from_name,
                                 &message.content,
                                 message.summary.as_deref(),
@@ -1483,7 +1515,7 @@ pub async fn assemble_with_credentials(
     // both exist. `MsgQueueWakeupScheduler` sleeps for the (clamped) delay, resolves
     // the `<<autonomous-loop-dynamic>>` sentinel, then enqueues the `/loop` input at
     // `Later` so it waits for the active turn and never enters the mid-turn drain. The cell was
-    // threaded out of `engine_desktop::build` on `DesktopRuntime` precisely because
+    // threaded out of `harness_runtime::desktop::build` on `DesktopRuntime` precisely because
     // the tool is constructed before this seam. Setting it more than once is a no-op
     // (`OnceLock`); a fresh per-connection `assemble` builds a fresh runtime + cell.
     let wakeup_scheduler = Arc::new(
@@ -1546,6 +1578,7 @@ pub async fn assemble_with_credentials(
         .with_cron_firer(cron_firer)
         .with_session_cron(runtime.session_lifecycle.cron_scheduler.clone())
         .with_credentials(runtime.credentials.clone())
+        .with_catalog_registry(runtime.catalog_registry.clone())
         .with_provider_model_catalog_listings(provider_model_catalog_listings)
         .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
         .with_http(runtime.http.clone())
@@ -1581,7 +1614,7 @@ pub async fn assemble_with_credentials(
     })
 }
 
-/// The `RegistrySlashDispatcher` returned by `engine_desktop::build` is owned by
+/// The `RegistrySlashDispatcher` returned by `harness_runtime::desktop::build` is owned by
 /// value on the runtime, but the router needs an `Arc<dyn SlashCommandDispatcher>`
 /// it can hold for the connection's lifetime. We cannot move the dispatcher out
 /// of the runtime (we keep the runtime alive), so this thin newtype clones the
@@ -2227,7 +2260,7 @@ mod tests {
         assert_eq!(cfg.setting_source_scope, (true, true));
         assert_eq!(
             cfg.customization_gates,
-            engine_desktop::CustomizationGates::default()
+            harness_runtime::desktop::CustomizationGates::default()
         );
         assert_eq!(cfg.mcp_paths.len(), 2);
         assert!(cfg.memory_provider.is_some());
@@ -2270,7 +2303,7 @@ mod tests {
         assert_eq!(cfg.setting_source_scope, (true, true));
         assert_eq!(
             cfg.customization_gates,
-            engine_desktop::CustomizationGates::default()
+            harness_runtime::desktop::CustomizationGates::default()
         );
         assert_eq!(cfg.mcp_paths.len(), 2);
         assert!(cfg.memory_provider.is_some());
@@ -2390,7 +2423,7 @@ mod tests {
             restricted_tools: None,
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
-            customization_gates: engine_desktop::CustomizationGates::default(),
+            customization_gates: harness_runtime::desktop::CustomizationGates::default(),
             session_persistence: true,
             cli_agents_json: None,
             cli_agent: None,
@@ -2431,28 +2464,15 @@ mod tests {
     }
 }
 
-/// Test-only support shared by the two round-10 finding N3 budget tests (one
-/// here, one in `router.rs`), because both drive the SAME process-wide
-/// `engine_desktop::FUSION_CATALOG_REFRESHERS` registry.
+/// Shared stalling-storage fixtures; each test owns its credential scope.
 #[cfg(test)]
 pub(crate) mod fusion_refresh_test_support {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// Serializes every test in this crate that registers into — or fans out
-    /// over — the PROCESS-WIDE Fusion catalog refresher registry.
-    ///
-    /// `engine_desktop::refresh_fusion_catalog_after_credential_write` walks
-    /// that global `Vec` SERIALLY, so a test that deliberately registers a
-    /// refresher over a never-answering credential backend would otherwise park
-    /// a concurrently-running test's refresh behind its own stall (and, with
-    /// the budget in place, make that test's refresh silently miss its
-    /// deadline). Every test that touches the registry takes this lock.
-    pub(crate) static REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     /// A credential backend whose READS never answer — the contended macOS
     /// keychain broker whose 5s stall the boot availability probe already wraps
-    /// in `tokio::time::timeout` (`apps/engine-desktop/src/lib.rs`,
+    /// in `tokio::time::timeout` (`harness-runtime/src/desktop/mod.rs`,
     /// `resolve_llm_stack`).
     ///
     /// Writes succeed, so seeding an ephemeral key never blocks; only the
@@ -2522,7 +2542,7 @@ pub(crate) mod fusion_refresh_test_support {
     }
 
     /// Build a `CredentialManager` over [`StallingSecureStorage`] and publish a
-    /// `FusionCatalogRefresher` for `profiles` into the process-wide registry —
+    /// `FusionCatalogRefresher` for `profiles` into an explicit registry —
     /// the registered refresher a credential write then fans out to.
     pub(crate) fn register_stalling_refresher(
         profiles: &[&str],
@@ -2530,6 +2550,7 @@ pub(crate) mod fusion_refresh_test_support {
         Arc<secret::CredentialManager>,
         Arc<std::sync::RwLock<std::collections::BTreeMap<String, bool>>>,
         Arc<AtomicUsize>,
+        harness_runtime::desktop::FusionCatalogRegistry,
     ) {
         let (storage, reads) = StallingSecureStorage::new();
         let credentials = Arc::new(secret::CredentialManager::new(
@@ -2543,14 +2564,16 @@ pub(crate) mod fusion_refresh_test_support {
                 .map(|profile| ((*profile).to_string(), false))
                 .collect::<std::collections::BTreeMap<String, bool>>(),
         ));
-        engine_desktop::register_fusion_catalog_refresher(
-            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+        let catalog_registry = harness_runtime::desktop::FusionCatalogRegistry::default();
+        harness_runtime::desktop::register_fusion_catalog_refresher(
+            &catalog_registry,
+            harness_runtime::desktop::FusionCatalogRefresher::for_keychain_profiles(
                 availability.clone(),
                 credentials.clone(),
                 profiles,
             ),
         );
-        (credentials, availability, reads)
+        (credentials, availability, reads, catalog_registry)
     }
 
     /// Give a detached refresh a bounded number of scheduler turns to reach
@@ -2570,9 +2593,7 @@ pub(crate) mod fusion_refresh_test_support {
 /// write must never put an UNBOUNDED keychain stall on connection assembly.
 #[cfg(test)]
 mod fusion_catalog_refresh_budget_tests {
-    use super::fusion_refresh_test_support::{
-        register_stalling_refresher, wait_for_refresh_start, REGISTRY_LOCK,
-    };
+    use super::fusion_refresh_test_support::{register_stalling_refresher, wait_for_refresh_start};
     use super::{seed_parent_supplied_provider_keys, FUSION_CATALOG_REFRESH_BUDGET};
     use std::collections::BTreeMap;
     use std::sync::atomic::Ordering;
@@ -2588,12 +2609,11 @@ mod fusion_catalog_refresh_budget_tests {
     /// clock only has to advance to it.
     #[tokio::test(start_paused = true)]
     async fn parent_supplied_keys_never_block_assembly_on_a_stalled_keychain() {
-        let _registry = REGISTRY_LOCK.lock().await;
         // The refresher covers four profiles; the parent supplies keys for
         // three. The fourth has no ephemeral key, so its probe reaches the
         // never-answering backend — exactly like a real install where the
         // parent-supplied providers are a subset of the configured ones.
-        let (credentials, _availability, reads) =
+        let (credentials, _availability, reads, catalog_registry) =
             register_stalling_refresher(&["openrouter", "deepseek", "groq", "never-answers"]);
 
         let provider_keys: BTreeMap<String, String> = [
@@ -2608,7 +2628,7 @@ mod fusion_catalog_refresh_budget_tests {
         let began = tokio::time::Instant::now();
         let seeded = tokio::time::timeout(
             FUSION_CATALOG_REFRESH_BUDGET * 3,
-            seed_parent_supplied_provider_keys(&credentials, &provider_keys),
+            seed_parent_supplied_provider_keys(&catalog_registry, &credentials, &provider_keys),
         )
         .await;
         assert!(

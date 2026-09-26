@@ -8,7 +8,7 @@
 //! `"Repeated 529 Overloaded errors"` copy from
 //! `claude-code/src/services/api/errors.ts:166`.
 
-use llm_client::LlmError;
+use llm_runtime::LlmError;
 use thiserror::Error;
 
 /// Byte-locked copy for the "Repeated 529 Overloaded errors" error message.
@@ -60,7 +60,7 @@ pub enum OrchestratorError {
     },
 
     /// The model API call failed (transport, rate-limit, context overflow,
-    /// etc). Wraps `llm_client::LlmError` — the live path flows through
+    /// etc). Wraps `llm_runtime::LlmError` — the live path flows through
     /// `ProviderApiAdapter → DefaultLlmClient`.
     ///
     /// Note: `LlmError::Overloaded { repeated: true }` is **not** wrapped here;
@@ -130,7 +130,7 @@ pub enum OrchestratorError {
     /// OpenRouter free model it preserves the provider's `error.message` and
     /// adds retry/model-switch guidance.
     ///
-    /// Task 6 (llm-client future-work batch 5): produced by the public turn
+    /// Task 6 (llm-runtime future-work batch 5): produced by the public turn
     /// drivers when the turn dies on `LlmError::RateLimited` AND the API
     /// client recorded a composed explanation
     /// (`OrchestratorApiClient::last_rate_limit_error_message`). Without that
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn streaming_display_starts_with_locked_prefix() {
-        let e = OrchestratorError::Streaming(llm_client::LlmError::Transport {
+        let e = OrchestratorError::Streaming(llm_runtime::LlmError::Transport {
             message: "nope".into(),
         });
         let s = format!("{e}");
@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn compaction_variant_projects_to_string() {
-        // CompactionError::Api wraps llm_client::LlmError; construct via the
+        // CompactionError::Api wraps llm_runtime::LlmError; construct via the
         // string variant for simplicity.
         let compact_err = compaction::CompactionError::Internal("test".into());
         let e = OrchestratorError::Compaction(compact_err);

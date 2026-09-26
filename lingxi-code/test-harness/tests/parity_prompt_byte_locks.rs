@@ -331,7 +331,7 @@ fn production_prompt_bodies_match_their_byte_locks() {
     for (model, expected_len, expected_sha) in cases {
         let assembled =
             assemble_system_prompt(&prompt_context(model, cwd.clone(), memory_dir.clone()));
-        let blocks = llm_client::prompt_format::split_system_blocks(&assembled, true);
+        let blocks = llm_runtime::prompt_format::split_system_blocks(&assembled, true);
         assert_eq!(
             blocks.len(),
             2,
@@ -514,7 +514,7 @@ fn production_output_style_bodies_match_their_byte_locks() {
                 keep_coding_instructions: style.keep_coding_instructions,
             }),
         );
-        let blocks = llm_client::prompt_format::split_system_blocks(&assembled, true);
+        let blocks = llm_runtime::prompt_format::split_system_blocks(&assembled, true);
         assert_eq!(blocks.len(), 2);
 
         let body = normalize_prompt_body(&blocks[1].text, &cwd, &memory_dir);

@@ -283,7 +283,7 @@ async fn non_guest_mobile_runtime_keeps_environment_re_emission_when_excluded() 
 #[tokio::test]
 async fn system_prompt_override_stays_verbatim_while_runtime_message_is_sent() {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![llm_client::ContentBlock::Text {
+        vec![llm_runtime::ContentBlock::Text {
             text: "ok".into(),
             cache_control: None,
         }],

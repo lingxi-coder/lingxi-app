@@ -6,7 +6,7 @@ final class ClientEventCenter {
         fileprivate let id: UUID
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
         private var handlers: [UUID: (ClientEvent) -> Void] = [:]
 
         @discardableResult

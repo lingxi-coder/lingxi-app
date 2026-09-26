@@ -19,7 +19,7 @@ pub(crate) struct MainOutputObservation {
 }
 
 impl MainOutputObservation {
-    pub(crate) fn observe(&mut self, usage: &llm_client::Usage) {
+    pub(crate) fn observe(&mut self, usage: &llm_runtime::Usage) {
         // Provider-normalized cumulative buckets are disjoint. Partial frames
         // may omit a bucket; never replace previously known counts with zero.
         self.visible = self.visible.max(usage.billable_tokens.output);
@@ -27,7 +27,7 @@ impl MainOutputObservation {
         self.observed = true;
     }
 
-    fn observe_completed(&mut self, usage: &llm_client::Usage) {
+    fn observe_completed(&mut self, usage: &llm_runtime::Usage) {
         // A completed output report replaces provisional bucket splits;
         // max-per-bucket would double count reclassified reasoning tokens.
         // An absent/default Completed usage must not erase retained partials.
@@ -84,9 +84,12 @@ impl Drop for MainOutputObservation {
 }
 
 pub(crate) fn account_stream(
-    stream: futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+    stream: futures::stream::BoxStream<
+        'static,
+        Result<llm_runtime::LlmEvent, llm_runtime::LlmError>,
+    >,
     observation: Option<MainOutputObservation>,
-) -> futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>> {
+) -> futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>> {
     let Some(observation) = observation else {
         return stream;
     };
@@ -97,17 +100,18 @@ pub(crate) fn account_stream(
 }
 
 struct OutputStream {
-    stream: futures::stream::BoxStream<'static, Result<llm_client::LlmEvent, llm_client::LlmError>>,
+    stream:
+        futures::stream::BoxStream<'static, Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>,
     observation: MainOutputObservation,
 }
 
 impl futures::Stream for OutputStream {
-    type Item = Result<llm_client::LlmEvent, llm_client::LlmError>;
+    type Item = Result<llm_runtime::LlmEvent, llm_runtime::LlmError>;
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        use llm_client::LlmEvent;
+        use llm_runtime::LlmEvent;
         use std::task::Poll;
         let this = self.get_mut();
         let polled = this.stream.as_mut().poll_next(cx);
@@ -378,7 +382,7 @@ mod tests {
                 .ok_or_else(|| BudgetError::Internal("missing scope".into()))
         }
     }
-    fn orch(responses: Vec<llm_client::LlmResponse>) -> ConversationOrchestrator {
+    fn orch(responses: Vec<llm_runtime::LlmResponse>) -> ConversationOrchestrator {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(responses)),
@@ -390,9 +394,9 @@ mod tests {
             std::env::temp_dir(),
         )
     }
-    fn usage(visible: u64, reasoning: u64) -> llm_client::Usage {
-        llm_client::Usage {
-            billable_tokens: llm_client::TokenUsage {
+    fn usage(visible: u64, reasoning: u64) -> llm_runtime::Usage {
+        llm_runtime::Usage {
+            billable_tokens: llm_runtime::TokenUsage {
                 output: visible,
                 reasoning_output: reasoning,
                 ..Default::default()
@@ -522,21 +526,21 @@ mod tests {
         response.usage = usage(40, 60);
         let expected = response.usage.clone();
         let stream = futures::stream::iter(vec![
-            Ok(llm_client::LlmEvent::Completed {
+            Ok(llm_runtime::LlmEvent::Completed {
                 response: Box::new(response),
             }),
-            Err(llm_client::LlmError::Overloaded { repeated: false }),
+            Err(llm_runtime::LlmError::Overloaded { repeated: false }),
         ])
         .boxed();
         let mut wrapped = account_stream(stream, Some(observation));
-        let Some(Ok(llm_client::LlmEvent::Completed { response })) = wrapped.next().await else {
+        let Some(Ok(llm_runtime::LlmEvent::Completed { response })) = wrapped.next().await else {
             panic!("output failure replaced final paid usage");
         };
         assert_eq!(response.usage, expected);
         assert!(failed.load(Ordering::Acquire));
         assert!(matches!(
             wrapped.next().await,
-            Some(Err(llm_client::LlmError::Overloaded { repeated: false }))
+            Some(Err(llm_runtime::LlmError::Overloaded { repeated: false }))
         ));
         assert!(wrapped.next().await.is_none());
     }
@@ -545,7 +549,7 @@ mod tests {
     async fn main_output_nonstream_turn_records_disjoint_usage_once() {
         let scopes = Arc::new(Scopes::default());
         let mut response = mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
             }],
@@ -577,8 +581,8 @@ mod tests {
             content_block_start_text(0),
             text_delta(0, "done"),
             content_block_stop(0),
-            llm_client::LlmEvent::MessageDelta {
-                delta: llm_client::MessageDeltaPayload {
+            llm_runtime::LlmEvent::MessageDelta {
+                delta: llm_runtime::MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
@@ -615,7 +619,7 @@ mod tests {
                 .unwrap();
             let mut observation = orch.capture_main_output().await.unwrap().unwrap();
             observation.observe(&usage(4, 6));
-            let mut completed = llm_client::Usage {
+            let mut completed = llm_runtime::Usage {
                 speed: Some("fast".into()),
                 ..Default::default()
             };
@@ -675,8 +679,8 @@ mod tests {
         let scope = scopes
             .capture(orch.session.lock().await.session_id)
             .unwrap();
-        let event = llm_client::LlmEvent::MessageDelta {
-            delta: llm_client::MessageDeltaPayload {
+        let event = llm_runtime::LlmEvent::MessageDelta {
+            delta: llm_runtime::MessageDeltaPayload {
                 stop_reason: None,
                 stop_details: None,
             },
@@ -703,16 +707,16 @@ mod tests {
         let mut response = mock_message_response(vec![], Some("end_turn"));
         response.usage = usage(40, 60);
         let stream = futures::stream::iter(vec![
-            Ok(llm_client::LlmEvent::MessageDelta {
-                delta: llm_client::MessageDeltaPayload {
+            Ok(llm_runtime::LlmEvent::MessageDelta {
+                delta: llm_runtime::MessageDeltaPayload {
                     stop_reason: Some("end_turn".into()),
                     stop_details: None,
                 },
                 // The final provider snapshot reclassifies provisional visible output.
                 usage: Some(usage(100, 0)),
             }),
-            Ok(llm_client::LlmEvent::MessageStop),
-            Ok(llm_client::LlmEvent::Completed {
+            Ok(llm_runtime::LlmEvent::MessageStop),
+            Ok(llm_runtime::LlmEvent::Completed {
                 response: Box::new(response),
             }),
         ])

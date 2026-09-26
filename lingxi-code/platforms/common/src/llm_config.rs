@@ -24,7 +24,7 @@
 //! (`modelSupportsThinking` → true for every non-`claude-3-*` first-party
 //! model), so every entry carries `reasoning: true` — the thinking field is sent
 //! by default (adaptive where supported, fixed budget otherwise). This gates
-//! `llm_client::validate_capabilities`'s reasoning check.
+//! `llm_runtime::validate_capabilities`'s reasoning check.
 //!
 //! ## Auth strategies
 //!
@@ -65,12 +65,12 @@ pub struct RoutingOverrides {
     pub backoff_ms: Option<u64>,
 }
 
-use llm_client::{
+use llm_runtime::{
     anthropic_provider_profile, parse_provider_profiles_strict, AuthStrategy, ClientConfig,
     CredentialConfig, LlmError, ProviderCredentialMode, ProviderParseOptions,
 };
 
-/// Build the built-in Anthropic [`ClientConfig`] for [`llm_client::DefaultLlmClient`].
+/// Build the built-in Anthropic [`ClientConfig`] for [`llm_runtime::DefaultLlmClient`].
 ///
 /// One [`ProviderProfile`] with the full Claude-4-generation model table (10
 /// entries). See module-level docs for the complete table and auth strategy
@@ -186,7 +186,7 @@ pub fn apply_settings_providers(
 /// Returns the `display_model` string of the resolved model (same as the
 /// `model_id` part in most cases, but normalised via the registry).
 fn resolve_display_model<'a>(
-    cfg: &'a llm_client::ClientConfig,
+    cfg: &'a llm_runtime::ClientConfig,
     profile_part: &str,
     model_part: &str,
 ) -> Option<&'a str> {
@@ -240,8 +240,8 @@ fn resolve_display_model<'a>(
 /// cannot be resolved in `cfg`.
 pub fn parse_routing_overrides(
     routing: &serde_json::Value,
-    cfg: &llm_client::ClientConfig,
-) -> Result<RoutingOverrides, llm_client::LlmError> {
+    cfg: &llm_runtime::ClientConfig,
+) -> Result<RoutingOverrides, llm_runtime::LlmError> {
     let mut overrides = RoutingOverrides::default();
 
     // ── fallback ──────────────────────────────────────────────────────────────
@@ -268,13 +268,13 @@ pub fn parse_routing_overrides(
             let chain =
                 chain_val
                     .as_array()
-                    .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                    .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
                         message: format!(
                     "routing.fallback[{key:?}]: value must be an array of \"profile/model\" strings"
                 ),
                     })?;
             if chain.is_empty() {
-                return Err(llm_client::LlmError::InvalidRequest {
+                return Err(llm_runtime::LlmError::InvalidRequest {
                     message: format!(
                         "routing.fallback[{key:?}]: chain must have at least one entry"
                     ),
@@ -286,20 +286,20 @@ pub fn parse_routing_overrides(
                 let target =
                     entry_val
                         .as_str()
-                        .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                        .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
                             message: format!(
                         "routing.fallback[{key:?}]: chain[{i}] must be a \"profile/model\" string"
                     ),
                         })?;
                 let (profile_part, model_part) = target.split_once('/').ok_or_else(|| {
-                    llm_client::LlmError::InvalidRequest {
+                    llm_runtime::LlmError::InvalidRequest {
                         message: format!(
                             "routing.fallback[{key:?}]: chain[{i}] target {target:?} must be \"profile/model\""
                         ),
                     }
                 })?;
                 let target_display = resolve_display_model(cfg, profile_part, model_part)
-                    .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                    .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
                         message: format!(
                             "routing.fallback[{key:?}]: chain[{i}] target {target:?} not found in any configured profile"
                         ),
@@ -318,7 +318,7 @@ pub fn parse_routing_overrides(
             let n =
                 max_attempts_val
                     .as_u64()
-                    .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                    .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
                         message: "routing.retry.maxAttempts must be a non-negative integer"
                             .to_string(),
                     })?;
@@ -327,13 +327,13 @@ pub fn parse_routing_overrides(
         if let Some(backoff_val) = retry_obj.get("backoffMs") {
             let n = backoff_val
                 .as_u64()
-                .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+                .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
                     message: "routing.retry.backoffMs must be a non-negative integer".to_string(),
                 })?;
             if n == 0 {
                 // 0 would collapse the jitter ladder to zero-delay retries (a
                 // tight retry loop hammering the provider) — reject up front.
-                return Err(llm_client::LlmError::InvalidRequest {
+                return Err(llm_runtime::LlmError::InvalidRequest {
                     message:
                         "routing.retry.backoffMs must be >= 1 (0 would disable backoff entirely)"
                             .to_string(),

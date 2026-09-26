@@ -100,7 +100,7 @@ mod skill_model_override_tests;
 #[path = "conversation/tests/task7_midstream_fallback_tests.rs"]
 mod task7_midstream_fallback_tests;
 
-/// Task 6 (llm-client future-work batch 5): the terminal-429 limits-copy
+/// Task 6 (llm-runtime future-work batch 5): the terminal-429 limits-copy
 /// re-map (`enrich_rate_limited_error`). The integration test
 /// (`tests/rate_limit_terminal_429_test.rs`) drives the batched `ApiCall`
 /// wrapper end-to-end; these cover the `Streaming` wrapper and the
@@ -314,3 +314,6 @@ mod tool_search_usage_reminder_tests;
 
 #[path = "conversation/tests/scheduled_turn_tests.rs"]
 mod scheduled_turn_tests;
+
+#[path = "conversation/tests/turn_admission_cancel_tests.rs"]
+mod turn_admission_cancel_tests;

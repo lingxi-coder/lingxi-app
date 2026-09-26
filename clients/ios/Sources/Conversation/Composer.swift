@@ -339,7 +339,7 @@ struct Composer: View {
                 .accessibilityIdentifier("composer.keyboard.dismiss")
             }
         }
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             .onChange(of: modelOpen) { _, _ in
                 NotificationCenter.default.post(
                     name: .lingxiPermissionPresentationContextChanged,

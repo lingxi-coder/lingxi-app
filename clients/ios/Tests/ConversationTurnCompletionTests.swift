@@ -4,8 +4,8 @@ import XCTest
 
 @testable import LingxiCode
 
-#if canImport(engine_mobileFFI)
-    import engine_mobileFFI
+#if canImport(harness_runtimeFFI)
+    import harness_runtimeFFI
 #endif
 
 @MainActor
@@ -48,7 +48,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
         source.cancel()
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
 
         private let zeroCost = CostDto(
             totalUsd: 0,

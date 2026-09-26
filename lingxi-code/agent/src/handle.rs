@@ -179,7 +179,7 @@ impl<T: ?Sized> RuntimeLink<Arc<T>> {
     }
 }
 
-pub(crate) fn subagent_usage_from_llm_usage(usage: &llm_client::Usage) -> SubagentUsage {
+pub(crate) fn subagent_usage_from_llm_usage(usage: &llm_runtime::Usage) -> SubagentUsage {
     let bt = usage.billable_tokens;
     SubagentUsage {
         total_tokens: bt
@@ -403,7 +403,7 @@ pub struct PoolSubagentSpawner {
     /// `haiku`→Sonnet upgrade is gated (binary `RF`). `None` (the default / tests /
     /// a default install with no policy allowlist) ⇒ the unrestricted resolution
     /// (byte-identical legacy). Set at boot via [`Self::with_model_restriction_opt`].
-    model_restriction: Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
+    model_restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
     /// LingXi multi-provider half of the 2.1.198 `GAe`/`obm` firstParty gate
     /// (`fr() !== "firstParty"`): `false` when the session's default model
     /// routes to a non-Anthropic provider profile (OpenAI/Gemini/…), which
@@ -1125,7 +1125,7 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_model_restriction_opt(
         mut self,
-        restriction: Option<(llm_client::model::allowlist::ModelEnforcement, Vec<String>)>,
+        restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
     ) -> Self {
         self.model_restriction = restriction;
         self
@@ -1176,7 +1176,8 @@ impl PoolSubagentSpawner {
             .model_restriction
             .as_ref()
             .is_some_and(|(enforcement, _)| {
-                llm_client::model::allowlist::model_allowed_under(enforcement, model) == Some(false)
+                llm_runtime::model::allowlist::model_allowed_under(enforcement, model)
+                    == Some(false)
             });
         if !barred {
             return Ok((model.to_string(), true));
@@ -1184,7 +1185,7 @@ impl PoolSubagentSpawner {
 
         tracing::warn!(
             "Subagent model \"{model}{}",
-            llm_client::model::allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+            llm_runtime::model::allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
         );
         let Some(parent_model) = parent_model else {
             return Err(SubagentSpawnError::Runtime(format!(
@@ -4187,7 +4188,7 @@ mod tests {
     }
 
     struct QueueApi {
-        responses: Mutex<VecDeque<llm_client::LlmResponse>>,
+        responses: Mutex<VecDeque<llm_runtime::LlmResponse>>,
         calls: AtomicUsize,
     }
 
@@ -4237,23 +4238,23 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<protocol::ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.responses.lock().unwrap().pop_front().unwrap())
         }
     }
 
-    fn text_response(text: &str) -> llm_client::LlmResponse {
-        llm_client::LlmResponse {
+    fn text_response(text: &str) -> llm_runtime::LlmResponse {
+        llm_runtime::LlmResponse {
             id: "mock".into(),
             model: "mock".into(),
-            content: vec![llm_client::ContentBlock::Text {
+            content: vec![llm_runtime::ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
-            usage: llm_client::Usage::default(),
+            usage: llm_runtime::Usage::default(),
             cost: None,
             provider_metadata: serde_json::Value::Null,
         }
@@ -4261,15 +4262,15 @@ mod tests {
 
     #[test]
     fn llm_usage_rollup_maps_only_billable_subagent_fields() {
-        let usage = llm_client::Usage {
-            billable_tokens: llm_client::TokenUsage {
+        let usage = llm_runtime::Usage {
+            billable_tokens: llm_runtime::TokenUsage {
                 input: 11,
                 output: 7,
                 cache_write: 5,
                 cache_read: 3,
                 reasoning_output: 55,
             },
-            ..llm_client::Usage::default()
+            ..llm_runtime::Usage::default()
         };
 
         assert_eq!(
@@ -4654,7 +4655,7 @@ mod tests {
                 _system: Option<&str>,
                 _messages: Vec<protocol::ConversationMessage>,
                 tools: Vec<serde_json::Value>,
-            ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+            ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
                 *self.seen_tools.lock().unwrap() = tools;
                 Ok(text_response("done"))
             }
@@ -4945,7 +4946,7 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<protocol::ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
             std::future::pending().await
         }
     }
@@ -7380,7 +7381,7 @@ mod tests {
     async fn provider_qualified_spawn_still_obeys_managed_model_restriction() {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
-        let enforcement = llm_client::model::allowlist::ModelEnforcement::Active {
+        let enforcement = llm_runtime::model::allowlist::ModelEnforcement::Active {
             allowlist: vec!["claude-opus-4-7".to_string()],
             overrides: std::collections::BTreeMap::new(),
         };

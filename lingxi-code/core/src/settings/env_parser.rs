@@ -20,6 +20,7 @@ pub const PREFIX_PRIORITY: &[&str] = &["LINGXI_"];
 /// Each entry is `(suffix, field, kind)` where `kind` drives value parsing.
 const FIELD_MAP: &[(&str, &str, FieldKind)] = &[
     ("MODEL", "model", FieldKind::Scalar),
+    ("PROVIDER_REGION", "providerRegion", FieldKind::Scalar),
     ("TELEMETRY_ENABLED", "telemetryEnabled", FieldKind::Bool),
     (
         "TRUSTED_DIRECTORIES",
@@ -91,6 +92,12 @@ pub fn parse_env(
             .expect("chosen field must be in FIELD_MAP");
         match (kind, *field) {
             (FieldKind::Scalar, "model") => out.model = Some(raw.clone()),
+            (FieldKind::Scalar, "providerRegion") => {
+                match serde_json::from_value(serde_json::Value::String(raw.clone())) {
+                    Ok(region) => out.provider_region = Some(region),
+                    Err(_) => invalid.push(("LINGXI_PROVIDER_REGION".into(), raw.clone())),
+                }
+            }
             (FieldKind::Bool, "telemetryEnabled") => match raw.as_str() {
                 "true" => out.telemetry_enabled = Some(true),
                 "false" => out.telemetry_enabled = Some(false),
@@ -121,6 +128,24 @@ pub fn parse_env(
     }
 
     Ok((out, invalid))
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+    #[test]
+    fn region_env_uses_the_shared_enum_and_rejects_unknown_values() {
+        for (value, valid) in [
+            ("international", true),
+            ("china_mainland", true),
+            ("global", false),
+        ] {
+            let env = BTreeMap::from([("LINGXI_PROVIDER_REGION".into(), value.into())]);
+            let (settings, invalid) = parse_env(&env).unwrap();
+            assert_eq!(settings.provider_region.is_some(), valid);
+            assert_eq!(invalid.is_empty(), valid);
+        }
+    }
 }
 
 #[cfg(test)]

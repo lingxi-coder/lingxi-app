@@ -7767,10 +7767,10 @@ impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
         _: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
         _: Vec<serde_json::Value>,
-    ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+    ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let content = if call == 0 {
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: protocol::ToolUseId::new().to_string(),
                 name: "SpawnOwnedTask".into(),
                 input: serde_json::json!({}),
@@ -7786,7 +7786,7 @@ impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
                     1
                 );
             }
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: if call == 1 {
                     "waiting for child"
                 } else {
@@ -7796,7 +7796,7 @@ impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
                 cache_control: None,
             }]
         };
-        Ok(llm_client::LlmResponse {
+        Ok(llm_runtime::LlmResponse {
             id: "owner-model".into(),
             model: "test".into(),
             content,

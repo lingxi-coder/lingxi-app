@@ -103,7 +103,7 @@ jobs:
 
       # Rust toolchain pinned to the workspace MSRV, with the two Android ABIs
       # the AAR cdylib is cross-compiled for (arm64-v8a + x86_64).
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: aarch64-linux-android,x86_64-linux-android
 
@@ -180,7 +180,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       # Same engine-build prerequisites as job 2 (fresh job → set up again).
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: aarch64-linux-android,x86_64-linux-android
 
@@ -242,7 +242,7 @@ jobs:
 
       # The three iOS rust targets the XCFramework is assembled from: device,
       # Apple-silicon simulator, and Intel simulator.
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 

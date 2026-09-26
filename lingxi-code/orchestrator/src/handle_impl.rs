@@ -1446,7 +1446,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         //
         // `managed_dir` mirrors the composition root's
         // `SkillsHandler::with_all_roots(.., Some(managed_settings_dir()), ..)`
-        // (`apps/engine-desktop/src/lib.rs:3351-3354`) exactly — it is the
+        // (`harness-runtime/src/desktop/mod.rs:3351-3354`) exactly — it is the
         // SAME pure, env/platform-derived function (`platform_api::live_sessions::
         // managed_settings_dir`), not a second computation; the loader
         // treats a non-existent managed dir as an empty tier, so this is
@@ -1456,14 +1456,14 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // first attempt read it from `self.session_cwd.trusted_dirs()`, but
         // that set is seeded at boot with `cwd` plus every settings-tier
         // `permissions.additionalDirectories` entry plus `--add-dir`
-        // (`apps/engine-desktop/src/lib.rs:7538-7568`, `:8666-8688`) — a much
+        // (`harness-runtime/src/desktop/mod.rs:7538-7568`, `:8666-8688`) — a much
         // wider set than what the sibling slash commands actually scan. The
         // desktop's own `SkillsHandler` (`/skills`,
-        // `apps/engine-desktop/src/lib.rs:3351-3354`) is constructed with
+        // `harness-runtime/src/desktop/mod.rs:3351-3354`) is constructed with
         // `additional_skill_dirs: Vec::new()` HARDCODED — it never sees any
         // additional directory. Its `ReloadSkillsHandler` counterpart
         // (`/reload-skills`) is wired to `DesktopRepoRootReloader
-        // .registered_roots` (`apps/engine-desktop/src/lib.rs:4919`,
+        // .registered_roots` (`harness-runtime/src/desktop/mod.rs:4919`,
         // `:4964-4977`), which starts empty and grows only through a live
         // `register_repo_root` call with no desktop-side call site outside
         // `apps/cli/src/run.rs` — so on the desktop it is always empty too.
@@ -1898,7 +1898,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
 
     /// Richer catalog listing for the grouped `/model` picker. Delegates to the
     /// api client's [`OrchestratorApiClient::list_model_listings`], which the
-    /// production `ProviderApiAdapter` sources from the llm-client catalog.
+    /// production `ProviderApiAdapter` sources from the llm-runtime catalog.
     async fn list_model_listings(&self) -> Vec<platform_api::orchestrator::ModelListing> {
         self.api.list_model_listings()
     }

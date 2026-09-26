@@ -179,7 +179,7 @@ Claude Code 基线：`2.1.215`（npm `latest` / `next`；native binary SHA-256 `
 | M-10 | agent frontmatter `memory:` 只解析不执行 | `agent/src/definition.rs:79-83`、`catalog.rs:264-266` 明确说明 auto-memory tool injection 未接线；声明 `memory: user/project/local` 的 agent 不会得到预期持久 memory。 |
 | M-11 | memory frontmatter 缺 ISO `modified` | `memory/src/file.rs:28-43` 的 `MemoryFrontmatter` 无 modified；2.1.214 已要求写入 ISO timestamp。影响选择、诊断与文件 parity。 |
 | M-12 | `paths:` 用自制扫描器，不是 YAML 语义 | `memory/src/lingxi_md/loader.rs:421-441` 承认不支持完整 YAML；如 `paths: src/** # note` 会把 inline comment 计入 glob，复杂 quoting/flow scalar 也会漂移。 |
-| M-13 | live retry status 没接线 | `tui-core/src/retry_ux.rs:16-21` 明确只有渲染纯函数/demo fixture，没有 `llm-client onRetryStatus` producer；真实 retry 时 TUI 仍像卡死。 |
+| M-13 | live retry status 没接线 | `tui-core/src/retry_ux.rs:16-21` 明确只有渲染纯函数/demo fixture，没有 `llm-runtime onRetryStatus` producer；真实 retry 时 TUI 仍像卡死。 |
 | M-14 | 动态 slash-command 协议不完整 | CLI init snapshot 只取 shared registry，遗漏 TUI local `/reload-plugins`；client protocol 无 `commands_changed`，bridge 的 SlashCommands 也未路由。插件/skills reload 后 SDK 客户端目录不会更新。 |
 | M-15 | `askUserQuestionTimeout` 解析了但 runtime 固定为 `never` | schema/config UI 已有 60s/5m/10m/never；`tools/ui/src/lib.rs:73-80` 明确 composition root 未接线，始终构造 `Never`。用户设置被静默忽略。 |
 

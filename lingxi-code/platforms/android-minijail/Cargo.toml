@@ -22,7 +22,7 @@ platform-android-libcap = { path = "../android-libcap" }
 
 [dependencies]
 serde = { workspace = true }
-# Pinned to match sibling crates (anthropic-oauth, filestate, llm-client, etc.)
+# Pinned to match sibling crates (anthropic-oauth, filestate, llm-runtime, etc.)
 sha2 = "0.10"
 hex = "0.4"
 

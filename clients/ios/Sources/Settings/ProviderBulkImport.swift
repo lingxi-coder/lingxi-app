@@ -27,7 +27,7 @@ enum ProviderBulkImport {
     /// dropped with a warning, so a provider reachable several ways MUST list
     /// `connections` / `credentialIds` / `fallback` — otherwise importing a
     /// multi-connection config silently yields a single-connection provider.
-    private static let providerFields: Set<String> = ["type", "baseUrl", "apiKeyEnv", "models", "region", "apiVersion", "supportsWebsockets", "supportsWebsocketCompression", "websocketConnectTimeoutMs", "visionDelegate", "pricing", "billingMode", "connections", "credentialIds", "fallback"]
+    private static let providerFields: Set<String> = ["type", "baseUrl", "apiKeyEnv", "models", "region", "regions", "apiVersion", "supportsWebsockets", "supportsWebsocketCompression", "websocketConnectTimeoutMs", "visionDelegate", "pricing", "billingMode", "connections", "credentialIds", "fallback"]
     private static let fallbackTriggers: Set<String> = ["rate_limit", "overloaded", "server_error", "network", "auth"]
     private static let modelFields: Set<String> = ["id", "aliases", "capabilities", "metadata"]
     private static let forbidden: Set<String> = ["__proto__", "prototype", "constructor"]

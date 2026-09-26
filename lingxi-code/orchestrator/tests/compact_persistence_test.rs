@@ -6,7 +6,7 @@
 //! These tests drive the actual compaction and writer, then compare loaded
 //! history with the live session and verify the next persisted parent UUID.
 
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 
 use compaction::CompactionOrchestrator;
 use orchestrator::test_support::{

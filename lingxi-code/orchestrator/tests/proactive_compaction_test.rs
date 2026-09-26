@@ -10,7 +10,7 @@
 //!   and a `CompactionCompleted` event is emitted.
 //! - With the history under the threshold (or no compactor wired), the trigger
 //!   is a strict NO-OP: history is identical and no `CompactionCompleted` fires.
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 
 use compaction::CompactionOrchestrator;
 use orchestrator::test_support::{
@@ -84,9 +84,9 @@ fn make_orch_with(
 /// `context_window_for_model` answers with the real catalog window instead of
 /// the 200k Claude default.
 fn register_model(id: &str, context_window: u64, max_output_tokens: u64) {
-    llm_client::model::model_limits::register(
+    llm_runtime::model::model_limits::register(
         id,
-        llm_client::model::model_limits::ModelLimits {
+        llm_runtime::model::model_limits::ModelLimits {
             context_window,
             max_output_tokens,
         },

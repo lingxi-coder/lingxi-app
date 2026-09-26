@@ -36,15 +36,15 @@ impl AppTier {
         }
     }
 
-    /// Convert to the render-facing `tui_core::computer_access_bridge`
+    /// Convert to the render-facing `permission::computer_access`
     /// tier — kept as a SEPARATE type there (backend-neutral, no dependency
     /// on this crate) rather than reusing `AppTier` directly.
     #[must_use]
-    pub fn to_bridge(self) -> tui_core::computer_access_bridge::AccessTier {
+    pub fn to_bridge(self) -> permission::computer_access::AccessTier {
         match self {
-            AppTier::Read => tui_core::computer_access_bridge::AccessTier::Read,
-            AppTier::Click => tui_core::computer_access_bridge::AccessTier::Click,
-            AppTier::Full => tui_core::computer_access_bridge::AccessTier::Full,
+            AppTier::Read => permission::computer_access::AccessTier::Read,
+            AppTier::Click => permission::computer_access::AccessTier::Click,
+            AppTier::Full => permission::computer_access::AccessTier::Full,
         }
     }
 }

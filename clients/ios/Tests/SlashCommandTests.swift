@@ -2,11 +2,11 @@ import XCTest
 
 @testable import LingxiCode
 
-#if canImport(engine_mobileFFI)
-    import engine_mobileFFI
+#if canImport(harness_runtimeFFI)
+    import harness_runtimeFFI
 #endif
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
 
     @MainActor
     final class SlashCommandTests: XCTestCase {

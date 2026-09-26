@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(v["fast_mode"], true);
     }
 
-    // ── rate_limits (llm-client future-work batch 5, Task 4) ────────────
+    // ── rate_limits (llm-runtime future-work batch 5, Task 4) ────────────
 
     /// `StatusLine.tsx:50-65`: each window spreads
     /// `{used_percentage: utilization * 100, resets_at}` into `rate_limits`

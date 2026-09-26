@@ -1,5 +1,5 @@
 //! `current_should_exit`.
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 fn build_orch_with_response(
-    response: llm_client::LlmResponse,
+    response: llm_runtime::LlmResponse,
 ) -> (
     ConversationOrchestrator,
     Arc<MockApiClient>,

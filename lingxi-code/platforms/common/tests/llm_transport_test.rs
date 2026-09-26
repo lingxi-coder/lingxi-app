@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use http_client::ReqwestHttp;
-use llm_client::LlmTransportBridge;
+use llm_runtime::LlmTransportBridge;
 use platform_api::http::{
     RawByteStream, RawByteStreamWithMeta, SseStream, WebSocketMessageStreamWithMeta,
 };
@@ -66,8 +66,8 @@ impl HttpTransport for FakeHttp {
     }
 }
 
-fn provider_request() -> llm_client::ProviderRequest {
-    let mut request = llm_client::ProviderRequest::post_json(
+fn provider_request() -> llm_runtime::ProviderRequest {
+    let mut request = llm_runtime::ProviderRequest::post_json(
         "https://api.anthropic.com/v1/messages",
         serde_json::json!({"model": "m"}),
     );
@@ -91,7 +91,7 @@ async fn execute_maps_request_and_response() {
     }));
     let bridge = LlmTransportBridge::new(fake);
 
-    let response = llm_client::Transport::execute(&bridge, &provider_request())
+    let response = llm_runtime::Transport::execute(&bridge, &provider_request())
         .await
         .expect("response");
 
@@ -137,7 +137,7 @@ async fn execute_body_bytes_pass_through_verbatim_and_suppress_json_body() {
     // PNG magic — deliberately not valid UTF-8 JSON.
     request.body_bytes = Some(vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF]);
 
-    llm_client::Transport::execute(&bridge, &request)
+    llm_runtime::Transport::execute(&bridge, &request)
         .await
         .expect("response");
 
@@ -173,7 +173,7 @@ async fn execute_without_body_bytes_keeps_json_body_behavior() {
     }));
     let bridge = LlmTransportBridge::new(fake);
 
-    llm_client::Transport::execute(&bridge, &provider_request())
+    llm_runtime::Transport::execute(&bridge, &provider_request())
         .await
         .expect("response");
 
@@ -203,7 +203,7 @@ async fn execute_passes_error_statuses_through_as_data() {
     }));
     let bridge = LlmTransportBridge::new(fake);
 
-    let response = llm_client::Transport::execute(&bridge, &provider_request())
+    let response = llm_runtime::Transport::execute(&bridge, &provider_request())
         .await
         .expect("error status is data, not Err");
 
@@ -220,7 +220,7 @@ async fn http_status_error_variant_also_becomes_data() {
     }));
     let bridge = LlmTransportBridge::new(fake);
 
-    let response = llm_client::Transport::execute(&bridge, &provider_request())
+    let response = llm_runtime::Transport::execute(&bridge, &provider_request())
         .await
         .expect("status error is data");
 
@@ -234,12 +234,12 @@ async fn connection_errors_map_to_llm_transport_error() {
     *fake.response.lock().unwrap() = Some(Err(HttpError::Connection("dns".to_string())));
     let bridge = LlmTransportBridge::new(fake);
 
-    let error = llm_client::Transport::execute(&bridge, &provider_request())
+    let error = llm_runtime::Transport::execute(&bridge, &provider_request())
         .await
         .expect_err("connection error");
 
     assert!(
-        matches!(error, llm_client::LlmError::Transport { message } if message.contains("dns"))
+        matches!(error, llm_runtime::LlmError::Transport { message } if message.contains("dns"))
     );
 }
 
@@ -260,7 +260,7 @@ async fn open_stream_maps_sse_events_to_frames() {
     *fake.sse.lock().unwrap() = Some(Ok(vec![sse(r#"{"type":"message_stop"}"#), sse("[DONE]")]));
     let bridge = LlmTransportBridge::new(fake);
 
-    let mut streaming = llm_client::Transport::open_stream(&bridge, &provider_request())
+    let mut streaming = llm_runtime::Transport::open_stream(&bridge, &provider_request())
         .await
         .expect("stream");
 
@@ -282,7 +282,7 @@ async fn open_stream_status_error_yields_status_and_body_frame() {
     }));
     let bridge = LlmTransportBridge::new(fake);
 
-    let mut streaming = llm_client::Transport::open_stream(&bridge, &provider_request())
+    let mut streaming = llm_runtime::Transport::open_stream(&bridge, &provider_request())
         .await
         .expect("status error is data");
 
@@ -308,7 +308,7 @@ async fn mid_stream_http_error_maps_to_llm_transport_error() {
     ]));
     let bridge = LlmTransportBridge::new(fake);
 
-    let mut streaming = llm_client::Transport::open_stream(&bridge, &provider_request())
+    let mut streaming = llm_runtime::Transport::open_stream(&bridge, &provider_request())
         .await
         .expect("stream");
 
@@ -327,12 +327,12 @@ async fn mid_stream_http_error_maps_to_llm_transport_error() {
         .await
         .expect_err("mid-stream error");
     assert!(
-        matches!(error, llm_client::LlmError::Transport { message } if message.contains("reset"))
+        matches!(error, llm_runtime::LlmError::Transport { message } if message.contains("reset"))
     );
 }
 
 #[tokio::test]
-async fn bridge_drives_llm_client_event_stream_end_to_end() {
+async fn bridge_drives_llm_runtime_event_stream_end_to_end() {
     let fake = FakeHttp::default();
     *fake.sse.lock().unwrap() = Some(Ok(vec![
         sse(
@@ -352,28 +352,30 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
     ]));
     let bridge = LlmTransportBridge::new(fake);
 
-    let client = llm_client::client::DefaultLlmClient::from_config(llm_client::ClientConfig {
-        providers: vec![llm_client::ProviderProfile {
-            provider_id: llm_client::ProviderId::AnthropicFirstParty,
+    let client = llm_runtime::client::DefaultLlmClient::from_config(llm_runtime::ClientConfig {
+        providers: vec![llm_runtime::ProviderProfile {
+            wire_profile: None,
+            regions: llm_runtime::Region::all(),
+            provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
             profile_name: "anthropic".to_string(),
             base_url: "https://api.anthropic.com".to_string(),
-            protocol: llm_client::ProtocolFamily::AnthropicMessages,
-            auth: llm_client::AuthStrategy::None,
-            credential: llm_client::CredentialConfig::None,
-            models: vec![llm_client::ModelProfile {
+            protocol: llm_runtime::ProtocolFamily::AnthropicMessages,
+            auth: llm_runtime::AuthStrategy::None,
+            credential: llm_runtime::CredentialConfig::None,
+            models: vec![llm_runtime::ModelProfile {
                 display_model: "claude-sonnet-4-20250514".to_string(),
                 request_model: "claude-sonnet-4-20250514".to_string(),
                 billing_model: "claude-sonnet-4".to_string(),
                 aliases: vec![],
                 description: None,
                 metadata: Default::default(),
-                capabilities: llm_client::Capabilities {
+                capabilities: llm_runtime::Capabilities {
                     streaming: true,
                     tools: true,
                     ..Default::default()
                 },
             }],
-            pricing: llm_client::PricingConfig::default(),
+            pricing: llm_runtime::PricingConfig::default(),
             signing: None,
             azure: None,
             supports_websockets: false,
@@ -386,7 +388,7 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
     .expect("client");
 
     let mut request =
-        llm_client::LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hello");
+        llm_runtime::LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hello");
     request.stream = true;
 
     let mut events = client
@@ -397,11 +399,11 @@ async fn bridge_drives_llm_client_event_stream_end_to_end() {
     let mut stop_reason = None;
     while let Some(event) = events.next_event().await.expect("event") {
         match event {
-            llm_client::LlmEvent::ContentBlockDelta {
-                delta: llm_client::ContentDelta::TextDelta { text },
+            llm_runtime::LlmEvent::ContentBlockDelta {
+                delta: llm_runtime::ContentDelta::TextDelta { text },
                 ..
             } => texts.push_str(&text),
-            llm_client::LlmEvent::MessageDelta { delta, .. } => stop_reason = delta.stop_reason,
+            llm_runtime::LlmEvent::MessageDelta { delta, .. } => stop_reason = delta.stop_reason,
             _ => {}
         }
     }
@@ -432,9 +434,9 @@ async fn open_stream_aws_event_stream_routes_to_raw_bytes_path() {
 
     // Build a request with AwsEventStream framing.
     let mut request = provider_request();
-    request.stream_framing = llm_client::StreamFraming::AwsEventStream;
+    request.stream_framing = llm_runtime::StreamFraming::AwsEventStream;
 
-    let mut streaming = llm_client::Transport::open_stream(&bridge, &request)
+    let mut streaming = llm_runtime::Transport::open_stream(&bridge, &request)
         .await
         .expect("raw stream");
 
@@ -484,17 +486,17 @@ async fn open_stream_responses_websocket_wraps_request_and_maps_messages() {
     }));
     let bridge = LlmTransportBridge::new(fake);
 
-    let mut request = llm_client::ProviderRequest::post_json(
+    let mut request = llm_runtime::ProviderRequest::post_json(
         "https://api.openai.com/v1/responses",
         serde_json::json!({"model": "gpt-5", "stream": true}),
     );
     request
         .headers
         .insert("authorization".to_string(), "Bearer test".to_string());
-    request.stream_transport = llm_client::ProviderStreamTransport::ResponsesWebSocket;
+    request.stream_transport = llm_runtime::ProviderStreamTransport::ResponsesWebSocket;
     request.websocket_connect_timeout_ms = Some(42);
 
-    let mut streaming = llm_client::Transport::open_stream(&bridge, &request)
+    let mut streaming = llm_runtime::Transport::open_stream(&bridge, &request)
         .await
         .expect("websocket stream");
 
@@ -548,13 +550,13 @@ async fn open_stream_responses_websocket_426_falls_back_to_http_sse_once() {
     *fake.sse.lock().unwrap() = Some(Ok(vec![sse(r#"{"type":"fallback"}"#)]));
     let bridge = LlmTransportBridge::new(fake);
 
-    let mut request = llm_client::ProviderRequest::post_json(
+    let mut request = llm_runtime::ProviderRequest::post_json(
         "https://api.openai.com/v1/responses",
         serde_json::json!({"model": "gpt-5", "stream": true}),
     );
-    request.stream_transport = llm_client::ProviderStreamTransport::ResponsesWebSocket;
+    request.stream_transport = llm_runtime::ProviderStreamTransport::ResponsesWebSocket;
 
-    let mut streaming = llm_client::Transport::open_stream(&bridge, &request)
+    let mut streaming = llm_runtime::Transport::open_stream(&bridge, &request)
         .await
         .expect("fallback stream");
 

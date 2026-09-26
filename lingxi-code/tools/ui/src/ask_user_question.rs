@@ -71,7 +71,7 @@ use telemetry::tengu::tool::{
     ASK_USER_QUESTION_COMPLETED, ASK_USER_QUESTION_FAILED, ASK_USER_QUESTION_STARTED,
 };
 use telemetry::AnalyticsBus;
-use tui_core::ask_user_question_bridge::{AskOption, AskQuestion, AskUserQuestionExchange};
+use tool_api::ask_user_question::{AskOption, AskQuestion, AskUserQuestionExchange};
 
 use tokio::sync::mpsc;
 use tool_api::context::ToolUseContext;

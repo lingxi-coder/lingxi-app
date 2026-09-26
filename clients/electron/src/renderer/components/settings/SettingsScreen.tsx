@@ -106,6 +106,7 @@ export function parseSettingsSnapshot(
   if (!raw) return { snapshot: null, error: null };
   try {
     const effective = JSON.parse(raw.effective_json) as Record<string, unknown>;
+    const active = raw.active_json ? JSON.parse(raw.active_json) as Record<string, unknown> : undefined;
     const provenance = JSON.parse(raw.provenance_json) as Record<string, string>;
     const files = raw.files_json ? (JSON.parse(raw.files_json) as SettingsSnapshot['files']) : [];
     const locked = raw.locked ?? [];
@@ -120,7 +121,7 @@ export function parseSettingsSnapshot(
     // existed instead of suppressing every provenance badge it can draw.
     const mergedKeys = raw.merged_keys ?? [];
     return {
-      snapshot: { effective, provenance, files, locked, layers, mergedKeys },
+      snapshot: { effective, active, provenance, files, locked, layers, mergedKeys },
       error: null,
     };
   } catch (cause) {

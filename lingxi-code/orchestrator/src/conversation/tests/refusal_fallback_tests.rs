@@ -373,7 +373,7 @@ async fn the_frame_never_reaches_the_wire() {
         "precondition: the frame is in history"
     );
 
-    let wire = llm_client::convert::normalize_messages_for_api(history);
+    let wire = llm_runtime::convert::normalize_messages_for_api(history);
     assert!(
         !wire
             .iter()
@@ -381,5 +381,5 @@ async fn the_frame_never_reaches_the_wire() {
         "a System message on the wire is an InvalidRequest: {wire:?}"
     );
     // And the stronger statement: the real encoder accepts what survives.
-    llm_client::convert::to_llm_messages(wire).expect("the normalized history encodes");
+    llm_runtime::convert::to_llm_messages(wire).expect("the normalized history encodes");
 }

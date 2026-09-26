@@ -198,7 +198,7 @@ pub(crate) const AUTH_COMMAND: &str = "/connect";
 /// same source cost and telemetry attribution use.
 ///
 /// The mapping deliberately mirrors the profile arm of
-/// `llm_client::pricing_provider_id_for_profile` rather than introducing a
+/// `llm_runtime::pricing_provider_id_for_profile` rather than introducing a
 /// second table that could drift out of agreement with it. An unrecognised
 /// profile names ITSELF instead of guessing a vendor: telling a `deepseek` user
 /// about Claude is exactly the bug this exists to prevent.
@@ -250,7 +250,7 @@ const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /connec
 ///
 /// `i` is `sir(e)`, the oracle's error-text normalizer. For a real API error
 /// with a body that is just `e.message` — i.e. the SDK's `${status} ${body}`,
-/// which is what [`llm_client::LlmError::provider_message`] holds — so this is
+/// which is what [`llm_runtime::LlmError::provider_message`] holds — so this is
 /// byte-correct on the common path.
 ///
 /// ⚠️ INCOMPLETE: `sir`'s SPECIAL cases are NOT ported (0 hits in this port) —
@@ -258,7 +258,7 @@ const OAUTH_TOKEN_REVOKED: &str = "OAuth token revoked \u{b7} Please run /connec
 /// "Request timed out. …", the seven SSL-code arms → "Unable to connect to
 /// API: …", `"Connection error."` → "Unable to connect to API…", and the
 /// empty-message fallback `API error (status …)`. Those need `sir` ported as
-/// its own unit; note the port's [`llm_client::ssl::ssl_hint`] is a DIFFERENT
+/// its own unit; note the port's [`llm_runtime::ssl::ssl_hint`] is a DIFFERENT
 /// oracle function (`YLe`), not these strings.
 ///
 /// ⚠️ DELIBERATE DIVERGENCE — see [`AUTH_COMMAND`].
@@ -407,7 +407,7 @@ const GCLOUD_ADC_LOGIN: &str = "gcloud auth application-default login";
 /// ```
 ///
 /// The 401-vs-other split is only decidable because the status survives into the
-/// message (`llm_client::api_error_status`); before that both collapsed to one
+/// message (`llm_runtime::api_error_status`); before that both collapsed to one
 /// variant and this could not have been ported.
 ///
 /// `None` for routes that are not cloud-hosted — the caller falls through to the
@@ -565,7 +565,7 @@ pub(crate) const SERVER_LIMITING: &str =
 /// `error.message` (falling back to a top-level `message`), and use the stripped
 /// remainder verbatim when it is not JSON. This only works because the decoder
 /// stringifies the whole body into the message — see
-/// `llm_client::providers::api_error_message`.
+/// `llm_runtime::providers::api_error_message`.
 #[must_use]
 pub(crate) fn rate_limit_detail(message: &str) -> String {
     let stripped = strip_status_prefix(message, 429);
@@ -1225,29 +1225,29 @@ mod tests {
     #[test]
     fn the_api_error_detail_unwraps_the_stringified_body() {
         assert_eq!(
-            llm_client::api_error_detail(
+            llm_runtime::api_error_detail(
                 r#"403 {"type":"error","error":{"type":"permission_error","message":"OAuth token has been revoked"}}"#
             ),
             "403 OAuth token has been revoked"
         );
         // `FOu` falls back to a top-level `message`.
         assert_eq!(
-            llm_client::api_error_detail(r#"401 {"message":"bad key"}"#),
+            llm_runtime::api_error_detail(r#"401 {"message":"bad key"}"#),
             "401 bad key"
         );
         // No status prefix → the extracted text alone.
         assert_eq!(
-            llm_client::api_error_detail(r#"{"message":"plain"}"#),
+            llm_runtime::api_error_detail(r#"{"message":"plain"}"#),
             "plain"
         );
         // Nothing extractable → unchanged, as the oracle's final return does.
         assert_eq!(
-            llm_client::api_error_detail(r#"403 {"nope":1}"#),
+            llm_runtime::api_error_detail(r#"403 {"nope":1}"#),
             r#"403 {"nope":1}"#
         );
         // No JSON at all → unchanged.
         assert_eq!(
-            llm_client::api_error_detail("403 forbidden"),
+            llm_runtime::api_error_detail("403 forbidden"),
             "403 forbidden"
         );
     }

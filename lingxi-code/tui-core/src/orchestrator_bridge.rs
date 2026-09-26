@@ -270,7 +270,7 @@ pub enum TurnEvent {
         /// Full transcript-only compact summary revealed by Ctrl-O.
         summary: String,
     },
-    /// Unified rate-limit header snapshot (llm-client future-work batch 3,
+    /// Unified rate-limit header snapshot (llm-runtime future-work batch 3,
     /// Task 9). Mirrors `platform_api::OutputEvent::RateLimit`'s nine fields —
     /// see that variant's per-field docs for the
     /// `anthropic-ratelimit-unified-*` header each value comes from. The
@@ -302,7 +302,7 @@ pub enum TurnEvent {
         /// `platform_api::OutputEvent::RateLimit::credits_required`.
         credits_required: bool,
     },
-    /// Raw per-window utilization snapshot (llm-client future-work batch 5,
+    /// Raw per-window utilization snapshot (llm-runtime future-work batch 5,
     /// Task 4). Mirrors `platform_api::OutputEvent::RawUtilization`'s four fields —
     /// tracked on every API response (unlike the warning-gated
     /// [`Self::RateLimit`]) and stored on `AppState.raw_utilization` for the
@@ -362,7 +362,7 @@ pub enum TurnEvent {
     /// Captured output of a `!`-prefixed bash-mode command (run off the model
     /// path). Rendered as a `UserBashOutput` cell — ANSI-parsed stdout then
     /// error-tinted stderr. Sent by the CLI `on_bash` closure after the
-    /// sandboxed [`crate::bash_runner::BashRunner`] returns.
+    /// sandboxed [`tool_api::bash_runner::BashRunner`] returns.
     BashOutput {
         /// Captured stdout.
         stdout: String,

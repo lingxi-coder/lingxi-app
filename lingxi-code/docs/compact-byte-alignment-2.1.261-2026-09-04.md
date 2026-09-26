@@ -50,7 +50,7 @@ Main implementation entry points:
   [`turn_loop.rs`](../orchestrator/src/turn_loop.rs).
 - [`sidequery/src/forked_agent.rs`](../sidequery/src/forked_agent.rs),
   [`provider_side_query.rs`](../sidequery/src/provider_side_query.rs), and the
-  [`Anthropic codec`](../llm-client/src/providers/anthropic.rs).
+  [`Anthropic codec`](../llm-runtime/src/providers/anthropic.rs).
 - [`apps/cli/src/run.rs`](../apps/cli/src/run.rs),
   [`stream_json.rs`](../apps/cli/src/stream_json.rs),
   [`stream_json_input.rs`](../apps/cli/src/stream_json_input.rs), and
@@ -87,7 +87,7 @@ Final validation on 2026-09-05:
 
 - `cargo test -p compaction -p orchestrator -p command-core --all-features --no-fail-fast`:
   **2,074 passed, 0 failed, 2 ignored** across 91 test/doc-test executables.
-- `cargo test -p protocol -p platform-api -p session -p sidequery -p llm-client --all-features --no-fail-fast`:
+- `cargo test -p protocol -p platform-api -p session -p sidequery -p llm-runtime --all-features --no-fail-fast`:
   **2,006 passed, 0 failed** across 65 test/doc-test executables.
 - `cargo test -p cli --lib compact`: **15 passed, 0 failed**, including SDK
   boundary/status ordering, replay and failed-command result text.

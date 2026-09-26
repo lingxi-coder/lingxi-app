@@ -29,6 +29,8 @@ export interface SettingsFile {
 export interface SettingsSnapshot {
   files: SettingsFile[];
   effective: Record<string, unknown>;
+  /** Settings captured by the currently running engine. */
+  active?: Record<string, unknown>;
   provenance: Record<string, string>;
   locked: string[];
   /**

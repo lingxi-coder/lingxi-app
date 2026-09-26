@@ -28,7 +28,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 test-harness = { path = "../test-harness" }
-llm-client = { path = "../llm-client" }
+llm-runtime = { path = "../llm-runtime" }
 tempfile = "3.13"
 tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
 # DEV-only: enables `scope::tests::app_id_grammar_agrees_with_local_apps_ids`,

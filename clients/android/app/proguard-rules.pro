@@ -6,7 +6,7 @@
 }
 
 -keep class uniffi.** { *; }
--keep class uniffi.engine_mobile.** { *; }
+-keep class uniffi.harness_runtime.** { *; }
 -keep class com.lingxi.code.** { *; }
 -keep class com.sun.jna.** { *; }
 -keep class * implements com.sun.jna.** { *; }

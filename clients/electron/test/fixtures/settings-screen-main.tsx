@@ -188,7 +188,7 @@ function Fixture() {
     refreshAuth: noopAsyncVoid,
     refreshHooks: noopAsyncVoid,
     refreshAgents: noopAsyncVoid,
-    restartBridge: noopAsyncVoid,
+    restartBridge: async () => { navCalls.current.push('restart'); },
     refreshSettingsSnapshot,
     refresh: noopAsyncVoid,
     refreshDiagnostics: noopAsyncArray,
@@ -284,14 +284,14 @@ function Fixture() {
       // this bug). `effective` is a naive last-object-wins shallow merge
       // across the given layers — good enough for these scenarios, which
       // only ever care about one key at a time.
-      setLayeredSnapshot: (layers: Record<string, Record<string, unknown>>) => {
+      setLayeredSnapshot: (layers: Record<string, Record<string, unknown>>, activeOverride?: Record<string, unknown>) => {
         const effective: Record<string, unknown> = {};
         for (const layerValues of Object.values(layers)) Object.assign(effective, layerValues);
         setSettingsSnapshotEvent({
           type: 'settings_snapshot',
           effective_json: JSON.stringify(effective),
           provenance_json: JSON.stringify(Object.fromEntries(Object.keys(effective).map((key) => [key, 'user']))),
-          active_json: JSON.stringify(effective),
+          active_json: JSON.stringify(activeOverride ?? effective),
           layers_json: JSON.stringify(layers),
         } as SettingsSnapshotEvent);
       },
@@ -413,7 +413,7 @@ declare global {
       holdSettingsWrite(): void;
       releaseSettingsWrite(): void;
       setSnapshot(effective: Record<string, unknown>, active: Record<string, unknown>): void;
-      setLayeredSnapshot(layers: Record<string, Record<string, unknown>>): void;
+      setLayeredSnapshot(layers: Record<string, Record<string, unknown>>, activeOverride?: Record<string, unknown>): void;
       clickLayerTab(layer: string): void;
       setFieldValue(selector: string, value: string): void;
       getFieldValue(selector: string): string | null;

@@ -66,7 +66,7 @@ pub enum SettingsError {
     },
 }
 
-pub use schema::SettingsJson;
+pub use schema::{ProviderRegion, SettingsJson};
 
 /// Inputs to [`Settings::load`].
 ///

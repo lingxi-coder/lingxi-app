@@ -7,7 +7,7 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 2.
 #![allow(clippy::field_reassign_with_default)]
 
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
@@ -314,7 +314,7 @@ async fn parity_cost_after_one_turn() {
     use protocol::SessionId;
     use tokio::sync::mpsc;
 
-    let response = llm_client::LlmResponse {
+    let response = llm_runtime::LlmResponse {
         id: "msg_mock".into(),
         model: "claude-opus-4-6".into(),
         // A realistic end_turn response carries visible text. (An empty-content
@@ -330,8 +330,8 @@ async fn parity_cost_after_one_turn() {
         // COST.3/5: new UsageApi fields default to None (no web-search /
         // non-fast) → base pricing, so this fixture's asserted cost is
         // unchanged.
-        usage: llm_client::Usage {
-            billable_tokens: llm_client::TokenUsage {
+        usage: llm_runtime::Usage {
+            billable_tokens: llm_runtime::TokenUsage {
                 input: 1_000,
                 output: 500,
                 ..Default::default()

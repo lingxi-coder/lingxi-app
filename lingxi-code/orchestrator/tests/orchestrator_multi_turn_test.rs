@@ -1,4 +1,4 @@
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
 use orchestrator::test_support::{

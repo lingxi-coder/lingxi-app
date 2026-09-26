@@ -5,7 +5,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use async_trait::async_trait;
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::structured_output::{StructuredOutputSlot, StructuredOutputTool};
 use orchestrator::test_support::{
     mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,

@@ -45,7 +45,7 @@ execute the same JSON fixture in `GeneratedAudioConfigurationTests.swift` and
 All device operations use the app-scoped `AudioService` contract in
 `lingxi-code/platform-api/src/audio.rs`; its wire/UniFFI DTOs are in
 `lingxi-code/client-protocol/src/audio.rs`. Rust platform adapters live in
-`lingxi-code/apps/engine-mobile/src/audio_service.rs` and
+`lingxi-code/harness-runtime/src/mobile/audio_service.rs` and
 `lingxi-code/apps/bridge-server/src/audio_bridge.rs`.
 UniFFI 0.28 cannot export an external callback trait, so the iOS and Android
 wrappers declare thin `IosAudioService` and `AndroidAudioService` callback

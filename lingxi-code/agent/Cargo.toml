@@ -9,7 +9,7 @@ license.workspace = true
 protocol = { path = "../protocol" }
 platform-api = { path = "../platform-api" }
 core = { path = "../core" }
-llm-client = { path = "../llm-client" }
+llm-runtime = { path = "../llm-runtime" }
 tool-api = { path = "../tool-api" }
 base64 = "0.22"
 mcp = { path = "../mcp" }
@@ -20,7 +20,7 @@ sidequery = { path = "../sidequery" }
 # Agent-hooks ORIGIN TRUST (cc 2.1.218 `mvo`): reads the global config's
 # `projects[<dir>].hasTrustDialogAccepted` before registering an agent
 # definition's frontmatter hooks. Acyclic — `migrations` depends only on
-# llm-client/telemetry/branding, none of which depend on `agent`.
+# llm-runtime/telemetry/branding, none of which depend on `agent`.
 migrations = { path = "../migrations" }
 telemetry = { path = "../telemetry" }
 branding.workspace = true

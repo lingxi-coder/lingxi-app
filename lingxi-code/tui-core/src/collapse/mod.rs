@@ -10,7 +10,7 @@
 //! on a breaker. The output is identical because claude-code's groups are
 //! already contiguous runs sealed by the same breakers.
 
-pub mod classify;
+pub use client_presentation::classify;
 pub mod group;
 
 pub use classify::{classify, SearchOrReadResult};

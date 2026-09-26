@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-llm-client = { path = "../llm-client" }
+llm-runtime = { path = "../llm-runtime" }
 secret = { path = "../secret" }
 protocol = { path = "../protocol" }
 cost = { path = "../cost" }

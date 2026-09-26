@@ -391,7 +391,7 @@ pub fn build_session_memory_handle(
 
 /// [`build_memdir_prefetch`] for a composition root that has raw Anthropic
 /// credentials + an HTTP transport but no pre-built [`sidequery::SideQueryClient`]
-/// (e.g. the mobile host, which assembles a multi-provider `llm_client` rather
+/// (e.g. the mobile host, which assembles a multi-provider `llm_runtime` rather
 /// than the desktop's side-query client). Constructs a
 /// [`sidequery::ProviderSideQueryClient`] over `(api_key, api_base, http)` —
 /// the same Anthropic-first-party side-query path the desktop build uses — so

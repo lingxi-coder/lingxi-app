@@ -198,7 +198,7 @@ pub enum AutoCompactWindowSource {
     ///
     /// Unreachable in LingXi: `TyS` reads the `rowan_thicket` client-data cache,
     /// which has no Rust equivalent (same deferral as the GrowthBook branches
-    /// already documented in `llm-client/src/model/context_window.rs`).
+    /// already documented in `llm-runtime/src/model/context_window.rs`).
     ClientData,
     /// `"experiment"` — the `gRa` experiment override.
     ///
@@ -271,7 +271,7 @@ pub const DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV: &str =
 /// name in the model registry". LingXi's registry split is:
 ///
 /// * non-Claude ids resolve through the catalog-fed
-///   `llm_client::model::model_limits` registry — the SAME
+///   `llm_runtime::model::model_limits` registry — the SAME
 ///   lookup [`context_window_for_model`] uses to decide whether it knows the
 ///   model, so `lookup(...).is_none()` is exactly "unrecognized" here, with no
 ///   second table to drift out of sync;
@@ -279,8 +279,8 @@ pub const DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV: &str =
 ///   back to the raw string), so they are treated as recognized. Conservative
 ///   on purpose: the port never warns about a `claude-*` id it might well know.
 fn model_window_is_assumed(model: &str) -> bool {
-    !llm_client::model::context_window::is_claude_family(model)
-        && llm_client::model::model_limits::lookup(model).is_none()
+    !llm_runtime::model::context_window::is_claude_family(model)
+        && llm_runtime::model::model_limits::lookup(model).is_none()
 }
 
 /// Resolve the auto-compact window together with the source that produced it.
@@ -367,7 +367,7 @@ pub fn resolve_auto_compact_window(
 /// Remote Cowork / local-agent table rows and served clientdata belong to
 /// their hosts; the ordinary CLI uses Sonnet 5's table default of 1M.
 fn model_default_compact_window(model: &str, model_window: u64, enabled: bool) -> Option<u64> {
-    let canonical = llm_client::model::thinking::canonical(model);
+    let canonical = llm_runtime::model::thinking::canonical(model);
     // The shared thinking canonicalizer predates Opus 5; preserve the same
     // provider/date suffix matching that the context-window registry applies.
     let canonical = if canonical.contains("claude-opus-5") {
@@ -420,7 +420,7 @@ pub fn resolve_auto_compact_env_window(raw: &str) -> Option<u64> {
 
 /// `Gpe()` — `CLAUDE_CODE_DISABLE_1M_CONTEXT`.
 ///
-/// Read here rather than borrowed from `llm_client::model::context_window`
+/// Read here rather than borrowed from `llm_runtime::model::context_window`
 /// because that crate's `is_1m_context_disabled` is private; the spelling is
 /// the un-rebranded one the port already honours there, so the two agree.
 fn is_1m_context_disabled() -> bool {
@@ -476,12 +476,12 @@ fn format_window_tokens(n: u64) -> String {
 ///   [`DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT_ENV`].
 /// * **`map it in the modelOverrides setting or ` is DROPPED.** LingXi has no
 ///   window-overrides setting — `modelOverrides` in
-///   `llm-client/src/model/allowlist.rs` is an unrelated Anthropic-id ->
+///   `llm-runtime/src/model/allowlist.rs` is an unrelated Anthropic-id ->
 ///   provider-id map for the allowlist gate. Rendering the clause would tell
 ///   the user to do something that cannot be done, which is worse than a
 ///   shorter notice. Everything else is byte-for-byte.
 /// * `LINGXI_MAX_CONTEXT_TOKENS` is itself honoured only under `USER_TYPE=ant`
-///   (`llm_client::model::context_window`, a pre-existing documented
+///   (`llm_runtime::model::context_window`, a pre-existing documented
 ///   divergence), so that remedy can be inert. The probe below still reads the
 ///   RAW var, like the oracle: if the user has already set it, repeating the
 ///   advice is noise regardless of whether the gate lets it through.
@@ -502,7 +502,7 @@ pub fn unknown_model_window_notice(
     }
     // `BCd(e)` — "this is not a `claude-*` model", i.e. the one case where a
     // real context window can be stated by hand.
-    let is_non_claude = !llm_client::model::context_window::is_claude_family(model);
+    let is_non_claude = !llm_runtime::model::context_window::is_claude_family(model);
     let max_context_tokens_set = std::env::var("LINGXI_MAX_CONTEXT_TOKENS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -544,7 +544,7 @@ pub fn unknown_model_window_notice(
 ///
 /// The oracle emits its notice exactly once, from the REPL launcher
 /// (@306693668), before the first turn. The port cannot emit it there: LingXi's
-/// model registry (`llm_client::model::model_limits`) is populated at
+/// model registry (`llm_runtime::model::model_limits`) is populated at
 /// CATALOG-ASSEMBLY time, which happens AFTER the launcher — so at the oracle's
 /// emit point every non-Claude model still looks unrecognized, including the
 /// ones the catalog is about to describe exactly. Upstream has no such window;

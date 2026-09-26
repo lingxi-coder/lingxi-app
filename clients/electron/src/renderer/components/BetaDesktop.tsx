@@ -1,3 +1,5 @@
+import { composerGoalState } from './goalPresentation';
+import { GoalStatus } from './GoalStatus';
 import { createPortal } from 'react-dom';
 import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react';
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
@@ -17,7 +19,6 @@ import type { ContextSummarySnapshot } from '../bridge/conversation';
 import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { runningSubagentIds } from '../bridge/runtimeCenterState';
-import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
 import { settingsLabel } from '../settingsLabel';
 import {
@@ -133,36 +134,8 @@ function invoke(action: () => Promise<unknown>): void {
   void action().catch(() => undefined);
 }
 
-const GOAL_CLEAR_TOKENS = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel']);
-
-/** Project active Goal state from the command lifecycle already visible in this conversation. */
 export function composerGoalActive(items: readonly RunItem[]): boolean {
-  let active = false;
-  for (const item of items) {
-    if (item.type === 'narration' && item.role === 'user') {
-      const match = /^\s*\/goal(?:\s+([\s\S]*))?\s*$/i.exec(item.text);
-      const args = match?.[1]?.trim();
-      if (args) active = !GOAL_CLEAR_TOKENS.has(args.toLocaleLowerCase());
-      continue;
-    }
-    if (item.type === 'command' && item.name.trim().split(/\s/, 1)[0]?.toLocaleLowerCase() === '/goal') {
-      const output = item.output.trim().toLocaleLowerCase();
-      if (output.startsWith('goal active:') || output.startsWith('goal set:')) active = true;
-      else if (
-        output.startsWith('no goal set')
-        || output.startsWith('goal cleared:')
-        || output.includes('only available in trusted workspaces')
-        || output.includes("can't run while hooks are restricted")
-        || output.startsWith('goal condition is limited')
-      ) active = false;
-      continue;
-    }
-    if (
-      item.type === 'narration'
-      && item.text.includes('Goal cleared after an unrecoverable error')
-    ) active = false;
-  }
-  return active;
+  return composerGoalState(items).active;
 }
 
 function Button({ children, onClick, disabled = false, primary = false, success = false, danger = false, title }: {
@@ -2867,7 +2840,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const permissionMode = PERMISSION_MODE_OPTIONS.find((mode) => mode.id === bridge.desktop.permissionMode) ?? PERMISSION_MODE_OPTIONS[0]!;
   const workspace = bridge.bootstrap?.workspace;
   const providerConfigured = bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured) ?? false;
-  const goalActive = composerGoalActive(bridge.conversation?.items ?? []);
+  const goal = composerGoalState(bridge.conversation?.items ?? []);
+  const goalActive = goal.active;
   const promptPlaceholder = !ready
     ? !workspace?.path || workspace.recovery
       ? 'Add or select an available project to start coding…'
@@ -2875,7 +2849,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         ? 'Connect a provider in Settings to start coding…'
         : 'Waiting for the local engine…'
     : goalActive
-        ? 'Describe the goal you want LingXi to accomplish'
+        ? 'Add guidance for this goal…'
         : bridge.running
           ? 'LingXi is working — draft your next message…'
           : 'Do anything';
@@ -2929,6 +2903,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           onClose={() => { void stopFlowMode(); }}
         />
       )}
+      {goalActive && <GoalStatus key={`${activeSessionId}:${goal.objective}`} objective={goal.objective} disabled={!ready || bridge.sessionLoading} running={bridge.running} cancelling={bridge.isCancelling} onClear={() => bridge.runSlashCommand('/goal clear')} onPause={() => bridge.cancel()} onResume={() => bridge.sendPrompt('Continue pursuing the current goal.')} />}
       <div
         className="beta-composer"
         onDragOver={(event) => {
@@ -3163,15 +3138,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               </div>
             )}
           </div>
-          {goalActive && (
-            <>
-              <span aria-hidden="true" style={{ width: 1, height: 24, background: t.border, margin: '0 4px' }} />
-              <div role="status" aria-label="Goal active" title="Session goal is active. Use /goal clear to stop it." style={{ ...composerPillStyle(t, true), minWidth: 40, minHeight: 40, justifyContent: 'center', padding: '0 10px', borderRadius: 12, color: t.accent }}>
-                <Icon name="goal" size={18} color={t.accent} stroke={1.6} />
-                <span>Goal</span>
-              </div>
-            </>
-          )}
+
 
           <div style={{ flex: 1 }} />
 
@@ -3545,21 +3512,4 @@ export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): v
   );
 }
 
-export function ErrorBanner({ bridge }: { bridge: UseBridge }) {
-  const t = useT();
-  useEffect(() => {
-    if (!bridge.error) return undefined;
-    const timeoutId = window.setTimeout(() => bridge.clearError(), 5_000);
-    return () => window.clearTimeout(timeoutId);
-  }, [bridge.error, bridge.clearError]);
-
-  if (!bridge.error) return null;
-  const error = classifyDesktopError(bridge.error);
-  return (
-    <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 12px', background: `color-mix(in oklab, ${t.danger} 12%, ${t.windowBg})`, borderBottom: `0.5px solid color-mix(in oklab, ${t.danger} 35%, transparent)`, color: t.danger, fontSize: 11.5 }}>
-      <Icon name="circle" size={13} color={t.danger} />
-      <span title={`${error.title}. ${error.detail}`} style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><strong>{error.title}.</strong> {error.detail}</span>
-      <Button onClick={bridge.clearError}>Dismiss</Button>
-    </div>
-  );
-}
+export { ErrorBanner } from './ErrorBanner';

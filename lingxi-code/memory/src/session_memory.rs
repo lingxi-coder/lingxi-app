@@ -492,6 +492,7 @@ fn estimate_block_tokens(block: &protocol::ContentBlock) -> u64 {
     use protocol::ContentBlock;
 
     match block {
+        ContentBlock::ProviderContent { value, .. } => rough_token_count(json_len(value)),
         ContentBlock::Text { text } => rough_token_count(utf16_len(text)),
         ContentBlock::TextJsUtf16 {
             utf16_code_units, ..

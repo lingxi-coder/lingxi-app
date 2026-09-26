@@ -3,7 +3,7 @@
 //! Port of claude-code `isEnvTruthy` (`utils/envUtils.ts:32-37`): unset/empty
 //! ⇒ false; otherwise the lowercased, trimmed value must be one of
 //! `1`/`true`/`yes`/`on`. The workspace previously carried several private
-//! copies; TS-faithful ones consolidate here (llm-client future-work batch 5,
+//! copies; TS-faithful ones consolidate here (llm-runtime future-work batch 5,
 //! Task 1). Copies with deliberately different semantics stay local and
 //! documented.
 

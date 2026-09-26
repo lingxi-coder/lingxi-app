@@ -12,7 +12,7 @@
 //!
 //! The real session host — [`MobileEngineHandle`] (owns the handle-owned tokio
 //! runtime + the wired `MobileRuntime` + the registered `ClientEventListener`)
-//! and its [`MobileEngineError`] — lives in `engine-mobile` and is RE-EXPORTED
+//! and its [`MobileEngineError`] — lives in `harness-runtime::mobile` and is RE-EXPORTED
 //! here, NOT re-derived. That single-source rule (plan F3-04) is what stops iOS
 //! and Android from drifting: this crate only adds the iOS-specific
 //! `Platform`-construction wrapper around the shared `build_mobile_engine`.
@@ -21,7 +21,7 @@
 //!
 //! The async FFI entry point — `MobileEngineHandle::submit(ClientCommand) ->
 //! Result<(), ClientError>` (under `uniffi`: `#[uniffi::export(async_runtime =
-//! "tokio")]`) — is defined ONCE on the shared host in `engine-mobile` and
+//! "tokio")]`) — is defined ONCE on the shared host in `harness-runtime::mobile` and
 //! reaches Swift through the re-exported [`MobileEngineHandle`]. There is no
 //! iOS-specific submit body: `SendPrompt` spawns the streaming turn on the
 //! handle-owned runtime and returns promptly (results stream via the listener);
@@ -33,7 +33,7 @@
 //! The async exports (`submit`, the F3-07 inspection helpers) cross the FFI seam
 //! as `UniFFI` rust-futures. The foreign async executor is NAMED explicitly by the
 //! `#[uniffi::export(async_runtime = "tokio")]` attribute on the shared host's
-//! `submit` impl (in `engine-mobile`), backed by the workspace `uniffi` dep's
+//! `submit` impl (in `harness-runtime::mobile`), backed by the workspace `uniffi` dep's
 //! `tokio` feature (pinned offline in F3-00). That scaffolding polls every async
 //! export on the handle-owned `rt-multi-thread` runtime — the one
 //! [`MobileEngineHandle`] owns per governing decision §0.5 (one connection ⇒ one
@@ -45,7 +45,7 @@
 //! ## `UniFFI` status
 //! The `uniffi` feature (default-on) lights up the real `UniFFI` surface: the
 //! re-exported [`MobileEngineHandle`] is a `#[derive(uniffi::Object)]`, the
-//! listener a callback interface, the DTOs `UniFFI` types. `engine-mobile` carries
+//! listener a callback interface, the DTOs `UniFFI` types. `harness-runtime::mobile` carries
 //! the `setup_scaffolding!()`; this crate re-exports it (and adds its own for
 //! the iOS-local exports) so the symbols land in the final `staticlib`/cdylib.
 
@@ -81,12 +81,12 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 use platform_api::Platform;
 
 // F3-04: the shared session host + its error type are DEFINED ONCE in
-// `engine-mobile` and re-exported here. Both FFI packager crates re-export the
+// `harness-runtime::mobile` and re-exported here. Both FFI packager crates re-export the
 // SAME types so iOS and Android cannot drift (plan F3-04). The listener +
 // permission-request-sink the constructor takes are likewise re-exported from
 // the shared host.
 #[cfg(feature = "uniffi")]
-pub use engine_mobile::{
+pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
     CronTaskDto, FiredCronJobDto, LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle,
     MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto,
@@ -490,7 +490,7 @@ pub enum MobileLinuxEventSinkFfiError {
 ///
 /// This is a THIN wrapper: it constructs the iOS-specific `Platform` from the
 /// foreign callbacks and then delegates ALL runtime/adapter/listener wiring to
-/// the shared [`engine_mobile::build_mobile_engine`] (F3-04) — so the heavy
+/// the shared [`harness_runtime::mobile::build_mobile_engine`] (F3-04) — so the heavy
 /// lifting lives in exactly one place. The returned [`MobileEngineHandle`] owns
 /// the tokio runtime + the wired orchestrator + the registered listener.
 ///
@@ -550,7 +550,7 @@ pub fn build_mobile_engine(
             workspace_host_path: Some(workspace_host_path),
             stable_workspace_id: Some(stable_workspace_id),
         }));
-        engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
+        harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
     #[cfg(not(target_os = "ios"))]
     {
@@ -771,7 +771,7 @@ fn ios_mobile_config_from_launch_config(
         cfg.default_model = config.model.clone();
     }
     if let Some(provider_config) = &config.provider_config {
-        let (profiles, routing) = engine_mobile::parse_mobile_provider_config_json(
+        let (profiles, routing) = harness_runtime::mobile::parse_mobile_provider_config_json(
             &provider_config.provider_profiles_json,
             provider_config.routing_json.as_deref(),
         )?;
@@ -786,7 +786,7 @@ fn ios_mobile_config_from_launch_config(
         // Local-app generation always runs in the bundled Mobile Linux runtime,
         // even when the user-facing terminal stays in Legacy mode. Advertise
         // the matching shell carrier so agents can invoke the bundled npm/Vite
-        // toolchain; engine-mobile's capability gate still fails closed when
+        // toolchain; harness-runtime::mobile's capability gate still fails closed when
         // the runtime is unavailable.
         cfg.enable_mobile_linux_shell();
     }
@@ -1499,7 +1499,7 @@ struct NoopPermissionSink;
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl engine_mobile::PermissionRequestSink for NoopPermissionSink {
+impl harness_runtime::mobile::PermissionRequestSink for NoopPermissionSink {
     async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
 }
 
@@ -1511,9 +1511,9 @@ impl engine_mobile::PermissionRequestSink for NoopPermissionSink {
 // host's prompt UI; the inbound resolution flows back through
 // `MobileEngineHandle::submit(ClientCommand::Approve/DenyPermission)`.
 // `IosPermissionSinkBridge` adapts this crate-local interface to the shared
-// `engine_mobile::PermissionRequestSink` the engine's adapter gate emits onto.
+// `harness_runtime::mobile::PermissionRequestSink` the engine's adapter gate emits onto.
 /// The Swift-implemented permission sink the iOS app registers when it builds the
-/// engine. Defined in this crate (not re-used from `engine-mobile`) so its UniFFI
+/// engine. Defined in this crate (not re-used from `harness-runtime::mobile`) so its UniFFI
 /// converter registers under `ios_framework`'s tag — see [`build_ios_engine`].
 /// The host presents a prompt for each request and resolves it by submitting
 /// `ClientCommand::ApprovePermission` / `DenyPermission` back through the handle.
@@ -1542,7 +1542,7 @@ struct IosPermissionSinkBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl engine_mobile::PermissionRequestSink for IosPermissionSinkBridge {
+impl harness_runtime::mobile::PermissionRequestSink for IosPermissionSinkBridge {
     async fn emit_request(&self, request: client_protocol::permission::PermissionRequest) {
         self.inner.on_request(request).await;
     }
@@ -1591,7 +1591,7 @@ pub enum IosAudioFfiError {
 
 /// Crate-local iOS callback interface for the single app-scoped audio service.
 /// Kept in this packager because UniFFI 0.28 cannot reference an external
-/// callback-interface definition from `engine-mobile` metadata.
+/// callback-interface definition from `harness-runtime::mobile` metadata.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
@@ -1617,7 +1617,7 @@ struct IosAudioServiceBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl engine_mobile::NativeAudioService for IosAudioServiceBridge {
+impl harness_runtime::mobile::NativeAudioService for IosAudioServiceBridge {
     fn capabilities(&self) -> client_protocol::audio::AudioCapabilitySnapshotDto {
         self.inner.capabilities()
     }
@@ -1632,13 +1632,13 @@ impl engine_mobile::NativeAudioService for IosAudioServiceBridge {
     async fn cancel(
         &self,
         identity: client_protocol::audio::AudioOperationIdDto,
-    ) -> Result<(), engine_mobile::AudioFfiError> {
+    ) -> Result<(), harness_runtime::mobile::AudioFfiError> {
         self.inner
             .cancel(identity)
             .await
             .map_err(|error| match error {
                 IosAudioFfiError::NativeFailure { message } => {
-                    engine_mobile::AudioFfiError::NativeFailure { message }
+                    harness_runtime::mobile::AudioFfiError::NativeFailure { message }
                 }
             })
     }
@@ -2548,9 +2548,9 @@ pub fn build_ios_engine_with_config(
     #[cfg(target_os = "ios")]
     {
         use platform_ios::{IosPlatform, IosPlatformInputs};
-        let native_audio: Arc<dyn engine_mobile::NativeAudioService> =
+        let native_audio: Arc<dyn harness_runtime::mobile::NativeAudioService> =
             Arc::new(IosAudioServiceBridge { inner: audio });
-        let audio = engine_mobile::from_native_audio_service(native_audio);
+        let audio = harness_runtime::mobile::from_native_audio_service(native_audio);
         let device_status = device_control
             .clone()
             .map(|service| service.clone() as Arc<dyn platform_api::DeviceStatusProvider>);
@@ -2613,7 +2613,7 @@ pub fn build_ios_engine_with_config(
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(IosPermissionSinkBridge { inner: permissions });
-        engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
+        harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
     #[cfg(not(target_os = "ios"))]
     {
@@ -3375,7 +3375,7 @@ pub fn configure_ios_mobile_linux_mounts(
     rt.block_on(handle.configure_mounts(mounts))
 }
 
-// F3-04: re-export `engine-mobile`'s UniFFI scaffolding so the shared host's FFI
+// F3-04: re-export `harness-runtime::mobile`'s UniFFI scaffolding so the shared host's FFI
 // symbols (the re-exported `MobileEngineHandle` / `MobileEngineError`) land in
 // this crate's final library. Under the `uniffi` feature only.
 #[cfg(feature = "uniffi")]
@@ -3484,7 +3484,7 @@ mod tests {
     use async_trait::async_trait;
     use client_protocol::events::ClientEvent;
     use client_protocol::permission::PermissionRequest as PermissionRequestDto;
-    use engine_mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
+    use harness_runtime::mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
     use platform_api::{
         CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
         SharingService, WorktreeManager,
@@ -3573,7 +3573,7 @@ mod tests {
         }
     }
 
-    fn build_handle(root: &std::path::Path) -> Arc<engine_mobile::MobileEngineHandle> {
+    fn build_handle(root: &std::path::Path) -> Arc<harness_runtime::mobile::MobileEngineHandle> {
         let platform: Arc<dyn Platform> = Arc::new(HostFakePlatform::new(root.to_path_buf()));
         let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
         let perm_sink: Arc<dyn PermissionRequestSink> =
@@ -3583,7 +3583,7 @@ mod tests {
             lingxi_home: root.join(".lingxi"),
             ..MobileConfig::default()
         };
-        engine_mobile::build_mobile_engine(cfg, platform, listener, perm_sink)
+        harness_runtime::mobile::build_mobile_engine(cfg, platform, listener, perm_sink)
             .expect("shared build_mobile_engine failed")
     }
 
@@ -3612,7 +3612,7 @@ mod tests {
         // stale `1` while `BUILTIN_MOBILE` grew to five, and because the module
         // is `#[cfg(feature = "uniffi")]` a plain `cargo test --workspace`
         // compiled none of it, so the rot only surfaced under `--all-features`.
-        let plugin_skills = engine_mobile::mobile_plugin_skill_names();
+        let plugin_skills = harness_runtime::mobile::mobile_plugin_skill_names();
         assert_eq!(
             plugin_skills.len(),
             27,
@@ -3981,7 +3981,7 @@ mod tests {
             api_base: "https://example.invalid".to_string(),
             api_key: "sk-test".to_string(),
             model: "claude-test".to_string(),
-            session_mode: engine_mobile::SessionModeDto::Code,
+            session_mode: harness_runtime::mobile::SessionModeDto::Code,
             vision_delegation_enabled: false,
             app_sandbox_root: temp.path().to_string_lossy().into_owned(),
             project_cwd: Some(workspace.to_string_lossy().into_owned()),
@@ -4043,7 +4043,7 @@ mod tests {
             api_base: String::new(),
             api_key: String::new(),
             model: String::new(),
-            session_mode: engine_mobile::SessionModeDto::Code,
+            session_mode: harness_runtime::mobile::SessionModeDto::Code,
             vision_delegation_enabled: true,
             app_sandbox_root: temp.path().to_string_lossy().into_owned(),
             project_cwd: None,
@@ -4085,7 +4085,7 @@ mod tests {
             api_base: String::new(),
             api_key: String::new(),
             model: String::new(),
-            session_mode: engine_mobile::SessionModeDto::Code,
+            session_mode: harness_runtime::mobile::SessionModeDto::Code,
             vision_delegation_enabled: true,
             app_sandbox_root: temp.path().to_string_lossy().into_owned(),
             project_cwd: None,

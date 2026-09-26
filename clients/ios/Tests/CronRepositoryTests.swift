@@ -155,7 +155,7 @@ final class CronRepositoryTests: XCTestCase {
         XCTAssertEqual(notifications.count, 1)
     }
 
-    #if canImport(engine_mobileFFI)
+    #if canImport(harness_runtimeFFI)
     func testNativeConfiguredStoreRoundTripsAndHonorsPause() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

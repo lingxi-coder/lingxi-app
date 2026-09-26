@@ -211,7 +211,7 @@ async fn propose_outcome(
         &crate::argv::Argv::default(),
         permission::PermissionMode::Default,
     );
-    let stack = engine_desktop::resolve_llm_stack(&cfg)
+    let stack = harness_runtime::desktop::resolve_llm_stack(&cfg)
         .await
         .map_err(|e| format!("The model call didn\u{2019}t start: {e}"))?;
 
@@ -247,7 +247,9 @@ async fn propose_outcome(
         classify_all_shell: false,
     };
 
-    let service = std::sync::Arc::new(engine_desktop::api_service_from_stack(&cfg, cwd, stack));
+    let service = std::sync::Arc::new(harness_runtime::desktop::api_service_from_stack(
+        &cfg, cwd, stack,
+    ));
     let query = ApiProposeQuery::new(service, model, profile, thinking);
 
     Ok(crate::commands::auto_mode_propose::run_propose_blocking(

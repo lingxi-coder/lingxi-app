@@ -72,7 +72,7 @@ pub fn large_memory_warning_rows(
     active_betas: &[String],
 ) -> Vec<String> {
     let max_chars = memory::max_memory_character_count(
-        llm_client::model::context_window::context_window_for_model(model, active_betas),
+        llm_runtime::model::context_window::context_window_for_model(model, active_betas),
         memory::memory_chars_per_token(model),
     );
     let max_u64 = u64::try_from(max_chars).unwrap_or(u64::MAX);

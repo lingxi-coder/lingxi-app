@@ -24,6 +24,17 @@ internal fun TypedSettingField(key: String, value: String, onChange: (String) ->
             val text = runCatching { JSONObject("{\"v\":$value}").optString("v", "") }.getOrDefault("")
             OutlinedTextField(if (value == "null") "" else text, { onChange(JSONObject.quote(it)) }, label = { Text(settingsLabel("Output style")) }, enabled = !readOnly)
         }
+        key == "providerRegion" -> Column {
+            Text(settingsLabel("Model region"))
+            listOf("international" to "International", "china_mainland" to "China mainland").forEach { (region, label) ->
+                Row {
+                    RadioButton(selected = value == JSONObject.quote(region), onClick = { onChange(JSONObject.quote(region)) }, enabled = !readOnly)
+                    Text(settingsLabel(label))
+                }
+            }
+            TextButton(enabled = !readOnly, onClick = { onChange("null") }) { Text(settingsLabel("Inherit")) }
+            Text(settingsLabel("Defaults to international. Apply saved settings when idle to change the running region."))
+        }
         key == "providers" -> ProviderFields(value, onChange, readOnly)
         key == "routing" -> RoutingFields(value, onChange, readOnly)
         key == "permissions" -> PermissionFields(value, onChange, readOnly)

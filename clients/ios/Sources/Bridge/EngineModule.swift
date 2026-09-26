@@ -10,9 +10,9 @@
 //      `ClientCommand` / `ClientError` / `MobileEngineError` Swift types, so a
 //      missing/mis-imported binding (the per-namespace `<ns>FFI` clang modules
 //      from the xcframework's bundled module.modulemap) fails to compile.
-//   2. Link-level: calls the C ABI function `ffi_engine_mobile_uniffi_contract_version()`
-//      (exported by the engine_mobile namespace of the static archive and
-//      surfaced through the `engine_mobileFFI` clang module). Because this is
+//   2. Link-level: calls the C ABI function `ffi_harness_runtime_uniffi_contract_version()`
+//      (exported by the harness_runtime namespace of the static archive and
+//      surfaced through the `harness_runtimeFFI` clang module). Because this is
 //      invoked from a REACHABLE path (`EngineModuleLinkageSmoke.verify()` is
 //      called from the app's startup), the linker cannot dead-strip it and must
 //      resolve the symbol from `libios_framework.a` — proving the framework is
@@ -22,7 +22,7 @@
 // `scripts/build-xcframework.sh` (in the gitignored `Generated/` dir). Its
 // dedup pass keeps the shared FfiConverter scaffolding in a single module so
 // cross-namespace references resolve; the per-namespace C/FFI clang modules
-// (engine_mobileFFI, client_protocolFFI, …) are imported automatically by the
+// (harness_runtimeFFI, client_protocolFFI, …) are imported automatically by the
 // generated Swift via `#if canImport(...)`, so there is intentionally NO
 // `import LingxiCodeFFI` here — the public Swift surface lives in this module.
 //
@@ -33,25 +33,25 @@
 
 import Foundation
 
-// The engine_mobile FFI clang module (from LingxiCodeFFI.xcframework) is what
-// exports `ffi_engine_mobile_uniffi_contract_version`. The generated Swift
+// The harness_runtime FFI clang module (from LingxiCodeFFI.xcframework) is what
+// exports `ffi_harness_runtime_uniffi_contract_version`. The generated Swift
 // imports it the same way, behind a `canImport` guard.
-#if canImport(engine_mobileFFI)
-    import engine_mobileFFI
+#if canImport(harness_runtimeFFI)
+    import harness_runtimeFFI
 #endif
 
 /// Namespace whose sole job is to force-link the engine static archive.
 enum EngineModuleLinkageSmoke {
-    /// Calls a no-argument C ABI function from the engine_mobile namespace of
+    /// Calls a no-argument C ABI function from the harness_runtime namespace of
     /// `libios_framework.a`. Reachable from app startup so the linker keeps the
     /// reference; harmless at runtime (returns the UniFFI contract version, no
     /// I/O, no engine). The result is intentionally discarded.
     @discardableResult
     static func verify() -> UInt32 {
-        #if canImport(engine_mobileFFI)
+        #if canImport(harness_runtimeFFI)
             // Load-bearing link reference: resolves a symbol from the linked
             // static archive shipped in LingxiCodeFFI.xcframework.
-            return ffi_engine_mobile_uniffi_contract_version()
+            return ffi_harness_runtime_uniffi_contract_version()
         #else
             return 0
         #endif

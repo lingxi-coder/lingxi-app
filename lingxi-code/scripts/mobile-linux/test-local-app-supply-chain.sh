@@ -360,7 +360,7 @@ expect_rejection "pnpm-lock byte drift to fail validation" \
 # Everything above validates the copy under
 # lingxi-code/local-apps/templates/runtime-profiles, but the bytes the engine
 # SHIPS come from a SECOND on-disk copy: `profile_file!` in
-# lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs
+# lingxi-code/harness-runtime/src/mobile/local_app_runtime_profiles.rs
 # `include_bytes!`es lingxi-code/plugins/lingxi-local-app/assets/templates/.
 # `compare_runtime_profile_trees` is what makes the attestation cover the
 # shipped bytes, so it gets its own red-and-green proof: exercised directly on

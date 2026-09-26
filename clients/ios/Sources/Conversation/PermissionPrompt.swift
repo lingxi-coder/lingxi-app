@@ -18,7 +18,7 @@
 import SwiftUI
 import UIKit
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
 
     extension Notification.Name {
         /// Posted by SwiftUI-owned sheets so the root permission-sheet host can

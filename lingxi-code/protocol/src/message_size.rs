@@ -23,6 +23,9 @@ pub fn text_byte_size(msg: &ConversationMessage) -> u64 {
 
 fn content_block_size(b: &ContentBlock) -> u64 {
     match b {
+        ContentBlock::ProviderContent { value, .. } => serde_json::to_vec(value)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0),
         ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
             text.len() as u64
         }

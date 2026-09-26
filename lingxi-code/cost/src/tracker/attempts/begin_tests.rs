@@ -88,6 +88,7 @@ fn intent(session: SessionId, id: &str) -> AttemptIntent {
                 provider: crate::ProviderId::Anthropic,
             },
         },
+        token_pricing_requires_quote: false,
         authorized_nano_usd: 10,
         authorized_input_tokens: 10,
         authorized_output_tokens: 20,
@@ -396,6 +397,7 @@ async fn owned_begin_dispatched_drop_retains_partial_usage_and_profile_until_ack
         revision: 1,
         replaces_revision: None,
         disposition: AttemptDisposition::Unknown,
+        token_quote_nano_usd: None,
         usage: Usage {
             tokens: crate::TokenUsage {
                 input: 7,

@@ -1,17 +1,8 @@
 # cargo-deny config (schema v2 / cargo-deny >= 0.19). Run by the CI `supply-chain`
 # job's `cargo deny check` step.
 #
-# TOOLCHAIN NOTE (M10 F3-00): `cargo deny` builds its dependency graph via
-# `cargo metadata`, which must PARSE every manifest in the lock — including the
-# pre-existing, WASI-target-only `wit-bindgen 0.57.x` (pulled transitively via
-# `getrandom -> wasi`) whose manifest declares `edition = "2024"`. That manifest
-# cannot be parsed by the workspace MSRV toolchain (`rust-version = "1.82"`), so
-# run cargo-deny's metadata pass under a newer cargo, e.g.:
-#     CARGO="$(rustup which --toolchain 1.85.0 cargo)" cargo deny check
-# This affects ONLY the supply-chain tool; the workspace itself still BUILDS on
-# 1.82 because that WASI branch is never compiled for the host target. cargo-deny
-# >= 0.19 is also required so its `rustsec` parser understands CVSS-4.0 advisory
-# entries now present in the live RUSTSEC database.
+# TOOLCHAIN NOTE: use the workspace Rust 1.94 toolchain for metadata and
+# builds. cargo-deny >= 0.19 is required for CVSS-4.0 advisories.
 #
 # Scope: supply-chain hygiene (licenses / advisories / duplicate versions /
 # sources). The COMPOSITION-ROOT *architectural* dependency rules (design §8.1 —
@@ -109,3 +100,5 @@ private = { ignore = true }
 [sources]
 unknown-registry = "warn"
 unknown-git = "warn"
+allow-git = ["https://github.com/lingxi-coder/llm-client"]
+required-git-spec = "rev"

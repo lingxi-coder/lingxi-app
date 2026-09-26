@@ -249,7 +249,7 @@ wrong about the oracle, and belong on the same backlog: **MCPCLI-5** (empty
   `platform_api::PermissionResolution::Allow` from a unit into a struct variant
   (`rule_source`), which only test-side constructors would have exposed.
 - **One real repair — `dac087a04`.** Gate run 1 at `6c73779e6` built clean but
-  `-p llm-client --lib` failed ~50% of the time on
+  `-p llm-runtime --lib` failed ~50% of the time on
   `global_fallback_model_works_without_chain_entry`
   (`left: Some("claude-opus-4-6")`, i.e. the primary model on the attempt that
   should have been the fallback). Root cause: `fix220/auth`'s `c10a97e7c` added

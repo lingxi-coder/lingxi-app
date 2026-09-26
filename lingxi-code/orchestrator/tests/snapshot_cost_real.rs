@@ -6,7 +6,7 @@
 
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
-use llm_client::{ContentBlock, LlmResponse, TokenUsage, Usage};
+use llm_runtime::{ContentBlock, LlmResponse, TokenUsage, Usage};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };

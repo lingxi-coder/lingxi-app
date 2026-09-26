@@ -73,7 +73,7 @@ mod terminal_sequence_tests {
 #[cfg(test)]
 mod terminal_api_error_tests {
     use crate::turn_loop::{refusal_explanation_clause, terminal_api_error_text};
-    use llm_client::StopDetails;
+    use llm_runtime::StopDetails;
 
     fn details(category: &str, explanation: Option<&str>) -> StopDetails {
         StopDetails {
@@ -1109,7 +1109,7 @@ mod read_file_state_tests {
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rejected_message_id = Arc::new(std::sync::Mutex::new(None));
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "Schemic".into(),
                 input: json!({}),
@@ -1406,7 +1406,7 @@ mod read_file_state_tests {
         // leg's twin is `streaming_concurrent_tools_test`.)
         let cwd = PathBuf::from("/tmp");
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
             }],
@@ -1892,7 +1892,7 @@ mod max_output_tokens_recovery_tests {
         MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
     };
     use crate::OrchestratorConfig;
-    use llm_client::LlmResponse;
+    use llm_runtime::LlmResponse;
     use protocol::{ContentBlock, ConversationMessage};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1917,7 +1917,7 @@ mod max_output_tokens_recovery_tests {
     /// A `max_tokens` response carrying one text block.
     fn max_tokens_response() -> LlmResponse {
         mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "partial".into(),
                 cache_control: None,
             }],
@@ -2212,7 +2212,7 @@ mod max_output_tokens_recovery_tests {
     #[tokio::test]
     async fn model_context_window_exceeded_surfaces_error_and_ends() {
         let orch = orch_with_responses(vec![mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "partial".into(),
                 cache_control: None,
             }],
@@ -2264,7 +2264,7 @@ mod max_output_tokens_recovery_tests {
     async fn terminal_refusal_without_fallback_surfaces_error_and_ends() {
         // Default config has no refusalFallbackModel → maybe_swap returns false.
         let orch = orch_with_responses(vec![mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "partial".into(),
                 cache_control: None,
             }],
@@ -2328,7 +2328,7 @@ mod max_output_tokens_recovery_tests {
     #[tokio::test]
     async fn normal_end_turn_unaffected_by_recovery() {
         let orch = orch_with_responses(vec![mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
             }],
@@ -2472,7 +2472,7 @@ mod malformed_and_thinking_only_tests {
         MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
     };
     use crate::OrchestratorConfig;
-    use llm_client::LlmResponse;
+    use llm_runtime::LlmResponse;
     use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2495,7 +2495,7 @@ mod malformed_and_thinking_only_tests {
     /// `tool_use` blocks (only a text block) — the #77 malformed shape.
     fn malformed_tool_use_response() -> LlmResponse {
         mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "I'll call the tool".into(),
                 cache_control: None,
             }],
@@ -2507,7 +2507,7 @@ mod malformed_and_thinking_only_tests {
     /// (thinking) block — no visible text. The #78 shape.
     fn thinking_only_response(stop_reason: &str) -> LlmResponse {
         mock_message_response(
-            vec![llm_client::ContentBlock::Reasoning {
+            vec![llm_runtime::ContentBlock::Reasoning {
                 text: "thinking quietly".into(),
                 signature: None,
             }],
@@ -2675,7 +2675,7 @@ mod malformed_and_thinking_only_tests {
     #[tokio::test]
     async fn normal_tool_use_does_not_trigger_malformed_path() {
         let resp = mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: "toolu_1".into(),
                 name: "Nope".into(), // unknown tool → synthetic error, still dispatched
                 input: serde_json::json!({}),
@@ -2857,7 +2857,7 @@ mod malformed_and_thinking_only_tests {
     async fn completed_batched_responses_without_tools_do_not_requery() {
         for stop_reason in [Some("stop_sequence"), None] {
             let orch = orch_with_responses(vec![mock_message_response(
-                vec![llm_client::ContentBlock::Text {
+                vec![llm_runtime::ContentBlock::Text {
                     text: "Complete answer".into(),
                     cache_control: None,
                 }],
@@ -2935,7 +2935,7 @@ mod malformed_and_thinking_only_tests {
     #[tokio::test]
     async fn end_turn_with_visible_text_does_not_nudge() {
         let resp = mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "Here is the answer.".into(),
                 cache_control: None,
             }],
@@ -2957,7 +2957,7 @@ mod malformed_and_thinking_only_tests {
     #[tokio::test]
     async fn whitespace_only_text_is_not_visible() {
         let resp = mock_message_response(
-            vec![llm_client::ContentBlock::Text {
+            vec![llm_runtime::ContentBlock::Text {
                 text: "   \n  ".into(),
                 cache_control: None,
             }],
@@ -4180,7 +4180,7 @@ mod pre_tool_hook_tests {
     fn orch_with(
         hooks: Arc<HookExecutorImpl>,
         perms: Arc<dyn PermissionGate>,
-        responses: Vec<llm_client::LlmResponse>,
+        responses: Vec<llm_runtime::LlmResponse>,
     ) -> ConversationOrchestrator {
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
@@ -4350,7 +4350,7 @@ mod pre_tool_hook_tests {
     async fn injected_message_sources_records_tool_use_id() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Inject".into(),
                 input: json!({}),
@@ -4400,7 +4400,7 @@ mod pre_tool_hook_tests {
     async fn normal_tool_records_no_source_and_serializes_no_field() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -4438,7 +4438,7 @@ mod pre_tool_hook_tests {
     async fn new_messages_appended_to_history_after_tool_result() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Inject".into(),
                 input: json!({}),
@@ -4752,7 +4752,7 @@ mod pre_tool_hook_tests {
         // ends with stop_reason "hook_stopped" (TS query.ts `{reason:'hook_stopped'}`).
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -4781,7 +4781,7 @@ mod pre_tool_hook_tests {
         // Without continue:false a tool-bearing step keeps looping (Continue).
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -4803,7 +4803,7 @@ mod pre_tool_hook_tests {
     async fn mcp_end_turn_result_ends_the_step_without_a_follow_up_call() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -4871,7 +4871,7 @@ mod pre_tool_hook_tests {
     async fn errored_mcp_result_cannot_end_the_turn() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -4899,7 +4899,7 @@ mod pre_tool_hook_tests {
     #[tokio::test]
     async fn multiple_mcp_end_turn_results_emit_one_event() {
         let calls = (0..2)
-            .map(|_| llm_client::ContentBlock::ToolCall {
+            .map(|_| llm_runtime::ContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -4956,7 +4956,7 @@ mod pre_tool_hook_tests {
     async fn post_tool_batch_emits_tools_refreshed_mid_turn_when_mcp_count_changes() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "RefreshMcpTools".into(),
                 input: json!({}),
@@ -4997,7 +4997,7 @@ mod pre_tool_hook_tests {
     async fn tool_requested_end_runs_but_cannot_be_blocked_by_stop_hook() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_client::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),

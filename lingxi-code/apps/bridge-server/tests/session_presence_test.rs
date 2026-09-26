@@ -329,7 +329,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         session_c_text
     );
 
-    let stale = engine_desktop::refresh_process_session_presence(session_a, session_b)
+    let stale = harness_runtime::desktop::refresh_process_session_presence(session_a, session_b)
         .await
         .expect_err("a stale A-to-B callback must not replace live C");
     assert!(stale.contains("stale session activation"), "{stale}");

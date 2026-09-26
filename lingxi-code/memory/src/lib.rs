@@ -252,7 +252,7 @@ pub fn memory_chars_per_token(model: &str) -> u64 {
 /// Math.max(gn_, Math.round(r*hn_*kC(e)))`.
 ///
 /// `context_window` is the effective window for the model+betas (LingXi's
-/// `llm_client::model::context_window_for_model`, the `JE`/`SZc` analog); `0`
+/// `llm_runtime::model::context_window_for_model`, the `JE`/`SZc` analog); `0`
 /// stands for "unknown" and takes the [`DEFAULT_MEMORY_CONTEXT_WINDOW`]
 /// fallback. `chars_per_token` comes from [`memory_chars_per_token`].
 #[must_use]

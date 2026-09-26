@@ -651,7 +651,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             parsed.command.as_ref(),
             Some(crate::commands::Commands::BgPtySession(_))
         );
-    let managed_otel_overrides = engine_desktop::managed_otel_env_overrides().await;
+    let managed_otel_overrides = harness_runtime::desktop::managed_otel_env_overrides().await;
     let _telemetry_guard =
         match telemetry::otel::OtelConfig::from_env_with_managed(&managed_otel_overrides) {
             cfg if cfg.enabled => telemetry::otel::install_process_with_config(
@@ -769,7 +769,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     //     &&r.options.appendSubagentSystemPrompt?Rm([...Xt,r.options.appendSubagentSystemPrompt]):Xt`).
     //
     // The env pair is the transport because the subagent spawner is reached
-    // through `engine-desktop`'s runtime build, which carries no per-spawn CLI
+    // through `harness-runtime::desktop`'s runtime build, which carries no per-spawn CLI
     // options channel; it is also what gives the oracle's "propagated to nested
     // subagents" for free — a nested spawn is a child of the same process and
     // reads the same variables. Both are set BEFORE any runtime is constructed.
@@ -839,7 +839,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                 return exit_codes::RUNTIME_ERROR;
             }
             if parsed.model.as_deref().is_some_and(|model| {
-                let (profile, _) = llm_client::split_profile_model(model);
+                let (profile, _) = llm_runtime::split_profile_model(model);
                 profile != "anthropic"
             }) {
                 eprintln!("lingxi-cli: --betas is only supported by the Anthropic provider.");
@@ -901,7 +901,8 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             .command
             .as_ref()
             .map(crate::commands::Commands::top_level_name);
-        let managed_tiers = engine_desktop::settings_watch::managed_settings_raw_tiers().await;
+        let managed_tiers =
+            harness_runtime::desktop::settings_watch::managed_settings_raw_tiers().await;
         let policy = lingxi_core::settings::enterprise::managed_version_policy(&managed_tiers);
         if let Some(msg) = lingxi_core::settings::enterprise::version_gate(
             env!("CARGO_PKG_VERSION"),
@@ -1546,7 +1547,7 @@ pub(crate) fn auto_mode_cycle_available(argv: &Argv) -> bool {
     let model = argv
         .model
         .clone()
-        .unwrap_or_else(|| engine_desktop::DesktopConfig::default().default_model);
+        .unwrap_or_else(|| harness_runtime::desktop::DesktopConfig::default().default_model);
     permission::auto_mode_available(&permission::AutoGateInputs {
         disabled_by_settings: settings.auto_mode_disabled,
         circuit_broken: false,
@@ -1575,7 +1576,7 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
     // MODE-FRONTMATTER-04: the selected main-thread agent's frontmatter
     // `permissionMode` sits between the CLI override and the settings
     // `defaultMode`. The agent catalog is resolved later in
-    // `engine_desktop::build()`, so this early CLI pass cannot see it yet; the
+    // `harness_runtime::desktop::build()`, so this early CLI pass cannot see it yet; the
     // composition root re-applies the same precedence once it knows which
     // agent actually won.
     let agent_frontmatter_mode: Option<permission::PermissionMode> = None;
@@ -1594,7 +1595,7 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
     let model = argv
         .model
         .clone()
-        .unwrap_or_else(|| engine_desktop::DesktopConfig::default().default_model);
+        .unwrap_or_else(|| harness_runtime::desktop::DesktopConfig::default().default_model);
     let inputs = permission::AutoGateInputs {
         disabled_by_settings: settings.auto_mode_disabled,
         circuit_broken: false,
@@ -1761,12 +1762,12 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
 /// The model resolution is byte-identical to the one
 /// `init::resolve_desktop_config` threads into `DesktopConfig.default_model`:
 /// the `--model` override if present, else the desktop default
-/// (`engine_desktop::DesktopConfig::default().default_model`). This mirrors
+/// (`harness_runtime::desktop::DesktopConfig::default().default_model`). This mirrors
 /// claude-code's `resolvedInitialModel = parseUserSpecifiedModel(
 /// initialMainLoopModel ?? getDefaultMainLoopModel())` (`main.tsx:2116`), the
 /// same value fed to `getModelDeprecationWarning` at `main.tsx:2873`.
 ///
-/// The lookup itself is `engine_desktop::model_deprecation_warning`
+/// The lookup itself is `harness_runtime::desktop::model_deprecation_warning`
 /// (moved from the deleted `providers` crate in Plan 3b); it returns
 /// `Some(warning)` only for a deprecated model under the active provider and
 /// `None` otherwise — so a current default model yields `None` and the caller
@@ -1775,8 +1776,8 @@ fn startup_deprecation_notice(argv: &Argv) -> Option<String> {
     let resolved_model = argv
         .model
         .clone()
-        .unwrap_or_else(|| engine_desktop::DesktopConfig::default().default_model);
-    engine_desktop::model_deprecation_warning(Some(&resolved_model))
+        .unwrap_or_else(|| harness_runtime::desktop::DesktopConfig::default().default_model);
+    harness_runtime::desktop::model_deprecation_warning(Some(&resolved_model))
 }
 
 /// (T3) One-line terminal-compatibility notice for terminals known to mis-render
@@ -1826,9 +1827,9 @@ mod startup_notice_tests {
         // Belt-and-suspenders: assert against the actual desktop default rather
         // than a hardcoded literal so a future default bump can't silently start
         // emitting a notice at every startup.
-        let default_model = engine_desktop::DesktopConfig::default().default_model;
+        let default_model = harness_runtime::desktop::DesktopConfig::default().default_model;
         assert!(
-            engine_desktop::model_deprecation_warning(Some(&default_model)).is_none(),
+            harness_runtime::desktop::model_deprecation_warning(Some(&default_model)).is_none(),
             "the shipped desktop default model ({default_model}) must not be deprecated, \
              else every startup would emit a notice"
         );
@@ -1849,7 +1850,7 @@ mod startup_notice_tests {
     /// including the leading `⚠ ` glyph). This is the only condition under which
     /// startup emits anything. The provider env is cleared first so the
     /// first-party retirement date is the one asserted (the table carries a
-    /// different date per provider; see `engine_desktop::model_deprecation_warning`).
+    /// different date per provider; see `harness_runtime::desktop::model_deprecation_warning`).
     #[test]
     fn deprecated_override_model_yields_first_party_notice() {
         let prior = [

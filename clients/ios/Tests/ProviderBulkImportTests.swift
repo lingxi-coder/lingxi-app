@@ -3,6 +3,47 @@ import XCTest
 
 final class ProviderBulkImportTests: XCTestCase {
 
+    func testProviderRegionsSurviveImportAndMerge() throws {
+        let regionPolicies: [[String]] = [["china_mainland"], ["international"], []]
+        for regions in regionPolicies {
+            let input: [String: Any] = ["providers": ["regional": [
+                "type": "openai", "baseUrl": "https://example.test/v1",
+                "apiKeyEnv": "API_KEY", "models": ["m"], "regions": regions,
+            ]]]
+            let data = try JSONSerialization.data(withJSONObject: input)
+            let document = ProviderBulkImport.parse(String(decoding: data, as: UTF8.self), existing: [:])
+            XCTAssertTrue(document.errors.isEmpty)
+            let entry = try XCTUnwrap(document.entries.first)
+            XCTAssertTrue(entry.warnings.isEmpty)
+            XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+            XCTAssertEqual(entry.draft["regions"] as? [String], regions)
+
+            let merged = try ProviderBulkImport.merge(document.entries, into: [:], configured: [])
+            let provider = try XCTUnwrap(merged["regional"] as? [String: Any])
+            XCTAssertEqual(provider["regions"] as? [String], regions)
+        }
+    }
+
+    func testConnectionRegionsOverrideSurvivesImportAndMerge() throws {
+        let input = #"{"providers":{"regional":{"type":"openai","baseUrl":"https://example.test/v1","apiKeyEnv":"API_KEY","models":["m"],"regions":["international"],"connections":[{"id":"inherited"},{"id":"cn","regions":["china_mainland"]},{"id":"disabled","regions":[]}]}}}"#
+        let document = ProviderBulkImport.parse(input, existing: [:])
+        XCTAssertTrue(document.errors.isEmpty)
+        let entry = try XCTUnwrap(document.entries.first)
+        XCTAssertTrue(entry.warnings.isEmpty)
+        XCTAssertNil(ProviderBulkImport.validate(entry, credentialConfigured: false))
+
+        let merged = try ProviderBulkImport.merge(document.entries, into: [:], configured: [])
+        let saved = try XCTUnwrap(merged["regional"] as? [String: Any])
+        for provider in [entry.draft, saved] {
+            XCTAssertEqual(provider["regions"] as? [String], ["international"])
+            let connections = try XCTUnwrap(provider["connections"] as? [[String: Any]])
+            XCTAssertEqual(connections.count, 3)
+            XCTAssertNil(connections.first { $0["id"] as? String == "inherited" }?["regions"])
+            XCTAssertEqual(connections.first { $0["id"] as? String == "cn" }?["regions"] as? [String], ["china_mainland"])
+            XCTAssertEqual(connections.first { $0["id"] as? String == "disabled" }?["regions"] as? [String], [])
+        }
+    }
+
     /// A provider reachable several ways must SURVIVE import. `connections` was
     /// absent from the carried-key set, so a multi-connection config used to be
     /// dropped with only a warning — silently yielding a single-connection

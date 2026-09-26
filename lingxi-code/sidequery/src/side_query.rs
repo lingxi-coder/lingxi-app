@@ -57,7 +57,7 @@ pub struct SideQueryRequest {
     /// summarization — match the binary's explicit `{type:"disabled"}`
     /// callers). Replaces the never-forwarded `thinking_budget` knob.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<llm_client::model::thinking::ThinkingConfig>,
+    pub thinking: Option<llm_runtime::model::thinking::ThinkingConfig>,
     /// Output effort inherited by compaction from the live parent request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Value>,
@@ -91,7 +91,7 @@ pub struct SideQueryResponse {
 pub enum SideQueryError {
     /// Underlying API call failed (transport, 4xx/5xx, malformed stream).
     #[error(transparent)]
-    Api(#[from] llm_client::LlmError),
+    Api(#[from] llm_runtime::LlmError),
     /// Provider returned a response we could not decode into a
     /// [`SideQueryResponse`].
     #[error("invalid response: {0}")]
@@ -227,7 +227,7 @@ pub trait SideQueryClient: Send + Sync {
         }?;
         Ok(SideQueryEstimate {
             serialized_bytes,
-            input_tokens: llm_client::model::count_tokens::approximate_tokens_for_bytes(
+            input_tokens: llm_runtime::model::count_tokens::approximate_tokens_for_bytes(
                 serialized_bytes,
             ),
         })

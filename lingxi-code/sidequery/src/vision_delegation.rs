@@ -218,7 +218,7 @@ impl VisionDelegationService {
                         continue;
                     }
                     if first_error.is_none() {
-                        first_error = Some(SideQueryError::Api(llm_client::LlmError::Transport {
+                        first_error = Some(SideQueryError::Api(llm_runtime::LlmError::Transport {
                             message: format!("vision delegation task failed: {error}"),
                         }));
                         join_set.abort_all();
@@ -317,7 +317,7 @@ impl VisionDelegationService {
             }
             if item.decoded_bytes_len > MAX_DECODED_BYTES_PER_QUERY {
                 return Err(SideQueryError::Api(
-                    llm_client::LlmError::MediaDelegationUnavailable {
+                    llm_runtime::LlmError::MediaDelegationUnavailable {
                         message: format!(
                             "Image '{}' exceeds the 24 MiB delegation limit.",
                             item.label
@@ -859,7 +859,7 @@ fn batch_media(media: Vec<DelegationMedia>) -> Result<Vec<Vec<DelegationMedia>>,
     for item in media {
         if item.decoded_bytes_len > MAX_DECODED_BYTES_PER_QUERY {
             return Err(SideQueryError::Api(
-                llm_client::LlmError::MediaDelegationUnavailable {
+                llm_runtime::LlmError::MediaDelegationUnavailable {
                     message: format!(
                         "Image '{}' exceeds the 24 MiB delegation limit.",
                         item.label
@@ -964,7 +964,7 @@ fn parse_response(
             })
         })
         .ok_or_else(|| {
-            SideQueryError::Api(llm_client::LlmError::MediaDelegationUnavailable {
+            SideQueryError::Api(llm_runtime::LlmError::MediaDelegationUnavailable {
                 message: "Vision delegate returned an empty response.".to_string(),
             })
         })?;
@@ -1072,7 +1072,7 @@ fn fingerprint_for_source(source: &ImageSource) -> Result<String, SideQueryError
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|error| {
-                    SideQueryError::Api(llm_client::LlmError::InvalidRequest {
+                    SideQueryError::Api(llm_runtime::LlmError::InvalidRequest {
                         message: format!("invalid base64 image payload: {error}"),
                     })
                 })?;
@@ -1097,7 +1097,7 @@ fn decoded_len(source: &ImageSource) -> Result<usize, SideQueryError> {
                 .decode(data)
                 .map(|bytes| bytes.len())
                 .map_err(|error| {
-                    SideQueryError::Api(llm_client::LlmError::InvalidRequest {
+                    SideQueryError::Api(llm_runtime::LlmError::InvalidRequest {
                         message: format!("invalid base64 image payload: {error}"),
                     })
                 })
@@ -1123,7 +1123,7 @@ fn validate_base64_media_type(media_type: &str) -> Result<(), SideQueryError> {
         return Ok(());
     }
     Err(SideQueryError::Api(
-        llm_client::LlmError::MediaDelegationUnavailable {
+        llm_runtime::LlmError::MediaDelegationUnavailable {
             message: "only JPEG, PNG, GIF, and WebP images can be delegated".to_string(),
         },
     ))
@@ -1257,13 +1257,13 @@ fn map_http_error(error: &HttpError) -> SideQueryError {
 }
 
 fn remote_fetch_error(message: &str) -> SideQueryError {
-    SideQueryError::Api(llm_client::LlmError::MediaDelegationUnavailable {
+    SideQueryError::Api(llm_runtime::LlmError::MediaDelegationUnavailable {
         message: message.to_string(),
     })
 }
 
 fn delegate_url_error() -> SideQueryError {
-    SideQueryError::Api(llm_client::LlmError::MediaDelegationUnavailable {
+    SideQueryError::Api(llm_runtime::LlmError::MediaDelegationUnavailable {
         message: "only public http(s) image URLs can be sent to the vision delegate".to_string(),
     })
 }
@@ -1272,7 +1272,7 @@ fn document_unsupported(source: &DocumentSource) -> SideQueryError {
     let media_type = match source {
         DocumentSource::Base64 { media_type, .. } => media_type.as_str(),
     };
-    SideQueryError::Api(llm_client::LlmError::MediaDelegationUnavailable {
+    SideQueryError::Api(llm_runtime::LlmError::MediaDelegationUnavailable {
         message: format!(
             "{media_type} delegation is not supported yet; switch to a document-capable model."
         ),
@@ -1280,7 +1280,7 @@ fn document_unsupported(source: &DocumentSource) -> SideQueryError {
 }
 
 fn document_value_unsupported() -> SideQueryError {
-    SideQueryError::Api(llm_client::LlmError::MediaDelegationUnavailable {
+    SideQueryError::Api(llm_runtime::LlmError::MediaDelegationUnavailable {
         message: "PDF delegation is not supported yet; switch to a document-capable model."
             .to_string(),
     })
@@ -1447,7 +1447,7 @@ mod tests {
             match self.calls.fetch_add(1, Ordering::SeqCst) {
                 0 => {
                     self.second_started.notified().await;
-                    Err(SideQueryError::Api(llm_client::LlmError::Transport {
+                    Err(SideQueryError::Api(llm_runtime::LlmError::Transport {
                         message: "delegate unavailable".into(),
                     }))
                 }
@@ -2069,7 +2069,7 @@ mod tests {
                 stop_reason: Some("end_turn".into()),
                 retry_count: 1,
             }),
-            Err(SideQueryError::Api(llm_client::LlmError::Transport {
+            Err(SideQueryError::Api(llm_runtime::LlmError::Transport {
                 message: "delegate unavailable".into(),
             })),
         ]));

@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use client_protocol::commands::WritableScopeDto;
+use lingxi_core::settings::env_parser;
 use lingxi_core::settings::merger::merge_raw_layer;
 use migrations::settings_update::{read_settings_map, settings_path, WritableScope};
 use serde_json::Value;
@@ -146,7 +147,7 @@ const FILE_LAYERS: [WritableScope; 3] = [
 /// `active` is the file-layer values as read at session start (the caller
 /// supplies it; this function does not compute it). `managed` is the
 /// administrator's key → value overlay, supplied by the composition root
-/// (`engine_desktop::managed_settings_overlay`) — this module deliberately
+/// (`harness_runtime::desktop::managed_settings_overlay`) — this module deliberately
 /// does not discover managed layers itself.
 ///
 /// The overlay is applied AFTER the file layers, never before, because managed
@@ -159,6 +160,15 @@ pub fn build_snapshot(
     paths: &SettingsPaths,
     active: BTreeMap<String, Value>,
     managed: BTreeMap<String, Value>,
+) -> SettingsSnapshot {
+    build_snapshot_with_env(paths, active, managed, &std::env::vars().collect())
+}
+
+fn build_snapshot_with_env(
+    paths: &SettingsPaths,
+    active: BTreeMap<String, Value>,
+    managed: BTreeMap<String, Value>,
+    env: &BTreeMap<String, String>,
 ) -> SettingsSnapshot {
     let mut effective: BTreeMap<String, Value> = BTreeMap::new();
     let mut provenance: BTreeMap<String, SettingsLayer> = BTreeMap::new();
@@ -226,6 +236,25 @@ pub fn build_snapshot(
         merged_keys.remove(key);
     }
     merged_keys.extend(merge_raw_layer(&mut effective, managed));
+
+    if active.contains_key("providerRegion") {
+        effective
+            .entry("providerRegion".into())
+            .or_insert_with(|| Value::String("international".into()));
+    }
+
+    // Region controls affect routing at startup. Report the same validated
+    // environment override so a saved value cannot look perpetually pending.
+    if let Some(region) = env_parser::parse_env(env)
+        .ok()
+        .and_then(|(settings, _)| settings.provider_region)
+    {
+        effective.insert(
+            "providerRegion".into(),
+            serde_json::to_value(region).expect("region serializes"),
+        );
+        provenance.insert("providerRegion".into(), SettingsLayer::Env);
+    }
 
     SettingsSnapshot {
         files,
@@ -467,7 +496,15 @@ fn apply_patch_before_publish<F>(
 where
     F: FnOnce(),
 {
-    for (key, _) in &patch {
+    for (key, value) in &patch {
+        if key == "providerRegion" {
+            if let Some(value) = value {
+                serde_json::from_value::<lingxi_core::settings::ProviderRegion>(value.clone())
+                    .map_err(|_| {
+                        "providerRegion must be international or china_mainland".to_owned()
+                    })?;
+            }
+        }
         if let Some((reserved, replacement)) =
             RESERVED_KEYS.iter().find(|(reserved, _)| reserved == key)
         {
@@ -546,7 +583,7 @@ pub fn layer_wire_name(layer: SettingsLayer) -> &'static str {
 /// `active` is the file layers PLUS the managed overlay, as loaded at session
 /// start (see [`SettingsSnapshot::active`] for why managed is folded in), and
 /// `managed` comes from the managed-settings layers the desktop composition
-/// root already loads (`engine_desktop::managed_settings_overlay`).
+/// root already loads (`harness_runtime::desktop::managed_settings_overlay`).
 /// bridge-server deliberately does not re-implement managed-layer loading.
 pub struct SettingsContext {
     /// The two roots every file layer's path is resolved from.
@@ -703,6 +740,60 @@ fn to_json_or_empty_object<T: serde::Serialize>(what: &str, value: &T) -> String
         );
         "{}".to_string()
     })
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+    #[test]
+    fn default_region_matches_runtime_without_a_spurious_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: root.path().join("home"),
+            project_dir: root.path().join("project"),
+        };
+        let active =
+            BTreeMap::from([("providerRegion".into(), serde_json::json!("international"))]);
+        let snapshot =
+            build_snapshot_with_env(&paths, active.clone(), BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(
+            snapshot.effective.get("providerRegion"),
+            active.get("providerRegion")
+        );
+    }
+
+    #[test]
+    fn region_env_uses_core_validation_and_preserves_file_values_when_invalid() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = SettingsPaths {
+            lingxi_home: root.path().join("home"),
+            project_dir: root.path().join("project"),
+        };
+        std::fs::create_dir_all(&paths.lingxi_home).unwrap();
+        std::fs::write(
+            paths.lingxi_home.join("settings.json"),
+            r#"{"providerRegion":"china_mainland"}"#,
+        )
+        .unwrap();
+
+        for (value, expected, layer) in [
+            ("international", "international", SettingsLayer::Env),
+            ("china_mainland", "china_mainland", SettingsLayer::Env),
+            ("invalid-region", "china_mainland", SettingsLayer::User),
+        ] {
+            let env = BTreeMap::from([(
+                format!("{}PROVIDER_REGION", env_parser::PREFIX_PRIORITY[0]),
+                value.into(),
+            )]);
+            let snapshot = build_snapshot_with_env(&paths, BTreeMap::new(), BTreeMap::new(), &env);
+            assert_eq!(
+                snapshot.effective.get("providerRegion"),
+                Some(&serde_json::json!(expected)),
+                "{value}"
+            );
+            assert_eq!(snapshot.provenance.get("providerRegion"), Some(&layer));
+        }
+    }
 }
 
 #[cfg(test)]

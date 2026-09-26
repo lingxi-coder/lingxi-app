@@ -183,7 +183,7 @@ function validModelPricing(value: unknown): boolean {
   }
   return true;
 }
-const providerFields = new Set(['type','baseUrl','apiKeyEnv','models','region','apiVersion','supportsWebsockets','supportsWebsocketCompression','websocketConnectTimeoutMs','visionDelegate','pricing','connections','credentialIds','fallback','billingMode']);
+const providerFields = new Set(['type','baseUrl','apiKeyEnv','models','region','regions','apiVersion','supportsWebsockets','supportsWebsocketCompression','websocketConnectTimeoutMs','visionDelegate','pricing','connections','credentialIds','fallback','billingMode']);
 const modelFields = new Set(['id','aliases','capabilities','metadata']);
 const sdkTypes: Record<string, string> = { '@ai-sdk/openai-compatible': 'openai', '@ai-sdk/openai': 'openai-responses', '@ai-sdk/anthropic': 'anthropic', '@ai-sdk/google': 'gemini' };
 const referenceFields = new Set(['apiKeyEnv', 'credentialIds']);

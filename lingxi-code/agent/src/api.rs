@@ -17,7 +17,7 @@
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
-use llm_client::{LlmError, LlmEvent, LlmResponse};
+use llm_runtime::{LlmError, LlmEvent, LlmResponse};
 use platform_api::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
 use protocol::{AgentId, SessionId};
 use std::path::PathBuf;
@@ -757,7 +757,7 @@ mod tests {
                 content: Vec::new(),
                 stop_reason: Some("end_turn".into()),
                 stop_details: None,
-                usage: llm_client::Usage::default(),
+                usage: llm_runtime::Usage::default(),
                 cost: None,
                 provider_metadata: serde_json::Value::Null,
             })

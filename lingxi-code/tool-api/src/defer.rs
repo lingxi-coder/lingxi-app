@@ -129,7 +129,7 @@ fn parse_auto_percentage(e: &str) -> Option<u8> {
 /// Read [`mode_from_values`] from the live environment. Prefers the rebranded
 /// `LINGXI_ENABLE_TOOL_SEARCH`, falling back to claude-code's bare
 /// `ENABLE_TOOL_SEARCH`; kill switch is `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`
-/// (kept, matching `llm-client`'s beta gate).
+/// (kept, matching `llm-runtime`'s beta gate).
 #[must_use]
 pub fn mode_from_env() -> ToolSearchMode {
     let enable = std::env::var("LINGXI_ENABLE_TOOL_SEARCH")

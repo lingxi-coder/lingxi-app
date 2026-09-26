@@ -1,6 +1,6 @@
 //! `computer` tool `request_access` DTOs — the wire shape for the Electron/
 //! bridge-server path, sourced from
-//! `tui_core::computer_access_bridge::{ComputerAccessRequest, ComputerAccessResponse}`.
+//! `permission::computer_access::{ComputerAccessRequest, ComputerAccessResponse}`.
 //!
 //! Mirrors [`crate::permission`]'s conventions exactly:
 //! - the outbound request/response STRUCTS carry no own `type` tag — like
@@ -14,7 +14,7 @@
 //! internally-tagged enum convention (`#[serde(tag = "type", …)]`, see
 //! [`crate::permission::PermissionResponseDto`]): it carries no per-variant
 //! payload and rides as a bare wire STRING (`"read"` / `"click"` / `"full"`),
-//! byte-identical to the source `tui_core::computer_access_bridge::AccessTier::
+//! byte-identical to the source `permission::computer_access::AccessTier::
 //! as_str()` — a plain `#[serde(rename_all = "snake_case")]` fieldless enum
 //! serializes exactly that way (no `tag` attribute ⇒ no wrapping object).
 //!
@@ -25,7 +25,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One requested application — mirrors
-/// `tui_core::computer_access_bridge::RequestedApp`.
+/// `permission::computer_access::RequestedApp`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct RequestedAppDto {
@@ -35,7 +35,7 @@ pub struct RequestedAppDto {
 }
 
 /// The per-app capability tier requested — mirrors
-/// `tui_core::computer_access_bridge::AccessTier`. A bare wire STRING (see the
+/// `permission::computer_access::AccessTier`. A bare wire STRING (see the
 /// module doc for why this is not internally tagged like this crate's other
 /// enums): `"read"` / `"click"` / `"full"`, byte-identical to `AccessTier::as_str()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ pub enum AccessTierDto {
 }
 
 /// Which macOS TCC permissions are missing — mirrors
-/// `tui_core::computer_access_bridge::TccState`.
+/// `permission::computer_access::TccState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct TccStateDto {
@@ -63,7 +63,7 @@ pub struct TccStateDto {
 }
 
 /// Outbound `request_access` request — the wire lowering of
-/// `tui_core::computer_access_bridge::ComputerAccessRequest`. Correlated by
+/// `permission::computer_access::ComputerAccessRequest`. Correlated by
 /// `request_id` (assigned by the connection-scoped broker, mirroring
 /// [`crate::permission::PermissionRequest::request_id`]); echoed back in the
 /// matching `ApproveComputerAccess`/`DenyComputerAccess`
@@ -98,7 +98,7 @@ pub struct ComputerAccessRequestDto {
 }
 
 /// The user's resolution — the wire lowering of
-/// `tui_core::computer_access_bridge::ComputerAccessResponse`. An empty
+/// `permission::computer_access::ComputerAccessResponse`. An empty
 /// `granted_apps` with every flag `false` means "denied"; there is no separate
 /// boolean (mirrors the source type's own doc comment).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

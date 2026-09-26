@@ -350,7 +350,7 @@ mod unix {
     async fn run_with_config(
         argv: &Argv,
         mode: permission::PermissionMode,
-        config: Option<engine_desktop::DesktopConfig>,
+        config: Option<harness_runtime::desktop::DesktopConfig>,
     ) -> Result<(), String> {
         let manifest = load_manifest(argv)?;
         std::env::set_var("LINGXI_CODE_TEAMMATE_BACKEND", "split-pane");
@@ -445,7 +445,7 @@ mod unix {
         connection: Arc<Connection>,
         input_rx: &mut mpsc::Receiver<TaskCommand>,
         cancelled: tokio_util::sync::CancellationToken,
-        config: Option<engine_desktop::DesktopConfig>,
+        config: Option<harness_runtime::desktop::DesktopConfig>,
     ) -> Result<(), String> {
         let mut cfg = match config {
             Some(config) => config,
@@ -470,9 +470,10 @@ mod unix {
         let output = Arc::new(crate::output_adapter::SinkAdapter::new(Arc::new(
             crate::output::PlainSink::new(),
         )));
-        let runtime = engine_desktop::build(cfg, output, Arc::new(InjectedPermissionSink))
-            .await
-            .map_err(|e| e.to_string())?;
+        let runtime =
+            harness_runtime::desktop::build(cfg, output, Arc::new(InjectedPermissionSink))
+                .await
+                .map_err(|e| e.to_string())?;
         runtime
             .coordinator
             .set_team_name(Some(manifest.team_name.clone()))

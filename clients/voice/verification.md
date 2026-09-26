@@ -37,8 +37,8 @@ playback, and device-specific interruptions were not exercised in this pass.
 | Actual macOS system synthesis | Silent render produced 82,364 PCM16 bytes at 22,050 Hz; explicit missing offline model returned `model_missing`; all operation/resource counts were zero afterward | `/tmp/lingxi-audio-native-smoke-signed.log` |
 | iOS audio | 86 selected XCTest tests passed, including real default-system PCM, config persistence, generated callback, stale operations, model references, and Flow snapshot pinning | `/private/tmp/lingxi-ios-audio-unification-20260923-final-refresh.log` and `.xcresult` |
 | Android Direct checkpoint | 966 JVM tests and lint passed after offload speech/media integration; final promoted JNI linked in the successful Direct APK build | `clients/android/app/build/reports/tests/testDirectDebugUnitTest/index.html`; `lint-results-directDebug.html` |
-| Rust lifecycle | Session retarget, recording across normal turn end, asynchronous engine disposal, and a callback gated on Drop returning passed | `engine-mobile` targeted lifecycle tests |
-| Rust Local App / tools | Runtime teardown during authorization passed; `tool-mobile` 23 tests passed | `engine-mobile` Local App regression and `tool-mobile --lib` |
+| Rust lifecycle | Session retarget, recording across normal turn end, asynchronous engine disposal, and a callback gated on Drop returning passed | `harness-runtime` (`mobile`) targeted lifecycle tests |
+| Rust Local App / tools | Runtime teardown during authorization passed; `tool-mobile` 23 tests passed | `harness-runtime` (`mobile`) Local App regression and `tool-mobile --lib` |
 | Rust capability projection | Live schema serialization and unknown/support-change/disconnect projection through wire cache and ToolSearch passed | `tool-api` and `orchestrator` targeted regressions |
 | Rust bridge | 5 audio unit tests, 4 request end-to-end tests, and 3 production assembly tests passed | `bridge-server` audio suites |
 | Rust protocol / platform | Full client-protocol suite passed; platform-api passed 509 unit tests, 1 integration test, and 3 doctests | Scoped Cargo verification |

@@ -34,7 +34,7 @@
 
 ## 本轮发现并修复的主流程回归
 
-- `llm-client` 的 retry 环境读取不得用进程级 `OnceLock` 固化。Claude/JS 的 `process.env` 是逐请求读取的，而且 provider fallback 测试会在请求之间更新 `USER_TYPE` 等变量；缓存导致 repeated 529 被错误判为不可重试。现已恢复每次构建 retry 环境时读取实时进程变量。
+- `llm-runtime` 的 retry 环境读取不得用进程级 `OnceLock` 固化。Claude/JS 的 `process.env` 是逐请求读取的，而且 provider fallback 测试会在请求之间更新 `USER_TYPE` 等变量；缓存导致 repeated 529 被错误判为不可重试。现已恢复每次构建 retry 环境时读取实时进程变量。
 - `try_run_turn_streaming` 的 async state machine 很大。三个公开 streaming wrapper 原先把它直接嵌入外层 future，默认测试线程栈下会 stack overflow；现只在这三个入口 `Box::pin` 内层 future，保持控制流、取消和 task-local scope 不变，同时缩小外层 future frame。独立 code review 未发现新的高/中风险问题。
 
 ## contextCollapse 边界

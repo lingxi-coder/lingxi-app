@@ -1,22 +1,20 @@
 //! Build the `cost::PricingCatalog` returned by `assemble` from the merged
 //! provider profiles (Plan 3c §8). Anthropic / `OpenAI` / Gemini reference tiers
-//! come from `cost::PricingCatalog::builtin_reference()`; any other profile model
-//! is priced from its **real** models.dev rates (via the llm-client preset
-//! pricing catalog). Only a model with no reference tier AND no models.dev price
-//! falls back to the default-unknown ($5/$25) row so the turn is priced, not
-//! errored — instead of mis-billing every non-Anthropic model at the Claude
-//! Opus tier (which over-charges e.g. deepseek-chat ~17×/~21× at V4.1
-//! Flash's $0.3/$1.2 rates).
+//! come from `cost::PricingCatalog::builtin_reference()`; other models use
+//! published USD rates from the pinned client. Missing cache rates stay
+//! unknown without discarding known input/output rates. Only a consumed
+//! missing bucket uses the host's unknown-price fallback; a model with no
+//! published rates uses that fallback for the whole response.
 
 use std::collections::HashMap;
 
-use llm_client::{ProviderId as LlmProviderId, ProviderProfile, TokenPricing};
+use llm_runtime::{ProviderId as LlmProviderId, ProviderProfile, TokenPricing};
 
 use cost::pricing::{
     MoneyPerToken, NonTokenBillableUnit, PricingSource, ProviderId as CostProviderId, TokenClass,
 };
 use cost::{ModelPricing, ModelRef, PricingCatalog};
-use llm_client::ModelBillingMode;
+use llm_runtime::ModelBillingMode;
 
 /// Convert a per-million-token USD price to nano-USD per token.
 /// `$X / Mtok` = `X * 1000` nano-USD per token (1 USD = 1e9 nano-USD; 1 Mtok = 1e6 tokens).
@@ -52,27 +50,13 @@ fn model_pricing_from_token_pricing(mr: &ModelRef, tp: &TokenPricing) -> ModelPr
             nano_usd_per_token: nano_per_token(tp.cache_read_per_million),
         },
     );
-    // [Finding 1] Always meter a `ReasoningOutput` bucket. Most models bill
-    // reasoning tokens at the plain output rate (field is 0.0 in models.dev),
-    // rather than truly for free — the provider decoders (openai.rs,
-    // gemini.rs, …) already split reasoning tokens out of `output` into this
-    // bucket, so leaving the class absent here means `CostCalculator`
-    // (`cost/src/calculator.rs`, which iterates only the classes present in
-    // `token_rates`) and Fusion's `DesktopFusionPriceBook::rates_for`
-    // (`apps/engine-desktop/src/lib.rs`) both silently bill those tokens at
-    // $0 while still reporting the total as exact. Only the minority of
-    // models that publish a real, separate reasoning price (DeepSeek,
-    // OpenRouter, …) get their own rate; everyone else falls back to the
-    // output rate they are actually billed at.
-    let reasoning_nano_usd_per_token = if tp.reasoning_per_million > 0.0 {
-        nano_per_token(tp.reasoning_per_million)
-    } else {
-        nano_per_token(tp.output_per_million)
-    };
+    // TokenPricing resolves an absent reasoning rate to the output rate when
+    // constructed. Zero here is an explicit free rate and must stay zero in
+    // both the host ledger and Fusion's captured prices.
     rates.insert(
         TokenClass::ReasoningOutput,
         MoneyPerToken {
-            nano_usd_per_token: reasoning_nano_usd_per_token,
+            nano_usd_per_token: nano_per_token(tp.reasoning_per_million),
         },
     );
     ModelPricing {
@@ -87,8 +71,60 @@ fn model_pricing_from_token_pricing(mr: &ModelRef, tp: &TokenPricing) -> ModelPr
     }
 }
 
+/// Preserve published USD buckets when the provider has not published every
+/// cache price. A missing bucket stays absent; the host ledger applies its
+/// unknown-price policy only if that bucket actually appears in usage.
+fn partial_published_pricing(
+    mr: &ModelRef,
+    published: &platform_api::ModelPricing,
+    conditional: bool,
+) -> Option<ModelPricing> {
+    if published.billing_mode != ModelBillingMode::PerToken {
+        return None;
+    }
+    let mut rates = HashMap::new();
+    for (class, value) in [
+        (TokenClass::Input, published.input_per_million),
+        (TokenClass::Output, published.output_per_million),
+        (TokenClass::CacheRead, published.cache_read_per_million),
+        (TokenClass::CacheWrite, published.cache_write_per_million),
+    ] {
+        if let Some(value) = value.filter(|value| value.is_finite() && *value >= 0.0) {
+            rates.insert(
+                class,
+                MoneyPerToken {
+                    nano_usd_per_token: nano_per_token(value),
+                },
+            );
+        }
+    }
+    // An absent reasoning rate means reasoning is included at the output rate.
+    if let Some(value) = published
+        .reasoning_per_million
+        .or(published.output_per_million)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+    {
+        rates.insert(
+            TokenClass::ReasoningOutput,
+            MoneyPerToken {
+                nano_usd_per_token: nano_per_token(value),
+            },
+        );
+    }
+    (!rates.is_empty()).then(|| ModelPricing {
+        model_ref: mr.clone(),
+        token_rates: rates,
+        non_token_rates_nano_usd: HashMap::new(),
+        effective_from: None,
+        source: PricingSource::PublishedPartial {
+            provider: mr.provider.clone(),
+            conditional,
+        },
+    })
+}
+
 fn cost_provider_id(profile_name: &str, provider_id: &LlmProviderId) -> CostProviderId {
-    let pricing_provider = llm_client::pricing_provider_id_for_profile(profile_name, provider_id);
+    let pricing_provider = llm_runtime::pricing_provider_id_for_profile(profile_name, provider_id);
     match pricing_provider {
         LlmProviderId::AnthropicFirstParty => CostProviderId::Anthropic,
         LlmProviderId::OpenAI | LlmProviderId::AzureOpenAI => CostProviderId::OpenAI,
@@ -114,11 +150,8 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
     let mut catalog = PricingCatalog::builtin_reference();
     // Real per-model rates from the bundled models.dev slices (deepseek, openai,
     // openrouter, zai/glm, github-copilot, …), keyed by (llm ProviderId, id).
-    let preset_pricing = llm_client::builtin_presets().pricing;
+    let preset_pricing = llm_runtime::builtin_presets().pricing;
     for profile in providers {
-        if profile.profile_name == "anthropic" {
-            continue; // Anthropic tiers already in builtin_reference.
-        }
         let provider = cost_provider_id(&profile.profile_name, &profile.provider_id);
         for model in &profile.models {
             let mr = ModelRef {
@@ -141,13 +174,60 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
                 catalog = catalog.mark_unpriced(mr);
                 continue;
             }
-            if catalog.resolve(&mr).is_ok() {
-                continue; // already priced by the reference catalog.
+            let published_row = profile.wire_profile.as_ref().and_then(|source| {
+                source.models.iter().find(|source_model| {
+                    source_model.display_model == model.display_model
+                        && source_model.request_model == model.request_model
+                })
+            });
+            let conditional = profile.wire_profile.as_ref().is_some_and(|source| {
+                source.pricing.peak.is_some()
+                    || published_row
+                        .and_then(|model| model.pricing.as_ref())
+                        .is_some_and(|prices| !prices.rules.is_empty())
+            }) || model
+                .metadata
+                .pricing
+                .as_ref()
+                .is_some_and(|pricing| !pricing.tiers.is_empty());
+            if let Ok((price, _)) = catalog.resolve(&mr) {
+                // Keep reference token and hosted-tool prices, but never
+                // present a base rate as exact when this row has SDK rules.
+                if conditional {
+                    let mut price = price;
+                    price.model_ref = mr.clone();
+                    price.source = PricingSource::PublishedPartial {
+                        provider: mr.provider.clone(),
+                        conditional: true,
+                    };
+                    catalog = catalog.with_entry(price);
+                }
+                continue;
             }
             // Prefer the model's real models.dev price over the $5/$25 default.
             if let Some(tp) = preset_pricing.get(&profile.provider_id, &model.billing_model) {
-                catalog = catalog.with_entry(model_pricing_from_token_pricing(&mr, &tp));
+                let mut price = model_pricing_from_token_pricing(&mr, &tp);
+                if conditional {
+                    price.source = PricingSource::PublishedPartial {
+                        provider: mr.provider.clone(),
+                        conditional: true,
+                    };
+                }
+                catalog = catalog.with_entry(price);
                 continue;
+            }
+            // Retain base rates for the picker and ordinary fixed-price
+            // requests. Conditional rules need the SDK's frozen per-attempt
+            // quote; the static ledger flags its fallback if no quote arrives.
+            if published_row.is_some() {
+                if let Some(price) =
+                    model.metadata.pricing.as_ref().and_then(|published| {
+                        partial_published_pricing(&mr, published, conditional)
+                    })
+                {
+                    catalog = catalog.with_entry(price);
+                    continue;
+                }
             }
             // No reference tier and no models.dev price: leave the model out.
             // CostTracker applies the default unknown tier when it is used.
@@ -159,13 +239,15 @@ pub fn pricing_for(providers: &[ProviderProfile]) -> PricingCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::{
+    use llm_runtime::{
         AuthStrategy, Capabilities, CredentialConfig, ModelProfile, PricingConfig, ProtocolFamily,
         TokenPricing,
     };
 
     fn user_profile(name: &str, model: &str) -> ProviderProfile {
         ProviderProfile {
+            wire_profile: None,
+            regions: llm_runtime::Region::all(),
             provider_id: LlmProviderId::OpenAICompatible {
                 name: name.to_string(),
             },
@@ -207,35 +289,345 @@ mod tests {
     }
 
     #[test]
-    fn preset_model_uses_real_models_dev_price_not_default_unknown() {
-        // Feed the real bundled presets through pricing_for; the current
-        // DeepSeek V4.1 Flash route must bill at its true $0.3/$1.2 rate, NOT
-        // the $5/$25 Claude default. The deprecated deepseek-chat route is no
-        // longer part of the bundled catalog.
-        let providers = llm_client::builtin_presets().providers;
-        let cat = pricing_for(&providers);
+    fn conditional_rules_are_marked_even_for_complete_and_reference_prices() {
+        let providers = llm_runtime::builtin_presets().providers;
+        let catalog = pricing_for(&providers);
+        let reference = PricingCatalog::builtin_reference();
+        let mut checked = 0;
+        let mut checked_reference = 0;
+        let mut checked_complete = 0;
+        for profile in &providers {
+            if profile.pricing.billing_mode == ModelBillingMode::Subscription {
+                continue;
+            }
+            let Some(wire_profile) = &profile.wire_profile else {
+                continue;
+            };
+            for model in &profile.models {
+                let Some(wire_model) = wire_profile.models.iter().find(|candidate| {
+                    candidate.display_model == model.display_model
+                        && candidate.request_model == model.request_model
+                }) else {
+                    continue;
+                };
+                let Some(rates) = wire_model.pricing.as_ref() else {
+                    continue;
+                };
+                if rates.currency.as_deref().unwrap_or("USD") != "USD"
+                    || (wire_profile.pricing.peak.is_none() && rates.rules.is_empty())
+                {
+                    continue;
+                }
+                let model_ref = ModelRef {
+                    provider: cost_provider_id(&profile.profile_name, &profile.provider_id),
+                    model: model.billing_model.clone(),
+                };
+                let Ok((price, _)) = catalog.resolve(&model_ref) else {
+                    continue;
+                };
+                assert!(
+                    matches!(
+                        price.source,
+                        PricingSource::PublishedPartial {
+                            conditional: true,
+                            ..
+                        }
+                    ),
+                    "{}/{} has conditional pricing",
+                    profile.profile_name,
+                    model.display_model
+                );
+                if let Ok((reference_price, _)) = reference.resolve(&model_ref) {
+                    assert_eq!(price.token_rates, reference_price.token_rates);
+                    assert_eq!(
+                        price.non_token_rates_nano_usd,
+                        reference_price.non_token_rates_nano_usd
+                    );
+                    checked_reference += 1;
+                }
+                if rates.input_per_million.is_some()
+                    && rates.output_per_million.is_some()
+                    && rates.cache_read_per_million.is_some()
+                    && rates.cache_write_per_million.is_some()
+                {
+                    checked_complete += 1;
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the SDK catalog contains conditional prices");
+        assert!(
+            checked_reference > 0,
+            "reference prices must also honor SDK rules"
+        );
+        assert!(
+            checked_complete > 0,
+            "fully populated prices must also honor SDK rules"
+        );
+    }
+
+    #[test]
+    fn explicit_override_remains_authoritative_over_sdk_price_rules() {
+        let mut profile = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "deepseek")
+            .unwrap();
+        assert!(profile
+            .wire_profile
+            .as_ref()
+            .unwrap()
+            .pricing
+            .peak
+            .is_some());
+        let model = profile.models[0].clone();
+        profile
+            .pricing
+            .overrides
+            .push((model.display_model, TokenPricing::input_output(1.0, 8.0)));
+        let model_ref = ModelRef {
+            provider: cost_provider_id(&profile.profile_name, &profile.provider_id),
+            model: model.billing_model,
+        };
+        let catalog = pricing_for(&[profile]);
+        let (price, _) = catalog.resolve(&model_ref).unwrap();
+        assert!(!matches!(
+            price.source,
+            PricingSource::PublishedPartial {
+                conditional: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            price.token_rates[&TokenClass::Output].nano_usd_per_token,
+            8_000
+        );
+    }
+
+    #[test]
+    fn published_deepseek_rates_survive_a_missing_cache_write_rate() {
+        let providers = llm_runtime::builtin_presets().providers;
+        let deepseek = providers
+            .iter()
+            .find(|p| p.profile_name == "deepseek")
+            .unwrap();
+        let model = deepseek
+            .models
+            .iter()
+            .find(|m| m.request_model == "deepseek-flash")
+            .unwrap();
+        assert!(model
+            .metadata
+            .pricing
+            .as_ref()
+            .unwrap()
+            .input_per_million
+            .is_some());
         let mr = ModelRef {
             provider: CostProviderId::OpenAICompatible {
-                name: "deepseek".to_string(),
+                name: "deepseek".into(),
             },
-            model: "deepseek-flash".to_string(),
+            model: "deepseek-flash".into(),
         };
-        let (p, _res) = cat.resolve(&mr).expect("priced");
+        let (price, _) = pricing_for(&providers)
+            .resolve(&mr)
+            .expect("published rates");
         assert_eq!(
-            p.token_rates[&cost::pricing::TokenClass::Input].nano_usd_per_token,
+            price.token_rates[&TokenClass::Input].nano_usd_per_token,
             300
         );
         assert_eq!(
-            p.token_rates[&cost::pricing::TokenClass::Output].nano_usd_per_token,
-            1200
+            price.token_rates[&TokenClass::Output].nano_usd_per_token,
+            1_200
         );
+        assert_eq!(
+            price.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+            6
+        );
+        assert!(!price.token_rates.contains_key(&TokenClass::CacheWrite));
+        assert!(matches!(
+            price.source,
+            PricingSource::PublishedPartial {
+                conditional: true,
+                ..
+            }
+        ));
+        let usage = cost::Usage {
+            tokens: cost::TokenUsage {
+                input: 1_000_000,
+                output: 1_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            cost::CostCalculator::calculate_nano_usd(&usage, &price),
+            30_000_000_000
+        );
+        assert!(cost::CostCalculator::uses_unknown_rate(&usage, &price));
+    }
+
+    #[test]
+    fn fixed_partial_prices_use_known_rates_and_flag_consumed_unknown_buckets() {
+        let providers = llm_runtime::builtin_presets().providers;
+        let mr = ModelRef {
+            provider: CostProviderId::OpenAICompatible {
+                name: "grok-responses".into(),
+            },
+            model: "grok-4.7".into(),
+        };
+        let (price, _) = pricing_for(&providers).resolve(&mr).unwrap();
+        assert!(matches!(
+            price.source,
+            PricingSource::PublishedPartial {
+                conditional: false,
+                ..
+            }
+        ));
+        let usage = cost::Usage {
+            tokens: cost::TokenUsage {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            cost::CostCalculator::calculate_nano_usd(&usage, &price),
+            8_500_000_000
+        );
+        assert!(!cost::CostCalculator::uses_unknown_rate(&usage, &price));
+        let mut cache_write_usage = usage;
+        cache_write_usage.tokens.cache_write = 1_000_000;
+        assert_eq!(
+            cost::CostCalculator::calculate_nano_usd(&cache_write_usage, &price),
+            14_750_000_000
+        );
+        assert!(cost::CostCalculator::uses_unknown_rate(
+            &cache_write_usage,
+            &price
+        ));
+        let mut hosted_tool_usage = usage;
+        hosted_tool_usage.server_tool_use = Some(cost::usage::ServerToolUsage {
+            web_search_requests: 1,
+        });
+        assert_eq!(
+            cost::CostCalculator::calculate_nano_usd(&hosted_tool_usage, &price),
+            8_510_000_000
+        );
+        assert!(cost::CostCalculator::uses_unknown_rate(
+            &hosted_tool_usage,
+            &price
+        ));
+        let mut fast_usage = usage;
+        fast_usage.speed = Some(cost::usage::ApiSpeed::Fast);
+        assert_eq!(
+            cost::CostCalculator::calculate_nano_usd(&fast_usage, &price),
+            30_500_000_000
+        );
+        assert!(cost::CostCalculator::uses_unknown_rate(&fast_usage, &price));
+        fast_usage.tokens.reasoning_output = 1_000_000;
+        assert_eq!(
+            cost::CostCalculator::calculate_nano_usd(&fast_usage, &price),
+            55_500_000_000
+        );
+    }
+
+    #[test]
+    fn every_published_usd_catalog_rate_survives_missing_cache_fields() {
+        let providers = llm_runtime::builtin_presets().providers;
+        let catalog = pricing_for(&providers);
+        let reference = PricingCatalog::builtin_reference();
+        let mut checked = 0;
+        for profile in &providers {
+            if profile.profile_name == "anthropic"
+                || profile.pricing.billing_mode != ModelBillingMode::PerToken
+            {
+                continue;
+            }
+            for model in &profile.models {
+                let Some(published) = model.metadata.pricing.as_ref() else {
+                    continue;
+                };
+                if published.billing_mode != ModelBillingMode::PerToken {
+                    continue;
+                }
+                let (Some(input), Some(output)) =
+                    (published.input_per_million, published.output_per_million)
+                else {
+                    continue;
+                };
+                let model_ref = ModelRef {
+                    provider: cost_provider_id(&profile.profile_name, &profile.provider_id),
+                    model: model.billing_model.clone(),
+                };
+                if reference.resolve(&model_ref).is_ok() {
+                    continue;
+                }
+                let (price, _) = catalog.resolve(&model_ref).unwrap_or_else(|_| {
+                    panic!(
+                        "lost published price for {}/{}",
+                        profile.profile_name, model.billing_model
+                    )
+                });
+                assert_eq!(
+                    price.token_rates[&TokenClass::Input].nano_usd_per_token,
+                    nano_per_token(input),
+                    "{model_ref:?}"
+                );
+                assert_eq!(
+                    price.token_rates[&TokenClass::Output].nano_usd_per_token,
+                    nano_per_token(output),
+                    "{model_ref:?}"
+                );
+                for (class, published_rate) in [
+                    (TokenClass::CacheRead, published.cache_read_per_million),
+                    (TokenClass::CacheWrite, published.cache_write_per_million),
+                ] {
+                    if let Some(rate) = published_rate {
+                        assert_eq!(
+                            price.token_rates[&class].nano_usd_per_token,
+                            nano_per_token(rate),
+                            "{model_ref:?} {class:?}"
+                        );
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 100,
+            "catalog audit unexpectedly covered only {checked} rows"
+        );
+    }
+
+    #[test]
+    fn metered_and_subscription_profiles_for_one_vendor_do_not_share_a_price_key() {
+        let providers = llm_runtime::builtin_presets().providers;
+        let catalog = pricing_for(&providers);
+        let metered = ModelRef {
+            provider: CostProviderId::OpenAICompatible { name: "zai".into() },
+            model: "glm-4.7".into(),
+        };
+        let subscription = ModelRef {
+            provider: CostProviderId::OpenAICompatible {
+                name: "zai-coding".into(),
+            },
+            model: "glm-4.7".into(),
+        };
+        assert!(catalog.resolve(&metered).is_ok());
+        assert!(matches!(
+            catalog.resolve(&subscription),
+            Err(cost::pricing::CostError::UnpricedModel(_))
+        ));
     }
 
     #[test]
     fn gemini_model_uses_real_price_not_default_unknown() {
         // M6: with the Gemini slice vendored, gemini-2.5-pro (not in
         // builtin_reference) bills at its real $1.25/$10 rate, not $5/$25.
-        let providers = llm_client::builtin_presets().providers;
+        let providers = llm_runtime::builtin_presets().providers;
         let cat = pricing_for(&providers);
         let mr = ModelRef {
             provider: CostProviderId::GoogleGemini,
@@ -292,13 +684,13 @@ mod tests {
     /// `cost::CostCalculator` (iterates only present classes) and Fusion's
     /// `DesktopFusionPriceBook::rates_for` (defaults an absent class to 0)
     /// read as "reasoning tokens are free" — even though the OpenAI decoder
-    /// (`llm_client::providers::openai`) splits real, billed reasoning
+    /// (`llm_runtime::providers::openai`) splits real, billed reasoning
     /// tokens out of `output` into exactly this bucket. It must instead
     /// fall back to the model's real output rate, since that is what OpenAI
     /// actually bills those tokens at.
     #[test]
     fn reasoning_capable_model_with_no_separate_price_bills_at_the_output_rate() {
-        let providers = llm_client::builtin_presets().providers;
+        let providers = llm_runtime::builtin_presets().providers;
         let cat = pricing_for(&providers);
         let mr = ModelRef {
             provider: CostProviderId::OpenAI,
@@ -363,15 +755,55 @@ mod tests {
         );
     }
 
-    /// [Finding 1] main-loop proof: the SAME catalog this module builds feeds
-    /// `cost::CostCalculator`, which the main (non-Fusion) turn loop bills
-    /// from. Before this fix, 30,000 reasoning tokens on `gpt-5.6-sol`
-    /// contributed exactly 0 nano-USD to a turn's total — this pins that the
-    /// main turn loop's billing is fixed by the same catalog-layer change,
-    /// not just Fusion's adapter.
     #[test]
-    fn main_loop_cost_calculator_bills_reasoning_tokens_through_the_same_catalog() {
-        let providers = llm_client::builtin_presets().providers;
+    fn parsed_override_preserves_omitted_and_explicit_zero_reasoning_rates() {
+        for (reasoning, expected_nano_usd) in [(None, 320_000_000), (Some(0.0), 80_000_000)] {
+            let mut pricing = serde_json::json!({"inputPerMtok": 2.0, "outputPerMtok": 8.0});
+            if let Some(reasoning) = reasoning {
+                pricing["reasoningPerMtok"] = serde_json::json!(reasoning);
+            }
+            let providers = serde_json::json!({"custom": {
+                "type": "openai",
+                "baseUrl": "https://example.com/v1",
+                "apiKeyEnv": "CUSTOM_REASONING_PRICE_TEST_KEY",
+                "models": [{"id": "custom-model"}],
+                "pricing": {"custom-model": pricing}
+            }});
+            let profile = llm_runtime::parse_provider_profiles_strict(
+                &serde_json::from_value(providers).unwrap(),
+                llm_runtime::ProviderParseOptions::strict_env(),
+            )
+            .unwrap()
+            .remove(0)
+            .profile;
+            let catalog = pricing_for(&[profile]);
+            let model_ref = ModelRef {
+                provider: CostProviderId::OpenAICompatible {
+                    name: "custom".into(),
+                },
+                model: "custom-model".into(),
+            };
+            let usage = cost::Usage {
+                tokens: cost::TokenUsage {
+                    output: 10_000,
+                    reasoning_output: 30_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let (price, _) = catalog.resolve(&model_ref).expect("override price");
+            assert_eq!(
+                cost::CostCalculator::calculate_nano_usd(&usage, &price),
+                expected_nano_usd
+            );
+        }
+    }
+
+    /// If a conditional model has no frozen quote, the host fallback must
+    /// flag the unknown price and still bill the reasoning output bucket.
+    #[test]
+    fn conditional_model_without_quote_bills_reasoning_at_flagged_fallback_rate() {
+        let providers = llm_runtime::builtin_presets().providers;
         let cat = pricing_for(&providers);
         let mr = ModelRef {
             provider: CostProviderId::OpenAI,
@@ -392,16 +824,10 @@ mod tests {
             speed: None,
         };
         let total = cost::CostCalculator::calculate_nano_usd(&usage, &pricing);
-        // 10_000 output tokens @ 20_000 nano-USD/tok + 30_000 reasoning
-        // tokens @ 20_000 nano-USD/tok (output-rate fallback) = 800_000_000
-        // nano-USD ($0.80) — matches what OpenAI actually bills for 40,000
-        // completion tokens of which 30,000 are reasoning. Before this fix
-        // the reasoning term was 0 and the total was only $0.20.
-        assert_eq!(
-            total, 800_000_000,
-            "the main turn loop's CostCalculator must bill reasoning tokens \
-             at the output rate when no separate reasoning price exists"
-        );
+        assert!(cost::CostCalculator::uses_unknown_rate(&usage, &pricing));
+        // Both visible and reasoning output use the unknown $25/M rate when
+        // the request's tier/context are unavailable to select the SDK rule.
+        assert_eq!(total, 1_000_000_000);
     }
 
     #[test]

@@ -74,7 +74,7 @@ xcodegen generate     # produces LingxiCode.xcodeproj from project.yml (gitignor
   bindings and links `LingxiCodeFFI.xcframework`.
 - **`LingxiCodeTests`** (`bundle.unit-test`) — the engine round-trip suite in
   `Tests/`, hosted in the app target (so it shares the compiled bindings) and
-  also linking the FFI xcframework so the per-namespace `engine_mobileFFI` clang
+  also linking the FFI xcframework so the per-namespace `harness_runtimeFFI` clang
   module is importable. The `LingxiCode` scheme runs this target under `test`.
 
 ## 3. Keyless simulator e2e test (no API key required)

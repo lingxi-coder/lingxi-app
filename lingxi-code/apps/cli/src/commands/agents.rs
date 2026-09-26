@@ -207,7 +207,7 @@ pub async fn run(cli: &Cli) -> i32 {
 ///
 /// The standalone agents view has no orchestrator, so the watcher loads the
 /// settings-file hooks itself (user then project tier, project last so it
-/// wins — the same standalone loader engine-desktop's composition root uses)
+/// wins — the same standalone loader harness-runtime::desktop's composition root uses)
 /// and executes them through a minimal `HookExecutorImpl`. When no
 /// `Notification` hook is registered the watcher is INERT (`executor: None`)
 /// — no polling work, mirroring the orchestrator's `has_notification_hook`
@@ -807,11 +807,11 @@ fn stop_all_agents(home: &Path) {
 }
 
 fn fallback_connect_auth_methods() -> std::collections::BTreeMap<String, String> {
-    llm_client::builtin_presets()
+    llm_runtime::builtin_presets()
         .providers
         .iter()
         .filter_map(|provider| {
-            use llm_client::AuthStrategy::*;
+            use llm_runtime::AuthStrategy::*;
             let tag = match &provider.auth {
                 ApiKey | Bearer => "api_key",
                 CopilotBearer => "copilot_device",
@@ -858,6 +858,7 @@ async fn run_agents_connect_flow(cli: &Cli) -> Result<(), String> {
         build.runtime.provider_auth_methods.clone()
     };
     let availability = build.runtime.provider_availability.clone();
+    let catalog_registry = build.runtime.catalog_registry.clone();
     let key_store = build.runtime.provider_key_store.clone();
     let oauth = build.runtime.oauth_connect_driver.clone();
     let copilot = build.runtime.connect_copilot.clone();
@@ -914,7 +915,15 @@ async fn run_agents_connect_flow(cli: &Cli) -> Result<(), String> {
     drop(session);
     let action = result?;
     if let Some(action) = action {
-        crate::mode::run_connect_action(action, key_store, oauth, copilot, turn_tx).await;
+        crate::mode::run_connect_action(
+            catalog_registry,
+            action,
+            key_store,
+            oauth,
+            copilot,
+            turn_tx,
+        )
+        .await;
     }
     Ok(())
 }
@@ -1142,11 +1151,11 @@ mod tests {
     #[test]
     fn fallback_connect_auth_methods_are_derived_only_from_the_provider_catalog() {
         let methods = fallback_connect_auth_methods();
-        let presets = llm_client::builtin_presets();
+        let presets = llm_runtime::builtin_presets();
         let catalog_names: std::collections::BTreeSet<_> = presets
             .providers
             .iter()
-            .filter(|provider| provider.auth != llm_client::AuthStrategy::None)
+            .filter(|provider| provider.auth != llm_runtime::AuthStrategy::None)
             .map(|provider| provider.profile_name.as_str())
             .collect();
         assert_eq!(

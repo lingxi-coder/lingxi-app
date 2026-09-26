@@ -1,4 +1,4 @@
-//! Task 6 (llm-client future-work batch 5): limits-specific terminal 429 copy.
+//! Task 6 (llm-runtime future-work batch 5): limits-specific terminal 429 copy.
 //!
 //! When a turn DIES on a 429 (retries exhausted), claude-code composes the
 //! rejected-branch limits copy from the error's own unified headers and makes
@@ -16,7 +16,7 @@
 //! whose `Display` IS the composed copy. With no unified-header context the
 //! generic `"api call failed: rate limited"` surface is unchanged.
 
-use llm_client::LlmError;
+use llm_runtime::LlmError;
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };

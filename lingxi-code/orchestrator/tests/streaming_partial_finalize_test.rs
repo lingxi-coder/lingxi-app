@@ -15,7 +15,7 @@
 //! output was visible on screen. Provider/server errors retain their existing
 //! fallback behavior until a block completes.
 
-use llm_client::{LlmError, LlmEvent};
+use llm_runtime::{LlmError, LlmEvent};
 use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_start, text_delta, MockApiClient,
     MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
@@ -217,7 +217,7 @@ async fn provider_internal_after_completed_block_finalizes_partial() {
 #[tokio::test]
 async fn idle_timeout_after_completed_block_finalizes_partial() {
     assert_finalizes(
-        llm_client::model::stream_watchdog::idle_timeout_error(std::time::Duration::from_secs(1)),
+        llm_runtime::model::stream_watchdog::idle_timeout_error(std::time::Duration::from_secs(1)),
         "watchdog",
         "API Error: The response stopped arriving. The response above may be incomplete.",
     )
@@ -228,7 +228,7 @@ async fn idle_timeout_after_completed_block_finalizes_partial() {
 #[tokio::test]
 async fn suspend_after_completed_block_finalizes_partial() {
     assert_finalizes(
-        llm_client::model::stream_watchdog::watchdog_abort_error(
+        llm_runtime::model::stream_watchdog::watchdog_abort_error(
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(5),
         ),

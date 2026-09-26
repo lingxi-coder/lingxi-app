@@ -106,6 +106,7 @@ fn receipt(scope: &WorkflowOutputScope) -> AttemptReceipt {
         revision: 1,
         replaces_revision: None,
         disposition: AttemptDisposition::Unknown,
+        token_quote_nano_usd: None,
         usage: Usage::default(),
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,

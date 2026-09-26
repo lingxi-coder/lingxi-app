@@ -198,7 +198,7 @@ pub struct AuthResponse {
 ///   `request_access` prompt can't be expressed as a
 ///   [`crate::wire::Frame::PermissionRequest`] (per-app checkboxes, a tier, and
 ///   independent capability flags — see
-///   `tui_core::computer_access_bridge`'s own doc comment for why it bypasses
+///   `permission::computer_access`'s own doc comment for why it bypasses
 ///   the generic permission gate), so it gets its own additive arm. Carries
 ///   **no** envelope `id`; the inner
 ///   [`ComputerAccessRequestDto::request_id`] is the correlator the client

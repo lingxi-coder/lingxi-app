@@ -465,9 +465,9 @@ fn analyst_user_message(
 /// closed item schemas for `contradictions`/`unique_insights`. Every property
 /// at every level is `required` and every object closes with
 /// `additionalProperties: false` — the shape every strict-mode JSON-schema
-/// codec demands (see `llm-client/src/providers/openai.rs`'s
+/// codec demands (see `llm-runtime/src/providers/openai.rs`'s
 /// `"strict": true`); `minimum`/`maximum` are dropped because the strict
-/// converter (`llm_client::strict_schema::to_strict_schema`) does not allow
+/// converter (`llm_runtime::strict_schema::to_strict_schema`) does not allow
 /// those keywords — the host re-validates the numeric range itself in
 /// [`scores_match_request`].
 /// `analyst_json_schema` helper: the `scores` sub-schema — one required
@@ -643,7 +643,7 @@ mod tests {
         let ids = vec!["P1".to_string(), "P2".to_string()];
         let dims = vec!["coverage".to_string(), "safety".to_string()];
         let schema = analyst_json_schema(&ids, &dims);
-        llm_client::strict_schema::to_strict_schema(&schema)
+        llm_runtime::strict_schema::to_strict_schema(&schema)
             .expect("analyst schema must be strict-mode compatible");
     }
 
@@ -673,7 +673,7 @@ mod tests {
         // The generated schema must itself accept the sample under the strict
         // conversion (closed objects, all-required) before we even ask serde
         // to decode it.
-        llm_client::strict_schema::to_strict_schema(&analyst_json_schema(&ids, &dims))
+        llm_runtime::strict_schema::to_strict_schema(&analyst_json_schema(&ids, &dims))
             .expect("schema must be strict-mode compatible");
         let analysis: FusionAnalysis =
             serde_json::from_value(sample).expect("sample matches FusionAnalysis");
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn failure_category_never_carries_the_raw_provider_error_text() {
         let secret = "https://internal.example/org/acct-12345?token=shh";
-        let err = SideQueryError::Api(llm_client::LlmError::InvalidRequest {
+        let err = SideQueryError::Api(llm_runtime::LlmError::InvalidRequest {
             message: secret.into(),
         });
         assert_eq!(analyst_failure_category(&err), "provider_error");

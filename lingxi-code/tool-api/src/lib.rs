@@ -18,6 +18,8 @@
 
 pub mod anthropic_request;
 pub mod artifact_gate;
+pub mod ask_user_question;
+pub mod bash_runner;
 pub mod builtin_context;
 pub mod content_replacement;
 pub mod context;

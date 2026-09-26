@@ -3,7 +3,7 @@
 
 use cost::pricing::PricingCatalog;
 use cost::CostTracker;
-use llm_client::{ContentBlock, LlmResponse, TokenUsage, Usage};
+use llm_runtime::{ContentBlock, LlmResponse, TokenUsage, Usage};
 use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -83,6 +83,46 @@ async fn turn_with_known_tokens_records_real_cost() {
     // 1000*5000 + 500*25000 = 17_500_000 nano-USD = $0.0175 (matches the
     // M3-05 tracker test).
     assert_eq!(snap.total_nano_usd, 17_500_000);
+}
+
+#[tokio::test]
+async fn turn_records_the_clients_frozen_quote_for_a_conditional_model() {
+    let mut response = end_turn_response_with_usage(1_000, 500);
+    response.model = "deepseek-flash".into();
+    let mut quote = llm_runtime::CostEstimate::unestimated(llm_runtime::PricingModelRef {
+        pricing_provider_id: llm_runtime::ProviderId::OpenAICompatible {
+            name: "deepseek".into(),
+        },
+        billing_model: "deepseek-flash".into(),
+        request_model: "deepseek-flash".into(),
+        display_model: "DeepSeek V4.1 Flash".into(),
+    });
+    quote.estimated = true;
+    quote.total_cost_usd = Some(0.00075);
+    response.cost = Some(quote);
+    let (tx, mut rx) = mpsc::channel(8);
+    let tracker = Arc::new(CostTracker::new(
+        SessionId::new(),
+        Arc::new(PricingCatalog::empty()),
+        tx,
+    ));
+    let mut cfg = OrchestratorConfig::default();
+    cfg.model = "deepseek-flash".into();
+    let orch = ConversationOrchestrator::new(
+        cfg,
+        Arc::new(MockApiClient::new(vec![response])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_cost_tracker(tracker.clone());
+    orch.run_turn("hi").await.expect("run_turn ok");
+    let snap = rx.recv().await.expect("quoted response persisted");
+    assert_eq!(snap.total_nano_usd, 750_000);
+    assert!(snap.unpriced_models.is_empty());
 }
 
 /// With an `AnalyticsBus` wired (as the desktop composition root does), a live

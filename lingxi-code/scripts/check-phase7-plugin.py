@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 REGISTRY = REPO / "lingxi-code" / "mcp" / "src" / "registry.rs"
-TRANSPORT = REPO / "lingxi-code" / "apps" / "engine-mobile" / "src" / "local_apps_mcp.rs"
+TRANSPORT = REPO / "lingxi-code" / "harness-runtime" / "src" / "mobile" / "local_apps_mcp.rs"
 TASKS = REPO / "docs" / "local-apps" / "harness" / "tasks-phase-7.json"
 
 

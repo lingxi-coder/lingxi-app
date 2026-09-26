@@ -595,7 +595,7 @@ async fn run_serve(a: &ServeArgs) -> i32 {
     let writer = Arc::new(Mutex::new(BufWriter::new(tokio::io::stdout())));
     let output = Arc::new(McpProtocolOutput::new(writer.clone()));
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut cfg = engine_desktop::DesktopConfig::default();
+    let mut cfg = harness_runtime::desktop::DesktopConfig::default();
     cfg.api_base = crate::init::resolve_api_base();
     cfg.api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     cfg.cwd = cwd;
@@ -610,7 +610,7 @@ async fn run_serve(a: &ServeArgs) -> i32 {
 
     let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
         Arc::new(McpServePermissionSink);
-    let runtime = match engine_desktop::build(
+    let runtime = match harness_runtime::desktop::build(
         cfg,
         output.clone() as Arc<dyn platform_api::OutputStream>,
         permission_sink,
@@ -2556,7 +2556,7 @@ async fn mcp_config_warnings_suppressed() -> bool {
     // an array naming the `mcp` slot. Managed tiers ascend in priority, so the
     // last tier that sets the key wins.
     let mut locked = false;
-    for raw in engine_desktop::settings_watch::managed_settings_raw_tiers().await {
+    for raw in harness_runtime::desktop::settings_watch::managed_settings_raw_tiers().await {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
             continue;
         };

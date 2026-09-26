@@ -1,5 +1,5 @@
 use super::*;
-use engine_desktop::session_agents::DesktopSessionAgentObserver;
+use harness_runtime::desktop::session_agents::DesktopSessionAgentObserver;
 use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
 
 fn observer(session_id: protocol::SessionId) -> Arc<DesktopSessionAgentObserver> {
@@ -239,7 +239,7 @@ async fn session_agent_idle_and_resume_observations_win_over_lagging_task_snapsh
 /// thing that says so — the transcript's last marker can still read `running`.
 /// The desktop read-back answered `idle` for that case while the live observer
 /// answered `completed` for the very same agent, which is how one agent showed
-/// up in the panel under two different words. `engine-mobile` states the
+/// up in the panel under two different words. `harness-runtime::mobile` states the
 /// contract at its own read-back: on the wire a parked agent is `completed`.
 #[tokio::test]
 async fn a_parked_row_reports_the_wire_word_rather_than_the_footer_group_word() {

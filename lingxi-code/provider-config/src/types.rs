@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use llm_client::{ClientConfig, ProviderId};
+use llm_runtime::{ClientConfig, ProviderId};
 
 /// Per-model cross-provider failover entry (one hop in a `ChainConfig` chain).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,7 @@ pub struct AssembleInputs {
     pub anthropic_api_base: String,
     /// Anthropic model ids to declare on the Anthropic profile (pre-resolved by
     /// the caller via `anthropic_models_for`, including the host fallback model).
-    pub anthropic_models: Vec<llm_client::ModelProfile>,
+    pub anthropic_models: Vec<llm_runtime::ModelProfile>,
     /// Whether an Anthropic API key is configured (api-key wins over OAuth).
     pub anthropic_has_api_key: bool,
     /// Whether an Anthropic OAuth session is available (only when no api key).

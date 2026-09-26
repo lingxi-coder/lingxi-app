@@ -38,6 +38,7 @@ pub mod bypass_guard;
 pub mod classifier;
 pub mod cli_mode;
 pub mod command_path_containment;
+pub mod computer_access;
 pub mod dangerous_patterns;
 pub mod dangerous_perms;
 pub mod dangerous_removal;

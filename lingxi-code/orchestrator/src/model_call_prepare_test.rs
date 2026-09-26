@@ -146,7 +146,7 @@ async fn context_collapse_projects_initial_and_retry_snapshots_without_mutating_
 async fn batched_turn_uses_shared_model_call_preparer() {
     let preparer = Arc::new(RecordingPreparer::default());
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-        vec![llm_client::ContentBlock::Text {
+        vec![llm_runtime::ContentBlock::Text {
             text: "done".into(),
             cache_control: None,
         }],
@@ -236,7 +236,7 @@ async fn thinking_strip_persistence_ignores_worker_only_rejections() {
             _system: Option<&str>,
             _msgs: Vec<ConversationMessage>,
             _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+        ) -> Result<llm_runtime::LlmResponse, llm_runtime::LlmError> {
             unreachable!("persistence must not call the provider")
         }
         fn thinking_stripped_messages(&self) -> std::collections::HashMap<MessageId, usize> {

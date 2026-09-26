@@ -5,7 +5,7 @@ use crate::test_support::{
     MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
-use llm_client::ContentBlock as LlmContentBlock;
+use llm_runtime::ContentBlock as LlmContentBlock;
 use protocol::ContentBlock;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;

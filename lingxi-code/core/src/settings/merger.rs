@@ -220,6 +220,7 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .strict_known_marketplaces
             .or(prev.strict_known_marketplaces),
         blocked_marketplaces: next.blocked_marketplaces.or(prev.blocked_marketplaces),
+        provider_region: next.provider_region.or(prev.provider_region),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
         fusion: merge_fusion_settings(prev.fusion, next.fusion),

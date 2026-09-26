@@ -6,7 +6,7 @@
 //! [`SideQueryResponse`]. Utility callers can construct an isolated Anthropic
 //! client with [`ProviderSideQueryClient::new`]. Session-bound compaction and
 //! recap use [`ProviderSideQueryClient::from_service`] so the fork reuses the
-//! parent [`llm_client::ApiService`] — including its exact provider route,
+//! parent [`llm_runtime::ApiService`] — including its exact provider route,
 //! OAuth/keychain credential, message normalization, prompt-cache boundaries,
 //! headers, and retry behavior.
 //!
@@ -14,7 +14,7 @@
 //!
 //! Forwards `model`, `system`, `messages`, `max_tokens`, `tools`, `temperature`,
 //! plus `tool_choice`, `stop_sequences` and (cc 2.1.198) `thinking` — a
-//! `Some` session [`llm_client::model::thinking::ThinkingConfig`] resolves
+//! `Some` session [`llm_runtime::model::thinking::ThinkingConfig`] resolves
 //! through the SAME `reasoning_for_request` rules as the main loop, so the
 //! isolated call inherits the supplied extended-thinking config.
 //! `output_format` drives the structured-text decode (not a server-side
@@ -24,7 +24,7 @@
 //! ## System forwarding fix
 //!
 //! Unlike the previous `api_client::AnthropicProvider` path, this client NOW
-//! correctly forwards the `system` field via [`llm_client::SystemBlock`], which
+//! correctly forwards the `system` field via [`llm_runtime::SystemBlock`], which
 //! the Anthropic codec encodes as `"system": [{"type":"text","text":"..."}]`.
 //! This fixes the pre-broken `text_response_decodes_text_usage_and_stop_reason`
 //! test.
@@ -34,8 +34,8 @@ use crate::side_query::{
     SideQueryRequest, SideQueryResponse,
 };
 use async_trait::async_trait;
-use llm_client::LlmTransportBridge;
-use llm_client::{
+use llm_runtime::LlmTransportBridge;
+use llm_runtime::{
     AuthStrategy, Capabilities, ClientConfig, Credential, CredentialConfig, DefaultLlmClient,
     LlmError, LlmRequest, ModelProfile, PricingConfig, ProtocolFamily, ProviderId, ProviderProfile,
     StaticCredentialProvider, SystemBlock,
@@ -77,7 +77,7 @@ enum ProviderSideQueryBackend {
         transport: Arc<dyn HttpTransport>,
     },
     /// The live session service used by compaction/recap.
-    Session(Arc<llm_client::ApiService>),
+    Session(Arc<llm_runtime::ApiService>),
 }
 
 /// One-shot [`SideQueryClient`] that can either run as an isolated Anthropic
@@ -106,6 +106,8 @@ impl ProviderSideQueryClient {
 
         let config = ClientConfig {
             providers: vec![ProviderProfile {
+                wire_profile: None,
+                regions: llm_runtime::Region::all(),
                 provider_id: ProviderId::AnthropicFirstParty,
                 profile_name: "anthropic".to_string(),
                 base_url,
@@ -158,7 +160,7 @@ impl ProviderSideQueryClient {
     /// when the parent is authenticated with OAuth, a keychain credential, a
     /// gateway, or a non-Anthropic provider profile.
     #[must_use]
-    pub fn from_service(service: Arc<llm_client::ApiService>) -> Self {
+    pub fn from_service(service: Arc<llm_runtime::ApiService>) -> Self {
         Self {
             backend: ProviderSideQueryBackend::Session(service),
         }
@@ -230,7 +232,7 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
     ]
 }
 
-/// Decode an [`llm_client::LlmResponse`] into the side-query response shape.
+/// Decode an [`llm_runtime::LlmResponse`] into the side-query response shape.
 ///
 /// * `Text` blocks are concatenated into the flattened `text`, except compact
 ///   responses, where cc 2.1.261 N0e selects the first text block only.
@@ -242,11 +244,11 @@ fn sidequery_model_table() -> Vec<ModelProfile> {
 ///   as JSON. A non-JSON body leaves `structured` as `None` rather than
 ///   erroring — `MemorySelector` tolerates `None` (empty selection), so the
 ///   best-effort path is the safer default.
-/// * `usage` maps `llm_client::Usage.billable_tokens` → `cost::Usage` with the
+/// * `usage` maps `llm_runtime::Usage.billable_tokens` → `cost::Usage` with the
 ///   same cross-naming the provider's own cost path uses: API `cache_write` →
 ///   cost `cache_write`, API `cache_read` → cost `cache_read`.
 fn decode_response(
-    resp: llm_client::LlmResponse,
+    resp: llm_runtime::LlmResponse,
     want_structured: bool,
     first_text_only: bool,
     separate_text_blocks: bool,
@@ -263,8 +265,8 @@ fn decode_response(
 
     for block in resp.content {
         match block {
-            llm_client::ContentBlock::Text { text, .. }
-            | llm_client::ContentBlock::TextJsUtf16 { text, .. } => {
+            llm_runtime::ContentBlock::Text { text, .. }
+            | llm_runtime::ContentBlock::TextJsUtf16 { text, .. } => {
                 if first_text_only {
                     if !saw_text {
                         text_acc.push_str(&text);
@@ -277,7 +279,7 @@ fn decode_response(
                 }
                 saw_text = true;
             }
-            llm_client::ContentBlock::ToolCall { id, name, input } => {
+            llm_runtime::ContentBlock::ToolCall { id, name, input } => {
                 tool_calls.push(serde_json::json!({
                     "id": id,
                     "name": name,
@@ -286,17 +288,18 @@ fn decode_response(
             }
             // Side queries ignore reasoning / server-tool / connector / advisor
             // / redacted-thinking blocks.
-            llm_client::ContentBlock::Reasoning { .. }
-            | llm_client::ContentBlock::RedactedThinking { .. }
-            | llm_client::ContentBlock::ServerToolUse { .. }
-            | llm_client::ContentBlock::ConnectorText { .. }
-            | llm_client::ContentBlock::AdvisorToolResult { .. }
-            | llm_client::ContentBlock::Image { .. }
-            | llm_client::ContentBlock::ImageUrl { .. }
-            | llm_client::ContentBlock::Document { .. }
-            | llm_client::ContentBlock::ToolResult { .. }
+            llm_runtime::ContentBlock::ProviderContent { .. }
+            | llm_runtime::ContentBlock::Reasoning { .. }
+            | llm_runtime::ContentBlock::RedactedThinking { .. }
+            | llm_runtime::ContentBlock::ServerToolUse { .. }
+            | llm_runtime::ContentBlock::ConnectorText { .. }
+            | llm_runtime::ContentBlock::AdvisorToolResult { .. }
+            | llm_runtime::ContentBlock::Image { .. }
+            | llm_runtime::ContentBlock::ImageUrl { .. }
+            | llm_runtime::ContentBlock::Document { .. }
+            | llm_runtime::ContentBlock::ToolResult { .. }
             // cache_edits is a request-only directive — never in a response.
-            | llm_client::ContentBlock::CacheEdits { .. } => {}
+            | llm_runtime::ContentBlock::CacheEdits { .. } => {}
         }
     }
 
@@ -395,7 +398,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                 }?;
                 Ok(SideQueryEstimate {
                     serialized_bytes,
-                    input_tokens: llm_client::model::count_tokens::approximate_tokens_for_bytes(
+                    input_tokens: llm_runtime::model::count_tokens::approximate_tokens_for_bytes(
                         serialized_bytes,
                     ),
                 })
@@ -455,12 +458,12 @@ impl SideQueryClient for ProviderSideQueryClient {
             .map(|s| vec![SystemBlock::text(s)])
             .unwrap_or_default();
 
-        // Convert protocol::ConversationMessage → llm_client::Message.
+        // Convert protocol::ConversationMessage → llm_runtime::Message.
         // We inline a minimal conversion here so sidequery does not need to
         // depend on `agent` (which depends back on sidequery — a cycle).
         let messages = convert_messages(request.messages)?;
 
-        // Convert JSON tool declarations → llm_client::ToolDeclaration.
+        // Convert JSON tool declarations → llm_runtime::ToolDeclaration.
         let tools = convert_tool_declarations(request.tools)?;
 
         // thinking (cc 2.1.198): a `Some` session config resolves through the
@@ -471,7 +474,7 @@ impl SideQueryClient for ProviderSideQueryClient {
         // extended-thinking config. `None` (all utility callers) keeps the
         // wire byte-identical to before (no `thinking` field).
         let reasoning = request.thinking.and_then(|t| {
-            llm_client::model::thinking::reasoning_for_request(
+            llm_runtime::model::thinking::reasoning_for_request(
                 t,
                 &request.model,
                 Some(request.max_tokens),
@@ -499,7 +502,7 @@ impl SideQueryClient for ProviderSideQueryClient {
         };
 
         // Route through the transport bridge so the existing Arc<dyn
-        // HttpTransport> is usable as an llm_client::Transport.
+        // HttpTransport> is usable as an llm_runtime::Transport.
         let arc_transport = ArcTransport(Arc::clone(transport));
         let bridge = LlmTransportBridge::new(arc_transport);
 
@@ -593,7 +596,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                     temperature: temperature.map(f64::from),
                     capture_retry_count: true,
                     query_source: Some(request.query_source.as_str().to_string()),
-                    response_format: Some(llm_client::ResponseFormat::JsonSchema {
+                    response_format: Some(llm_runtime::ResponseFormat::JsonSchema {
                         schema: request.schema,
                     }),
                     ..LlmRequest::default()
@@ -639,7 +642,7 @@ fn estimate_canonical_request(request: LlmRequest) -> Result<SideQueryEstimate, 
     let serialized_bytes = crate::side_query::serialized_size(&request)?;
     Ok(SideQueryEstimate {
         serialized_bytes,
-        input_tokens: llm_client::model::count_tokens::approximate_tokens(&request),
+        input_tokens: llm_runtime::model::count_tokens::approximate_tokens(&request),
     })
 }
 
@@ -648,14 +651,14 @@ fn estimate_canonical_request(request: LlmRequest) -> Result<SideQueryEstimate, 
 /// `temperature` parameter — `models.dev`'s `temperature` bit, already
 /// surfaced on every configured model's listing as
 /// `ModelListing.metadata.temperature_control == Some(false)` (see
-/// `llm_client::catalog::map::to_metadata`, consumed identically by the
+/// `llm_runtime::catalog::map::to_metadata`, consumed identically by the
 /// client-facing `/model` picker). `profile: None` matches any listing with
 /// the given `request_model`; every `StrictStructuredQueryRequest` built in
 /// this codebase carries an explicit profile (the Fusion analyst always
 /// does), so that branch only matters for a hypothetical profile-less
 /// caller. A model with no listing, or an unset/`true` bit, is unaffected.
 fn model_rejects_temperature(
-    listings: &[llm_client::ModelListing],
+    listings: &[llm_runtime::ModelListing],
     profile: Option<&str>,
     model: &str,
 ) -> bool {
@@ -678,7 +681,7 @@ fn model_rejects_temperature(
 /// Fusion analyst) is returned unchanged regardless of capability, since
 /// there is nothing to withhold.
 fn temperature_for_capable_model(
-    listings: &[llm_client::ModelListing],
+    listings: &[llm_runtime::ModelListing],
     profile: Option<&str>,
     model: &str,
     temperature: Option<f32>,
@@ -692,7 +695,7 @@ fn temperature_for_capable_model(
 
 // ── Inline message/tool conversion (no dep on `agent` crate) ─────────────────
 
-fn map_structured_llm_error(err: llm_client::LlmError) -> SideQueryError {
+fn map_structured_llm_error(err: llm_runtime::LlmError) -> SideQueryError {
     let message = err.to_string().to_ascii_lowercase();
     let provider = err.provider_message().unwrap_or("").to_ascii_lowercase();
     if message.contains("json schema")
@@ -706,9 +709,9 @@ fn map_structured_llm_error(err: llm_client::LlmError) -> SideQueryError {
     SideQueryError::Api(err)
 }
 
-/// Drive a `query_json_schema` event stream to its final [`llm_client::LlmResponse`].
+/// Drive a `query_json_schema` event stream to its final [`llm_runtime::LlmResponse`].
 ///
-/// F003: this previously scanned for an [`llm_client::LlmEvent::Completed`]
+/// F003: this previously scanned for an [`llm_runtime::LlmEvent::Completed`]
 /// event by hand — but the Anthropic codec (the provider every real Fusion
 /// analyst call over the Session backend uses) never emits `Completed`; a
 /// normal stream ends `MessageStart` → `ContentBlockStart/Delta/Stop` →
@@ -717,45 +720,45 @@ fn map_structured_llm_error(err: llm_client::LlmError) -> SideQueryError {
 /// scan therefore ran off the end of every real Anthropic stream and always
 /// returned this function's own `InvalidResponse` — the analyst call was
 /// unreachable end-to-end regardless of the schema/prompt. Delegate to the
-/// shared [`llm_client::stream_accumulator::accumulate_stream_salvaging`]
+/// shared [`llm_runtime::stream_accumulator::accumulate_stream_salvaging`]
 /// instead, which assembles the response from `MessageStop` (or `Completed`,
 /// when a provider does send it) the same way every other streaming call in
 /// the codebase does.
 async fn collect_completed_response(
-    stream: impl futures_util::Stream<Item = Result<llm_client::LlmEvent, llm_client::LlmError>>
+    stream: impl futures_util::Stream<Item = Result<llm_runtime::LlmEvent, llm_runtime::LlmError>>
         + Send
         + 'static,
-) -> Result<llm_client::LlmResponse, SideQueryError> {
-    llm_client::stream_accumulator::accumulate_stream_salvaging(Box::pin(stream))
+) -> Result<llm_runtime::LlmResponse, SideQueryError> {
+    llm_runtime::stream_accumulator::accumulate_stream_salvaging(Box::pin(stream))
         .await
         .map_err(|(_partial_content, err)| map_structured_llm_error(err))
 }
 
 fn convert_messages(
     messages: Vec<protocol::ConversationMessage>,
-) -> Result<Vec<llm_client::Message>, llm_client::LlmError> {
+) -> Result<Vec<llm_runtime::Message>, llm_runtime::LlmError> {
     messages.into_iter().map(convert_one_message).collect()
 }
 
 fn convert_one_message(
     msg: protocol::ConversationMessage,
-) -> Result<llm_client::Message, llm_client::LlmError> {
+) -> Result<llm_runtime::Message, llm_runtime::LlmError> {
     match msg {
-        protocol::ConversationMessage::User { content, .. } => Ok(llm_client::Message {
+        protocol::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message {
             role: "user".to_string(),
             content: content
                 .into_iter()
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        protocol::ConversationMessage::Assistant { content, .. } => Ok(llm_client::Message {
+        protocol::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message {
             role: "assistant".to_string(),
             content: content
                 .into_iter()
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        protocol::ConversationMessage::System { .. } => Err(llm_client::LlmError::InvalidRequest {
+        protocol::ConversationMessage::System { .. } => Err(llm_runtime::LlmError::InvalidRequest {
             message:
                 "System messages must not appear in the messages vec; pass them via system_prompt"
                     .to_string(),
@@ -765,16 +768,19 @@ fn convert_one_message(
 
 fn convert_content_block(
     block: protocol::ContentBlock,
-) -> Result<llm_client::ContentBlock, llm_client::LlmError> {
+) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match block {
-        protocol::ContentBlock::Text { text } => Ok(llm_client::ContentBlock::Text {
+        protocol::ContentBlock::ProviderContent { protocol, value } => {
+            Ok(llm_runtime::ContentBlock::ProviderContent { protocol, value })
+        }
+        protocol::ContentBlock::Text { text } => Ok(llm_runtime::ContentBlock::Text {
             text,
             cache_control: None,
         }),
         protocol::ContentBlock::TextJsUtf16 {
             text,
             utf16_code_units,
-        } => Ok(llm_client::ContentBlock::TextJsUtf16 {
+        } => Ok(llm_runtime::ContentBlock::TextJsUtf16 {
             text,
             utf16_code_units,
             cache_control: None,
@@ -784,7 +790,7 @@ fn convert_content_block(
             name,
             input,
             provider_id,
-        } => Ok(llm_client::ContentBlock::ToolCall {
+        } => Ok(llm_runtime::ContentBlock::ToolCall {
             // Replay the verbatim provider id when preserved (see agent::convert).
             id: provider_id.unwrap_or_else(|| id.to_string()),
             name,
@@ -796,7 +802,7 @@ fn convert_content_block(
             is_error,
             provider_tool_use_id,
             content_blocks,
-        } => Ok(llm_client::ContentBlock::ToolResult {
+        } => Ok(llm_runtime::ContentBlock::ToolResult {
             tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
             // A structured content-block array (e.g. MCP image/resource) rides
             // as the `Value::Array` output and is emitted verbatim; plain text
@@ -812,28 +818,28 @@ fn convert_content_block(
         protocol::ContentBlock::Thinking {
             thinking,
             signature,
-        } => Ok(llm_client::ContentBlock::Reasoning {
+        } => Ok(llm_runtime::ContentBlock::Reasoning {
             text: thinking,
             signature,
         }),
         protocol::ContentBlock::Image { source } => convert_image(source),
         protocol::ContentBlock::Document { source } => convert_document(source),
-        protocol::ContentBlock::MediaAnalysis { analysis } => Ok(llm_client::ContentBlock::Text {
+        protocol::ContentBlock::MediaAnalysis { analysis } => Ok(llm_runtime::ContentBlock::Text {
             text: render_media_analysis(&analysis),
             cache_control: None,
         }),
         // Low-frequency server-side blocks: replayed verbatim into the request
         // so the provider round-trips them (see agent::convert::convert_block).
         protocol::ContentBlock::RedactedThinking { data } => {
-            Ok(llm_client::ContentBlock::RedactedThinking { data })
+            Ok(llm_runtime::ContentBlock::RedactedThinking { data })
         }
         protocol::ContentBlock::ServerToolUse { id, name, input } => {
-            Ok(llm_client::ContentBlock::ServerToolUse { id, name, input })
+            Ok(llm_runtime::ContentBlock::ServerToolUse { id, name, input })
         }
         protocol::ContentBlock::ConnectorText {
             connector_text,
             signature,
-        } => Ok(llm_client::ContentBlock::ConnectorText {
+        } => Ok(llm_runtime::ContentBlock::ConnectorText {
             connector_text,
             signature,
         }),
@@ -841,7 +847,7 @@ fn convert_content_block(
             tool_use_id,
             content,
             is_error,
-        } => Ok(llm_client::ContentBlock::AdvisorToolResult {
+        } => Ok(llm_runtime::ContentBlock::AdvisorToolResult {
             tool_use_id,
             content,
             is_error,
@@ -851,33 +857,33 @@ fn convert_content_block(
 
 fn convert_image(
     source: protocol::ImageSource,
-) -> Result<llm_client::ContentBlock, llm_client::LlmError> {
+) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match source {
         protocol::ImageSource::Base64 { media_type, data } => {
             use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
-                .map_err(|e| llm_client::LlmError::InvalidRequest {
+                .map_err(|e| llm_runtime::LlmError::InvalidRequest {
                     message: format!("Image base64 decode failed: {e}"),
                 })?;
-            Ok(llm_client::ContentBlock::Image { media_type, bytes })
+            Ok(llm_runtime::ContentBlock::Image { media_type, bytes })
         }
-        protocol::ImageSource::Url { url } => Ok(llm_client::ContentBlock::ImageUrl { url }),
+        protocol::ImageSource::Url { url } => Ok(llm_runtime::ContentBlock::ImageUrl { url }),
     }
 }
 
 fn convert_document(
     source: protocol::DocumentSource,
-) -> Result<llm_client::ContentBlock, llm_client::LlmError> {
+) -> Result<llm_runtime::ContentBlock, llm_runtime::LlmError> {
     match source {
         protocol::DocumentSource::Base64 { media_type, data } => {
             use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
-                .map_err(|e| llm_client::LlmError::InvalidRequest {
+                .map_err(|e| llm_runtime::LlmError::InvalidRequest {
                     message: format!("Document base64 decode failed: {e}"),
                 })?;
-            Ok(llm_client::ContentBlock::Document { media_type, bytes })
+            Ok(llm_runtime::ContentBlock::Document { media_type, bytes })
         }
     }
 }
@@ -891,24 +897,24 @@ fn render_media_analysis(analysis: &MediaAnalysis) -> String {
 
 fn convert_tool_declarations(
     tools: Vec<serde_json::Value>,
-) -> Result<Vec<llm_client::ToolDeclaration>, llm_client::LlmError> {
+) -> Result<Vec<llm_runtime::ToolDeclaration>, llm_runtime::LlmError> {
     tools.into_iter().map(convert_one_tool).collect()
 }
 
-/// Map the DTO's JSON `tool_choice` to [`llm_client::ToolChoice`]. Accepts the
+/// Map the DTO's JSON `tool_choice` to [`llm_runtime::ToolChoice`]. Accepts the
 /// Anthropic wire shapes: `{"type":"auto"}`, `{"type":"any"}`,
 /// `{"type":"none"}`, `{"type":"tool","name":N}`. Unknown / absent ⇒ `None`
 /// (provider default), so the memory selector that passes `None` is unchanged.
-fn convert_tool_choice(choice: Option<&serde_json::Value>) -> Option<llm_client::ToolChoice> {
+fn convert_tool_choice(choice: Option<&serde_json::Value>) -> Option<llm_runtime::ToolChoice> {
     let ty = choice?.get("type").and_then(serde_json::Value::as_str)?;
     match ty {
-        "auto" => Some(llm_client::ToolChoice::Auto),
-        "none" => Some(llm_client::ToolChoice::None),
-        "any" | "required" => Some(llm_client::ToolChoice::Required),
+        "auto" => Some(llm_runtime::ToolChoice::Auto),
+        "none" => Some(llm_runtime::ToolChoice::None),
+        "any" | "required" => Some(llm_runtime::ToolChoice::Required),
         "tool" => choice?
             .get("name")
             .and_then(serde_json::Value::as_str)
-            .map(|name| llm_client::ToolChoice::Tool { name: name.into() }),
+            .map(|name| llm_runtime::ToolChoice::Tool { name: name.into() }),
         _ => None,
     }
 }
@@ -916,11 +922,11 @@ fn convert_tool_choice(choice: Option<&serde_json::Value>) -> Option<llm_client:
 #[allow(clippy::needless_pass_by_value)]
 fn convert_one_tool(
     value: serde_json::Value,
-) -> Result<llm_client::ToolDeclaration, llm_client::LlmError> {
+) -> Result<llm_runtime::ToolDeclaration, llm_runtime::LlmError> {
     let name = value
         .get("name")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+        .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
             message: "Tool declaration missing required string field: name".to_string(),
         })?
         .to_string();
@@ -928,7 +934,7 @@ fn convert_one_tool(
     let description = value
         .get("description")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+        .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
             message: "Tool declaration missing required string field: description".to_string(),
         })?
         .to_string();
@@ -937,11 +943,11 @@ fn convert_one_tool(
         .get("input_schema")
         .cloned()
         .filter(|v| !v.is_null())
-        .ok_or_else(|| llm_client::LlmError::InvalidRequest {
+        .ok_or_else(|| llm_runtime::LlmError::InvalidRequest {
             message: "Tool declaration missing required field: input_schema".to_string(),
         })?;
 
-    Ok(llm_client::ToolDeclaration {
+    Ok(llm_runtime::ToolDeclaration {
         name,
         description,
         input_schema,
@@ -1088,7 +1094,7 @@ mod tests {
 
         // The forwarded fields reach the wire body.
         assert_eq!(body["model"].as_str(), Some("claude-haiku-4-5"));
-        // llm-client encodes system as an array of blocks:
+        // llm-runtime encodes system as an array of blocks:
         // `"system": [{"type":"text","text":"system"}]`
         // (not the legacy string form the old api-client used).
         let system_arr = body["system"].as_array().expect("system is a JSON array");
@@ -1199,6 +1205,8 @@ mod tests {
 
         let config = ClientConfig {
             providers: vec![ProviderProfile {
+                wire_profile: None,
+                regions: llm_runtime::Region::all(),
                 provider_id: ProviderId::AnthropicFirstParty,
                 profile_name: "parent-profile".to_string(),
                 base_url: DEFAULT_BASE_URL.to_string(),
@@ -1236,15 +1244,15 @@ mod tests {
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("parent-oauth-token".to_string()),
             )));
-        let parent_transport: Arc<dyn llm_client::Transport> = Arc::new(LlmTransportBridge::new(
+        let parent_transport: Arc<dyn llm_runtime::Transport> = Arc::new(LlmTransportBridge::new(
             ArcTransport(transport.clone() as Arc<dyn HttpTransport>),
         ));
         let parent_service = Arc::new(
-            llm_client::ApiService::new(
+            llm_runtime::ApiService::new(
                 Arc::new(parent_client),
                 parent_transport,
-                llm_client::SubscriberState::default(),
-                llm_client::model::user_agent::UserAgentEnv::default(),
+                llm_runtime::SubscriberState::default(),
+                llm_runtime::model::user_agent::UserAgentEnv::default(),
                 "test",
                 None,
                 None,
@@ -1252,9 +1260,9 @@ mod tests {
             // Exercise the main-turn temperature default: disabled thinking
             // would inject `temperature: 1`, which the side query's explicit
             // `None` must clear to preserve its independent wire contract.
-            .with_thinking(llm_client::model::thinking::ThinkingConfig::Disabled)
+            .with_thinking(llm_runtime::model::thinking::ThinkingConfig::Disabled)
             // A main `--json-schema` requirement must not leak into compact.
-            .with_forced_tool_choice(llm_client::ToolChoice::Tool {
+            .with_forced_tool_choice(llm_runtime::ToolChoice::Tool {
                 name: "StructuredOutput".to_string(),
             }),
         );
@@ -1264,7 +1272,7 @@ mod tests {
         request.query_source = QuerySource::Compaction;
         request.profile = Some("parent-profile".to_string());
         request.temperature = None;
-        request.thinking = Some(llm_client::model::thinking::ThinkingConfig::Adaptive);
+        request.thinking = Some(llm_runtime::model::thinking::ThinkingConfig::Adaptive);
         request.effort = Some(serde_json::json!("high"));
         let parent_tools = vec![serde_json::json!({
             "name": "Read",
@@ -1490,7 +1498,7 @@ mod tests {
         // intent renders exactly like a main-loop turn: {"type":"adaptive"}.
         r.model = "claude-opus-4-6".into();
         r.query_source = QuerySource::Compaction;
-        r.thinking = Some(llm_client::model::thinking::ThinkingConfig::default());
+        r.thinking = Some(llm_runtime::model::thinking::ThinkingConfig::default());
         r.effort = Some(serde_json::json!("high"));
         client.query(r).await.expect("query ok");
         let received = transport.received.lock().unwrap();
@@ -1547,7 +1555,7 @@ mod tests {
             r.query_source = QuerySource::Compaction;
             // Compaction forks inherit the session thinking config (cc
             // 2.1.198); all three models support (adaptive) thinking.
-            r.thinking = Some(llm_client::model::thinking::ThinkingConfig::default());
+            r.thinking = Some(llm_runtime::model::thinking::ThinkingConfig::default());
 
             let resp = client
                 .query(r)
@@ -1605,23 +1613,24 @@ mod tests {
 
     /// `query_json_schema` on the Session backend is a STREAMING call
     /// (`build_request(..., stream=true, ..)` -> `ApiService::drive_stream`),
-    /// so it needs a scripted [`llm_client::Transport::open_stream`], not
+    /// so it needs a scripted [`llm_runtime::Transport::open_stream`], not
     /// [`StubTransport`]'s non-streaming `request` (whose `stream_sse` always
     /// errors — driving these tests through it hangs behind the streaming
     /// connect-phase retry/backoff loop instead of failing fast). This mirrors
-    /// `llm-client/tests/transport_stream_test.rs`'s `StreamTransport` /
+    /// `llm-runtime/tests/transport_stream_test.rs`'s `StreamTransport` /
     /// `ScriptedFrames` pattern, one layer below the SSE-byte-stream bridge,
     /// and captures each request's decoded `body_json` for wire assertions.
     struct ScriptedFrames {
-        items: std::collections::VecDeque<Result<llm_client::RawStreamFrame, llm_client::LlmError>>,
+        items:
+            std::collections::VecDeque<Result<llm_runtime::RawStreamFrame, llm_runtime::LlmError>>,
     }
 
-    impl llm_client::FrameStream for ScriptedFrames {
+    impl llm_runtime::FrameStream for ScriptedFrames {
         fn next_frame(
             &mut self,
-        ) -> llm_client::BoxFuture<
+        ) -> llm_runtime::BoxFuture<
             '_,
-            Result<Option<llm_client::RawStreamFrame>, llm_client::LlmError>,
+            Result<Option<llm_runtime::RawStreamFrame>, llm_runtime::LlmError>,
         > {
             let next = match self.items.pop_front() {
                 Some(Ok(frame)) => Ok(Some(frame)),
@@ -1680,14 +1689,14 @@ mod tests {
         }
     }
 
-    impl llm_client::Transport for StreamStubTransport {
+    impl llm_runtime::Transport for StreamStubTransport {
         fn execute<'a>(
             &'a self,
-            _request: &'a llm_client::ProviderRequest,
-        ) -> llm_client::BoxFuture<'a, Result<llm_client::ProviderResponse, llm_client::LlmError>>
+            _request: &'a llm_runtime::ProviderRequest,
+        ) -> llm_runtime::BoxFuture<'a, Result<llm_runtime::ProviderResponse, llm_runtime::LlmError>>
         {
             Box::pin(async move {
-                Err(llm_client::LlmError::Transport {
+                Err(llm_runtime::LlmError::Transport {
                     message: "execute not scripted; this stub only serves streaming calls".into(),
                 })
             })
@@ -1695,8 +1704,8 @@ mod tests {
 
         fn open_stream<'a>(
             &'a self,
-            request: &'a llm_client::ProviderRequest,
-        ) -> llm_client::BoxFuture<'a, Result<llm_client::StreamingResponse, llm_client::LlmError>>
+            request: &'a llm_runtime::ProviderRequest,
+        ) -> llm_runtime::BoxFuture<'a, Result<llm_runtime::StreamingResponse, llm_runtime::LlmError>>
         {
             self.received_bodies
                 .lock()
@@ -1705,10 +1714,14 @@ mod tests {
             let items = self
                 .frames
                 .iter()
-                .map(|payload| Ok(llm_client::RawStreamFrame::new(payload.as_bytes().to_vec())))
+                .map(|payload| {
+                    Ok(llm_runtime::RawStreamFrame::new(
+                        payload.as_bytes().to_vec(),
+                    ))
+                })
                 .collect();
             Box::pin(async move {
-                Ok(llm_client::StreamingResponse {
+                Ok(llm_runtime::StreamingResponse {
                     status: 200,
                     headers: std::collections::BTreeMap::new(),
                     frames: Box::new(ScriptedFrames { items }),
@@ -1739,6 +1752,8 @@ mod tests {
     ) -> ProviderSideQueryClient {
         let config = ClientConfig {
             providers: vec![ProviderProfile {
+                wire_profile: None,
+                regions: llm_runtime::Region::all(),
                 provider_id: ProviderId::AnthropicFirstParty,
                 profile_name: "anthropic".to_string(),
                 base_url: DEFAULT_BASE_URL.to_string(),
@@ -1777,18 +1792,18 @@ mod tests {
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("session-oauth-token".to_string()),
             )));
-        let session_transport: Arc<dyn llm_client::Transport> = transport;
-        let service = llm_client::ApiService::new(
+        let session_transport: Arc<dyn llm_runtime::Transport> = transport;
+        let service = llm_runtime::ApiService::new(
             Arc::new(session_client),
             session_transport,
-            llm_client::SubscriberState::default(),
-            llm_client::model::user_agent::UserAgentEnv::default(),
+            llm_runtime::SubscriberState::default(),
+            llm_runtime::model::user_agent::UserAgentEnv::default(),
             "test",
             analytics,
             None,
         );
         let service = if parent_forced_tool_choice {
-            service.with_forced_tool_choice(llm_client::ToolChoice::Tool {
+            service.with_forced_tool_choice(llm_runtime::ToolChoice::Tool {
                 name: "StructuredOutput".to_string(),
             })
         } else {
@@ -1883,7 +1898,12 @@ mod tests {
 
     #[derive(Default)]
     struct SchemaAttemptProbe {
-        usages: Mutex<Vec<(llm_client::Usage, llm_client::ModelAttemptUsageCompleteness)>>,
+        usages: Mutex<
+            Vec<(
+                llm_runtime::Usage,
+                llm_runtime::ModelAttemptUsageCompleteness,
+            )>,
+        >,
         settled: std::sync::atomic::AtomicBool,
     }
 
@@ -1891,25 +1911,25 @@ mod tests {
     struct SchemaAttemptHooks(Arc<SchemaAttemptProbe>);
 
     #[async_trait]
-    impl llm_client::ModelAttemptHooks for SchemaAttemptHooks {
+    impl llm_runtime::ModelAttemptHooks for SchemaAttemptHooks {
         async fn begin(
             &self,
             _: &platform_api::ModelAttemptContext,
             _: &LlmRequest,
-            _: &llm_client::PreparedLlmCall,
-        ) -> Result<Box<dyn llm_client::ModelAttemptLease>, LlmError> {
+            _: &llm_runtime::PreparedLlmCall,
+        ) -> Result<Box<dyn llm_runtime::ModelAttemptLease>, LlmError> {
             Ok(Box::new(SchemaAttemptLease(self.0.clone())))
         }
     }
 
-    impl llm_client::ModelAttemptLease for SchemaAttemptLease {
+    impl llm_runtime::ModelAttemptLease for SchemaAttemptLease {
         fn mark_dispatched(&mut self) -> Result<(), LlmError> {
             Ok(())
         }
         fn observe_usage(
             &mut self,
-            usage: &llm_client::Usage,
-            completeness: llm_client::ModelAttemptUsageCompleteness,
+            usage: &llm_runtime::Usage,
+            completeness: llm_runtime::ModelAttemptUsageCompleteness,
         ) {
             self.0
                 .usages
@@ -1917,13 +1937,13 @@ mod tests {
                 .unwrap()
                 .push((usage.clone(), completeness));
         }
-        fn finish(self: Box<Self>) -> Box<dyn llm_client::ModelAttemptSettlement> {
+        fn finish(self: Box<Self>) -> Box<dyn llm_runtime::ModelAttemptSettlement> {
             self
         }
     }
 
     #[async_trait]
-    impl llm_client::ModelAttemptSettlement for SchemaAttemptLease {
+    impl llm_runtime::ModelAttemptSettlement for SchemaAttemptLease {
         async fn wait(self: Box<Self>) -> Result<(), LlmError> {
             self.0
                 .settled
@@ -1958,7 +1978,7 @@ mod tests {
         assert_eq!(usage.billable_tokens.output, 1);
         assert_eq!(
             *completeness,
-            llm_client::ModelAttemptUsageCompleteness::Complete
+            llm_runtime::ModelAttemptUsageCompleteness::Complete
         );
         assert_eq!(transport.received_bodies.lock().unwrap().len(), 1);
     }
@@ -2034,6 +2054,8 @@ mod tests {
         let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
         let config = ClientConfig {
             providers: vec![ProviderProfile {
+                wire_profile: None,
+                regions: llm_runtime::Region::all(),
                 provider_id: ProviderId::AnthropicFirstParty,
                 profile_name: "anthropic".to_string(),
                 base_url: DEFAULT_BASE_URL.to_string(),
@@ -2050,7 +2072,7 @@ mod tests {
                     description: None,
                     // The vendored capability bit this fix must consult —
                     // real gpt-5.6-*/kimi-* judge rows carry this exact
-                    // value (`llm-client/data/models-dev/openai.json` etc.,
+                    // value (`llm-runtime/data/models-dev/openai.json` etc.,
                     // mapped by `catalog::map::to_metadata`).
                     metadata: platform_api::ModelMetadata {
                         temperature_control: Some(false),
@@ -2079,12 +2101,12 @@ mod tests {
             .with_credential_provider(Arc::new(StaticCredentialProvider::new(
                 Credential::BearerToken("session-oauth-token".to_string()),
             )));
-        let session_transport: Arc<dyn llm_client::Transport> = transport.clone();
-        let service = Arc::new(llm_client::ApiService::new(
+        let session_transport: Arc<dyn llm_runtime::Transport> = transport.clone();
+        let service = Arc::new(llm_runtime::ApiService::new(
             Arc::new(session_client),
             session_transport,
-            llm_client::SubscriberState::default(),
-            llm_client::model::user_agent::UserAgentEnv::default(),
+            llm_runtime::SubscriberState::default(),
+            llm_runtime::model::user_agent::UserAgentEnv::default(),
             "test",
             None,
             None,

@@ -43,7 +43,7 @@ pub async fn run(_cli: &Cli) -> i32 {
         return crate::exit_codes::RUNTIME_ERROR;
     }
 
-    let org_pin = engine_desktop::managed_force_login_org_pin().await;
+    let org_pin = harness_runtime::desktop::managed_force_login_org_pin().await;
     let org_uuid = match &org_pin {
         ForceLoginOrgPin::Pinned(ids) if ids.len() == 1 => ids.first().cloned(),
         ForceLoginOrgPin::Invalid => {

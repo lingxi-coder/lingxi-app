@@ -1,6 +1,6 @@
 import Foundation
 
-#if canImport(engine_mobileFFI)
+#if canImport(harness_runtimeFFI)
 
 actor FfiCronStoreProvider: CronStoreProviding {
     private var stores: [String: FfiCronStoreClient] = [:]

@@ -3,7 +3,7 @@
 //! Replaces the `AnthropicProvider::build_request` seam formerly used
 //! by `BuiltinToolContext.provider` + `WebSearchTool`. Only the non-streaming
 //! `POST /v1/messages` request assembly is needed here; all retry, OAuth,
-//! telemetry, and streaming logic lives in `llm-client` (used by the
+//! telemetry, and streaming logic lives in `llm-runtime` (used by the
 //! main engine path via `orchestrator`).
 //!
 //! **Origin:** ported 1:1 from `AnthropicProvider::build_request`

@@ -26,7 +26,7 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use hooks::{HookPromptRunner, PromptHookError, PromptHookRequest};
-use llm_client::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
+use llm_runtime::{ContentBlock as LlmContentBlock, LlmError, LlmResponse};
 use protocol::{ConversationMessage, MessageId};
 
 use crate::conversation::{ConversationOrchestrator, OrchestratorApiClient};
@@ -279,8 +279,8 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
             };
             response.map_err(Self::map_error)
         };
-        let query = llm_client::thinking_scope::scope_thinking_recovery(
-            llm_client::thinking_scope::ThinkingRecoveryScope::default(),
+        let query = llm_runtime::thinking_scope::scope_thinking_recovery(
+            llm_runtime::thinking_scope::ThinkingRecoveryScope::default(),
             query,
         );
         let response = tokio::time::timeout(req.timeout, query)
@@ -291,7 +291,7 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
 }
 
 fn hook_transcript_budget(model: &str) -> usize {
-    use llm_client::model::context_window::{has_1m_context, model_native_1m};
+    use llm_runtime::model::context_window::{has_1m_context, model_native_1m};
     if has_1m_context(model) || model_native_1m(model) {
         500_000
     } else {
@@ -477,7 +477,7 @@ fn bound_hook_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::{LlmResponse, Usage};
+    use llm_runtime::{LlmResponse, Usage};
     use std::sync::Mutex;
 
     /// One recorded `messages_create` call: `(model, profile, system, messages)`.

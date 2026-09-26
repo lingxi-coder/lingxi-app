@@ -6,7 +6,7 @@
 //! `tool_use` block STARTING flips that flag, this also guarantees a
 //! non-idempotent tool that already started is never re-run.
 
-use llm_client::{LlmError, LlmEvent};
+use llm_runtime::{LlmError, LlmEvent};
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_thinking, content_block_start_tool_use,
     input_json_delta, message_start, message_stop, text_delta, thinking_delta, MockApiClient,

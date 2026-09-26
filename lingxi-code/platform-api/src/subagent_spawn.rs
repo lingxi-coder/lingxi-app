@@ -412,9 +412,9 @@ fn usage_complete_default() -> bool {
 /// (`{web_search_requests, web_fetch_requests}`), `service_tier`
 /// (`standard|priority|batch`), and `cache_creation`
 /// (`{ephemeral_1h_input_tokens, ephemeral_5m_input_tokens}`) — are DEFERRED:
-/// the runner's source `llm_client::Usage` has no `web_fetch_requests`,
+/// the runner's source `llm_runtime::Usage` has no `web_fetch_requests`,
 /// `service_tier`, or 1h/5m cache split to populate them faithfully, so they are
-/// intentionally omitted rather than zero-faked. Extending `llm_client::Usage`
+/// intentionally omitted rather than zero-faked. Extending `llm_runtime::Usage`
 /// is the prerequisite for carrying them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentUsage {
@@ -431,7 +431,7 @@ pub struct SubagentUsage {
     pub cache_creation_input_tokens: u64,
     /// Cache-read input tokens (claude `usage.cache_read_input_tokens`).
     pub cache_read_input_tokens: u64,
-    /// Reasoning/thinking output tokens (`llm_client::Usage.billable_tokens
+    /// Reasoning/thinking output tokens (`llm_runtime::Usage.billable_tokens
     /// .reasoning_output`) — a bucket some providers (OpenAI, Gemini,
     /// DeepSeek, several OpenRouter routes) bill separately from visible
     /// output tokens. Finding [1]: before this field existed, a subagent's

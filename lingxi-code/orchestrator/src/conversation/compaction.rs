@@ -1708,7 +1708,7 @@ impl ConversationOrchestrator {
     /// overflow guard. Called by both turn drivers after every successful call.
     /// Mirrors claude-code's `Xtt` last-usage snapshot (see
     /// [`Self::last_response_input_tokens`]).
-    pub(crate) fn record_response_input_tokens(&self, usage: &llm_client::Usage) {
+    pub(crate) fn record_response_input_tokens(&self, usage: &llm_runtime::Usage) {
         let total_input = usage
             .billable_tokens
             .input

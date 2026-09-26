@@ -93,7 +93,7 @@ pub const BRIEF_MODE_DISABLED_REMINDER: &str = "<system-reminder>\nBrief mode is
 /// takes the ENABLED branch and emits "[Tool references removed - tools no
 /// longer available]" — not the disabled branch's "[…tool search not enabled]".
 ///
-/// The request builder (`llm-client`) is provider-agnostic and has no session
+/// The request builder (`llm-runtime`) is provider-agnostic and has no session
 /// handle, so it cannot compute this itself; the orchestrator — which knows the
 /// mode and resolved provider — publishes the decision here and the builder
 /// reads it. Defaults `false` (tool search off / no provider support). Set by

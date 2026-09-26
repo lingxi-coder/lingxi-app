@@ -1,7 +1,7 @@
-//! Translation helpers between `llm_client::Usage` and
+//! Translation helpers between `llm_runtime::Usage` and
 //! `cost::Usage` plus model-string → `ProviderId` resolution.
 //!
-//! Also contains the bridge that populates an `llm_client::PricingCatalog` from
+//! Also contains the bridge that populates an `llm_runtime::PricingCatalog` from
 //! the `cost::PricingCatalog` so `LlmResponse.cost` carries real estimates.
 //!
 //! Used by M6-06 to feed `LlmResponse.usage` into `CostTracker`.
@@ -9,9 +9,9 @@
 use cost::pricing::{ProviderId, TokenClass};
 use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
 use cost::ModelRef;
-use llm_client::Usage as LlmUsage;
+use llm_runtime::Usage as LlmUsage;
 
-/// Translate an `llm_client::Usage` into the cost crate's `Usage` shape.
+/// Translate an `llm_runtime::Usage` into the cost crate's `Usage` shape.
 ///
 /// Maps `billable_tokens.cache_write` → `TokenUsage::cache_write`
 /// and `billable_tokens.cache_read` → `TokenUsage::cache_read`.
@@ -210,20 +210,22 @@ pub fn llm_usage_to_cost_usage_checked(usage: &LlmUsage) -> Result<Usage, cost::
     })
 }
 
-fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderId {
+fn llm_provider_to_cost_provider(provider: &llm_runtime::ProviderId) -> ProviderId {
     match provider {
-        llm_client::ProviderId::AnthropicFirstParty => ProviderId::Anthropic,
-        llm_client::ProviderId::OpenAI | llm_client::ProviderId::AzureOpenAI => ProviderId::OpenAI,
-        llm_client::ProviderId::Gemini
-        | llm_client::ProviderId::VertexGemini
-        | llm_client::ProviderId::VertexClaude => ProviderId::GoogleGemini,
-        llm_client::ProviderId::BedrockClaude => ProviderId::AmazonBedrock,
+        llm_runtime::ProviderId::AnthropicFirstParty => ProviderId::Anthropic,
+        llm_runtime::ProviderId::OpenAI | llm_runtime::ProviderId::AzureOpenAI => {
+            ProviderId::OpenAI
+        }
+        llm_runtime::ProviderId::Gemini
+        | llm_runtime::ProviderId::VertexGemini
+        | llm_runtime::ProviderId::VertexClaude => ProviderId::GoogleGemini,
+        llm_runtime::ProviderId::BedrockClaude => ProviderId::AmazonBedrock,
         // Foundry hosts Claude models — attribute cost/telemetry to Anthropic.
-        llm_client::ProviderId::FoundryClaude => ProviderId::Anthropic,
-        llm_client::ProviderId::OpenAICompatible { name } => {
+        llm_runtime::ProviderId::FoundryClaude => ProviderId::Anthropic,
+        llm_runtime::ProviderId::OpenAICompatible { name } => {
             ProviderId::OpenAICompatible { name: name.clone() }
         }
-        llm_client::ProviderId::Custom { name } => ProviderId::Custom { name: name.clone() },
+        llm_runtime::ProviderId::Custom { name } => ProviderId::Custom { name: name.clone() },
     }
 }
 
@@ -231,7 +233,7 @@ fn llm_provider_to_cost_provider(provider: &llm_client::ProviderId) -> ProviderI
 ///
 /// Prefer the LIVE session `profile` when known: `model` is the bare wire id and
 /// the real provider lives in `session.model_profile`. Falling back to
-/// [`llm_client::split_profile_model`] (the `profile = None` path) only sees the
+/// [`llm_runtime::split_profile_model`] (the `profile = None` path) only sees the
 /// bare id and mis-infers `anthropic` for every non-`claude-` bare id (deepseek,
 /// `gpt-*`, `gemini-*`) AND for provider-shared `claude-*` ids (e.g. Copilot /
 /// Bedrock Claude) — misattributing the cost and the `tengu_api_success`
@@ -248,12 +250,26 @@ pub fn model_ref_from_string(model: &str, profile: Option<&str>) -> ModelRef {
         // `tengu_api_success` provider tag).
         None => match crate::provider_adapter::provider_for_model(model) {
             Some(p) => (p, model.to_string()),
-            None => llm_client::split_profile_model(model),
+            // A shared wire id such as deepseek-flash can mean metered chat
+            // or a different connection with distinct billing. If session
+            // provenance was lost, charge the unknown tier and flag it instead
+            // of fabricating a first-party Anthropic price.
+            None if crate::provider_adapter::model_has_ambiguous_profile(model)
+                && !model.starts_with("claude-") =>
+            {
+                return ModelRef {
+                    provider: ProviderId::Custom {
+                        name: "unknown-profile".into(),
+                    },
+                    model: model.to_string(),
+                };
+            }
+            None => llm_runtime::split_profile_model(model),
         },
     };
-    let pricing_provider = llm_client::pricing_provider_id_for_profile(
+    let pricing_provider = llm_runtime::pricing_provider_id_for_profile(
         &profile,
-        &llm_client::ProviderId::OpenAICompatible {
+        &llm_runtime::ProviderId::OpenAICompatible {
             name: profile.clone(),
         },
     );
@@ -277,7 +293,7 @@ pub(crate) fn provider_tag(provider: &ProviderId) -> String {
     }
 }
 
-/// Map a `cost::pricing::ProviderId` to its `llm_client::ProviderId` equivalent.
+/// Map a `cost::pricing::ProviderId` to its `llm_runtime::ProviderId` equivalent.
 ///
 /// Mapping:
 /// - `Anthropic` → `AnthropicFirstParty`
@@ -286,37 +302,62 @@ pub(crate) fn provider_tag(provider: &ProviderId) -> String {
 /// - `AmazonBedrock` → `BedrockClaude`
 /// - `OpenAICompatible { name }` → `OpenAICompatible { name }`
 /// - `Custom { name }` → `Custom { name }`
-fn cost_provider_to_llm_provider(p: &ProviderId) -> llm_client::ProviderId {
+fn cost_provider_to_llm_provider(p: &ProviderId) -> llm_runtime::ProviderId {
     match p {
-        ProviderId::Anthropic => llm_client::ProviderId::AnthropicFirstParty,
-        ProviderId::OpenAI => llm_client::ProviderId::OpenAI,
-        ProviderId::GoogleGemini => llm_client::ProviderId::Gemini,
-        ProviderId::AmazonBedrock => llm_client::ProviderId::BedrockClaude,
+        ProviderId::Anthropic => llm_runtime::ProviderId::AnthropicFirstParty,
+        ProviderId::OpenAI => llm_runtime::ProviderId::OpenAI,
+        ProviderId::GoogleGemini => llm_runtime::ProviderId::Gemini,
+        ProviderId::AmazonBedrock => llm_runtime::ProviderId::BedrockClaude,
         ProviderId::OpenAICompatible { name } => {
-            llm_client::ProviderId::OpenAICompatible { name: name.clone() }
+            llm_runtime::ProviderId::OpenAICompatible { name: name.clone() }
         }
-        ProviderId::Custom { name } => llm_client::ProviderId::Custom { name: name.clone() },
+        ProviderId::Custom { name } => llm_runtime::ProviderId::Custom { name: name.clone() },
     }
 }
 
-/// Build an `llm_client::PricingCatalog` populated from a `cost::PricingCatalog`.
+/// Convert the client's completed, USD-only frozen token estimate to the
+/// ledger unit and exact route identity. Provider-reported money is separate.
+#[must_use]
+pub(crate) fn frozen_cost_quote(estimate: &llm_runtime::CostEstimate) -> Option<(ModelRef, u64)> {
+    let amount = estimate.total_cost_usd? * 1_000_000_000.0;
+    if !estimate.estimated || !amount.is_finite() || amount < 0.0 || amount >= u64::MAX as f64 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let nano_usd = amount.round() as u64;
+    Some((
+        ModelRef {
+            provider: llm_provider_to_cost_provider(&estimate.pricing_model.pricing_provider_id),
+            model: estimate.pricing_model.billing_model.clone(),
+        },
+        nano_usd,
+    ))
+}
+
+/// Build an `llm_runtime::PricingCatalog` populated from a `cost::PricingCatalog`.
 ///
 /// Conversion: for each [`cost::ModelPricing`] entry, the `billing_model` is the
 /// catalog key (the stripped model name the cost crate uses, e.g. `"claude-opus-4-6"`),
 /// and per-bucket rates are converted from **nano-USD per token** to
 /// **USD per million tokens** via `usd_per_million = nano_usd_per_token as f64 / 1000.0`.
 ///
-/// Missing token classes in a cost entry produce `0.0` for that bucket in the
-/// llm-client `TokenPricing` (never an error).  Provider defaults are not
-/// iterable from the cost catalog and are omitted; only explicitly-keyed model
-/// entries are transferred.
+/// Partially published entries are omitted because the legacy estimator's
+/// `TokenPricing` requires every bucket; production responses use the SDK's
+/// frozen price snapshot instead. Provider defaults are not iterable from the
+/// cost catalog and are omitted.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn llm_catalog_from_cost(
     catalog: &cost::pricing::PricingCatalog,
-) -> llm_client::PricingCatalog {
-    let mut out = llm_client::PricingCatalog::empty();
+) -> llm_runtime::PricingCatalog {
+    let mut out = llm_runtime::PricingCatalog::empty();
     for entry in catalog.entries() {
+        // The legacy estimator's TokenPricing has mandatory numeric fields.
+        // Do not turn an unpublished cache rate into a free (zero) rate here;
+        // production responses use the SDK's frozen, bucket-aware estimate.
+        if matches!(entry.source, cost::PricingSource::PublishedPartial { .. }) {
+            continue;
+        }
         let provider = cost_provider_to_llm_provider(&entry.model_ref.provider);
         let billing_model = entry.model_ref.model.clone();
         let nano_to_usd = |class: TokenClass| -> f64 {
@@ -325,7 +366,7 @@ pub fn llm_catalog_from_cost(
                 .get(&class)
                 .map_or(0.0, |m| m.nano_usd_per_token as f64 / 1000.0)
         };
-        let pricing = llm_client::TokenPricing {
+        let pricing = llm_runtime::TokenPricing {
             input_per_million: nano_to_usd(TokenClass::Input),
             output_per_million: nano_to_usd(TokenClass::Output),
             cache_write_per_million: nano_to_usd(TokenClass::CacheWrite),
@@ -340,16 +381,41 @@ pub fn llm_catalog_from_cost(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::{ServerToolUsage as LlmServerToolUsage, TokenUsage as LlmTokenUsage};
+    use llm_runtime::{ServerToolUsage as LlmServerToolUsage, TokenUsage as LlmTokenUsage};
+
+    #[test]
+    fn frozen_quote_carries_exact_price_identity_and_nano_amount() {
+        let mut estimate = llm_runtime::CostEstimate::unestimated(llm_runtime::PricingModelRef {
+            pricing_provider_id: llm_runtime::ProviderId::OpenAICompatible {
+                name: "deepseek".into(),
+            },
+            billing_model: "deepseek-flash".into(),
+            request_model: "deepseek-flash".into(),
+            display_model: "deepseek-flash".into(),
+        });
+        estimate.estimated = true;
+        estimate.total_cost_usd = Some(0.00075);
+        let (model, nano) = frozen_cost_quote(&estimate).unwrap();
+        assert_eq!(
+            model.provider,
+            ProviderId::OpenAICompatible {
+                name: "deepseek".into()
+            }
+        );
+        assert_eq!(model.model, "deepseek-flash");
+        assert_eq!(nano, 750_000);
+        estimate.total_cost_usd = Some(f64::INFINITY);
+        assert!(frozen_cost_quote(&estimate).is_none());
+    }
 
     /// Resolve a model-name string to its `ProviderId` by parsing the
     /// `provider/model` prefix. Only needed in tests — the production path goes
     /// through `model_ref_from_string`.
     fn provider_from_model(model: &str) -> ProviderId {
-        let (profile, _) = llm_client::split_profile_model(model);
-        let llm_provider = llm_client::pricing_provider_id_for_profile(
+        let (profile, _) = llm_runtime::split_profile_model(model);
+        let llm_provider = llm_runtime::pricing_provider_id_for_profile(
             &profile,
-            &llm_client::ProviderId::OpenAICompatible {
+            &llm_runtime::ProviderId::OpenAICompatible {
                 name: profile.clone(),
             },
         );
@@ -360,14 +426,14 @@ mod tests {
 
     #[test]
     fn split_prefixed_splits_profile_and_model() {
-        let (p, m) = llm_client::split_profile_model("openai/gpt-4o");
+        let (p, m) = llm_runtime::split_profile_model("openai/gpt-4o");
         assert_eq!(p, "openai");
         assert_eq!(m, "gpt-4o");
     }
 
     #[test]
     fn split_bare_string_is_anthropic_backcompat() {
-        let (p, m) = llm_client::split_profile_model("claude-opus-4-7");
+        let (p, m) = llm_runtime::split_profile_model("claude-opus-4-7");
         assert_eq!(p, "anthropic");
         assert_eq!(m, "claude-opus-4-7");
     }
@@ -375,21 +441,21 @@ mod tests {
     #[test]
     fn split_claude_with_slash_stays_anthropic() {
         // A claude model id is never reinterpreted as profile/model.
-        let (p, m) = llm_client::split_profile_model("claude-3-5/sonnet");
+        let (p, m) = llm_runtime::split_profile_model("claude-3-5/sonnet");
         assert_eq!(p, "anthropic");
         assert_eq!(m, "claude-3-5/sonnet");
     }
 
     #[test]
     fn split_non_claude_no_slash_is_anthropic_profile() {
-        let (p, m) = llm_client::split_profile_model("some-model");
+        let (p, m) = llm_runtime::split_profile_model("some-model");
         assert_eq!(p, "anthropic");
         assert_eq!(m, "some-model");
     }
 
     #[test]
     fn split_custom_profile_name() {
-        let (p, m) = llm_client::split_profile_model("groq/llama-3.3-70b");
+        let (p, m) = llm_runtime::split_profile_model("groq/llama-3.3-70b");
         assert_eq!(p, "groq");
         assert_eq!(m, "llama-3.3-70b");
     }
@@ -716,16 +782,21 @@ mod tests {
 
     #[test]
     fn model_ref_recovers_provider_by_id_when_profile_is_none() {
-        // Bug fix: after a cross-provider `--resume` clears model_profile, a bare
-        // non-claude id must still attribute to its REAL provider (resolved from
-        // the catalog), NOT default to Anthropic via split_profile_model.
+        // Two DeepSeek profiles serve this id. Without a live profile, neither
+        // the provider nor the price can be recovered from the model alone.
         let mr = model_ref_from_string("deepseek-flash", None);
         assert_eq!(
             mr.provider,
-            ProviderId::OpenAICompatible {
-                name: "deepseek".to_string()
+            ProviderId::Custom {
+                name: "unknown-profile".to_string()
             },
-            "bare deepseek id with no profile must resolve to deepseek, not anthropic"
+            "ambiguous bare id must not inherit another provider's price"
+        );
+
+        assert_eq!(
+            model_ref_from_string("gpt-4o", None).provider,
+            ProviderId::OpenAI,
+            "unique catalog ids still recover their provider"
         );
 
         // A bare `claude-` id with no profile still resolves to Anthropic
@@ -750,7 +821,7 @@ mod tests {
     #[test]
     fn bridge_opus_4_6_converts_exact_rates() {
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_client::{CostEstimator, PricingPolicy, TokenUsage, Usage as LlmUsage};
+        use llm_runtime::{CostEstimator, PricingPolicy, TokenUsage, Usage as LlmUsage};
 
         let cost_cat = CostCatalog::builtin_reference();
         let llm_cat = llm_catalog_from_cost(&cost_cat);
@@ -760,8 +831,8 @@ mod tests {
 
         // Construct the PricingModelRef that the estimator needs.
         // billing_model is the raw model name (no prefix) as stored in the catalog.
-        let pricing_ref = llm_client::PricingModelRef {
-            pricing_provider_id: llm_client::ProviderId::AnthropicFirstParty,
+        let pricing_ref = llm_runtime::PricingModelRef {
+            pricing_provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
             billing_model: "claude-opus-4-6".to_string(),
             request_model: "claude-opus-4-6".to_string(),
             display_model: "Claude Opus 4.6".to_string(),
@@ -804,14 +875,14 @@ mod tests {
     #[test]
     fn bridge_unknown_model_returns_unestimated() {
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_client::{CostEstimator, PricingPolicy, Usage as LlmUsage};
+        use llm_runtime::{CostEstimator, PricingPolicy, Usage as LlmUsage};
 
         let cost_cat = CostCatalog::builtin_reference();
         let llm_cat = llm_catalog_from_cost(&cost_cat);
         let estimator = CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated);
 
-        let pricing_ref = llm_client::PricingModelRef {
-            pricing_provider_id: llm_client::ProviderId::AnthropicFirstParty,
+        let pricing_ref = llm_runtime::PricingModelRef {
+            pricing_provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
             billing_model: "claude-nonexistent-9999".to_string(),
             request_model: "claude-nonexistent-9999".to_string(),
             display_model: "Claude Nonexistent".to_string(),
@@ -834,14 +905,14 @@ mod tests {
     #[test]
     fn bridge_openai_gpt4o_maps_to_correct_provider() {
         use cost::pricing::PricingCatalog as CostCatalog;
-        use llm_client::{CostEstimator, PricingPolicy, TokenUsage, Usage as LlmUsage};
+        use llm_runtime::{CostEstimator, PricingPolicy, TokenUsage, Usage as LlmUsage};
 
         let cost_cat = CostCatalog::builtin_reference();
         let llm_cat = llm_catalog_from_cost(&cost_cat);
         let estimator = CostEstimator::new(llm_cat, PricingPolicy::MarkUnestimated);
 
-        let pricing_ref = llm_client::PricingModelRef {
-            pricing_provider_id: llm_client::ProviderId::OpenAI,
+        let pricing_ref = llm_runtime::PricingModelRef {
+            pricing_provider_id: llm_runtime::ProviderId::OpenAI,
             billing_model: "gpt-4o".to_string(),
             request_model: "gpt-4o".to_string(),
             display_model: "GPT-4o".to_string(),

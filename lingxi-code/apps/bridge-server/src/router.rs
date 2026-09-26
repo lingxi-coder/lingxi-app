@@ -188,7 +188,7 @@ impl SessionStoreContext {
 ///
 /// Abstracting routing behind a trait keeps the connection loop decoupled from
 /// HOW the engine was assembled: the production server builds an
-/// [`EngineCommandRouter`] from `engine_desktop::build`'s `DesktopRuntime`
+/// [`EngineCommandRouter`] from `harness_runtime::desktop::build`'s `DesktopRuntime`
 /// handles, while a routing test builds the SAME router over the engine's mock
 /// handles.
 #[async_trait]
@@ -263,9 +263,10 @@ pub struct EngineCommandRouter {
     /// Process-owned observer facts supplement the live task registry for
     /// foreground children and allocation before the first transcript write.
     session_agent_observer:
-        Option<Arc<engine_desktop::session_agents::DesktopSessionAgentObserver>>,
+        Option<Arc<harness_runtime::desktop::session_agents::DesktopSessionAgentObserver>>,
     /// Shared provider credential manager. Production bridge boot wires the
     /// exact manager used by the runtime; tests/embedded clients may omit it.
+    catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
     credentials: Option<Arc<secret::CredentialManager>>,
     /// Settings-visible provider model directory assembled from the full
     /// provider config, including providers not currently routable.
@@ -283,20 +284,21 @@ pub struct EngineCommandRouter {
     settings: Option<SettingsContext>,
     /// Optional MCP-scope roots backing `UpsertMcpServer` / `RemoveMcpServer`.
     /// Production boot wires it from the SAME `.mcp.json` / global-config
-    /// paths `engine_desktop` resolves the read-side registry from;
+    /// paths `harness_runtime::desktop` resolves the read-side registry from;
     /// lightweight users of the routing seam may omit it, in which case the
     /// two commands report the missing context rather than doing nothing.
     mcp: Option<McpPaths>,
     /// Live MCP registry for Desktop-only configuration snapshots and hot reloads.
     mcp_registry: Option<Arc<mcp::McpRegistry>>,
     /// Live plugin runtime for Desktop-only refresh after install/config changes.
-    plugin_runtime: Option<Arc<engine_desktop::PluginRuntime>>,
+    plugin_runtime: Option<Arc<harness_runtime::desktop::PluginRuntime>>,
     /// Live hook registry for source-scoped hot swaps.
     hook_registry: Option<Arc<RwLock<hooks::HookRegistry>>>,
     /// Existing repo-root catalog reloader used for skills/plugins live refresh.
     repo_root_reloader: Option<Arc<dyn platform_api::RepoRootReloader>>,
     /// FileChanged watcher controller used to replace watch matchers after hook edits.
-    file_changed_watcher: Option<engine_desktop::file_changed_watch::FileChangedWatcherController>,
+    file_changed_watcher:
+        Option<harness_runtime::desktop::file_changed_watch::FileChangedWatcherController>,
     /// Set while a turn is in flight — `ClearSession` is rejected in this window
     /// (plan §2 mid-turn semantics).
     turn_active: AtomicBool,
@@ -345,7 +347,7 @@ async fn read_session_agent_summary(
     path: &std::path::Path,
     raw: &[u8],
 ) -> Option<SessionAgentSummaryDto> {
-    let messages = engine_desktop::session_agents::lower_transcript(raw);
+    let messages = harness_runtime::desktop::session_agents::lower_transcript(raw);
     let mut status = "unknown".to_string();
     let mut name = None;
     let mut agent_type = None;
@@ -389,7 +391,7 @@ async fn read_session_agent_summary(
                 // `agent::transcript::record_terminal`) is an engine-internal
                 // word. Translate it here rather than letting it reach a
                 // client: on the wire a parked agent is `completed`, exactly
-                // like claude-code's row. `engine-mobile` already does this at
+                // like claude-code's row. `harness-runtime::mobile` already does this at
                 // its own read-back; the desktop path did not, so one agent
                 // reached the panel as `idle` here and `completed` from the
                 // live observer.
@@ -505,7 +507,7 @@ impl EngineCommandRouter {
             }
         }
         if let Err(error) =
-            engine_desktop::refresh_process_session_presence(previous, current).await
+            harness_runtime::desktop::refresh_process_session_presence(previous, current).await
         {
             problems.push(error.to_string());
         }
@@ -598,6 +600,7 @@ impl EngineCommandRouter {
             slash_registry,
             session_store: None,
             session_agent_observer: None,
+            catalog_registry: harness_runtime::desktop::FusionCatalogRegistry::default(),
             credentials: None,
             provider_model_catalog_listings: Vec::new(),
             provider_credentials_ephemeral: false,
@@ -616,6 +619,14 @@ impl EngineCommandRouter {
     /// Attach the runtime's shared credential manager so Desktop credential
     /// operations use the same secure-store entries as CLI and TUI.
     #[must_use]
+    pub fn with_catalog_registry(
+        mut self,
+        registry: harness_runtime::desktop::FusionCatalogRegistry,
+    ) -> Self {
+        self.catalog_registry = registry;
+        self
+    }
+
     pub fn with_credentials(mut self, credentials: Arc<secret::CredentialManager>) -> Self {
         self.credentials = Some(credentials);
         self
@@ -650,7 +661,7 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_session_agent_observer(
         mut self,
-        observer: Arc<engine_desktop::session_agents::DesktopSessionAgentObserver>,
+        observer: Arc<harness_runtime::desktop::session_agents::DesktopSessionAgentObserver>,
     ) -> Self {
         self.session_agent_observer = Some(observer);
         self
@@ -698,7 +709,7 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_plugin_runtime(
         mut self,
-        plugin_runtime: Option<Arc<engine_desktop::PluginRuntime>>,
+        plugin_runtime: Option<Arc<harness_runtime::desktop::PluginRuntime>>,
     ) -> Self {
         self.plugin_runtime = plugin_runtime;
         self
@@ -726,7 +737,7 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_file_changed_watcher(
         mut self,
-        watcher: Option<engine_desktop::file_changed_watch::FileChangedWatcherController>,
+        watcher: Option<harness_runtime::desktop::file_changed_watch::FileChangedWatcherController>,
     ) -> Self {
         self.file_changed_watcher = watcher;
         self
@@ -2618,15 +2629,18 @@ impl EngineCommandRouter {
             &session_id.as_uuid().to_string(),
         );
         let mut unreadable = 0usize;
-        match engine_desktop::session_agents::collect_transcript_paths(&dir).await {
+        match harness_runtime::desktop::session_agents::collect_transcript_paths(&dir).await {
             Ok(paths) => {
                 for path in paths {
-                    let Some(agent_id) = engine_desktop::session_agents::agent_id_from_path(&path)
+                    let Some(agent_id) =
+                        harness_runtime::desktop::session_agents::agent_id_from_path(&path)
                     else {
                         continue;
                     };
-                    let raw = match engine_desktop::session_agents::read_transcript(&dir, &path)
-                        .await
+                    let raw = match harness_runtime::desktop::session_agents::read_transcript(
+                        &dir, &path,
+                    )
+                    .await
                     {
                         Ok(raw) => raw,
                         Err(error) => {
@@ -2636,7 +2650,9 @@ impl EngineCommandRouter {
                         }
                     };
                     if let Some(line) =
-                        engine_desktop::session_agents::first_corrupt_transcript_line(&raw)
+                        harness_runtime::desktop::session_agents::first_corrupt_transcript_line(
+                            &raw,
+                        )
                     {
                         unreadable = unreadable.saturating_add(1);
                         tracing::warn!(
@@ -2786,7 +2802,7 @@ impl EngineCommandRouter {
                             &replayed.display_history,
                             &replayed.client_state_tool_results,
                         ),
-                        engine_desktop::session_agents::transcript_revision(&raw),
+                        harness_runtime::desktop::session_agents::transcript_revision(&raw),
                     )
                 }
                 Err(error) => {
@@ -2812,7 +2828,7 @@ impl EngineCommandRouter {
                 &store.session_cwd,
                 &requested_session_id.as_uuid().to_string(),
             );
-            let path = match engine_desktop::session_agents::find_transcript_path(
+            let path = match harness_runtime::desktop::session_agents::find_transcript_path(
                 &dir,
                 &parsed.to_string(),
             )
@@ -2830,7 +2846,9 @@ impl EngineCommandRouter {
             };
             let raw = match path {
                 Some(path) => {
-                    match engine_desktop::session_agents::read_transcript(&dir, &path).await {
+                    match harness_runtime::desktop::session_agents::read_transcript(&dir, &path)
+                        .await
+                    {
                         Ok(raw) => raw,
                         Err(error) => {
                             tracing::warn!(%error, "bridge-server: session agent transcript unreadable");
@@ -2867,7 +2885,8 @@ impl EngineCommandRouter {
                     return;
                 }
             };
-            if let Some(line) = engine_desktop::session_agents::first_corrupt_transcript_line(&raw)
+            if let Some(line) =
+                harness_runtime::desktop::session_agents::first_corrupt_transcript_line(&raw)
             {
                 tracing::warn!(
                     line,
@@ -2882,8 +2901,8 @@ impl EngineCommandRouter {
                 return;
             }
             (
-                engine_desktop::session_agents::lower_transcript(&raw),
-                engine_desktop::session_agents::transcript_revision(&raw),
+                harness_runtime::desktop::session_agents::lower_transcript(&raw),
+                harness_runtime::desktop::session_agents::transcript_revision(&raw),
             )
         };
         if self.handle.current_session_id().await != requested_session_id {
@@ -3257,7 +3276,7 @@ impl CommandRouter for EngineCommandRouter {
 
     // The full command dispatch is one match over the command surface; splitting
     // it would scatter the one-place-routes-everything map this module exists to
-    // be. (Same convention as `engine_desktop::build`.)
+    // be. (Same convention as `harness_runtime::desktop::build`.)
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
@@ -3324,7 +3343,7 @@ impl CommandRouter for EngineCommandRouter {
                 }
                 let cwd = status.cwd;
                 let fs = platform_posix::PosixFileSystem::new(cwd.clone());
-                let result = engine_desktop::cron_management::manage(
+                let result = harness_runtime::desktop::cron_management::manage(
                     &fs,
                     &cwd,
                     request,
@@ -3403,11 +3422,17 @@ impl CommandRouter for EngineCommandRouter {
                 // full-source reconciliation detached; `false` means storage
                 // succeeded but this process's fixed auth route needs restart.
                 if error.is_none()
-                    && !crate::boot::refresh_fusion_catalog_bounded(vec![provider_id.clone()]).await
+                    && !crate::boot::refresh_fusion_catalog_bounded(
+                        &self.catalog_registry,
+                        vec![provider_id.clone()],
+                    )
+                    .await
                 {
-                    error = Some(engine_desktop::fusion_credential_restart_required_message(
-                        &provider_id,
-                    ));
+                    error = Some(
+                        harness_runtime::desktop::fusion_credential_restart_required_message(
+                            &provider_id,
+                        ),
+                    );
                 }
                 let applied = error.is_none();
                 let credential_previews = applied
@@ -3443,7 +3468,7 @@ impl CommandRouter for EngineCommandRouter {
             // (`refresh_inner`: `if row.available { insert(true) } else {
             // entry(..).or_insert(false) }`), so a re-probe cannot close this
             // either. Hence the dedicated removal fan-out
-            // `engine_desktop::refresh_fusion_catalog_after_credential_delete`
+            // `harness_runtime::desktop::refresh_fusion_catalog_after_credential_delete`
             // below. Without it a provider whose key was deleted mid-session
             // survived `filter_fusion_catalog`, could be auto-selected as a
             // `/fusion` panel, had budget reserved for it, and died on
@@ -3480,8 +3505,11 @@ impl CommandRouter for EngineCommandRouter {
                 };
                 let applied = error.is_none();
                 if applied {
-                    engine_desktop::refresh_fusion_catalog_after_credential_delete(&provider_id)
-                        .await;
+                    harness_runtime::desktop::refresh_fusion_catalog_after_credential_delete(
+                        &self.catalog_registry,
+                        &provider_id,
+                    )
+                    .await;
                 }
                 sink.emit(ClientEvent::ProviderCredentialStatus {
                     operation_id,
@@ -3821,7 +3849,7 @@ impl CommandRouter for EngineCommandRouter {
             // process. Deliberately NOT fixed with a call here: `self.auth`
             // is the SAME `Arc<dyn AuthHandle>` the TUI's `/logout`
             // (`command_core::LogoutHandler`) drives, so the clearing lives
-            // in `engine_desktop::FusionCatalogClearingAuth`, which wraps
+            // in `harness_runtime::desktop::FusionCatalogClearingAuth`, which wraps
             // that one handle for every sign-out surface in the process at
             // once. Adding a second call here would double-fire the same
             // fan-out and let the two mechanisms drift.
@@ -4242,7 +4270,7 @@ impl CommandRouter for EngineCommandRouter {
             // Durable turn recovery (`attach_turn` / `resume_turn` /
             // `pause_turn`) is a MOBILE host capability: it needs the retained
             // per-turn event log and the recovery state machine that
-            // `engine-mobile`'s host owns (`host.rs`'s `AttachTurn` /
+            // `harness-runtime::mobile`'s host owns (`host.rs`'s `AttachTurn` /
             // `ResumeTurn` / `PauseTurn` arms). This bridge keeps no retained
             // event window and no `TurnRecoverySnapshotDto` state, so there is
             // nothing here to attach to, resume, or pause.
@@ -4470,7 +4498,7 @@ mod mcp_config_json_parsing_tests {
 
 /// Round-9 review finding [2]: the Electron desktop's ONLY credential-add path
 /// is [`ClientCommand::SetProviderCredential`] (Settings -> Provider
-/// Credentials). It must tell Fusion's process-wide catalog refresher about the
+/// Credentials). It must tell Fusion's scoped catalog refresher about the
 /// write, exactly the way the TUI key view does
 /// (`apps/cli/src/mode.rs`'s `run_connect_action`); without it a key added in
 /// Settings routes on the next ordinary turn but stays invisible to `/fusion`
@@ -4691,8 +4719,8 @@ mod fusion_catalog_refresh_tests {
         let cwd = temp.path().join("project");
         let home = temp.path().join("home");
         std::fs::create_dir_all(&cwd).unwrap();
-        let runtime = Box::pin(engine_desktop::build(
-            engine_desktop::DesktopConfig {
+        let runtime = Box::pin(harness_runtime::desktop::build(
+            harness_runtime::desktop::DesktopConfig {
                 cwd: cwd.clone(),
                 lingxi_home: home.clone(),
                 isolated_credential_storage: true,
@@ -4793,6 +4821,7 @@ mod fusion_catalog_refresh_tests {
     async fn router_with_credentials(
         credentials: Arc<secret::CredentialManager>,
         ephemeral: bool,
+        catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
     ) -> EngineCommandRouter {
         EngineCommandRouter::new(
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::new())
@@ -4804,6 +4833,7 @@ mod fusion_catalog_refresh_tests {
         )
         .with_credentials(credentials)
         .with_ephemeral_provider_credentials(ephemeral)
+        .with_catalog_registry(catalog_registry)
     }
 
     /// Both branches of the arm — the persistent keychain write and the
@@ -4813,12 +4843,6 @@ mod fusion_catalog_refresh_tests {
     /// pins the wiring end to end, not just that some function was called.
     #[tokio::test]
     async fn setting_a_provider_credential_refreshes_the_fusion_catalog() {
-        // The refresher registry is process-wide and its entries are fanned out
-        // to SERIALLY, so this test must not run alongside the sibling test
-        // below, which deliberately registers a never-answering backend.
-        let _registry = crate::boot::fusion_refresh_test_support::REGISTRY_LOCK
-            .lock()
-            .await;
         let temp = tempfile::tempdir().expect("tempdir");
         let storage = Arc::new(
             PlainTextSecureStorage::new(temp.path().join("credentials"))
@@ -4842,8 +4866,10 @@ mod fusion_catalog_refresh_tests {
             .into_iter()
             .collect::<std::collections::BTreeMap<String, bool>>(),
         ));
-        engine_desktop::register_fusion_catalog_refresher(
-            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+        let catalog_registry = harness_runtime::desktop::FusionCatalogRegistry::default();
+        harness_runtime::desktop::register_fusion_catalog_refresher(
+            &catalog_registry,
+            harness_runtime::desktop::FusionCatalogRefresher::for_keychain_profiles(
                 availability.clone(),
                 credentials.clone(),
                 &["openrouter", "deepseek"],
@@ -4851,7 +4877,7 @@ mod fusion_catalog_refresh_tests {
         );
 
         let sink: Arc<dyn ClientEventSink> = Arc::new(SilentSink);
-        router_with_credentials(credentials.clone(), false)
+        router_with_credentials(credentials.clone(), false, catalog_registry.clone())
             .await
             .route(
                 ClientCommand::SetProviderCredential {
@@ -4862,7 +4888,7 @@ mod fusion_catalog_refresh_tests {
                 sink.clone(),
             )
             .await;
-        router_with_credentials(credentials, true)
+        router_with_credentials(credentials, true, catalog_registry.clone())
             .await
             .route(
                 ClientCommand::SetProviderCredential {
@@ -4902,19 +4928,16 @@ notification can make it visible to Fusion: {published:?}"
     /// Virtual time (`start_paused`): the assertion is on the DEADLINE.
     #[tokio::test(start_paused = true)]
     async fn a_stalled_credential_backend_never_parks_the_router_arm() {
-        let _registry = crate::boot::fusion_refresh_test_support::REGISTRY_LOCK
-            .lock()
-            .await;
         // "never-answers" has no credential of any kind, so the re-probe this
         // write triggers reaches the never-answering backend.
-        let (credentials, _availability, reads) =
+        let (credentials, _availability, reads, catalog_registry) =
             crate::boot::fusion_refresh_test_support::register_stalling_refresher(&[
                 "openrouter",
                 "never-answers",
             ]);
 
         let sink: Arc<dyn ClientEventSink> = Arc::new(SilentSink);
-        let router = router_with_credentials(credentials, true).await;
+        let router = router_with_credentials(credentials, true, catalog_registry.clone()).await;
         let began = tokio::time::Instant::now();
         let arm_returned = tokio::time::timeout(
             crate::boot::FUSION_CATALOG_REFRESH_BUDGET * 3,
@@ -4963,9 +4986,6 @@ zero reads this test would pass without exercising the stall at all"
     /// packaged/brokered ephemeral one — must clear the entry.
     #[tokio::test]
     async fn deleting_a_provider_credential_clears_it_from_the_fusion_catalog() {
-        let _registry = crate::boot::fusion_refresh_test_support::REGISTRY_LOCK
-            .lock()
-            .await;
         let temp = tempfile::tempdir().expect("tempdir");
         let storage = Arc::new(
             PlainTextSecureStorage::new(temp.path().join("credentials"))
@@ -4986,8 +5006,10 @@ zero reads this test would pass without exercising the stall at all"
             .into_iter()
             .collect::<std::collections::BTreeMap<String, bool>>(),
         ));
-        engine_desktop::register_fusion_catalog_refresher(
-            engine_desktop::FusionCatalogRefresher::for_keychain_profiles(
+        let catalog_registry = harness_runtime::desktop::FusionCatalogRegistry::default();
+        harness_runtime::desktop::register_fusion_catalog_refresher(
+            &catalog_registry,
+            harness_runtime::desktop::FusionCatalogRefresher::for_keychain_profiles(
                 availability.clone(),
                 credentials.clone(),
                 &["openrouter", "deepseek"],
@@ -4996,7 +5018,7 @@ zero reads this test would pass without exercising the stall at all"
 
         let sink: Arc<dyn ClientEventSink> = Arc::new(SilentSink);
         // Boot state: both providers credentialed and published as available.
-        router_with_credentials(credentials.clone(), false)
+        router_with_credentials(credentials.clone(), false, catalog_registry.clone())
             .await
             .route(
                 ClientCommand::SetProviderCredential {
@@ -5007,7 +5029,7 @@ zero reads this test would pass without exercising the stall at all"
                 sink.clone(),
             )
             .await;
-        router_with_credentials(credentials.clone(), true)
+        router_with_credentials(credentials.clone(), true, catalog_registry.clone())
             .await
             .route(
                 ClientCommand::SetProviderCredential {
@@ -5026,7 +5048,7 @@ zero reads this test would pass without exercising the stall at all"
 delete assertions below would pass without exercising anything: {seeded:?}"
         );
 
-        router_with_credentials(credentials.clone(), false)
+        router_with_credentials(credentials.clone(), false, catalog_registry.clone())
             .await
             .route(
                 ClientCommand::DeleteProviderCredential {
@@ -5036,7 +5058,7 @@ delete assertions below would pass without exercising anything: {seeded:?}"
                 sink.clone(),
             )
             .await;
-        router_with_credentials(credentials, true)
+        router_with_credentials(credentials, true, catalog_registry.clone())
             .await
             .route(
                 ClientCommand::DeleteProviderCredential {

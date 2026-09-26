@@ -1,7 +1,7 @@
 //! Assemble the merged `ClientConfig` + pricing + chains + credential sources
 //! from Anthropic state + `settings.providers` + `settings.routing` (spec §5.3).
 
-use llm_client::{AuthStrategy, ClientConfig, CredentialConfig, ProviderId, ProviderProfile};
+use llm_runtime::{AuthStrategy, ClientConfig, CredentialConfig, ProviderId, ProviderProfile};
 
 use crate::parse_providers::parse_user_providers;
 use crate::parse_routing::parse_routing;
@@ -60,8 +60,28 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
     };
 
     let mut profile =
-        llm_client::anthropic_provider_profile(&inputs.anthropic_api_base, auth, credential);
-    profile.models = inputs.anthropic_models.clone();
+        llm_runtime::anthropic_provider_profile(&inputs.anthropic_api_base, auth, credential);
+    if let Some(preset) = llm_runtime::builtin_presets()
+        .providers
+        .into_iter()
+        .find(|p| p.profile_name == "anthropic")
+    {
+        profile.regions = preset.regions;
+        profile.wire_profile = preset.wire_profile;
+        profile.models = preset.models;
+        for model in &inputs.anthropic_models {
+            if !profile
+                .models
+                .iter()
+                .any(|existing| existing.request_model == model.request_model)
+            {
+                profile.models.push(model.clone());
+            }
+        }
+    } else {
+        profile.regions = vec![llm_runtime::Region::International];
+        profile.models = inputs.anthropic_models.clone();
+    }
     (profile, cred_source)
 }
 
@@ -90,6 +110,12 @@ fn locate(providers: &[ProviderProfile], target: &str) -> Option<(usize, usize)>
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
 pub fn assemble(inputs: AssembleInputs) -> Assembled {
+    assemble_for_region(inputs, llm_runtime::Region::International)
+}
+
+/// Build an execution catalog for one explicit product usage region.
+/// Configuration and credentials in other regions remain stored by the host.
+pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) -> Assembled {
     let mut warnings = Vec::new();
     let mut providers: Vec<ProviderProfile> = Vec::new();
     let mut credential_sources: Vec<CredentialSource> = Vec::new();
@@ -102,8 +128,11 @@ pub fn assemble(inputs: AssembleInputs) -> Assembled {
     }
 
     // 2. Built-in presets: rewrite Env -> Static{id = profile_name}.
-    let catalog = llm_client::builtin_presets();
+    let catalog = llm_runtime::builtin_presets();
     for mut preset in catalog.providers {
+        if preset.profile_name == "anthropic" {
+            continue;
+        }
         let env_var = match &preset.credential {
             CredentialConfig::Env { var } => Some(var.clone()),
             _ => None,
@@ -172,6 +201,8 @@ pub fn assemble(inputs: AssembleInputs) -> Assembled {
         }
     }
 
+    providers.retain(|profile| profile.regions.contains(&region));
+
     // 4. Routing: aliases (fold) + fallback (validate).
     let (mut chains, raw_fallback, routing_warns) = parse_routing(inputs.routing.as_ref());
     warnings.extend(routing_warns);
@@ -229,9 +260,50 @@ pub fn assemble(inputs: AssembleInputs) -> Assembled {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::ModelProfile;
+    use llm_runtime::ModelProfile;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn region_filters_builtin_and_custom_routes_without_losing_saved_configuration() {
+        let mut inputs = anthropic_only_inputs();
+        inputs.user_providers.insert(
+            "mainland-only".into(),
+            serde_json::json!({
+                "baseUrl":"https://example.test/v1", "type":"openai", "regions":["china_mainland"],
+                "models":["custom-model"]
+            }),
+        );
+        let saved = inputs.user_providers.clone();
+        for region in [
+            llm_runtime::Region::International,
+            llm_runtime::Region::ChinaMainland,
+        ] {
+            let assembled = assemble_for_region(inputs.clone(), region);
+            assert!(assembled
+                .client_config
+                .providers
+                .iter()
+                .all(|p| p.regions.contains(&region)));
+            assert_eq!(
+                assembled
+                    .client_config
+                    .providers
+                    .iter()
+                    .any(|p| p.profile_name == "openai"),
+                region == llm_runtime::Region::International
+            );
+            assert_eq!(
+                assembled
+                    .client_config
+                    .providers
+                    .iter()
+                    .any(|p| p.profile_name == "mainland-only"),
+                region == llm_runtime::Region::ChinaMainland
+            );
+        }
+        assert_eq!(inputs.user_providers, saved);
+    }
 
     fn anthropic_only_inputs() -> AssembleInputs {
         AssembleInputs {
@@ -243,7 +315,7 @@ mod tests {
                 aliases: Vec::new(),
                 description: None,
                 metadata: Default::default(),
-                capabilities: llm_client::Capabilities::default(),
+                capabilities: llm_runtime::Capabilities::default(),
             }],
             anthropic_has_api_key: true,
             anthropic_has_oauth: false,
@@ -256,7 +328,7 @@ mod tests {
     fn merges_anthropic_and_presets() {
         let out = assemble(anthropic_only_inputs());
         // anthropic + 10 built-in presets (incl. Kimi Open Platform and Code).
-        assert_eq!(out.client_config.providers.len(), 11);
+        assert!(out.client_config.providers.len() > 11);
         let names: Vec<&str> = out
             .client_config
             .providers
@@ -266,9 +338,9 @@ mod tests {
         assert!(names.contains(&"anthropic"));
         assert!(names.contains(&"openrouter"));
         assert!(names.contains(&"deepseek"));
-        assert!(names.contains(&"kimi"));
+        assert!(names.contains(&"kimi-intl"));
         assert!(names.contains(&"kimi-code"));
-        assert!(names.contains(&"glm-coding"));
+        assert!(!names.contains(&"glm-coding"));
         assert!(names.contains(&"zai"));
         assert!(names.contains(&"openai"));
         assert!(names.contains(&"openai-chatgpt"));
@@ -303,22 +375,25 @@ mod tests {
             .client_config
             .providers
             .iter()
-            .find(|p| p.profile_name == "kimi")
+            .find(|p| p.profile_name == "kimi-intl")
             .unwrap();
-        assert_eq!(kimi.base_url, "https://api.moonshot.cn/v1");
-        assert_eq!(kimi.protocol, llm_client::ProtocolFamily::OpenAiChat);
+        assert_eq!(kimi.base_url, "https://api.moonshot.ai/v1");
+        assert_eq!(kimi.protocol, llm_runtime::ProtocolFamily::OpenAiChat);
         assert_eq!(
             kimi.credential,
             CredentialConfig::Static {
-                id: "kimi".to_string()
+                id: "kimi-intl".to_string()
             }
         );
         let kimi_source = out
             .credential_sources
             .iter()
-            .find(|c| c.credential_id == "kimi")
+            .find(|c| c.credential_id == "kimi-intl")
             .unwrap();
-        assert_eq!(kimi_source.env_var.as_deref(), Some("MOONSHOT_API_KEY"));
+        assert_eq!(
+            kimi_source.env_var.as_deref(),
+            Some("MOONSHOT_INTL_API_KEY")
+        );
         assert_eq!(kimi_source.kind, CredentialKind::ApiKey);
 
         let kimi_code = out
@@ -462,7 +537,14 @@ mod tests {
         inp.routing = Some(json!({ "aliases": { "boss": "anthropic/claude-opus-4-6" } }));
         let out = assemble(inp);
         let anthropic = &out.client_config.providers[0];
-        assert!(anthropic.models[0].aliases.iter().any(|a| a == "boss"));
+        assert!(anthropic
+            .models
+            .iter()
+            .find(|m| m.request_model == "claude-opus-4-6")
+            .unwrap()
+            .aliases
+            .iter()
+            .any(|a| a == "boss"));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! three independent capability flags, or a TCC missing-permissions panel.
 
 use async_trait::async_trait;
-use tui_core::computer_access_bridge::{
+use permission::computer_access::{
     ComputerAccessExchange, ComputerAccessRequest, ComputerAccessResponse,
 };
 
@@ -91,7 +91,7 @@ impl ComputerAccessResolver for TuiBridgeResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tui_core::computer_access_bridge::AccessTier;
+    use permission::computer_access::AccessTier;
 
     fn sample_request() -> ComputerAccessRequest {
         ComputerAccessRequest {

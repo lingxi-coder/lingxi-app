@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import LingxiCode
 
-#if canImport(engine_mobileFFI)
-import engine_mobileFFI
+#if canImport(harness_runtimeFFI)
+import harness_runtimeFFI
 
 private actor AdminRoundtripListener: IosEventListener {
     private var events: [ClientEvent] = []
@@ -121,6 +121,6 @@ final class NativeAdminEngineRoundtripTests: XCTestCase {
 }
 #else
 final class NativeAdminEngineRoundtripTests: XCTestCase {
-    func testAdminRequiresRealNativeBindings() { XCTFail("Native admin roundtrip requires linked engine_mobileFFI") }
+    func testAdminRequiresRealNativeBindings() { XCTFail("Native admin roundtrip requires linked harness_runtimeFFI") }
 }
 #endif

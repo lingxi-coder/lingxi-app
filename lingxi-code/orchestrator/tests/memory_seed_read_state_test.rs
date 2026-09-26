@@ -19,7 +19,7 @@
 //!
 //! LingXi reuses the ALREADY-WIRED session-start seam
 //! `fire_instructions_loaded` (called once by every composition root — see
-//! `apps/engine-desktop/src/lib.rs`), so this test drives the exact production
+//! `harness-runtime/src/desktop/mod.rs`), so this test drives the exact production
 //! entry point rather than the private helper.
 
 use async_trait::async_trait;

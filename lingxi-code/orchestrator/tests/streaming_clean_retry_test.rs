@@ -1,6 +1,6 @@
 //! cc 2.1.263 Oer: retry from pre-attempt history plus the clean meta nudge.
 
-use llm_client::LlmEvent;
+use llm_runtime::LlmEvent;
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_thinking, content_block_stop, message_delta_stop,
     message_start, message_stop, noop_hook_executor, text_delta, thinking_delta, MockApiClient,

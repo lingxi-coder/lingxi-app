@@ -17,7 +17,7 @@ telemetry = { path = "../telemetry" }
 # directly lets the missing-usage settlement fallback reuse
 # `count_tokens::approximate_tokens_for_bytes` instead of hand-rolling a
 # second, divergent bytes-per-token formula (user-directed T1 policy).
-llm-client = { path = "../llm-client" }
+llm-runtime = { path = "../llm-runtime" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

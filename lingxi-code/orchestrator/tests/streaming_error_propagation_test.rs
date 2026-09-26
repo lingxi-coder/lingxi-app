@@ -1,4 +1,4 @@
-use llm_client::{LlmError, LlmEvent};
+use llm_runtime::{LlmError, LlmEvent};
 use orchestrator::test_support::{
     message_start, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
     StaticMemoryProvider,

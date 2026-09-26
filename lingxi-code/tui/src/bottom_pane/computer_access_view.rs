@@ -33,15 +33,15 @@ use std::any::Any;
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use permission::computer_access::{
+    ComputerAccessExchange, ComputerAccessRequest, ComputerAccessResponse, TccState,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use tokio::sync::oneshot;
-use tui_core::computer_access_bridge::{
-    ComputerAccessExchange, ComputerAccessRequest, ComputerAccessResponse, TccState,
-};
 
 use crate::bottom_pane::dialog_view::centered_rect;
 use crate::bottom_pane::view::{BottomPaneView, ViewAction, ViewOutcome};
@@ -483,8 +483,8 @@ impl BottomPaneView for ComputerAccessView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use permission::computer_access::{AccessTier, RequestedApp};
     use ratatui::layout::Position;
-    use tui_core::computer_access_bridge::{AccessTier, RequestedApp};
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

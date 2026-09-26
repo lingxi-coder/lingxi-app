@@ -120,7 +120,7 @@ const APP_EVENT_DTO_ORDINALS_AT_12_0_0: &[&str] = &[
 /// production producer at all — which is exactly what makes "just delete the
 /// dead variant" look free. It is not: dropping it renumbers `Unverified` and
 /// `Unavailable`. (It does have a producer now,
-/// `apps/engine-mobile/src/local_apps_host.rs:2016-2036`, but this lock does
+/// `harness-runtime/src/mobile/local_apps_host.rs:2016-2036`, but this lock does
 /// not depend on that and must outlive it.)
 const LOCAL_APP_VERIFICATION_STATUS_DTO_ORDINALS_AT_12_0_0: &[&str] =
     &["Pending", "Passed", "Failed", "Unverified", "Unavailable"];

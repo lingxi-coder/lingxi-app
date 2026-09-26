@@ -57,7 +57,7 @@ pub use report_findings::ReportFindingsTool;
 pub use send_message::SendMessageTool;
 pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
-pub use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
+pub use tool_api::ask_user_question::AskUserQuestionExchange;
 
 use std::sync::Arc;
 /// Register the UI tools against `reg` (the full set, including the builtin
@@ -181,7 +181,7 @@ fn register_with_options(
     reg.register_builtin(Arc::new(ReportFindingsTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
     // NOTE: `ArtifactTool` lives in this crate but is registered by the DESKTOP
-    // composition root (`engine_desktop::register_desktop_tools`), not here — it
+    // composition root (`harness_runtime::desktop::register_desktop_tools`), not here — it
     // is a first-party/claude.ai feature gated on `tengu_cobalt_plinth` +
     // first-party auth, so it is desktop-only (and stays out of the mobile tool
     // set). Its `is_enabled` (CC `dY()`) keeps it invisible to the model until

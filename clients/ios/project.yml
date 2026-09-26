@@ -52,7 +52,7 @@ targets:
     dependencies:
       - target: LocalAppsWidget
         embed: true
-      # UniFFI FFI static-library xcframework: exports the engine_mobile /
+      # UniFFI FFI static-library xcframework: exports the harness_runtime /
       # client_protocol C symbols the generated bindings call, and ships the
       # clang modulemap (module.modulemap) that defines the *FFI modules the
       # generated Swift imports via `#if canImport(...)`. Static archive →
@@ -223,7 +223,7 @@ targets:
   # in-process. Passes KEYLESS: with no ANTHROPIC_API_KEY the turn surfaces a
   # terminal `.error` event. Hosted in the app target so it shares the app's
   # compiled UniFFI bindings; also links the FFI xcframework so the per-namespace
-  # `engine_mobileFFI` clang module is importable here.
+  # `harness_runtimeFFI` clang module is importable here.
   LingxiCodeTests:
     type: bundle.unit-test
     platform: iOS

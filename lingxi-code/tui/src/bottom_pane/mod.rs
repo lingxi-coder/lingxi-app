@@ -51,13 +51,13 @@ use std::time::{Duration, Instant};
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use permission::computer_access::ComputerAccessExchange;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
-use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
-use tui_core::computer_access_bridge::ComputerAccessExchange;
+use tool_api::ask_user_question::AskUserQuestionExchange;
 use tui_core::orchestrator_bridge::RunningAgentStatus;
 use tui_core::permission_bridge::PermissionExchange;
 use tui_core::theme::Theme;
@@ -4572,7 +4572,7 @@ mod tests {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         drop(resp_rx);
         p.show_ask_user_question(AskUserQuestionExchange {
-            questions: vec![tui_core::ask_user_question_bridge::AskQuestion {
+            questions: vec![tool_api::ask_user_question::AskQuestion {
                 question: "Pick one".to_string(),
                 header: "Pick".to_string(),
                 options: Vec::new(),
@@ -4594,10 +4594,10 @@ mod tests {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         drop(resp_rx);
         p.show_computer_access(ComputerAccessExchange {
-            request: tui_core::computer_access_bridge::ComputerAccessRequest {
+            request: permission::computer_access::ComputerAccessRequest {
                 reason: "screenshot".to_string(),
                 apps: Vec::new(),
-                tier: tui_core::computer_access_bridge::AccessTier::Full,
+                tier: permission::computer_access::AccessTier::Full,
                 clipboard_read: false,
                 clipboard_write: false,
                 system_key_combos: false,

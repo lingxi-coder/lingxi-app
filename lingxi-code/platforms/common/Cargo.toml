@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 branding.workspace = true
 jsonrpc = { path = "../../jsonrpc" }
-llm-client = { path = "../../llm-client" }
+llm-runtime = { path = "../../llm-runtime" }
 http-client = { path = "../../http-client" }
 platform-api = { path = "../../platform-api" }
 protocol = { path = "../../protocol" }

@@ -1,5 +1,5 @@
 //! Dynamic /loop delivery for the local terminal host.
-use engine_desktop::loop_tools;
+use harness_runtime::desktop::loop_tools;
 use loop_tools::WakeupScheduler;
 use platform_api::OrchestratorHandle;
 use std::sync::{Arc, Weak};

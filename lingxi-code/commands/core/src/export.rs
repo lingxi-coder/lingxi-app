@@ -129,7 +129,7 @@ fn render_blocks(content: &[ContentBlock]) -> String {
             ContentBlock::AdvisorToolResult { content, .. } => {
                 lines.push(format!("[advisor result] {content}"));
             }
-            ContentBlock::MediaAnalysis { .. } => {}
+            ContentBlock::MediaAnalysis { .. } | ContentBlock::ProviderContent { .. } => {}
         }
     }
     lines.join("\n")

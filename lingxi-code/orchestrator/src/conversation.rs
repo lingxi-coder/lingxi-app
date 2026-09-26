@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use lingxi_core::SessionState;
-use llm_client::{LlmError, LlmEvent, LlmResponse};
+use llm_runtime::{LlmError, LlmEvent, LlmResponse};
 use protocol::{ConversationMessage, HookId, MessageId, SessionId};
 use session::JsonlWriter;
 use sha2::{Digest, Sha256};
@@ -41,7 +41,7 @@ use tool_api::ToolRegistryView as _;
 /// Minimal contract the orchestrator needs from the API client.
 ///
 /// Production: [`crate::provider_adapter::ProviderApiAdapter`] (Task 6)
-/// drives `llm_client::DefaultLlmClient` into this shape.
+/// drives `llm_runtime::DefaultLlmClient` into this shape.
 /// Tests: `MockApiClient`.
 #[async_trait]
 pub trait OrchestratorApiClient: Send + Sync {
@@ -246,7 +246,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         &self,
         _model: &str,
         _profile: Option<&str>,
-    ) -> Result<llm_client::MediaRoute, LlmError> {
+    ) -> Result<llm_runtime::MediaRoute, LlmError> {
         Err(LlmError::ModelUnavailable)
     }
 
@@ -263,7 +263,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// Replace the thinking policy used for subsequent provider requests.
     /// Implementations without a mutable request layer may keep the default
     /// no-op; the production provider adapter overrides it.
-    fn set_thinking_config(&self, _thinking: llm_client::model::thinking::ThinkingConfig) {}
+    fn set_thinking_config(&self, _thinking: llm_runtime::model::thinking::ThinkingConfig) {}
 
     /// Replace the main-loop effort used for subsequent provider requests.
     /// `None` clears the live override.
@@ -331,7 +331,7 @@ pub trait OrchestratorApiClient: Send + Sync {
 
     /// Return the FULL most recently observed rate-limit header snapshot.
     ///
-    /// Task 8 (llm-client future-work batch 3): unlike
+    /// Task 8 (llm-runtime future-work batch 3): unlike
     /// [`Self::last_rate_limit_info`] — whose signature is kept untouched and
     /// projects the three-field public `platform_api::RateLimitSnapshot` — this
     /// returns the orchestrator-internal nine-field
@@ -348,7 +348,7 @@ pub trait OrchestratorApiClient: Send + Sync {
 
     /// Return the most recently observed RAW per-window utilization snapshot.
     ///
-    /// Task 2 (llm-client future-work batch 5): the parallel accessor to
+    /// Task 2 (llm-runtime future-work batch 5): the parallel accessor to
     /// [`Self::last_rate_limit_full`] for claude-code's `rawUtilization`
     /// tracking (`extractRawUtilization`, `claudeAiLimits.ts:164-179`) —
     /// per-window 5h/7d values recorded on every unified-headers response,
@@ -365,7 +365,7 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// Return the user-facing copy composed from the most recent 429 **error**
     /// response, if any.
     ///
-    /// Task 6 (llm-client future-work batch 5): claude-code builds the
+    /// Task 6 (llm-runtime future-work batch 5): claude-code builds the
     /// rejected-limits view from the terminal 429's own headers and renders
     /// `getRateLimitErrorMessage` as the user-visible error content
     /// (`errors.ts:480-524`). `ProviderApiAdapter` overrides this to expose the
@@ -780,11 +780,11 @@ pub(crate) fn request_too_large_notice(interactive: bool) -> String {
 }
 
 /// Build the persisted assistant-envelope `usage` value from a normalized
-/// [`llm_client::Usage`]. Prefers the raw Anthropic usage object the codec
+/// [`llm_runtime::Usage`]. Prefers the raw Anthropic usage object the codec
 /// retained on `provider_metadata` (byte-faithful to claude-code's persisted
 /// `BetaMessage.usage`); falls back to a reconstruction from the normalized
 /// billable buckets only when no raw object is present (unusual).
-fn assistant_usage_value(usage: &llm_client::Usage) -> serde_json::Value {
+fn assistant_usage_value(usage: &llm_runtime::Usage) -> serde_json::Value {
     if usage.provider_metadata.is_object() {
         return usage.provider_metadata.clone();
     }

@@ -1,4 +1,4 @@
-//! Composite credential provider: the single `llm_client::CredentialProvider`
+//! Composite credential provider: the single `llm_runtime::CredentialProvider`
 //! slot backing every routable profile.
 //!
 //! Dispatch (on `scope.credential_id`):
@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use llm_client::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
+use llm_runtime::{BoxFuture, Credential, CredentialProvider, CredentialScope, LlmError};
 
 use crate::CredentialSource;
 
@@ -25,7 +25,7 @@ pub struct MultiCredentialProvider {
     sources: BTreeMap<String, CredentialSource>,
     anthropic_api_key: Option<String>,
     anthropic_api_key_helper: Option<String>,
-    anthropic_api_key_helper_cache: llm_client::oauth::anthropic::ApiKeyHelperCache,
+    anthropic_api_key_helper_cache: llm_runtime::oauth::anthropic::ApiKeyHelperCache,
     oauth_delegates: BTreeMap<String, Arc<dyn CredentialProvider>>,
 }
 
@@ -71,7 +71,7 @@ impl MultiCredentialProvider {
             sources,
             anthropic_api_key,
             anthropic_api_key_helper,
-            anthropic_api_key_helper_cache: llm_client::oauth::anthropic::ApiKeyHelperCache::new(),
+            anthropic_api_key_helper_cache: llm_runtime::oauth::anthropic::ApiKeyHelperCache::new(),
             oauth_delegates,
         }
     }
@@ -99,8 +99,8 @@ impl MultiCredentialProvider {
         // through to the store; only when the store is ALSO empty does a helper
         // failure surface, preserving its diagnostic message.
         let helper_error = if let Some(helper) = self.anthropic_api_key_helper.as_deref() {
-            let ttl_ms = llm_client::oauth::anthropic::api_key_helper_ttl_ms();
-            match llm_client::oauth::anthropic::fetch_api_key_result(
+            let ttl_ms = llm_runtime::oauth::anthropic::api_key_helper_ttl_ms();
+            match llm_runtime::oauth::anthropic::fetch_api_key_result(
                 helper,
                 &self.anthropic_api_key_helper_cache,
                 ttl_ms,
@@ -178,7 +178,7 @@ impl CredentialProvider for MultiCredentialProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_client::{
+    use llm_runtime::{
         Capabilities, Credential, CredentialProvider, CredentialScope, DefaultLlmClient, LlmError,
         LlmRequest, ModelProfile, ProviderId,
     };
@@ -685,7 +685,7 @@ mod tests {
         fn load<'a>(
             &'a self,
             _scope: &'a CredentialScope,
-        ) -> llm_client::BoxFuture<'a, Result<Credential, LlmError>> {
+        ) -> llm_runtime::BoxFuture<'a, Result<Credential, LlmError>> {
             let tok = self.token.clone();
             Box::pin(async move { Ok(Credential::BearerToken(tok)) })
         }
@@ -737,7 +737,7 @@ mod tests {
         fn load<'a>(
             &'a self,
             _scope: &'a CredentialScope,
-        ) -> llm_client::BoxFuture<'a, Result<Credential, LlmError>> {
+        ) -> llm_runtime::BoxFuture<'a, Result<Credential, LlmError>> {
             let c = self.0.clone();
             Box::pin(async move { Ok(c) })
         }

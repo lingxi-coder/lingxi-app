@@ -1596,7 +1596,7 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
 /// omitting `apiErrorStatus` when the error is not an `APIError`-with-status).
 #[test]
 fn classify_api_error_prefers_the_true_status_over_the_canonical_table() {
-    use llm_client::LlmError;
+    use llm_runtime::LlmError;
     // A REAL 422 used to be persisted as 400: `InvalidRequest` mapped to its
     // canonical status because the raw one was gone by then. The provider
     // decoders now store the SDK's `${status} ${body}` text, so the true
@@ -1629,7 +1629,7 @@ fn classify_api_error_prefers_the_true_status_over_the_canonical_table() {
 
 #[test]
 fn classify_api_error_maps_llm_variants_to_category_and_status() {
-    use llm_client::LlmError;
+    use llm_runtime::LlmError;
     let cases: Vec<(LlmError, Option<&'static str>, Option<u16>)> = vec![
         (
             LlmError::RateLimited {
@@ -1779,7 +1779,7 @@ fn classify_api_error_generic_variants_are_unknown_no_status() {
 /// presence + values 1:1 with the classifier output.
 #[test]
 fn classified_envelope_stamps_jsonl_top_level_fields() {
-    use llm_client::LlmError;
+    use llm_runtime::LlmError;
     let dir = tempfile::tempdir().expect("tempdir");
     let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"));
     let msg = ConversationMessage::Assistant {
@@ -2365,7 +2365,7 @@ async fn scheduled_persistence_keeps_actual_settings_separate_from_session_defau
             model: "claude-opus-4-6".into(),
             provider: "anthropic".into(),
             reasoning: platform_api::ReasoningSelection::Level { id: "high".into() },
-            thinking: llm_client::model::thinking::ThinkingConfig::Adaptive,
+            thinking: llm_runtime::model::thinking::ThinkingConfig::Adaptive,
             effort: Some(serde_json::json!("high")),
         };
         crate::scheduled_turn::SETTINGS

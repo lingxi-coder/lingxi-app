@@ -42,7 +42,7 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "lingxi-code/llm-client/src/types.rs", "text": "pub enum ProviderId" }
+        { "kind": "present", "path": "lingxi-code/llm-runtime/src/types.rs", "text": "pub enum ProviderId" }
       ]
     },
     {
@@ -66,7 +66,7 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "lingxi-code/apps/engine-mobile/Cargo.toml", "text": "engine-mobile" }
+        { "kind": "present", "path": "lingxi-code/harness-runtime/src/lib.rs", "text": "pub mod mobile;" }
       ]
     },
     {

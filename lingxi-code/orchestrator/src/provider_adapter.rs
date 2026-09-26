@@ -91,6 +91,30 @@ impl ProviderApiAdapter {
             .clone()
     }
 
+    fn build_scheduled_request(
+        &self,
+        settings: crate::scheduled_turn::ScheduledSettings,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        max_tokens: Option<u32>,
+    ) -> Result<llm_client::LlmRequest, LlmError> {
+        self.service.build_side_query_request_with_thinking(
+            &settings.model,
+            Some(&settings.provider),
+            system,
+            messages,
+            tools,
+            max_tokens,
+            None,
+            Vec::new(),
+            Some(settings.thinking),
+            settings.effort,
+            None,
+            Some("scheduled_task"),
+        )
+    }
+
     /// Return the most recently observed rate-limit header snapshot (the internal
     /// nine-field [`RateLimitInfo`]). Delegates to the service. Kept as an inherent
     /// method so both the `OrchestratorApiClient::last_rate_limit_info` (three-field
@@ -248,20 +272,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         context_hint: Option<serde_json::Value>,
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
-            let mut request = self.service.build_side_query_request_with_thinking(
-                &settings.model,
-                Some(&settings.provider),
-                system,
-                msgs,
-                tools,
-                None,
-                None,
-                Vec::new(),
-                Some(settings.thinking),
-                settings.effort,
-                None,
-                Some("scheduled_task"),
-            )?;
+            let mut request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
             request.context_hint = context_hint;
             return self.service.execute_side_query_request(request).await;
         }
@@ -280,20 +291,8 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         max_tokens: u32,
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.service.build_side_query_request_with_thinking(
-                &settings.model,
-                Some(&settings.provider),
-                system,
-                msgs,
-                tools,
-                Some(max_tokens),
-                None,
-                Vec::new(),
-                Some(settings.thinking),
-                settings.effort,
-                None,
-                Some("scheduled_task"),
-            )?;
+            let request =
+                self.build_scheduled_request(settings, system, msgs, tools, Some(max_tokens))?;
 
             return self.service.execute_side_query_request(request).await;
         }
@@ -314,20 +313,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         is_enterprise: bool,
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.service.build_side_query_request_with_thinking(
-                &settings.model,
-                Some(&settings.provider),
-                system,
-                msgs,
-                tools,
-                None,
-                None,
-                Vec::new(),
-                Some(settings.thinking),
-                settings.effort,
-                None,
-                Some("scheduled_task"),
-            )?;
+            let request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
 
             return self.service.execute_side_query_request(request).await;
         }
@@ -355,20 +341,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         initial_consecutive_overloaded: u8,
     ) -> Result<LlmResponse, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.service.build_side_query_request_with_thinking(
-                &settings.model,
-                Some(&settings.provider),
-                system,
-                msgs,
-                tools,
-                None,
-                None,
-                Vec::new(),
-                Some(settings.thinking),
-                settings.effort,
-                None,
-                Some("scheduled_task"),
-            )?;
+            let request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
 
             return self.service.execute_side_query_request(request).await;
         }
@@ -1047,20 +1020,7 @@ impl StreamingApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.service.build_side_query_request_with_thinking(
-                &settings.model,
-                Some(&settings.provider),
-                system,
-                messages,
-                tools,
-                None,
-                None,
-                Vec::new(),
-                Some(settings.thinking),
-                settings.effort,
-                None,
-                Some("scheduled_task"),
-            )?;
+            let request = self.build_scheduled_request(settings, system, messages, tools, None)?;
             return self.service.stream_request(request).await;
         }
         // (M4 cc2.1.198) The MAIN loop carries the session's initial effort

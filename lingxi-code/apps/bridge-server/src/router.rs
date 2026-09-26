@@ -72,6 +72,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+pub(crate) use client_adapter::controls::decode_reasoning_selection;
+use client_adapter::controls::lower_conversation_controls;
 use client_adapter::lowering::{
     lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
     lower_provider_model_catalog_entry, lower_skill_info, lower_status_snapshot,
@@ -81,9 +83,6 @@ use client_adapter::ClientEventSink;
 use client_protocol::commands::{
     ClientCommand, HookAdminCommandDto, ListingKindDto, McpAdminCommandDto, PermissionBehaviorDto,
     PluginAdminCommandDto, SkillAdminCommandDto, WritableScopeDto,
-};
-use client_protocol::controls::{
-    ConversationControlsDto, ReasoningControlStateDto, ReasoningSelectionDto,
 };
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::listings::{
@@ -783,35 +782,8 @@ impl EngineCommandRouter {
             return;
         };
         let fast_mode = self.handle.fast_mode().await;
-        let reasoning = controls.reasoning_spec.clone();
         sink.emit(ClientEvent::ConversationControlsChanged {
-            controls: ConversationControlsDto {
-                qualified_model: controls.model_reference.clone(),
-                permission: client_protocol::controls::PermissionControlStateDto {
-                    requested: controls.permission.requested,
-                    effective: controls.permission.effective,
-                    options: controls
-                        .permission
-                        .modes
-                        .into_iter()
-                        .map(|mode| client_protocol::controls::PermissionModeOptionDto {
-                            mode: mode.mode,
-                            available: mode.available,
-                            disabled_reason: mode.disabled_reason.map(|code| {
-                                client_protocol::controls::ControlDisabledReasonDto {
-                                    code,
-                                    message: None,
-                                }
-                            }),
-                        })
-                        .collect(),
-                },
-                reasoning: ReasoningControlStateDto {
-                    requested: lower_reasoning_selection(&controls.requested_reasoning_selection),
-                    effective: lower_reasoning_selection(&controls.effective_reasoning_selection),
-                    spec: client_adapter::lowering::lower_reasoning_control_spec(&reasoning),
-                },
-            },
+            controls: lower_conversation_controls(controls),
         })
         .await;
 
@@ -4317,37 +4289,6 @@ impl CommandRouter for EngineCommandRouter {
                 );
             }
         }
-    }
-}
-
-fn lower_reasoning_selection(
-    selection: &platform_api::ReasoningSelection,
-) -> ReasoningSelectionDto {
-    match selection {
-        platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
-        platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
-        platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        platform_api::ReasoningSelection::Level { id } => {
-            ReasoningSelectionDto::Level { id: id.clone() }
-        }
-        platform_api::ReasoningSelection::TokenBudget { tokens } => {
-            ReasoningSelectionDto::TokenBudget { tokens: *tokens }
-        }
-    }
-}
-
-pub(crate) fn decode_reasoning_selection(
-    selection: ReasoningSelectionDto,
-) -> platform_api::ReasoningSelection {
-    match selection {
-        ReasoningSelectionDto::Automatic => platform_api::ReasoningSelection::Automatic,
-        ReasoningSelectionDto::Disabled => platform_api::ReasoningSelection::Disabled,
-        ReasoningSelectionDto::Enabled => platform_api::ReasoningSelection::Enabled,
-        ReasoningSelectionDto::Level { id } => platform_api::ReasoningSelection::Level { id },
-        ReasoningSelectionDto::TokenBudget { tokens } => {
-            platform_api::ReasoningSelection::TokenBudget { tokens }
-        }
-        _ => platform_api::ReasoningSelection::Automatic,
     }
 }
 

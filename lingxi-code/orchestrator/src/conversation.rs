@@ -9,8 +9,7 @@ use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
 use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
-    call_api_with_ptl_recovery, execute_one_turn_with_recovery_tracked, surface_prompt_too_long,
-    surface_rapid_refill_thrashing, PtlCallOutcome, RecoveryState, TurnStepOutcome,
+    execute_one_turn_with_recovery_tracked, RecoveryState, TurnStepOutcome,
     MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_NUDGE,
     MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
 };

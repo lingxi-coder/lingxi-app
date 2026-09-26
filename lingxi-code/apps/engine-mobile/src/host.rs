@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use client_adapter::controls::{decode_reasoning_selection, lower_conversation_controls};
 use client_adapter::lowering::lower_status_snapshot;
 use client_adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
@@ -53,11 +54,7 @@ use client_protocol::commands::{
     AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto as ProtocolListingKind,
     PromptModeDto, ProviderCredentialSecretDto,
 };
-use client_protocol::controls::{
-    ControlDisabledReasonDto, ConversationControlsDto, PermissionControlStateDto,
-    PermissionModeOptionDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
-    ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
-};
+use client_protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
 use client_protocol::listings::{
@@ -928,100 +925,18 @@ struct SlashAuthoritySnapshot {
     catalog: Vec<SlashCommandDto>,
 }
 
-fn lower_reasoning_selection(
-    selection: &platform_api::ReasoningSelection,
-) -> ReasoningSelectionDto {
-    match selection {
-        platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
-        platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
-        platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        platform_api::ReasoningSelection::Level { id } => {
-            ReasoningSelectionDto::Level { id: id.clone() }
-        }
-        platform_api::ReasoningSelection::TokenBudget { tokens } => {
-            ReasoningSelectionDto::TokenBudget { tokens: *tokens }
-        }
-    }
-}
-
-fn decode_reasoning_selection(
-    selection: ReasoningSelectionDto,
-) -> platform_api::ReasoningSelection {
-    match selection {
-        ReasoningSelectionDto::Automatic => platform_api::ReasoningSelection::Automatic,
-        ReasoningSelectionDto::Disabled => platform_api::ReasoningSelection::Disabled,
-        ReasoningSelectionDto::Enabled => platform_api::ReasoningSelection::Enabled,
-        ReasoningSelectionDto::Level { id } => platform_api::ReasoningSelection::Level { id },
-        ReasoningSelectionDto::TokenBudget { tokens } => {
-            platform_api::ReasoningSelection::TokenBudget { tokens }
-        }
-        _ => platform_api::ReasoningSelection::Automatic,
-    }
-}
-
-fn lower_reasoning_spec_dto(spec: &platform_api::ReasoningControlSpec) -> ReasoningControlSpecDto {
-    let options = spec
-        .available
-        .iter()
-        .cloned()
-        .map(|selection| ReasoningOptionDto {
-            persistable: spec.selections_persistable
-                && !matches!(selection, platform_api::ReasoningSelection::Level { ref id } if id == "max"),
-            selection: lower_reasoning_selection(&selection),
-        })
-        .collect();
-    ReasoningControlSpecDto {
-        options,
-        budget_range: spec
-            .budget_range
-            .as_ref()
-            .map(|range| ReasoningBudgetRangeDto {
-                min_tokens: u64::from(range.min_tokens),
-                max_tokens: u64::from(range.max_tokens),
-            }),
-        provider_default: lower_reasoning_selection(&spec.provider_default),
-        forced_reasoning: spec.forced,
-        editable: spec.modifiable,
-        disabled_reason: spec
-            .disabled_reason
-            .as_ref()
-            .map(|code| ControlDisabledReasonDto {
-                code: code.clone(),
-                message: None,
-            }),
-    }
-}
-
 fn lower_controls(
     controls: platform_api::ConversationControls,
     requested_permission: String,
 ) -> ConversationControlsDto {
-    let spec = controls.reasoning_spec;
-    ConversationControlsDto {
-        qualified_model: controls.model_reference,
-        permission: PermissionControlStateDto {
-            requested: requested_permission,
-            effective: controls.permission.effective,
-            options: controls
-                .permission
-                .modes
-                .into_iter()
-                .map(|mode| PermissionModeOptionDto {
-                    mode: mode.mode,
-                    available: mode.available,
-                    disabled_reason: mode.disabled_reason.map(|code| ControlDisabledReasonDto {
-                        code,
-                        message: None,
-                    }),
-                })
-                .collect(),
-        },
-        reasoning: ReasoningControlStateDto {
-            requested: lower_reasoning_selection(&controls.requested_reasoning_selection),
-            effective: lower_reasoning_selection(&controls.effective_reasoning_selection),
-            spec: lower_reasoning_spec_dto(&spec),
-        },
+    let mut controls = lower_conversation_controls(controls);
+    controls.permission.requested = requested_permission;
+    for option in &mut controls.reasoning.spec.options {
+        if matches!(&option.selection, ReasoningSelectionDto::Level { id } if id == "max") {
+            option.persistable = false;
+        }
     }
+    controls
 }
 
 fn lower_model_details(listing: &platform_api::ModelListing) -> ModelDetailsDto {
@@ -15252,6 +15167,7 @@ mod tests {
     include!("host/fast_mode_preference_tests.rs");
     include!("host/permission_preference_tests.rs");
     include!("host/model_preference_tests.rs");
+    include!("host/provider_region_tests.rs");
     include!("host/reasoning_preference_tests.rs");
     use std::collections::HashMap;
     use std::path::Path;

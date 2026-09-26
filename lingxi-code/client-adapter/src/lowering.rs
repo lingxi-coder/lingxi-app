@@ -69,60 +69,7 @@ use platform_api::task_registry::{TaskOutputChunk, TaskRecord};
 use platform_api::team_registry::WorkerInfo;
 use session::jsonl::loader::SessionMetadata;
 
-fn lower_reasoning_selection(
-    selection: &platform_api::ReasoningSelection,
-) -> client_protocol::controls::ReasoningSelectionDto {
-    use client_protocol::controls::ReasoningSelectionDto;
-    match selection {
-        platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
-        platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
-        platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        platform_api::ReasoningSelection::Level { id } => {
-            ReasoningSelectionDto::Level { id: id.clone() }
-        }
-        platform_api::ReasoningSelection::TokenBudget { tokens } => {
-            ReasoningSelectionDto::TokenBudget { tokens: *tokens }
-        }
-    }
-}
-
-/// Lower the exact route-level reasoning contract used by request validation.
-#[must_use]
-pub fn lower_reasoning_control_spec(
-    spec: &platform_api::ReasoningControlSpec,
-) -> client_protocol::controls::ReasoningControlSpecDto {
-    use client_protocol::controls::{
-        ControlDisabledReasonDto, ReasoningBudgetRangeDto, ReasoningControlSpecDto,
-        ReasoningOptionDto,
-    };
-    ReasoningControlSpecDto {
-        options: spec
-            .available
-            .iter()
-            .map(|selection| ReasoningOptionDto {
-                selection: lower_reasoning_selection(selection),
-                persistable: spec.selections_persistable,
-            })
-            .collect(),
-        budget_range: spec
-            .budget_range
-            .as_ref()
-            .map(|range| ReasoningBudgetRangeDto {
-                min_tokens: u64::from(range.min_tokens),
-                max_tokens: u64::from(range.max_tokens),
-            }),
-        provider_default: lower_reasoning_selection(&spec.provider_default),
-        forced_reasoning: spec.forced,
-        editable: spec.modifiable,
-        disabled_reason: spec
-            .disabled_reason
-            .as_ref()
-            .map(|code| ControlDisabledReasonDto {
-                code: code.clone(),
-                message: None,
-            }),
-    }
-}
+pub use crate::controls::lower_reasoning_control_spec;
 
 /// Lower one provider-qualified model listing without inventing missing facts.
 #[must_use]

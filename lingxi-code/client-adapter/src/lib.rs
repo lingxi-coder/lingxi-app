@@ -29,6 +29,7 @@
 
 pub mod ask_user_question_broker;
 pub mod computer_access_broker;
+pub mod controls;
 pub mod listener;
 pub mod lowering;
 pub mod output_stream;

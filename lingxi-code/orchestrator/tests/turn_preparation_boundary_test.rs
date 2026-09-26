@@ -546,7 +546,10 @@ fn a_ptl_retry_does_not_duplicate_the_durable_task_notification() {
 #[test]
 fn the_prompt_snapshot_is_recorded_from_exactly_one_place() {
     const BATCHED: &str = include_str!("../src/turn_loop.rs");
-    const STREAMING: &str = include_str!("../src/conversation/drivers/mod.rs");
+    const STREAMING: &str = concat!(
+        include_str!("../src/conversation/drivers/mod.rs"),
+        include_str!("../src/conversation/drivers/streaming.rs"),
+    );
     const COLLECTOR: &str = include_str!("../src/conversation/drivers/prepare.rs");
 
     let calls = |src: &str| src.matches(".record_prompt_snapshot_if_needed(").count();

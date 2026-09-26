@@ -214,7 +214,10 @@ fn the_per_turn_counters_start_fresh_on_each_turn() {
 /// story from PR 2: tighten the number, do not delete the check.
 #[test]
 fn each_entry_takes_the_baseline_directly_after_begin_output_turn() {
-    const DRIVERS: &str = include_str!("../src/conversation/drivers/mod.rs");
+    const DRIVERS: &str = concat!(
+        include_str!("../src/conversation/drivers/mod.rs"),
+        include_str!("../src/conversation/drivers/streaming.rs"),
+    );
 
     let baselines = DRIVERS.matches("turn_start_output_baseline.store(").count();
     assert_eq!(

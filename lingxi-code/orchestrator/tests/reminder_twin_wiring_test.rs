@@ -28,7 +28,10 @@
 //! `assert_shared_reminder_order`, not by cross-path equality.
 
 const BATCHED: &str = include_str!("../src/turn_loop.rs");
-const STREAMING: &str = include_str!("../src/conversation/drivers/mod.rs");
+const STREAMING: &str = concat!(
+    include_str!("../src/conversation/drivers/mod.rs"),
+    include_str!("../src/conversation/drivers/streaming.rs"),
+);
 const COLLECTOR: &str = include_str!("../src/conversation/drivers/prepare.rs");
 const PROMPT_PIPELINE: &str = include_str!("../src/conversation/prompt.rs");
 

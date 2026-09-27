@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-PINS="${REPO_ROOT}/docs/mobile-linux/mobile-linux-pins.json"
+PINS="${REPO_ROOT}/docs/mobile-linux/mobile-linux-native-pins.json"
 OPENMINIS="${OPENMINIS_SOURCE:-${REPO_ROOT}/docs/superpowers/references/OpenMinis}"
 PROOT="${PROOT_SOURCE:-${OPENMINIS}/deps/proot}"
 
@@ -61,17 +61,6 @@ for patch in pins.get("patches", []):
         raise SystemExit(f"pinned mobile-linux patch source missing or unsafe: {path}")
     if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
         raise SystemExit(f"pinned mobile-linux patch source SHA-256 mismatch: {path}")
-
-for abi, item in pins["rootfs"]["archives"].items():
-    if len(item["sha256"]) != 64 or any(c not in "0123456789abcdef" for c in item["sha256"]):
-        raise SystemExit(f"invalid rootfs SHA-256 for {abi}")
-
-# NOTE: this script deliberately does NOT validate `rootfs.release_archives`.
-# No such key is committed (see the "KNOWN UNANCHORED STEP" section of
-# docs/mobile-linux/README.md), so any loop over it here iterates zero times and
-# turns a documented gap into a green check. `rootfs_tool.py
-# verify-release-archive` validates that pin's shape at the point of use, where
-# a malformed value has something to reject.
 
 print(f"mobile-linux pins verified: {pins_path}")
 PY

@@ -47,10 +47,10 @@ uniffi = [
 ]
 
 [dependencies]
-harness-runtime = { path = "../../harness-runtime", default-features = false, features = ["mobile"] }
-skill-api = { path = "../../skill-api" }
-platform-api = { path = "../../platform-api" }
-protocol = { path = "../../protocol" }
+harness-runtime = { workspace = true, default-features = false, features = ["mobile"] }
+skill-api = { workspace = true }
+platform-api = { workspace = true }
+protocol = { workspace = true }
 branding.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -65,31 +65,31 @@ uniffi = { workspace = true, optional = true }
 # the F3-04 handle tests name. Optional + pulled under `uniffi` so the plain
 # (no-feature) build stays minimal. All engine-tier (no `apps/*` edge).
 async-trait = { workspace = true, optional = true }
-client-protocol = { path = "../../client-protocol", optional = true }
-platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
-orchestrator = { path = "../../orchestrator", optional = true }
+client-protocol = { workspace = true, optional = true }
+platform-posix-minimal = { workspace = true, optional = true }
+orchestrator = { workspace = true, optional = true }
 # The engine's own app-id rule (`ids::is_valid_app_id`) — the boot-time cwd
 # validator accepts `apps/<id>/workspace` scopes with the SAME derivation the
 # local-apps service mints ids with, never a twin regex (mirrors ios-framework).
-local-apps = { path = "../../local-apps", optional = true }
+local-apps = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 # P3-T5: the `AndroidShellToolCtx` carrier type assigned onto `MobileConfig`
 # (the Shell-tool registration gate result). Optional + pulled under `uniffi` so
 # the plain (no-feature) build stays minimal.
-tool-api = { path = "../../tool-api", optional = true }
+tool-api = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-platform-android = { path = "../../platforms/android" }
+platform-android = { workspace = true }
 # P0a: the minijail smoke behind the `android_sandbox_smoke()` UniFFI export
 # (serialized to the instrumentation test as JSON via serde_json). Both only
 # named inside `cfg(target_os = "android")` blocks, so target-gated like
 # `platform-android` to keep host builds dep-minimal.
-platform-android-minijail = { path = "../../platforms/android-minijail" }
+platform-android-minijail = { workspace = true }
 # P4-T11: the real `GitTool` (libgit2 in-process) behind the
 # `android_git_probe()` UniFFI export. Target-gated to keep host builds
 # dep-minimal and to anchor the libgit2 cdylib link from a reachable crate
 # (the P2 libcap link-anchor lesson).
-tool-git-mobile = { path = "../../tools/git-mobile" }
+tool-git-mobile = { workspace = true }
 # P5b-T7: the bundled-shell bootstrap (`bootstrap_bundled_shell`) sha256-hashes
 # `libmksh.so` for the runner's content-identity check and hex-encodes it.
 # Target-gated (android-only) like `platform-android` to keep host builds
@@ -103,3 +103,6 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[build-dependencies]
+branding.workspace = true

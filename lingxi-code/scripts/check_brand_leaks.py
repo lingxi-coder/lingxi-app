@@ -663,7 +663,11 @@ def check_namespace_coverage(root):
     findings = set()
     full = os.path.join(root, BRANDING_LIB)
     if not os.path.exists(full):
-        return findings
+        resolver = os.path.join(root, "lingxi-code", "scripts", "runtime_source.py")
+        runtime_root = subprocess.check_output(
+            [sys.executable, resolver, "--root"], text=True
+        ).strip()
+        full = os.path.join(runtime_root, "crates", "branding", "src", "lib.rs")
     with open(full, encoding="utf-8") as fh:
         lines = text_lines(fh.read())
 

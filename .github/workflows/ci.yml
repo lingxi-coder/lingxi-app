@@ -9,103 +9,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run every checked-in repository gate
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Test pinned-source rejection cases
+        run: python3 lingxi-code/scripts/test_runtime_source.py
+      - name: Resolve the pinned runtime source
+        run: python3 lingxi-code/scripts/runtime_source.py --root
+      - name: Run every checked-in product gate
         working-directory: lingxi-code
         run: ./scripts/check-all.sh
+      - name: Test brand gate rejection cases
+        working-directory: lingxi-code
+        run: python3 scripts/check_brand_leaks.py --selftest
       - name: Verify every gate and the trigger chain
         working-directory: lingxi-code
         run: python3 scripts/test_gate_triggers.py
-
-  compile-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-        with:
-          components: rustfmt, clippy
-      - name: Zero-OS-deps check
+      - name: Native Host and pinned runtime template integration
         working-directory: lingxi-code
-        run: |
-          cargo check -p protocol --no-default-features
-          cargo check -p core --no-default-features
-          cargo check -p platform-api
-
-  # The mobile clients are the only consumers that turn `client-protocol`'s
-  # `uniffi` feature on, and NOTHING else in this file builds with it: the
-  # On 2026-08-27 `ClientCommand` grew past `uniffi_core`'s hardcoded
-  # 16384-byte `MetadataBuffer` and stopped compiling for iOS/Android. Be
-  # precise about what missed it, because the obvious story is wrong:
-  # `unit-tests` runs `cargo test --workspace --all-features`, and
-  # `--all-features` turns on `client-protocol`'s own `uniffi` feature, so CI
-  # WOULD have gone red. What was blind was per-package local verification
-  # (`cargo test -p bridge-server`, `-p core`, the electron suites) — none of
-  # which enables the feature — so the break survived a whole 21-task run and
-  # two rounds of review before any workspace-wide build ran.
-  #
-  # This job exists for how it fails, not whether. `--all-features` fails as a
-  # `const`-eval `assert!` inside a dependency: the whole workspace stops
-  # compiling and the message names `uniffi_core/src/metadata.rs`, not the enum
-  # that outgrew it. This job names the thing, and its budget test goes red
-  # ~4 KiB EARLIER, while the crate still compiles and a test can still run to
-  # say WHICH type is running out of room.
-  #
-  # Its own job, not a step in `compile-check`, so it reports under its own
-  # name and cannot hide behind an unrelated earlier failure in that script.
-  mobile-ffi-surface:
-    name: Mobile FFI surface (client-protocol --features uniffi)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-      - name: cargo check (the build iOS and Android actually need)
-        working-directory: lingxi-code
-        run: cargo check -p client-protocol --features uniffi
-      - name: UniFFI metadata budget
-        working-directory: lingxi-code
-        # Goes red ~4 KiB BEFORE the hard limit, while the crate still compiles
-        # and a test can still run to say which type is running out of room.
-        run: cargo test -p client-protocol --features uniffi --test uniffi_metadata_budget_test
+        run: node --test scripts/test-local-app-r4-libs.mjs
 
   unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
-      - name: cargo test
+      - name: Test all retained product packages
         working-directory: lingxi-code
-        # `--no-fail-fast` is load-bearing, not tidiness. Without it cargo stops
-        # at the first failing test BINARY and never runs the rest, so one red
-        # test hides every other one and the reported pass count is a truncated
-        # prefix. `mid_stream_err_ends_turn_gracefully_as_model_error` broke in
-        # d7215d659 (2026-07-13) and stayed invisible for over a month behind an
-        # earlier failure for exactly this reason.
-        run: cargo test --workspace --all-features --no-fail-fast
-
-  pty-runtime-linux:
-    name: PTY runtime (Linux)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Exercise real Linux PTY and process groups
-        working-directory: lingxi-code
-        env:
-          RUST_BACKTRACE: "1"
-        run: cargo test -p platform-pty -- --nocapture --test-threads=1
-
-  pty-runtime-windows:
-    name: PTY runtime (Windows ConPTY)
-    runs-on: windows-2022
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-      - name: Exercise real ConPTY and kill-on-close Job Object
-        working-directory: lingxi-code
-        env:
-          RUST_BACKTRACE: "1"
-        run: cargo test -p platform-pty -- --nocapture --test-threads=1
+        run: cargo test --locked --workspace --all-features --no-fail-fast
 
   lint:
     runs-on: ubuntu-latest
@@ -119,77 +48,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         working-directory: lingxi-code
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-  cross-compile-desktop:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-apple-darwin
-          - x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-        with:
-          targets: ${{ matrix.target }}
-      - name: Install cross
-        run: cargo install cross --locked
-      - name: Cross-compile core crates
-        working-directory: lingxi-code
-        run: |
-          cross check --target ${{ matrix.target }} -p lingxi-protocol
-          cross check --target ${{ matrix.target }} -p lingxi-core
-          cross check --target ${{ matrix.target }} -p lingxi-traits
-          cross check --target ${{ matrix.target }} -p lingxi-api-client
-
-  cross-compile-mobile:
-    runs-on: ubuntu-latest
-    continue-on-error: true   # M3 scope — informational only for v0.3.0
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - aarch64-linux-android
-          - aarch64-apple-ios
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-        with:
-          targets: ${{ matrix.target }}
-      - name: Install cross
-        run: cargo install cross --locked
-      - name: Cross-compile core crates (informational)
-        working-directory: lingxi-code
-        run: |
-          cross check --target ${{ matrix.target }} -p lingxi-protocol
-          cross check --target ${{ matrix.target }} -p lingxi-core
-          cross check --target ${{ matrix.target }} -p lingxi-traits
-          cross check --target ${{ matrix.target }} -p lingxi-api-client
-
-  cross-compile-musl:
-    # v3 §32.4 Layer 5: confirm the engine still type-checks against musl.
-    # Hard gate (not continue-on-error) — musl is an inherited M3 target.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-        with:
-          targets: x86_64-unknown-linux-musl
-      - name: Install musl-tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: cargo check (musl)
-        working-directory: lingxi-code
-        run: |
-          # Per spec line 608: musl is a check-only gate (NOT build/test) —
-          # confirms the engine type-checks against musl, no runtime needed.
-          cargo check --target x86_64-unknown-linux-musl \
-                      -p lingxi-protocol \
-                      -p lingxi-core \
-                      -p lingxi-traits \
-                      -p lingxi-api-client
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   supply-chain:
     # v3 §32.4 Layers 1-3: cargo-deny + cargo-audit + cargo-vet.
@@ -223,29 +82,3 @@ jobs:
         # `cargo vet check --locked` prints a setup hint without failing
         # (the directory lives outside this plan's scope; M4 deliverable).
         run: cargo vet check --locked || echo "::warning::cargo vet supply-chain/ not yet configured; v0.4.0 ships the workflow, M4 adds the audit data"
-
-  parity-fixtures:
-    # Per the brief: "add parity-fixture gating (every parity_*.rs driver
-    # from M3-01..M3-06 in per-PR test matrix)". This job runs ALL parity
-    # drivers — both the 7 M2 drivers (inherited from v0.3.0) and the 9
-    # M3 drivers (8 from M3-01..M3-06 + the v0.4.0 smoke fixture from
-    # Phase D).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94.0
-      - name: cargo test parity_* drivers
-        working-directory: lingxi-code
-        run: |
-          # The 'parity_*' glob picks up every test driver matching the
-          # convention. As of v0.4.0:
-          # M2 (7): parity_keychain_service_name, parity_lsp_plugin_only,
-          #        parity_mcp_initialize, parity_mcp_transports,
-          #        parity_sandbox_config, parity_tmux_windows,
-          #        parity_worktree_naming.
-          # M3 (9): parity_settings_merge, parity_memory_loading,
-          #        parity_memory_relevance, parity_messages_create,
-          #        parity_betas, parity_oauth_pkce_refresh,
-          #        parity_cost_events, parity_tengu_events,
-          #        parity_full_v0_4_0_smoke.
-          cargo test -p lingxi-test-harness --test 'parity_*'

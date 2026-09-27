@@ -103,15 +103,15 @@ def run_standalone(gate: str) -> tuple:
     each gate's recorded behaviour inside check-all.sh is checked against,
     both by exit code AND by the actual text it printed."""
     argv = ["./scripts/" + gate] + ARGV_OVERRIDES.get(gate, [])
-    proc = subprocess.run(argv, cwd=str(LINGXI_CODE), capture_output=True, text=True)
-    return proc.returncode, (proc.stdout + proc.stderr)
+    proc = subprocess.run(argv, cwd=str(LINGXI_CODE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return proc.returncode, proc.stdout
 
 
 def run_check_all() -> tuple:
     proc = subprocess.run(
-        ["./scripts/check-all.sh"], cwd=str(LINGXI_CODE), capture_output=True, text=True
+        ["./scripts/check-all.sh"], cwd=str(LINGXI_CODE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
-    return proc.returncode, proc.stdout + proc.stderr
+    return proc.returncode, proc.stdout
 
 
 def parse_invocations(output: str) -> dict:

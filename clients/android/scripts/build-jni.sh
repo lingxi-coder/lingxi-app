@@ -42,7 +42,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"                  # clients/android
 REPO_ROOT="$(cd "${ANDROID_DIR}/../.." && pwd)"               # worktree root
 CARGO_DIR="${REPO_ROOT}/lingxi-code"                          # Rust workspace
-CARGO_TARGET_DIR="${CARGO_DIR}/target"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${CARGO_DIR}/target}"
 
 CRATE="android-aar"
 LIB_STEM="android_aar"                # cargo turns the `-` into `_`

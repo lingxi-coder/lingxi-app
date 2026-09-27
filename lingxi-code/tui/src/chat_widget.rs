@@ -4380,7 +4380,10 @@ impl ChatWidget {
         self.run_core_command(
             "version",
             args,
-            &command_core::version::VersionHandler::new(),
+            &command_core::version::VersionHandler::with_build_info(command_core::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            )),
         )
     }
 
@@ -8082,9 +8085,14 @@ mod tests {
         let outcome = widget.cmd_version("");
         assert!(matches!(outcome, ChatOutcome::Continue));
         let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
-        assert!(
-            !systext.body().is_empty(),
-            "version output rendered as system text"
+        assert_eq!(
+            systext.body(),
+            format!(
+                "lingxi-cli {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
+            "the direct TUI path must report host identity",
         );
         assert!(!systext.is_error(), "version output is not an error");
     }

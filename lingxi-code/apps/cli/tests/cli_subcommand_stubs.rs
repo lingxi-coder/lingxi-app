@@ -15,8 +15,7 @@ use predicates::prelude::*;
 
 /// The captured `claude gateway --help` fixture — the same bytes
 /// `test-harness/tests/parity_claude_2_1_198.rs` pins from the fixture side.
-const GATEWAY_HELP_FIXTURE: &str =
-    include_str!("../../../test-harness/src/parity/fixtures/cc_2_1_198_gateway_help.txt");
+const GATEWAY_HELP_FIXTURE: &str = include_str!("fixtures/cc_2_1_198_gateway_help.txt");
 
 /// `gateway --help` (and `-h`) prints the fixture BYTE-FOR-BYTE, exit 0.
 #[test]

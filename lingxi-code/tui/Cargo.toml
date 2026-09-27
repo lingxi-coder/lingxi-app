@@ -10,19 +10,19 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-tool-api = { path = "../tool-api" }
+tool-api = { workspace = true }
 # The backend-neutral core extracted from `tui` during the iocraft → ratatui
 # migration. `tui` renders it with ratatui; it must never depend on iocraft.
 tui-core = { path = "../tui-core" }
-permission = { path = "../permission" }
+permission = { workspace = true }
 # (fix round 1) `TurnEvent::ContextPressure`/`RateLimit` handling needs the
 # banner + subscription types the bridge events carry. Already in the graph via
 # tui-core (promoted from dev-dependencies; no new external dependency).
-platform-api = { path = "../platform-api" }
+platform-api = { workspace = true }
 # (fix round 1) `rate_limit_messages` reuses the existing 1:1
 # `formatResetTime` port instead of duplicating it (the old iocraft `tui`
 # reaches the SAME function through its `orchestrator` dependency).
-llm-runtime = { path = "../llm-runtime" }
+llm-runtime = { workspace = true }
 # Ratatui 0.29 uses crossterm 0.28 — the SAME major the workspace pins — so only
 # one crossterm version links (verified via `cargo tree -p tui -i crossterm`).
 # All three features are dependency-free cfg gates, also enabled by codex-rs/tui:
@@ -54,34 +54,34 @@ serde_json = { workspace = true }
 unicode-width = "=0.1.14"
 uuid = { version = "1.10", features = ["v4"] }
 async-trait = { workspace = true }
-session = { path = "../session" }
-protocol = { path = "../protocol" }
+session = { workspace = true }
+protocol = { workspace = true }
 tracing = { workspace = true }
 # `/web` WebSearch-config port (screens/web_picker.rs + screens/web_config.rs
 # from the deleted iocraft `tui`): pure KeyCode->Outcome reducers over the
 # tool_web provider config + secret store + memory settings.
-tool-web = { path = "../tools/web" }
+tool-web = { workspace = true }
 # `/workflows` "Save dynamic workflow" (`s` chord) reuses the byte-exact save
 # logic (`save_dynamic_workflow` / `WorkflowScope` / `saved_feedback`) instead of
 # re-implementing the dir resolver + file modes. `tool-workflow` does not depend
 # on `tui`, so this introduces no dependency cycle.
-tool-workflow = { path = "../tools/workflow" }
+tool-workflow = { workspace = true }
 # `emit_workflow_saved` (`tengu_workflow_saved`) is fired at the save call site.
-telemetry = { path = "../telemetry" }
+telemetry = { workspace = true }
 # `.lingxi` dir name for the project-scope save preview path.
-branding = { path = "../branding" }
-secret = { path = "../secret" }
-memory = { path = "../memory" }
-command-core = { path = "../commands/core" }
+branding = { workspace = true }
+secret = { workspace = true }
+memory = { workspace = true }
+command-core = { workspace = true }
 # The bridge (`ChatWidget::run_core_command`) needs the `BuiltinCommandHandler`
 # trait + `CommandResult`/`ParsedSlashCommand` types to invoke `command-core`
 # handlers directly. Same path-style as the `command-core` entry above.
-command-api = { path = "../command-api" }
+command-api = { workspace = true }
 # Shared `CostSnapshot -> i6e()` cost-summary renderer (byte-exact `/cost`
 # block) — the `/usage` Stats tab renders the same block as the headless
 # `/usage` command via `cost::render::cost_summary_from_snapshot`. `cost`
 # does not depend on `tui`, so this introduces no dependency cycle.
-cost = { path = "../cost" }
+cost = { workspace = true }
 url = "2"
 dirs = "5"
 
@@ -92,9 +92,12 @@ dirs = "5"
 # mock exists in `tui`/`tui-core`; hand-rolling one would re-implement the
 # trait's ~16 non-defaulted methods. `orchestrator` does not depend on `tui`, so
 # this dev-only edge introduces no dependency cycle.
-orchestrator = { path = "../orchestrator" }
+orchestrator = { workspace = true }
 # Prompt-history persistence tests write a real `history.jsonl` in a tempdir.
 tempfile = "3.13"
 
 [lints]
 workspace = true
+
+[build-dependencies]
+branding.workspace = true

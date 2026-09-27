@@ -585,6 +585,10 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let trusted = args.trusted_workspace;
 
     DesktopConfig {
+        build_info: harness_runtime::desktop::BuildInfo::new(
+            env!("CARGO_PKG_VERSION"),
+            option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+        ),
         host_workspace_trusted: Some(trusted),
         enable_automation_scheduler: args.scheduled_controller,
         initial_teammate_team_name: None,
@@ -2324,6 +2328,10 @@ mod tests {
     #[test]
     fn has_no_credential_source_detects_empty() {
         let mut cfg = DesktopConfig {
+            build_info: harness_runtime::desktop::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             api_key: String::new(),
             provider_profiles: None,
             ..DesktopConfig::default()
@@ -2361,6 +2369,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            build_info: harness_runtime::desktop::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             enable_automation_scheduler: false,
             host_workspace_trusted: Some(true),
             initial_teammate_team_name: None,

@@ -21,35 +21,35 @@ path = "src/lib.rs"
 
 [dependencies]
 # Shared question contracts used by production brokers and test tools.
-tool-api = { path = "../../tool-api" }
+tool-api = { workspace = true }
 # Namespace/branding literals (config-dir name, env var names) route through this
 # crate so the Claude namespace lives in one place.
 branding.workspace = true
-configuration-admin = { path = "../../configuration-admin" }
-bridge = { path = "../../bridge" }
-client-protocol = { path = "../../client-protocol" }
-client-adapter = { path = "../../client-adapter" }
-permission = { path = "../../permission" }
+configuration-admin = { workspace = true }
+bridge = { workspace = true }
+client-protocol = { workspace = true }
+client-adapter = { workspace = true }
+permission = { workspace = true }
 # Global config (`~/.claude.json`) path resolver — user/global-scope MCP servers
 # live inside it (top-level `mcpServers`), matching claude-code.
-migrations = { path = "../../migrations" }
+migrations = { workspace = true }
 # F2-08: the full command-routing seam reaches the engine handles (in `traits`)
 # and the slash-command dispatcher (`command-api`). harness-runtime::desktop wires the
 # production runtime the router is built from (F2-05 binary path).
-platform-api = { path = "../../platform-api" }
-command-api = { path = "../../command-api" }
-command-core = { path = "../../commands/core" }
+platform-api = { workspace = true }
+command-api = { workspace = true }
+command-core = { workspace = true }
 # S1: the production TurnDriver (`src/driver.rs`) drives a real
 # ConversationOrchestrator's cancelable streaming entry, so `orchestrator` is now
 # a LIBRARY dependency (it was dev-only when the only driver was the test one).
-orchestrator = { path = "../../orchestrator" }
+orchestrator = { workspace = true }
 # Desktop Beta session lifecycle: enumerate/replay the same JSONL store used by
 # the CLI/mobile hosts, then adopt the replayed protocol history in place.
-session = { path = "../../session" }
-protocol = { path = "../../protocol" }
-secret = { path = "../../secret" }
-platform-posix = { path = "../../platforms/posix" }
-platform-pty = { path = "../../platforms/pty" }
+session = { workspace = true }
+protocol = { workspace = true }
+secret = { workspace = true }
+platform-posix = { workspace = true }
+platform-pty = { workspace = true }
 uuid = "1.10"
 # `AudioResultDto` carries recorded/synthesized audio as base64 (the same
 # convention as `ImageRefDto`); `audio_bridge` decodes it back to the `Vec<u8>`
@@ -59,31 +59,31 @@ base64 = "0.22"
 # prompt that arrives while a turn is in flight and the spawned run loop drains
 # it as a follow-up turn — the parity twin of print.ts run()'s `running` guard +
 # do/while drainCommandQueue loop.
-msgqueue = { path = "../../msgqueue" }
+msgqueue = { workspace = true }
 # Phase-2 /loop: the composition-root `WakeupScheduler` impl (one-shot delayed
 # self-wakeup → enqueue) implements the `tool_cron::WakeupScheduler` seam.
-tool-cron = { path = "../../tools/cron" }
-cron = { path = "../../cron" }
+tool-cron = { workspace = true }
+cron = { workspace = true }
 # S2: the real binary resolves a DesktopConfig from env/argv and assembles the
 # production runtime through the desktop composition root. app→app is permitted
 # by the dependency gate (apps are leaves; the rule only forbids non-leaf→leaf).
-harness-runtime = { path = "../../harness-runtime", features = ["desktop"] }
+harness-runtime = { workspace = true, default-features = true, features = ["desktop"] }
 cli = { path = "../cli" }
-plugin = { path = "../../plugin" }
-skill-api = { path = "../../skill-api" }
-hooks = { path = "../../hooks" }
-mcp = { path = "../../mcp" }
+plugin = { workspace = true }
+skill-api = { workspace = true }
+hooks = { workspace = true }
+mcp = { workspace = true }
 # `computer_access_bridge::ComputerAccessExchange` — the channel item type for
 # `DesktopConfig::computer_access_tx`; boot.rs constructs the channel directly
 # so it needs the type in scope (the same edge `tool-computer-use` and
 # `client-adapter` already take on `tui-core`, for the identical reason).
 tui-core = { path = "../../tui-core" }
-telemetry = { path = "../../telemetry" }
+telemetry = { workspace = true }
 # S2: `boot::load_settings_blocks` reads the layered settings `providers` /
 # `routing` blocks (same loader the CLI uses) to fill the DesktopConfig.
-core = { path = "../../core" }
-provider-config = { path = "../../provider-config" }
-llm-runtime = { path = "../../llm-runtime" }
+core = { workspace = true }
+provider-config = { workspace = true }
+llm-runtime = { workspace = true }
 # S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
 # F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
 dirs = "5"
@@ -108,7 +108,7 @@ anyhow = "1"
 # `tool_computer_use::TuiBridgeResolver` (generic despite the name) over a
 # fixture tool, exercising the exact resolver the production `computer` tool
 # uses — not a reinvented test double.
-tool-computer-use = { path = "../../tools/computer-use" }
+tool-computer-use = { workspace = true }
 # `test-util` (dev-only) gives the audio_bridge tests `#[tokio::test(start_paused
 # = true)]`, so the "client never answers" deadline is exercised by advancing the
 # runtime's clock rather than by sleeping for the real timeout.
@@ -121,3 +121,6 @@ once_cell = "1"
 tempfile = "3"
 [lints]
 workspace = true
+
+[build-dependencies]
+branding.workspace = true

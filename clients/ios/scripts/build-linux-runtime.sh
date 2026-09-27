@@ -24,6 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${IOS_DIR}/../.." && pwd)"
+RUNTIME_ROOT="$(python3 "${REPO_ROOT}/lingxi-code/scripts/runtime_source.py" --root)"
 OPENMINIS_ROOT="${REPO_ROOT}/docs/superpowers/references/OpenMinis"
 DEPS_DIR="${OPENMINIS_ROOT}/deps"
 
@@ -124,9 +125,10 @@ if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
   # input here, and it was passed to the verifier alone -- nothing ever
   # installed those packages, which is why the shipped rootfs had no Node.
   echo "[build-linux-runtime] Building local-app Alpine rootfs (aarch64)"
-  bash "${REPO_ROOT}/lingxi-code/scripts/mobile-linux/build-local-app-rootfs.sh" \
+  bash "${RUNTIME_ROOT}/scripts/mobile-linux/build-local-app-rootfs.sh" \
     --arch aarch64 \
-    --output "${LOCAL_APP_ROOTFS_DIR}"
+    --output "${LOCAL_APP_ROOTFS_DIR}" \
+    --cache-dir "${IOS_DIR}/build/local-app-cache"
   LOCAL_APP_TARBALL="${LOCAL_APP_ROOTFS_DIR}/aarch64/rootfs.tar.gz"
   [[ -f "${LOCAL_APP_TARBALL}" ]] || {
     echo "local-app rootfs build produced no tarball: ${LOCAL_APP_TARBALL}" >&2
@@ -240,7 +242,7 @@ if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
   VERIFY_TREE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/lingxi-rootfs-verify.XXXXXX")"
   trap 'chmod -R u+w "${VERIFY_TREE_DIR}" 2>/dev/null || true; rm -rf "${VERIFY_TREE_DIR}"' EXIT
   tar -xzf "${LOCAL_APP_TARBALL}" -C "${VERIFY_TREE_DIR}"
-  python3 "${REPO_ROOT}/lingxi-code/scripts/mobile-linux/rootfs_tool.py" verify-tree \
+  python3 "${RUNTIME_ROOT}/scripts/mobile-linux/rootfs_tool.py" verify-tree \
     --root "${VERIFY_TREE_DIR}"
 else
   echo "[build-linux-runtime] Preparing pinned Alpine rootfs (${ALPINE_VERSION})"
@@ -297,7 +299,7 @@ MANIFEST="${STAGE_ROOT}/manifest.json"
 # legacy path passes to the vendored helper.
 if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
   ALPINE_VERSION="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["alpine"]["version"])' \
-    "${REPO_ROOT}/docs/mobile-linux/local-app-runtime-pins.json")"
+    "${RUNTIME_ROOT}/docs/mobile-linux/local-app-runtime-pins.json")"
 fi
 if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then LOCAL_APP_RUNTIME_JSON=true; else LOCAL_APP_RUNTIME_JSON=false; fi
 ROOTFS_SHA=""

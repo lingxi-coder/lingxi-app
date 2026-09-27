@@ -18,10 +18,11 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ANDROID_DIR}/../.." && pwd)"
+RUNTIME_ROOT="$(python3 "${REPO_ROOT}/lingxi-code/scripts/runtime_source.py" --root)"
 OUTPUT="${ANDROID_DIR}/app/build/generated/localApps/${VARIANT}/assets/local-app-runtime"
 
-python3 "${REPO_ROOT}/lingxi-code/scripts/mobile-linux/stage-local-app-runtime.py" \
-  --repo-root "${REPO_ROOT}" \
+python3 "${RUNTIME_ROOT}/scripts/mobile-linux/stage-local-app-runtime.py" \
+  --repo-root "${RUNTIME_ROOT}" \
   --node-modules "${NODE_MODULES}" \
   --output "${OUTPUT}" \
   --platform android \

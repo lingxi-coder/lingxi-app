@@ -230,6 +230,13 @@ targets:
     deploymentTarget: "18.0"
     sources:
       - path: Tests
+    preBuildScripts:
+      - name: Stage pinned Harness protocol fixtures
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          export PATH="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+          python3 "${SRCROOT}/scripts/stage-protocol-fixtures.py" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/HarnessProtocolFixtures"
     dependencies:
       - target: LingxiCode
       - framework: Frameworks/LingxiCodeFFI.xcframework
@@ -241,6 +248,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.tests
         GENERATE_INFOPLIST_FILE: true
+        # The locked Cargo resolver reads its immutable checkout outside SRCROOT.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
 
   LocalAppsWidget:
     type: app-extension

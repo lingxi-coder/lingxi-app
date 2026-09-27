@@ -10,14 +10,19 @@ esac
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../../.." && pwd)"
+runtime_root="$(python3 "${script_dir}/../runtime_source.py" --root)"
 declare -a scan_paths=(
   "${repo_root}/clients/android"
   "${repo_root}/clients/ios"
   "${repo_root}/lingxi-code/apps/android-aar"
   "${repo_root}/lingxi-code/apps/ios-framework"
-  "${repo_root}/lingxi-code/platforms/android"
-  "${repo_root}/lingxi-code/platforms/ios"
+  "${runtime_root}/crates/platforms/android"
+  "${runtime_root}/crates/platforms/ios"
 )
+
+for scan_path in "${scan_paths[@]}"; do
+  [[ -d "${scan_path}" ]] || { echo "required compliance source missing: ${scan_path}" >&2; exit 1; }
+done
 
 declare -a base_rg=(
   rg

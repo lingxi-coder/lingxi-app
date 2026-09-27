@@ -1,15 +1,12 @@
 package com.lingxi.code.conversation
 
-import java.io.File
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
 class CompactionProgressTest {
     @Test fun hybridProgressFixture() {
-        val relative = "lingxi-code/client-protocol/snapshots/compaction_hybrid_progress.json"
-        val fixture = generateSequence(File(requireNotNull(System.getProperty("user.dir")))) { it.parentFile }
-            .map { File(it, relative) }.first { it.isFile }
+        val fixture = RuntimeProtocolFixtures.snapshot("compaction_hybrid_progress.json")
         val cases = JSONObject(fixture.readText()).getJSONArray("cases")
         for (i in 0 until cases.length()) {
             val sample = cases.getJSONObject(i)

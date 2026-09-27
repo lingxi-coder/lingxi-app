@@ -16,8 +16,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-const AGENTS_HELP_FIXTURE: &str =
-    include_str!("../../../test-harness/src/parity/fixtures/cc_2_1_252_agents_help.txt");
+const AGENTS_HELP_FIXTURE: &str = include_str!("../assets/cc_2_1_252_agents_help.txt");
 
 /// `agents --help` / `-h` print the fixture byte-for-byte, exit 0.
 #[test]

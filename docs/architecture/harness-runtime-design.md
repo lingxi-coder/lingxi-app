@@ -1,5 +1,7 @@
 # LingXi Harness 架构
 
+运行时已迁入独立 `lingxi-coder/harness-runtime` 仓库；本仓库通过固定 Git 提交接入。源码与资源归属、验证边界和维护方式见 [独立仓迁移记录](harness-runtime-extraction.md)。以下组件与行为边界继续适用。
+
 ## 重构原则
 
 本次工作以现有完整产品实现为基线。移动原代码、明确组件归属、收敛依赖和装配入口；不重新实现 Agent 循环、权限系统、模型调用、会话恢复或持久化。

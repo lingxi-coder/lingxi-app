@@ -1,7 +1,0 @@
-{
-  "type": "cron_manage",
-  "request_id": "cron-1",
-  "request": {
-    "action": "list"
-  }
-}

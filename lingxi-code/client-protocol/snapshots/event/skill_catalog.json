@@ -1,4 +1,0 @@
-{
-  "type": "skill_catalog",
-  "catalog_json": "{\"skills\":[{\"id\":\"user:greet\",\"scope\":\"user\",\"writable\":true}]}"
-}

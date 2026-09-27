@@ -870,6 +870,10 @@ pub(crate) fn resolve_desktop_config_at(
     let _ = argv.no_stream;
 
     DesktopConfig {
+        build_info: harness_runtime::desktop::BuildInfo::new(
+            env!("CARGO_PKG_VERSION"),
+            option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+        ),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
         // Real CLI session: the machine's keychain and env ARE legitimate
@@ -1720,6 +1724,10 @@ mod tests {
         let marker = home.path().join("settings.json");
         std::fs::write(&marker, "{}\n").unwrap();
         let mut cfg = DesktopConfig {
+            build_info: harness_runtime::desktop::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             lingxi_home: home.path().to_path_buf(),
             ..Default::default()
         };

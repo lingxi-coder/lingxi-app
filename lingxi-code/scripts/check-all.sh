@@ -77,10 +77,10 @@ for g in "${gates[@]}"; do
             # closest thing an unattended trigger can run is the engine's
             # own self-test: it exercises all ten planted criteria in both
             # directions and fails if the judging logic itself regresses.
-            if ./scripts/lap-gate.sh selftest; then rc=0; else rc=$?; fi
+            if ./scripts/lap-gate.sh selftest 2>&1; then rc=0; else rc=$?; fi
             ;;
         *)
-            if ./scripts/"$g"; then rc=0; else rc=$?; fi
+            if ./scripts/"$g" 2>&1; then rc=0; else rc=$?; fi
             ;;
     esac
     echo "=== RESULT: $g exit=$rc ==="

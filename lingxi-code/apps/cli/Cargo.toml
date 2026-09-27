@@ -14,7 +14,7 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-configuration-admin = { path = "../../configuration-admin" }
+configuration-admin = { workspace = true }
 # Single source of truth for the product namespace (config dir/file names, env
 # var names, memory filenames, plugin manifest dir). The CLI routes its runtime
 # `.claude*` / `CLAUDE_CONFIG_DIR` literals through these constants.
@@ -25,88 +25,88 @@ branding.workspace = true
 # ~270-line wiring (and the dozen crates it pulled in — compaction, mcp, hooks,
 # agent, cost, anthropic-oauth, secret, tool-api, permission, sandbox) moved
 # with it and is no longer a direct CLI dependency.
-harness-runtime = { path = "../../harness-runtime", features = ["desktop"] }
+harness-runtime = { workspace = true, default-features = true, features = ["desktop"] }
 # (Plan 3c C1) The CLI `Runtime` re-projects `DesktopRuntime.credentials`
 # (`Arc<secret::CredentialManager>`) and threads it into the TUI session so the
 # `/connect` screen persists provider keys. Naming the leaf `secret` type re-adds
 # it as a direct dep.
-secret = { path = "../../secret" }
+secret = { workspace = true }
 # (`/connect` Copilot device-flow) The CLI `Runtime` re-projects
 # `DesktopRuntime.connect_copilot` (`Arc<dyn command_core::CopilotConnectDriver>`)
 # and threads it into the TUI session so picking GitHub Copilot in `/connect`
 # runs the real web sign-in. Naming the trait re-adds command-core as a direct dep.
-command-core = { path = "../../commands/core" }
+command-core = { workspace = true }
 # F2-01: `harness_runtime::desktop::build` takes an `Arc<dyn client_adapter::PermissionRequestSink>`
 # whose method carries a `client_protocol::permission::PermissionRequest`. The CLI
 # defines a no-op sink (it opts into `NoOpPermissionGate`), so it names both
 # engine-tier crates. Legal: the dep rule (§0.3) only forbids
 # client-protocol/client-adapter → apps/*, not apps/* → client-protocol/client-adapter.
-client-protocol = { path = "../../client-protocol" }
-client-adapter = { path = "../../client-adapter" }
-protocol = { path = "../../protocol" }
-platform-api = { path = "../../platform-api" }
-command-api = { path = "../../command-api" }
-orchestrator = { path = "../../orchestrator" }
-core = { path = "../../core" }
+client-protocol = { workspace = true }
+client-adapter = { workspace = true }
+protocol = { workspace = true }
+platform-api = { workspace = true }
+command-api = { workspace = true }
+orchestrator = { workspace = true }
+core = { workspace = true }
 # Orphaned-permission recovery: the stdio control-plane forwards an
 # `OrphanedPermission` command to the run loop, which re-runs the tool.
-msgqueue = { path = "../../msgqueue" }
+msgqueue = { workspace = true }
 # stream-json P2b: contextWindow/maxOutputTokens per model from the llm-runtime catalog.
-llm-runtime = { path = "../../llm-runtime" }
+llm-runtime = { workspace = true }
 # `/status` oversized-memory-file warnings resolve the session's model through
 # `agent::model_resolution::resolve_user_specified_model` (claude-code `Ei`)
 # before deriving the size threshold: `orch_cfg.model` is `cfg.default_model`
 # with only a `profile/` prefix stripped, so an `opus`/`opusplan`/`sonnet`
 # install leaves it a bare ALIAS. This is the same seam
 # `harness_runtime::desktop::build` already uses for the subagent spawner's parent model.
-agent = { path = "../../agent" }
+agent = { workspace = true }
 # Canonical pricing-model id for the stream-json per-model usage block
 # (`canonicalModel`, cc 2.1.218 `yo(r)` = `firstPartyNameToCanonical`).
-cost = { path = "../../cost" }
+cost = { workspace = true }
 dirs = "5"
 # `/web` async effect closure (`mode.rs::run_web_action`): persists the
 # picker/config save via `tui::web::persist`'s `WebSearchConfig`, and runs the
 # real test-search via `tool_web::web_search_client`. Naming the leaf crate
 # here (rather than only reaching it transitively through `tui`) matches the
 # `secret`/`command-core` precedent above.
-tool-web = { path = "../../tools/web" }
+tool-web = { workspace = true }
 tui = { path = "../../tui" }
 tui-core = { path = "../../tui-core" }
-session = { path = "../../session" }
+session = { workspace = true }
 # M9-05: desktop TaskRegistry type (the `Runtime` bundle re-surfaces the handle
 # built by `harness_runtime::desktop::build` for the TUI poller).
-tasks = { path = "../../tasks" }
-telemetry = { path = "../../telemetry" }
+tasks = { workspace = true }
+telemetry = { workspace = true }
 # config migrations at startup (runMigrations port)
-migrations = { path = "../../migrations" }
+migrations = { workspace = true }
 # Real posix primitives: `has_internet` HTTP probe (bypass_env.rs) + session-row
 # FileSystem (run.rs) bind the live `PosixHttp` / `PosixFileSystem`.
-platform-posix = { path = "../../platforms/posix" }
-platform-pty = { path = "../../platforms/pty" }
+platform-posix = { workspace = true }
+platform-pty = { workspace = true }
 # CLI-resolved permission mode + bypass-safety guard substrate (cli_mode /
 # bypass_guard). The real `BypassEnv` impl (`bypass_env.rs`) names this directly.
-permission = { path = "../../permission" }
+permission = { workspace = true }
 # CLI parity (2.1.191): the `mcp` and `plugin` subcommand families (`commands/`)
 # drive the MCP config/registry and the plugin manager directly from the CLI
 # (claude `claude mcp …` / `claude plugin …`). These libs moved into
 # harness-runtime::desktop's wiring earlier; the management subcommands re-add them as
 # direct CLI deps.
-mcp = { path = "../../mcp" }
+mcp = { workspace = true }
 # (P1-08 runtime `/add-dir`) the `/add-dir` off-loop effect widens the live
 # `Arc<SessionCwd>` trusted set so file tools accept a mid-session dir at once.
-tool-api = { path = "../../tool-api" }
-plugin = { path = "../../plugin" }
+tool-api = { workspace = true }
+plugin = { workspace = true }
 # Phase 8 (tui command registry): the `/skills` + `/memory` startup
 # snapshots — the same on-disk walks the iocraft screens used, captured once
 # into `tui_rata::session::SessionInfo` before the TUI loop starts.
-skill-api = { path = "../../skill-api" }
-memory = { path = "../../memory" }
+skill-api = { workspace = true }
+memory = { workspace = true }
 # (M8 cc2.1.198) The standalone `agents` view fires the user's `Notification`
 # hook (`agent_needs_input`/`agent_completed`) directly — the view runs
 # WITHOUT an orchestrator, so it loads settings hooks and executes them via
 # the hooks crate (the same standalone loader harness-runtime::desktop's composition
 # root uses).
-hooks = { path = "../../hooks" }
+hooks = { workspace = true }
 # (M8 cc2.1.198) Display-column clamp for the `Pon` job-label port
 # (`agents_notify::job_label`); same pin as tui-core.
 unicode-width = "=0.1.14"
@@ -149,7 +149,7 @@ sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
-platform-windows = { path = "../../platforms/windows" }
+platform-windows = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # Real `BypassEnv::effective_uid` returns the REAL uid (parity with TS

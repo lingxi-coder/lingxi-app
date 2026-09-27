@@ -7,5 +7,4 @@
 # Plan A 阶段本清单为空：Plan A 不改名，所以还没有需要冻结的东西。
 # Plan B 的第一个任务就是填满它。
 
-lingxi-code/tools/skill/src/prompt_shell.rs:CLAUDECODE  # 上游标记，唯一消费者是用户自己的 rc 文件（仓库外）。Plan B 前不动。
-lingxi-code/mcp/src/headers_helper.rs:CLAUDE_PLUGIN_ROOT  # 已安装插件的 headersHelper 脚本键入的已发布名。Plan B 才移除。
+lingxi-code/apps/android-aar/src/lib.rs:LINGXI_GIT_SHA_SHORT  # Existing branding::ENV_PREFIX build metadata key now read by Host BuildInfo; option_env! requires a literal.

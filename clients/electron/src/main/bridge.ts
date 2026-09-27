@@ -133,6 +133,7 @@ export interface BridgeManagerOptions {
   onModelChanged?: (model: string) => void;
   /** Persist only an explicitly requested, engine-confirmed model selection. */
   onModelSelected?: (model: string) => void;
+  /** This session’s explicit selection; never the default for new sessions. */
   getSavedModel?: () => string | undefined;
   getSavedPermissionMode?: () => PermissionModeId | undefined;
   onPermissionModeSelected?: (mode: PermissionModeId) => void;
@@ -641,10 +642,12 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'onFirstPromptSent' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
+  onModelSelected?: (ref: SessionRef, model: string) => void;
+  getSavedModel?: (ref: SessionRef) => string | undefined;
   onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   /** Maximum retained runtimes when enough idle sessions are evictable. */
   maxCachedRuntimes?: number;
@@ -3560,6 +3563,8 @@ export class SessionRuntimeManager {
       launchConfig,
       accessState,
       onModelChanged,
+      onModelSelected,
+      getSavedModel,
       onFirstPromptSent,
       maxCachedRuntimes: _maxCachedRuntimes,
       ...base
@@ -3571,6 +3576,8 @@ export class SessionRuntimeManager {
       envelopeEvents: true,
       registerIpc: false,
       launchConfig: () => launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
+      ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
+      ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
       beforeOpenAiOAuthLaunch: () => this.claimCodexRuntime(ref.sessionId),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
       onModelChanged: (model: string) => {

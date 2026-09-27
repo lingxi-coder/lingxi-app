@@ -82,6 +82,8 @@ export interface PersistedSettings {
   theme?: 'dark' | 'light' | 'system';
   collapseThoughtsByDefault?: boolean;
   model?: string;
+  /** Explicit model selections are scoped to their owning session. */
+  sessionModels?: Array<SessionRef & { model: string }>;
   /** Last user-selected permission mode on this device. */
   lastPermissionMode?: PermissionModeId;
   /** Last user-selected fast-mode state on this device. */
@@ -176,6 +178,16 @@ export function parseSettings(value: unknown): PersistedSettings {
     settings.collapseThoughtsByDefault = value['collapseThoughtsByDefault'];
   }
   settings.model = boundedString(value['model'], 256);
+  if (Array.isArray(value['sessionModels'])) {
+    settings.sessionModels = value['sessionModels'].flatMap((entry: unknown) => {
+      if (!isPlainObject(entry)) return [];
+      const projectPath = boundedString(entry['projectPath'], 4_096);
+      const sessionId = boundedString(entry['sessionId'], 128);
+      const model = boundedString(entry['model'], 256);
+      return projectPath && sessionId && SESSION_ID_PATTERN.test(sessionId) && model
+        ? [{ projectPath, sessionId, model }] : [];
+    });
+  }
   if (isPermissionModeId(value['lastPermissionMode'])) {
     settings.lastPermissionMode = value['lastPermissionMode'];
   }

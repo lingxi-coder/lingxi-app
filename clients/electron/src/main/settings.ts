@@ -306,6 +306,30 @@ export class SettingsStore {
     }
   }
 
+  getSessionModel(ref: SessionRef): string | undefined {
+    return this.settings.sessionModels?.find(entry =>
+      entry.sessionId === ref.sessionId && entry.projectPath === ref.projectPath)?.model;
+  }
+
+  /** Save the session choice and the default for new sessions atomically. */
+  setSessionModel(ref: SessionRef, model: string): void {
+    const validated = validateString(model, 'model', 256);
+    const previous = this.settings;
+    const entries = (previous.sessionModels ?? []).filter(entry =>
+      entry.sessionId !== ref.sessionId || entry.projectPath !== ref.projectPath);
+    this.settings = {
+      ...previous,
+      model: validated,
+      sessionModels: [...entries, { ...ref, model: validated }],
+    };
+    try {
+      this.persist();
+    } catch (error) {
+      this.settings = previous;
+      throw error;
+    }
+  }
+
   /** Restore Bypass only after the existing one-time acknowledgement. */
   getLastPermissionMode(): PermissionModeId | undefined {
     const mode = this.settings.lastPermissionMode;

@@ -508,6 +508,10 @@ pub fn build_mobile_engine(
     {
         use platform_ios::{IosPlatform, IosPlatformInputs};
         let cfg = MobileConfig {
+            build_info: harness_runtime::mobile::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             cwd: std::path::PathBuf::from(&impls.app_sandbox_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(branding::DOT_DIR),
             host_environment: Some(platform_api::MobileHostEnvironment::new(
@@ -703,6 +707,10 @@ fn ios_mobile_config_from_launch_config(
 ) -> Result<MobileConfig, MobileEngineError> {
     let cwd = ios_project_cwd(&config.app_sandbox_root, config.project_cwd.as_deref())?;
     let mut cfg = MobileConfig {
+        build_info: harness_runtime::mobile::BuildInfo::new(
+            env!("CARGO_PKG_VERSION"),
+            option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+        ),
         cwd,
         lingxi_home: std::path::PathBuf::from(&config.app_sandbox_root).join(branding::DOT_DIR),
         session_mode: match config.session_mode {
@@ -3579,6 +3587,10 @@ mod tests {
         let perm_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let cfg = MobileConfig {
+            build_info: harness_runtime::mobile::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             cwd: root.to_path_buf(),
             lingxi_home: root.join(".lingxi"),
             ..MobileConfig::default()

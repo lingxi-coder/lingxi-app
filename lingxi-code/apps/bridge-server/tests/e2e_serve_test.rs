@@ -41,6 +41,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
     let cfg = DesktopConfig {
+        build_info: harness_runtime::desktop::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
         api_base: "https://api.anthropic.com".to_string(),

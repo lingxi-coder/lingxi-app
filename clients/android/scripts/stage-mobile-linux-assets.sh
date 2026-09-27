@@ -22,12 +22,13 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ANDROID_DIR}/../.." && pwd)"
+RUNTIME_ROOT="$(python3 "${REPO_ROOT}/lingxi-code/scripts/runtime_source.py" --root)"
 OUTPUT="${ANDROID_DIR}/app/build/generated/mobileLinux/${VARIANT}/assets/mobile-linux"
-PINS="${REPO_ROOT}/docs/mobile-linux/mobile-linux-pins.json"
+PINS="${RUNTIME_ROOT}/docs/mobile-linux/mobile-linux-pins.json"
 
 bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh" --release --apk-dir "${APK_DIR}"
 
-python3 - "${INPUT_DIR}" "${OUTPUT}" "${PINS}" "${REPO_ROOT}" <<'PY'
+python3 - "${INPUT_DIR}" "${OUTPUT}" "${PINS}" "${RUNTIME_ROOT}" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -70,7 +71,7 @@ for abi in pins["rootfs"]["archives"]:
     subprocess.check_call(
         [
             sys.executable,
-            str(repo / "lingxi-code/scripts/mobile-linux/rootfs_tool.py"),
+            str(repo / "scripts/mobile-linux/rootfs_tool.py"),
             "verify-release-archive",
             "--pins",
             str(pins_path),
@@ -83,7 +84,7 @@ for abi in pins["rootfs"]["archives"]:
     subprocess.check_call(
         [
             sys.executable,
-            str(repo / "lingxi-code/scripts/mobile-linux/rootfs_tool.py"),
+            str(repo / "scripts/mobile-linux/rootfs_tool.py"),
             "verify-archive",
             "--archive",
             str(archive),
@@ -92,7 +93,7 @@ for abi in pins["rootfs"]["archives"]:
     subprocess.check_call(
         [
             sys.executable,
-            str(repo / "lingxi-code/scripts/mobile-linux/rootfs_tool.py"),
+            str(repo / "scripts/mobile-linux/rootfs_tool.py"),
             "validate-lock",
             "--lock",
             str(lock),
@@ -103,7 +104,7 @@ for abi in pins["rootfs"]["archives"]:
     subprocess.check_call(
         [
             "bash",
-            str(repo / "lingxi-code/scripts/mobile-linux/check-rootfs-manifest.sh"),
+            str(repo / "scripts/mobile-linux/check-rootfs-manifest.sh"),
             str(manifest),
         ]
     )

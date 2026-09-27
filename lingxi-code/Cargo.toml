@@ -1,174 +1,28 @@
 [workspace]
 resolver = "2"
 members = [
-    "harness-runtime",
-    "branding",
-    "protocol",
-    "client-protocol",
-    "client-adapter",
-    "client-presentation",
-    "configuration-admin",
-    "tool-api",
-    "tools/file",
-    "tools/shell",
-    "tools/shell-mobile",
-    "tools/git-mobile",
-    "tools/task",
-    "tools/web",
-    "tools/plan",
-    "tools/meta",
-    "tools/cron",
-    "tools/ui",
-    "tools/skill",
-    "tools/worktree",
-    "tools/lsp",
-    "tools/mcp",
-    "tools/agent",
-    "tools/workflow",
-    "tools/mobile",
-    "tools/computer-use",
-    "tools/android-use",
     "tools/ios-use",
-    "core",
-    "platform-api",
-    "test-harness",
-    "secret",
-    "cost",
-    "permission",
-    "hooks",
-    "memory",
-    "migrations",
-    "jsonrpc",
-    "mcp",
-    "llm-runtime",
-    "http-client",
-    "provider-config",
     "config-requirements",
-    "orchestrator",
-    "compaction",
-    "agent",
-    "tasks",
-    "task-store",
-    "workflow",
-    "coordinator",
-    "sidequery",
-    "fusion",
-    "skill-api",
-    "command-api",
-    "commands/core",
-    "outputstyles",
-    "msgqueue",
-    "session",
-    "cron",
-    "local-apps",
-    "sandbox",
-    "sandbox-runtime",
-    "sandbox-runtime-runner",
-    "apply-seccomp",
-    "lsp",
-    "telemetry",
-    "telemetry-macros",
-    "bridge",
-    "plugin",
     "apps/ios-framework",
     "apps/android-aar",
     "apps/bridge-server",
     "apps/cli",
     "tui-core",
     "tui",
-    "platforms/common",
-    "platforms/posix-minimal",
-    "platforms/posix",
-    "platforms/pty",
-    "platforms/windows",
-    "platforms/ios",
     "platforms/ios-ish-runtime",
-    "platforms/android",
-    "platforms/android-libcap",
-    "platforms/android-minijail",
     "platforms/android-shellbin",
-    "platforms/macos-computer-control",
-    "platforms/posix/tests/fixtures/mock_stdio_mcp",
 ]
 
 # Fixtures are workspace members so they share lockfile + target/ dir, but
 # they MUST NOT be part of the default build set — CI release jobs should
 # build only the real crates, not the integration-test fixtures.
 default-members = [
-    "harness-runtime",
-    "branding",
-    "protocol",
-    "client-protocol",
-    "client-adapter",
-    "client-presentation",
-    "tool-api",
-    "tools/file",
-    "tools/shell",
-    "tools/shell-mobile",
-    "tools/git-mobile",
-    "tools/task",
-    "tools/web",
-    "tools/plan",
-    "tools/meta",
-    "tools/cron",
-    "tools/ui",
-    "tools/skill",
-    "tools/worktree",
-    "tools/lsp",
-    "tools/mcp",
-    "tools/agent",
-    "tools/workflow",
-    "tools/mobile",
-    "tools/computer-use",
-    "tools/android-use",
     "tools/ios-use",
-    "core",
-    "platform-api",
-    "secret",
-    "cost",
-    "permission",
-    "hooks",
-    "memory",
-    "migrations",
-    "jsonrpc",
-    "mcp",
-    "llm-runtime",
-    "provider-config",
     "config-requirements",
-    "orchestrator",
-    "compaction",
-    "agent",
-    "tasks",
-    "task-store",
-    "workflow",
-    "coordinator",
-    "sidequery",
-    "fusion",
-    "skill-api",
-    "command-api",
-    "commands/core",
-    "outputstyles",
-    "msgqueue",
-    "session",
-    "cron",
-    "local-apps",
-    "sandbox",
-    "sandbox-runtime",
-    "sandbox-runtime-runner",
-    "lsp",
-    "telemetry",
-    "telemetry-macros",
-    "bridge",
-    "plugin",
     "apps/bridge-server",
     "apps/cli",
     "tui-core",
     "tui",
-    "platforms/common",
-    "platforms/posix-minimal",
-    "platforms/posix",
-    "platforms/pty",
-    "platforms/windows",
 ]
 
 [workspace.package]
@@ -179,10 +33,57 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi/lingxi-code"
 
 [workspace.dependencies]
+
+# Runtime packages share one immutable upstream source.
+agent = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+branding = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+bridge = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+client-adapter = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+client-presentation = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+client-protocol = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+command-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+command-core = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+configuration-admin = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+core = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+cost = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+cron = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+harness-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52", default-features = false }
+hooks = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+llm-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+local-apps = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+mcp = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+memory = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+migrations = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+msgqueue = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+orchestrator = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+permission = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+platform-android = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+platform-android-minijail = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+platform-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+platform-ios = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+platform-posix = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+platform-posix-minimal = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+platform-pty = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+platform-windows = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+plugin = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+protocol = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+provider-config = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+secret = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+session = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+skill-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+tasks = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+telemetry = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+tool-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+tool-computer-use = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+tool-cron = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+tool-git-mobile = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+tool-shell = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+tool-web = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+tool-workflow = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "36dd3c1295ae13bde59f6131705dbf86a244ae52" }
+
 # Single source of truth for the product namespace (paths, filenames, env
 # prefix, brand name). Path is workspace-root-relative so every member uses
 # `branding.workspace = true` regardless of its own depth.
-branding = { path = "branding" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `serde_json::Map` keys in insertion order across
 # Value round-trips. Required for claude-code wire-byte fidelity: outbound

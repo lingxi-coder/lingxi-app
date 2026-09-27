@@ -42,7 +42,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"                  # clients/android
 REPO_ROOT="$(cd "${ANDROID_DIR}/../.." && pwd)"               # worktree root
 CARGO_DIR="${REPO_ROOT}/lingxi-code"                          # Rust workspace
-CARGO_TARGET_DIR="${CARGO_DIR}/target"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${CARGO_DIR}/target}"
 
 CRATE="android-aar"
 LIB_STEM="android_aar"                # cargo turns the `-` into `_`
@@ -126,6 +126,9 @@ log "Using NDK: ${ANDROID_NDK_HOME}"
 # Ensure the Android std targets are installed for the active toolchain.
 ACTIVE_TOOLCHAIN="$(cd "${CARGO_DIR}" && rustup show active-toolchain 2>/dev/null | awk '{print $1}')"
 if [[ -n "${ACTIVE_TOOLCHAIN}" ]]; then
+  # Keep host bindgen on the workspace toolchain even when called outside it;
+  # --manifest-path alone does not select rustup's directory override.
+  export RUSTUP_TOOLCHAIN="${ACTIVE_TOOLCHAIN}"
   INSTALLED_TARGETS="$(rustup target list --toolchain "${ACTIVE_TOOLCHAIN}" --installed 2>/dev/null || true)"
   MISSING=()
   for t in "${TARGETS[@]}"; do

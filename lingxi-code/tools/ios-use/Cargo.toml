@@ -10,16 +10,16 @@ license.workspace = true
 # backend, injected via UniFFI in P12). Linked only by engine-mobile on iOS.
 
 [dependencies]
-tool-api = { path = "../../tool-api" }
-platform-api = { path = "../../platform-api" }
-permission = { path = "../../permission" }
+tool-api = { workspace = true }
+platform-api = { workspace = true }
+permission = { workspace = true }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 once_cell = "1"
 
 [dev-dependencies]
-tool-api = { path = "../../tool-api", features = ["test-support"] }
+tool-api = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

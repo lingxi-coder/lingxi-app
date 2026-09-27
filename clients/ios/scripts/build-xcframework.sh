@@ -145,6 +145,10 @@ SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 # default toolchain's targets, which can differ from the pinned one.
 ACTIVE_TOOLCHAIN="$(cd "${CARGO_DIR}" && rustup show active-toolchain 2>/dev/null | awk '{print $1}')"
 if [[ -n "${ACTIVE_TOOLCHAIN}" ]]; then
+  # --manifest-path does not select a rustup toolchain. Keep every cargo and
+  # bindgen invocation on the workspace-selected toolchain even when this
+  # script was launched from outside the Rust workspace.
+  export RUSTUP_TOOLCHAIN="${ACTIVE_TOOLCHAIN}"
   INSTALLED_TARGETS="$(rustup target list --toolchain "${ACTIVE_TOOLCHAIN}" --installed 2>/dev/null || true)"
   MISSING=()
   for t in "${BUILD_TARGETS[@]}"; do

@@ -126,6 +126,9 @@ log "Using NDK: ${ANDROID_NDK_HOME}"
 # Ensure the Android std targets are installed for the active toolchain.
 ACTIVE_TOOLCHAIN="$(cd "${CARGO_DIR}" && rustup show active-toolchain 2>/dev/null | awk '{print $1}')"
 if [[ -n "${ACTIVE_TOOLCHAIN}" ]]; then
+  # Keep host bindgen on the workspace toolchain even when called outside it;
+  # --manifest-path alone does not select rustup's directory override.
+  export RUSTUP_TOOLCHAIN="${ACTIVE_TOOLCHAIN}"
   INSTALLED_TARGETS="$(rustup target list --toolchain "${ACTIVE_TOOLCHAIN}" --installed 2>/dev/null || true)"
   MISSING=()
   for t in "${TARGETS[@]}"; do

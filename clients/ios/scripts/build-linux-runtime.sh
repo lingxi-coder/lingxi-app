@@ -216,7 +216,10 @@ if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
   # fakefsify gets built without editing the pinned snapshot.
   if [[ ! -x "${FAKEFSIFY}" ]]; then
     echo "[build-linux-runtime] Building fakefsify via the pinned OpenMinis helper"
-    bash "${PREPARE_ROOTFS}" "${ALPINE_VERSION}"
+    # fakefsify runs on this Mac. The parent XCFramework script exports the
+    # device deployment target, which otherwise makes clang emit an iOS host
+    # sanity executable that macOS cannot run.
+    env -u IPHONEOS_DEPLOYMENT_TARGET bash "${PREPARE_ROOTFS}" "${ALPINE_VERSION}"
   fi
   [[ -x "${FAKEFSIFY}" ]] || {
     echo "fakefsify was not built: ${FAKEFSIFY}" >&2
@@ -246,7 +249,7 @@ if [[ "${LOCAL_APP_RUNTIME}" == "1" ]]; then
     --root "${VERIFY_TREE_DIR}"
 else
   echo "[build-linux-runtime] Preparing pinned Alpine rootfs (${ALPINE_VERSION})"
-  bash "${PREPARE_ROOTFS}" "${ALPINE_VERSION}"
+  env -u IPHONEOS_DEPLOYMENT_TARGET bash "${PREPARE_ROOTFS}" "${ALPINE_VERSION}"
 fi
 
 echo "[build-linux-runtime] Staging headers, static libs, and resources"

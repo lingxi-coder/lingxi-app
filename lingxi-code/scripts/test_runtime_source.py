@@ -28,6 +28,15 @@ class RuntimeSourceTests(unittest.TestCase):
         self.assertEqual(result["root"], str(Path("/tmp/locked-harness").resolve()))
         self.assertEqual(result["revision"], self.revision)
 
+    def test_accepts_renamed_runtime_crate_directory(self):
+        self.metadata["packages"][0]["manifest_path"] = "/tmp/locked-harness/crates/runtime/Cargo.toml"
+        self.assertEqual(self.inspect()["root"], str(Path("/tmp/locked-harness").resolve()))
+
+    def test_rejects_unknown_runtime_crate_directory(self):
+        self.metadata["packages"][0]["manifest_path"] = "/tmp/locked-harness/crates/other/Cargo.toml"
+        with self.assertRaisesRegex(ValueError, "unexpected.*layout"):
+            self.inspect()
+
     def test_rejects_unpinned_or_different_url(self):
         for field, value in (("rev", "main"), ("git", self.repository.removesuffix(".git"))):
             with self.subTest(field=field):
@@ -58,6 +67,13 @@ class RuntimeSourceTests(unittest.TestCase):
     def test_rejects_inactive_host_path_dependency(self):
         self.metadata["packages"].append({"name": "ios-framework", "dependencies": [
             {"name": "protocol", "path": "/tmp/old-lingxi/protocol", "target": "cfg(target_os = ios)"},
+        ]})
+        with self.assertRaisesRegex(ValueError, "local dependency"):
+            self.inspect()
+
+    def test_rejects_host_path_into_the_cargo_checkout(self):
+        self.metadata["packages"].append({"name": "ios-framework", "dependencies": [
+            {"name": "protocol", "path": "/tmp/locked-harness/crates/protocol"},
         ]})
         with self.assertRaisesRegex(ValueError, "local dependency"):
             self.inspect()

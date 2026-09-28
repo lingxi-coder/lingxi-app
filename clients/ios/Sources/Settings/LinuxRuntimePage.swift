@@ -56,6 +56,7 @@ private enum LinuxRuntimeBridge {
     private static let cache = HandleCache()
 
     private static func config(for mode: LinuxRuntimeMode) -> IosMobileLinuxConfigFfi {
+        LXISHRuntimeResourceBootstrap.prepare()
         let manifest = LXISHRuntimeBundleMetadata.current()
         // The shared helpers, not local re-derivations: this page and the
         // terminal must resolve the SAME workspace id and directory, and the

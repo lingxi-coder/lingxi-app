@@ -1,7 +1,7 @@
 /**
  * Which transcript rows a `/loop` no-op fold hides, and which row reveals them.
  *
- * Pure and DOM-free (like `collapseStore.ts` and `planOverflow.ts`) so the rule
+ * Pure and DOM-free (like `collapseStore.ts`) so the rule
  * is unit-tested rather than asserted in a comment.
  *
  * ## What the engine says, and what is left to decide here

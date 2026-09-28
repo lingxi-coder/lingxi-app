@@ -1183,6 +1183,9 @@ fn mobile_linux_error_to_ffi(error: platform_api::MobileLinuxError) -> MobileLin
         platform_api::MobileLinuxError::Unsupported => MobileLinuxApiErrorFfi::Unavailable {
             message: "runtime unsupported on this build".to_string(),
         },
+        platform_api::MobileLinuxError::RestartRequired(message) => {
+            MobileLinuxApiErrorFfi::Unavailable { message: format!("restart_required: {message}") }
+        }
         platform_api::MobileLinuxError::Unavailable(message) => {
             MobileLinuxApiErrorFfi::Unavailable { message }
         }

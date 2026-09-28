@@ -1,7 +1,7 @@
 /**
  * The transcript's open/closed choices, scoped to one session.
  *
- * Pure and DOM-free (like `planOverflow.ts`) so the rule below is unit-tested
+ * Pure and DOM-free so the rule below is unit-tested
  * rather than asserted in a comment.
  *
  * ## Why the session key is part of the state

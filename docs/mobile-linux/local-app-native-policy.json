@@ -1,9 +1,5 @@
 {
   "android_network_policy_launcher": {
-    "source": "clients/android/app/src/main/cpp/mobile_linux_policy_launcher.c",
-    "source_sha256": "3cf616ba8f5d94c5026eeb0dbc5d60cfe92e333f2d470e665d0e43752e895026",
-    "proot_overlay_source": "clients/android/app/src/main/cpp/proot_lingxi_network_policy.c",
-    "proot_overlay_source_sha256": "752a7fc0a0b2cd5fcdfca0f8fa094d274c32430f4acfc891e6680c3764610e26",
     "artifact": "libmobile_linux_policy_launcher.so",
     "supported_network_policies": [
       "disabled",
@@ -20,12 +16,6 @@
     ]
   },
   "ios_ish_execution_policy": {
-    "registry_source": "clients/ios/Sources/LinuxRuntimeNative/LXISHExecutionPolicy.c",
-    "registry_source_sha256": "599492ddae2141b0e899b749c44b4c9f946c299e260d79bf9ae182a66c6661c8",
-    "header_source": "clients/ios/Sources/LinuxRuntimeNative/LXISHExecutionPolicy.h",
-    "header_source_sha256": "c92b7af0f20412c8a8622fe408c757637df9ca98f7e2930d6e80660670fa91dc",
-    "ish_patch_source": "clients/ios/Sources/LinuxRuntimeNative/patches/ish-socket-network-policy.patch",
-    "ish_patch_source_sha256": "2122d7284c98fc88c6b8b72570c64297d299ab7a941a20f3a879c6465003834f",
     "hook_version": 1,
     "supported_network_policies": [
       "disabled",
@@ -38,5 +28,12 @@
     "local_app_build_mount_layout": "single_root_materialized_snapshot",
     "nested_bind_mount_resolution": "longest_guest_prefix",
     "platform": "iphoneos"
+  },
+  "schema_version": 2,
+  "sdk_integration": {
+    "source_resolver": "lingxi-code/scripts/mobile_linux_source.py",
+    "android_artifact_kind": "native-support-only",
+    "ios_framework": "MobileLinuxNativeSupport.xcframework",
+    "contains_rust_core": false
   }
 }

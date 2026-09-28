@@ -138,7 +138,11 @@ jobs:
         run: |
           bash clients/android/scripts/verify-mobile-linux-pins.sh
           bash lingxi-code/scripts/mobile-linux/test-rootfs-tooling.sh
-          python3 -m json.tool docs/mobile-linux/sbom/mobile-linux.spdx.json >/dev/null
+          sdk_root="$(python3 lingxi-code/scripts/mobile_linux_source.py --root)"
+          rootfs_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["alpine"]["version"])' "$sdk_root/docs/toolchains/runtime-pins.json")"
+          evidence="$sdk_root/docs/mobile-linux/releases/$rootfs_version/arm64-v8a"
+          bash "$sdk_root/scripts/mobile-linux/check-rootfs-manifest.sh" "$evidence/rootfs-manifest.json"
+          python3 "$sdk_root/scripts/mobile-linux/verify-evidence.py" --evidence-dir "$evidence"
 
       - name: Build Store and Full native runtimes from source
         run: |

@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TEMP_ROOT="$(mktemp -d)"
 trap 'chmod -R u+w "${TEMP_ROOT}"; rm -rf "${TEMP_ROOT}"' EXIT
 python3 "${SCRIPT_DIR}/verify-local-app-host.py" --repo-root "${REPO_ROOT}"
+python3 "${SCRIPT_DIR}/test_host_sdk_integration.py"
 expect_rejection() {
   local label="$1"
   shift

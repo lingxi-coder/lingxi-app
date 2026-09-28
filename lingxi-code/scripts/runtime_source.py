@@ -14,12 +14,12 @@ WORKSPACE = Path(__file__).resolve().parent.parent
 PACKAGE_LIST = Path(__file__).with_name("harness-runtime-packages.json")
 
 
-def inspect_metadata(metadata, dependency, package_list):
+def inspect_metadata(metadata, dependency, package_list, *, anchor="harness-runtime", layout=None, layouts=("crates/harness-runtime/Cargo.toml", "crates/runtime/Cargo.toml")):
     """Validate package identities and return the immutable resource source."""
     revision = dependency.get("rev", "")
     repository = package_list["repository"]
     if dependency.get("git") != repository or not re.fullmatch(r"[0-9a-f]{40}", revision):
-        raise ValueError("harness-runtime must use its canonical Git URL and a full commit SHA")
+        raise ValueError(f"{anchor} must use its canonical Git URL and a full commit SHA")
     expected_source = f"git+{repository}?rev={revision}#{revision}"
     owned = set(package_list["packages"] + package_list["vendored_packages"])
     packages = {}
@@ -32,23 +32,29 @@ def inspect_metadata(metadata, dependency, package_list):
         if name in packages:
             raise ValueError(f"multiple Cargo identities for migrated package {name}")
         packages[name] = package
-    if "harness-runtime" not in packages:
-        raise ValueError("locked Cargo metadata does not contain harness-runtime")
-    manifest = Path(packages["harness-runtime"]["manifest_path"]).resolve()
-    root = manifest.parent.parent.parent
-    if manifest.relative_to(root).as_posix() != "crates/harness-runtime/Cargo.toml":
-        raise ValueError("unexpected Harness source layout")
+    if anchor not in packages:
+        raise ValueError(f"locked Cargo metadata does not contain {anchor}")
+    manifest = Path(packages[anchor]["manifest_path"]).resolve()
+    if layout is not None:
+        layouts = (layout,)
+    roots = [manifest.parents[len(Path(layout).parts) - 1] for layout in layouts
+             if manifest.relative_to(manifest.parents[len(Path(layout).parts) - 1]).as_posix() == layout]
+    if len(roots) != 1:
+        raise ValueError(f"unexpected {anchor} source layout")
+    root = roots[0]
     for name, package in packages.items():
         try:
             Path(package["manifest_path"]).resolve().relative_to(root)
         except ValueError as error:
-            raise ValueError(f"{name} is outside the locked Harness checkout") from error
+            raise ValueError(f"{name} is outside the locked {anchor} checkout") from error
     # Check declared edges too, including dependencies inactive on this target.
     for package in metadata["packages"]:
         for edge in package.get("dependencies", []):
             if edge["name"] not in owned:
                 continue
             if edge.get("path"):
+                if package.get("source") != expected_source:
+                    raise ValueError(f"{package['name']} retains a local dependency on {edge['name']}")
                 try:
                     Path(edge["path"]).resolve().relative_to(root)
                 except ValueError as error:

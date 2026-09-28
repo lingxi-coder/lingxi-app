@@ -2028,7 +2028,6 @@
     <string name="voice_flow_exit_a11y">心流を終了</string>
     <string name="voice_flow_hint_with_input">%1$s · 下の入力欄も引き続き使えます</string>
     <string name="voice_flow_listening_hint">話し終えたらタップして認識を終了 · 続けて話すこともできます</string>
-    <string name="voice_flow_finalizing_hint">音声認識の完了を待っています…</string>
     <string name="voice_flow_listening_label">聞き取り中</string>
     <string name="voice_flow_mode_label">心流モード</string>
     <string name="voice_flow_release_hint">指を離して送信 · 上にスワイプでキャンセル</string>
@@ -2162,4 +2161,16 @@
     <string name="voice_turn_max_turns">Agent が最大ターン数に達しました。タップして再試行してください</string>
     <string name="voice_voice_name">音声</string>
     <string name="voice_waiting_permission">権限待ち</string>
+    <string name="permission_prompt_auto_risk">自動モードでは、今後の操作が確認なしで承認される場合があります。権限の範囲を慎重に確認してください。</string>
+    <string name="permission_prompt_bypass_risk">このモードでは機密データへのアクセスや変更が可能です。このセッションを信頼する場合のみ続行してください。</string>
+    <string name="permission_prompt_general_summary">続行するには、灵犀への承認が必要です。</string>
+    <string name="permission_prompt_once_risk">この決定は現在のリクエストにのみ適用されます。</string>
+    <string name="permission_prompt_plan_summary">灵犀はプランモードを終了し、このプランに従って続行しようとしています。</string>
+    <string name="permission_prompt_rule_risk">常に許可すると、このワークスペースに一致ルールが保存されます。今後一致する操作を信頼する場合のみ使用してください。</string>
+    <string name="permission_prompt_tool_summary">灵犀が %1$s を使用しようとしています。続行する前にリクエスト内容を確認してください。</string>
+    <string name="settings_provider_region">モデルのリージョン</string>
+    <string name="settings_provider_region_china">中国本土</string>
+    <string name="settings_provider_region_help">既定は国際リージョンです。実行中のリージョンを変更するには、タスクが待機中のときに保存済みの設定を適用してください。</string>
+    <string name="settings_provider_region_international">国際</string>
+    <string name="voice_flow_finalizing_hint">音声認識の完了を待っています…</string>
 </resources>

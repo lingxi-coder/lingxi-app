@@ -1,53 +1,10 @@
 {
-  "schema_version": 1,
-  "android_api": 26,
-  "supported_abis": [
-    "arm64-v8a",
-    "x86_64"
-  ],
-  "components": {
-    "openminis": {
-      "repository": "https://github.com/OpenMinis/OpenMinis.git",
-      "commit": "9cf3a855fecd27bb5735b84cacbd56852a3ab8dd",
-      "git_archive_sha256": "eaa2c18a04326c04289283e23343cc213e8287373fb11e9aef8641a9998b437d",
-      "license": "GPL-3.0-only",
-      "license_file_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
-    },
-    "proot": {
-      "repository": "https://github.com/OpenMinis/proot.git",
-      "commit": "8cf13e997cdc9472997aae19df8050c073c9a86c",
-      "git_archive_sha256": "46137b4e6cd11cca50eae2a2a907c4b3e40891189857223a0b4f4af1b1b75599",
-      "license": "GPL-2.0-or-later",
-      "license_file_sha256": "0ffa6454acbe7e410ac6f0007df83b9b3161fe55484c1f4b87487c0f2d228a6d"
-    },
-    "talloc": {
-      "version": "2.4.2",
-      "source": "https://download.samba.org/pub/talloc/talloc-2.4.2.tar.gz",
-      "sha256": "85ecf9e465e20f98f9950a52e9a411e14320bc555fa257d87697b7e7a9b1d8a6",
-      "license": "LGPL-3.0-or-later",
-      "openminis_vendored_files": {
-        "deps/talloc/talloc.c": "15f218ee70beb4da371646d4116622b48f2f552a3d051e5d360e790e2c3d3a37",
-        "deps/talloc/talloc.h": "e01fb092aaed2b431be26674e2b791c77fb5984537c29b514e957582c6b31465",
-        "deps/talloc/replace.h": "7bc76ccedd248fc6ad8c61c184580d4c00b8987a7a35f1666caa98b994d20deb"
-      }
-    },
-    "pty_bridge": {
-      "source_component": "openminis",
-      "path": "src/android/app/src/main/cpp/pty_bridge.c",
-      "sha256": "0cc73b1e356429b07d9ab065f8a082fd16ea59393c8583d0c6615acd9725d96a",
-      "license": "GPL-3.0-only"
-    }
-  },
-  "patches": [
-    {
-      "description": "Persistent raw stdin and byte-preserving stdout/stderr for non-PTY protocol transports",
-      "path": "docs/superpowers/references/OpenMinis/src/ios/iSH/ISHShellExecutor.h",
-      "sha256": "5904ca717bdf10a6ac025e7e56e43bd99e91fd7661aee6f4c9a7169952e3e39f"
-    },
-    {
-      "description": "Persistent raw stdio executor implementation with process-group cleanup",
-      "path": "docs/superpowers/references/OpenMinis/src/ios/iSH/ISHShellExecutor.m",
-      "sha256": "1c3af8e11c59a24a0c4eaebc322340dbc372c68b24fd175172f46f956aabd3b2"
-    }
-  ]
+  "schema_version": 2,
+  "source": "Cargo.lock",
+  "resolver": "lingxi-code/scripts/mobile_linux_source.py",
+  "android_source_pins": "docs/android/native-pins.json",
+  "ios_source_pins": "native/ios/sources.json",
+  "artifact_kind": "native-support-only",
+  "contains_rust_core": false,
+  "sdk_version": "0.1.0"
 }

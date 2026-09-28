@@ -3,6 +3,8 @@ import groovy.json.JsonSlurper
 val voiceManifest = rootProject.file("../voice/models.json")
 val voiceRuntime = JsonSlurper().parse(voiceManifest) as Map<*, *>
 val sherpaRuntimeVersion = (voiceRuntime["runtime"] as Map<*, *>)["version"] as String
+val mobileLinuxContract = JsonSlurper().parse(rootProject.file("../../docs/mobile-linux/mobile-linux-native-pins.json")) as Map<*, *>
+val mobileLinuxSdkVersion = mobileLinuxContract["sdk_version"] as String
 
 plugins {
     id("com.android.application")
@@ -142,9 +144,31 @@ listOf("play", "direct").forEach { distribution ->
             distribution,
         )
     }
+    listOf("debug", "release").forEach { buildType ->
+        val variantName = capitalized + buildType.replaceFirstChar(Char::uppercaseChar)
+        val verifyApk = tasks.register<Exec>("verify${variantName}MobileLinuxApk") {
+            group = "verification"
+            description = "Check the final APK's native bytes and extraction packaging ($variantName)."
+            commandLine(
+                "python3", rootProject.file("scripts/verify-mobile-linux-apk.py").absolutePath,
+                "--apk-dir", layout.buildDirectory.dir("outputs/apk/$distribution/$buildType").get().asFile,
+                "--source", layout.buildDirectory.dir("mobileLinuxNative/$distribution/native-support").get().asFile,
+                "--jni-root", file("src/$distribution/jniLibs"),
+            )
+        }
+        tasks.matching { it.name == "pre${variantName}Build" }.configureEach {
+            dependsOn("verify${capitalized}MobileLinuxNative")
+        }
+        tasks.matching { it.name == "assemble$variantName" }.configureEach {
+            finalizedBy(verifyApk)
+        }
+    }
 }
 
 dependencies {
+    // Installer + native helpers only: libandroid_aar.so already owns Rust FFI.
+    implementation("io.github.lingxi-coder:mobile-linux-installer:$mobileLinuxSdkVersion")
+    implementation("io.github.lingxi-coder:mobile-linux-native-support:$mobileLinuxSdkVersion")
     val composeBom = platform("androidx.compose:compose-bom:2026.05.00")
     implementation(composeBom)
     androidTestImplementation(composeBom)

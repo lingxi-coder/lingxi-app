@@ -80,7 +80,8 @@ private struct LiveTerminalRuntimeFFIBridge: TerminalRuntimeFFIBridge {
     }
 
     private func map(_ config: TerminalRuntimeConfig) -> IosMobileLinuxConfigFfi {
-        IosMobileLinuxConfigFfi(
+        LXISHRuntimeResourceBootstrap.prepare()
+        return IosMobileLinuxConfigFfi(
             mode: map(config.mode),
             managedRoot: config.managedRoot,
             workspaceHostPath: config.workspaceHostPath,

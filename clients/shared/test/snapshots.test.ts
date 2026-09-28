@@ -15,8 +15,8 @@
 
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
+import { runtimePath } from './runtimeSource.js';
 import { test } from 'node:test';
 
 import type {
@@ -39,16 +39,7 @@ import {
 } from '../src/protocolCoverage.js';
 import { validateClientEvent, validateServerHello } from '../src/validation.js';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const SNAP_ROOT = join(
-  here,
-  '..',
-  '..',
-  '..',
-  'lingxi-code',
-  'client-protocol',
-  'snapshots',
-);
+const SNAP_ROOT = runtimePath('crates/client-protocol/snapshots');
 
 function loadSnapshot<T>(category: string, name: string): T {
   const raw = readFileSync(join(SNAP_ROOT, category, name), 'utf8');

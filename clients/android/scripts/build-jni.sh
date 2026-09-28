@@ -58,7 +58,7 @@ VOICE_MANIFEST="${ANDROID_DIR}/../voice/models.json"
 }
 
 # Build into a gitignored staging directory, then atomically replace only this
-# script's three owned files after every ABI and binding step succeeds. A Rust
+# script's Rust libraries after every ABI and binding step succeeds. A Rust
 # compile failure must not erase the last known-good app binaries.
 # Optional output roots keep a complete JNI/bindings refresh isolated from
 # concurrent Gradle builds until the caller promotes the verified pair.
@@ -204,61 +204,8 @@ for t in "${TARGETS[@]}"; do
   log "  ${abi}/${SONAME} ($(du -h "${so}" | awk '{print $1}'))"
 done
 
-# ---------------------------------------------------------------------------
-# 1b. Bundled shell binaries — mksh + toybox as lib*.so (P5a)
-# ---------------------------------------------------------------------------
-# The `platform-android-shellbin` build crate NDK-compiles mksh + toybox into
-# free-standing ELF executables. P5 ships them inside the APK as
-# jniLibs/<abi>/libmksh.so + libtoybox.so so that, with useLegacyPackaging=true
-# (set in app/build.gradle.kts), the package manager EXTRACTS them into
-# nativeLibraryDir as real executable files — the only place Android 10+ W^X
-# permits `execve` of app-shipped binaries. These are gitignored build
-# artifacts, exactly like libandroid_aar.so.
-#
-# The build crate has no `links` key, so the binary paths aren't exposed as
-# DEP_ env vars. We locate them by globbing the per-target build-script OUT_DIR
-# (target/<triple>/<profile>/build/platform-android-shellbin-*/out/{mksh,toybox})
-# after a `cargo ndk build -p platform-android-shellbin` for that ABI.
-SHELLBIN_CRATE="platform-android-shellbin"
-case "$(uname -s)" in
-  Darwin) NDK_HOST_TAG="darwin-x86_64" ;;
-  Linux)  NDK_HOST_TAG="linux-x86_64" ;;
-  *)      NDK_HOST_TAG="unknown" ;;
-esac
-LLVM_STRIP="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/llvm-strip"
-
-log "Building ${SHELLBIN_CRATE} (mksh+toybox) per ABI and packaging as lib*.so…"
-for t in "${TARGETS[@]}"; do
-  abi="$(abi_of "${t}")"
-  ( cd "${CARGO_DIR}" && cargo ndk -t "${abi}" \
-      build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${SHELLBIN_CRATE}" --"${PROFILE}" )
-
-  # Locate the two executables for this triple's build-script out dir. A clean
-  # tree has exactly one platform-android-shellbin-* build dir per triple; if a
-  # stale dir lingers, prefer the newest with both binaries present.
-  build_glob="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/build/${SHELLBIN_CRATE}-*/out"
-  mksh_src=""; toybox_src=""
-  for d in $(ls -dt ${build_glob} 2>/dev/null); do
-    if [[ -f "${d}/mksh" && -f "${d}/toybox" ]]; then
-      mksh_src="${d}/mksh"; toybox_src="${d}/toybox"; break
-    fi
-  done
-  [[ -n "${mksh_src}" ]] || { echo "ERROR: mksh/toybox not found under ${build_glob} for ${abi}" >&2; exit 1; }
-
-  abi_dir="${JNILIBS_DIR}/${abi}"
-  mkdir -p "${abi_dir}"
-  cp -f "${mksh_src}"   "${abi_dir}/libmksh.so"
-  cp -f "${toybox_src}" "${abi_dir}/libtoybox.so"
-  # Strip to shrink the APK (unstripped debug ELFs are large). Best-effort: a
-  # missing llvm-strip is non-fatal (the unstripped binaries still exec).
-  if [[ -x "${LLVM_STRIP}" ]]; then
-    "${LLVM_STRIP}" "${abi_dir}/libmksh.so" "${abi_dir}/libtoybox.so"
-  else
-    log "  WARN: llvm-strip not found at ${LLVM_STRIP}; shipping unstripped"
-  fi
-  log "  ${abi}/libmksh.so   ($(du -h "${abi_dir}/libmksh.so"   | awk '{print $1}'))"
-  log "  ${abi}/libtoybox.so ($(du -h "${abi_dir}/libtoybox.so" | awk '{print $1}'))"
-done
+# Native shell/PRoot/PTY support is built and verified by the Cargo-locked SDK
+# through build-mobile-linux-native.sh. This script owns only LingXi's Rust FFI.
 
 # ---------------------------------------------------------------------------
 # 2. Generate Kotlin bindings (uniffi-bindgen --library, offline patched bin)
@@ -320,8 +267,6 @@ for t in "${TARGETS[@]}"; do
   mkdir -p "${FINAL_JNILIBS_DIR}/${abi}"
   cp -f \
     "${JNILIBS_DIR}/${abi}/${SONAME}" \
-    "${JNILIBS_DIR}/${abi}/libmksh.so" \
-    "${JNILIBS_DIR}/${abi}/libtoybox.so" \
     "${FINAL_JNILIBS_DIR}/${abi}/"
 done
 

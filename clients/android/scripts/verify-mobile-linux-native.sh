@@ -1,59 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 VARIANT=""
-if [[ "${1:-}" == "--variant" ]]; then
-  VARIANT="${2:-}"
-fi
+JNI_ROOT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --variant) VARIANT="${2:?missing variant}"; shift 2 ;;
+    --jni-root) JNI_ROOT="${2:?missing JNI root}"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
 case "${VARIANT}" in
   play|direct) ;;
-  *) echo "usage: $0 --variant <play|direct>" >&2; exit 2 ;;
+  *) echo "usage: $0 --variant <play|direct> [--jni-root DIR]" >&2; exit 2 ;;
 esac
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-JNI_ROOT="${SCRIPT_DIR}/../app/src/${VARIANT}/jniLibs"
-
-python3 - "${JNI_ROOT}" <<'PY'
-import pathlib
-import struct
-import sys
-
-root = pathlib.Path(sys.argv[1])
-machines = {"arm64-v8a": 183, "x86_64": 62}
-required = (
-    "libandroid_aar.so",
-    "libproot.so",
-    "libproot-loader.so",
-    "libmobile_linux_policy_launcher.so",
-    "libpty_bridge.so",
-    "libmksh.so",
-    "libtoybox.so",
-)
-
-errors = []
-for abi, expected_machine in machines.items():
-    for filename in required:
-        path = root / abi / filename
-        if not path.is_file():
-            errors.append(f"missing {path}")
-            continue
-        header = path.read_bytes()[:20]
-        if len(header) < 20 or header[:4] != b"\x7fELF":
-            errors.append(f"not ELF: {path}")
-            continue
-        if header[4] != 2:
-            errors.append(f"not ELF64: {path}")
-        endian = "<" if header[5] == 1 else ">" if header[5] == 2 else None
-        if endian is None:
-            errors.append(f"invalid ELF byte order: {path}")
-            continue
-        machine = struct.unpack(endian + "H", header[18:20])[0]
-        if machine != expected_machine:
-            errors.append(
-                f"wrong machine for {path}: expected {expected_machine}, got {machine}"
-            )
-
-if errors:
-    raise SystemExit("\n".join(errors))
-print(f"verified seven MobileLinux native artifacts for both ABIs under {root}")
-PY
+ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${ANDROID_DIR}/../.." && pwd)"
+SDK_ROOT="$(python3 "${REPO_ROOT}/lingxi-code/scripts/mobile_linux_source.py" --root)"
+ARTIFACT_ROOT="${ANDROID_DIR}/app/build/mobileLinuxNative/${VARIANT}/native-support"
+[[ -n "${JNI_ROOT}" ]] || JNI_ROOT="${ANDROID_DIR}/app/src/${VARIANT}/jniLibs"
+python3 "${SDK_ROOT}/scripts/verify-android-native.py" --artifact-dir "${ARTIFACT_ROOT}"
+SDK_REVISION="$(python3 "${REPO_ROOT}/lingxi-code/scripts/mobile_linux_source.py" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["revision"])')"
+exec python3 "${SCRIPT_DIR}/mobile-linux-native.py" verify --source "${ARTIFACT_ROOT}" --jni-root "${JNI_ROOT}" \
+  --maven-dir "${ANDROID_DIR}/build/mobileLinuxSdk/maven" --expected-revision "${SDK_REVISION}"

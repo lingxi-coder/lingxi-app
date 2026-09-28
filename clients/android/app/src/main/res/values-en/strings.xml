@@ -2028,7 +2028,6 @@
     <string name="voice_flow_exit_a11y">Exit flow mode</string>
     <string name="voice_flow_hint_with_input">%1$s · You can keep using the input box below</string>
     <string name="voice_flow_listening_hint">Tap when done to finish recognition · or keep talking</string>
-    <string name="voice_flow_finalizing_hint">Waiting for speech recognition to finish…</string>
     <string name="voice_flow_listening_label">Listening</string>
     <string name="voice_flow_mode_label">Flow Mode</string>
     <string name="voice_flow_release_hint">Release to send · swipe up to cancel</string>
@@ -2162,8 +2161,16 @@
     <string name="voice_turn_max_turns">The agent reached the maximum number of turns; please tap retry</string>
     <string name="voice_voice_name">Voice</string>
     <string name="voice_waiting_permission">Waiting for Permission</string>
+    <string name="permission_prompt_auto_risk">Auto mode may approve future actions without asking. Review the permission scope carefully.</string>
+    <string name="permission_prompt_bypass_risk">This mode can expose or modify sensitive data. Continue only if you trust this session.</string>
+    <string name="permission_prompt_general_summary">LingXi needs your approval before it can continue.</string>
+    <string name="permission_prompt_once_risk">This decision applies only to the current request.</string>
+    <string name="permission_prompt_plan_summary">LingXi wants to leave plan mode and proceed with this plan.</string>
+    <string name="permission_prompt_rule_risk">Always Allow saves a matching rule for this workspace. Use it only when you trust future matching requests.</string>
+    <string name="permission_prompt_tool_summary">LingXi wants to use %1$s. Review the requested input before continuing.</string>
     <string name="settings_provider_region">Model region</string>
-    <string name="settings_provider_region_international">International</string>
     <string name="settings_provider_region_china">China mainland</string>
     <string name="settings_provider_region_help">Defaults to international. Apply saved settings when idle to change the running region.</string>
+    <string name="settings_provider_region_international">International</string>
+    <string name="voice_flow_finalizing_hint">Waiting for speech recognition to finish…</string>
 </resources>

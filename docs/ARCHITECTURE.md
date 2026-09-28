@@ -1,10 +1,33 @@
 # Architecture
 
-LingXi Code is an event-sourced conversation engine split across ~73 flat
-crates under `lingxi-code/`. This document is a navigation aid; full design
-lives in `docs/superpowers/specs/2026-05-22-lingxi-core-rust-engine-design.md`,
-and the M8 composition-root restructure (the layout described below) in
-`docs/superpowers/specs/2026-05-29-m8-composable-engine-mobile-design.md`.
+## Current product and runtime boundary
+
+LingXi retains ten Rust workspace members under `lingxi-code/`: CLI, Bridge,
+iOS/Android FFI entrypoints, TUI, configuration requirements and host adapters.
+Shared runtime crates live in the pinned `harness-runtime` Git dependency.
+
+```text
+Electron / Web / iOS / Android / CLI + TUI
+                 ↓
+       Bridge / native FFI / CLI host
+                 ↓
+       pinned harness-runtime profiles
+                 ↓
+       orchestration, tools, sessions, providers
+```
+
+The authoritative source layout and resource ownership are documented in
+[Harness extraction](architecture/harness-runtime-extraction.md).
+Use [the source resolver](../lingxi-code/scripts/runtime_source.py) to locate the
+locked runtime checkout. Workspace membership comes from
+[`Cargo.toml`](../lingxi-code/Cargo.toml), not the historical map below.
+
+## Historical architecture notes
+
+The following M1–M8 notes preserve design rationale and existing section anchors.
+Their local crate paths, old composition roots and milestone status describe the
+pre-extraction repository. Some original planning documents have been removed;
+use the current extraction guide for build and navigation instructions.
 
 ## M8 composition-root architecture
 

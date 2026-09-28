@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn compact_progress_matches_shared_hybrid_cases() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../client-protocol/snapshots/compaction_hybrid_progress.json"
+            "../tests/fixtures/compaction_hybrid_progress.json"
         ))
         .unwrap();
         for case in fixture["cases"].as_array().unwrap() {

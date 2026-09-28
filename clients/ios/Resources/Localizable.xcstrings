@@ -39884,6 +39884,244 @@
         }
       }
     },
+    "permission_prompt_auto_risk": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动模式可能在后续操作中不再征求确认，请仔细检查权限范围。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自動模式可能在後續操作中不再徵求確認，請仔細檢查權限範圍。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auto mode may approve future actions without asking. Review the permission scope carefully."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自動モードでは、今後の操作が確認なしで承認される場合があります。権限の範囲を慎重に確認してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "자동 모드에서는 이후 작업이 확인 없이 승인될 수 있습니다. 권한 범위를 신중하게 확인하세요."
+          }
+        }
+      }
+    },
+    "permission_prompt_bypass_risk": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该模式可能访问或修改敏感数据。仅在信任当前会话时继续。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "該模式可能存取或修改敏感資料。僅在信任目前工作階段時繼續。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This mode can expose or modify sensitive data. Continue only if you trust this session."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このモードでは機密データへのアクセスや変更が可能です。このセッションを信頼する場合のみ続行してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 모드에서는 민감한 데이터에 접근하거나 데이터를 변경할 수 있습니다. 현재 세션을 신뢰하는 경우에만 계속하세요."
+          }
+        }
+      }
+    },
+    "permission_prompt_general_summary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀需要你的批准才能继续。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀需要你的批准才能繼續。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi needs your approval before it can continue."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "続行するには、灵犀への承認が必要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계속하려면 灵犀에 대한 승인이 필요합니다."
+          }
+        }
+      }
+    },
+    "permission_prompt_once_risk": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此决定仅应用于当前请求。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此決定僅套用於目前的請求。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This decision applies only to the current request."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この決定は現在のリクエストにのみ適用されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 결정은 현재 요청에만 적용됩니다."
+          }
+        }
+      }
+    },
+    "permission_prompt_plan_summary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀想退出计划模式并按计划继续。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀想退出計畫模式並按計畫繼續。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi wants to leave plan mode and proceed with this plan."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀はプランモードを終了し、このプランに従って続行しようとしています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀가 계획 모드를 종료하고 이 계획에 따라 계속 진행하려고 합니다."
+          }
+        }
+      }
+    },
+    "permission_prompt_rule_risk": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "始终允许会为此工作区保存匹配规则，请确认你信任后续匹配的操作。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一律允許會為此工作區儲存符合條件的規則，請確認你信任後續符合條件的操作。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Always Allow saves a matching rule for this workspace. Use it only when you trust future matching requests."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "常に許可すると、このワークスペースに一致ルールが保存されます。今後一致する操作を信頼する場合のみ使用してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "항상 허용하면 이 작업 공간에 일치 규칙이 저장됩니다. 이후 일치하는 작업을 신뢰하는 경우에만 사용하세요."
+          }
+        }
+      }
+    },
+    "permission_prompt_tool_summary": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀想使用 %1$s。请先查看请求内容。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀想使用 %1$s。請先查看請求內容。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi wants to use %1$s. Review the requested input before continuing."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀が %1$s を使用しようとしています。続行する前にリクエスト内容を確認してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀가 %1$s을(를) 사용하려고 합니다. 계속하기 전에 요청 내용을 확인하세요."
+          }
+        }
+      }
+    },
     "permission_request_title": {
       "localizations": {
         "zh-Hans": {
@@ -61712,6 +61950,142 @@
         }
       }
     },
+    "settings_provider_region": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型区域"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型區域"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Model region"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "モデルのリージョン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "모델 지역"
+          }
+        }
+      }
+    },
+    "settings_provider_region_china": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中国大陆"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中國大陸"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "China mainland"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中国本土"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "중국 본토"
+          }
+        }
+      }
+    },
+    "settings_provider_region_help": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认使用国际区域。保存后请在任务空闲时应用设置，更改当前运行区域。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "預設使用國際區域。儲存後請在任務閒置時套用設定，變更目前執行區域。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Defaults to international. Apply saved settings when idle to change the running region."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "既定は国際リージョンです。実行中のリージョンを変更するには、タスクが待機中のときに保存済みの設定を適用してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "기본값은 국제 지역입니다. 실행 중인 지역을 변경하려면 작업이 유휴 상태일 때 저장한 설정을 적용하세요."
+          }
+        }
+      }
+    },
+    "settings_provider_region_international": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "国际"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "國際"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "International"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "国際"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "국제"
+          }
+        }
+      }
+    },
     "settings_provider_remove": {
       "localizations": {
         "zh-Hans": {
@@ -72932,6 +73306,40 @@
         }
       }
     },
+    "voice_flow_finalizing_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待语音识别完成…"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待語音辨識完成…"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for speech recognition to finish…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音声認識の完了を待っています…"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "음성 인식이 끝나기를 기다리는 중…"
+          }
+        }
+      }
+    },
     "voice_flow_hint_with_input": {
       "localizations": {
         "zh-Hans": {
@@ -72971,31 +73379,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "说完轻点收音 · 或继续"
+            "value": "说完后轻点结束识别 · 也可继续说"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "說完輕點收音 · 或繼續"
+            "value": "說完後輕點結束辨識 · 也可以繼續說"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Tap to stop recording when done · or keep talking"
+            "value": "Tap when done to finish recognition · or keep talking"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "話し終えたらタップして収音を終了 · または続けて話す"
+            "value": "話し終えたらタップして認識を終了 · 続けて話すこともできます"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "말이 끝나면 탭하여 녹음 종료 · 또는 계속 말하기"
+            "value": "마치면 탭하여 인식을 끝내세요 · 계속 말해도 됩니다"
           }
         }
       }
@@ -77688,94 +78096,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "권한 대기 중"
-          }
-        }
-      }
-    },
-    "settings_provider_region": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模型区域"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Model region"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模型區域"
-          }
-        }
-      }
-    },
-    "settings_provider_region_international": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "国际"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "International"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "國際"
-          }
-        }
-      }
-    },
-    "settings_provider_region_china": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "中国大陆"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "China mainland"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "中國大陸"
-          }
-        }
-      }
-    },
-    "settings_provider_region_help": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "默认使用国际区域。保存后请在任务空闲时应用设置，更改当前运行区域。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Defaults to international. Apply saved settings when idle to change the running region."
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "預設使用國際區域。儲存後請在任務閒置時套用設定，變更目前執行區域。"
           }
         }
       }

@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 
-const root = fileURLToPath(new URL('../plugins/lingxi-local-app/assets/templates/', import.meta.url));
+const runtimeRoot = execFileSync('python3', [fileURLToPath(new URL('./runtime_source.py', import.meta.url)), '--root'], { encoding: 'utf8' }).trim();
+const root = `${runtimeRoot}/crates/plugins/lingxi-local-app/assets/templates/`;
 const revision = 'r4';
 const families = ['react-dom', 'canvas-2d', 'three-3d', 'phaser-2d', 'babylon-3d'];
 

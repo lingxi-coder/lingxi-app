@@ -45,7 +45,7 @@ uniffi = [
     "dep:uniffi",
     "dep:async-trait",
     "dep:client-protocol",
-    "dep:platform-ios-ish-runtime",
+    "dep:mobile-linux-ios",
     "dep:platform-posix-minimal",
     "dep:tokio",
     "dep:orchestrator",
@@ -81,10 +81,10 @@ cli = [
 ]
 
 [dependencies]
-harness-runtime = { path = "../../harness-runtime", default-features = false, features = ["mobile"] }
-skill-api = { path = "../../skill-api" }
-platform-api = { path = "../../platform-api" }
-protocol = { path = "../../protocol" }
+harness-runtime = { workspace = true, default-features = false, features = ["mobile"] }
+skill-api = { workspace = true }
+platform-api = { workspace = true }
+protocol = { workspace = true }
 branding.workspace = true
 thiserror.workspace = true
 sha2 = "0.10"
@@ -100,14 +100,14 @@ async-trait = { workspace = true, optional = true }
 # Opaque-blob serde for the iOS Keychain secure-storage bridge: `SecureStorageData`
 # is serialized to bytes the native side persists. Optional + pulled under `uniffi`.
 serde_json = { workspace = true, optional = true }
-client-protocol = { path = "../../client-protocol", optional = true }
-platform-ios-ish-runtime = { path = "../../platforms/ios-ish-runtime", optional = true }
-platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
-orchestrator = { path = "../../orchestrator", optional = true }
+client-protocol = { workspace = true, optional = true }
+mobile-linux-ios = { workspace = true, optional = true }
+platform-posix-minimal = { workspace = true, optional = true }
+orchestrator = { workspace = true, optional = true }
 # The engine's own app-id rule (`ids::is_valid_app_id`) — the boot-time cwd
 # validator accepts `apps/<id>/workspace` scopes with the SAME derivation the
 # local-apps service mints ids with, never a twin regex.
-local-apps = { path = "../../local-apps", optional = true }
+local-apps = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 # M10-P1b: the `cli`-gated bindgen-bin deps. Pinned to match the offline-vendored
@@ -123,7 +123,7 @@ toml = { version = "0.5", optional = true }
 anyhow = { version = "1", optional = true }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-platform-ios = { path = "../../platforms/ios" }
+platform-ios = { workspace = true }
 
 [dev-dependencies]
 # F3-04: a sandboxed cwd/claude_home root for the handle-host tests (the host
@@ -132,3 +132,6 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[build-dependencies]
+branding.workspace = true

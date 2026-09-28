@@ -52,7 +52,7 @@ PROFILE_DIR="release"               # `--release` → target/<triple>/release
 # objects for the SDK default (for example iOS 26.x) while rustc links for its
 # historical iOS 10 default, which can introduce unavailable symbols such as
 # ___chkstk_darwin.
-export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-18.0}"
 
 # Stage a complete matching bindings/framework pair without disrupting a live
 # Xcode build; callers can promote both outputs after verification succeeds.
@@ -93,49 +93,22 @@ for tool in cargo rustc xcrun xcodebuild; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "ERROR: required tool not found: ${tool}" >&2; exit 1; }
 done
 
-# Build the device-only iSH archives and bundled Alpine fakefs before the Rust
-# device slice. The helper is idempotent and sources everything from the pinned
-# OpenMinis submodule; no generated binary or rootfs is committed.
+# The SDK native-support framework contains no Rust core. LingXiCodeFFI below
+# remains the only Rust/UniFFI implementation in the application.
 LINUX_RUNTIME_BUILD="${SCRIPT_DIR}/build-linux-runtime.sh"
-# Device development needs the complete Local App toolchain by default.
-# Set LINGXI_LOCAL_APP_RUNTIME=0 explicitly for a bare-runtime distribution.
-# The staged runtime is linked only under `LIBRARY_SEARCH_PATHS[sdk=iphoneos*]`
-# and project.yml's "Stage Alpine rootfs" phase exits 0 when PLATFORM_NAME is
-# not iphoneos, so a simulator build consumes none of it.
 if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
-  log "Simulator-only build: skipping the device-only Linux runtime."
-elif [[ -x "${LINUX_RUNTIME_BUILD}" ]]; then
-  if [[ "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
-    STAGED_LINUX_RUNTIME="${IOS_DIR}/build/linux-runtime/openminis"
-    for required in \
-      "${STAGED_LINUX_RUNTIME}/manifest.json" \
-      "${STAGED_LINUX_RUNTIME}/libs/libfakefs.a" \
-      "${STAGED_LINUX_RUNTIME}/libs/libish.a" \
-      "${STAGED_LINUX_RUNTIME}/libs/libish_emu.a" \
-      "${STAGED_LINUX_RUNTIME}/resources/alpine-rootfs.zip"; do
-      [[ -f "${required}" ]] || {
-        echo "ERROR: staged Linux runtime is incomplete: ${required}" >&2
-        exit 1
-      }
-    done
-    if [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
-      "${SCRIPT_DIR}/validate-local-app-build-assets.sh" \
-        --configuration FullDebug --platform iphoneos --rootfs-only \
-        --rootfs-manifest "${STAGED_LINUX_RUNTIME}/manifest.json"
-    fi
-    log "Reusing complete staged iSH ARM64 + Alpine Linux runtime…"
-  else
-    log "Building iSH ARM64 + Alpine Linux runtime…"
-    # Propagate the runtime mode. Calling the helper bare rebuilds the LEGACY
-    # bare minirootfs and overwrites whatever is staged, so an xcframework build
-    # run after a local-app rootfs build silently reverted the app to a rootfs
-    # with no Node in it.
-    if [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
-      "${LINUX_RUNTIME_BUILD}" --local-app-runtime
-    else
-      "${LINUX_RUNTIME_BUILD}"
-    fi
+  "${LINUX_RUNTIME_BUILD}" --simulator-only
+elif [[ "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
+  "${SCRIPT_DIR}/verify-linux-runtime.sh"
+  if [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
+    "${SCRIPT_DIR}/validate-local-app-build-assets.sh" \
+      --configuration FullDebug --platform iphoneos --rootfs-only \
+      --rootfs-manifest "${IOS_DIR}/build/linux-runtime/openminis/manifest.json"
   fi
+elif [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
+  "${LINUX_RUNTIME_BUILD}" --local-app-runtime
+else
+  "${LINUX_RUNTIME_BUILD}"
 fi
 SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 
@@ -145,6 +118,10 @@ SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 # default toolchain's targets, which can differ from the pinned one.
 ACTIVE_TOOLCHAIN="$(cd "${CARGO_DIR}" && rustup show active-toolchain 2>/dev/null | awk '{print $1}')"
 if [[ -n "${ACTIVE_TOOLCHAIN}" ]]; then
+  # --manifest-path does not select a rustup toolchain. Keep every cargo and
+  # bindgen invocation on the workspace-selected toolchain even when this
+  # script was launched from outside the Rust workspace.
+  export RUSTUP_TOOLCHAIN="${ACTIVE_TOOLCHAIN}"
   INSTALLED_TARGETS="$(rustup target list --toolchain "${ACTIVE_TOOLCHAIN}" --installed 2>/dev/null || true)"
   MISSING=()
   for t in "${BUILD_TARGETS[@]}"; do

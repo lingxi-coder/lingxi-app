@@ -3,7 +3,7 @@
 
 产出一个排序后的违规集合并与 baseline 精确比对。用集合而不是计数，是因为
 计数只能发现「多了」；集合同时能发现「少了」，而「少了」正是正则退化成零
-匹配的症状 —— 这个仓库的 tools/scripts/check_version.sh 就是被这种失效咬过
+匹配的症状 —— 已移除的旧版本检查脚本 就是被这种失效咬过
 的活例子（目录改名让它的 find 空转，脚本打印 OK 并 exit 0）。
 
 规则（见 spec §7.1）：
@@ -663,7 +663,11 @@ def check_namespace_coverage(root):
     findings = set()
     full = os.path.join(root, BRANDING_LIB)
     if not os.path.exists(full):
-        return findings
+        resolver = os.path.join(root, "lingxi-code", "scripts", "runtime_source.py")
+        runtime_root = subprocess.check_output(
+            [sys.executable, resolver, "--root"], text=True
+        ).strip()
+        full = os.path.join(runtime_root, "crates", "branding", "src", "lib.rs")
     with open(full, encoding="utf-8") as fh:
         lines = text_lines(fh.read())
 

@@ -73,12 +73,12 @@ jobs:
       - name: Build (cross)
         if: ${{ matrix.cross }}
         working-directory: lingxi-code
-        run: cross build --release -p cli --target ${{ matrix.target }}
+        run: cross build --locked --release -p cli --target ${{ matrix.target }}
       - name: Build (cargo)
         if: ${{ !matrix.cross }}
         working-directory: lingxi-code
         shell: bash
-        run: cargo build --release -p cli --target ${{ matrix.target }}
+        run: cargo build --locked --release -p cli --target ${{ matrix.target }}
       - name: Build macOS credential broker resources
         if: ${{ startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin') }}
         shell: bash

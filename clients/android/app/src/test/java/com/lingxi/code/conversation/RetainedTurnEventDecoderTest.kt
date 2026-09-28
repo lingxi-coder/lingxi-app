@@ -31,7 +31,7 @@ class RetainedTurnEventDecoderTest {
         assertEquals("turn_ended", snapshot.optString("type"))
         val outcome = snapshot.optJSONObject("outcome")
         assertNotNull(
-            "lingxi-code/client-protocol/snapshots/event/turn_ended.json no longer carries " +
+            "Pinned Harness client-protocol/snapshots/event/turn_ended.json no longer carries " +
                 "`outcome` as a tagged OBJECT; retainedTurnEventToReply's decoder must be " +
                 "re-derived from the new shape before this test is relaxed.",
             outcome,
@@ -70,20 +70,6 @@ class RetainedTurnEventDecoderTest {
         assertNull(retainedTurnEventToReply("""{"type":"turn_ended"}"""))
     }
 
-    private fun blessedTurnEndedSnapshot(): File {
-        var dir: File? = File("").absoluteFile
-        while (dir != null) {
-            val candidate = File(dir, BLESSED_SNAPSHOT)
-            if (candidate.isFile) return candidate
-            dir = dir.parentFile
-        }
-        throw AssertionError(
-            "could not locate $BLESSED_SNAPSHOT above ${File("").absoluteFile}; " +
-                "this test must read the blessed snapshot, never a transcribed copy",
-        )
-    }
-
-    private companion object {
-        const val BLESSED_SNAPSHOT = "lingxi-code/client-protocol/snapshots/event/turn_ended.json"
-    }
+    private fun blessedTurnEndedSnapshot(): File =
+        RuntimeProtocolFixtures.snapshot("event/turn_ended.json")
 }

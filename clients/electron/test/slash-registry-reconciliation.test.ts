@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runtimePath } from '../../shared/test/runtimeSource';
 
 import {
   ALL_DESKTOP_COMMANDS,
@@ -9,8 +10,8 @@ import {
   DESKTOP_UNAVAILABLE_BUILTIN_COMMANDS,
 } from '../src/renderer/bridge/desktopCommands';
 
-const REGISTER_RS = new URL('../../../lingxi-code/commands/core/src/register.rs', import.meta.url);
-const NAMES_RS = new URL('../../../lingxi-code/command-api/src/builtin_support/names.rs', import.meta.url);
+const REGISTER_RS = runtimePath('crates/commands/core/src/register.rs');
+const NAMES_RS = runtimePath('crates/command-api/src/builtin_support/names.rs');
 
 /**
  * Names the ENGINE answers with "available in interactive TUI mode only"

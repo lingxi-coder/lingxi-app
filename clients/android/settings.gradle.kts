@@ -18,6 +18,11 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // Populated from the Cargo-locked SDK by build-mobile-linux-native.sh.
+        exclusiveContent {
+            forRepository { maven { url = uri("build/mobileLinuxSdk/maven") } }
+            filter { includeGroup("io.github.lingxi-coder") }
+        }
         google()
         mavenCentral()
         // Vendored sherpa-onnx AAR (offline voice runtime) — no Maven publication

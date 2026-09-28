@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "source": "Cargo.lock",
+  "resolver": "lingxi-code/scripts/mobile_linux_source.py",
+  "android_source_pins": "docs/android/native-pins.json",
+  "ios_source_pins": "native/ios/sources.json",
+  "artifact_kind": "native-support-only",
+  "contains_rust_core": false,
+  "sdk_version": "0.1.0"
+}

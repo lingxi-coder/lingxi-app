@@ -2028,7 +2028,6 @@
     <string name="voice_flow_exit_a11y">退出心流</string>
     <string name="voice_flow_hint_with_input">%1$s · 可继续使用下方输入框</string>
     <string name="voice_flow_listening_hint">说完后轻点结束识别 · 也可继续说</string>
-    <string name="voice_flow_finalizing_hint">正在等待语音识别完成…</string>
     <string name="voice_flow_listening_label">聆听中</string>
     <string name="voice_flow_mode_label">心流模式</string>
     <string name="voice_flow_release_hint">松开发送 · 上滑取消</string>
@@ -2162,8 +2161,16 @@
     <string name="voice_turn_max_turns">Agent 已达到最大轮数，请轻点重试</string>
     <string name="voice_voice_name">声音</string>
     <string name="voice_waiting_permission">等待权限</string>
+    <string name="permission_prompt_auto_risk">自动模式可能在后续操作中不再征求确认，请仔细检查权限范围。</string>
+    <string name="permission_prompt_bypass_risk">该模式可能访问或修改敏感数据。仅在信任当前会话时继续。</string>
+    <string name="permission_prompt_general_summary">灵犀需要你的批准才能继续。</string>
+    <string name="permission_prompt_once_risk">此决定仅应用于当前请求。</string>
+    <string name="permission_prompt_plan_summary">灵犀想退出计划模式并按计划继续。</string>
+    <string name="permission_prompt_rule_risk">始终允许会为此工作区保存匹配规则，请确认你信任后续匹配的操作。</string>
+    <string name="permission_prompt_tool_summary">灵犀想使用 %1$s。请先查看请求内容。</string>
     <string name="settings_provider_region">模型区域</string>
-    <string name="settings_provider_region_international">国际</string>
     <string name="settings_provider_region_china">中国大陆</string>
     <string name="settings_provider_region_help">默认使用国际区域。保存后请在任务空闲时应用设置，更改当前运行区域。</string>
+    <string name="settings_provider_region_international">国际</string>
+    <string name="voice_flow_finalizing_hint">正在等待语音识别完成…</string>
 </resources>

@@ -257,8 +257,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         return { workspace: ref.projectPath, trusted: false };
       }
     },
-    onModelSelected: (model) => settings.setLastModel(model),
-    getSavedModel: () => settings.getPublic().model,
+    onModelSelected: (ref, model) => settings.setSessionModel(ref, model),
+    getSavedModel: (ref) => settings.getSessionModel(ref),
     resolveProviderCredential: (providerId) => resolveProviderCredential(providerId, { credentialBroker }),
     resolveOpenAiOAuth: () => launchCache.openAiOAuth(credentialBroker),
     onOpenAiOAuthUpdated: async (session) => {
@@ -298,7 +298,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     launchConfig: async (ref: SessionRef, resumeModel?: string) => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
-      const model = resumeModel ?? configured.model;
+      const model = settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
       const credentialStartedAt = Date.now();
       const credentialsPromise = launchCache.credentials(model, credentialBroker).then((credentials) => {

@@ -36,8 +36,7 @@ use std::time::Duration;
 
 /// The locked `claude agents --help` text — byte-identical to the captured
 /// 2.1.252 fixture (`cli_agents.rs` asserts this output end-to-end).
-pub const AGENTS_HELP: &str =
-    include_str!("../../../../test-harness/src/parity/fixtures/cc_2_1_252_agents_help.txt");
+pub const AGENTS_HELP: &str = include_str!("../../assets/cc_2_1_252_agents_help.txt");
 
 /// `agents` args — byte-match `claude agents --help` (options only; no
 /// children). Repeatable options (`--add-dir`, `--mcp-config`, `--plugin-dir`)

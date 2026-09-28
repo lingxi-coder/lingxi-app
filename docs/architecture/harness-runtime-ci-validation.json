@@ -1,0 +1,699 @@
+{
+  "captured_at": "2026-09-27T03:46:57.640443+00:00",
+  "run_id": 36291111935,
+  "ci_commit": "0fe594a610bc46e7db11a19bdcaa9f39bee61680",
+  "runtime_consumer_pin": "36dd3c1295ae13bde59f6131705dbf86a244ae52",
+  "jobs": [
+    {
+      "id": 108541253927,
+      "name": "PTY runtime (Linux)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541253927"
+    },
+    {
+      "id": 108541254027,
+      "name": "script-gates",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254027"
+    },
+    {
+      "id": 108541254044,
+      "name": "unit-tests",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254044"
+    },
+    {
+      "id": 108541254049,
+      "name": "PTY runtime (Windows ConPTY)",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254049"
+    },
+    {
+      "id": 108541254062,
+      "name": "Core platform (x86_64-unknown-linux-gnu)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254062"
+    },
+    {
+      "id": 108541254063,
+      "name": "Harness desktop (macos-14)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254063"
+    },
+    {
+      "id": 108541254065,
+      "name": "Harness Android (arm64-v8a, android-computer-use,uniffi)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254065"
+    },
+    {
+      "id": 108541254068,
+      "name": "Harness desktop (windows-2022)",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254068"
+    },
+    {
+      "id": 108541254072,
+      "name": "Harness feature (desktop)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254072"
+    },
+    {
+      "id": 108541254086,
+      "name": "supply-chain",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254086"
+    },
+    {
+      "id": 108541254100,
+      "name": "Core platform (x86_64-pc-windows-msvc)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254100"
+    },
+    {
+      "id": 108541254119,
+      "name": "compile-check",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254119"
+    },
+    {
+      "id": 108541254120,
+      "name": "Mobile FFI surface (client-protocol --features uniffi)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254120"
+    },
+    {
+      "id": 108541254122,
+      "name": "lint",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254122"
+    },
+    {
+      "id": 108541254138,
+      "name": "cross-compile-musl",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254138"
+    },
+    {
+      "id": 108541254144,
+      "name": "Core platform (aarch64-apple-darwin)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254144"
+    },
+    {
+      "id": 108541254156,
+      "name": "parity-fixtures",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254156"
+    },
+    {
+      "id": 108541254158,
+      "name": "Harness feature (minimal)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254158"
+    },
+    {
+      "id": 108541254160,
+      "name": "Harness iOS (aarch64-apple-ios-sim)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254160"
+    },
+    {
+      "id": 108541254161,
+      "name": "Harness feature (mobile-uniffi)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254161"
+    },
+    {
+      "id": 108541254171,
+      "name": "Harness Android (arm64-v8a, mobile,uniffi)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254171"
+    },
+    {
+      "id": 108541254176,
+      "name": "Harness Android (x86_64, android-computer-use,uniffi)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254176"
+    },
+    {
+      "id": 108541254190,
+      "name": "Harness feature (core)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254190"
+    },
+    {
+      "id": 108541254193,
+      "name": "Harness desktop (ubuntu-24.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254193"
+    },
+    {
+      "id": 108541254206,
+      "name": "Harness Android (x86_64, mobile,uniffi)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254206"
+    },
+    {
+      "id": 108541254219,
+      "name": "Harness feature (mobile)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254219"
+    },
+    {
+      "id": 108541254239,
+      "name": "Harness feature (android-computer-use)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254239"
+    },
+    {
+      "id": 108541254379,
+      "name": "Harness iOS (aarch64-apple-ios)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291111935/job/108541254379"
+    }
+  ],
+  "unchanged_source_evidence": [
+    {
+      "original_commit": "01dcc428ba0c12522f6ee29b6474f3a4e0891c47",
+      "original_path": "lingxi-code/platforms/posix/src/process/kill_tree.rs",
+      "upstream_path": "crates/platforms/posix/src/process/kill_tree.rs",
+      "identical_bytes": true,
+      "sha256": "a9eb6d9e45fd07e94562c0738c052d6c277d7c2117da26ab17a1bec376e8f911"
+    },
+    {
+      "original_commit": "01dcc428ba0c12522f6ee29b6474f3a4e0891c47",
+      "original_path": "lingxi-code/platforms/posix/src/process/spawn_unsafe.rs",
+      "upstream_path": "crates/platforms/posix/src/process/spawn_unsafe.rs",
+      "identical_bytes": true,
+      "sha256": "4717753c69bb61bde2a1e02c26ef637fdfcdc269f5b832b53a28ad6d4448035b"
+    },
+    {
+      "original_commit": "01dcc428ba0c12522f6ee29b6474f3a4e0891c47",
+      "original_path": "lingxi-code/platforms/posix/src/secure_storage/plaintext.rs",
+      "upstream_path": "crates/platforms/posix/src/secure_storage/plaintext.rs",
+      "identical_bytes": true,
+      "sha256": "420f439e1a2d2a035be62bb83f7776be24845089eb5774afe7dd6c9e770ffa6d"
+    },
+    {
+      "original_commit": "01dcc428ba0c12522f6ee29b6474f3a4e0891c47",
+      "original_path": "lingxi-code/platforms/pty/src/tests.rs",
+      "upstream_path": "crates/platforms/pty/src/tests.rs",
+      "identical_bytes": true,
+      "sha256": "0c5f3b77f1d58f813781800aec5b82c5ce71038d5609d59a5e2509a741c52b3a"
+    },
+    {
+      "original_commit": "01dcc428ba0c12522f6ee29b6474f3a4e0891c47",
+      "original_path": "lingxi-code/platforms/pty/src/win/conpty.rs",
+      "upstream_path": "crates/platforms/pty/src/win/conpty.rs",
+      "identical_bytes": true,
+      "sha256": "d74b845d1d996c268ef8cdefbe668362498262046d555cd0485d78c8a7508b6a"
+    },
+    {
+      "original_commit": "01dcc428ba0c12522f6ee29b6474f3a4e0891c47",
+      "original_path": "lingxi-code/platform-api/src/subagent_output_guard.rs",
+      "upstream_path": "crates/platform-api/src/subagent_output_guard.rs",
+      "identical_bytes": true,
+      "sha256": "7a54ecd2e9e713764523dee21d615a98558ea32616378cca1807edfd17069c6e"
+    }
+  ],
+  "remaining_failures": {
+    "windows_desktop": "Unconditional original platform-posix desktop dependency references nix::sys/unistd and std::os::unix/fd on Windows; feature array and dependency declaration match original.",
+    "windows_pty": "8 pass /3 fail: conpty_close_stdin_delivers_eof and conpty_raw_interaction_and_wait_are_lossless timeout; conpty_job_object_termination_kills_descendants cannot parse PID with ANSI prefix. All15 PTY Rust source files are byte-identical.",
+    "lint": "6 Clippy platform-api findings in5 unchanged source files.",
+    "script_gates": "82 known added brand keys and114 stale keys; apple-design description425/180.",
+    "parity": "Proven inherited: original and migrated binaries both fail14612vs14602 under controlled uname Linux6.14.0-1018-azure. Existing normalizer matches lowercase OS version, but production emits uppercase OS Version; Linux version length23 vs Darwin24.6.0 length13 explains+10. Logs: /tmp/harness-baseline-live-prompt-native.log, /tmp/harness-baseline-live-prompt-uname.log, /tmp/harness-current-live-prompt-uname.log.",
+    "supply_chain": "cargo-deny rejects borrow-or-share0.2.4 MIT-0 license and advisories, including anyhow Error::downcast_mut unsoundness. No dependency/policy change made.",
+    "unit_tests": "Completed failure:17 failed targets;554 complete summaries report16845 passed,48 failed,8 ignored; agent binary also aborts on stack overflow and has no complete summary. No blanket baseline-pass claim."
+  },
+  "linux_seccomp": {
+    "status": "completed",
+    "commit": "36436caf643efcaa5b3fd58b81f37ac30beb86ba",
+    "assertions": [
+      "real helper build",
+      "custom target production path discovery",
+      "AF_UNIX socket and socketpair EPERM",
+      "AF_INET allowed",
+      "NO_NEW_PRIVS",
+      "child exit73 propagation"
+    ],
+    "conclusion": "success",
+    "run_id": 36291747832,
+    "job_id": 108543030207,
+    "url": "https://github.com/lingxi-coder/harness-runtime/actions/runs/36291747832/job/108543030207",
+    "log": "/tmp/harness-ci-linux-seccomp-real.log"
+  },
+  "unit_tests": {
+    "job_id": 108541254044,
+    "status": "completed",
+    "conclusion": "failure",
+    "exit_code": 101,
+    "log": "/tmp/harness-ci-followup-unit-tests.log",
+    "failed_targets": [
+      "-p agent --lib",
+      "-p client-protocol --test task_row_dto_stage_uniffi_default_test",
+      "-p core --lib",
+      "-p harness-runtime --lib",
+      "-p harness-runtime --test audio_injection",
+      "-p harness-runtime --test mobile_tool_list_snapshot",
+      "-p hooks --lib",
+      "-p orchestrator --lib",
+      "-p orchestrator --test ptl_recovery_test",
+      "-p platform-common --lib",
+      "-p platform-common --test llm_transport_test",
+      "-p platform-posix --test process_kill_tree_test",
+      "-p sandbox-runtime --lib",
+      "-p sidequery --lib",
+      "-p tasks --lib",
+      "-p telemetry-macros --test trybuild",
+      "-p test-harness --test parity_prompt_byte_locks"
+    ],
+    "failed_test_names": [
+      "task_row_display_fields_are_trailing_and_have_generated_constructor_defaults",
+      "settings::merger::tests::every_field_merge_combines_is_registered_and_fixtured",
+      "desktop::tests::build_persists_and_restores_agent_setting_on_resume",
+      "desktop::tests::build_resume_missing_catalog_agent_uses_persisted_snapshot",
+      "desktop::tests::build_resume_restores_agent_frontmatter_permission_mode",
+      "mobile::host::default_model_resolution_tests::fallback_is_taken_from_the_listings_when_anthropic_is_not_registered",
+      "mobile::host::default_model_resolution_tests::double_qualified_ref_falls_back_to_the_anthropic_boot_default",
+      "mobile::host::default_model_resolution_tests::unknown_qualified_ref_falls_back",
+      "mobile::host::tests::mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_history",
+      "mobile::host::tests::mobile_provider_catalog_matches_engine_presets_without_secrets",
+      "mobile::host::tests::model_preference_tests::model_preference_disabled_providers_never_restore_or_accept_selection",
+      "mobile::host::tests::model_preference_tests::model_preference_unavailable_saved_provider_falls_back_to_config_without_overwrite",
+      "a_recorder_alone_registers_voice_but_not_speech",
+      "a_recognizer_alone_registers_speech_but_not_voice",
+      "mobile_tool_list_snapshot",
+      "function_hook::tests::runaway_allocation_is_capped",
+      "conversation::conversation_test::additional_context_tests::runtime_message_is_prepended_before_additional_context",
+      "conversation::conversation_test::additional_context_tests::runtime_message_stays_first_when_transient_context_is_reattached",
+      "conversation::conversation_test::additional_context_tests::system_prompt_override_stays_verbatim_while_runtime_message_is_sent",
+      "provider_adapter::tests::opts_variants_thread_max_output_tokens_onto_the_wire",
+      "reactive_summary_success_retries_once_below_the_local_auto_threshold",
+      "llm_config::llm_config_test::pricing_overrides_optional_fields_may_be_absent",
+      "mobile_linux::tests::mobile_linux_sandbox_rejects_unmounted_host_cwd",
+      "bridge_drives_llm_runtime_event_stream_end_to_end",
+      "kill_tree_terminates_grandchildren",
+      "manager::tests::external_http_internal_socks_does_not_mint_proxy_auth_token",
+      "provider_side_query::tests::forwards_tool_choice_stop_sequences_and_thinking",
+      "provider_side_query::tests::current_default_models_resolve_for_compaction_forks",
+      "provider_side_query::tests::no_thinking_config_keeps_legacy_wire",
+      "provider_side_query::tests::session_backend_reuses_parent_route_auth_and_message_pipeline",
+      "provider_side_query::tests::session_thinking_config_rides_on_the_wire",
+      "provider_side_query::tests::text_response_decodes_text_usage_and_stop_reason",
+      "handlers::local_workflow::local_workflow_test::a_failed_fusion_call_still_charges_its_realized_output_tokens_to_the_workflow_budget",
+      "handlers::local_workflow::local_workflow_test::budget_total_and_own_spend_drive_the_budget_global",
+      "handlers::local_workflow::local_workflow_test::handler_maps_a_script_error_to_failed",
+      "handlers::local_workflow::local_workflow_test::handler_runs_workflow_and_spools_the_return_value",
+      "handlers::local_workflow::local_workflow_test::handler_spools_live_progress_then_the_result",
+      "handlers::local_workflow::local_workflow_test::local_workflow_scopes_budget_to_its_origin_session_at_spawn",
+      "handlers::local_workflow::local_workflow_test::resume_replays_journaled_agent_results_without_respawning",
+      "handlers::local_workflow::local_workflow_test::resume_with_a_changed_prefix_reruns_from_the_edit_onward",
+      "handlers::local_workflow::local_workflow_test::telemetry_launched_uses_declared_phase_count_and_utf16_script_size",
+      "handlers::local_workflow::local_workflow_test::transcript_journal_appends_started_and_result_before_resume",
+      "handlers::local_workflow::local_workflow_test::workflow_agent_cached_event_on_journal_replay",
+      "handlers::local_workflow::local_workflow_test::workflow_fusion_cap_rejection_still_advances_the_resume_cursor_for_later_calls",
+      "handlers::local_workflow::local_workflow_test::workflow_transcript_dir_matches_child_transcript_location",
+      "handlers::local_workflow::local_workflow_test::workflow_transcript_root_stays_pinned_across_retarget",
+      "audit_compile_fail",
+      "live_orchestrator_prompt_uses_production_context"
+    ],
+    "completed_summary_count": 554,
+    "completed_summary_totals": {
+      "passed": 16845,
+      "failed": 48,
+      "ignored": 8,
+      "measured": 0,
+      "filtered_out": 2273
+    },
+    "aborted_binary": {
+      "target": "-p agent --lib",
+      "test": "runner::runner_test::agent_cache_ttl_1h_reaches_the_request_site",
+      "reason": "stack overflow / SIGABRT",
+      "limitation": "No final summary; its partially executed cases are not included in completed-summary totals."
+    },
+    "source_comparison": [
+      {
+        "path": "crates/client-protocol/tests/task_row_dto_stage_uniffi_default_test.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/core/src/settings/merger.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/harness-runtime/src/desktop/mod.rs",
+        "identical_to_original": false
+      },
+      {
+        "path": "crates/harness-runtime/src/mobile/host.rs",
+        "identical_to_original": false
+      },
+      {
+        "path": "crates/harness-runtime/src/mobile/host/model_preference_tests.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/harness-runtime/tests/desktop/audio_injection.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/harness-runtime/tests/mobile/mobile_tool_list_snapshot.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/hooks/src/function_hook.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/orchestrator/src/conversation/tests/additional_context_tests.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/orchestrator/src/provider_adapter.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/orchestrator/tests/ptl_recovery_test.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/platforms/common/src/llm_config_test.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/platforms/common/src/mobile_linux.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/platforms/common/tests/llm_transport_test.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/platforms/posix/tests/process_kill_tree_test.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/sandbox-runtime/src/manager.rs",
+        "identical_to_original": false
+      },
+      {
+        "path": "crates/sidequery/src/provider_side_query.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/tasks/src/handlers/local_workflow_test.rs",
+        "identical_to_original": true
+      },
+      {
+        "path": "crates/test-harness/tests/parity_prompt_byte_locks.rs",
+        "identical_to_original": true
+      }
+    ],
+    "classification": "No confirmed migration regression in bounded log/source inspection. Sixteen of19 panic-source files are byte-identical; other3 changes are host BuildInfo injection or a relocated source-root parent. This is not proof that all48 failures have been reproduced in an original-source full Linux run.",
+    "changed_panic_files": [
+      {
+        "path": "crates/harness-runtime/src/desktop/mod.rs",
+        "change": "BuildInfo field/default/debug and version-handler injection only; failed resume tests unchanged."
+      },
+      {
+        "path": "crates/harness-runtime/src/mobile/host.rs",
+        "change": "BuildInfo field/default/debug and version-handler injection only; failed provider/model assertions unchanged."
+      },
+      {
+        "path": "crates/sandbox-runtime/src/manager.rs",
+        "change": "windows_repo_root adds one parent to account for crates/ layout; used only Windows dependency checks and Windows wrapping. Linux failure is explicit missing bwrap/socat, unrelated to this path."
+      }
+    ],
+    "workflow_layout_inspection": {
+      "failure_count": 14,
+      "fixtures": "Inline JS workflow strings, temporary output dirs, InMemoryFs, MockRuntimeSpawner, EchoSpawner/MockInvoker/MockBudget. No Harness DesktopConfig/MobileConfig or SandboxManager dependency in test setup.",
+      "wait_helper": "await_terminal polls400 yield_now iterations, then returns latest status even if Running; observed failures all report Running rather than terminal. Scheduling sensitivity is supported, not a complete original-Linux reproduction.",
+      "layout_guard": "plugin_workflow_agent_types_match_shipped_agent_roster actually reads crates/plugins relative to tasks manifest and passed in this same remote run.",
+      "test_source_identical": true
+    }
+  },
+  "host_native_packaging": {
+    "status": "passed",
+    "reported_by": "parent task",
+    "evidence": "Full required macOS packaging wrapper passed with source checkout absent;4684 pinned Git checkout hashes unchanged."
+  },
+  "local_baseline_comparison": {
+    "failed_targets_before_doc_fix": 13,
+    "independently_reproduced_on_original": 12,
+    "migration_documentation_example_fixed": 1,
+    "scope_note": "This local13-target baseline comparison is separate from the remote17-target Linux outcome; extra Linux failures have not all been independently reproduced."
+  },
+  "host_macos_package": {
+    "runtime_pin": "36dd3c1295ae13bde59f6131705dbf86a244ae52",
+    "checkout_files_checked": 4684,
+    "all_file_bytes_unchanged": true,
+    "local_checkout_absent_during_full_mac_package": true,
+    "host_build_commit": "0102773438de56fad21d1ce7d88fab18e96f82d2",
+    "wrapper": "npm run package:mac:flare -- --launch",
+    "result": "passed",
+    "signing_team": "AZ4AX7J833",
+    "zip_sha256": "63893a8dfd5934d66150a913bef5a5481a5b1c9ff9a286ac89d1933d101fdd52",
+    "artifact": "clients/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+    "source_checkout_restored": true
+  },
+  "independent_runtime_test_cases": [
+    {
+      "test": "mobile::host::tests::submit_resume_session_restores_anchored_empty_session_with_same_uuid",
+      "exit": 0,
+      "exactly_one_pass": true
+    },
+    {
+      "test": "mobile::host::tests::submit_resume_session_rehydrates_and_emits",
+      "exit": 0,
+      "exactly_one_pass": true
+    },
+    {
+      "test": "mobile::host::tests::submit_resume_session_restores_its_persisted_permission_mode",
+      "exit": 0,
+      "exactly_one_pass": true
+    },
+    {
+      "test": "mobile::host::tests::submit_cancel_waits_for_cleanup_before_new_session",
+      "exit": 0,
+      "exactly_one_pass": true
+    },
+    {
+      "test": "mobile::host::tests::stale_specific_cancel_does_not_touch_current_turn",
+      "exit": 0,
+      "exactly_one_pass": true
+    },
+    {
+      "test": "desktop::tests::managed_permission_deny_rule_binds_and_cites_policy_settings",
+      "exit": 0,
+      "exactly_one_pass": true
+    },
+    {
+      "test": "desktop::tests::sandbox_network_ask_routes_through_session_permission_gate",
+      "exit": 0,
+      "exactly_one_pass": true
+    }
+  ],
+  "android_native_baseline_proof": {
+    "source_commit": "01dcc428ba0c12522f6ee29b6474f3a4e0891c47",
+    "original_pin_path": "docs/mobile-linux/mobile-linux-pins.json",
+    "current_pin_path": "docs/mobile-linux/mobile-linux-native-pins.json",
+    "patch_entries_identical": true,
+    "original_gitlink": "9cf3a855fecd27bb5735b84cacbd56852a3ab8dd",
+    "actual_openminis_head": "9cf3a855fecd27bb5735b84cacbd56852a3ab8dd",
+    "openminis_status_porcelain": "",
+    "files": [
+      {
+        "path": "docs/superpowers/references/OpenMinis/src/ios/iSH/ISHShellExecutor.h",
+        "baseline_expected_sha256": "5904ca717bdf10a6ac025e7e56e43bd99e91fd7661aee6f4c9a7169952e3e39f",
+        "current_expected_sha256": "5904ca717bdf10a6ac025e7e56e43bd99e91fd7661aee6f4c9a7169952e3e39f",
+        "baseline_gitlink_blob_sha256": "e6ec5e57279c3e92e46cba694e44ad0ac4bd4d4cacd7d9d1a5bfdc1c4e04da62",
+        "actual_sha256": "e6ec5e57279c3e92e46cba694e44ad0ac4bd4d4cacd7d9d1a5bfdc1c4e04da62",
+        "mismatch_predates_migration": true
+      },
+      {
+        "path": "docs/superpowers/references/OpenMinis/src/ios/iSH/ISHShellExecutor.m",
+        "baseline_expected_sha256": "1c3af8e11c59a24a0c4eaebc322340dbc372c68b24fd175172f46f956aabd3b2",
+        "current_expected_sha256": "1c3af8e11c59a24a0c4eaebc322340dbc372c68b24fd175172f46f956aabd3b2",
+        "baseline_gitlink_blob_sha256": "c844f7859252826d20048e32d8d4747d4f8a0505a473ef51433e56b99a9f205a",
+        "actual_sha256": "c844f7859252826d20048e32d8d4747d4f8a0505a473ef51433e56b99a9f205a",
+        "mismatch_predates_migration": true
+      }
+    ]
+  },
+  "rollback": {
+    "resource_seed_commit": "e78020129f4d383538fbe8de5725e4fbe62d9b64",
+    "required_policies_restored": 10,
+    "approved_existing_brand_keys": 40,
+    "actual_git_revert_restores_exact_preparation_tree": true,
+    "old_validation_history_ref": "codex/extract-harness-runtime-validated-builds",
+    "native_validation_commit": "e672b8a6d0bfad00d057af57c2228c375ce3233e",
+    "native_validation_ref": "codex/extract-harness-runtime-native-validation"
+  },
+  "android_pinned_bindgen": {
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "kotlin_sha256": "688d4a4d868890f5fee02c6f2f9b40296f28ff37231f484a68343112e45730c7",
+    "input_sha256": "fe3eb9198384cc6ad84630a4bdc29c4e0991b9afd990cc1a113cc513725bccbb",
+    "results": [
+      {
+        "variant": "play",
+        "abi": "arm64-v8a",
+        "generated_kotlin_byte_identical": true,
+        "ffi_exports_verified": 296
+      },
+      {
+        "variant": "play",
+        "abi": "x86_64",
+        "generated_kotlin_byte_identical": true,
+        "ffi_exports_verified": 296
+      },
+      {
+        "variant": "direct",
+        "abi": "arm64-v8a",
+        "generated_kotlin_byte_identical": true,
+        "ffi_exports_verified": 296
+      },
+      {
+        "variant": "direct",
+        "abi": "x86_64",
+        "generated_kotlin_byte_identical": true,
+        "ffi_exports_verified": 296
+      }
+    ]
+  },
+  "ios_final_acceptance": {
+    "result": "passed",
+    "scope": "full iOS XCFramework build and Swift binding integration; no device app launch",
+    "host_commit": "e672b8a6d0bfad00d057af57c2228c375ce3233e",
+    "runtime_commit": "36dd3c1295ae13bde59f6131705dbf86a244ae52",
+    "rust_toolchain": "1.94.0-aarch64-apple-darwin",
+    "toolchain_verified": "live cargo and rustc executable paths observed under toolchains/1.94.0",
+    "slices": {
+      "ios-arm64": [
+        "arm64"
+      ],
+      "ios-arm64_x86_64-simulator": [
+        "arm64",
+        "x86_64"
+      ]
+    },
+    "framework": "/tmp/harness-ios-validation/Frameworks/LingxiCodeFFI.xcframework",
+    "bindings": "/tmp/harness-ios-validation/Generated",
+    "artifact_sha256_manifest": "/tmp/harness-ios-validation/final-provenance.json",
+    "rootfs": {
+      "manifest": "/Users/luolingfeng/Projects/LingXi-Next/clients/ios/build/linux-runtime/openminis/manifest.json",
+      "manifest_sha256": "1604b45684d01b3883d39dbd2a6bd22b021e1e5da6c68ed6f69660231768e540",
+      "zip": "/Users/luolingfeng/Projects/LingXi-Next/clients/ios/build/linux-runtime/openminis/resources/alpine-rootfs.zip",
+      "zip_sha256": "c7c4f3f7fcc8b7f646e19856d4ebee4b4e89fb4d8561ae2d029092445dbb5b54",
+      "alpine_version": "3.24.2",
+      "local_app_runtime": true,
+      "exact_tree_verification": "passed"
+    },
+    "swift": {
+      "simulator_sdk_typecheck": "passed, zero diagnostics",
+      "normalized_binding_equivalence": {
+        "client_protocol": true,
+        "client_adapter": true,
+        "ios_framework": true,
+        "harness_runtime": true
+      },
+      "host_ffi_smoke": "passed runtime + ios namespaces and checksum initialization",
+      "simulator_static_link": "passed; Mach-O platform IOSSIMULATOR verified; linker emitted sysroot warning",
+      "simulator_execution": false,
+      "physical_device_execution": false
+    },
+    "logs": {
+      "full_build": "/tmp/harness-ios-validation-final-194.log",
+      "swift_typecheck": "/tmp/harness-ios-validation-final-swift-typecheck.log",
+      "host_ffi_smoke": "/tmp/harness-ios-validation-final-binding-smoke.log",
+      "simulator_link": "/tmp/harness-ios-validation-final-simulator-link.log",
+      "simulator_build_version": "/tmp/harness-ios-validation/final-simulator-build-version.txt",
+      "podman_shutdown": "/tmp/harness-podman-validation-stop.log"
+    },
+    "ish_tracked_changes": false,
+    "podman_shutdown": "normal stop succeeded",
+    "source_caches_preserved": true
+  },
+  "ios_artifact_provenance": {
+    "host_commit": "e672b8a6d0bfad00d057af57c2228c375ce3233e",
+    "runtime_commit": "36dd3c1295ae13bde59f6131705dbf86a244ae52",
+    "rust_toolchain": "1.94.0-aarch64-apple-darwin",
+    "libraries": [
+      {
+        "BinaryPath": "libios_framework.a",
+        "HeadersPath": "Headers",
+        "LibraryIdentifier": "ios-arm64_x86_64-simulator",
+        "LibraryPath": "libios_framework.a",
+        "SupportedArchitectures": [
+          "arm64",
+          "x86_64"
+        ],
+        "SupportedPlatform": "ios",
+        "SupportedPlatformVariant": "simulator"
+      },
+      {
+        "BinaryPath": "libios_framework.a",
+        "HeadersPath": "Headers",
+        "LibraryIdentifier": "ios-arm64",
+        "LibraryPath": "libios_framework.a",
+        "SupportedArchitectures": [
+          "arm64"
+        ],
+        "SupportedPlatform": "ios"
+      }
+    ],
+    "artifacts": {
+      "Frameworks/LingxiCodeFFI.xcframework/ios-arm64/libios_framework.a": "5424c1ea77cb3bc2a0a98b926eb084e061f572ec66bab096242dc153eb13f97a",
+      "Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/libios_framework.a": "a5118c5120c8c8e2002fe0649ed3d33603fd56d214059ac618a677a3b612be61",
+      "Generated/client_adapter.swift": "fe0184a6b9dd61f38fa16ad8c04063d6bd21271641ab98c7b5a0e66afcb6edb7",
+      "Generated/client_adapterFFI.h": "45f8108991e5016ed7474e8e5924afc92e3d1f7317a04769d53592b20524e856",
+      "Generated/client_protocol.swift": "9e1223ecbce61b8fde62c21ea551539ba2c8da108c015e075a60e03d6cd2081a",
+      "Generated/client_protocolFFI.h": "3e366bf590313a53176436aae365ab550605e61b1ba708e2483152e6611ba631",
+      "Generated/harness_runtime.swift": "7252f357a2cd9a6c79040443788e3be29c45ab8cf7d035bc90f0330689d356a7",
+      "Generated/harness_runtimeFFI.h": "1ffa6271782eb60256dcbc63d3884783519391ea9ed103744c6a4b8b809f20d8",
+      "Generated/ios_framework.swift": "94b28431e45c79abab88bce8e2682fc47b0eefbdfad9fcabec298c1ae3646bfe",
+      "Generated/ios_frameworkFFI.h": "8f3ee8c51623b40d386b325b6c39ea884ab9351f646b6f0f1c55dd84b5d26062",
+      "Generated/module.modulemap": "5b3891fe320b427d8decbb53e5e5284ed9b4cf012dfecee54b10214c8a292b47"
+    }
+  },
+  "github_transport": {
+    "canonical_dependency_url": "https://github.com/lingxi-coder/harness-runtime.git",
+    "local_owner_url_rewrite": {
+      "from": "https://github.com/lingxi-coder/",
+      "to": "git@github.com-lingxi-coder:lingxi-coder/"
+    },
+    "cargo_git_fetch_with_cli": true,
+    "fresh_cargo_git_cache_fetch": "passed",
+    "runtime_commit": "36dd3c1295ae13bde59f6131705dbf86a244ae52",
+    "evidence_log": "/tmp/harness-ssh-cargo-probe/fetch.log",
+    "other_account_routes_changed": false
+  }
+}

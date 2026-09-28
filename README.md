@@ -1,136 +1,89 @@
 # LingXi Code
 
-Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral
-parity to claude-code (2026-03-31 TypeScript reference) on desktop OSes.
+LingXi 的产品仓库，包含命令行与 TUI、Electron 桌面端、iOS、Android 和 Web 客户端。
+共享代理运行时位于独立的 [harness-runtime](https://github.com/lingxi-coder/harness-runtime)
+仓库，通过 `lingxi-code/Cargo.toml` 和 `Cargo.lock` 固定到同一 Git 提交。
 
-## Install the CLI
+## 项目结构
 
-    npm install -g lingxi      # or: bun install -g lingxi
-    uv tool install lingxi     # or: uvx lingxi  /  pip install lingxi
+| 目录 | 职责 |
+|---|---|
+| [`lingxi-code/`](lingxi-code/) | Rust 产品 workspace：CLI、Bridge、移动 FFI、TUI 和宿主平台适配 |
+| [`clients/`](clients/README.md) | Electron、iOS、Android、Web、共享 TypeScript SDK、翻译和语音配置 |
+| [`docs/`](docs/README.md) | 架构、平台说明、集成指南和历史审计记录 |
+| [`assets/brand/`](assets/brand/) | 品牌设计源文件 |
+| [`third_party/`](third_party/) | Android shell 构建使用的 mksh / toybox 源码 |
+| [`scripts/`](scripts/) | 仓库级工具 |
+| [`.github/workflows/`](.github/workflows/) | CI、客户端验证及发行流程 |
 
-Both install the `lingxi` command (the TUI), downloading the prebuilt
-`lingxi-cli` binary for your platform (Linux x64/arm64, macOS x64/arm64,
-Windows x64/arm64). Binaries are built + published per tagged release by
-`.github/workflows/lingxi-release.yml`.
+运行时源码不在本仓库内维护。产品与运行时的边界、固定来源解析和资源归属见
+[运行时迁移说明](docs/architecture/harness-runtime-extraction.md)。
 
-v0.10.0 (M9) completes the **Multi-Agent TUI Surface**: team message renderers,
-background-task rows + footer + dialog (live `TaskRegistryHandle` output
-tailing), coordinator/team status chrome, worker-permission chrome, and a
-read-only `/agents` discovery screen — built UI-first against a presentation
-adapter (real data where the engine is live, deterministic fixtures where the
-execution pool is stubbed).
-v0.12.0 extends the provider layer (**LLM Providers v2**): image/vision input,
-reasoning-model controls (effort / thinking budget), managed-cloud providers
-(Azure OpenAI, Vertex AI, Bedrock), and a core router (model aliases, fallback
-chains, retry). The post-v0.12.0 follow-ups are now closed too: real Bedrock
-token streaming, layered AWS / GCP / Azure-AD credential discovery,
-Bedrock-specific pricing, live `/model` listing, and paste→image ingestion.
-See `docs/LLM_PROVIDERS.md`.
-v0.11.0 adds **multi-LLM-provider support**: an in-engine provider layer so
-LingXi can use OpenAI / OpenAI-compatible (Groq, Together, Ollama, vLLM,
-OpenRouter, …) and Google Gemini as the model backend, selected via a
-`provider/model` string. Anthropic stays the default and claude-code parity is
-unchanged — every provider normalizes to LingXi's canonical message format. See
-`docs/LLM_PROVIDERS.md`.
-v0.8.0 (M7) ships the **TUI Surface**: the full single-user terminal UI on top
-of the v0.7.0 foundation — full ANSI/markdown/syntect rendering + StructuredDiff,
-~22 message renderers, a windowed `VirtualMessageList` scrollback, an advanced
-multi-line `PromptInput` (vim Normal/Insert/Visual + command palette +
-`@`-completion + history search + image paste), four full-page screens
-(Doctor / Resume / Settings / Memory), a message search/jump/export selector,
-and a 6-theme picker. `--no-tui` and non-TTY fall back byte-for-byte to the
-v0.6.0 stdio REPL.
-v0.7.0 (M6) shipped the **TUI Foundation**: the first iocraft-based terminal
-UI — a 3-zone layout (StatusLine / Scrollback / PromptInput) with streaming,
-4 message renderers, 3 permission dialogs, and real cost + MCP/Hooks/Agents
-listings + `/compact` wired into the surface.
-v0.6.0 (M5) completed the Execution Engine 全集: `ConversationOrchestrator`
-batched turn loop, streaming SSE, interactive permission gate, Hooks 4-arm
-runtime, byte-equivalent session JSONL, `--resume` session loading, 18
-implemented slash commands, `lingxi-cli` binary, and stdio REPL mode.
-v0.5.0 (M4) completed the Tools 全集 surface: **40 tools** (File ×5,
-Search ×1, Shell ×4, Web ×2, Workflow ×5, Agent+Task ×8, Team ×2,
-MCP+LSP ×5, System ×8) all wired with byte-aligned schemas, telemetry
-events (`tengu_tool_*_{started,completed,failed}`), and permission gating.
-The v0.4.0 (M3) engine surface — Settings/Memory/API client/OAuth/cost
-events/telemetry, 238 events — remains intact underneath.
+## 构建 CLI
 
-## Quickstart
+Rust 工具链由 `lingxi-code/rust-toolchain.toml` 固定。以下命令从仓库根目录执行：
 
-```bash
-cargo build --workspace --release
-
-# Run the CLI. Tool/skill/command assembly is owned by the `harness-runtime` (`desktop`)
-# composition root (M8); the `cli` crate just hands it the platform + config.
-ANTHROPIC_API_KEY=sk-ant-... cargo run -p cli -- \
-    --model claude-opus-4-7
-
-# The minimal end-to-end demo (effect-only path, no live API call):
-cargo run -p cli-demo
+```sh
+cd lingxi-code
+cargo build --locked -p cli --release
+cargo run --locked -p cli -- --help
 ```
 
-## Platform support
+发行安装入口为 `npm install -g lingxi` 或 `uv tool install lingxi`，由
+[release workflow](.github/workflows/lingxi-release.yml) 发布。
 
-| OS | Status |
-|---|---|
-| macOS 13+ | Full support (Keychain, sandbox-exec, tmux/iTerm) |
-| Linux | Full support (bubblewrap + socat sandbox; plaintext SecureStorage) |
-| WSL2 | Full support (same as Linux) |
-| Windows 10 22H2+ | Limited (no sandbox, no tmux; LSP/MCP/worktree work) |
-| WSL1 | Sandbox refused at init |
-| Android / iOS | M4 (not v0.4.0) |
+## 桌面和移动端
 
-All three Tier-1 platforms (macOS / Linux / WSL2) run the M3 engine
-subsystems (Settings, Memory, API client, OAuth refresh, cost events,
-telemetry schema) identically. See `docs/PLATFORMS.md` for the per-OS
-setup notes + the "M3 engine subsystems" section.
+```sh
+# 初始化 Rust Bridge、共享 SDK 和客户端依赖；移动工具链可选
+./clients/setup.sh
 
-## Subsystem status (v0.12.0)
+# macOS：签名预检、打包、静态/运行验证并启动
+cd clients/electron
+npm run package:mac:flare -- --check
+npm run package:mac:flare -- --launch
+```
 
-| Subsystem | Status | Milestone |
-|---|---|---|
-| Settings / Memory / API client / OAuth | Complete | M3 / v0.4.0 |
-| Tools (40 builtins, 9 categories) | Complete | M4 / v0.5.0 |
-| ConversationOrchestrator (turn loop + streaming SSE) | Complete | M5 / v0.6.0 |
-| Permission gate UX | Complete | M5 / v0.6.0 |
-| Hooks 4-arm runtime (Builtin/Http/Command/Agent) | Complete (Command stub) | M5 / v0.6.0 |
-| Session JSONL byte-equivalent | Complete | M5 / v0.6.0 |
-| `--resume` session loading | Complete | M5 / v0.6.0 |
-| Slash commands (99 registered, 18 implemented) | Complete | M5 / v0.6.0 |
-| `lingxi-cli` binary + stdio REPL | Complete | M5 / v0.6.0 |
-| TUI foundation (iocraft 3-zone, streaming, 4 renderers, 3 dialogs) | Complete | M6 / v0.7.0 |
-| TUI engine wiring (real cost / MCP-Hooks-Agents lists / `/compact`) | Complete (summary stub) | M6 / v0.7.0 |
-| Plugin marketplace + MCP server | M6 | M6 |
-| TUI rendering primitives (ANSI 16/256/truecolor, markdown, syntect, StructuredDiff) | Complete | M7 / v0.8.0 |
-| TUI message renderers (~22 system/assistant/user) + VirtualMessageList scrollback | Complete | M7 / v0.8.0 |
-| Advanced PromptInput (vim Normal/Insert/Visual, command palette, `@`-completion, history search, image paste) | Complete (vim parity subset) | M7 / v0.8.0 |
-| TUI full-page screens (Doctor / Resume / Settings / Memory) + theme picker + message selector | Complete | M7 / v0.8.0 |
-| Live assistant text → markdown/syntect (#211) | Plain text (markdown wired only into secondary renderers) | M8 |
-| Advanced engine wiring (real `/compact` summary, CostTracker→AnalyticsBus, MCP auto-connect, OAuth PKCE, per-model cost) | Deferred | M8 |
-| Team / Coordinator / Swarm renderers, voice, mouse mode, inline image display | Out of scope | M8 |
-| Composable engine (`harness-runtime` desktop/mobile composition profiles, ~73 flat crates, §8.1 dep gate) | Complete | M8 / v0.9.0 |
-| Mobile platform + UniFFI callbacks (`platform-ios/android`, `tool-camera/voice/share`, `ios-framework`/`android-aar` + Swift/Kotlin skeletons) | Skeleton only — full bring-up in M9 | M8 / v0.9.0 |
-| LLM Providers v1 (OpenAI-compatible + Gemini codecs, `provider/model` routing, per-provider cost) | Complete | v0.11.0 |
-| LLM Providers v2 (vision, reasoning params, Azure/Vertex/Bedrock, router: aliases/fallback/retry) | Complete | v0.12.0 |
+macOS 签名要求见 [AGENTS.md](AGENTS.md)。凭据和真实会话验证使用签名应用；
+`npm run dev` 仅适用于不依赖 Credential Broker 的界面开发。
 
-## Architecture
+客户端统一使用 npm 和各自的 `package-lock.json`。共享 SDK 必须先构建，
+Electron 才能使用它的 `dist/` 导出。详见 [客户端设置](clients/README.md)、
+[iOS](clients/ios/README.md) 和 [Android](clients/android/README.md)。
 
-Full design lives in three docs:
-- `docs/superpowers/specs/2026-05-23-m3-engine-completion-design.md` (M3
-  engine completion, v0.4.0)
-- `docs/superpowers/specs/2026-05-23-m2-claude-code-parity-design.md` (M2
-  desktop parity, v0.3.0)
-- `docs/superpowers/specs/2026-05-22-lingxi-core-rust-engine-design.md` (M1
-  engine design, v0.2.0)
+## 检查
 
-Navigation aid: `docs/ARCHITECTURE.md`. Security model: `docs/SECURITY.md`.
-Provider configuration: `docs/LLM_PROVIDERS.md`.
-Behavioral parity guarantees with claude-code: see
-`docs/ARCHITECTURE.md#claude-code-parity-guarantees-locked-in-v030`
-(M2 v0.3.0 additions) and the
-`claude-code parity guarantees (v0.4.0 additions)` subsection beneath it
-(M3 v0.4.0 additions).
+```sh
+# Rust 产品与固定上游边界
+cd lingxi-code
+./scripts/check-all.sh
+cargo fmt --all -- --check
+cargo test --locked --workspace --all-features --no-fail-fast
+cargo clippy --locked --workspace --all-targets -- -D warnings
+```
+
+```sh
+# 从仓库根目录执行
+npm --prefix clients/shared ci
+npm --prefix clients/shared run build
+npm --prefix clients/electron ci
+npm --prefix clients/electron run typecheck
+npm --prefix clients/electron test
+python3 clients/translations/generate.py --check
+```
+
+本地运行时源码路径通过 `python3 lingxi-code/scripts/runtime_source.py --root`
+解析；不要使用相邻 checkout 替换固定依赖。旧里程碑和历史审计记录不代表当前验证状态。
+
+## 文档
+
+- [文档导航](docs/README.md)
+- [产品架构](docs/ARCHITECTURE.md)
+- [平台说明](docs/PLATFORMS.md)
+- [模型配置](docs/LLM_PROVIDERS.md)
+- [安全模型](docs/SECURITY.md)
+- [版本记录](CHANGELOG.md)
 
 ## License
 
-MIT OR Apache-2.0.
+Rust workspace 声明为 MIT OR Apache-2.0；客户端及第三方组件以各自许可声明为准。

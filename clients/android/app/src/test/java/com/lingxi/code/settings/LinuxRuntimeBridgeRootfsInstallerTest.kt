@@ -16,6 +16,21 @@ import java.nio.file.Files
 import java.security.MessageDigest
 
 class LinuxRuntimeBridgeRootfsInstallerTest {
+    // Fixture DTOs describe JSON inputs; production parsing lives in the SDK.
+    private data class AllowlistFixture(
+        val path: String,
+        val sha256: String,
+        val kind: String,
+        val sizeBytes: Long?,
+    )
+
+    private data class ImmutableFixture(
+        val path: String,
+        val sha256: String,
+        val kind: String,
+        val sizeBytes: Long,
+    )
+
     private companion object {
         const val manifestFileName = "rootfs-manifest.json"
         const val sbomFileName = "rootfs.spdx.json"
@@ -41,7 +56,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                 archiveBytes = archiveBytes,
                 immutableFiles = immutable,
                 executableAllowlist = listOf(
-                    RootfsAllowlistEntryData(
+                    AllowlistFixture(
                         path = "/bin/busybox",
                         sha256 = sha256(busybox),
                         kind = "interpreter",
@@ -102,7 +117,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                         archiveBytes = archiveBytes,
                         immutableFiles = immutable,
                         executableAllowlist = listOf(
-                            RootfsAllowlistEntryData(
+                            AllowlistFixture(
                                 path = "/bin/busybox",
                                 sha256 = sha256(busybox),
                                 kind = "interpreter",
@@ -141,7 +156,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                 archiveBytes = archiveBytes,
                 immutableFiles = immutable,
                 executableAllowlist = listOf(
-                    RootfsAllowlistEntryData(
+                    AllowlistFixture(
                         path = "/bin/busybox",
                         sha256 = sha256(busybox),
                         kind = "interpreter",
@@ -190,7 +205,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                 archiveBytes = archiveBytes,
                 immutableFiles = immutable,
                 executableAllowlist = listOf(
-                    RootfsAllowlistEntryData(
+                    AllowlistFixture(
                         path = "/bin/busybox",
                         sha256 = sha256(busybox),
                         kind = "interpreter",
@@ -246,7 +261,7 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
                         archiveBytes = archiveBytes,
                         immutableFiles = immutable,
                         executableAllowlist = listOf(
-                            RootfsAllowlistEntryData(
+                            AllowlistFixture(
                                 path = "/bin/busybox",
                                 sha256 = sha256(busybox),
                                 kind = "interpreter",
@@ -270,8 +285,8 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
     private fun manifestJson(
         archiveName: String,
         archiveBytes: ByteArray,
-        immutableFiles: List<RootfsImmutableEntryData>,
-        executableAllowlist: List<RootfsAllowlistEntryData>,
+        immutableFiles: List<ImmutableFixture>,
+        executableAllowlist: List<AllowlistFixture>,
         archiveSha256: String = sha256(archiveBytes),
     ): String {
         val packagesJson = """
@@ -323,23 +338,23 @@ class LinuxRuntimeBridgeRootfsInstallerTest {
             }
         """.trimIndent()
 
-    private fun immutableFile(path: String, bytes: ByteArray): RootfsImmutableEntryData =
-        RootfsImmutableEntryData(
+    private fun immutableFile(path: String, bytes: ByteArray): ImmutableFixture =
+        ImmutableFixture(
             path = path,
             sha256 = sha256(bytes),
             kind = "regular-file",
             sizeBytes = bytes.size.toLong(),
         )
 
-    private fun immutableSymlink(path: String, linkTarget: String): RootfsImmutableEntryData =
-        RootfsImmutableEntryData(
+    private fun immutableSymlink(path: String, linkTarget: String): ImmutableFixture =
+        ImmutableFixture(
             path = path,
             sha256 = sha256(linkTarget.toByteArray(StandardCharsets.UTF_8)),
             kind = "symlink",
             sizeBytes = linkTarget.toByteArray(StandardCharsets.UTF_8).size.toLong(),
         )
 
-    private fun canonicalInventorySha256(entries: List<RootfsImmutableEntryData>): String {
+    private fun canonicalInventorySha256(entries: List<ImmutableFixture>): String {
         val canonical = entries.joinToString(prefix = "[", postfix = "]", separator = ",") { entry ->
             """{"kind":${jsonQuote(entry.kind)},"path":${jsonQuote(entry.path)},"sha256":${jsonQuote(entry.sha256)},"size_bytes":${entry.sizeBytes}}"""
         }

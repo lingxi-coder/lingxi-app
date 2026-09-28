@@ -1,5 +1,0 @@
-{
-  "type": "set_default_permission_mode",
-  "destination": "user",
-  "mode": "acceptEdits"
-}

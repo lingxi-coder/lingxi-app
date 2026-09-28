@@ -10,6 +10,8 @@ import com.lingxi.code.bindings.MobileLinuxStatusFfi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class LinuxRuntimeStateTest {
@@ -22,9 +24,26 @@ class LinuxRuntimeStateTest {
             stableWorkspaceId = "default",
             abi = "arm64-v8a",
             mode = LinuxRuntimeMode.MobileLinux,
+            rootfsIdentity = RootfsArtifactIdentity("fixture-v1", "arm64-v8a", "a".repeat(64), "rootfs.tar.gz", 123),
         )
 
         assertEquals("/tmp", config.appSandboxRoot)
+        assertEquals("fixture-v1", config.rootfsVersion)
+        assertEquals("a".repeat(64), config.archiveSha256)
+    }
+
+    @Test
+    fun mobile_linux_config_rejects_missing_release_identity() {
+        assertThrows(IllegalStateException::class.java) {
+            mobileLinuxConfig("/tmp/runtime", "/tmp", "/tmp/workspace", "fixture", "arm64-v8a", LinuxRuntimeMode.MobileLinux)
+        }
+    }
+
+    @Test
+    fun legacy_config_does_not_invent_an_archive_identity() {
+        val config = mobileLinuxConfig("/tmp/runtime", "/tmp", "/tmp/workspace", "fixture", "arm64-v8a", LinuxRuntimeMode.Legacy)
+        assertNull(config.archiveSha256)
+        assertEquals("", config.rootfsVersion)
     }
 
     @Test

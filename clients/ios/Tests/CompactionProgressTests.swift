@@ -3,9 +3,11 @@ import XCTest
 
 final class CompactionProgressTests: XCTestCase {
     func testHybridProgressFixture() throws {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let url = root.appendingPathComponent("lingxi-code/client-protocol/snapshots/compaction_hybrid_progress.json")
+        let bundle = Bundle(for: Self.self)
+        let url = try XCTUnwrap(bundle.url(forResource: "compaction_hybrid_progress", withExtension: "json", subdirectory: "HarnessProtocolFixtures"))
+        let provenanceURL = try XCTUnwrap(bundle.url(forResource: "source", withExtension: "json", subdirectory: "HarnessProtocolFixtures"))
+        let provenance = try JSONSerialization.jsonObject(with: Data(contentsOf: provenanceURL)) as! [String: Any]
+        XCTAssertEqual((provenance["revision"] as? String)?.count, 40)
         let fixture = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
         for sample in fixture["cases"] as! [[String: Any]] {
             let milliseconds = (sample["elapsed_ms"] as! NSNumber).doubleValue

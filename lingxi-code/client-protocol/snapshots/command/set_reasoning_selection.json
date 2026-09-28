@@ -1,7 +1,0 @@
-{
-  "type": "set_reasoning_selection",
-  "selection": {
-    "type": "token_budget",
-    "tokens": 2048
-  }
-}

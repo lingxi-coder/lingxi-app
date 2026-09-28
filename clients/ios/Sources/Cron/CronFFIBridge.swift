@@ -345,7 +345,8 @@ func makeIosMobileLinuxConfig(
     _ config: TerminalRuntimeConfig,
     appSandboxRoot: String
 ) -> IosMobileLinuxConfigFfi {
-    IosMobileLinuxConfigFfi(
+    LXISHRuntimeResourceBootstrap.prepare()
+    return IosMobileLinuxConfigFfi(
         mode: config.mode == .legacy ? .legacy : .mobileLinux,
         managedRoot: config.managedRoot,
         workspaceHostPath: config.workspaceHostPath,

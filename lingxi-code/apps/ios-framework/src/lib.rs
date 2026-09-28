@@ -70,6 +70,9 @@
 #![allow(dead_code)]
 
 #[cfg(feature = "uniffi")]
+mod mobile_linux_sdk;
+
+#[cfg(feature = "uniffi")]
 use platform_api::mobile_linux::MAX_MOBILE_LINUX_EVENT_BATCH;
 use platform_api::{AudioService, CameraControl, SharingService};
 use std::sync::Arc;
@@ -508,6 +511,10 @@ pub fn build_mobile_engine(
     {
         use platform_ios::{IosPlatform, IosPlatformInputs};
         let cfg = MobileConfig {
+            build_info: harness_runtime::mobile::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             cwd: std::path::PathBuf::from(&impls.app_sandbox_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(branding::DOT_DIR),
             host_environment: Some(platform_api::MobileHostEnvironment::new(
@@ -703,6 +710,10 @@ fn ios_mobile_config_from_launch_config(
 ) -> Result<MobileConfig, MobileEngineError> {
     let cwd = ios_project_cwd(&config.app_sandbox_root, config.project_cwd.as_deref())?;
     let mut cfg = MobileConfig {
+        build_info: harness_runtime::mobile::BuildInfo::new(
+            env!("CARGO_PKG_VERSION"),
+            option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+        ),
         cwd,
         lingxi_home: std::path::PathBuf::from(&config.app_sandbox_root).join(branding::DOT_DIR),
         session_mode: match config.session_mode {
@@ -1146,8 +1157,8 @@ fn linked_ios_mobile_linux_runtime(
     let (workspace_host_path, stable_workspace_id) =
         validate_mobile_linux_workspace_config(app_sandbox_root.to_string_lossy().as_ref(), cfg)
             .ok()?;
-    Some(platform_ios_ish_runtime::linked_runtime(
-        platform_ios_ish_runtime::IosIshRuntimeConfig {
+    let runtime = mobile_linux_sdk::linked_runtime(
+        mobile_linux_sdk::IosIshRuntimeConfig {
             managed_root: std::path::PathBuf::from(&cfg.managed_root),
             app_sandbox_root,
             workspace_host_path,
@@ -1157,7 +1168,16 @@ fn linked_ios_mobile_linux_runtime(
             archive_sha256: cfg.archive_sha256.clone(),
             authorization_file: cfg.authorization_file.clone(),
         },
-    ))
+    );
+    Some(runtime.unwrap_or_else(|error| {
+        Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
+            platform_api::SandboxBackend::IosIsh,
+            platform_api::MobileLinuxRuntimeMode::MobileLinux,
+            "ios",
+            cfg.abi.clone(),
+            error.to_string(),
+        ))
+    }))
 }
 
 #[cfg(feature = "uniffi")]
@@ -1370,6 +1390,9 @@ fn mobile_linux_error_to_ffi(
 ) -> MobileLinuxOperationFfiError {
     match error {
         platform_api::MobileLinuxError::Unsupported => MobileLinuxOperationFfiError::Unsupported,
+        platform_api::MobileLinuxError::RestartRequired(message) => {
+            MobileLinuxOperationFfiError::Unavailable { message: format!("restart_required: {message}") }
+        }
         platform_api::MobileLinuxError::Unavailable(message) => {
             MobileLinuxOperationFfiError::Unavailable { message }
         }
@@ -3579,6 +3602,10 @@ mod tests {
         let perm_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let cfg = MobileConfig {
+            build_info: harness_runtime::mobile::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             cwd: root.to_path_buf(),
             lingxi_home: root.join(".lingxi"),
             ..MobileConfig::default()

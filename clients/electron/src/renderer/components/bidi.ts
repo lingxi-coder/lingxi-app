@@ -1,6 +1,6 @@
 /**
  * Bidi glue for the head-clipping trick, kept out of the component files so it
- * runs under `node --test` with no DOM (same reason as `planOverflow.ts`).
+ * runs under `node --test` with no DOM.
  *
  * ## The bug this exists to prevent
  *

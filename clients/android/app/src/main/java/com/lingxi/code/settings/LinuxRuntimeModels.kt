@@ -146,22 +146,24 @@ fun mobileLinuxConfig(
     abi: String,
     mode: LinuxRuntimeMode,
     authorizationFile: String? = null,
-): AndroidMobileLinuxConfigFfi =
-    AndroidMobileLinuxConfigFfi(
+    rootfsIdentity: RootfsArtifactIdentity? = null,
+): AndroidMobileLinuxConfigFfi {
+    if (mode == LinuxRuntimeMode.MobileLinux) {
+        checkNotNull(rootfsIdentity) { "Mobile Linux requires a bundled verified release rootfs for ABI $abi" }
+    }
+    check(rootfsIdentity == null || rootfsIdentity.abi == abi) { "Bundled rootfs identity ABI mismatch" }
+    return AndroidMobileLinuxConfigFfi(
         mode = mode.toFfi(),
         managedRoot = managedRoot,
         appSandboxRoot = appSandboxRoot,
         workspaceHostPath = workspaceHostPath,
         stableWorkspaceId = stableWorkspaceId,
         abi = abi,
-        rootfsVersion = "3.21.3",
-        archiveSha256 = when (abi) {
-            "arm64-v8a" -> "ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea"
-            "x86_64" -> "1a694899e406ce55d32334c47ac0b2efb6c06d7e878102d1840892ad44cd5239"
-            else -> null
-        },
+        rootfsVersion = rootfsIdentity?.version.orEmpty(),
+        archiveSha256 = rootfsIdentity?.sha256,
         authorizationFile = authorizationFile,
     )
+}
 
 fun linuxRuntimeUiStateFrom(
     mode: LinuxRuntimeMode,

@@ -4,18 +4,19 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SessionRuntime } from '../src/main/bridge';
+import { SessionRuntime, SessionRuntimeManager } from '../src/main/bridge';
 import { SettingsStore } from '../src/main/settings';
 import type { ClientCommand } from '@lingxi/bridge-client';
-function runtime(store: SettingsStore) {
+const defaultRef = { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' };
+function runtime(store: SettingsStore, ref = defaultRef) {
   const commands: ClientCommand[] = [];
   const observed: string[] = [];
   const client = Object.assign(new EventEmitter(), { sendCommand: (command: ClientCommand) => commands.push(command) });
   const instance = new SessionRuntime({
-    projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555',
+    ...ref,
     launchConfig: () => ({ workspace: '/workspace', trusted: true, model: store.getPublic().model }),
-    onModelSelected: model => store.setLastModel(model),
-    getSavedModel: () => store.getPublic().model,
+    onModelSelected: model => store.setSessionModel(ref, model),
+    getSavedModel: () => store.getSessionModel(ref),
     onModelChanged: model => observed.push(model),
   });
   Object.assign(instance, { client, activeWorkspace: '/workspace', activeWorkspaceTrusted: true });
@@ -72,6 +73,7 @@ test('write failure is reported and rolls back the restart default', async () =>
     await assert.rejects(selection, /Could not save model/);
     assert.equal(store.getPublic().model, 'old-model');
     assert.equal(readFileSync(store.settingsPath, 'utf8'), before);
+    assert.equal(store.getSessionModel(defaultRef), undefined);
     assert.deepEqual(observed, ['new-model']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -79,7 +81,7 @@ test('write failure is reported and rolls back the restart default', async () =>
 test('resume reapplies the last selection over an old snapshot even without a subsequent message', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-preference-'));
   try {
-    new SettingsStore(dir).setLastModel('latest-model');
+    new SettingsStore(dir).setSessionModel(defaultRef, 'latest-model');
     const store = new SettingsStore(dir);
     const { instance, client, commands } = runtime(store);
     const resumed = instance.resumeOwnedSession();
@@ -96,7 +98,7 @@ test('resume reapplies the last selection over an old snapshot even without a su
 test('a now-unavailable saved model reports restore failure without breaking resume or overwriting it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-preference-'));
   try {
-    const store = new SettingsStore(dir); store.setLastModel('unavailable-model');
+    const store = new SettingsStore(dir); store.setSessionModel(defaultRef, 'unavailable-model');
     const { instance, client } = runtime(store);
     const events: unknown[] = [];
     (instance as any).broadcastClientEvent = (event: unknown) => events.push(event);
@@ -188,4 +190,60 @@ test('rejected explicit /model never saves or reports success', async () => {
     assert.equal(new SettingsStore(dir).getPublic().model, 'old-model');
 
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('session model selections remain isolated across resume and settings reload', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-isolation-'));
+  try {
+    const refB = { ...defaultRef, sessionId: '11111111-2222-4333-8444-555555555556' };
+    const store = new SettingsStore(dir);
+    store.setSessionModel(refB, 'model-b');
+    const a = runtime(store);
+    const selected = a.instance.dispatchCommand({ type: 'set_model', model: 'model-a' });
+    await tick();
+    a.client.emit('event', { type: 'model_changed', model: 'model-a' });
+    await selected;
+    const reloaded = new SettingsStore(dir);
+    assert.equal(reloaded.getPublic().model, 'model-a', 'new sessions inherit the last choice');
+    assert.equal(reloaded.getSessionModel(defaultRef), 'model-a');
+    assert.equal(reloaded.getSessionModel(refB), 'model-b');
+    assert.equal(reloaded.getSessionModel({ ...defaultRef, projectPath: '/other' }), undefined);
+    for (const saved of [store, reloaded]) {
+      const b = runtime(saved, refB);
+      const resumed = b.instance.resumeOwnedSession();
+      b.client.emit('event', { type: 'session_resumed', session_id: refB.sessionId, mode: 'default', messages: [] });
+      b.client.emit('event', { type: 'model_changed', model: 'old-model-b' });
+      await tick();
+      assert.deepEqual(b.commands[1], { type: 'set_model', model: 'model-b' });
+      b.client.emit('event', { type: 'model_changed', model: 'model-b' });
+      await resumed;
+    }
+    const legacy = runtime(reloaded, { ...refB, sessionId: '11111111-2222-4333-8444-555555555557' });
+    const resumed = legacy.instance.resumeOwnedSession();
+    legacy.client.emit('event', { type: 'session_resumed', session_id: legacy.instance.sessionId, mode: 'default', messages: [] });
+    legacy.client.emit('event', { type: 'model_changed', model: 'historical-model' });
+    await resumed;
+    assert.deepEqual(legacy.commands.map(command => command.type), ['resume_session']);
+    assert.deepEqual(legacy.observed, ['historical-model']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runtime manager binds model preferences to each owning session', async () => {
+  const refB = { ...defaultRef, sessionId: '11111111-2222-4333-8444-555555555556' };
+  const selections: unknown[] = [];
+  const manager = new SessionRuntimeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+    getSavedModel: ref => ref.sessionId === defaultRef.sessionId ? 'model-a' : 'model-b',
+    onModelSelected: (ref, model) => { selections.push({ ref, model }); },
+  });
+  try {
+    const a = await manager.ensure(defaultRef, false);
+    const b = await manager.ensure(refB, false);
+    assert.equal((a as any).opts.getSavedModel(), 'model-a');
+    assert.equal((b as any).opts.getSavedModel(), 'model-b');
+    (a as any).opts.onModelSelected('new-a');
+    (b as any).opts.onModelSelected('new-b');
+    assert.deepEqual(selections, [{ ref: defaultRef, model: 'new-a' }, { ref: refB, model: 'new-b' }]);
+  } finally { await manager.dispose(); }
 });

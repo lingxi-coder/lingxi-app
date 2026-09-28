@@ -4,8 +4,10 @@ LingXi's Android or iOS combined distribution is GPLv3 when it includes the
 OpenMinis-derived shell, PRoot, PTY bridge, or Alpine rootfs integration.
 Original MIT and Apache-2.0 components retain their notices.
 
-The source baseline is immutable and machine-readable in
-`mobile-linux-pins.json`:
+Native sources and toolchains belong to the Cargo-locked mobile Linux SDK;
+Local Apps profiles belong to the Cargo-locked Harness. See
+[RUNTIME-SOURCE-CONTRACT.md](RUNTIME-SOURCE-CONTRACT.md) for their resolvers,
+artifact ownership and validation. The inherited component baseline includes:
 
 - OpenMinis `9cf3a855fecd27bb5735b84cacbd56852a3ab8dd`
 - OpenMinis PRoot fork `8cf13e997cdc9472997aae19df8050c073c9a86c`
@@ -32,7 +34,8 @@ reported explicitly and must never silently switch to the Legacy runtime.
 
 iOS device builds use the pinned OpenMinis iSH ARM64 source and Alpine aarch64
 fakefs rootfs. `clients/ios/scripts/build-linux-runtime.sh` reconstructs all
-native archives and the rootfs locally; simulator builds never link iSH.
+native-support framework and rootfs through the locked SDK; simulator slices
+compile the same API and report unavailable without linking the iSH kernel.
 Full local-app release builds pass `--local-app-runtime --apk-dir <closure>`;
 that path validates the exact Node/Git closure before doing the expensive iSH
 build and verifies the resulting rootfs package database before staging.

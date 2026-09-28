@@ -733,6 +733,10 @@ pub fn build_mobile_engine(
     {
         use platform_android::{AndroidPlatform, AndroidPlatformInputs};
         let cfg = MobileConfig {
+            build_info: harness_runtime::mobile::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             cwd: std::path::PathBuf::from(&impls.app_files_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_files_root).join(branding::DOT_DIR),
             host_environment: Some(platform_api::MobileHostEnvironment::new(
@@ -1179,6 +1183,9 @@ fn mobile_linux_error_to_ffi(error: platform_api::MobileLinuxError) -> MobileLin
         platform_api::MobileLinuxError::Unsupported => MobileLinuxApiErrorFfi::Unavailable {
             message: "runtime unsupported on this build".to_string(),
         },
+        platform_api::MobileLinuxError::RestartRequired(message) => {
+            MobileLinuxApiErrorFfi::Unavailable { message: format!("restart_required: {message}") }
+        }
         platform_api::MobileLinuxError::Unavailable(message) => {
             MobileLinuxApiErrorFfi::Unavailable { message }
         }
@@ -3745,6 +3752,10 @@ pub fn build_android_engine_with_mobile_linux(
         let local_apps_runtime_requested = local_apps_runtime_root.is_some();
         let cwd = android_project_cwd(&app_files_root, project_cwd.as_deref())?;
         let mut cfg = MobileConfig {
+            build_info: harness_runtime::mobile::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             cwd,
             lingxi_home: std::path::PathBuf::from(&app_files_root).join(branding::DOT_DIR),
             session_mode: match session_mode {
@@ -4993,6 +5004,10 @@ mod tests {
         let perm_sink: Arc<dyn PermissionRequestSink> =
             Arc::new(RecordingPermissionSink::default());
         let cfg = MobileConfig {
+            build_info: harness_runtime::mobile::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+            ),
             cwd: root.to_path_buf(),
             lingxi_home: root.join(".lingxi"),
             ..MobileConfig::default()

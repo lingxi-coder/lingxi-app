@@ -33,7 +33,7 @@ The generated Swift bindings (`Generated/`) and the FFI static-library
 xcframework (`Frameworks/LingxiCodeFFI.xcframework`) are **git-ignored** and
 reproduced from the Rust workspace. Run this before the first `xcodegen
 generate`, and again whenever the UniFFI surface
-(`lingxi-code/apps/ios-framework`, `client-protocol`, …) changes:
+(`crates/apps/ios-framework`, `client-protocol`, …) changes:
 
 ```sh
 cd clients/ios

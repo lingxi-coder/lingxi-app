@@ -13,7 +13,7 @@
 ## Context
 
 - Design spec: `docs/superpowers/specs/2026-06-09-llm-client-crate-design.md`.
-- Workspace manifest: `lingxi-code/Cargo.toml`.
+- Workspace manifest: `Cargo.toml`.
 - Existing reference crates:
   - `lingxi-code/api-client`: Anthropic wire DTOs, SSE parser, retry behavior.
   - `lingxi-code/providers`: provider traits, codecs, registry/profile routing.
@@ -36,7 +36,7 @@
 ### Task 1: Workspace Crate Skeleton
 
 **Files:**
-- Modify: `lingxi-code/Cargo.toml`
+- Modify: `Cargo.toml`
 - Create: `lingxi-code/llm-client/Cargo.toml`
 - Create: `lingxi-code/llm-client/src/lib.rs`
 - Test: Cargo package resolution via `cargo test -p llm-client --no-run`
@@ -53,7 +53,7 @@ Expected: FAIL with an error like `package ID specification 'llm-client' did not
 
 **Step 2: Add `llm-client` to the workspace**
 
-In `lingxi-code/Cargo.toml`, add `"llm-client",` to both `members` and `default-members` near the other flat engine crates.
+In `Cargo.toml`, add `"llm-client",` to both `members` and `default-members` near the other flat engine crates.
 
 **Step 3: Create `lingxi-code/llm-client/Cargo.toml`**
 

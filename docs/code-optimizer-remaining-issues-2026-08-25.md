@@ -39,10 +39,10 @@
 | | |
 |---|---|
 | **严重度** | HIGH |
-| **文件** | `lingxi-code/apps/cli/src/init.rs`（约 411–589 行） |
+| **文件** | `crates/apps/cli/src/init.rs`（约 411–589 行） |
 | **现状** | `load_provider_profiles`、`load_settings_ax_screen_reader`、`load_always_thinking_enabled`、`load_settings_model`、`load_settings_plans_directory`、`load_settings_api_key_helper`、`load_settings_company_announcements`、`load_settings_emoji_completion_enabled`、`load_lingxi_md_excludes`、`load_routing` 各自 `Settings::load_scoped`，启动时反复读盘解析同一套 JSON。 |
 | **建议** | 仿 `engine-desktop` 的 `load_merged_settings`：按 `(project_dir, include_user, include_project)` 缓存一次 `EffectiveSettings`，各 helper 只取字段。 |
-| **参考** | `lingxi-code/apps/engine-desktop/src/lib.rs` `load_merged_settings`（约 4265 行）已做。 |
+| **参考** | `crates/apps/engine-desktop/src/lib.rs` `load_merged_settings`（约 4265 行）已做。 |
 | **验证** | `cargo test -p cli` 里走 `--setting-sources` 的 boot 测试。 |
 
 ### 2. Write 工具无体积上限
@@ -50,7 +50,7 @@
 | | |
 |---|---|
 | **严重度** | HIGH |
-| **文件** | `lingxi-code/tools/file/src/write.rs` `FileWriteTool::call`（约 242 行起） |
+| **文件** | `crates/tools/file/src/write.rs` `FileWriteTool::call`（约 242 行起） |
 | **现状** | 解析 `content` 后直接 `tokio::fs::write`，模型可塞入超大字符串导致内存和磁盘膨胀。Edit 已有 `MAX_EDIT_FILE_SIZE = 1GiB`。 |
 | **建议** | 在 `emit_started` 之前用同一常量拒绝：`content.len() as u64 > MAX_EDIT_FILE_SIZE` → `ToolError::InvalidInput`，文案对齐 Edit 的 `format_file_size`。可加 `pub const MAX_WRITE_FILE_SIZE = MAX_EDIT_FILE_SIZE`。 |
 | **不要** | 把 Edit 的 1GiB 改小（字节锁，见「明确不改」）。 |
@@ -91,7 +91,7 @@
 | | |
 |---|---|
 | **严重度** | MEDIUM |
-| **文件** | `lingxi-code/tools/file/src/grep.rs`（约 962–967 行） |
+| **文件** | `crates/tools/file/src/grep.rs`（约 962–967 行） |
 | **现状** | `RegexMatcherBuilder::new()...build(pattern)` 无 `nest_limit` / `size_limit` / `dfa_size_limit`。病态正则可打爆 CPU（ReDoS）。 |
 | **结论** | **不实施。** Claude Code 2.1.245 使用 ripgrep/grep-regex 的默认编译限制；本项目保持相同默认值：nest 250、size 100MiB、DFA 1000MiB。 |
 | **原因** | 自定义 `nest_limit(50)` 和 10MiB size/DFA 会拒绝 Claude 接受的合法表达式，破坏工具输入兼容性与字节级对齐。 |
@@ -122,7 +122,7 @@
 | | |
 |---|---|
 | **严重度** | MEDIUM |
-| **文件** | `lingxi-code/tui-core/src/render/markdown.rs` `render_with_width`（约 163 行） |
+| **文件** | `crates/tui-core/src/render/markdown.rs` `render_with_width`（约 163 行） |
 | **现状** | transcript 已有 committed wrap cache（`tui/src/transcript.rs`）。wrap cache 在 `committed_len` 变化时整表失效，每个 cell 会再走一遍 pulldown-cmark。 |
 | **建议** | 在 `render_with_width` 做 LRU（约 64 条），key = `(text hash, width, theme)`。`StyledLine` 已 `Clone`。 |
 | **验证** | `tui-core` markdown 渲染测试；确认 theme 切换不会串色。 |
@@ -132,7 +132,7 @@
 | | |
 |---|---|
 | **严重度** | MEDIUM |
-| **文件** | `lingxi-code/apps/cli/src/stream_json.rs`（`OutboundTx` / `enqueue_line` / `spawn_drain_task`） |
+| **文件** | `crates/apps/cli/src/stream_json.rs`（`OutboundTx` / `enqueue_line` / `spawn_drain_task`） |
 | **现状** | `mpsc::unbounded_channel`。`--include-partial-messages` 的 `stream_event` 在 stdout 慢时会无限堆积。heartbeat 已有 `CoalescedHeartbeatLines`。 |
 | **建议** | **不要**把 result/init/assistant 改成可丢。对 `stream_event` 单独做 pending cap（例如 8192）：`Arc<AtomicUsize>` 在 enqueue +1、drain -1，超限丢新的 stream_event。协议帧保持 FIFO。 |
 | **验证** | `stream_json` 里 `stream_event_*` 测试；确认 result 帧从不丢。 |

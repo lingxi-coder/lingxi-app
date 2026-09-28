@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ErrorBanner } from '../../src/renderer/components/ErrorBanner';
 import { Notifications } from '../../src/renderer/components/settings/pages/Notifications';
-import type { UseBridge } from '../../src/renderer/bridge/useBridge';
+import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
 import { defaultNotificationPreferences } from '../../src/shared/notificationPreferences';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';

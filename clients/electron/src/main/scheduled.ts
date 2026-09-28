@@ -5,7 +5,9 @@ import { basename, dirname, join } from 'node:path';
 import type { CronJobDto, CronRequestDto, CronAutomationDto, CronRunDto } from '@lingxi/bridge-client';
 import type { ScheduledScope } from '../shared/scheduled.js';
 import type { SettingsStore } from './settings.js';
-import { isSessionId, type SessionRuntime, type SessionRuntimeManager } from './bridge.js';
+import type { SessionRuntime } from './bridge.js';
+import { isSessionId } from './sessionIdentity.js';
+import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import type { ProjectSessionCatalog } from './session-catalog.js';
 import type { SessionRef } from '../shared/settings.js';
 

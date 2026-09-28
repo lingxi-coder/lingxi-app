@@ -39,10 +39,10 @@
 
 #### 证据链
 
-- [`tools/agent/src/agent.rs:1466`](../lingxi-code/tools/agent/src/agent.rs#L1466) 将本地 Agent 默认设为异步执行。
+- [`tools/agent/src/agent.rs:1466`](../crates/tools/agent/src/agent.rs#L1466) 将本地 Agent 默认设为异步执行。
 - 同文件约 1499–1521 行在 worktree 创建逻辑之前直接进入 `dispatch_async` 并返回。
 - 同文件约 856–876 行只把原始 `isolation` 和 `cwd` 搬运到 `SubagentSpawnRequest`。
-- 真正的 `create_worktree` 仅位于 [`tools/agent/src/agent.rs:1582`](../lingxi-code/tools/agent/src/agent.rs#L1582) 之后的同步路径。
+- 真正的 `create_worktree` 仅位于 [`tools/agent/src/agent.rs:1582`](../crates/tools/agent/src/agent.rs#L1582) 之后的同步路径。
 - [`agent/src/handle.rs:971`](../lingxi-code/agent/src/handle.rs#L971) 只消费 `request.cwd`，没有消费 `request.isolation`。
 
 #### 触发条件
@@ -65,7 +65,7 @@ Claude Code 2.1.203 已修复 worktree-isolated subagent 在父 checkout 执行�
 
 #### 证据链
 
-- [`tools/agent/src/agent.rs:216`](../lingxi-code/tools/agent/src/agent.rs#L216) 的模型可见 schema 声明支持 `mode: "plan"`。
+- [`tools/agent/src/agent.rs:216`](../crates/tools/agent/src/agent.rs#L216) 的模型可见 schema 声明支持 `mode: "plan"`。
 - mode 被搬运到 spawn request，但 [`agent/src/handle.rs:845`](../lingxi-code/agent/src/handle.rs#L845) 构建 child context 时没有读取 `request.mode`。
 - [`agent/src/tool_resolver.rs:215`](../lingxi-code/agent/src/tool_resolver.rs#L215) 只按静态 `AgentDefinition.permission_mode` 缩窄工具。
 - `SubagentSpawnRequest` 的注释仍将 permission-mode application 标记为 deferred。
@@ -82,11 +82,11 @@ Claude Code 2.1.203 已修复 worktree-isolated subagent 在父 checkout 执行�
 
 #### 证据链
 
-- [`apps/engine-desktop/src/background_agent.rs:97`](../lingxi-code/apps/engine-desktop/src/background_agent.rs#L97) 创建对外 Agent UUID。
+- [`apps/engine-desktop/src/background_agent.rs:97`](../crates/apps/engine-desktop/src/background_agent.rs#L97) 创建对外 Agent UUID。
 - Task registry handler 又在 [`tasks/src/handlers/local_agent.rs:232`](../lingxi-code/tasks/src/handlers/local_agent.rs#L232) 生成独立 `aXXXXXXXX` task ID。
 - Agent tool 只把对外 UUID 返回给模型。
-- TaskStop 在 [`tools/task/src/task.rs:1981`](../lingxi-code/tools/task/src/task.rs#L1981) 附近直接用输入字符串查 registry。
-- TaskOutput 在 [`tools/task/src/task.rs:2487`](../lingxi-code/tools/task/src/task.rs#L2487) 附近使用同样的直接 lookup。
+- TaskStop 在 [`tools/task/src/task.rs:1981`](../crates/tools/task/src/task.rs#L1981) 附近直接用输入字符串查 registry。
+- TaskOutput 在 [`tools/task/src/task.rs:2487`](../crates/tools/task/src/task.rs#L2487) 附近使用同样的直接 lookup。
 - 生产路径不存在 UUID/name 到 registry task ID 的 alias resolver。
 
 #### 影响
@@ -156,7 +156,7 @@ Summary、preserved tail、恢复附件和 metadata 消失，压缩前 raw histo
 
 #### 证据链
 
-- [`apps/engine-desktop/src/lib.rs:4886`](../lingxi-code/apps/engine-desktop/src/lib.rs#L4886) 为文件工具创建一份 rich read-state map。
+- [`apps/engine-desktop/src/lib.rs:4886`](../crates/apps/engine-desktop/src/lib.rs#L4886) 为文件工具创建一份 rich read-state map。
 - [`orchestrator/src/conversation.rs:1270`](../lingxi-code/orchestrator/src/conversation.rs#L1270) 又创建独立 legacy Vec 和另一份 rich map。
 - [`orchestrator/src/turn_loop.rs:122`](../lingxi-code/orchestrator/src/turn_loop.rs#L122) 成功执行 Read/Edit/Write 后只更新 legacy Vec。
 - 文件工具内部只更新 `BuiltinToolContext.read_file_state`。
@@ -176,8 +176,8 @@ Summary、preserved tail、恢复附件和 metadata 消失，压缩前 raw histo
 
 #### 证据链
 
-- [`tools/meta/src/tool_search.rs:105`](../lingxi-code/tools/meta/src/tool_search.rs#L105) 的生产构造器安装空 `StaticRegistryView`。
-- [`tools/meta/src/lib.rs:21`](../lingxi-code/tools/meta/src/lib.rs#L21) 的生产注册路径使用该空构造器。
+- [`tools/meta/src/tool_search.rs:105`](../crates/tools/meta/src/tool_search.rs#L105) 的生产构造器安装空 `StaticRegistryView`。
+- [`tools/meta/src/lib.rs:21`](../crates/tools/meta/src/lib.rs#L21) 的生产注册路径使用该空构造器。
 - 生产代码没有使用 `with_view` 注入真实 registry；它只出现在测试。
 - `Tool::should_defer()` 被多个工具实现，但没有生产 consumer。
 - [`tool-api/src/registry.rs:69`](../lingxi-code/tool-api/src/registry.rs#L69) 仍返回所有 enabled builtin/dynamic tools。
@@ -199,7 +199,7 @@ Claude Code 默认启用 Tool Search；MCP tools 应 deferred，并在需要时�
 
 #### 证据链
 
-- [`apps/engine-desktop/src/lib.rs:3993`](../lingxi-code/apps/engine-desktop/src/lib.rs#L3993) 只把 `--add-dir` 合并到 permission policy。
+- [`apps/engine-desktop/src/lib.rs:3993`](../crates/apps/engine-desktop/src/lib.rs#L3993) 只把 `--add-dir` 合并到 permission policy。
 - 文件工具的 `trusted_dirs` 仍只有启动 cwd。
 - Bash cwd containment 也只认静态 workspace。
 - [`mcp/src/inbound.rs:17`](../lingxi-code/mcp/src/inbound.rs#L17) 的 `roots/list` 固定返回单 cwd。
@@ -243,8 +243,8 @@ Claude Code 2.1.205 已明确修复“一个插件 LSP 初始化失败阻止另�
 
 #### 证据链
 
-- [`apps/engine-desktop/src/lib.rs:3957`](../lingxi-code/apps/engine-desktop/src/lib.rs#L3957) 只解析 user/project/local 三层 permission rules。
-- [`apps/engine-desktop/src/lib.rs:4024`](../lingxi-code/apps/engine-desktop/src/lib.rs#L4024) 明确说明 managed raw settings 仅用于 sandbox derivation。
+- [`apps/engine-desktop/src/lib.rs:3957`](../crates/apps/engine-desktop/src/lib.rs#L3957) 只解析 user/project/local 三层 permission rules。
+- [`apps/engine-desktop/src/lib.rs:4024`](../crates/apps/engine-desktop/src/lib.rs#L4024) 明确说明 managed raw settings 仅用于 sandbox derivation。
 - 同处注释明确写明 managed permission rules 未加载。
 - `PermissionRuleSource::PolicySettings` 虽存在，但没有进入该生产构建链。
 
@@ -283,12 +283,12 @@ Claude Code 2.1.205 专门修改后台 task notification，要求明确声明没
 
 #### 证据链
 
-- [`apps/cli/src/background_dispatch.rs:19`](../lingxi-code/apps/cli/src/background_dispatch.rs#L19) 明确没有 control socket/live background protocol。
-- [`apps/cli/src/commands/bg_worker.rs:31`](../lingxi-code/apps/cli/src/commands/bg_worker.rs#L31) 明确没有 PTY、IPC、respawn、watchdog 和 upgrade takeover。
+- [`apps/cli/src/background_dispatch.rs:19`](../crates/apps/cli/src/background_dispatch.rs#L19) 明确没有 control socket/live background protocol。
+- [`apps/cli/src/commands/bg_worker.rs:31`](../crates/apps/cli/src/commands/bg_worker.rs#L31) 明确没有 PTY、IPC、respawn、watchdog 和 upgrade takeover。
 - worker 只执行一次 `run_turn`。
-- [`apps/cli/src/commands/daemon.rs:314`](../lingxi-code/apps/cli/src/commands/daemon.rs#L314) 将 worker crash 直接标记为永久 failed，不恢复。
-- [`apps/cli/src/commands/agents.rs:484`](../lingxi-code/apps/cli/src/commands/agents.rs#L484) 的 attach 实际启动第二个 `--resume` CLI 进程，而不是连接原 worker。
-- [`apps/cli/src/background_dispatch.rs:200`](../lingxi-code/apps/cli/src/background_dispatch.rs#L200) 将 dispatch env 固定为空 map。
+- [`apps/cli/src/commands/daemon.rs:314`](../crates/apps/cli/src/commands/daemon.rs#L314) 将 worker crash 直接标记为永久 failed，不恢复。
+- [`apps/cli/src/commands/agents.rs:484`](../crates/apps/cli/src/commands/agents.rs#L484) 的 attach 实际启动第二个 `--resume` CLI 进程，而不是连接原 worker。
+- [`apps/cli/src/background_dispatch.rs:200`](../crates/apps/cli/src/background_dispatch.rs#L200) 将 dispatch env 固定为空 map。
 
 #### 影响
 
@@ -309,9 +309,9 @@ Claude Code 2.1.203–2.1.207 连续修复了后台 daemon token 恢复、attach
 
 #### 证据链
 
-- [`tools/task/src/todo_store.rs:11`](../lingxi-code/tools/task/src/todo_store.rs#L11) 明确将 Claude Code 的跨进程文件锁替换为进程内 mutex。
-- [`tools/task/src/todo_store.rs:189`](../lingxi-code/tools/task/src/todo_store.rs#L189) 的 high-water mark 是普通 read/write。
-- [`tools/task/src/todo_store.rs:282`](../lingxi-code/tools/task/src/todo_store.rs#L282) 的 update 是非原子 read-modify-write。
+- [`tools/task/src/todo_store.rs:11`](../crates/tools/task/src/todo_store.rs#L11) 明确将 Claude Code 的跨进程文件锁替换为进程内 mutex。
+- [`tools/task/src/todo_store.rs:189`](../crates/tools/task/src/todo_store.rs#L189) 的 high-water mark 是普通 read/write。
+- [`tools/task/src/todo_store.rs:282`](../crates/tools/task/src/todo_store.rs#L282) 的 update 是非原子 read-modify-write。
 - 当前项目已经存在 daemon、后台 worker、attach/resume 和多个进程访问同一 session/task directory 的路径。
 
 #### 影响
@@ -327,8 +327,8 @@ Claude Code 2.1.203–2.1.207 连续修复了后台 daemon token 恢复、attach
 | 级别 | Gap | 证据与影响 |
 |---|---|---|
 | P2 | MCP 最新配置未闭环 | `.mcp.json` parser 缺少 `request_timeout_ms` 和 server-level `alwaysLoad`：[`mcp/src/json_config.rs:71`](../lingxi-code/mcp/src/json_config.rs#L71)。Timeout 仍只读全局 env：[`mcp/src/client.rs:903`](../lingxi-code/mcp/src/client.rs#L903)。tools/resources/prompts list-changed 也没有动态刷新。 |
-| P2 | `--agent` 实际为 no-op | [`apps/engine-desktop/src/lib.rs:5723`](../lingxi-code/apps/engine-desktop/src/lib.rs#L5723) 只 resolve/log，注释明确 main-thread application pending；没有替换主线程 system prompt、tool restrictions、model、hooks 或 MCP。 |
-| P2 | `.worktreeinclude` 未实现 | Agent 创建 worktree 固定传 `&[]`：[`tools/agent/src/agent.rs:1594`](../lingxi-code/tools/agent/src/agent.rs#L1594)。没有 parser 或 composition wiring。 |
+| P2 | `--agent` 实际为 no-op | [`apps/engine-desktop/src/lib.rs:5723`](../crates/apps/engine-desktop/src/lib.rs#L5723) 只 resolve/log，注释明确 main-thread application pending；没有替换主线程 system prompt、tool restrictions、model、hooks 或 MCP。 |
+| P2 | `.worktreeinclude` 未实现 | Agent 创建 worktree 固定传 `&[]`：[`tools/agent/src/agent.rs:1594`](../crates/tools/agent/src/agent.rs#L1594)。没有 parser 或 composition wiring。 |
 | P2 | Hook 返回值被解析但不应用 | `displayContent`、`suppressOriginalPrompt` 均保留 TODO：[`hooks/src/response.rs:123`](../lingxi-code/hooks/src/response.rs#L123)。MessageDisplay aggregate 被丢弃：[`orchestrator/src/conversation.rs:4264`](../lingxi-code/orchestrator/src/conversation.rs#L4264)。Setup/PostCompact 也因缺少 trigger 而跳过 matcher。 |
 | P2 | 内部 meta 消息被持久化为真实 user | [`orchestrator/src/conversation.rs:3105`](../lingxi-code/orchestrator/src/conversation.rs#L3105) 调用 `ConversationMessage::user`，其 `is_meta=false`；正确构造器位于 [`protocol/src/messages.rs:230`](../lingxi-code/protocol/src/messages.rs#L230)。会污染 title、first/last prompt、branch 和 resume。 |
 | P2 | Plugin userConfig 不生效 | Sensitive 值只生成 Null：[`plugin/src/loader.rs:27`](../lingxi-code/plugin/src/loader.rs#L27)；解析结果在 [`plugin/src/manager.rs:483`](../lingxi-code/plugin/src/manager.rs#L483) 被丢弃。`pluginConfigs` scopes、secure storage、subprocess env 和 `${user_config.*}` substitution 未闭环。 |

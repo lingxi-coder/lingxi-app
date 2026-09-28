@@ -31,7 +31,7 @@
   },
   "schema_version": 2,
   "sdk_integration": {
-    "source_resolver": "lingxi-code/scripts/mobile_linux_source.py",
+    "source_resolver": "scripts/lib/mobile_linux_source.py",
     "android_artifact_kind": "native-support-only",
     "ios_framework": "MobileLinuxNativeSupport.xcframework",
     "contains_rust_core": false

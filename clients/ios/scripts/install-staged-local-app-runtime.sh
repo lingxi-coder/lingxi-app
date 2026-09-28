@@ -2,7 +2,7 @@
 # Install a staged local-app runtime tree into an app bundle's resources.
 #
 # This lives in a script rather than inline in the Xcode build phase so the
-# removal-and-copy is reachable from lingxi-code/scripts/mobile-linux/
+# removal-and-copy is reachable from scripts/local-apps/
 # test-local-app-supply-chain.sh. The phase body it replaces was not runnable
 # by any test, so the chmod below shipped unverified.
 set -euo pipefail

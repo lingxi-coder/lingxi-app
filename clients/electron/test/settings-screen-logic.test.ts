@@ -9,7 +9,7 @@ import {
   SETTINGS_SIDEBAR_TOP_INSET,
 } from '../src/renderer/components/settings/SettingsScreen';
 import { projectDirFromSnapshot } from '../src/renderer/components/settings/useEngineSettings';
-import type { SettingsSnapshotEvent } from '../src/renderer/bridge/useBridge';
+import type { SettingsSnapshotEvent } from '../src/renderer/bridge/bridgeTypes.js';
 
 test('resolveInitialPage opens the provider-credentials deep link when a provider id is given', () => {
   assert.equal(resolveInitialPage(undefined, 'anthropic'), 'provider-credentials');

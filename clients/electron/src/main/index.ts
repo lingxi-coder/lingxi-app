@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { SessionRuntimeManager, stopLegacyOrphanBridges, type SessionRef } from './bridge.js';
+import { stopLegacyOrphanBridges } from './bridgeDiscovery.js';
+import type { SessionRef } from './bridgeTypes.js';
+import { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import {
   createMacCredentialBrokerClient,
   resolveProviderCredential,

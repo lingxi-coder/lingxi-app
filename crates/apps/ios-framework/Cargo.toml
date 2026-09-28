@@ -1,0 +1,138 @@
+[package]
+name = "ios-framework"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P12 → M10-F3: the iOS UniFFI packager crate. Wraps the SHARED session host
+# (`harness_runtime::mobile::MobileEngineHandle`, F3-04 — re-exported, not re-derived)
+# behind the iOS-specific `Platform`-construction wrapper, accepting
+# foreign-supplied (Swift) callback objects (camera / audio / share) to build an
+# `IosPlatform`.
+#
+# UniFFI: F3-00 vendored/pinned `uniffi` 0.28.3 offline, so the `uniffi` feature
+# (default-on) lights up the real FFI surface — the re-exported handle is a
+# `uniffi::Object`, the listener a callback interface, the DTOs UniFFI types.
+
+# M10-P1a: linkable crate types for the iOS app + bindgen introspection.
+#   - "staticlib" — the archive lipo'd into the per-arch slices of the
+#     LingxiCodeFFI.xcframework the iOS build script assembles + links.
+#   - "cdylib"    — a host dylib `uniffi-bindgen --library` introspects to emit
+#     the Swift bindings (`cargo build -p ios-framework --features uniffi`).
+#   - "lib"       — kept so the host UniFFI tests (`cargo test -p ios-framework
+#     --features uniffi`) and downstream Rust crates still link the rlib.
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
+
+# M10-P1a: the offline UniFFI bindings generator. Behind the `cli` feature so the
+# default build never pulls the bindgen/clap toolchain; only built on demand via
+# `cargo build -p ios-framework --features cli --bin uniffi-bindgen`. The bin's
+# source is itself `#[cfg(feature = "cli")]`-gated (a near-empty stub otherwise)
+# and `required-features` keeps it out of a no-`cli` `cargo build`.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+# F3-04: default-on so `cargo build -p ios-framework` exercises the real FFI
+# surface. It activates `harness-runtime/uniffi` (which pulls the shared session
+# host + the `client-adapter`/`client-protocol` UniFFI types) and this crate's
+# own `setup_scaffolding!`. `uniffi` is offline-clear since F3-00.
+default = ["uniffi"]
+uniffi = [
+    "dep:uniffi",
+    "dep:async-trait",
+    "dep:client-protocol",
+    "dep:mobile-linux-ios",
+    "dep:platform-posix-minimal",
+    "dep:tokio",
+    "dep:orchestrator",
+    "dep:serde_json",
+    "dep:local-apps",
+    "harness-runtime/uniffi",
+]
+# M10-P1b: opt-in bindings-generator toolchain for the `uniffi-bindgen` bin.
+#
+# The bin is NOT the stock `uniffi::uniffi_bindgen_main()` — UniFFI 0.28.3's
+# `--library` pipeline panics on our cross-crate `Result<(), client_protocol::
+# ClientError>` throw type (see the bin's module docs). Instead the bin
+# reimplements the Swift `generate --library` path over UniFFI's PUBLIC library
+# APIs (`uniffi_bindgen` + `uniffi_meta`), inserting one surgical metadata fixup
+# that re-tags the external error throw type so 0.28.3 can render it.
+#
+# `uniffi/bindgen` pulls the `uniffi_bindgen` crate; we also name `uniffi_bindgen`
+# and `uniffi_meta` directly (the `uniffi` facade only re-exports a partial
+# surface). `cargo-metadata` is deliberately NOT enabled: we ship no per-crate
+# `uniffi.toml`, so the bin uses `EmptyCrateConfigSupplier` and never shells out
+# to `cargo metadata` — avoiding the pinned-cargo edition-2024 manifest-parse
+# failure the old `--metadata-no-deps` flag papered over. All transitive deps are
+# already in the offline cargo cache from F3-00, so this resolves `--offline`.
+# NOT in `default` — only the bindgen build asks for it.
+cli = [
+    "uniffi",
+    "uniffi/bindgen",
+    "dep:uniffi_bindgen",
+    "dep:uniffi_meta",
+    "dep:camino",
+    "dep:toml",
+    "dep:anyhow",
+]
+
+[dependencies]
+mobile-linux-api.workspace = true
+harness-runtime = { workspace = true, default-features = false, features = ["mobile"] }
+skill-api = { workspace = true }
+platform-api = { workspace = true }
+protocol = { workspace = true }
+branding.workspace = true
+thiserror.workspace = true
+sha2 = "0.10"
+
+# F3-04: optional UniFFI dep — pulled under the (default) `uniffi` feature so the
+# re-exported shared-host scaffolding lands in this crate's library. Pinned
+# offline in F3-00 (workspace dep: 0.28.3 + `tokio` for the F3-07 async executor).
+uniffi = { workspace = true, optional = true }
+# The host test shim (a portable fake `Platform`) + the DTO/orchestrator types
+# the F3-04 handle tests name. Optional + pulled under `uniffi` so the plain
+# (no-feature) build stays minimal. All engine-tier (no `apps/*` edge).
+async-trait = { workspace = true, optional = true }
+# Opaque-blob serde for the iOS Keychain secure-storage bridge: `SecureStorageData`
+# is serialized to bytes the native side persists. Optional + pulled under `uniffi`.
+serde_json = { workspace = true, optional = true }
+client-protocol = { workspace = true, optional = true }
+mobile-linux-ios = { workspace = true, optional = true }
+platform-posix-minimal = { workspace = true, optional = true }
+orchestrator = { workspace = true, optional = true }
+# The engine's own app-id rule (`ids::is_valid_app_id`) — the boot-time cwd
+# validator accepts `apps/<id>/workspace` scopes with the SAME derivation the
+# local-apps service mints ids with, never a twin regex.
+local-apps = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
+
+# M10-P1b: the `cli`-gated bindgen-bin deps. Pinned to match the offline-vendored
+# `uniffi` 0.28.3 toolchain exactly: `uniffi_bindgen`/`uniffi_meta` are `=0.28.3`
+# so the bin shares the SAME `ComponentInterface` / `Metadata` types the `uniffi`
+# facade compiles against; `toml = "0.5"` matches `uniffi_bindgen`'s own `toml`
+# dep so `Component<toml::value::Table>` type-checks against the same crate
+# instance. All already in the F3-00 offline cache; none are pulled by `default`.
+uniffi_bindgen = { version = "=0.28.3", optional = true }
+uniffi_meta = { version = "=0.28.3", optional = true }
+camino = { version = "1", optional = true }
+toml = { version = "0.5", optional = true }
+anyhow = { version = "1", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+platform-ios = { workspace = true }
+
+[dev-dependencies]
+# F3-04: a sandboxed cwd/claude_home root for the handle-host tests (the host
+# fake `Platform` is rooted at a temp dir).
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+branding.workspace = true

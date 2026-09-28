@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { UseBridge } from '../bridge/useBridge';
+import type { UseBridge } from '../bridge/bridgeTypes.js';
 import { useT } from '../theme/ThemeContext';
 import { commandMenuStyle } from './MentionMenu';
 import { Icon } from './Icon';

@@ -193,7 +193,7 @@ async function main() {
   const electronExecutable = join(electronApp, 'Contents', 'MacOS', 'Electron');
   const sidecar = resolve(
     process.env['LINGXI_BRIDGE_SERVER_BIN'] ??
-      join(repoRoot, 'lingxi-code', 'target', 'release', 'bridge-server'),
+      join(repoRoot, 'target', 'release', 'bridge-server'),
   );
 
   // Reject the most expensive and most common packaging mistakes before building.

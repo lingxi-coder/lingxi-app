@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { SessionRuntime, SessionRuntimeManager } from '../src/main/bridge';
+import { SessionRuntime } from '../src/main/bridge.js';
+import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 
 const session = { access_token: 'test-private-token', expires_at: 123, fedramp: false };
 const command = { type: 'run_slash_command', raw: '/fusion compare approaches' };

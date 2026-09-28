@@ -6,14 +6,24 @@ on:
       - '.github/workflows/desktop-packages.yml'
       - 'clients/electron/**'
       - 'clients/shared/**'
-      - 'lingxi-code/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'scripts/**'
+      - 'packaging/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/desktop-packages.yml'
       - 'clients/electron/**'
       - 'clients/shared/**'
-      - 'lingxi-code/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'scripts/**'
+      - 'packaging/**'
   workflow_dispatch:
 
 concurrency:
@@ -70,7 +80,7 @@ jobs:
 
       - name: Check and test native Rust host
         shell: bash
-        working-directory: lingxi-code
+        working-directory: .
         run: |
           cargo check --locked -p bridge-server
           cargo test --locked -p client-protocol
@@ -78,12 +88,12 @@ jobs:
 
       - name: Test POSIX secure storage
         if: matrix.platform != 'win32'
-        working-directory: lingxi-code
+        working-directory: .
         run: cargo test --locked -p platform-posix secure_storage --lib
 
       - name: Test Windows Credential Manager storage
         if: matrix.platform == 'win32'
-        working-directory: lingxi-code
+        working-directory: .
         run: cargo test --locked -p platform-windows --lib
 
       - name: Build and test shared SDK
@@ -196,7 +206,7 @@ jobs:
           EOF
           harness="$RUNNER_TEMP/lingxi-development-broker-integration"
           xcrun swiftc -O -parse-as-library -target arm64-apple-macos13.0 \
-            lingxi-code/platforms/macos-credential-broker/CredentialBrokerIntegrationMain.swift \
+            clients/electron/native/credential-broker/CredentialBrokerIntegrationMain.swift \
             -o "$harness"
           /usr/bin/codesign --force --sign "$LINGXI_DEV_IDENTITY" --options runtime \
             --timestamp -i com.lingxi.code.cli.development "$harness"

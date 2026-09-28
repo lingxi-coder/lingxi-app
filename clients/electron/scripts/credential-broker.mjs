@@ -32,7 +32,7 @@ export function brokerIdentifiers(channel = BROKER_CHANNEL) {
   };
 }
 
-const SWIFT_SOURCE_ROOT = resolve(repoRoot, 'lingxi-code', 'platforms', 'macos-credential-broker');
+const SWIFT_SOURCE_ROOT = resolve(repoRoot, 'clients/electron/native/credential-broker');
 const SWIFT_TARGET_BY_TRIPLE = Object.freeze({
   'aarch64-apple-darwin': 'arm64-apple-macos13.0',
   'x86_64-apple-darwin': 'x86_64-apple-macos13.0',

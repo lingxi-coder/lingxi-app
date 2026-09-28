@@ -3,9 +3,13 @@ import assert from 'node:assert/strict';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
-import { emptyRuntimeCenterState, openRuntimeCenterItem, type RuntimeCenterState } from '../src/renderer/bridge/runtimeCenterState';
+import {
+  emptyRuntimeCenterState,
+  openRuntimeCenterItem,
+  type RuntimeCenterState,
+} from '../src/renderer/bridge/runtimeCenterState';
 import { beginSideQuestion, finishSideQuestion } from '../src/renderer/bridge/sideQuestion';
-import type { UseBridge } from '../src/renderer/bridge/useBridge';
+import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
 import { RuntimeCenterInspector } from '../src/renderer/components/RuntimeCenter';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';

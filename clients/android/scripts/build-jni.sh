@@ -41,7 +41,7 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"                  # clients/android
 REPO_ROOT="$(cd "${ANDROID_DIR}/../.." && pwd)"               # worktree root
-CARGO_DIR="${REPO_ROOT}/lingxi-code"                          # Rust workspace
+CARGO_DIR="${REPO_ROOT}"                          # Rust workspace
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${CARGO_DIR}/target}"
 
 CRATE="android-aar"
@@ -49,7 +49,7 @@ LIB_STEM="android_aar"                # cargo turns the `-` into `_`
 SONAME="lib${LIB_STEM}.so"
 HOST_DYLIB="lib${LIB_STEM}.dylib"     # macOS host cdylib (bindgen introspection)
 
-UNIFFI_CONFIG="${CARGO_DIR}/apps/${CRATE}/uniffi.toml"
+UNIFFI_CONFIG="${CARGO_DIR}/crates/apps/${CRATE}/uniffi.toml"
 VOICE_MANIFEST="${ANDROID_DIR}/../voice/models.json"
 
 [[ -f "${VOICE_MANIFEST}" ]] || {

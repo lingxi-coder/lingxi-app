@@ -35,7 +35,7 @@ export function provenanceLabel(d: Provenance): string {
  * 每一层「值落到哪、影响谁」的一句话。这是整套设置界面里唯一解释层含义的地方——
  * 三个裸标签（用户 / 项目 / 本地）本身什么都不说明，而它们的差别有真实后果：
  * `project` 层的文件随仓库提交，团队每个人都会拿到；`local` 层的同名文件被
- * gitignore（`lingxi-code/.gitignore`），只在本机生效。一个人在「项目」层加一条
+ * gitignore（`.gitignore`），只在本机生效。一个人在「项目」层加一条
  * 权限规则，是在替整个团队做决定——今天界面上没有任何东西说过这件事。
  *
  * 刻意不写死具体路径：真实路径由引擎在 `files_json` 里逐层回传，界面显示的必须是

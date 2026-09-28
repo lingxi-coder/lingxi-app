@@ -3,7 +3,7 @@
 Audit date: 2026-06-24
 Binary: `/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude`
 TS source: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/`
-LingXi posix: `lingxi-code/platforms/posix/src/` + `lingxi-code/tools/shell/src/bash.rs`
+LingXi posix: `lingxi-code/platforms/posix/src/` + `crates/tools/shell/src/bash.rs`
 
 **Confirmed gaps: 7 (HIGH: 2, MEDIUM: 3, LOW: 2)**
 
@@ -52,7 +52,7 @@ At session start, claude-code runs `createAndSaveSnapshot(binShell)`:
    - Without snapshot: `['-c', '-l', commandString]` (login shell as fallback)
 5. The command build is: `source <snapshot> || true && <sessionEnvScript> && <disableExtglob> && eval <cmd> && pwd -P >| <cwdFile>`
 
-**LingXi behavior** (`lingxi-code/tools/shell/src/bash.rs` lines 1206-1209):
+**LingXi behavior** (`crates/tools/shell/src/bash.rs` lines 1206-1209):
 
 > "the snapshot mechanism is deferred here, so `lastSnapshotFilePath` is always undefined ⇒ `skipLoginShell == false` ⇒ `-l` always added"
 
@@ -77,7 +77,7 @@ if (shellOverride) {
 // fallback: check SHELL env, then probe /bin/bash, /bin/zsh, etc.
 ```
 
-**LingXi behavior** (`lingxi-code/tools/shell/src/bash.rs:257-263` — `resolve_shell_path()`):
+**LingXi behavior** (`crates/tools/shell/src/bash.rs:257-263` — `resolve_shell_path()`):
 
 ```rust
 pub fn resolve_shell_path() -> &'static str {
@@ -186,7 +186,7 @@ for (const [key, value] of getSessionEnvVars()) {
 
 Session env vars (set by hook-delivered env files and sourced by `getSessionEnvironmentScript()`) are injected as explicit env overrides into each bash command spawn.
 
-**LingXi behavior** (`lingxi-code/tools/shell/src/bash.rs:1117, 1211`):
+**LingXi behavior** (`crates/tools/shell/src/bash.rs:1117, 1211`):
 
 Both foreground and background paths build `ProcessCommand { env: HashMap::new(), ... }`. The bash spawn env comes entirely from the inherited parent process env + the fixed overrides in `PosixProcess::build_command()` (CLAUDECODE, AI_AGENT, GIT_EDITOR, SHELL, CLAUDE_CODE_CHILD_SESSION). No dynamic session-scoped env vars are injected.
 

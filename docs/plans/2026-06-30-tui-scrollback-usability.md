@@ -13,8 +13,8 @@
 ## Task 1: Lock current keyboard scroll behavior with viewport-height tests
 
 **Files:**
-- Modify: `lingxi-code/tui/tests/behavior_scroll.rs`
-- Modify if needed: `lingxi-code/tui/tests/behavior_virtual_window.rs`
+- Modify: `crates/tui/tests/behavior_scroll.rs`
+- Modify if needed: `crates/tui/tests/behavior_virtual_window.rs`
 
 **Step 1: Add/confirm failing keyboard mapping tests**
 
@@ -54,7 +54,7 @@ Expected: existing scroll math should already pass. If not, capture the failure 
 **Step 3: Commit**
 
 ```bash
-git add lingxi-code/tui/tests/behavior_scroll.rs lingxi-code/tui/tests/behavior_virtual_window.rs
+git add crates/tui/tests/behavior_scroll.rs crates/tui/tests/behavior_virtual_window.rs
 git commit -m "test(tui): lock scrollback keyboard scrolling"
 ```
 
@@ -63,9 +63,9 @@ git commit -m "test(tui): lock scrollback keyboard scrolling"
 ## Task 2: Route live keyboard scroll events through the real viewport height
 
 **Files:**
-- Modify: `lingxi-code/tui/src/root.rs:1450-1485` (current `scroll_with_viewport(st, dir, viewport)` call site)
-- Inspect: `lingxi-code/tui/src/events/keymap.rs:160-180` and `tui/src/app.rs:600-612`
-- Test: `lingxi-code/tui/tests/cross_state_seam_test.rs` or add focused behavior test if an event-level helper exists
+- Modify: `crates/tui/src/root.rs:1450-1485` (current `scroll_with_viewport(st, dir, viewport)` call site)
+- Inspect: `crates/tui/src/events/keymap.rs:160-180` and `tui/src/app.rs:600-612`
+- Test: `crates/tui/tests/cross_state_seam_test.rs` or add focused behavior test if an event-level helper exists
 
 **Step 1: Write failing event-level test**
 
@@ -116,7 +116,7 @@ Expected: pass.
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tui/src/root.rs lingxi-code/tui/tests/cross_state_seam_test.rs
+git add crates/tui/src/root.rs crates/tui/tests/cross_state_seam_test.rs
 git commit -m "fix(tui): scroll chat with live viewport height"
 ```
 
@@ -125,16 +125,16 @@ git commit -m "fix(tui): scroll chat with live viewport height"
 ## Task 3: Add mouse/trackpad wheel scrolling without stealing terminal selection
 
 **Files:**
-- Modify: `lingxi-code/tui/src/root.rs` (iocraft/crossterm mouse event conversion)
-- Inspect: `lingxi-code/tui/src/terminal.rs:21-51` (only disables mouse capture on restore)
-- Test: add/extend a root event test under `lingxi-code/tui/tests/`
+- Modify: `crates/tui/src/root.rs` (iocraft/crossterm mouse event conversion)
+- Inspect: `crates/tui/src/terminal.rs:21-51` (only disables mouse capture on restore)
+- Test: add/extend a root event test under `crates/tui/tests/`
 
 **Step 1: Confirm mouse capture state**
 
 Search in code before editing:
 
 ```bash
-grep -RIn "EnableMouseCapture\|DisableMouseCapture\|MouseEvent\|FullscreenMouse" lingxi-code/tui/src
+grep -RIn "EnableMouseCapture\|DisableMouseCapture\|MouseEvent\|FullscreenMouse" crates/tui/src
 ```
 
 Expected: no broad `EnableMouseCapture` in app code; `DisableMouseCapture` only on restore. If broad capture exists, disable/narrow it before adding wheel handling.
@@ -189,7 +189,7 @@ In a real terminal:
 **Step 6: Commit**
 
 ```bash
-git add lingxi-code/tui/src/root.rs lingxi-code/tui/tests/<new-or-existing-test>.rs
+git add crates/tui/src/root.rs crates/tui/tests/<new-or-existing-test>.rs
 git commit -m "fix(tui): scroll chat with mouse wheel"
 ```
 
@@ -198,9 +198,9 @@ git commit -m "fix(tui): scroll chat with mouse wheel"
 ## Task 4: Render scroll position feedback when not at bottom
 
 **Files:**
-- Modify: `lingxi-code/tui/src/components/virtual_message_list.rs`
-- Possibly modify: `lingxi-code/tui/src/screens/repl.rs` if viewport chrome belongs there
-- Test: add snapshot or behavior test in `lingxi-code/tui/tests/behavior_virtual_window.rs` or snapshot tests
+- Modify: `crates/tui/src/components/virtual_message_list.rs`
+- Possibly modify: `crates/tui/src/screens/repl.rs` if viewport chrome belongs there
+- Test: add snapshot or behavior test in `crates/tui/tests/behavior_virtual_window.rs` or snapshot tests
 
 **Step 1: Write failing test**
 
@@ -256,7 +256,7 @@ Expected: pass.
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tui/src/components/virtual_message_list.rs lingxi-code/tui/src/screens/repl.rs lingxi-code/tui/tests/<test-file>.rs
+git add crates/tui/src/components/virtual_message_list.rs crates/tui/src/screens/repl.rs crates/tui/tests/<test-file>.rs
 git commit -m "feat(tui): show scrollback position"
 ```
 
@@ -265,9 +265,9 @@ git commit -m "feat(tui): show scrollback position"
 ## Task 5: Ensure prompt cursor is visible while prompt is focused
 
 **Files:**
-- Inspect/modify: `lingxi-code/tui/src/screens/repl.rs:330-360` (current `show_cursor: true`)
-- Inspect/modify: `lingxi-code/tui/src/components/prompt_input/mod.rs:387-432`
-- Test: `lingxi-code/tui/tests/prompt_input_footer_snapshot.rs` or `render_repl_screen.rs`
+- Inspect/modify: `crates/tui/src/screens/repl.rs:330-360` (current `show_cursor: true`)
+- Inspect/modify: `crates/tui/src/components/prompt_input/mod.rs:387-432`
+- Test: `crates/tui/tests/prompt_input_footer_snapshot.rs` or `render_repl_screen.rs`
 
 **Step 1: Write failing cursor visibility test**
 
@@ -316,7 +316,7 @@ Expected: pass.
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tui/src/screens/repl.rs lingxi-code/tui/src/components/prompt_input/mod.rs lingxi-code/tui/tests/<test-file>.rs
+git add crates/tui/src/screens/repl.rs crates/tui/src/components/prompt_input/mod.rs crates/tui/tests/<test-file>.rs
 git commit -m "fix(tui): keep prompt cursor visible"
 ```
 
@@ -325,8 +325,8 @@ git commit -m "fix(tui): keep prompt cursor visible"
 ## Task 6: Preserve terminal-native copy behavior
 
 **Files:**
-- Inspect/modify: `lingxi-code/tui/src/root.rs`
-- Inspect: `lingxi-code/tui/src/terminal.rs`
+- Inspect/modify: `crates/tui/src/root.rs`
+- Inspect: `crates/tui/src/terminal.rs`
 - Test/manual QA required
 
 **Step 1: Verify no broad mouse capture**
@@ -334,7 +334,7 @@ git commit -m "fix(tui): keep prompt cursor visible"
 Run:
 
 ```bash
-grep -RIn "EnableMouseCapture\|DisableMouseCapture" lingxi-code/tui/src
+grep -RIn "EnableMouseCapture\|DisableMouseCapture" crates/tui/src
 ```
 
 Expected acceptable state:
@@ -365,7 +365,7 @@ If the backend cannot support both wheel capture and drag selection, update the 
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tui/src/root.rs lingxi-code/tui/src/terminal.rs docs/superpowers/specs/2026-06-30-tui-scrollback-usability-design.md
+git add crates/tui/src/root.rs crates/tui/src/terminal.rs docs/superpowers/specs/2026-06-30-tui-scrollback-usability-design.md
 git commit -m "fix(tui): preserve terminal-native scrollback copy"
 ```
 

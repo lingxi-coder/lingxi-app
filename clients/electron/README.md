@@ -84,10 +84,10 @@ npm run build
 For development launch, build the sidecar first:
 
 ```bash
-cd lingxi-code
+cd ../..
 cargo build -p bridge-server --bin bridge-server
 
-cd ../clients/electron
+cd clients/electron
 npm run dev
 ```
 
@@ -97,15 +97,15 @@ resolve the sidecar exclusively from their signed resources.
 ## Build the internal Beta artifact
 
 ```bash
-cd lingxi-code
+cd ../..
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 RUSTFLAGS="--remap-path-prefix=${REPO_ROOT}=. \
 --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo-home \
 --remap-path-prefix=$HOME/.rustup=/rustup" \
   cargo build --locked --release -p bridge-server --bin bridge-server
 
-cd ../clients/electron
-npm run package:mac
+cd clients/electron
+npm run package:mac:flare
 npm run verify:package
 ```
 
@@ -174,11 +174,11 @@ non-interactively on one machine. Manual follow-up is still required for
 Gatekeeper approval on transferred builds, Developer ID signing/notarization,
 and native trust-dialog copy on a tester's host.
 
-Rust release gates are run from `lingxi-code/`:
+Rust release gates are run from the repository root:
 
 ```bash
 cargo fmt --check
-cargo test -p bridge -p bridge-server
+cargo test --locked -p bridge-server
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 RUSTFLAGS="--remap-path-prefix=${REPO_ROOT}=. \
 --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo-home \

@@ -50,7 +50,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 //   workspace    = <repo>/lingxi-code   (the cargo workspace)
 const sharedDir = resolve(__dirname, '..');
 const repoRoot = resolve(sharedDir, '..', '..');
-const cargoWorkspace = join(repoRoot, 'lingxi-code');
+const cargoWorkspace = repoRoot;
 
 /** Print a clearly-prefixed status line to stderr (stdout is the transcript). */
 function log(msg) {

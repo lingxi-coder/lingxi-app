@@ -2,12 +2,21 @@ import { useInspectorMotion } from './useInspectorMotion';
 import { SummaryContextActions } from './BetaDesktop';
 import { PlanDocument } from './PlanDocument';
 import { GitReview, GitEnvironment } from './GitReview';
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react';
 import type { PlanTaskDto, SessionAgentSummaryDto, TaskRowDto } from '@lingxi/bridge-client';
 
 import { conversationFromMessages } from '../bridge/conversation';
 import { orderedTasks } from '../bridge/desktopState';
-import type { UseBridge } from '../bridge/useBridge';
+import type { UseBridge } from '../bridge/bridgeTypes.js';
 import {
   planRuntimeItemId,
   runtimeCenterItemKey,

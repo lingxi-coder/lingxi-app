@@ -69,10 +69,10 @@
 
 ## Files changed
 
-- `lingxi-code/apps/cli/src/argv.rs` — +524 lines (flag defs, is_json_output(), system-prompt wiring)
-- `lingxi-code/apps/cli/src/init.rs` — updated to use `Argv::default()`
-- `lingxi-code/apps/cli/src/lib.rs` — output-format wire-up
-- `lingxi-code/apps/cli/src/mode.rs` — is_json_output() consumption
-- `lingxi-code/apps/cli/src/run.rs` — system-prompt wire-up
-- `lingxi-code/apps/engine-desktop/src/lib.rs` — system_prompt_override/append_system_prompt fields + build() injection
-- `lingxi-code/apps/bridge-server/src/boot.rs` — Argv::default() update
+- `crates/apps/cli/src/argv.rs` — +524 lines (flag defs, is_json_output(), system-prompt wiring)
+- `crates/apps/cli/src/init.rs` — updated to use `Argv::default()`
+- `crates/apps/cli/src/lib.rs` — output-format wire-up
+- `crates/apps/cli/src/mode.rs` — is_json_output() consumption
+- `crates/apps/cli/src/run.rs` — system-prompt wire-up
+- `crates/apps/engine-desktop/src/lib.rs` — system_prompt_override/append_system_prompt fields + build() injection
+- `crates/apps/bridge-server/src/boot.rs` — Argv::default() update

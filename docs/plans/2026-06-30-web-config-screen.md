@@ -13,9 +13,9 @@
 ## Context
 
 - Design spec: `docs/superpowers/specs/2026-06-30-web-config-screen-design.md`.
-- Existing UI pattern: `lingxi-code/tui/src/screens/connect_picker.rs`, `connect.rs`, and `root.rs::pump_store_provider_key`.
-- Existing settings-write patterns: `lingxi-code/tui/src/theme_persist.rs`, `recent_models.rs`.
-- Existing web runtime: `lingxi-code/tools/web/src/web_search_client.rs`, `web_search.rs`.
+- Existing UI pattern: `crates/tui/src/screens/connect_picker.rs`, `connect.rs`, and `root.rs::pump_store_provider_key`.
+- Existing settings-write patterns: `crates/tui/src/theme_persist.rs`, `recent_models.rs`.
+- Existing web runtime: `crates/tools/web/src/web_search_client.rs`, `web_search.rs`.
 - Existing credential store: `secret::CredentialManager::{set_provider_key,get_provider_key}` via `/connect`.
 
 ## Global rules
@@ -30,8 +30,8 @@
 ### Task 1: Web search config model + settings persistence
 
 **Files:**
-- Create: `lingxi-code/tools/web/src/web_search_config.rs`
-- Modify: `lingxi-code/tools/web/src/lib.rs`
+- Create: `crates/tools/web/src/web_search_config.rs`
+- Modify: `crates/tools/web/src/lib.rs`
 - Test: `cargo test -p tool-web web_search_config`
 
 **Step 1: Write failing tests**
@@ -123,7 +123,7 @@ Expected: EXIT=0.
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tools/web/src/web_search_config.rs lingxi-code/tools/web/src/lib.rs
+git add crates/tools/web/src/web_search_config.rs crates/tools/web/src/lib.rs
 git commit -m "feat(web): add WebSearch config settings model"
 ```
 
@@ -132,9 +132,9 @@ git commit -m "feat(web): add WebSearch config settings model"
 ### Task 2: Runtime resolver reads config + credential store/env fallback
 
 **Files:**
-- Modify: `lingxi-code/tools/web/src/web_search_client.rs`
+- Modify: `crates/tools/web/src/web_search_client.rs`
 - Modify: `lingxi-code/tool-api/src/builtin_context.rs` (only if a credential-store seam is needed)
-- Modify: `lingxi-code/apps/engine-desktop/src/lib.rs` (thread credential store into tool context if needed)
+- Modify: `crates/apps/engine-desktop/src/lib.rs` (thread credential store into tool context if needed)
 - Test: `cargo test -p tool-web web_search_client::tests::*resolve*`
 
 **Step 1: Write failing resolver tests**
@@ -208,7 +208,7 @@ Expected: EXIT=0.
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tools/web/src/web_search_client.rs
+git add crates/tools/web/src/web_search_client.rs
 git commit -m "feat(web): resolve active search provider from config"
 ```
 
@@ -217,8 +217,8 @@ git commit -m "feat(web): resolve active search provider from config"
 ### Task 3: `/web` picker pure reducer + detail lines
 
 **Files:**
-- Create: `lingxi-code/tui/src/screens/web_picker.rs`
-- Modify: `lingxi-code/tui/src/screens/mod.rs`
+- Create: `crates/tui/src/screens/web_picker.rs`
+- Modify: `crates/tui/src/screens/mod.rs`
 - Test: `cargo test -p tui --lib web_picker`
 
 **Step 1: Write failing reducer/detail tests**
@@ -277,7 +277,7 @@ Expected: EXIT=0.
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tui/src/screens/web_picker.rs lingxi-code/tui/src/screens/mod.rs
+git add crates/tui/src/screens/web_picker.rs crates/tui/src/screens/mod.rs
 git commit -m "feat(tui): add pure /web provider picker"
 ```
 
@@ -286,8 +286,8 @@ git commit -m "feat(tui): add pure /web provider picker"
 ### Task 4: `/web` config screen pure reducer
 
 **Files:**
-- Create: `lingxi-code/tui/src/screens/web_config.rs`
-- Modify: `lingxi-code/tui/src/screens/mod.rs`
+- Create: `crates/tui/src/screens/web_config.rs`
+- Modify: `crates/tui/src/screens/mod.rs`
 - Test: `cargo test -p tui --lib web_config`
 
 **Step 1: Write failing reducer tests**
@@ -346,7 +346,7 @@ Expected: EXIT=0.
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tui/src/screens/web_config.rs lingxi-code/tui/src/screens/mod.rs
+git add crates/tui/src/screens/web_config.rs crates/tui/src/screens/mod.rs
 git commit -m "feat(tui): add pure /web provider config screen"
 ```
 
@@ -355,12 +355,12 @@ git commit -m "feat(tui): add pure /web provider config screen"
 ### Task 5: TUI root/app wiring + persistence/test pumps
 
 **Files:**
-- Modify: `lingxi-code/tui/src/screens/mod.rs`
-- Modify: `lingxi-code/tui/src/app.rs`
-- Modify: `lingxi-code/tui/src/root.rs`
-- Modify: `lingxi-code/tui/src/state.rs`
-- Modify: `lingxi-code/tui/src/session.rs`
-- Modify: `lingxi-code/tools/web/src/web_search_client.rs` (runtime load path if needed)
+- Modify: `crates/tui/src/screens/mod.rs`
+- Modify: `crates/tui/src/app.rs`
+- Modify: `crates/tui/src/root.rs`
+- Modify: `crates/tui/src/state.rs`
+- Modify: `crates/tui/src/session.rs`
+- Modify: `crates/tools/web/src/web_search_client.rs` (runtime load path if needed)
 - Test: `cargo test -p tui --lib web_` and targeted root/app tests
 
 **Step 1: Write failing integration-style unit tests**
@@ -439,7 +439,7 @@ Expected: EXIT=0.
 **Step 7: Commit**
 
 ```bash
-git add lingxi-code/tui/src/screens/mod.rs lingxi-code/tui/src/app.rs lingxi-code/tui/src/root.rs lingxi-code/tui/src/state.rs lingxi-code/tui/src/session.rs lingxi-code/tools/web/src/web_search_client.rs
+git add crates/tui/src/screens/mod.rs crates/tui/src/app.rs crates/tui/src/root.rs crates/tui/src/state.rs crates/tui/src/session.rs crates/tools/web/src/web_search_client.rs
 git commit -m "feat(tui): wire /web picker config persistence and test search"
 ```
 
@@ -449,9 +449,9 @@ git commit -m "feat(tui): wire /web picker config persistence and test search"
 
 **Files:**
 - Modify: `lingxi-code/tool-api/src/builtin_context.rs` if not already done
-- Modify: `lingxi-code/apps/engine-desktop/src/lib.rs`
-- Modify: `lingxi-code/tools/web/src/web_search.rs`
-- Modify: `lingxi-code/tools/web/src/web_search_client.rs`
+- Modify: `crates/apps/engine-desktop/src/lib.rs`
+- Modify: `crates/tools/web/src/web_search.rs`
+- Modify: `crates/tools/web/src/web_search_client.rs`
 - Test: `cargo test -p tool-web web_search_client` plus targeted desktop tests if available
 
 **Step 1: Write failing runtime tests**
@@ -503,7 +503,7 @@ Expected: EXIT=0.
 **Step 5: Commit**
 
 ```bash
-git add lingxi-code/tool-api/src/builtin_context.rs lingxi-code/apps/engine-desktop/src/lib.rs lingxi-code/tools/web/src/web_search.rs lingxi-code/tools/web/src/web_search_client.rs
+git add lingxi-code/tool-api/src/builtin_context.rs crates/apps/engine-desktop/src/lib.rs crates/tools/web/src/web_search.rs crates/tools/web/src/web_search_client.rs
 git commit -m "feat(web): use persisted /web configuration at runtime"
 ```
 
@@ -512,7 +512,7 @@ git commit -m "feat(web): use persisted /web configuration at runtime"
 ### Task 7: Verification, PTY smoke, final build
 
 **Files:**
-- Optional create: `lingxi-code/tui/tests/web_config_pty.py`
+- Optional create: `crates/tui/tests/web_config_pty.py`
 - Modify only if PTY is practical.
 
 **Step 1: Run full targeted test suite**
@@ -557,7 +557,7 @@ Expected: EXIT=0. If not practical, document limitation in final report.
 **Step 4: Commit final verification artifacts**
 
 ```bash
-git add lingxi-code/tui/tests/web_config_pty.py
+git add crates/tui/tests/web_config_pty.py
 git commit -m "test(tui): PTY smoke for /web provider config" || true
 ```
 
@@ -570,7 +570,7 @@ Only commit if a PTY file was created.
 From any workspace:
 
 ```bash
-/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/target/debug/lingxi-cli
+/Users/luolingfeng/Projects/LingXi-Next/target/debug/lingxi-cli
 ```
 
 Manual flow:

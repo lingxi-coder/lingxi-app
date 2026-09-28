@@ -5,7 +5,19 @@ import { DragDropProvider, DragOverlay, type DragEndEvent } from '@dnd-kit/react
 import { isSortable, useSortable } from '@dnd-kit/react/sortable';
 import { PointerActivationConstraints, PointerSensor } from '@dnd-kit/dom';
 import { ContextWindow } from './ContextWindow';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ClipboardEvent,
+  type KeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import type {
   ImageRefDto,
   ModelDetailsDto,
@@ -13,7 +25,7 @@ import type {
   SessionRowDto,
 } from '@lingxi/bridge-client';
 
-import { type UseBridge } from '../bridge/useBridge';
+import type { UseBridge } from '../bridge/bridgeTypes.js';
 import { isSideQuestionCommand } from '../bridge/sideQuestion';
 import type { ContextSummarySnapshot } from '../bridge/conversation';
 import type { NativeAudioApi } from '../bridge/lingxi';
@@ -77,7 +89,10 @@ import { MarkdownContent } from './MarkdownContent';
 import { VoiceFlowPanel } from './voice/VoiceFlowPanel';
 import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
-import { audioConfigurationDefaults, resolveAudioLanguage } from '../../shared/generatedAudioConfiguration';
+import {
+  audioConfigurationDefaults,
+  resolveAudioLanguage,
+} from '../../shared/generatedAudioConfiguration';
 import type { AudioOperationResultDto } from '@lingxi/bridge-client';
 import type { NativeAudioOwner } from '../../shared/nativeAudio';
 import {

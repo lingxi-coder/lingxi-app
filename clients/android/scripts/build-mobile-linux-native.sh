@@ -17,7 +17,7 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ANDROID_DIR}/../.." && pwd)"
-SDK_ROOT="$(python3 "${REPO_ROOT}/lingxi-code/scripts/mobile_linux_source.py" --root)"
+SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 BUILD_ROOT="${ANDROID_DIR}/app/build/mobileLinuxNative/${VARIANT}"
 ARTIFACT_ROOT="${BUILD_ROOT}/native-support"
 JNI_ROOT="${LINGXI_ANDROID_JNILIBS_DIR:-${ANDROID_DIR}/app/src/${VARIANT}/jniLibs}"
@@ -31,15 +31,15 @@ fi
 ARGS=(--ndk "${ANDROID_NDK_HOME}" --output-dir "${ARTIFACT_ROOT}"
   --cache-dir "${ANDROID_DIR}/app/build/mobileLinuxNative/cache" --abi all)
 if [[ -n "${PROOT_SOURCE:-}" ]]; then ARGS+=(--proot-source "${PROOT_SOURCE}"); fi
-bash "${SDK_ROOT}/scripts/build-android-native.sh" "${ARGS[@]}"
-python3 "${SDK_ROOT}/scripts/verify-android-native.py" --artifact-dir "${ARTIFACT_ROOT}"
+bash "${SDK_ROOT}/scripts/build/build-android-native.sh" "${ARGS[@]}"
+python3 "${SDK_ROOT}/scripts/checks/verify-android-native.py" --artifact-dir "${ARTIFACT_ROOT}"
 if [[ "${SKIP_JNI}" == false ]]; then
   "${SCRIPT_DIR}/build-jni.sh" --variant "${VARIANT}"
 fi
 # Publish metadata-backed AARs outside the immutable SDK checkout. Their native
 # helpers are packaged once through Gradle; LingXi owns only libandroid_aar.so.
 SDK_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sdk_version"])' "${REPO_ROOT}/docs/mobile-linux/mobile-linux-native-pins.json")"
-python3 "${SDK_ROOT}/scripts/publish-android.py" --native-artifacts "${ARTIFACT_ROOT}" \
+python3 "${SDK_ROOT}/scripts/release/publish-android.py" --native-artifacts "${ARTIFACT_ROOT}" \
   --maven-dir "${ANDROID_DIR}/build/mobileLinuxSdk/maven" \
   --build-dir "${ANDROID_DIR}/build/mobileLinuxSdk/gradle" --version "${SDK_VERSION}" --native-only
 # Delete only obsolete generated helper copies after validated AAR publication.
@@ -48,5 +48,5 @@ for abi in arm64-v8a x86_64; do
     rm -f "${JNI_ROOT}/${abi}/${name}"
   done
 done
-python3 "${REPO_ROOT}/lingxi-code/scripts/mobile_linux_source.py" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k:d[k] for k in ("source","revision")},sys.stdout)' > "${BUILD_ROOT}/sdk-source.json"
+python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k:d[k] for k in ("source","revision")},sys.stdout)' > "${BUILD_ROOT}/sdk-source.json"
 "${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}" --jni-root "${JNI_ROOT}"

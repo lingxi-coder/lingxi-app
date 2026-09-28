@@ -4,36 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A platform-agnostic Rust engine for an AI coding assistant with **1:1 behavioral parity to claude-code** (2026-03-31 TypeScript reference), plus native clients that all drive that one engine. Parity is the organizing constraint: most design questions are settled by "what does the reference do", not by preference. `docs/ARCHITECTURE.md#claude-code-parity-guarantees-locked-in-v030` lists the guarantees that are locked.
+LingXi's product repository: CLI/TUI, desktop and mobile hosts, native clients and
+product resources. The shared agent runtime is a pinned Git dependency from
+`lingxi-coder/harness-runtime`, not a local collection of engine crates.
 
 ## Repo navigation
 
-Only two directories are the product, and only these are tracked by git:
+- `Cargo.toml` / `crates/` — eight Rust workspace members: product entrypoints, TUI and product tools.
+- `clients/` — Electron, iOS, Android, Web, shared TypeScript SDK, translations and voice configuration.
+- `docs/` — current architecture and guides; historical notes are identified in `docs/README.md`.
+- `packaging/` — npm and Python distribution packaging.
+- `assets/brand/` — design source assets; absence of a runtime import does not make them disposable.
+- `scripts/`, `.github/` — repository tooling and CI.
 
-- `lingxi-code/` — the Rust workspace (~90 crates)
-- `clients/` — Electron desktop, iOS, Android, web, the shared TS SDK, i18n
-
-Also tracked: `docs/`, `skills/`, `third_party/`, `.github/`.
-
-Everything else at the repo root (`claude-code/`, `codex/`, `opencode/`, `claw-code*/`, `backups/`, `output/`, `codegraph-out/`, `liter-llm/`) is **untracked local working material**. Scope repo-wide sweeps to `lingxi-code/` and `clients/` or they will wander into unrelated trees.
+Root `claude-code/`, `codex/`, `backups/`, `output/` and code-intelligence indexes
+are ignored local material. Scope sweeps to tracked product files; do not recurse
+into reference checkouts or delete user state and signed release artifacts.
 
 ## Build and test
 
-### Engine (from `lingxi-code/`)
+### Rust hosts (from the repository root)
 
 ```bash
-cargo build --workspace --release
-cargo test --workspace --all-features --no-fail-fast   # what CI runs
-cargo test -p orchestrator --lib                        # one crate
-cargo test -p orchestrator --test resume_test some_name # one test
+cargo build --locked -p cli -p bridge-server --release
+cargo test --locked --workspace --all-features --no-fail-fast   # what CI runs
+cargo test --locked -p bridge-server                   # retained product crate
 ./scripts/check-all.sh                                  # every checked-in gate
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`check-all.sh` **discovers** gates by walking `scripts/` for `check-*.sh` / `*-gate.sh` — a new gate is picked up without editing a list. Run it from `lingxi-code/`, not from inside `scripts/`.
+`check-all.sh` **discovers** gates by walking `scripts/checks/` for `check-*.sh` / `*-gate.sh` — a new gate is picked up without editing a list. Run it from the repository root.
 
-The core crate's package name is `core` but its Rust ident is `lingxi_core` (so it does not shadow sysroot `libcore`): `cargo test -p core`, `use lingxi_core::`.
+Resolve upstream sources with `python3 scripts/lib/runtime_source.py --root`. Runtime crates and their own unit-test suites are maintained upstream; local workspace tests cover the retained product packages.
 
 ### Clients
 
@@ -53,14 +56,16 @@ Mobile builds are optional in `setup.sh` and skip cleanly without their toolchai
 
 ## Architecture
 
-### Composition roots decide what ships
+### Product and runtime ownership
 
-Library crates make no shipping choices — they expose capabilities (`tools/*`, `skill-api`, `command-api`) and abstractions (`tool-api`, `platform_api::Platform`). Two composition roots under `apps/` assemble a product by naming a different subset of capability crates as Cargo dependencies:
+`crates/apps/cli`, `crates/apps/bridge-server`, `crates/apps/ios-framework` and `crates/apps/android-aar`
+consume the fixed upstream `harness-runtime` desktop/mobile profiles. Shared
+orchestration, tools, permissions, sessions and protocol types live upstream.
+The local `scripts/checks/check-runtime-dependency.sh` verifies the common Git identity;
+`check-client-protocol.sh` verifies host boundaries and mirrored fixtures.
 
-- `apps/engine-desktop` — all 14 desktop tool crates (40 tools), core + desktop commands
-- `apps/engine-mobile` — the cross-platform subset + mobile tools (camera/voice/share)
-
-There is **no `#[cfg(target_os)]` in any library crate**. That is confined to `platforms/*` and `apps/*`, and `scripts/check-deps.sh` (the §8.1 dependency-graph gate) enforces it: tools never depend on sibling tools or platforms, apps are leaves, `*-api` crates stay impl-free.
+See `docs/architecture/harness-runtime-extraction.md` for the source and resource
+contract. Do not edit Cargo's upstream checkout or add local path overrides.
 
 ### Engine ↔ client seam
 
@@ -100,5 +105,5 @@ From `AGENTS.md`, which governs this and should be read in full before packaging
 
 - **`cargo check` is blind to test modules.** Use `cargo build --tests --keep-going` to surface every error at once, and `--all-features` — a feature-gated subsystem (mobile UniFFI) is invisible without it.
 - **Generated artifacts are not sources.** `clients/ios/Generated/` and the Android JNI bindings are gitignored build output — change a wire DTO without regenerating and the clients cannot compile. `clients/ios/Resources/Localizable.xcstrings` and Android `strings.xml` are generated from `clients/translations/*.json` by `generate.py`; edit the JSON.
-- **`client-protocol --features uniffi` has a metadata budget.** CI runs `cargo test -p client-protocol --features uniffi --test uniffi_metadata_budget_test`; blowing it breaks both mobile builds while ordinary gates stay green.
+- **`client-protocol --features uniffi` has a metadata budget.** The upstream runtime suite runs `cargo test -p client-protocol --features uniffi --test uniffi_metadata_budget_test`; blowing it breaks both mobile builds while ordinary gates stay green.
 - **A green test run is not a green commit.** Uncommitted changes can make the working tree compile while the committed tree does not; and a falling test *count* at zero failures means a binary aborted early, not that everything passed.

@@ -25,7 +25,7 @@ Binary search confirmed: `treeKill(pid, 'SIGKILL')` is called **directly** in `S
 
 ## Files Changed
 
-- `lingxi-code/tools/shell/src/bash.rs` — `resolve_shell_path()` now checks `CLAUDE_CODE_SHELL` env var; 4 new tests added
+- `crates/tools/shell/src/bash.rs` — `resolve_shell_path()` now checks `CLAUDE_CODE_SHELL` env var; 4 new tests added
 - `lingxi-code/platforms/posix/src/process/runner.rs` — `kill()` changed from `kill_tree_unix` (async, SIGTERM+grace) to `kill_tree_force` (sync, immediate SIGKILL)
 - `lingxi-code/platforms/posix/src/process/kill_tree.rs` — module doc updated to describe both variants
 

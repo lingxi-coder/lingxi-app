@@ -12,22 +12,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Test pinned-source rejection cases
         run: |
-          python3 lingxi-code/scripts/test_runtime_source.py
-          python3 lingxi-code/scripts/test_mobile_linux_source.py
+          python3 scripts/tests/test_runtime_source.py
+          python3 scripts/tests/test_mobile_linux_source.py
+          python3 scripts/tests/test_workspace_layout.py
       - name: Validate both pinned runtime sources
-        run: python3 lingxi-code/scripts/check-runtime-dependency.py
+        run: python3 scripts/checks/check-runtime-dependency.py
       - name: Run every checked-in product gate
-        working-directory: lingxi-code
+        working-directory: .
         run: ./scripts/check-all.sh
       - name: Test brand gate rejection cases
-        working-directory: lingxi-code
-        run: python3 scripts/check_brand_leaks.py --selftest
+        working-directory: .
+        run: python3 scripts/checks/check_brand_leaks.py --selftest
       - name: Verify every gate and the trigger chain
-        working-directory: lingxi-code
-        run: python3 scripts/test_gate_triggers.py
+        working-directory: .
+        run: python3 scripts/tests/test_gate_triggers.py
       - name: Native Host and pinned runtime template integration
-        working-directory: lingxi-code
-        run: node --test scripts/test-local-app-r4-libs.mjs
+        working-directory: .
+        run: node --test scripts/tests/test-local-app-r4-libs.mjs
 
   unit-tests:
     runs-on: ubuntu-latest
@@ -35,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Test all retained product packages
-        working-directory: lingxi-code
+        working-directory: .
         run: cargo test --locked --workspace --all-features --no-fail-fast
 
   lint:
@@ -46,10 +47,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: cargo fmt
-        working-directory: lingxi-code
+        working-directory: .
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        working-directory: lingxi-code
+        working-directory: .
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   supply-chain:
@@ -69,17 +70,17 @@ jobs:
       - name: Install cargo-vet
         run: cargo install cargo-vet --locked --version '^0.10'
       - name: cargo deny check
-        working-directory: lingxi-code
-        # Uses lingxi-code/deny.toml for license/advisory/duplicate-version
+        working-directory: .
+        # Uses deny.toml for license/advisory/duplicate-version
         # policy. Runs under the workspace toolchain so the metadata
         # pass can parse the edition2024 WASI manifest. The architectural
         # dependency-graph rules (design §8.1) are a separate step below.
         run: cargo deny check
       - name: cargo audit
-        working-directory: lingxi-code
+        working-directory: .
         run: cargo audit --deny warnings
       - name: cargo vet
-        working-directory: lingxi-code
+        working-directory: .
         # vet requires supply-chain/ directory with audits. If absent,
         # `cargo vet check --locked` prints a setup hint without failing
         # (the directory lives outside this plan's scope; M4 deliverable).

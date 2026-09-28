@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import '../../src/renderer/global.css';
 
 import { SettingsScreen } from '../../src/renderer/components/settings/SettingsScreen';
-import type { SettingsSnapshotEvent } from '../../src/renderer/bridge/useBridge';
+import type { SettingsSnapshotEvent } from '../../src/renderer/bridge/bridgeTypes.js';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 

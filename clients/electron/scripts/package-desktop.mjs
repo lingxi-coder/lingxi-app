@@ -212,7 +212,7 @@ async function main() {
   const electronDist = join(packageRoot, 'node_modules', 'electron', 'dist');
   const sidecar = resolve(
     process.env['LINGXI_BRIDGE_SERVER_BIN']
-      ?? join(repoRoot, 'lingxi-code', 'target', 'release', target.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server'),
+      ?? join(repoRoot, 'target', 'release', target.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server'),
   );
   assertBinaryArchitecture(sidecar, target, 'release bridge-server sidecar');
   scanTreeForForbiddenContent(sidecar);

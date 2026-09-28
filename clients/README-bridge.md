@@ -14,7 +14,7 @@ Electron / iOS shell  ──ws──▶  bridge-server (loopback)  ──▶  de
         └──────────────────────  streamed ClientEvents  ◀──────────────────────────────┘
 ```
 
-The `bridge-server` binary (`lingxi-code/apps/bridge-server`) boots one local
+The `bridge-server` binary (`crates/apps/bridge-server`) boots one local
 conversation over a `127.0.0.1` WebSocket, publishes a discovery lockfile at
 `~/.lingxi/bridge/<port>.lock`, and drives a real `engine_desktop` runtime. The
 Node-side `@lingxi/bridge-client` SDK (`clients/shared`) connects through that
@@ -35,7 +35,7 @@ From the cargo workspace:
 ```sh
 cd lingxi-code
 cargo build -p bridge-server --bin bridge-server
-# binary: lingxi-code/target/debug/bridge-server
+# binary: target/debug/bridge-server
 # (add --release for an optimized build at target/release/bridge-server)
 ```
 
@@ -127,7 +127,7 @@ The main process resolves the `bridge-server` binary in this order:
 1. `BridgeManagerOptions.serverBin` (programmatic override), else
 2. the `LINGXI_BRIDGE_SERVER_BIN` environment variable, else
 3. a path derived **relative to the repo**, walking up to the first existing
-   `lingxi-code/target/{debug,release}/bridge-server`.
+   `target/{debug,release}/bridge-server`.
 
 If none resolve, the app surfaces an `error` connection state telling you to
 build the binary (step 1) or set `LINGXI_BRIDGE_SERVER_BIN`. No absolute paths

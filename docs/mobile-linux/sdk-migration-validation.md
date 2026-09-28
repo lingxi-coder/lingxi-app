@@ -1,5 +1,9 @@
 # Mobile Linux SDK migration
 
+This records the earlier SDK migration candidate. For the current three-repository
+structure and pinned revisions, see
+[`../architecture/three-repo-structure-validation.md`](../architecture/three-repo-structure-validation.md).
+
 This is a candidate delivery. Android physical-device and emulator results are recorded separately. A successful compile alone is not a device result.
 
 ## Ownership and baseline
@@ -21,7 +25,7 @@ The migration preserves the pre-existing dirty documentation, translations, UI c
 
 Production resource lookup uses `cargo metadata --locked --all-features`, the canonical Git URL, and a full 40-character commit. Account-specific SSH transport is configured outside shared manifests; this checkout uses `github.com-lingxi-coder` without switching other GitHub accounts.
 
-`lingxi-code/scripts/runtime_source.py` resolves Harness; `mobile_linux_source.py` resolves the SDK. Their gates reject duplicate identities, alternate revisions, inactive local dependencies, and resources outside the locked checkout. A host path pointing into the Cargo cache is still rejected. Cargo's empty `.cargo-ok` marker is distinguished from source modifications; build inventories still verify source immutability.
+`scripts/lib/runtime_source.py` resolves Harness; `mobile_linux_source.py` resolves the SDK. Their gates reject duplicate identities, alternate revisions, inactive local dependencies, and resources outside the locked checkout. A host path pointing into the Cargo cache is still rejected. Cargo's empty `.cargo-ok` marker is distinguished from source modifications; build inventories still verify source immutability.
 
 Rootfs producer revision, SDK binary source revision, and the later SwiftPM checksum wrapper revision are separate provenance fields. Release artifacts must be rebuilt through the guarded tools; editing a manifest cannot promote a dirty or stale binary.
 

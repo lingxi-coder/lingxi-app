@@ -2,10 +2,14 @@ import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Stage } from '../../src/renderer/components/Stage';
 import { RuntimeCenterInspector } from '../../src/renderer/components/RuntimeCenter';
-import { closeRuntimeCenterItem, emptyRuntimeCenterState, openRuntimeCenterItem } from '../../src/renderer/bridge/runtimeCenterState';
+import {
+  closeRuntimeCenterItem,
+  emptyRuntimeCenterState,
+  openRuntimeCenterItem,
+} from '../../src/renderer/bridge/runtimeCenterState';
 import { emptyConversation } from '../../src/renderer/bridge/conversation';
 import { emptyDesktopState } from '../../src/renderer/bridge/desktopState';
-import type { UseBridge } from '../../src/renderer/bridge/useBridge';
+import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import '../../src/renderer/global.css';

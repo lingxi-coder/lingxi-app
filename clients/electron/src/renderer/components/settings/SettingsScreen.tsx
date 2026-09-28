@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 
-import { dialogFocusTarget, type UseBridge, type SettingsSnapshotEvent } from '../../bridge/useBridge';
+import { dialogFocusTarget } from '../../bridge/bridgeRuntimeState.js';
+import type { SettingsSnapshotEvent, UseBridge } from '../../bridge/bridgeTypes.js';
 import { useT } from '../../theme/ThemeContext';
 import type { ThemeMode } from '../../theme/tokens';
 import { Icon } from '../Icon';

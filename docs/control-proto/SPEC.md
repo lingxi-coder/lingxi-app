@@ -5,7 +5,7 @@ validation) shipped. This is **P5**: the bidirectional control plane.
 
 **Oracle binary:** `/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude` (v2.1.187, GIT_SHA `6a53320fad…`).
 **Readable TS (OLDER subset — structure-only, never authoritative on byte detail):** `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/` (`cli/print.ts`, `cli/structuredIO.ts`, `entrypoints/sdk/controlSchemas.ts`).
-**LingXi target:** `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/apps/cli/` + `engine-desktop` + `orchestrator` + `traits`.
+**LingXi target:** `/Users/luolingfeng/Projects/LingXi-Next/crates/apps/cli/` + `engine-desktop` + `orchestrator` + `traits`.
 
 **Authority rule (carry through the whole port):** the binary is canonical on every
 field set, literal, and tag (e.g. `decideLocation:"ask-path"`, the `mYm`/`fYm` Sets,

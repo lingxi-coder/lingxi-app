@@ -3,7 +3,9 @@ import { realpathSync } from 'node:fs';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 
 import { buildBridgeArguments, buildBridgeEnvironment } from './host-utils.js';
-import { isSessionId, resolveServerBin, type BridgeManagerOptions } from './bridge.js';
+import { resolveServerBin } from './bridgeDiscovery.js';
+import type { BridgeManagerOptions } from './bridgeTypes.js';
+import { isSessionId } from './sessionIdentity.js';
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SESSIONS = 200;

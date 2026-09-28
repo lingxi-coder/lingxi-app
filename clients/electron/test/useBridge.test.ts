@@ -4,21 +4,20 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  appendTrackedTurnDelta,
-  bindTrackedTurn,
+  isPermissionRequestGone,
+  restartBridgePreconditionError,
+  restartBridgeSingleFlight,
+  restartBridgeWithTimeout,
+} from '../src/renderer/bridge/bridgeConnection.js';
+import {
   beginProjectCatalogRequest,
   claimSlashTurn,
   clearCancellationRuntime,
   clearSlashTurnClaim,
-  clearTrackedTurnState,
-  completeTrackedTurn,
-  createDesktopTurnToken,
-  dequeueTrackedTurn,
-  enqueueTrackedTurn,
+  dialogFocusTarget,
   displayedSession,
   isLatestOperation,
   isLatestProjectCatalogRequest,
-  isPermissionRequestGone,
   isRuntimeRemovedState,
   nextOperationId,
   pendingCountAfterResponse,
@@ -26,16 +25,21 @@ import {
   reconcilePendingCount,
   recoverLatestNavigationFailure,
   removeRuntimeFromMaps,
-  dialogFocusTarget,
   resetBridgeRuntimeState,
-  restartBridgePreconditionError,
-  restartBridgeSingleFlight,
-  restartBridgeWithTimeout,
   shouldApplyBootstrapSnapshot,
   shouldClearPendingPermissions,
   shouldReleaseSlashTurn,
   shouldResetBridgeRuntime,
-} from '../src/renderer/bridge/useBridge';
+} from '../src/renderer/bridge/bridgeRuntimeState.js';
+import {
+  appendTrackedTurnDelta,
+  bindTrackedTurn,
+  clearTrackedTurnState,
+  completeTrackedTurn,
+  createDesktopTurnToken,
+  dequeueTrackedTurn,
+  enqueueTrackedTurn,
+} from '../src/renderer/bridge/trackedTurns.js';
 import { emptyConversation } from '../src/renderer/bridge/conversation';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
 

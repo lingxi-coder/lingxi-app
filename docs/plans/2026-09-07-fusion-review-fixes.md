@@ -80,7 +80,7 @@ and static checking (SHA-256
 
 - Transcript coordination: `lingxi-code/orchestrator/src/conversation/model.rs`,
   its `tests/persist_with_parent_tests.rs`, and
-  `lingxi-code/apps/engine-desktop/src/fusion_recorder.rs`.
+  `crates/apps/engine-desktop/src/fusion_recorder.rs`.
 - Bounded scan and regression tests:
   `lingxi-code/session/src/jsonl/durable_writer.rs`. The separate last-parent
   scan was removed; the duplicate scan now also returns the parent identity.
@@ -89,9 +89,9 @@ and static checking (SHA-256
 - Search provenance: `lingxi-code/platform-api/src/evidence.rs`,
   `evidence/delivery.rs`, `evidence/delivery_test.rs`,
   `lingxi-code/platform-api/src/fusion.rs`, `lingxi-code/fusion/src/panel.rs`,
-  and `lingxi-code/apps/engine-desktop/src/fusion_evidence_e2e_test.rs`.
+  and `crates/apps/engine-desktop/src/fusion_evidence_e2e_test.rs`.
 - Safe-mode discovery gate and boot regression:
-  `lingxi-code/apps/engine-desktop/src/lib.rs`.
+  `crates/apps/engine-desktop/src/lib.rs`.
 
 ## Second-review corrections
 

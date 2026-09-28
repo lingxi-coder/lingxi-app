@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { CSSProperties } from 'react';
 import { useT } from '../../../theme/ThemeContext';
-import type { UseBridge } from '../../../bridge/useBridge';
+import type { UseBridge } from '../../../bridge/bridgeTypes.js';
 
 type ExtensionHubTab = 'plugins' | 'mcp' | 'skills';
 

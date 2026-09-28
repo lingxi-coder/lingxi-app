@@ -58,7 +58,7 @@ References consulted:
 - `clients/electron/src/main/{bridge,host-utils}.ts`: private token transport, refresh persistence, runtime ownership and model switching.
 - `clients/electron/src/{preload/index,shared/providers,shared/clientCommands}.ts` and renderer provider/bridge files: provider entry, login actions and status.
 - `clients/shared/src/{protocol,validation,protocolCoverage,client}.ts`: typed private event, validation and exclusion from replay.
-- `lingxi-code/apps/bridge-server/src/{boot,main,server}.rs` and `apps/engine-desktop/src/lib.rs`: prebuild OAuth injection and startup event delivery.
+- `crates/apps/bridge-server/src/{boot,main,server}.rs` and `apps/engine-desktop/src/lib.rs`: prebuild OAuth injection and startup event delivery.
 - `lingxi-code/secret/src/credential.rs`, `llm-client/src/client.rs`, and `client-protocol`: refresh observer, Codex request shape and appended wire event.
 - Corresponding Electron/shared/Rust tests and protocol snapshots. The existing mobile/parity edits in the working tree are outside this change.
 

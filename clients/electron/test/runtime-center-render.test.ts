@@ -26,7 +26,7 @@ import type { TaskRowDto } from '@lingxi/bridge-client';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { TaskDetail } from '../src/renderer/components/RuntimeCenter';
-import type { UseBridge } from '../src/renderer/bridge/useBridge';
+import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
 
 function render(node: React.ReactElement): string {
   return renderToStaticMarkup(
@@ -61,7 +61,11 @@ test('TaskDetail renders nothing extra when a task has no stage', () => {
   assert.ok(!html.includes('Running panels'), `expected no stage text, got: ${html}`);
 });
 
-import { RuntimeCenterOverview, RuntimeCenterInspector, usesSummaryOverlayLayout } from '../src/renderer/components/RuntimeCenter';
+import {
+  RuntimeCenterOverview,
+  RuntimeCenterInspector,
+  usesSummaryOverlayLayout,
+} from '../src/renderer/components/RuntimeCenter';
 import { emptyRuntimeCenterState } from '../src/renderer/bridge/runtimeCenterState';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
 

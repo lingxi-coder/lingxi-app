@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SessionRuntime } from '../src/main/bridge';
+import { SessionRuntime } from '../src/main/bridge.js';
 import { SettingsStore } from '../src/main/settings';
 import type { ClientCommand, PermissionModeId } from '@lingxi/bridge-client';
 function runtime(store: SettingsStore) {

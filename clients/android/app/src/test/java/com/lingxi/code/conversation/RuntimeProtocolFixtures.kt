@@ -6,7 +6,7 @@ import java.io.File
 internal object RuntimeProtocolFixtures {
     private val root: File by lazy {
         val resolver = generateSequence(File("").absoluteFile) { it.parentFile }
-            .map { File(it, "lingxi-code/scripts/runtime_source.py") }
+            .map { File(it, "scripts/lib/runtime_source.py") }
             .firstOrNull { it.isFile }
             ?: error("Cannot locate the host runtime_source.py resolver")
         val process = ProcessBuilder("python3", resolver.absolutePath, "--root")

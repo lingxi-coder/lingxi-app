@@ -8,7 +8,7 @@ ELECTRON_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly ELECTRON_DIR
 REPO_ROOT="$(cd "${ELECTRON_DIR}/../.." && pwd)"
 readonly REPO_ROOT
-readonly ENGINE_DIR="${REPO_ROOT}/lingxi-code"
+readonly ENGINE_DIR="${REPO_ROOT}"
 readonly PROVISIONING_PROJECT="${ELECTRON_DIR}/macos-signing/ProvisioningBootstrap.xcodeproj"
 
 readonly FLARE_TEAM_ID="AZ4AX7J833"

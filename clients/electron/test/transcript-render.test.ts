@@ -167,7 +167,7 @@ test('compaction renders engine stages and keeps cancellation distinct from fail
 
 test('compaction progress matches shared hybrid phase boundaries', () => {
   const runtimeRoot = execFileSync('python3', [
-    fileURLToPath(new URL('../../../lingxi-code/scripts/runtime_source.py', import.meta.url)), '--root',
+    fileURLToPath(new URL('../../../scripts/lib/runtime_source.py', import.meta.url)), '--root',
   ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
   const oracle = JSON.parse(readFileSync(join(runtimeRoot, 'crates/client-protocol/snapshots/compaction_hybrid_progress.json'), 'utf8'));
   for (const { phase, elapsed_ms, percent } of oracle.cases) {

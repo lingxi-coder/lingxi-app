@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 (globalThis as { React?: typeof React }).React = React;
 
-import { canResumePendingSession } from '../src/renderer/bridge/useBridge';
+import { canResumePendingSession } from '../src/renderer/bridge/bridgeRuntimeState.js';
 import {
   BetaComposer,
   BetaSidebar,
@@ -22,7 +22,11 @@ import {
 } from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
-import { formatClockTime, formatRelativeSessionTime, formatSessionMetadata } from '../src/renderer/bridge/sessionPresentation';
+import {
+  formatClockTime,
+  formatRelativeSessionTime,
+  formatSessionMetadata,
+} from '../src/renderer/bridge/sessionPresentation';
 
 const projectPath = '/Users/tester/Projects/LingXi-Next';
 const pinnedProjectPath = '/Users/tester/Projects/MLPlatform';

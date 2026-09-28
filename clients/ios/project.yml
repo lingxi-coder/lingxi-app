@@ -186,7 +186,7 @@ targets:
               if [ ! -f "${STAGED_RUNTIME}/node_modules/vite/bin/vite.js" ]; then
                 echo "error: the staged local-app dependency seed is missing: ${STAGED_RUNTIME}"
                 echo "       Run, from the repository root:"
-                echo "         lingxi-code/scripts/mobile-linux/build-local-app-node-modules.sh --arch aarch64"
+                echo "         scripts/local-apps/build-local-app-node-modules.sh --arch aarch64"
                 echo "         clients/ios/scripts/stage-local-app-runtime.sh --variant full \\"
                 echo "           --node-modules clients/ios/build/local-app-node-modules/aarch64/node_modules"
                 exit 1

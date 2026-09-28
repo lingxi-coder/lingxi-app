@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source": "Cargo.lock",
-  "resolver": "lingxi-code/scripts/mobile_linux_source.py",
+  "resolver": "scripts/lib/mobile_linux_source.py",
   "android_source_pins": "docs/android/native-pins.json",
   "ios_source_pins": "native/ios/sources.json",
   "artifact_kind": "native-support-only",

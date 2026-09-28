@@ -5,7 +5,7 @@
 # Reproduces the fresh-clone setup the native shells need, end to end:
 #
 #   1. Engine for Electron : cargo build -p bridge-server
-#        → <repo>/lingxi-code/target/debug/bridge-server, which the renderer's
+#        → <repo>/target/debug/bridge-server, which the renderer's
 #          repo-relative resolveServerBin() discovers automatically.
 #   2. Shared SDK          : (cd clients/shared && npm install && npm run build)
 #        → dist/  (REQUIRED before electron — electron depends on file:../shared).
@@ -34,7 +34,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # clients/
 CLIENTS_DIR="${SCRIPT_DIR}"
 REPO_ROOT="$(cd "${CLIENTS_DIR}/.." && pwd)"                 # worktree / clone root
-CARGO_DIR="${REPO_ROOT}/lingxi-code"                         # Rust workspace
+CARGO_DIR="${REPO_ROOT}"                         # Rust workspace
 BRIDGE_BIN="${CARGO_DIR}/target/debug/bridge-server"
 
 SHARED_DIR="${CLIENTS_DIR}/shared"
@@ -93,7 +93,7 @@ have npm   || die "npm not found. Install Node.js (bundles npm) and re-run."
 # ===========================================================================
 header "Engine: cargo build -p bridge-server"
 info "workspace: ${CARGO_DIR}"
-info "(electron's resolveServerBin finds it at lingxi-code/target/debug/bridge-server)"
+info "(electron's resolveServerBin finds it at target/debug/bridge-server)"
 ( cd "${CARGO_DIR}" && cargo build -p bridge-server --bin bridge-server )
 if [ -x "${BRIDGE_BIN}" ]; then
   ok "bridge-server built → ${BRIDGE_BIN}"

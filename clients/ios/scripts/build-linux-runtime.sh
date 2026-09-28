@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-SDK_ROOT="$(python3 "${REPO_ROOT}/lingxi-code/scripts/mobile_linux_source.py" --root)"
+SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
 CACHE="${IOS_DIR}/build/mobile-linux-cache"
 STAGE_ROOT="${IOS_DIR}/build/linux-runtime/openminis"
@@ -40,24 +40,22 @@ if json.load(open(sys.argv[1])).get("local_app_runtime"):
 CHECK
 fi
 if [[ "${CLEAN}" == 1 ]]; then rm -rf "${STAGE_ROOT}"; fi
-# This directory is generated output, not the native source cache. Rebuild it
-# fresh so a previous SDK revision cannot leave extra Swift module interfaces
-# in an otherwise verified XCFramework.
+# Generated output must not retain module interfaces from an earlier SDK.
 rm -rf "${SDK_OUTPUT}"
 ARGS=(--kind native-support --output "${SDK_OUTPUT}" --cache "${CACHE}" --configuration "${CONFIGURATION}")
 if [[ "${SIMULATOR_ONLY}" == 1 ]]; then ARGS+=(--simulator-only); fi
-bash "${SDK_ROOT}/scripts/build-ios-xcframework.sh" "${ARGS[@]}"
-python3 "${SDK_ROOT}/scripts/verify-ios-native.py" --artifact-dir "${SDK_OUTPUT}"
+bash "${SDK_ROOT}/scripts/build/build-ios-xcframework.sh" "${ARGS[@]}"
+python3 "${SDK_ROOT}/scripts/checks/verify-ios-native.py" --artifact-dir "${SDK_OUTPUT}"
 mkdir -p "${FRAMEWORKS}"
 rsync -a --delete "${SDK_OUTPUT}/${FRAMEWORK}/" "${FRAMEWORKS}/${FRAMEWORK}/"
-python3 "${REPO_ROOT}/lingxi-code/scripts/mobile_linux_source.py" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k:d[k] for k in ("source","revision")},sys.stdout)' > "${SDK_OUTPUT}/sdk-source.json"
+python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --json | python3 -c 'import json,sys; d=json.load(sys.stdin); json.dump({k:d[k] for k in ("source","revision")},sys.stdout)' > "${SDK_OUTPUT}/sdk-source.json"
 if [[ "${SIMULATOR_ONLY}" == 1 ]]; then
   echo "Staged simulator-only native-support stubs; no device runtime claimed."
   exit 0
 fi
 if [[ "${LOCAL_APP_RUNTIME}" == 1 ]]; then
   ROOTFS_PROFILE=toolchain
-  bash "${REPO_ROOT}/lingxi-code/scripts/mobile-linux/build-local-app-rootfs.sh" --arch aarch64
+  bash "${REPO_ROOT}/scripts/local-apps/build-local-app-rootfs.sh" --arch aarch64
   ARCHIVE="${IOS_DIR}/build/local-app-rootfs/aarch64/rootfs.tar.gz"
   VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["alpine"]["version"])' "${SDK_ROOT}/docs/toolchains/runtime-pins.json")"
   EXPECTED_ARCHIVE_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"),"sha256").hexdigest())' "${ARCHIVE}")"
@@ -87,7 +85,7 @@ fi
 if [[ -n "${ALPINE_VERSION}" && "${ALPINE_VERSION}" != "${VERSION}" ]]; then
   echo "--alpine-version must match the SDK's pinned version ${VERSION}" >&2; exit 1
 fi
-bash "${SDK_ROOT}/scripts/prepare-ios-rootfs.sh" --archive "${ARCHIVE}" \
+bash "${SDK_ROOT}/scripts/build/prepare-ios-rootfs.sh" --archive "${ARCHIVE}" \
   --profile "${ROOTFS_PROFILE}" --expected-archive-sha256 "${EXPECTED_ARCHIVE_SHA}" \
   --output "${STAGE_ROOT}" --cache "${CACHE}" --native-output "${SDK_OUTPUT}/native"
 python3 - "${STAGE_ROOT}/manifest.json" "${LOCAL_APP_RUNTIME}" "${VERSION}" "${SDK_OUTPUT}/sdk-source.json" <<'PROFILE'

@@ -25,7 +25,7 @@ system-prompt registration. The binary confirms:
 - `coerceInput` for `PE.name`: also handles `edits` key (`{file_path, edits:[{...}]}` → `{file_path, old_string, new_string, replace_all}`).
 
 **How it was replicated:**
-- New `lingxi-code/tools/file/src/multi_edit.rs` with `MultiEditTool` struct.
+- New `crates/tools/file/src/multi_edit.rs` with `MultiEditTool` struct.
 - Schema: `{file_path: string (required), edits: array of {old_string, new_string, replace_all?} (required)}`.
 - `call()`: extracts `file_path` + `edits[0]`, builds flat `{file_path, old_string, new_string, replace_all}`, delegates to `FileEditTool::new(ctx).call(flat, ctx, tx)`.
 - Only `edits[0]` is applied — matches binary `V4l` which dispatches only the first element.

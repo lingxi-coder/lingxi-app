@@ -7,16 +7,15 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { BridgeClient } from '@lingxi/bridge-client';
 
+import { SessionRuntime } from '../src/main/bridge.js';
 import {
-  BridgeManager,
   discoverExternalReusableBridge,
   discoverLegacyOrphanBridges,
   discoverReusableBridge,
   processCommandOwnsSession,
-  SessionRuntime,
-  SessionRuntimeManager,
   stopLegacyOrphanBridges,
-} from '../src/main/bridge';
+} from '../src/main/bridgeDiscovery.js';
+import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 
@@ -939,7 +938,7 @@ test('closeProject removes runtimes from routing before asynchronous disposal', 
 
 test('restart exposes an explicit restarting state and structured connection diagnostics', async () => {
   const diagnostics = new DiagnosticBuffer();
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     diagnostics,
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
@@ -964,7 +963,7 @@ test('restart exposes an explicit restarting state and structured connection dia
 });
 
 test('stop disconnects the active project and returns the bridge to idle', async () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const states: string[] = [];
@@ -982,7 +981,7 @@ test('stop disconnects the active project and returns the bridge to idle', async
 
 test('restart surfaces launch failures instead of remaining stuck in restarting', async () => {
   const diagnostics = new DiagnosticBuffer();
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     diagnostics,
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
@@ -1010,7 +1009,7 @@ test('lockfile polling ignores invalid candidates until a valid private lockfile
   const workspace = temporaryDirectory();
   const launchDir = temporaryDirectory();
   const lockfilePath = join(launchDir, 'bridge.lock');
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     diagnostics,
     lockfileTimeoutMs: 500,
     launchConfig: () => ({ workspace, trusted: true }),
@@ -1047,7 +1046,7 @@ test('lockfile polling ignores invalid candidates until a valid private lockfile
 test('privileged bridge access re-checks current workspace trust before use', () => {
   let trusted = true;
   const client = { sendCommand: () => undefined };
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted }),
   });
   (manager as any).client = client;
@@ -1061,7 +1060,7 @@ test('privileged bridge access re-checks current workspace trust before use', ()
 });
 
 test('computer access requests broadcast to renderers and are tracked as pending', async () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const broadcasts: Array<{ channel: string; payload: unknown }> = [];
@@ -1095,7 +1094,7 @@ test('computer access requests broadcast to renderers and are tracked as pending
 });
 
 test('AskUserQuestion events are tracked and cleared across disconnect', async () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const broadcasts: Array<{ channel: string; payload: unknown }> = [];
@@ -1133,7 +1132,7 @@ test('AskUserQuestion events are tracked and cleared across disconnect', async (
 });
 
 test('AskUserQuestion resolved events clear replay state before a renderer reload', () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const handlers = new Map<string, (...args: unknown[]) => void>();
@@ -1166,7 +1165,7 @@ test('AskUserQuestion resolved events clear replay state before a renderer reloa
 });
 
 test('AskUserQuestion broker resolution clears replay state without a renderer answer', async () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const handlers = new Map<string, (...args: unknown[]) => void>();
@@ -1246,7 +1245,7 @@ test('permission resolutions clear every renderer and pending host state', () =>
 });
 
 test('registerWindow replays pending AskUserQuestion requests to a reloaded renderer', () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const handlers = new Map<string, (...args: unknown[]) => void>();
@@ -1282,7 +1281,7 @@ test('registerWindow replays pending AskUserQuestion requests to a reloaded rend
 });
 
 test('old bridge generations cannot repopulate turn or permission state', () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const broadcasts: unknown[] = [];
@@ -1303,7 +1302,7 @@ test('old bridge generations cannot repopulate turn or permission state', () => 
 });
 
 test('turn terminal owns release and rejects late interactive or tool events', () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const broadcasts: Array<{ channel: string; payload: any }> = [];
@@ -1344,7 +1343,7 @@ test('turn terminal owns release and rejects late interactive or tool events', (
 });
 
 test('cancelling turn rejects late interactions but keeps turn events flowing', () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const broadcasts: Array<{ channel: string; payload: any }> = [];
@@ -1378,7 +1377,7 @@ test('cancelling turn rejects late interactions but keeps turn events flowing', 
 
 test('an engine-initiated turn re-arms the host and its permission prompts reach the user', () => {
   const diagnostics = new DiagnosticBuffer();
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     diagnostics,
   });
@@ -1430,7 +1429,7 @@ test('an engine-initiated turn re-arms the host and its permission prompts reach
 
 test('prompt submission owns the pre-turn_started cancellation window', () => {
   const calls: Array<{ type: string; value?: unknown }> = [];
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     accessState: () => ({ workspace: '/workspace', trusted: true }),
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
@@ -1462,7 +1461,7 @@ test('prompt submission owns the pre-turn_started cancellation window', () => {
 
 test('prompt submission forwards validated image attachments to the bridge client', () => {
   const calls: Array<{ text: string; images?: unknown[] }> = [];
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     accessState: () => ({ workspace: '/workspace', trusted: true }),
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
@@ -1486,7 +1485,7 @@ test('prompt submission forwards validated image attachments to the bridge clien
 
 test('provider credential status is sourced from the engine secure store', async () => {
   const commands: Array<Record<string, unknown>> = [];
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     providerIds: ['deepseek'],
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
@@ -1517,7 +1516,7 @@ test('provider credential status is sourced from the engine secure store', async
 
 test('provider credential preview is requested only for an explicitly selected provider', async () => {
   const commands: Array<Record<string, unknown>> = [];
-  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const manager = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
 
   const pending = manager.listProviderCredentials(['deepseek'], ['deepseek']);
@@ -1535,7 +1534,7 @@ test('provider credential preview is requested only for an explicitly selected p
 
 test('provider credential writes cross only the authenticated bridge command path', async () => {
   const commands: Array<Record<string, unknown>> = [];
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
@@ -1559,7 +1558,7 @@ test('provider credential writes cross only the authenticated bridge command pat
 test('provider switching during an active turn hot-loads the destination credential before set_model', async () => {
   const commands: Array<Record<string, unknown>> = [];
   let resolves = 0;
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     resolveProviderCredential: async (providerId) => {
       resolves += 1;
@@ -1606,7 +1605,7 @@ test('concurrent model switches are rejected while the first awaits credentials 
   const commands: Array<Record<string, unknown>> = [];
   const credential = deferred<string>();
   let resolves = 0;
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     resolveProviderCredential: async () => {
       resolves += 1;
@@ -1674,7 +1673,7 @@ test('credential refresh skips disconnected cached runtimes that will reload on 
 
 test('provider connection test keeps stored credentials engine-side and correlates the result', async () => {
   const commands: Array<Record<string, unknown>> = [];
-  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const manager = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
 
   const pending = manager.testProviderConnection(
@@ -1713,7 +1712,7 @@ test('provider connection test keeps stored credentials engine-side and correlat
 
 test('provider connection test can use an unsaved draft without persisting it', async () => {
   const commands: Array<Record<string, unknown>> = [];
-  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const manager = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
 
   const pending = manager.testProviderConnection(
@@ -1745,7 +1744,7 @@ test('provider connection test can use an unsaved draft without persisting it', 
 test('partial credential read failures preserve unavailable providers and publish successful status', async () => {
   const commands: Array<Record<string, unknown>> = [];
   const broadcasts: unknown[] = [];
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   (manager as any).client = { sendCommand: (command: Record<string, unknown>) => commands.push(command) };
@@ -1770,7 +1769,7 @@ test('partial credential read failures preserve unavailable providers and publis
 });
 
 test('clean child exit clears the SIGKILL timer so the process group is not signalled twice', async () => {
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     stopTimeoutMs: 40,
   });
@@ -1804,7 +1803,7 @@ function trustedManager(confirm?: () => Promise<boolean>): {
   commands: Array<Record<string, unknown>>;
 } {
   const commands: Array<Record<string, unknown>> = [];
-  const manager = new BridgeManager({
+  const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     accessState: () => ({ workspace: '/workspace', trusted: true }),
     ...(confirm ? { confirmBypassPermissions: confirm } : {}),
@@ -2119,7 +2118,7 @@ test('successful scheduled creation commits the draft owner, while rejection kee
 });
 
 test('custom provider IDs follow the latest engine settings snapshot', () => {
-  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const manager = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   const client = new EventEmitter();
   (manager as any).wireClient(client, 0);
   client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({ providers: {
@@ -2133,7 +2132,7 @@ test('custom provider IDs follow the latest engine settings snapshot', () => {
 });
 
 test('custom credential authorization waits for the newly saved settings snapshot', async () => {
-  const manager = new BridgeManager({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+  const manager = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
   const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
   let requested = false;
   client.sendCommand = () => { requested = true; };

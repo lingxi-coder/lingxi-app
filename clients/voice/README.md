@@ -43,15 +43,15 @@ execute the same JSON fixture in `GeneratedAudioConfigurationTests.swift` and
 `AudioConfigurationFixtureTest.kt`.
 
 All device operations use the app-scoped `AudioService` contract in
-`lingxi-code/platform-api/src/audio.rs`; its wire/UniFFI DTOs are in
-`lingxi-code/client-protocol/src/audio.rs`. Rust platform adapters live in
-`lingxi-code/harness-runtime/src/mobile/audio_service.rs` and
-`lingxi-code/apps/bridge-server/src/audio_bridge.rs`.
+Harness `crates/platform-api/src/audio.rs`; its wire/UniFFI DTOs are in
+Harness `crates/client-protocol/src/audio.rs`. Rust platform adapters live in
+Harness `crates/runtime/src/mobile/audio_service.rs` and
+`crates/apps/bridge-server/src/audio_bridge.rs`.
 UniFFI 0.28 cannot export an external callback trait, so the iOS and Android
 wrappers declare thin `IosAudioService` and `AndroidAudioService` callback
 interfaces and adapt them to engine-mobile's internal `NativeAudioService`
-using those shared DTOs (`lingxi-code/apps/ios-framework/src/lib.rs` and
-`lingxi-code/apps/android-aar/src/lib.rs`). Keep that FFI boundary platform-
+using those shared DTOs (`crates/apps/ios-framework/src/lib.rs` and
+`crates/apps/android-aar/src/lib.rs`). Keep that FFI boundary platform-
 local rather than exporting the internal callback trait directly.
 
 `Listen` always captures live speech. `Synthesize` returns bounded, nonempty

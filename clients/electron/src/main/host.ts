@@ -5,10 +5,25 @@ import type { GitService } from './git.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT, type GitRequest } from '../shared/git.js';
 import type { TerminalManager } from './terminal.js';
 import { TerminalDelivery } from './terminal-delivery.js';
-import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT, TERMINAL_DRAFT_SESSION, type TerminalScope } from '../shared/terminal.js';
+import {
+  CH_TERMINAL_REQUEST,
+  CH_TERMINAL_EVENT,
+  TERMINAL_DRAFT_SESSION,
+  type TerminalScope,
+} from '../shared/terminal.js';
 import { createRequire } from 'node:module';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { open, utimes } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
@@ -19,10 +34,10 @@ import type {
   ProviderConnectionTestResult,
   RuntimeEventEnvelope,
   SessionRef,
-  SessionRuntimeManager,
   SessionRuntimeSummary,
-} from './bridge.js';
-import { isSessionId } from './bridge.js';
+} from './bridgeTypes.js';
+import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
+import { isSessionId } from './sessionIdentity.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
@@ -43,7 +58,13 @@ import {
 import { validateClipboardText, validateClientCommand } from './validation.js';
 import { readMicrophoneAccess, type MediaAccessReader } from './microphoneAccess.js';
 import type { NativeAudioManager } from './audio/nativeAudioManager.js';
-import { CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_EVENT, CH_NATIVE_AUDIO_FINISH_LISTEN, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_REQUEST } from '../shared/nativeAudio.js';
+import {
+  CH_NATIVE_AUDIO_CANCEL,
+  CH_NATIVE_AUDIO_EVENT,
+  CH_NATIVE_AUDIO_FINISH_LISTEN,
+  CH_NATIVE_AUDIO_OPERATION,
+  CH_NATIVE_AUDIO_REQUEST,
+} from '../shared/nativeAudio.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
 import { CODEX_PROVIDER_ID, loginCodex } from './codex-auth.js';
 import type { SettingsStore } from './settings.js';

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToString } from 'react-dom/server';
 
-import { useBridge, type UseBridge } from '../src/renderer/bridge/useBridge';
+import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
+import { useBridge } from '../src/renderer/bridge/useBridge.js';
 import { defaultVoicePreferences } from '../src/shared/voicePreferences';
 
 /**

@@ -1,8 +1,16 @@
 import { conversationPlans } from './bridge/planDocuments';
 import { selectedGitScope } from './bridge/gitScope';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type CSSProperties } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type CSSProperties,
+} from 'react';
 
-import { useBridge } from './bridge/useBridge';
+import { useBridge } from './bridge/useBridge.js';
 import {
   BetaComposer,
   BetaSidebar,

@@ -111,7 +111,7 @@ Local Apps 的资源编译器、inventory、模板和供应链检查随代码迁
 - 平台实现和工具保持既有依赖约束；模型提供商通信继续由独立 `llm-client` 完成。
 - 客户端显示派生由 `client-presentation` 共享，`client-adapter` 与终端共同使用迁出的原实现；终端 I/O 和主题自动检测仍留在 `tui-core`。
 
-依赖检查由 `lingxi-code/scripts/check_deps.py` 执行。
+依赖检查由 `scripts/checks/check_deps.py` 执行。
 
 ## 验证要求
 

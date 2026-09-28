@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import type { UseBridge } from '../bridge/useBridge';
+import type { UseBridge } from '../bridge/bridgeTypes.js';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';

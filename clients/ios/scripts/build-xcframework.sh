@@ -30,7 +30,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"                       # clients/ios
 REPO_ROOT="$(cd "${IOS_DIR}/../.." && pwd)"                     # worktree root
-CARGO_DIR="${REPO_ROOT}/lingxi-code"                           # Rust workspace
+CARGO_DIR="${REPO_ROOT}"                           # Rust workspace
 # Honour an inherited CARGO_TARGET_DIR: cargo reads it from the environment, so
 # hard-coding the shared dir here would make the script look for outputs
 # somewhere cargo never wrote them. A private dir also keeps a long iOS release

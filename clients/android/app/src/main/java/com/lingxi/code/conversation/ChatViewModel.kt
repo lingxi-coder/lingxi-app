@@ -4,15 +4,14 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.R
-import com.lingxi.code.bindings.AskUserQuestionRequestDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ImageRefDto
-import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.bindings.MobileLinuxEventFfi
 import com.lingxi.code.bindings.MobileLinuxEventKindFfi
 import com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi
 import com.lingxi.code.bindings.MobileLinuxTaskStateFfi
+import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.bindings.TaskStatusDto
 import com.lingxi.code.bindings.TurnRecoveryStateDto
 import com.lingxi.code.model.ConversationScope
@@ -21,15 +20,18 @@ import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.MCPServer
 import com.lingxi.code.model.Message
-import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.ModelOption
+import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
 import com.lingxi.code.model.SessionRow
 import com.lingxi.code.model.canonicalSessionId
-import kotlinx.coroutines.Job
+import java.security.SecureRandom
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -44,157 +46,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import java.security.SecureRandom
-import java.util.Locale
-import java.util.concurrent.atomic.AtomicLong
-
-/**
- * Immutable UI state for the conversation surface. Hoisted out of the
- * composables and driven entirely by [ChatViewModel] / [ConversationSource].
- */
-data class ChatState(
-    val session: SessionRef,
-    /** Completed/user transcript rows. The in-flight assistant row is separate. */
-    val messages: List<Message>,
-    /**
-     * Assistant row currently receiving text deltas.
-     *
-     * Keeping it outside [messages] avoids copying the entire transcript for
-     * every streamed token when a conversation has a large history.
-     */
-    val streamingMessage: Message? = null,
-    /** A brand-new (empty) chat shows the empty-state hero instead of a list. */
-    val isNew: Boolean = false,
-    /** True while the assistant reply streams — keeps the run trace live. */
-    val streaming: Boolean = false,
-    /** True while ResumeSession/NewSession is awaiting engine confirmation. */
-    val sessionTransitioning: Boolean = false,
-    /** Cancel has stopped UI streaming but the engine has not acknowledged it yet. */
-    val cancellationInFlight: Boolean = false,
-    /**
-     * False when the visible session has not been confirmed by the engine.
-     * Sending is rejected in that state so a cached transcript can never be
-     * presented as context that the engine does not actually hold.
-     */
-    val sessionReady: Boolean = true,
-    /** The model selected in the composer chip (a real engine id once loaded). */
-    val model: ModelOption,
-    /**
-     * The catalog the picker shows. Driven by the engine's REAL `ModelList`
-     * (out-of-band, via [ConversationSource.modelState]). It remains empty until
-     * the engine reports a catalog. The active row is [model].
-     */
-    val availableModels: List<ModelOption> = emptyList(),
-    /**
-     * A transient, user-visible status line (tool activity). `null` hides the
-     * row. Mirrors the iOS `ConversationModel.statusLine`. Errors no longer ride
-     * this dim line — they surface in [error] as a persistent banner.
-     */
-    val statusLine: String? = null,
-    /** Latest manual `/compact` lifecycle; terminal state remains until the next action. */
-    val compaction: CompactionProgressUi? = null,
-    /** Live/completed shell calls for the current session, keyed by task id. */
-    val shellTools: List<ShellToolCardState> = emptyList(),
-    /** Latest android_use invocation, used to reopen setup guidance after dismissal. */
-    val computerUseRequestKey: String? = null,
-    /** The latest turn's live trace; terminal copies are anchored in the transcript. */
-    val agentRun: AgentRunState? = null,
-    /** Terminal Agent results, anchored after the assistant message they produced. */
-    val agentRunsByMessageId: Map<String, AgentRunState> = emptyMap(),
-    /** Out-of-band tasks that remain alive after their initiating turn ended. */
-    val activeBackgroundTaskIds: Set<String> = emptySet(),
-    /** Full task rows retained for the unified execution card. */
-    val backgroundTasks: Map<String, BackgroundTaskUi> = emptyMap(),
-    /** Session agent roster shown alongside workflows and tasks. */
-    val sessionAgents: List<SessionAgentUi> = emptyList(),
-    /** Direct resume feedback for the unified workflow row. */
-    val workflowResumeState: WorkflowResumeUiState = WorkflowResumeUiState.Idle,
-    /** Event-driven workflow/subagent progress for the visible session only. */
-    val workflowRuns: Map<String, WorkflowRunUi> = emptyMap(),
-    /**
-     * A persistent, dismissible turn error. Unlike [statusLine] (which the next
-     * tool-activity event overwrites and a turn clears), this survives until the
-     * user dismisses it ([ChatViewModel.dismissError]) or starts a new turn —
-     * so a failed reply is never lost to a transient flash. `null` hides the
-     * banner.
-     */
-    val error: ChatError? = null,
-    /**
-     * Interactive `AskUserQuestion` requests awaiting the user, oldest first.
-     * The FIRST one renders as a card at the transcript tail
-     * ([buildChatRenderItems]); entries leave only on answer/cancel, on the
-     * engine's `AskUserQuestionResolved`, on `SessionEnded`, or when the
-     * engine connection itself is replaced — a question can outlive its
-     * turn's stream, so `TurnEnded` deliberately does NOT clear it.
-     */
-    val pendingQuestions: List<AskUserQuestionRequestDto> = emptyList(),
-    /**
-     * The model-managed working plan, pinned above the composer. Driven by
-     * `ClientEvent.PlanUpdated`, a FULL-LIST REPLACE emitted on the TodoWrite
-     * CALL — an empty list is a real payload meaning "clear the panel".
-     */
-    val planTasks: List<PlanTaskUi> = emptyList(),
-    /** Whether the plan panel shows every row instead of the capped window. */
-    val planExpanded: Boolean = false,
-    /**
-     * A recovered durable turn is parked at WaitingForUser without a local
-     * executor. The composer exposes Stop/Discard while this is true, but it
-     * must not count as active work for the foreground-service lease.
-     */
-    val durableRecoveryBlocked: Boolean = false,
-    /** A live local executor is parked at WaitingForUser; Stop still cancels it. */
-    val liveTurnWaitingForUser: Boolean = false,
-    /**
-     * Tool-use ids whose result body/diff the user expanded.
-     *
-     * This lives in the MODEL layer on purpose. Both surfaces that render a tool
-     * call — the transcript `LazyColumn` and the run timeline's row list —
-     * RECYCLE their rows, so `rememberSaveable` inside the row would drop the
-     * expansion the moment it scrolled out of view. Holding it here also makes
-     * it assertable from a plain JVM reducer test.
-     */
-    val expandedToolCalls: Set<String> = emptySet(),
-) {
-    /** True while a turn is in flight or a live executor is waiting for input. */
-    val isStreaming: Boolean get() = streaming || liveTurnWaitingForUser
-
-    /** Every engine workload that needs the Android foreground-service lease. */
-    val requiresBackgroundExecution: Boolean
-        get() = streaming ||
-            liveTurnWaitingForUser ||
-            compaction?.status == CompactionProgressStatus.Running ||
-            activeBackgroundTaskIds.isNotEmpty() ||
-            shellTools.any { it.status == ShellToolStatus.Running } ||
-            agentRun?.activeWorkers?.let { it > 0 } == true ||
-            agentRunsByMessageId.values.any { it.activeWorkers > 0 } ||
-            agentRun?.tools?.any { it.status == AgentToolStatus.Running } == true
-}
-
-/**
- * A user-facing turn error rendered as the dismissible banner. [message] is the
- * engine's failure reason; [kind] selects the banner's label/glyph so an auth
- * failure reads differently from a transport blip (kind-aware, per spec item 4).
- */
-data class ChatError(
-    val message: String,
-    val kind: ChatErrorKind = ChatErrorKind.GENERIC,
-)
-
-/**
- * Coarse error classification for the banner. Derived from the engine error
- * MESSAGE (the reply stream carries a flat string, not the wire `ErrorKindDto`),
- * so the UI can lead with a kind-appropriate headline.
- */
-enum class ChatErrorKind {
-    /** Missing / rejected credentials (401 / "api key" / "unauthorized"). */
-    AUTH,
-
-    /** Network / transport blip (timeout, connection reset). */
-    NETWORK,
-
-    /** Anything else. */
-    GENERIC,
-}
 
 private const val ANDROID_COMPUTER_USE_TOOL = "android_use"
 
@@ -205,36 +56,6 @@ private object DurableConversationTurnIds {
 
     fun next(): Long = next.updateAndGet { current ->
         if (current == Long.MAX_VALUE) 1L else current + 1L
-    }
-}
-
-enum class ConversationTurnOrigin {
-    Ordinary,
-    Flow,
-}
-
-enum class ConversationTurnOutcome {
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-data class ConversationTurnCompletion(
-    val token: Long,
-    val origin: ConversationTurnOrigin,
-    val outcome: ConversationTurnOutcome,
-    val finalAssistantText: String,
-)
-
-/** Classify a raw engine error message into a [ChatErrorKind] for the banner. */
-internal fun classifyError(message: String): ChatErrorKind {
-    val m = message.lowercase()
-    return when {
-        "401" in m || "api key" in m || "apikey" in m || "unauthorized" in m ||
-            "authentication" in m || "未授权" in m || "密钥" in m -> ChatErrorKind.AUTH
-        "timeout" in m || "timed out" in m || "connection" in m || "network" in m ||
-            "transport" in m || "超时" in m || "网络" in m || "连接" in m -> ChatErrorKind.NETWORK
-        else -> ChatErrorKind.GENERIC
     }
 }
 
@@ -2882,186 +2703,4 @@ class ChatViewModel(
          */
         const val DISCARD_CONFIRMATION_TIMEOUT_MS = 8_000L
     }
-}
-
-/** A settled turn: the transcript it produced, and what is left of its run trace. */
-internal data class SettledTurn(
-    val messages: List<Message>,
-    val run: AgentRunState?,
-    val agentRunsByMessageId: Map<String, AgentRunState>,
-)
-
-/**
- * Restore the durable terminal row that follows each assistant transcript
- * message. Live-only trace details are not part of SessionResumed, but the
- * persisted assistant result is sufficient to reconstruct its terminal status
- * without letting the row disappear after reconnect/process restoration.
- */
-internal fun reconstructTerminalAgentRuns(messages: List<Message>): Map<String, AgentRunState> =
-    buildMap {
-        var restoredTurn = -1L
-        messages.forEach { message ->
-            if (message.role != Role.Ai) return@forEach
-            // SessionResumed persists the assistant result but not the overall
-            // turn outcome. A failed child tool does not imply a failed Agent —
-            // the model may have recovered — so use the neutral Finished state
-            // until the wire carries an explicit outcome.
-            put(
-                message.id,
-                AgentRunState(turnId = restoredTurn--).finish(AgentRunOutcome.Finished),
-            )
-        }
-    }
-
-private fun Map<String, BackgroundTaskUi>.updateStatus(
-    taskId: String,
-    status: TaskStatusDto,
-    error: String? = null,
-): Map<String, BackgroundTaskUi> = mapNotNull { (id, task) ->
-    if (id == taskId) {
-        // Never clear a reason already learned from a `TaskRow` backfill — the
-        // push and the row list are two sources for the same field.
-        id to task.copy(status = status, error = error?.takeIf { it.isNotBlank() } ?: task.error)
-    } else {
-        id to task
-    }
-}.toMap()
-
-private fun Set<String>.withTaskStatus(taskId: String, status: TaskStatusDto): Set<String> =
-    when (status) {
-        TaskStatusDto.PENDING, TaskStatusDto.RUNNING -> this + taskId
-        TaskStatusDto.PAUSED,
-        TaskStatusDto.COMPLETED,
-        TaskStatusDto.FAILED,
-        TaskStatusDto.CANCELLED,
-        -> this - taskId
-    }
-
-/**
- * Settle a finished turn: MOVE its tool calls out of the transient run trace and
- * into the transcript message that settles with it.
- *
- * ### Why they have to move
- *
- * A live turn's tool calls exist in exactly ONE place — [ChatState.agentRun] —
- * and [ChatViewModel.send] overwrites that with a fresh [AgentRunState] the
- * instant the next turn starts. So turn N-1's tool rows were destroyed by turn
- * N, and the same conversation read completely differently before and after a
- * restart (a resumed transcript rebuilds every call inline, via
- * [transcriptFromDtos]).
- *
- * ### Why they must be APPENDED, not merged
- *
- * The engine SPLITS the model stream (`orchestrator/src/streaming_loop.rs`):
- * text and thinking accumulate into `PumpedTurn::assistant_blocks`, while a
- * `ToolUse` goes to a separate `tool_uses` field and is explicitly NOT pushed to
- * `assistant_blocks`. `MessageComplete`'s payload is
- * `synthesize_message(turn)` over `assistant_blocks` alone
- * (`client-adapter/src/turn.rs`), so its `blocks` NEVER contain a `ToolUse` and
- * [messageDtoToMessage] never yields a [MessageContent.Tool]. A merge keyed on
- * an existing tool block therefore matched nothing, ever. The rows themselves
- * must be added. (The by-id merge is still done first, so the day the engine
- * does ship `ToolUse` in `assistant_blocks` its header/display are honored in
- * place instead of being duplicated.)
- *
- * ### Why it is a MOVE
- *
- * Copying would draw every row twice — once in the bubble, once in the run card
- * that stays on screen until the next turn. Removing what was absorbed also
- * makes this idempotent: `MessageComplete` followed by `TurnEnded` settles once.
- *
- * Shell calls are the exception and are left in the run trace: they already own
- * a persistent [ChatRenderItem.Shell] terminal card of their own, so absorbing
- * them would be a third copy.
- *
- * PURE, for JVM tests.
- */
-internal fun ChatState.settleTurn(run: AgentRunState?, settling: Message?): SettledTurn {
-    val shellBacked = shellTools.mapTo(mutableSetOf()) { it.taskId }
-    val absorbed = run?.tools.orEmpty().filterNot { it.id in shellBacked }
-    val terminalRun = run?.takeUnless { it.active || it.outcome == AgentRunOutcome.Running }
-    val terminalAlreadySettled = terminalRun != null &&
-        agentRunsByMessageId.values.any { it.turnId == terminalRun.turnId }
-    if (absorbed.isEmpty() && settling == null) {
-        return SettledTurn(messages, run, agentRunsByMessageId)
-    }
-    // A turn can end with tools or status and no prose at all. Mint a hidden
-    // anchor message so the terminal result still has a stable transcript slot.
-    val base = settling ?: Message(role = Role.Ai, text = "")
-    val settled = if (absorbed.isEmpty()) base else base.absorbToolCalls(absorbed)
-    val remainingRun = run?.let { existing ->
-        if (absorbed.isEmpty()) existing else existing.copy(
-            tools = existing.tools.filter { it.id in shellBacked },
-            revision = existing.revision + 1,
-        )
-    }
-    val settledRuns = if (terminalRun != null && !terminalAlreadySettled) {
-        agentRunsByMessageId + (settled.id to (remainingRun ?: terminalRun))
-    } else {
-        agentRunsByMessageId
-    }
-    return SettledTurn(
-        messages = messages + settled,
-        run = remainingRun,
-        agentRunsByMessageId = settledRuns,
-    )
-}
-
-/** Merge [rows] into this message's own tool blocks by id, then append the rest. */
-private fun Message.absorbToolCalls(rows: List<AgentToolRunState>): Message {
-    val byId = rows.associateBy { it.id }
-    val mergedIds = mutableSetOf<String>()
-    val existing = blocks.map { block ->
-        val call = (block as? MessageContent.Tool)?.call ?: return@map block
-        val live = byId[call.id] ?: return@map block
-        mergedIds += call.id
-        MessageContent.Tool(
-            call.copy(
-                header = call.header ?: live.header,
-                display = call.display ?: live.display,
-                status = if (call.display != null) call.status else live.status,
-            ),
-        )
-    }
-    // A streamed message carries prose in `text` and no blocks. Once blocks
-    // exist the bubble renders THOSE and ignores `text`, so the prose has to be
-    // seeded as a block or it would vanish behind the tool rows.
-    val prose = existing.ifEmpty {
-        if (text.isBlank()) emptyList() else listOf(MessageContent.Text(text))
-    }
-    val appended = rows.filterNot { it.id in mergedIds }
-        .map { MessageContent.Tool(it.toToolCall()) }
-    return copy(blocks = prose + appended)
-}
-
-/**
- * The transient one-line notice for a background task transition (`/tasks`
- * push events). Rides [ChatState.statusLine] — the same dim, auto-overwritten
- * row tool activity uses — deliberately NOT the persistent error banner; a
- * full task-progress surface is a later pass. PURE for JVM tests.
- */
-internal fun taskStatusLine(
-    taskId: String,
-    status: TaskStatusDto,
-    strings: ConversationStrings = DefaultConversationStrings,
-    error: String? = null,
-): String = when (status) {
-    TaskStatusDto.PENDING ->
-        strings.resolve(R.string.chat_task_status_pending, "后台任务 %1\$s 已排队", taskId)
-    TaskStatusDto.RUNNING ->
-        strings.resolve(R.string.chat_task_status_running, "后台任务 %1\$s 运行中", taskId)
-    TaskStatusDto.PAUSED ->
-        strings.resolve(R.string.chat_task_status_paused, "后台任务 %1\$s 已暂停", taskId)
-    TaskStatusDto.COMPLETED ->
-        strings.resolve(R.string.chat_task_status_completed, "后台任务 %1\$s 已完成", taskId)
-    TaskStatusDto.FAILED -> error?.takeIf { it.isNotBlank() }?.let { reason ->
-        strings.resolve(
-            R.string.chat_task_status_failed_reason,
-            "后台任务 %1\$s 已失败：%2\$s",
-            taskId,
-            reason,
-        )
-    } ?: strings.resolve(R.string.chat_task_status_failed, "后台任务 %1\$s 已失败", taskId)
-    TaskStatusDto.CANCELLED ->
-        strings.resolve(R.string.chat_task_status_cancelled, "后台任务 %1\$s 已取消", taskId)
 }

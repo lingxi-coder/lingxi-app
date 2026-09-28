@@ -72,11 +72,11 @@ jobs:
         run: cargo install cross --locked
       - name: Build (cross)
         if: ${{ matrix.cross }}
-        working-directory: lingxi-code
+        working-directory: .
         run: cross build --locked --release -p cli --target ${{ matrix.target }}
       - name: Build (cargo)
         if: ${{ !matrix.cross }}
-        working-directory: lingxi-code
+        working-directory: .
         shell: bash
         run: cargo build --locked --release -p cli --target ${{ matrix.target }}
       - name: Build macOS credential broker resources
@@ -95,7 +95,7 @@ jobs:
           const identity = process.env['LINGXI_CODESIGN_IDENTITY'];
           const teamId = process.env['LINGXI_MAC_TEAM_ID'];
           const profilePath = resolve(process.env['LINGXI_MAC_BROKER_PROVISIONING_PROFILE']);
-          const outputRoot = resolve('lingxi-code', 'target', target, 'credential-broker');
+          const outputRoot = resolve('target', target, 'credential-broker');
           buildCredentialBrokerResources(outputRoot, {
             teamId,
             profilePath,
@@ -116,7 +116,7 @@ jobs:
           RELEASE_VERSION: ${{ github.ref_name }}
       - name: Sign macOS CLI binary
         if: ${{ startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin') }}
-        working-directory: lingxi-code
+        working-directory: .
         shell: bash
         run: |
           test -n "${LINGXI_CODESIGN_IDENTITY}" || { echo "LINGXI_CODESIGN_IDENTITY is required for macOS releases"; exit 1; }
@@ -128,7 +128,7 @@ jobs:
           /usr/bin/codesign --display --verbose=4 "$bin" 2>&1 | grep "TeamIdentifier=${LINGXI_MAC_TEAM_ID}" >/dev/null
       - name: Test signed Data Protection Keychain broker
         if: ${{ startsWith(matrix.target, 'aarch64-apple-darwin') || startsWith(matrix.target, 'x86_64-apple-darwin') }}
-        working-directory: lingxi-code
+        working-directory: .
         shell: bash
         run: |
           case "${{ matrix.target }}" in
@@ -138,7 +138,7 @@ jobs:
           esac
           harness="$RUNNER_TEMP/lingxi-credential-broker-integration"
           xcrun swiftc -O -parse-as-library -target "$swift_target" \
-            platforms/macos-credential-broker/CredentialBrokerIntegrationMain.swift \
+            clients/electron/native/credential-broker/CredentialBrokerIntegrationMain.swift \
             -o "$harness"
           /usr/bin/codesign --force --sign "${LINGXI_CODESIGN_IDENTITY}" \
             --options runtime --timestamp -i com.lingxi.code.cli "$harness"
@@ -147,7 +147,7 @@ jobs:
             --options runtime --timestamp -i com.lingxi.code.unknown "$harness"
           "$harness" "target/${{ matrix.target }}/credential-broker/bin/lingxi-credential-client" production --expect-rejected
       - name: Collect binary
-        working-directory: lingxi-code
+        working-directory: .
         shell: bash
         run: |
           mkdir -p "out/${{ matrix.target }}/release"
@@ -159,7 +159,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
-          path: lingxi-code/out/${{ matrix.target }}/
+          path: out/${{ matrix.target }}/
 
   package-and-publish:
     needs: build
@@ -177,7 +177,7 @@ jobs:
       - name: Reassemble target/<triple>/release layout
         shell: bash
         run: |
-          cd lingxi-code
+          cd .
           for d in ../artifacts/bin-*; do
             t="$(basename "$d" | sed 's/^bin-//')"
             mkdir -p "target/$t"
@@ -193,13 +193,13 @@ jobs:
         shell: bash
         run: echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Stage npm packages
-        working-directory: lingxi-code
+        working-directory: .
         run: |
           for p in lingxi lingxi-linux-x64 lingxi-linux-arm64 lingxi-darwin-x64 lingxi-darwin-arm64 lingxi-win32-x64 lingxi-win32-arm64; do
             python3 npm/scripts/build_npm_package.py --package "$p" --release-version "${{ steps.ver.outputs.v }}" --staging-dir "/tmp/npm/$p" --vendor-src target
           done
       - name: Build wheels (one per target/tag)
-        working-directory: lingxi-code/pypi
+        working-directory: packaging/pypi
         shell: bash
         run: |
           # Inject the release version (pyproject ships a static 0.0.0-dev
@@ -242,4 +242,4 @@ jobs:
         if: ${{ env.PYPI_TOKEN != '' }}
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
-        run: uv publish lingxi-code/pypi/dist/*.whl
+        run: uv publish packaging/pypi/dist/*.whl

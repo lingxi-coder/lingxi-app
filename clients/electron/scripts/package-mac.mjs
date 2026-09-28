@@ -191,9 +191,10 @@ async function main() {
   const paths = artifactPaths(packageRoot, metadata);
   const electronApp = join(packageRoot, 'node_modules', 'electron', 'dist', 'Electron.app');
   const electronExecutable = join(electronApp, 'Contents', 'MacOS', 'Electron');
+  const cargoTargetDir = resolve(repoRoot, process.env['CARGO_TARGET_DIR'] || 'target');
   const sidecar = resolve(
     process.env['LINGXI_BRIDGE_SERVER_BIN'] ??
-      join(repoRoot, 'lingxi-code', 'target', 'release', 'bridge-server'),
+      join(cargoTargetDir, 'release', 'bridge-server'),
   );
 
   // Reject the most expensive and most common packaging mistakes before building.

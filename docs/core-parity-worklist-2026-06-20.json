@@ -5,7 +5,7 @@
         "rank": 1,
         "task": "Gate the bash sleep-block behind a tengu_amber_sentinel flag defaulting to false (so it's inert in default config), and while active fix the threshold 2s->25s, replace the message with the binary's exact string, and match the fractional regex (\\d+(\\.\\d*)?, f64 parse)",
         "subsystem": "bash-shell",
-        "files": "lingxi-code/tools/shell/src/bash.rs",
+        "files": "crates/tools/shell/src/bash.rs",
         "severity": "high",
         "risk": "low"
       },
@@ -13,7 +13,7 @@
         "rank": 2,
         "task": "Delete the fabricated CYBER_RISK_MITIGATION_REMINDER / MITIGATION_EXEMPT_MODELS / should_include_file_read_mitigation and its append; a successful text read's model_content should be just add_line_numbers(slice, offset)",
         "subsystem": "file-read",
-        "files": "lingxi-code/tools/file/src/read.rs (~555, 574, 579, 1624-1626)",
+        "files": "crates/tools/file/src/read.rs (~555, 574, 579, 1624-1626)",
         "severity": "high",
         "risk": "low"
       },
@@ -21,7 +21,7 @@
         "rank": 3,
         "task": "Remove the 2000-line default cap on no-limit reads (don't clamp end_idx to MAX_LINES_TO_READ when limit is None), delete the default_capped flag and the invented '[File truncated...]' note; keep MAX_LINES_TO_READ only for the prompt advertisement string",
         "subsystem": "file-read",
-        "files": "lingxi-code/tools/file/src/read.rs (1526-1531, 1619-1623)",
+        "files": "crates/tools/file/src/read.rs (1526-1531, 1619-1623)",
         "severity": "high",
         "risk": "low"
       },
@@ -29,7 +29,7 @@
         "rank": 4,
         "task": "Add early device-file guard ($3p): reject the 12 static /dev/* paths + the two /proc/<pid> regexes with 'Cannot read '{raw_path}': this device file would block or produce infinite output.' BEFORE canonicalize (test the expanded/user-supplied path, not the symlink-resolved one)",
         "subsystem": "file-read",
-        "files": "lingxi-code/tools/file/src/read.rs (validateInput path, before canonicalize_and_validate ~1350)",
+        "files": "crates/tools/file/src/read.rs (validateInput path, before canonicalize_and_validate ~1350)",
         "severity": "high",
         "risk": "low"
       },
@@ -37,7 +37,7 @@
         "rank": 5,
         "task": "Add -o/--only-matching flag to Grep schema and arg-parse, and implement only-matching output (one match substring per line via grep_searcher SinkMatch spans); requires output_mode:content",
         "subsystem": "grep-glob",
-        "files": "lingxi-code/tools/file/src/grep.rs (schema ~383-409, arg parse ~459-491, sink ~285)",
+        "files": "crates/tools/file/src/grep.rs (schema ~383-409, arg parse ~459-491, sink ~285)",
         "severity": "high",
         "risk": "low"
       },
@@ -45,7 +45,7 @@
         "rank": 6,
         "task": "Rewrite is_todo_v2_enabled as !platform_api::env::is_env_defined_falsy(CLAUDE_CODE_ENABLE_TASKS); drop the non_interactive term and NON_INTERACTIVE_SESSION_FLAG plumbing for this gate (fixes 3 opposite-outcome cases for TodoWrite/Task V1/V2 enablement)",
         "subsystem": "todo",
-        "files": "lingxi-code/tools/.../task.rs (187-204)",
+        "files": "crates/tools/.../task.rs (187-204)",
         "severity": "high",
         "risk": "low"
       },
@@ -53,7 +53,7 @@
         "rank": 7,
         "task": "Replace TodoWrite model-facing prompt() with verbatim FWd/UWd consts (default UWd long-form), select via a simple-prompt gate; drop the bogus 'id' field mention",
         "subsystem": "todo",
-        "files": "lingxi-code/tools/.../todo_write.rs (238-243), tool-api/src/wire.rs (137-142)",
+        "files": "crates/tools/.../todo_write.rs (238-243), tool-api/src/wire.rs (137-142)",
         "severity": "high",
         "risk": "low"
       },
@@ -61,7 +61,7 @@
         "rank": 8,
         "task": "Replace WebSearch description()/prompt() 1-line stub with the verbatim claude-code WebSearch DESCRIPTION incl. CRITICAL REQUIREMENT 'Sources:' block, US-only/domain-filtering lines, and runtime-substituted current-month/year (needs date injection)",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_search.rs (758-765)",
+        "files": "crates/tools/web/src/web_search.rs (758-765)",
         "severity": "high",
         "risk": "low"
       },
@@ -69,7 +69,7 @@
         "rank": 9,
         "task": "Add graceful token-cap PARTIAL view on the full-view branch (offset<=1 && no limit && no pages): port binary-shrink (6x0.7 backoff, 0.85 factor, char-fallback, strip trailing high-surrogate), set isPartialView, prepend the oIt-style paginating '[Truncated: PARTIAL view...]' reminder; keep hard error only for ranged reads",
         "subsystem": "file-read",
-        "files": "lingxi-code/tools/file/src/read.rs (1544-1547, validate_content_tokens 129-138)",
+        "files": "crates/tools/file/src/read.rs (1544-1547, validate_content_tokens 129-138)",
         "severity": "high",
         "risk": "medium"
       },
@@ -77,7 +77,7 @@
         "rank": 10,
         "task": "Convert WebFetch HTTP>=400 from a thrown transport error to a SUCCESS data result: build 'The server returned HTTP {code} {statusText}.{retryAfterLine}\\n\\nThe response body was not retrieved...' with a full STATUS_CODES table (fallback 'Unknown Status'), echo numeric Retry-After, return as data result (bytes:0, code, codeText), emit tengu_web_fetch_http_error",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_fetch.rs (238-240, 812-816, 886-890)",
+        "files": "crates/tools/web/src/web_fetch.rs (238-240, 812-816, 886-890)",
         "severity": "high",
         "risk": "medium"
       },
@@ -117,7 +117,7 @@
         "rank": 15,
         "task": "Append the Edit/Write 'file state is current' suffix (PYN, U+2014 em-dash) when user_modified==false && stale_recovered==false (effectively always on the non-interactive common path) to both edit_result_message() and write_result_message()",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/edit.rs (79-85), write.rs (40-46)",
+        "files": "crates/tools/file/src/edit.rs (79-85), write.rs (40-46)",
         "severity": "medium",
         "risk": "low"
       },
@@ -125,7 +125,7 @@
         "rank": 16,
         "task": "Single-Edit deletion: when actual_new is empty && !actual_old.ends_with('\\n') && file contains actual_old+'\\n', replace actual_old+'\\n' (consume trailing newline) for both replacen and replace_all paths, matching AUa",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/edit.rs (440-444)",
+        "files": "crates/tools/file/src/edit.rs (440-444)",
         "severity": "medium",
         "risk": "low"
       },
@@ -141,7 +141,7 @@
         "rank": 18,
         "task": "Drop both timeout>600000 rejections and the schema 'maximum':600000; use the timeout value as-is when >0 (H5a). Add numeric-string coercion (VF): accept a string matching ^[-+]?\\d+(\\.\\d+)?$ before as_u64. Keep describe() max-text for guidance",
         "subsystem": "bash-shell",
-        "files": "lingxi-code/tools/shell/src/bash.rs (564, 658-663, 713-716, 726-730)",
+        "files": "crates/tools/shell/src/bash.rs (564, 658-663, 713-716, 726-730)",
         "severity": "medium",
         "risk": "low"
       },
@@ -149,7 +149,7 @@
         "rank": 19,
         "task": "Add .describe() strings to all Grep (15) and Glob (path/pattern) input-schema properties verbatim from the binary",
         "subsystem": "grep-glob",
-        "files": "lingxi-code/tools/file/src/grep.rs (389-406), glob.rs (175-176)",
+        "files": "crates/tools/file/src/grep.rs (389-406), glob.rs (175-176)",
         "severity": "medium",
         "risk": "low"
       },
@@ -189,7 +189,7 @@
         "rank": 24,
         "task": "Set WEBFETCH_TIMEOUT to 60s (KHp) instead of 30s; update the doc comment",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_fetch.rs (73, 730)",
+        "files": "crates/tools/web/src/web_fetch.rs (73, 730)",
         "severity": "medium",
         "risk": "low"
       },
@@ -197,7 +197,7 @@
         "rank": 25,
         "task": "Fix WebFetch User-Agent to 'Claude-User (claude-code/<version>; +https://support.anthropic.com/)' (full formatter, not prefix); decide whether to track upstream VERSION string vs CARGO_PKG_VERSION",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_fetch.rs (67, 312-318, 725)",
+        "files": "crates/tools/web/src/web_fetch.rs (67, 312-318, 725)",
         "severity": "medium",
         "risk": "low"
       },
@@ -205,7 +205,7 @@
         "rank": 26,
         "task": "Add 303 to the WebFetch redirect-status match and replace redirect_status_text with a full reason-phrase table (fallback 'Unknown Status', shared with the http-error codeText path); fix the 303->'Found' and 200->'Found' test assertions",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_fetch.rs (139-146, 736, 1138-1142)",
+        "files": "crates/tools/web/src/web_fetch.rs (139-146, 736, 1138-1142)",
         "severity": "medium",
         "risk": "low"
       },
@@ -213,7 +213,7 @@
         "rank": 27,
         "task": "Cache and return the FULL converted WebFetch content; apply the 100k truncation only inside the apply-step prompt (remove truncate_markdown_for_return from cache/return path; recompute the truncated flag from the apply step)",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_fetch.rs (853-877), markdown.rs",
+        "files": "crates/tools/web/src/web_fetch.rs (853-877), markdown.rs",
         "severity": "medium",
         "risk": "medium"
       },
@@ -221,7 +221,7 @@
         "rank": 28,
         "task": "Invert WebFetch apply-step gate: when a side_query client exists, run the apply step (prompt='' if absent); take the raw path ONLY when isPreapprovedUrl && content-type contains text/markdown && len<100k",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_fetch.rs (377-387)",
+        "files": "crates/tools/web/src/web_fetch.rs (377-387)",
         "severity": "medium",
         "risk": "medium"
       },
@@ -229,7 +229,7 @@
         "rank": 29,
         "task": "Distinguish Grep match vs context lines in the sink and pass ripgrep context through verbatim ('-'-separated, not ':'), emit '--' group separators between context groups (stop forcing '{rel}:{n}:{text}' on every line)",
         "subsystem": "grep-glob",
-        "files": "lingxi-code/tools/file/src/grep.rs (308-315, 650-658)",
+        "files": "crates/tools/file/src/grep.rs (308-315, 650-658)",
         "severity": "medium",
         "risk": "medium"
       },
@@ -237,7 +237,7 @@
         "rank": 30,
         "task": "Thread an active Read(deny) accessor into BuiltinToolContext and convert deny rules to '--glob !<pattern>' excludes for both Grep and Glob (absolute->'!path', relative->'!**/path')",
         "subsystem": "grep-glob",
-        "files": "lingxi-code/tools/file/src/grep.rs (527-550), glob.rs (274-289)",
+        "files": "crates/tools/file/src/grep.rs (527-550), glob.rs (274-289)",
         "severity": "medium",
         "risk": "medium"
       },
@@ -253,7 +253,7 @@
         "rank": 32,
         "task": "Thread already-parsed merged settings additionalDirectories into .with_working_dirs(dirs) on the PermissionPolicy chain at engine boot so acceptEdits auto-allows edits/writes under additional working dirs",
         "subsystem": "permissions",
-        "files": "lingxi-code/apps/engine-desktop/src/lib.rs (~2430, dirs already at 259-260/369-370)",
+        "files": "crates/apps/engine-desktop/src/lib.rs (~2430, dirs already at 259-260/369-370)",
         "severity": "medium",
         "risk": "low"
       },
@@ -269,7 +269,7 @@
         "rank": 34,
         "task": "Add a MultiEdit tool {file_path, edits:[{old_string,new_string,replace_all?}]} implementing the Alo engine (strip trailing \\n+, substring-of-prior-new_string guard, shared AUa helper, 'String not found'/'Original and edited match' guards, all-or-nothing); register it and resolve the dangling 'MultiEdit' name in turn_loop.rs",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/ (new multi_edit.rs), lib.rs (160-167), orchestrator turn_loop.rs (22)",
+        "files": "crates/tools/file/src/ (new multi_edit.rs), lib.rs (160-167), orchestrator turn_loop.rs (22)",
         "severity": "medium",
         "risk": "medium"
       },
@@ -317,7 +317,7 @@
         "rank": 40,
         "task": "Filter hidden/internal/disabled commands out of the slash palette and help screen (apply isHidden/isEnabled gating; wire the INTENTIONALLY_DISABLED/STUBS tables to a runtime consumer)",
         "subsystem": "slash-commands",
-        "files": "lingxi-code/tui/src/components/prompt_input/palette.rs (67-85), command-api/src/builtin_support/help_render.rs (24-58)",
+        "files": "crates/tui/src/components/prompt_input/palette.rs (67-85), command-api/src/builtin_support/help_render.rs (24-58)",
         "severity": "medium",
         "risk": "medium"
       },
@@ -373,7 +373,7 @@
         "rank": 47,
         "task": "Drop the TodoWrite verification-nudge suffix entirely (v2.1.183 emits only the unconditional base string) \u2014 or at minimum gate it behind verification_feature_enabled() at the call site; update test nudge_fires_when_all_completed_3plus_no_verif",
         "subsystem": "todo",
-        "files": "lingxi-code/tools/.../todo_write.rs (329-341, 776)",
+        "files": "crates/tools/.../todo_write.rs (329-341, 776)",
         "severity": "medium",
         "risk": "low"
       },
@@ -381,7 +381,7 @@
         "rank": 48,
         "task": "Update NotebookEdit description() to the f2a string and prompt() to the A2a cell_id-based text (mind U+2014 em-dash); aligns the prompt with LingXi's already-cell_id schema",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/notebook_edit.rs (166, 171)",
+        "files": "crates/tools/file/src/notebook_edit.rs (166, 171)",
         "severity": "low",
         "risk": "low"
       },
@@ -389,7 +389,7 @@
         "rank": 49,
         "task": "Add Edit input-alias normalization (replace_name->replace_all true if true/'true', path->file_path, old_str->old_string, new_str->new_string) each only when canonical key absent and alias is a string",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/edit.rs (249-264)",
+        "files": "crates/tools/file/src/edit.rs (249-264)",
         "severity": "low",
         "risk": "low"
       },
@@ -397,7 +397,7 @@
         "rank": 50,
         "task": "Extend Edit not-found recovery (vIe) with \\uXXXX escape-swap decode + non-ASCII regex fallback after the curly-quote path, and append the escape-swap note to the not-found error when old_string matches /\\\\u[0-9a-fA-F]{4}/ or contains U+0080..U+FFFF",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/quotes.rs, edit.rs (417-429)",
+        "files": "crates/tools/file/src/quotes.rs, edit.rs (417-429)",
         "severity": "low",
         "risk": "low"
       },
@@ -405,7 +405,7 @@
         "rank": 51,
         "task": "Add Edit max-editable-file-size gate: stat the file and if size>1_073_741_824 return ask/InvalidInput 'File is too large to edit (<human-size>). Maximum editable file size is 1 GB.' (errorCode 10)",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/edit.rs (call/validateInput)",
+        "files": "crates/tools/file/src/edit.rs (call/validateInput)",
         "severity": "low",
         "risk": "low"
       },
@@ -413,7 +413,7 @@
         "rank": 52,
         "task": "Add UNC early-allow (path starts with \\\\\\\\ or //) in Edit validateInput; defer the deny-directory check (errorCode 2) to permission-subsystem activation and document/defer the Perforce read-only gate",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/edit.rs (216-225)",
+        "files": "crates/tools/file/src/edit.rs (216-225)",
         "severity": "low",
         "risk": "low"
       },
@@ -429,7 +429,7 @@
         "rank": 54,
         "task": "Add cyan-noise stderr post-processing: strip <sandbox_violations> blocks (xEp) + extract/remove trailing 'Shell cwd was reset to ...' (kEp); in the cwd-tracking path, when canonicalize fails append 'Shell cwd was reset to <restored-cwd>' and fire tengu_bash_tool_reset_to_original_dir",
         "subsystem": "bash-shell",
-        "files": "lingxi-code/tools/shell/src/bash.rs (966-1007)",
+        "files": "crates/tools/shell/src/bash.rs (966-1007)",
         "severity": "low",
         "risk": "low"
       },
@@ -461,7 +461,7 @@
         "rank": 58,
         "task": "Replace Glob/Grep generic PathBlocked path errors with specific 'Directory does not exist: {path}' / 'Path is not a directory: {path}' (and optional 'Did you mean {s}?' fuzzy hint) in a validateInput-equivalent",
         "subsystem": "grep-glob",
-        "files": "lingxi-code/tools/file/src/glob.rs (261-268), grep.rs (496-503)",
+        "files": "crates/tools/file/src/glob.rs (261-268), grep.rs (496-503)",
         "severity": "low",
         "risk": "low"
       },
@@ -469,7 +469,7 @@
         "rank": 59,
         "task": "Change Grep files_with_matches equal-mtime tiebreak from Rust byte Ord to a localeCompare-equivalent filename comparison (production branch only)",
         "subsystem": "grep-glob",
-        "files": "lingxi-code/tools/file/src/grep.rs (764-775)",
+        "files": "crates/tools/file/src/grep.rs (764-775)",
         "severity": "low",
         "risk": "low"
       },
@@ -477,7 +477,7 @@
         "rank": 60,
         "task": "Drop the WebFetch scheme-allowlist rejection (keep http->https upgrade; rely on validate_input parse check); keep the url_safety SSRF gate as documented LingXi-only hardening; fix file/data/ftp rejection tests; route redirect-without-Location to the http_error data result instead of a thrown 'redirect missing Location header'",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_fetch.rs (96-110, 609, 742-751, 937-953)",
+        "files": "crates/tools/web/src/web_fetch.rs (96-110, 609, 742-751, 937-953)",
         "severity": "low",
         "risk": "low"
       },
@@ -485,7 +485,7 @@
         "rank": 61,
         "task": "Add model.contains('claude-fable-5') to the WebSearch Vertex enablement arm; optionally model the Foundry per-deployment web_search capability gate",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_search.rs (131-144)",
+        "files": "crates/tools/web/src/web_search.rs (131-144)",
         "severity": "low",
         "risk": "low"
       },
@@ -493,7 +493,7 @@
         "rank": 62,
         "task": "Persist WebFetch binary content to a webfetch-<ts>-<rand> temp file and append '\\n\\n[Binary content (<ctype>, <human-size>) also saved to <path>]'; populate the dead persisted_path/persisted_size fields (depends on full-content fix)",
         "subsystem": "web-tools",
-        "files": "lingxi-code/tools/web/src/web_fetch.rs (853-877), cache.rs (49-50)",
+        "files": "crates/tools/web/src/web_fetch.rs (853-877), cache.rs (49-50)",
         "severity": "low",
         "risk": "medium"
       },
@@ -501,7 +501,7 @@
         "rank": 63,
         "task": "Route PDFs >3MB (bki) or unsupported-model to page extraction instead of inlining (keep PDF_TARGET_RAW_SIZE=20MB as the inline hard reject); dormant until pdf-render exists",
         "subsystem": "file-read",
-        "files": "lingxi-code/tools/file/src/read.rs (~1044), pdf_read.rs (11)",
+        "files": "crates/tools/file/src/read.rs (~1044), pdf_read.rs (11)",
         "severity": "low",
         "risk": "low"
       },
@@ -509,7 +509,7 @@
         "rank": 64,
         "task": "Add TodoWrite schema strictness: 'additionalProperties':false at top level + 'description':'The updated todo list' on the todos array; return Qla verbatim from description(); align empty-field messages to 'Content cannot be empty'/'Active form cannot be empty' and remove the 4096-char cap",
         "subsystem": "todo",
-        "files": "lingxi-code/tools/.../todo_write.rs (40, 55-71, 89-111, 235-237)",
+        "files": "crates/tools/.../todo_write.rs (40, 55-71, 89-111, 235-237)",
         "severity": "low",
         "risk": "low"
       },
@@ -621,7 +621,7 @@
         "rank": 78,
         "task": "Delete the single trailing space after 'reading the file.' in EDIT_DESCRIPTION, update the doc comment claiming it's intentional, and fix the two tests asserting the trailing space",
         "subsystem": "file-edit",
-        "files": "lingxi-code/tools/file/src/edit.rs (42, 46, ~1336, ~1344)",
+        "files": "crates/tools/file/src/edit.rs (42, 46, ~1336, ~1344)",
         "severity": "cosmetic",
         "risk": "low"
       },
@@ -727,7 +727,7 @@
       "fix_sketch": "Add a stderr post-processor mirroring xEp (strip <sandbox_violations> blocks) + kEp (extract/remove trailing 'Shell cwd was reset to ...'); in the cwd-tracking path, when canonicalize fails, append 'Shell cwd was reset to <restored-cwd>' to stderr and fire tengu_bash_tool_reset_to_original_dir."
     },
     {
-      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "subsystem": "file-read (Read tool) parity \u2014 crates/tools/file/src/read.rs vs claude-code v2.1.183",
       "title": "Read tool has NO 2000-line default cap; LingXi caps no-limit reads at 2000 lines and emits a truncation note that claude-code never produces",
       "verdict": "confirmed",
       "corrected_detail": "BINARY (v2.1.183, payload offset ~10.92M): qel calls `Zdt(n,m,s,s===void 0?a:void 0,...)` where the 3rd arg is `s`=limit (maxLines) and the 4th is `s===void 0?a:void 0` = the byteCap (maxSizeBytes) only when no limit. `Zdt`\u2192`a$p(l,size,mtime,t=offset,n=maxLines,...)`. In a$p: the full-file fast path `if(r===0&&o===void 0&&s===void 0)` returns the ENTIRE file uncapped; otherwise `let l=o!==void 0?r+o:1/0` \u2192 Infinity when no maxLines. The streaming reader `d$p` (files \u2265 i$p=10485760=10MB) likewise sets `endLine:n!==void 0?t+n:1/0`. So NEITHER reader path has a 2000-line cap \u2014 confirmed verbatim. LQe=2000 exists but is used only in the prompt text (`By default, it reads up to ${LQe} lines`) and the separate @-mention attachment path. LINGXI (read.rs:1526 `let effective_limit = limit.unwrap_or(MAX_LINES_TO_READ)`, :1527 end_idx clamp, :1531 default_capped, :1619-1623 `[File truncated to the first {MAX_LINES_TO_READ} lines...]`): hard-caps no-limit reads to 2000 lines AND appends an invented note (claude-code's only truncation note is in the attachment path with different wording + 'Don't tell the user about this truncation'). Auditor's binary/LingXi line refs all accurate; version is 2.1.183 not 2.1.181 but behavior identical. Real divergence: a 2500-line <256KB no-limit read returns 2500 lines in claude-code, 2000+note in LingXi.",
@@ -736,7 +736,7 @@
       "fix_sketch": "When input_limit is None, do NOT clamp end_idx to MAX_LINES_TO_READ \u2014 read the full file (the 256KB byte cap at read.rs:1350, gated on input_limit.is_none(), already bounds no-limit oversize reads; the token gate bounds the rest). Delete the default_capped flag and the :1619-1623 note. Keep MAX_LINES_TO_READ only for the prompt advertisement string."
     },
     {
-      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "subsystem": "file-read (Read tool) parity \u2014 crates/tools/file/src/read.rs vs claude-code v2.1.183",
       "title": "No graceful token-cap truncation: LingXi hard-errors on token overflow where claude-code returns a truncated PARTIAL view",
       "verdict": "confirmed",
       "corrected_detail": "BINARY: in qel, after `Zdt`, `k=(o??1)<=1&&s===void 0&&i===void 0` marks a full view (offset<=1, no limit, no pages). `try{await $el(f,r,l)}catch(L){if(L instanceof Fae&&k){...binary-shrink with a 6-iteration 0.7 backoff + 0.85 factor + char-fallback...; R=!W&&S<h?oIt+`showing lines 1-${S} of ${h} total (${L.tokenCount} tokens, cap ${l}). Call ${Ws} with offset=${S+1} limit=${S} for the next page, or ${$c} to find a specific section. Do NOT answer from this page alone...]`:oIt+`showing the first ${U.length} of ${f.length} characters...`}else throw L}`. oIt=`[Truncated: PARTIAL view \u2014 `; result carries truncatedByTokenCap/isPartialView; render prepends `<system-reminder>${r}</system-reminder>`. The hard Fae throw only surfaces for NON-full-view reads. $el=validateContentTokens (early-pass o<=r/4, API-refine `Iel(e)??o`, throw Fae if >r) and Fae msg = `File content (${e} tokens) exceeds maximum allowed tokens (${t})...`. LINGXI (read.rs:1544-1547): `if let Err(msg)=validate_content_tokens(&slice,...){ emit_failed(...max_tokens_exceeded); return Err(ToolError::Io(msg)) }` for ALL reads. validate_content_tokens (:129-138) returns a hard error for any overflow (its token logic is itself 1:1 with $el offline \u2014 early-pass max/4, fallback admit, error if >max). No 'PARTIAL view'/'truncatedByTokenCap'/binary-shrink path exists (0 hits). format_max_tokens_exceeded (:108) byte-matches Fae. Confirmed: the token-gate logic matches but the graceful full-view truncation + paginating reminder is entirely absent.",
@@ -744,7 +744,7 @@
       "fix_sketch": "On the full-view branch (input_offset<=1 && input_limit==None && pages==None), catch the token-cap overflow instead of erroring: port the binary-shrink (split lines, est chars/token ratio N, $=floor(lines*cap/tokenCount*0.85), 6\u00d70.7 backoff, then char-fallback for un-paginatable long-line files, strip trailing high-surrogate), set isPartialView, and prepend the oIt-style `[Truncated: PARTIAL view \u2014 showing lines 1-{S} of {total} total ({tokenCount} tokens, cap {cap}). Call Read with offset={S+1} limit={S} for the next page, or Grep to find a specific section. Do NOT answer from this page alone if the answer may be further in the file.]` reminder (and the char-variant for long-line files). Keep the hard error only for ranged (offset/limit/pages) reads."
     },
     {
-      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "subsystem": "file-read (Read tool) parity \u2014 crates/tools/file/src/read.rs vs claude-code v2.1.183",
       "title": "Missing device-file guard: LingXi will read /dev/* and /proc/* device files that claude-code refuses",
       "verdict": "confirmed",
       "corrected_detail": "BINARY: in the Read tool's `validateInput` (NOT `call`): `let r=Ds(e)` (Ds=expandPath, resolves base/cwd/~ but NOT symlinks) \u2192 permission-deny check \u2192 UNC short-circuit \u2192 binary-extension check \u2192 `if($3p(r))return{result:!1,message:`Cannot read '${e}': this device file would block or produce infinite output.`,errorCode:9}`. NOTE the check tests the EXPANDED `r` but interpolates the RAW `${e}` into the message. `function $3p(e){if(U3p.has(e))return!0;if(e.startsWith(\"/proc/\")&&(e.endsWith(\"/fd/0\")||e.endsWith(\"/fd/1\")||e.endsWith(\"/fd/2\")))return!0;if(/^\\/proc\\/[^/]+\\/(environ|cmdline|auxv|maps|mem|stat)$/.test(e))return!0;return!1}`; `U3p=new Set([\"/dev/zero\",\"/dev/random\",\"/dev/urandom\",\"/dev/full\",\"/dev/stdin\",\"/dev/tty\",\"/dev/console\",\"/dev/stdout\",\"/dev/stderr\",\"/dev/fd/0\",\"/dev/fd/1\",\"/dev/fd/2\"])` \u2014 exactly 12 paths + 2 /proc rules, verbatim. LINGXI: 0 hits for /dev//proc/'device file'/'would block' in tools/file/src AND tool-api/src. read.rs uses size=metadata.len() (which is 0 for char devices, so the 256KB cap does NOT catch them) then `tokio::fs::read(&canon)` (:1355) reads to EOF \u2014 /dev/zero//dev/urandom never EOF, causing unbounded Vec growth / hang; /proc/<pid>/maps reads as text. Confirmed real.",
@@ -752,7 +752,7 @@
       "fix_sketch": "Port $3p as an early guard. Because LingXi canonicalizes (resolves symlinks) where claude-code tests the merely-expanded path, place the guard on the user-supplied/expanded path BEFORE canonicalize_and_validate (or also test the pre-symlink path) to match \u2014 a static set {/dev/zero,/dev/random,/dev/urandom,/dev/full,/dev/stdin,/dev/tty,/dev/console,/dev/stdout,/dev/stderr,/dev/fd/0,/dev/fd/1,/dev/fd/2} membership + the two /proc regexes, returning `Cannot read '{path}': this device file would block or produce infinite output.` (interpolate the raw path, matching claude-code which interpolates ${e})."
     },
     {
-      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "subsystem": "file-read (Read tool) parity \u2014 crates/tools/file/src/read.rs vs claude-code v2.1.183",
       "title": "Fabricated cyber-risk/malware reminder appended to every text read \u2014 does not exist in claude-code v2.1.181",
       "verdict": "confirmed",
       "corrected_detail": "BINARY (v2.1.183): `grep -c malware`=0, `shouldIncludeFileReadMitigation`=0, `refuse to improve`=0 in the 17MB JS payload (and 0 in full `strings`). The text result render is `(r?`<system-reminder>${r}</system-reminder>\\n\\n`:\"\")+J3p(e)+z3p(e.file)` where r=the token-cap partial-view reminder only, J3p=memory-age reminder, z3p=Atn=cat -n line numbers. No malware/cyber-risk reminder and no model-gated read mitigation anywhere. The `claude-opus-4-6` hits in the binary are unrelated (Vertex region map + deprecation-date map + modelOverrides example). LINGXI: read.rs:555 CYBER_RISK_MITIGATION_REMINDER (~360-char malware <system-reminder>), :574 MITIGATION_EXEMPT_MODELS=[\"claude-opus-4-6\"], :579 should_include_file_read_mitigation, appended at :1624-1626 to every non-empty text read's model_content. Pure invention (or a stale port of an older claude-code version). Auditor only erred on version label (2.1.181 vs actual 2.1.183) \u2014 immaterial, absent in both per the auditor and my check.",
@@ -760,7 +760,7 @@
       "fix_sketch": "Delete CYBER_RISK_MITIGATION_REMINDER (:555), MITIGATION_EXEMPT_MODELS (:574), should_include_file_read_mitigation (:579), and the :1624-1626 append. A successful text read's model_content should be just add_line_numbers(slice, offset), with the token-cap partial-view reminder prepended if/when GAP-2 is implemented. (The 'byte-locked to FileReadTool.ts:729-730' doc comment is false \u2014 verify-then-delete, but it is absent in 2.1.183.)"
     },
     {
-      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "subsystem": "file-read (Read tool) parity \u2014 crates/tools/file/src/read.rs vs claude-code v2.1.183",
       "title": "Missing tengu_file_read_reread analytics event",
       "verdict": "confirmed",
       "corrected_detail": "BINARY: in `call`, immediately after the read-state lookup and BEFORE the dedup gate: `let f=a.get(m);if(f)j(\"tengu_file_read_reread\",{priorOp:Qe(f.offset===void 0?\"edit_write\":\"read\")});` then a SEPARATE lookup `let h=ct(\"tengu_read_dedup_killswitch\",!1)?void 0:a.get(m)` for dedup. So reread fires on every read of a prior entry; dedup is distinct. Verbatim in payload. LINGXI: telemetry/src/tengu/tool.rs has FILE_READ_DEDUP, SESSION_FILE_READ, FILE_READ_LIMITS_OVERRIDE only \u2014 no FILE_READ_REREAD constant; FILE_READ_ANALYTICS_NAMES.len()==3. The only 'reread' grep hits in tools/file are test fn names. read.rs:1287 goes straight from the read_file_state::get lookup to the dedup gate with no reread emit. Confirmed (analytics-only, no model-facing effect).",
@@ -768,7 +768,7 @@
       "fix_sketch": "Add `pub const FILE_READ_REREAD: &str=\"tengu_file_read_reread\";` to telemetry tengu/tool.rs and FILE_READ_ANALYTICS_NAMES (bump the count assertions 3\u21924). In read.rs `call`, right after the read_file_state::get lookup (independent of and before the dedup short-circuit at :1287), emit it when an entry exists: priorOp=\"read\" if entry.from_read (TS `offset!==undefined`) else \"edit_write\". Wrap the value in the PII tagger used by the other tool events (TS `Qe`)."
     },
     {
-      "subsystem": "file-read (Read tool) parity \u2014 lingxi-code/tools/file/src/read.rs vs claude-code v2.1.183",
+      "subsystem": "file-read (Read tool) parity \u2014 crates/tools/file/src/read.rs vs claude-code v2.1.183",
       "title": "PDF inline-vs-extraction routing constant: claude-code routes PDFs >3MB to page extraction; LingXi inlines up to 20MB",
       "verdict": "confirmed",
       "corrected_detail": "BINARY: constants `bki=3145728` (3MB), `k0t=20971520` (20MB), `Lbn=10`/`Iie=20` present. PDF path in qel: page-count `if(L!==null&&L>Lbn)throw too_many_pages`; then `let N=await jt().stat(n);if(!PQe()||N.size>bki){let W=await ago(n);...tengu_pdf_page_extraction...}`; then `if(!PQe())throw 'Reading full PDFs is not supported...'`. So a supported-model PDF >3MB routes to page-image EXTRACTION (ago); only \u22643MB on a supported model is inlined as a base64 document via Pel (which itself rejects >k0t=20MB). LINGXI (read.rs:1044-ish + pdf_read.rs:11 PDF_TARGET_RAW_SIZE=20MB): inline gate is only `if original_size > PDF_TARGET_RAW_SIZE \u2192 too_large`; no 3MB bki routing. A 3-20MB supported-model PDF is inlined as a document block instead of extracted to page images. Confirmed BUT correctly low severity: the whole PDF path is behind the default-OFF `pdf-read` feature, and page-image extraction itself requires the heavier `pdf-render` feature (poppler/tempfile/process) \u2014 so this is feature-gated and partly out of default scope, exactly as the auditor flagged (confidence medium is appropriate).",

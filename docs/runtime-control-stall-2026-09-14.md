@@ -85,7 +85,7 @@ but the retained incident evidence does not establish that a model-switch hook
 was active in this particular incident.
 
 Relevant code: `lingxi-code/bridge/src/mcp_endpoint.rs` and
-`lingxi-code/apps/bridge-server/src/server.rs`.
+`crates/apps/bridge-server/src/server.rs`.
 
 ## Alternatives checked
 

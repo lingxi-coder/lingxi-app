@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import type { ClientEvent } from '@lingxi/bridge-client';
-import { SessionRuntime } from '../src/main/bridge';
-import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from '../src/preload/event-replay';
+import { SessionRuntime } from '../src/main/bridge.js';
+import {
+  createRuntimeEventReplayBuffer,
+  type SequencedRuntimeEventEnvelope,
+} from '../src/preload/event-replay';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 
 test('compaction events preserve their originating session when two runtimes share a project and window', () => {

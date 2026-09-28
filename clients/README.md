@@ -28,7 +28,7 @@ Use npm and the checked-in `package-lock.json` in each JavaScript package.
 
 That's the whole bootstrap. From a fresh clone it:
 
-1. **Engine** — `cargo build -p bridge-server` → `lingxi-code/target/debug/bridge-server`
+1. **Engine** — `cargo build -p bridge-server` → `target/debug/bridge-server`
    (the path electron's repo-relative `resolveServerBin()` discovers automatically).
 2. **Shared SDK** — `(cd clients/shared && npm install && npm run build)`.
    The build is **required before electron**: electron resolves
@@ -75,7 +75,7 @@ If you prefer to run the steps by hand (or `setup.sh` is unavailable), the
 equivalents are:
 
 ```sh
-# 1. Engine binary (electron discovers it under lingxi-code/target/debug/)
+# 1. Engine binary (electron discovers it under target/debug/)
 cd lingxi-code && cargo build -p bridge-server --bin bridge-server
 
 # 2. Shared SDK — install AND build (build is REQUIRED before electron)

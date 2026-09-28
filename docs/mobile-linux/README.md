@@ -46,7 +46,7 @@ packages over the network inside the emulated guest. The Xcode phase fails
 closed when it is absent, so produce it first:
 
 ```text
-lingxi-code/scripts/mobile-linux/build-local-app-node-modules.sh --arch aarch64
+scripts/local-apps/build-local-app-node-modules.sh --arch aarch64
 clients/ios/scripts/stage-local-app-runtime.sh --variant full \
   --node-modules clients/ios/build/local-app-node-modules/aarch64/node_modules
 ```

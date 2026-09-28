@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
-import type { UseBridge } from '../../src/renderer/bridge/useBridge';
+import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
 import { ScheduledTasks } from '../../src/renderer/components/ScheduledTasks';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { emptyDesktopState } from '../../src/renderer/bridge/desktopState';

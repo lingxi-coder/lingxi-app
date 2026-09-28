@@ -339,7 +339,7 @@ async fn query_json_schema<T: DeserializeOwned>(
 
 **Files:**
 - Create: `lingxi-code/fusion/Cargo.toml`, `src/lib.rs`, `config.rs`, `model_resolver.rs`, `panel.rs`, `analyst.rs`, `decision.rs`, `synthesizer.rs`, `budget.rs`, `orchestrator.rs`, `progress.rs`
-- Modify: `lingxi-code/Cargo.toml` workspace `members` + `default-members` 加 `"fusion"`
+- Modify: `Cargo.toml` workspace `members` + `default-members` 加 `"fusion"`
 
 依赖：`platform-api`, `sidequery`, `protocol`, `cost`, `core`, `tokio`, `async-trait`, `serde`, `thiserror`, `tracing`。**不要**依赖 `agent` / `tool-agent` / `tasks`。
 
@@ -444,7 +444,7 @@ async fn release_reservation(&self, id: BudgetReservationId);
 #### Task 4.1 AgentToolInput + intercept
 
 **Files:**
-- Modify: `lingxi-code/tools/agent/src/agent.rs`
+- Modify: `crates/tools/agent/src/agent.rs`
 
 `AgentTool` 增加 `fusion: Option<Arc<dyn FusionExecutor>>`。
 
@@ -478,13 +478,13 @@ pub cross_provider: Option<bool>,
 6. `executor.run`
 7. `Ok(ToolCallResult)`：`model_content = final_text`；`data` 含 runId/status/decision/panel summary/usage/timing/egress。NeedsParent 仍是 Ok。
 
-- Modify: `lingxi-code/tools/agent/src/lib.rs` 保持 `register_all` 不注入 fusion。
-- Modify: `lingxi-code/apps/engine-desktop/src/lib.rs`：构造 `AgentTool::new(ctx).with_fusion(orch)` 再 register（不要改 `register_all` 签名以免 mobile/测试全炸）。
+- Modify: `crates/tools/agent/src/lib.rs` 保持 `register_all` 不注入 fusion。
+- Modify: `crates/apps/engine-desktop/src/lib.rs`：构造 `AgentTool::new(ctx).with_fusion(orch)` 再 register（不要改 `register_all` 签名以免 mobile/测试全炸）。
 
 #### Task 4.2 listing + spawn 计数
 
 **Files:**
-- Modify: `lingxi-code/tools/agent/src/agent.rs` prompt/listing 路径：executor.is_some() && settings.enabled 时追加 `SubagentListingEntry { agent_type: "fusion", when_to_use: "...并行多模型审议...约 4–5× 成本...", tools_description: "..." }`
+- Modify: `crates/tools/agent/src/agent.rs` prompt/listing 路径：executor.is_some() && settings.enabled 时追加 `SubagentListingEntry { agent_type: "fusion", when_to_use: "...并行多模型审议...约 4–5× 成本...", tools_description: "..." }`
 - Modify: `lingxi-code/platform-api/src/task_registry.rs`
 
 ```rust
@@ -537,7 +537,7 @@ sink 实现：展示 + `ConversationMessage::user_meta` 一条 fusion-result（X
 **Files:**
 - Create: `lingxi-code/commands/core/src/fusion.rs`（或 `apps/engine-desktop` 扩展 handler，只要 **不** 写入 `BUILTIN_COMMAND_NAMES`）
 - Modify: `lingxi-code/commands/core/src/lib.rs` / desktop 扩展注册
-- Modify: `lingxi-code/tui/src/command.rs` 广告 `/fusion`（否则 CLI 有、TUI 补全没有）
+- Modify: `crates/tui/src/command.rs` 广告 `/fusion`（否则 CLI 有、TUI 补全没有）
 - 移动端：不注册，或 unavailable handler
 
 语法：

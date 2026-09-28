@@ -67,7 +67,7 @@ Cargo.lock.*
 # ---------------------------------------------------------------
 # Swift Package Manager build output (ios-framework xcframework)
 # ---------------------------------------------------------------
-lingxi-code/apps/ios-framework/swift/.build/
+crates/apps/ios-framework/swift/.build/
 
 # ---------------------------------------------------------------
 # Python caches (graphify is python)
@@ -84,13 +84,37 @@ __pycache__/
 .superpowers/
 
 # stray local build artifact (not part of the project)
-lingxi-code/test_entry
+test_entry
 
 # Local task/tool output artifacts (rebuildable)
 output/
 
 # test-harness conversation capture artifacts (regenerated)
-lingxi-code/test-harness/conversation-*.txt
+test-harness/conversation-*.txt
 
 # Root diagnostic captures from local verification runs.
 /*.log
+# ---------------------------------------------------------------
+# Local-app template `.lingxi/` documents are SOURCE, not tool state.
+# `.lingxi/` above ignores the runtime state directory everywhere, but the
+# app templates ship a committed `.lingxi/source-policy.json` (and the Next
+# template's manifest/design-spec) that engine-mobile `include_bytes!`s and
+# the supply-chain verifier reads. Without these negations `git add` silently
+# skips them and a fresh clone cannot compile engine-mobile.
+# The directory itself must be re-included first: git never descends into an
+# excluded directory, so a file-only negation would never be reached.
+# ---------------------------------------------------------------
+
+# Rust workspace and distribution build outputs
+.lingxi/settings.local.json
+/packaging/npm/vendor/
+/packaging/npm/dist/
+/packaging/pypi/dist/
+/packaging/pypi/build/
+/packaging/pypi/src/lingxi_cli_bin/bin/
+/packaging/pypi/src/lingxi_cli_bin/lingxi-package.json
+/packaging/pypi/.pytest_cache/
+/out/
+patch*.py
+test_output*.txt
+tmp/

@@ -14,10 +14,10 @@ import { ProviderRegion } from './ProviderRegion';
 
 /**
  * The nine provider `type` values `settings.providers` accepts. Read from
- * `lingxi-code/llm-client/src/provider_settings.rs`'s
+ * `llm-client/src/provider_settings.rs`'s
  * `SUPPORTED_PROVIDER_TYPES` constant per this task's instruction — NOT
  * retyped from memory — and kept in the engine's own declaration order.
- * `lingxi-code/` itself is never edited from this side.
+ * the Rust workspace itself is never edited from this side.
  */
 // Re-exported for existing import sites (including `settings-providers.test.ts`)
 // now that the canonical definition lives in `../rows` (Task 18 fix round 1,

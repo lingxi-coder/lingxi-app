@@ -1,399 +1,156 @@
-import type { ScheduledScope, ScheduledContext } from '../../shared/scheduled';
-import { firstSubmittedSession, submittedSessionCatalogs, type SubmittedSession } from './submittedSessionCatalog';
-import { saveProviderSettings } from './providerSettingsSave';
-import { requestCronManagement } from './cronManagement';
-import { beginSideQuestion, finishSideQuestion, isSideQuestionCommand, SIDE_QUESTION_AGENT_PREFIX } from './sideQuestion';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  CronJobDto,
-  CronRunDto,
-  CronRequestDto,
-  AgentDto,
-  AskUserQuestionRequestDto,
   AudioOperationDto,
-  AuthStateDto,
   ClientEvent,
-  ComputerAccessRequestDto,
   ComputerAccessResponseDto,
   ConfigurationDomainDto,
+  CronJobDto,
+  CronRequestDto,
+  CronRunDto,
   HookAdminCommandDto,
-  HookDto,
   ImageRefDto,
   McpAdminCommandDto,
-  WritableScopeDto,
   PermissionBehaviorDto,
   PermissionModeId,
-  PermissionRequest,
   PermissionResponseDto,
-  ReasoningSelectionDto,
   PluginAdminCommandDto,
+  ReasoningSelectionDto,
   SkillAdminCommandDto,
+  WritableScopeDto,
 } from '@lingxi/bridge-client';
-
-import {
-  hostMicrophonePermissionReader,
-  type MicrophonePermissionStatus as VoicePermissionStatus,
-} from '../../shared/microphoneAccess';
-import {
-  defaultNativeAudioSnapshot,
-  type NativeAudioCommand,
-  type NativeAudioCommandResult,
-  type NativeAudioOperationResponse,
-  type NativeAudioResponse,
-  type NativeAudioSnapshot,
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { AudioConfigurationV3 } from '../../shared/generatedAudioConfiguration.js';
+import { hostMicrophonePermissionReader } from '../../shared/microphoneAccess.js';
+import type {
+  MicrophonePermissionStatus as VoicePermissionStatus,
+} from '../../shared/microphoneAccess.js';
+import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio.js';
+import type {
+  NativeAudioCommand,
+  NativeAudioOperationResponse,
+  NativeAudioResponse,
+  NativeAudioSnapshot,
 } from '../../shared/nativeAudio.js';
-import type { VoicePreferences } from '../../shared/voicePreferences';
-import type { NotificationPreferences } from '../../shared/notificationPreferences';
-import type { ModelPickerVisibilitySettings } from '../../shared/settings';
-import type { AudioConfigurationV3 } from '../../shared/generatedAudioConfiguration';
+import type { NotificationPreferences } from '../../shared/notificationPreferences.js';
+import type { ScheduledContext, ScheduledScope } from '../../shared/scheduled.js';
+import type { ModelPickerVisibilitySettings } from '../../shared/settings.js';
+import type { VoicePreferences } from '../../shared/voicePreferences.js';
 import {
-  appendPendingUserPrompt,
+  isPermissionRequestGone,
+  messageFrom,
+  restartBridgePreconditionError,
+  restartBridgeSingleFlight,
+  restartBridgeWithTimeout,
+  stopSessionSubagents,
+} from './bridgeConnection.js';
+import {
+  beginProjectCatalogRequest,
+  claimSlashTurn,
+  clearCancellationRuntime,
+  clearSlashTurnClaim,
+  displayedSession,
+  emptyRuntimeState,
+  isLatestOperation,
+  isLatestProjectCatalogRequest,
+  isRuntimeRemovedState,
+  nextOperationId,
+  pendingAskQueueFromBootstrap,
+  pendingCountAfterResponse,
+  pruneRuntimeMaps,
+  reconcilePendingCount,
+  recoverLatestNavigationFailure,
+  removeRuntimeFromMaps,
+  seedDesktopFromCache,
+  shouldApplyBootstrapSnapshot,
+  shouldClearPendingPermissions,
+  shouldReleaseSlashTurn,
+  shouldResetBridgeRuntime,
+  updateSharedDesktopCache,
+} from './bridgeRuntimeState.js';
+import type { RuntimeState, SharedDesktopCache } from './bridgeRuntimeState.js';
+import type {
+  ConfigurationOperationEvent,
+  DesktopTurnToken,
+  McpConfigurationSnapshotEvent,
+  McpServersEvent,
+  PluginCatalogEvent,
+  SessionRuntimeStatus,
+  SettingsSnapshotEvent,
+  SkillCatalogEvent,
+  SkillDocumentEvent,
+  SkillsEvent,
+  TrackedPromptPurpose,
+  TrackedSpeechTerminal,
+  UseBridge,
+} from './bridgeTypes.js';
+import {
   acknowledgePromptDispatch,
+  appendPendingUserPrompt,
   beginCompaction,
   beginLocalSlashCommand,
   beginSlashCommand,
+  emptyConversation,
   failSlashCommand,
+  isPendingFusionSessionRestore,
+  reduceEvent,
   reduceEventWithPendingFusion,
   slashCommandEchoesRequest,
-  isPendingFusionSessionRestore,
-  emptyConversation,
-  reduceEvent,
-  type ConversationState,
-  type UsageSnapshot,
-} from './conversation';
-import {
-  beginTaskRefresh,
-  emptyDesktopState,
-  reduceDesktopEvent,
-  type DesktopState,
-} from './desktopState';
-import {
-  addRuntimeResources,
-  closeRuntimeCenterItem,
-  commitRuntimeResources,
-  emptyRuntimeCenterState,
-  runningSubagentIds,
-  openRuntimeCenterItem,
-  promptRuntimeResources,
-  reduceRuntimeCenterEvent,
-  reduceRuntimeCenterPermission,
-  resetRuntimeCenterConnection,
-  interruptedSideQuestionAgents,
-  resourcesFromRestoredMessages,
-  rollbackRuntimeResources,
-  setRuntimeCenterOverviewOpen,
-  setRuntimeInspectorOpen,
-  toggleRuntimeCenterSection,
-  type RuntimeCenterItemRef,
-  type RuntimeCenterSection,
-  type RuntimeCenterState,
-} from './runtimeCenterState';
+} from './conversation.js';
+import type { ConversationState } from './conversation.js';
+import { requestCronManagement } from './cronManagement.js';
+import { beginTaskRefresh, emptyDesktopState, reduceDesktopEvent } from './desktopState.js';
 import type {
+  LingxiApi,
   BootstrapState,
   ConnectionState,
-  DiagnosticEntry,
-  PluginSecretMetadata,
   ProjectSessionCatalogState,
-  ProviderCredentialMetadata,
-  ProviderCredentialUpdate,
-  ProviderConnectionTestResult,
   SequencedRuntimeEventEnvelope,
   SessionPinInput,
   SessionRef,
   SessionRuntimeSummary,
   SystemSettingsPane,
-  WorkspaceFileSearchResult,
   WorkspaceFilePreview,
-  WorkspaceMetadata,
-  LingxiApi,
-} from './lingxi';
-
-/**
- * The wire shape of `ClientEvent::SettingsSnapshot`, unparsed. The settings
- * shell (not this hook) turns its JSON-string fields into structured data —
- * this hook's job stops at "the latest one the engine sent", the same way
- * `bootstrap` stops at the raw `BootstrapState` DTO without interpreting it.
- */
-export type SettingsSnapshotEvent = Extract<ClientEvent, { type: 'settings_snapshot' }>;
-
-/** The wire shape of the MCP server listing (`ClientEvent::McpServers`), unparsed — same "latest one wins, one per app not per session" treatment as {@link SettingsSnapshotEvent}. */
-export type McpServersEvent = Extract<ClientEvent, { type: 'mcp_servers' }>;
-
-/** The wire shape of the discovered-skills listing (`ClientEvent::Skills`), unparsed. */
-export type SkillsEvent = Extract<ClientEvent, { type: 'skills' }>;
-export type ConfigurationOperationEvent = Extract<ClientEvent, { type: 'configuration_operation' }>;
-export type SkillCatalogEvent = Extract<ClientEvent, { type: 'skill_catalog' }>;
-export type SkillDocumentEvent = Extract<ClientEvent, { type: 'skill_document' }>;
-export type McpConfigurationSnapshotEvent = Extract<ClientEvent, { type: 'mcp_configuration_snapshot' }>;
-export type PluginCatalogEvent = Extract<ClientEvent, { type: 'plugin_catalog' }>;
-export type TrackedPromptPurpose = 'composer' | 'flow';
-
-export interface DesktopTurnToken {
-  readonly sessionId: string;
-  readonly clientTurnId: string;
-  readonly purpose: TrackedPromptPurpose;
-}
-
-export type TrackedSpeechTerminal = 'message_complete' | 'turn_ended' | 'stale';
-
-export interface TrackedSpeechEvent {
-  readonly type: 'delta' | 'completion';
-  readonly token: DesktopTurnToken;
-  readonly text: string;
-  readonly sequence: number;
-  readonly turnId?: number;
-  readonly terminal?: TrackedSpeechTerminal;
-}
-
-/** Stop explicit agent aliases through the session they belong to, even across UI navigation. */
-export async function stopSessionSubagents(
-  host: Pick<LingxiApi, 'command'>,
-  sessionId: string,
-  agentIds: readonly string[],
-): Promise<void> {
-  const results = await Promise.allSettled(agentIds.map((agentId) =>
-    host.command(sessionId, { type: 'task_stop', task_id: agentId })));
-  // Refresh after dispatch so reconnect/stale roster entries can reconcile.
-  await host.command(sessionId, { type: 'list_session_agents' });
-  const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
-  if (failures.length) throw new Error(`Failed to stop background agents: ${failures.map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason)).join('; ')}`);
-}
-
-export interface UseBridge {
-  readonly hosted: boolean;
-  readonly loading: boolean;
-  readonly bootstrap: BootstrapState | null;
-  readonly settingsSnapshotEvent: SettingsSnapshotEvent | null;
-  readonly mcpServersEvent: McpServersEvent | null;
-  readonly skillsEvent: SkillsEvent | null;
-  readonly skillCatalogEvent: SkillCatalogEvent | null;
-  readonly skillDocumentEvent: SkillDocumentEvent | null;
-  readonly mcpConfigurationSnapshotEvent: McpConfigurationSnapshotEvent | null;
-  readonly pluginCatalogEvent: PluginCatalogEvent | null;
-  readonly configurationOperations: Readonly<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>;
-  readonly activeSession: SessionRef | undefined;
-  readonly sessionLoading: boolean;
-  readonly connection: ConnectionState;
-  readonly connected: boolean;
-  readonly conversation: ConversationState;
-  readonly desktop: DesktopState;
-  readonly authState: AuthStateDto | null;
-  readonly hooksCatalog: readonly HookDto[];
-  readonly agentCatalog: readonly AgentDto[];
-  readonly cost: DesktopState['lastCost'];
-  readonly lastCompaction: DesktopState['lastCompaction'];
-  readonly retryState: DesktopState['lastApiRetry'];
-  readonly runtimeCenter: RuntimeCenterState;
-  readonly usage: UsageSnapshot | null;
-  readonly running: boolean;
-  readonly isCancelling: boolean;
-  readonly pendingPermission: PermissionRequest | null;
-  readonly pendingComputerAccess: ComputerAccessRequestDto | null;
-  readonly pendingAskUserQuestion: AskUserQuestionRequestDto | null;
-  readonly error: string | null;
-  readonly audioSnapshot: NativeAudioSnapshot;
-  clearError(): void;
-  dismissCommandResult(): void;
-  sendTrackedPrompt(
-    text: string,
-    images?: ImageRefDto[],
-    imageNames?: string[],
-    filePaths?: string[],
-    options?: { purpose?: TrackedPromptPurpose },
-  ): { token: DesktopTurnToken; queued: Promise<void> } | null;
-  subscribeTrackedSpeech(token: DesktopTurnToken, listener: (event: TrackedSpeechEvent) => void): () => void;
-  sendPrompt(text: string, images?: ImageRefDto[], imageNames?: string[], filePaths?: string[]): Promise<void>;
-  runSlashCommand(raw: string): Promise<void>;
-  /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
-  beginLocalCommand(raw: string): void;
-  /** Push a locally-produced command's own output into the transcript. */
-  emitCommandOutput(output: string, isError: boolean): void;
-  cancel(turnId?: number): Promise<void>;
-  approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
-  deny(requestId: number): Promise<void>;
-  approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;
-  denyComputerAccess(requestId: number): Promise<void>;
-  answerAskUserQuestion(requestId: number, answers: Record<string, string>): Promise<void>;
-  cancelAskUserQuestion(requestId: number): Promise<void>;
-  openSystemSettings(pane: SystemSettingsPane): Promise<void>;
-  /**
-   * The OS microphone grant, read by the MAIN process
-   * (`systemPreferences.getMediaAccessStatus`). The renderer has no honest
-   * equivalent — `navigator.permissions.query({name:'microphone'})` reports
-   * the page permission this app grants itself — so the voice settings page
-   * asks through here. Never rejects: an unreachable host, a failed IPC call
-   * or an answer this renderer cannot interpret are all `'unavailable'`
-   * ("cannot determine"), which the 麦克风权限 row renders as 无法确定. It is
-   * deliberately NOT routed through `capture`: a permission probe that the
-   * page already renders as an honest state has nothing to say in the
-   * shell's global error banner.
-   */
-  microphonePermission(): Promise<VoicePermissionStatus>;
-  addProject(): Promise<WorkspaceMetadata | null>;
-  activateProject(path: string): Promise<WorkspaceMetadata | null>;
-  removeProject(path: string): Promise<void>;
-  updateSidebarPreferences(preferences: import('../../shared/settings').SidebarPreferences): Promise<void>;
-  preflightSessionArchive(projectPath: string, sessionId: string): Promise<CronJobDto[]>;
-  archiveSession(projectPath: string, sessionId: string): Promise<void>;
-  touchSession(projectPath: string, sessionId: string): Promise<void>;
-  renameSession(projectPath: string, sessionId: string, title: string): Promise<void>;
-  setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
-  openSession(projectPath: string, sessionId: string): Promise<void>;
-  listProjectSessions(projectPath: string): Promise<ProjectSessionCatalogState | undefined>;
-  sessionRuntimeStatus(sessionId: string): SessionRuntimeStatus | undefined;
-  searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
-  setProviderCredential(providerId: string, credential: string): Promise<ProviderCredentialUpdate>;
-  clearProviderCredential(providerId: string): Promise<ProviderCredentialMetadata>;
-  loginCodex(): Promise<ProviderCredentialUpdate>;
-  cancelCodexLogin(): Promise<void>;
-  testProviderConnection(providerId: string, credentialOverride?: string): Promise<ProviderConnectionTestResult>;
-  refreshProviderCredential(providerId: string): Promise<void>;
-  pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
-  setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
-  clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
-  setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
-  setCollapseThoughtsByDefault(collapseThoughtsByDefault: boolean): Promise<void>;
-  /**
-   * Writes the WHOLE notification-preferences object at once, like
-   * `setVoicePreferences`. The main process pushes the result straight at
-   * `HostNotifier`, which holds armed timers and so cannot notice a change it
-   * is not told about.
-   */
-  setNotificationPreferences(notifications: NotificationPreferences): Promise<void>;
-  /** The device-level (Electron store) custom API base URL override — `null` clears it. Distinct from `updateEngineSettings` below, which writes to an engine settings FILE layer. */
-  setApiBaseUrl(apiBaseUrl: string | null): Promise<void>;
-  /**
-   * Writes the WHOLE voice-preferences object at once, through the same
-   * device-settings path `setThemePreference`/`setApiBaseUrl` already use
-   * (`host.updateSettings({ voice })` → `SettingsStore.update()` →
-   * `parseVoicePreferences`, Task 4). The voice settings page is the only
-   * caller and always supplies a complete `VoicePreferences`, matching how
-   * both phones persist voice settings (whole-snapshot writes, never a
-   * partial per-field merge) — see `shared/voicePreferences.ts`'s own doc.
-   * Never restarts the bridge: unlike `model`/`apiBaseUrl`, nothing here
-   * changes what the running engine talks to.
-   */
-  setVoicePreferences(voice: VoicePreferences, expectedRevision: number): Promise<void>;
-  setModelPickerVisibility(modelPickerVisibility: ModelPickerVisibilitySettings): Promise<void>;
-  /**
-   * Writes a JSON-object patch into one engine settings file layer via the
-   * `update_settings` wire command (`patch_json`; a `null` value in the patch
-   * deletes that key at this layer). This is the ONLY write path a `layered`
-   * settings page (`nav.ts`'s `layered: true`) has — there is no per-key
-   * command for `settings.providers` / `settings.routing`, unlike
-   * `permissions`/`workspace directories`, which get their own typed
-   * commands. Refetches the snapshot afterward so the page's own `snapshot`
-   * prop reflects the write without a separate caller-side refresh call.
-   */
-  updateEngineSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
-  /** Save provider settings and wait for confirmation from the persisted file layer. */
-  updateProviderSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
-  /**
-   * `update_permission_rules` — the ONLY write path for `permissions.{allow,deny,ask}`.
-   * `apply_patch` refuses the `permissions` key outright, so there is no
-   * generic-patch alternative to fall back to. `add`/`remove` are rule
-   * strings; parsing is infallible on the engine side
-   * (`PermissionRuleValue::from_rule_string` degrades malformed input to a
-   * bare tool name, matching claude-code) — this wrapper does not validate
-   * or reject anything either. Refetches the snapshot afterward so the
-   * page renders the ACTUALLY persisted (possibly normalised) rule text,
-   * never an optimistic echo of the raw input.
-   */
-  updatePermissionRules(
-    destination: WritableScopeDto, behavior: PermissionBehaviorDto, add: string[], remove: string[],
-  ): Promise<void>;
-  /**
-   * `set_default_permission_mode` — persists `permissions.defaultMode`.
-   * The engine deliberately refuses `"bypassPermissions"` here (returns
-   * `Ok(false)` and emits a `Rejected` error event) as a security property,
-   * not a bug — see `permission::persist_permission_mode`. This wrapper
-   * does not special-case that mode; it always refetches the snapshot
-   * afterward so a caller can tell a refusal apart from a success by
-   * comparing the requested mode against what the snapshot actually shows.
-   */
-  setDefaultPermissionMode(destination: WritableScopeDto, mode: string): Promise<void>;
-  /** `update_workspace_directories` — the dedicated writer for `permissions.additionalDirectories`, same add/remove-delta shape as {@link updatePermissionRules}. */
-  updateWorkspaceDirectories(destination: WritableScopeDto, add: string[], remove: string[]): Promise<void>;
-  /** Re-pulls the MCP server listing (`refresh_listings{mcp}` → `ClientEvent::McpServers`). This is a RUNNING/merged view (name, status, transport) with no per-scope provenance — see `McpServers.tsx`'s own doc comment for why the page cannot decompose it by scope. */
-  refreshMcpServers(): Promise<void>;
-  /** Re-pulls the discovered-skills listing (`refresh_listings{skills}` → `ClientEvent::Skills`). Directory-discovered, NOT layered — `Skills.tsx` reads this the same way regardless of `editingLayer`. */
-  refreshSkills(): Promise<void>;
-  /** `upsert_mcp_server` — writes one server definition into exactly the named scope's own storage location (`~/.lingxi.json` for User/Local, `<project>/.mcp.json` for Project). Refetches the MCP listing afterward. `config` is a plain JS object; this wrapper owns the `JSON.stringify` the wire's `config_json: String` field requires. */
-  upsertMcpServer(scope: WritableScopeDto, name: string, config: Record<string, unknown>): Promise<void>;
-  /** `remove_mcp_server` — idempotent removal from exactly the named scope. Refetches the MCP listing afterward. */
-  removeMcpServer(scope: WritableScopeDto, name: string): Promise<void>;
-  /** Native Desktop skill administration. Write commands resolve only after the correlated terminal operation event. */
-  scheduledScopes: ScheduledScope[];
-  scheduledContext(scopeId: string): Promise<ScheduledContext>;
-  manageScheduled(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]>;
-  readScheduledHistory(scopeId: string, jobId: string): Promise<CronRunDto[]>;
-  openScheduledSession(scopeId: string, sessionId: string): Promise<void>;
-  manageCron(request: CronRequestDto): Promise<CronJobDto[]>;
-  skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
-  /** Native Desktop MCP administration with strict validation, revision/CAS, approval, and live reconcile. */
-  mcpAdmin(command: McpAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
-  /** Native Desktop plugin catalog/package/config administration. */
-  pluginAdmin(command: PluginAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
-  /** Native Desktop hook document validation and persistence. */
-  hookAdmin(command: HookAdminCommandDto): Promise<ConfigurationOperationEvent | void>;
-  restartBridge(sessionId?: string): Promise<void>;
-  refreshDiagnostics(): Promise<DiagnosticEntry[]>;
-  copyDiagnostics(): Promise<void>;
-  copyText(text: string): Promise<void>;
-  exportDiagnostics(): Promise<string | null>;
-  audioRequest(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
-  audioExecute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV3): Promise<NativeAudioOperationResponse>;
-  audioCancel(): Promise<void>;
-  audioFinishListen(): Promise<void>;
-  refresh(): Promise<void>;
-  newSession(projectPath?: string): Promise<void>;
-  resumeSession(sessionId: string): Promise<void>;
-  setModel(model: string): Promise<void>;
-  setReasoningSelection(selection: ReasoningSelectionDto): Promise<void>;
-  setFastMode(enabled: boolean): Promise<void>;
-  setPermissionMode(mode: PermissionModeId): Promise<void>;
-  login(): Promise<void>;
-  logout(): Promise<void>;
-  forceCompact(instructions?: string): Promise<void>;
-  clearSession(name?: string): Promise<void>;
-  refreshTasks(options?: { preserve?: boolean }): Promise<void>;
-  refreshAuth(): Promise<void>;
-  refreshHooks(): Promise<void>;
-  refreshAgents(): Promise<void>;
-  refreshStatus(): Promise<void>;
-  refreshDoctor(): Promise<void>;
-  /** Re-pulls the live engine slash-command registry for completion and the command palette. */
-  refreshSlashCommands(): Promise<void>;
-  /**
-   * Re-pulls everything the model picker shows: the catalog (`ModelList` +
-   * `ProviderModelCatalog`) and the reasoning controls.
-   *
-   * The once-per-connection listing batch is the only other thing that asks for
-   * either, so without this a single lost reply left the picker with nothing to
-   * offer — and its Effort row dead — until the app was restarted.
-   */
-  refreshModelPicker(): Promise<void>;
-  refreshSessionAgents(): Promise<void>;
-  loadSessionAgentTranscript(agentId: string): Promise<void>;
-  openRuntimeItem(item: RuntimeCenterItemRef): void;
-  closeRuntimeItem(item: RuntimeCenterItemRef): void;
-  setRuntimeCenterOverviewOpen(open: boolean): void;
-  setRuntimeInspectorOpen(open: boolean): void;
-  toggleRuntimeCenterSection(section: RuntimeCenterSection): void;
-  previewWorkspaceFile(path: string): Promise<WorkspaceFilePreview>;
-  taskOutput(taskId: string): Promise<void>;
-  stopTask(taskId: string): Promise<void>;
-  refreshSettingsSnapshot(): Promise<void>;
-}
-
-export interface SessionRuntimeStatus {
-  readonly backgroundAgentsRunning?: boolean;
-  readonly connection: ConnectionState;
-  readonly turnActive: boolean;
-  readonly pendingInteractions: number;
-  readonly pendingAskUserQuestions: number;
-  readonly error?: string;
-}
+} from './lingxi.js';
+import { saveProviderSettings } from './providerSettingsSave.js';
+import {
+  addRuntimeResources,
+  closeRuntimeCenterItem,
+  commitRuntimeResources,
+  emptyRuntimeCenterState,
+  interruptedSideQuestionAgents,
+  openRuntimeCenterItem,
+  promptRuntimeResources,
+  reduceRuntimeCenterEvent,
+  reduceRuntimeCenterPermission,
+  resetRuntimeCenterConnection,
+  resourcesFromRestoredMessages,
+  rollbackRuntimeResources,
+  runningSubagentIds,
+  setRuntimeCenterOverviewOpen,
+  setRuntimeInspectorOpen,
+  toggleRuntimeCenterSection,
+} from './runtimeCenterState.js';
+import type { RuntimeCenterItemRef, RuntimeCenterSection } from './runtimeCenterState.js';
+import {
+  SIDE_QUESTION_AGENT_PREFIX,
+  beginSideQuestion,
+  finishSideQuestion,
+  isSideQuestionCommand,
+} from './sideQuestion.js';
+import { firstSubmittedSession, submittedSessionCatalogs } from './submittedSessionCatalog.js';
+import type { SubmittedSession } from './submittedSessionCatalog.js';
+import {
+  MAX_TRACKED_SPEECH_SUBSCRIBERS,
+  appendTrackedTurnDelta,
+  bindTrackedTurn,
+  clearTrackedTurnState,
+  completeTrackedTurn,
+  createDesktopTurnToken,
+  dequeueTrackedTurn,
+  emitTrackedSpeech,
+  enqueueTrackedTurn,
+  trackedListenerKey,
+} from './trackedTurns.js';
+import type { ActiveTrackedTurn, TrackedSpeechListener } from './trackedTurns.js';
 
 interface PendingConfigurationOperation {
   domain: ConfigurationDomainDto;
@@ -403,7 +160,6 @@ interface PendingConfigurationOperation {
 }
 
 const CONFIGURATION_OPERATION_TIMEOUT_MS = 5 * 60_000;
-const MAX_TRACKED_SPEECH_SUBSCRIBERS = 64;
 
 function configurationOperationId(
   command: SkillAdminCommandDto | McpAdminCommandDto | PluginAdminCommandDto | HookAdminCommandDto,
@@ -411,460 +167,8 @@ function configurationOperationId(
   return 'operation_id' in command && typeof command.operation_id === 'number' ? command.operation_id : undefined;
 }
 
-function getHost() {
+function getHost(): LingxiApi | undefined {
   return typeof window !== 'undefined' ? window.lingxi : undefined;
-}
-
-function messageFrom(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message;
-  return 'The desktop host could not complete that action.';
-}
-
-/** An interaction can race an engine-side expiry or another window's answer. */
-export function isPermissionRequestGone(error: unknown): boolean {
-  return /\bpermission request is not pending\b/.test(messageFrom(error));
-}
-
-export const BRIDGE_RESTART_TIMEOUT_MS = 20_000;
-
-export function restartBridgePreconditionError(
-  sessionLoading: boolean,
-  hasHost: boolean,
-  sessionId: string | null | undefined,
-): Error | null {
-  if (sessionLoading) {
-    return new Error('Cannot restart the engine while a session is loading. Please wait for it to finish opening.');
-  }
-  if (!hasHost) return new Error('Desktop host unavailable.');
-  if (!sessionId) return new Error('Open a session before restarting the engine.');
-  return null;
-}
-
-/**
- * Keep renderer actions bounded even if an IPC handler never settles. The
- * underlying restart is intentionally not cancelled: the host owns that
- * lifecycle and may still finish after the renderer has entered recovery.
- */
-export async function restartBridgeWithTimeout(
-  restart: () => Promise<void>,
-  timeoutMs = BRIDGE_RESTART_TIMEOUT_MS,
-): Promise<void> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error('invalid bridge restart timeout');
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const operation = Promise.resolve().then(restart);
-    await Promise.race([
-      operation,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Timed out waiting for the engine to restart.')), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-/**
- * Share one host restart per session. A renderer timeout must not release the
- * slot while the host is still stopping/starting that session.
- */
-export function restartBridgeSingleFlight(
-  inFlight: Map<string, Promise<void>>,
-  sessionId: string,
-  restart: () => Promise<void>,
-): Promise<void> {
-  const current = inFlight.get(sessionId);
-  if (current) return current;
-
-  const operation = Promise.resolve().then(restart);
-  inFlight.set(sessionId, operation);
-  const clear = (): void => {
-    if (inFlight.get(sessionId) === operation) inFlight.delete(sessionId);
-  };
-  // Supplying both handlers prevents a rejected operation's cleanup promise
-  // from becoming an unhandled rejection while preserving the original error
-  // for every caller awaiting `operation`.
-  void operation.then(clear, clear);
-  return operation;
-}
-
-/** Choose the edge target when focus is outside or at a dialog boundary. */
-export function dialogFocusTarget<T>(
-  focusable: readonly T[],
-  active: T | null | undefined,
-  backwards: boolean,
-): T | undefined {
-  if (focusable.length === 0) return undefined;
-  const activeIndex = active === null || active === undefined ? -1 : focusable.indexOf(active);
-  if (activeIndex < 0) return backwards ? focusable.at(-1) : focusable[0];
-  if (backwards && activeIndex === 0) return focusable.at(-1);
-  if (!backwards && activeIndex === focusable.length - 1) return focusable[0];
-  return undefined;
-}
-
-export function shouldResetBridgeRuntime(state: ConnectionState): boolean {
-  return state.status === 'spawning';
-}
-
-export function shouldClearPendingPermissions(state: ConnectionState): boolean {
-  return shouldResetBridgeRuntime(state)
-    || state.status === 'disconnected'
-    || state.status === 'error'
-    || state.status === 'idle';
-}
-
-export function resetBridgeRuntimeState(): {
-  conversation: ConversationState;
-  desktop: DesktopState;
-  permissionQueue: PermissionRequest[];
-  computerAccessQueue: ComputerAccessRequestDto[];
-  askUserQuestionQueue: AskUserQuestionRequestDto[];
-} {
-  return {
-    conversation: emptyConversation(),
-    desktop: emptyDesktopState(),
-    permissionQueue: [],
-    computerAccessQueue: [],
-    askUserQuestionQueue: [],
-  };
-}
-
-export function clearCancellationRuntime(
-  cancelling: { current: boolean },
-  task: { current: Promise<void> | null },
-): void {
-  cancelling.current = false;
-  task.current = null;
-}
-
-/** Remove renderer state for runtimes no longer present in the host snapshot. */
-interface SessionRuntimeMap {
-  keys(): IterableIterator<string>;
-  delete(sessionId: string): boolean;
-}
-
-export function pruneRuntimeMaps(runtimeIds: Iterable<string>, ...maps: SessionRuntimeMap[]): void {
-  const authoritativeIds = new Set(runtimeIds);
-  for (const map of maps) {
-    for (const sessionId of map.keys()) {
-      if (!authoritativeIds.has(sessionId)) map.delete(sessionId);
-    }
-  }
-}
-
-export function removeRuntimeFromMaps(sessionId: string, ...maps: SessionRuntimeMap[]): void {
-  for (const map of maps) map.delete(sessionId);
-}
-
-/**
- * Turn ownership for slash dispatch.
- *
- * `sendPrompt` claims the turn the instant the command crosses the bridge
- * (`turn_started` may land a tick later; `bridge.ts:900` carries the same
- * pre-claim). Slash dispatch needs the same claim — but most slash commands
- * are display-only and never start a turn, so an unconditional claim would
- * lock the composer forever on `/status`. The claim is therefore released by
- * `slash_command_result`, and only while it is still outstanding: the engine
- * has a fallback arm that emits a display-only result for a prompt command
- * (`bridge-server/src/router.rs:938`), and releasing on that would unlock the
- * composer in the middle of a live turn.
- */
-export function claimSlashTurn(pending: Map<string, boolean>, sessionId: string): void {
-  pending.set(sessionId, true);
-}
-
-export function clearSlashTurnClaim(pending: Map<string, boolean>, sessionId: string): void {
-  pending.delete(sessionId);
-}
-
-export function shouldReleaseSlashTurn(pending: Map<string, boolean>, sessionId: string): boolean {
-  return pending.get(sessionId) === true;
-}
-
-export function shouldApplyBootstrapSnapshot(
-  latestRevision: number | null,
-  snapshotRevision: number,
-): boolean {
-  const normalizedSnapshotRevision = Number.isFinite(snapshotRevision) ? snapshotRevision : 0;
-  // Equal revisions cannot establish ordering. Treat the first snapshot as
-  // the baseline, then require a strictly newer revision so a delayed copy
-  // cannot undo a local runtime-disposal tombstone.
-  return latestRevision === null || normalizedSnapshotRevision > latestRevision;
-}
-
-export function nextOperationId(current: number): number {
-  return current + 1;
-}
-
-export function isLatestOperation(operationId: number, latestOperationId: number): boolean {
-  return operationId === latestOperationId;
-}
-
-export function beginProjectCatalogRequest(generations: Map<string, number>, projectPath: string): number {
-  const generation = (generations.get(projectPath) ?? 0) + 1;
-  generations.set(projectPath, generation);
-  return generation;
-}
-
-export function isLatestProjectCatalogRequest(
-  generations: ReadonlyMap<string, number>,
-  projectPath: string,
-  generation: number,
-): boolean {
-  return generations.get(projectPath) === generation;
-}
-
-export async function recoverLatestNavigationFailure<T>(
-  operationId: number,
-  isCurrent: (operationId: number) => boolean,
-  fetchAuthoritative: () => Promise<T>,
-  applyAuthoritative: (snapshot: T) => void,
-): Promise<void> {
-  if (!isCurrent(operationId)) return;
-  const snapshot = await fetchAuthoritative();
-  if (isCurrent(operationId)) applyAuthoritative(snapshot);
-}
-
-export function pendingCountAfterResponse(current: number | undefined, fallback: number): number {
-  return Math.max(0, (current ?? fallback) - 1);
-}
-
-export function reconcilePendingCount(localOverride: number | undefined, snapshotCount: number): number | undefined {
-  return localOverride !== undefined && snapshotCount > localOverride ? localOverride : undefined;
-}
-
-const SESSION_RUNTIME_DISPOSED_REASON = 'session runtime disposed';
-
-export function isRuntimeRemovedState(state: ConnectionState): boolean {
-  return state.status === 'disconnected' && state.reason === SESSION_RUNTIME_DISPOSED_REASON;
-}
-
-function pendingAskQueueFromBootstrap(snapshot: BootstrapState): AskUserQuestionRequestDto[] {
-  return snapshot.pendingAskUserQuestions ? [...snapshot.pendingAskUserQuestions] : [];
-}
-
-export function canResumePendingSession(
-  pending: SessionRef | null,
-  workspace: WorkspaceMetadata | undefined,
-  connection: ConnectionState,
-): boolean {
-  return Boolean(
-    pending
-    && connection.status === 'connected'
-    && workspace?.path === pending.projectPath
-    && workspace.trusted,
-  );
-}
-
-export function displayedSession(
-  persisted: SessionRef | undefined,
-  pending: SessionRef | null,
-): SessionRef | undefined {
-  return pending ?? persisted;
-}
-
-interface RuntimeState {
-  submittedSession?: SubmittedSession;
-  connection: ConnectionState;
-  conversation: ConversationState;
-  desktop: DesktopState;
-  runtimeCenter: RuntimeCenterState;
-  permissionQueue: PermissionRequest[];
-  computerAccessQueue: ComputerAccessRequestDto[];
-  askUserQuestionQueue: AskUserQuestionRequestDto[];
-  pendingInteractionsOverride?: number;
-  pendingAskUserQuestionsOverride?: number;
-  resolvedPermissionIds: Set<number>;
-  resolvedAskUserQuestionIds: Set<number>;
-  isCancelling: boolean;
-  error?: string;
-}
-
-/** Project-scoped listing data that is safe to paint while a new runtime refreshes. */
-interface SharedDesktopCache {
-  models: string[];
-  modelDetails: DesktopState['modelDetails'];
-  providerModelCatalog: DesktopState['providerModelCatalog'];
-  slashCommands: DesktopState['slashCommands'];
-}
-
-function updateSharedDesktopCache(
-  cache: SharedDesktopCache | undefined,
-  event: ClientEvent,
-): SharedDesktopCache | undefined {
-  switch (event.type) {
-    case 'model_list':
-      return {
-        models: [...event.models],
-        modelDetails: [...(event.details ?? [])],
-        providerModelCatalog: cache?.providerModelCatalog ?? [],
-        slashCommands: cache?.slashCommands ?? [],
-      };
-    case 'provider_model_catalog':
-      return {
-        models: cache?.models ?? [],
-        modelDetails: cache?.modelDetails ?? [],
-        providerModelCatalog: [...event.providers],
-        slashCommands: cache?.slashCommands ?? [],
-      };
-    case 'slash_command_catalog':
-    case 'commands_changed':
-      return {
-        models: cache?.models ?? [],
-        modelDetails: cache?.modelDetails ?? [],
-        providerModelCatalog: cache?.providerModelCatalog ?? [],
-        slashCommands: [...event.commands],
-      };
-    default:
-      return cache;
-  }
-}
-
-function seedDesktopFromCache(state: DesktopState, cache: SharedDesktopCache | undefined): DesktopState {
-  if (!cache) return state;
-  return {
-    ...state,
-    models: state.models.length > 0 ? state.models : [...cache.models],
-    modelDetails: state.modelDetails.length > 0 ? state.modelDetails : [...cache.modelDetails],
-    providerModelCatalog: state.providerModelCatalog.length > 0
-      ? state.providerModelCatalog
-      : [...cache.providerModelCatalog],
-    slashCommands: state.slashCommands.length > 0 ? state.slashCommands : [...cache.slashCommands],
-  };
-}
-
-interface ActiveTrackedTurn {
-  token: DesktopTurnToken;
-  text: string;
-  sequence: number;
-  turnId?: number;
-  completed: boolean;
-}
-
-type TrackedSpeechListener = (event: TrackedSpeechEvent) => void;
-
-export function createDesktopTurnToken(
-  sessionId: string,
-  sequence: number,
-  purpose: TrackedPromptPurpose,
-): DesktopTurnToken {
-  return { sessionId, clientTurnId: `${sessionId}:tracked:${sequence}`, purpose };
-}
-
-export function enqueueTrackedTurn(
-  pending: Map<string, DesktopTurnToken[]>,
-  token: DesktopTurnToken,
-): void {
-  const queue = pending.get(token.sessionId);
-  if (queue) queue.push(token);
-  else pending.set(token.sessionId, [token]);
-}
-
-export function dequeueTrackedTurn(
-  pending: Map<string, DesktopTurnToken[]>,
-  token: DesktopTurnToken,
-): void {
-  const queue = pending.get(token.sessionId);
-  if (!queue) return;
-  const next = queue.filter((entry) => entry.clientTurnId !== token.clientTurnId);
-  if (next.length === 0) pending.delete(token.sessionId);
-  else pending.set(token.sessionId, next);
-}
-
-function eventClientTurnId(event: Extract<ClientEvent, { type: 'turn_started' }>): string | undefined {
-  const clientTurnId = (event as { client_turn_id?: unknown }).client_turn_id;
-  return typeof clientTurnId === 'string' && clientTurnId.length > 0 ? clientTurnId : undefined;
-}
-
-function trackedListenerKey(token: DesktopTurnToken): string {
-  return token.clientTurnId;
-}
-
-function emitTrackedSpeech(
-  listeners: Map<string, Set<TrackedSpeechListener>>,
-  event: TrackedSpeechEvent,
-): void {
-  const subscribers = listeners.get(trackedListenerKey(event.token));
-  if (!subscribers || subscribers.size === 0) return;
-  for (const listener of [...subscribers]) listener(event);
-}
-
-export function bindTrackedTurn(
-  pending: Map<string, DesktopTurnToken[]>,
-  active: Map<string, ActiveTrackedTurn>,
-  sessionId: string,
-  event: Extract<ClientEvent, { type: 'turn_started' }>,
-): ActiveTrackedTurn | null {
-  const queue = pending.get(sessionId);
-  if (!queue || queue.length === 0) return null;
-  const explicitClientTurnId = eventClientTurnId(event);
-  const index = explicitClientTurnId
-    ? Math.max(0, queue.findIndex((entry) => entry.clientTurnId === explicitClientTurnId))
-    : 0;
-  const [token] = queue.splice(index, 1);
-  if (!token) return null;
-  if (queue.length === 0) pending.delete(sessionId);
-  const tracked = { token, text: '', sequence: 0, turnId: event.turn_id, completed: false };
-  active.set(sessionId, tracked);
-  return tracked;
-}
-
-export function appendTrackedTurnDelta(
-  active: Map<string, ActiveTrackedTurn>,
-  sessionId: string,
-  text: string,
-): ActiveTrackedTurn | null {
-  if (!text) return null;
-  const tracked = active.get(sessionId);
-  if (!tracked || tracked.completed) return null;
-  tracked.text += text;
-  tracked.sequence += 1;
-  return tracked;
-}
-
-export function completeTrackedTurn(
-  active: Map<string, ActiveTrackedTurn>,
-  sessionId: string,
-): ActiveTrackedTurn | null {
-  const tracked = active.get(sessionId);
-  if (!tracked || tracked.completed) return null;
-  tracked.completed = true;
-  active.delete(sessionId);
-  return tracked;
-}
-
-export function clearTrackedTurnState(
-  pending: Map<string, DesktopTurnToken[]>,
-  active: Map<string, ActiveTrackedTurn>,
-  listeners: Map<string, Set<TrackedSpeechListener>>,
-  sessionId: string,
-): DesktopTurnToken[] {
-  const cleared: DesktopTurnToken[] = pending.get(sessionId) ?? [];
-  pending.delete(sessionId);
-  const tracked = active.get(sessionId);
-  if (tracked) {
-    active.delete(sessionId);
-    cleared.push(tracked.token);
-  }
-  for (const token of cleared) listeners.delete(trackedListenerKey(token));
-  return cleared;
-}
-
-function emptyRuntimeState(connection: ConnectionState = { status: 'idle' }): RuntimeState {
-  return {
-    connection,
-    conversation: emptyConversation(),
-    desktop: emptyDesktopState(),
-    runtimeCenter: emptyRuntimeCenterState(),
-    permissionQueue: [],
-    computerAccessQueue: [],
-    askUserQuestionQueue: [],
-    resolvedPermissionIds: new Set(),
-    resolvedAskUserQuestionIds: new Set(),
-    isCancelling: false,
-  };
 }
 
 export function useBridge(): UseBridge {

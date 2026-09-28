@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
-import type { UseBridge } from '../../src/renderer/bridge/useBridge';
+import type { UseBridge } from '../../src/renderer/bridge/bridgeTypes.js';
 import { ArchiveChatDialog } from '../../src/renderer/components/ArchiveChatDialog';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';

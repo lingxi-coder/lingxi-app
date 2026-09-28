@@ -31,13 +31,13 @@
 
 ## Files changed
 
-- `lingxi-code/tools/skill/src/skill.rs` — `prompt()` replacement + 9-assertion prompt test
+- `crates/tools/skill/src/skill.rs` — `prompt()` replacement + 9-assertion prompt test
 - `lingxi-code/skill-api/src/model.rs` — 14 new `SkillFrontmatter` fields
 - `lingxi-code/skill-api/src/frontmatter.rs` — 22 frontmatter parsing tests
 - `lingxi-code/skill-api/Cargo.toml` — `serde_json` dependency added
 - `lingxi-code/outputstyles/src/disk.rs` — `force_for_plugin` field + 2 tests
 - `lingxi-code/plugin/src/discovery.rs` — 12 new `RawManifest` fields
-- `lingxi-code/Cargo.lock` — `serde_json` lockfile update
+- `Cargo.lock` — `serde_json` lockfile update
 
 ---
 

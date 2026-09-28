@@ -22,8 +22,8 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ANDROID_DIR}/../.." && pwd)"
-RUNTIME_ROOT="$(python3 "${REPO_ROOT}/lingxi-code/scripts/runtime_source.py" --root)"
-SDK_ROOT="$(python3 "${REPO_ROOT}/lingxi-code/scripts/mobile_linux_source.py" --root)"
+RUNTIME_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/runtime_source.py" --root)"
+SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 NATIVE_ROOT="${ANDROID_DIR}/app/build/mobileLinuxNative/${VARIANT}/native-support"
 OUTPUT="${ANDROID_DIR}/app/build/generated/mobileLinux/${VARIANT}/assets/mobile-linux"
 

@@ -1,8 +1,8 @@
 # Shell & Web Tool Parity Gap Audit
 
 **Oracle binary:** `/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude`
-**LingXi shell tools:** `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/tools/shell/src/`
-**LingXi web tools:** `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/tools/web/src/`
+**LingXi shell tools:** `/Users/luolingfeng/Projects/LingXi-Next/crates/tools/shell/src/`
+**LingXi web tools:** `/Users/luolingfeng/Projects/LingXi-Next/crates/tools/web/src/`
 
 **All binary evidence independently verified by direct string extraction.**
 

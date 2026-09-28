@@ -1,0 +1,109 @@
+[package]
+name = "android-aar"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P12 → M10-F3: the Android UniFFI packager crate. Wraps the SHARED session
+# host (`harness_runtime::mobile::MobileEngineHandle`, F3-04 — re-exported, not re-derived)
+# behind the Android-specific `Platform`-construction wrapper, accepting
+# foreign-supplied (Kotlin) callback objects (camera / audio / share) to build an
+# `AndroidPlatform`.
+#
+# UniFFI: F3-00 vendored/pinned `uniffi` 0.28.3 offline, so the `uniffi` feature
+# (default-on) lights up the real FFI surface — the re-exported handle is a
+# `uniffi::Object`, the listener a callback interface, the DTOs UniFFI types.
+
+# T2.4: `cdylib` added (additively) so cargo-ndk can cross-compile a loadable
+# `libandroid_aar.so` for the Android `jniLibs/<abi>/`; `lib` is kept so the
+# crate stays a normal Rust dependency (host tests, the F3-04 handle tests).
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+# F3-04: default-on so `cargo build -p android-aar` exercises the real FFI
+# surface. It activates `harness-runtime/uniffi` (which pulls the shared session
+# host + the `client-adapter`/`client-protocol` UniFFI types) and this crate's
+# own `setup_scaffolding!`. `uniffi` is offline-clear since F3-00.
+default = ["uniffi"]
+android-computer-use = ["harness-runtime/android-computer-use"]
+uniffi = [
+    "dep:uniffi",
+    "dep:async-trait",
+    "dep:client",
+    "dep:platform-posix-minimal",
+    "dep:tokio",
+    "dep:orchestrator",
+    "dep:local-apps",
+    "dep:tool-api",
+    # P4-T11: the on-device `android_git_probe` export builds a
+    # `BuiltinToolContext` via tool-api's test-support stubs (the git ops use
+    # real libgit2 + the filesystem directly, not the ctx's fs/process handles,
+    # so the stubs are inert for Git). Gated to `uniffi` so the plain build is
+    # unaffected; the probe body itself is `cfg(target_os = "android")`.
+    "tool-api/test-support",
+    "harness-runtime/uniffi",
+]
+
+[dependencies]
+mobile-linux-api.workspace = true
+harness-runtime = { workspace = true, default-features = false, features = ["mobile"] }
+skill-api = { workspace = true }
+platform-api = { workspace = true }
+protocol = { workspace = true }
+branding.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+
+# F3-04: optional UniFFI dep — pulled under the (default) `uniffi` feature so the
+# re-exported shared-host scaffolding lands in this crate's library. Pinned
+# offline in F3-00 (workspace dep: 0.28.3 + `tokio` for the F3-07 async executor).
+uniffi = { workspace = true, optional = true }
+# The host test shim (a portable fake `Platform`) + the DTO/orchestrator types
+# the F3-04 handle tests name. Optional + pulled under `uniffi` so the plain
+# (no-feature) build stays minimal. All engine-tier (no `apps/*` edge).
+async-trait = { workspace = true, optional = true }
+client = { workspace = true, optional = true }
+platform-posix-minimal = { workspace = true, optional = true }
+orchestrator = { workspace = true, optional = true }
+# The engine's own app-id rule (`ids::is_valid_app_id`) — the boot-time cwd
+# validator accepts `apps/<id>/workspace` scopes with the SAME derivation the
+# local-apps service mints ids with, never a twin regex (mirrors ios-framework).
+local-apps = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
+# P3-T5: the `AndroidShellToolCtx` carrier type assigned onto `MobileConfig`
+# (the Shell-tool registration gate result). Optional + pulled under `uniffi` so
+# the plain (no-feature) build stays minimal.
+tool-api = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+platform-android = { workspace = true }
+# P0a: the minijail smoke behind the `android_sandbox_smoke()` UniFFI export
+# (serialized to the instrumentation test as JSON via serde_json). Both only
+# named inside `cfg(target_os = "android")` blocks, so target-gated like
+# `platform-android` to keep host builds dep-minimal.
+platform-android-minijail = { workspace = true }
+# P4-T11: the real `GitTool` (libgit2 in-process) behind the
+# `android_git_probe()` UniFFI export. Target-gated to keep host builds
+# dep-minimal and to anchor the libgit2 cdylib link from a reachable crate
+# (the P2 libcap link-anchor lesson).
+tool-git-mobile = { workspace = true }
+# P5b-T7: the bundled-shell bootstrap (`bootstrap_bundled_shell`) sha256-hashes
+# `libmksh.so` for the runner's content-identity check and hex-encodes it.
+# Target-gated (android-only) like `platform-android` to keep host builds
+# dep-minimal. Pins match `platforms/android/Cargo.toml`.
+hex = "0.4"
+
+[dev-dependencies]
+# F3-04: a sandboxed cwd/claude_home root for the handle-host tests (the host
+# fake `Platform` is rooted at a temp dir).
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+branding.workspace = true

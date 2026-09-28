@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { runtimePath } from '../../shared/test/runtimeSource';
+import { runtimePath } from '../../shared/test/runtimeSource.js';
 
 import {
   ALL_DESKTOP_COMMANDS,

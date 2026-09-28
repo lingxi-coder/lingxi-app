@@ -183,9 +183,10 @@ test('credential broker packaging resolves Swift targets for both macOS CLI trip
 test('credential broker requests cryptographic signing information before reading TeamIdentifier', () => {
   const source = readFileSync(join(
     repoRoot,
-    'lingxi-code',
-    'platforms',
-    'macos-credential-broker',
+    'clients',
+    'electron',
+    'native',
+    'credential-broker',
     'BrokerCommon.swift',
   ), 'utf8');
   assert.match(
@@ -199,16 +200,18 @@ test('credential broker requests cryptographic signing information before readin
 test('credential broker replaces a same-version installed bundle when its signed code changes', () => {
   const commonSource = readFileSync(join(
     repoRoot,
-    'lingxi-code',
-    'platforms',
-    'macos-credential-broker',
+    'clients',
+    'electron',
+    'native',
+    'credential-broker',
     'BrokerCommon.swift',
   ), 'utf8');
   const clientSource = readFileSync(join(
     repoRoot,
-    'lingxi-code',
-    'platforms',
-    'macos-credential-broker',
+    'clients',
+    'electron',
+    'native',
+    'credential-broker',
     'CredentialClientMain.swift',
   ), 'utf8');
 
@@ -258,7 +261,7 @@ test('credential broker manifest stays metadata-only and caller allowlist stays 
 test('credential broker admits only the plugin-secret service in its matching channel', () => {
   const source = readFileSync(join(
     repoRoot,
-    'lingxi-code/platforms/macos-credential-broker/CredentialBrokerMain.swift',
+    'clients/electron/native/credential-broker/CredentialBrokerMain.swift',
   ), 'utf8');
   assert.match(source, /"com\.lingxi\.plugin-secrets\.v1"/);
   assert.match(source, /"com\.lingxi\.plugin-secrets\.v1\.development"/);

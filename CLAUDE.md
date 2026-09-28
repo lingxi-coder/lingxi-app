@@ -10,10 +10,10 @@ product resources. The shared agent runtime is a pinned Git dependency from
 
 ## Repo navigation
 
-- `lingxi-code/` — ten Rust workspace members: product entrypoints, TUI and host adapters.
+- `Cargo.toml` / `crates/` — eight Rust workspace members: product entrypoints, TUI and product tools.
 - `clients/` — Electron, iOS, Android, Web, shared TypeScript SDK, translations and voice configuration.
 - `docs/` — current architecture and guides; historical notes are identified in `docs/README.md`.
-- `third_party/` — mksh/toybox source required by Android builds.
+- `packaging/` — npm and Python distribution packaging.
 - `assets/brand/` — design source assets; absence of a runtime import does not make them disposable.
 - `scripts/`, `.github/` — repository tooling and CI.
 
@@ -23,7 +23,7 @@ into reference checkouts or delete user state and signed release artifacts.
 
 ## Build and test
 
-### Engine (from `lingxi-code/`)
+### Rust hosts (from the repository root)
 
 ```bash
 cargo build --locked -p cli -p bridge-server --release
@@ -34,9 +34,9 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`check-all.sh` **discovers** gates by walking `scripts/` for `check-*.sh` / `*-gate.sh` — a new gate is picked up without editing a list. Run it from `lingxi-code/`, not from inside `scripts/`.
+`check-all.sh` **discovers** gates by walking `scripts/checks/` for `check-*.sh` / `*-gate.sh` — a new gate is picked up without editing a list. Run it from the repository root.
 
-Resolve upstream sources with `python3 scripts/runtime_source.py --root`. Runtime crates and their own unit-test suites are maintained upstream; local workspace tests cover the retained product packages.
+Resolve upstream sources with `python3 scripts/lib/runtime_source.py --root`. Runtime crates and their own unit-test suites are maintained upstream; local workspace tests cover the retained product packages.
 
 ### Clients
 
@@ -58,10 +58,10 @@ Mobile builds are optional in `setup.sh` and skip cleanly without their toolchai
 
 ### Product and runtime ownership
 
-`apps/cli`, `apps/bridge-server`, `apps/ios-framework` and `apps/android-aar`
+`crates/apps/cli`, `crates/apps/bridge-server`, `crates/apps/ios-framework` and `crates/apps/android-aar`
 consume the fixed upstream `harness-runtime` desktop/mobile profiles. Shared
 orchestration, tools, permissions, sessions and protocol types live upstream.
-The local `scripts/check-runtime-dependency.sh` verifies the common Git identity;
+The local `scripts/checks/check-runtime-dependency.sh` verifies the common Git identity;
 `check-client-protocol.sh` verifies host boundaries and mirrored fixtures.
 
 See `docs/architecture/harness-runtime-extraction.md` for the source and resource

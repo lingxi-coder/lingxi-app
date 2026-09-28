@@ -210,9 +210,10 @@ async function main() {
   const metadata = readJson(join(packageRoot, 'package.json'));
   const paths = desktopArtifactPaths(packageRoot, target.platform, target.arch);
   const electronDist = join(packageRoot, 'node_modules', 'electron', 'dist');
+  const cargoTargetDir = resolve(repoRoot, process.env['CARGO_TARGET_DIR'] || 'target');
   const sidecar = resolve(
     process.env['LINGXI_BRIDGE_SERVER_BIN']
-      ?? join(repoRoot, 'lingxi-code', 'target', 'release', target.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server'),
+      ?? join(cargoTargetDir, 'release', target.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server'),
   );
   assertBinaryArchitecture(sidecar, target, 'release bridge-server sidecar');
   scanTreeForForbiddenContent(sidecar);

@@ -38,6 +38,7 @@ import {
   ALL_TASK_ROW_DTO_KEYS,
 } from '../src/protocolCoverage.js';
 import { validateClientEvent, validateServerHello } from '../src/validation.js';
+import { runtimePath } from './runtimeSource.js';
 
 const SNAP_ROOT = runtimePath('crates/client-protocol/snapshots');
 

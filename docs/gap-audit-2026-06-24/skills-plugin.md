@@ -1,7 +1,7 @@
 # Skills + OutputStyles + Plugin Subsystem Parity Audit — v2.1.186
 **Binary**: `/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude`
 **TS reference**: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/`
-**LingXi source**: `lingxi-code/skill-api/src/`, `lingxi-code/outputstyles/src/`, `lingxi-code/plugin/src/`, `lingxi-code/tools/skill/src/`
+**LingXi source**: `lingxi-code/skill-api/src/`, `lingxi-code/outputstyles/src/`, `lingxi-code/plugin/src/`, `crates/tools/skill/src/`
 **Date re-verified**: 2026-06-24
 **Re-audit scope**: fresh binary + TS cross-check for skills frontmatter, SkillTool prompt, outputstyle disk/plugin, plugin manifest
 
@@ -34,7 +34,7 @@
   - If you see a <command-name> tag in the current conversation turn, the skill has ALREADY been loaded - follow the instructions directly instead of calling this tool again
   ```
 - **LingXi has**: `async fn prompt(&self, _: &PromptOptions) -> String { "Skill: invoke a slash-command skill by name.".into() }`
-- **File**: `lingxi-code/tools/skill/src/skill.rs:524-526`
+- **File**: `crates/tools/skill/src/skill.rs:524-526`
 - **Note**: The binary text is also DIFFERENT from the leaked TS source at `claude-code/src/tools/SkillTool/prompt.ts:173-195` (TS has "Examples:" bullet format; binary has "Set `skill`" format). The binary is the ground truth. LingXi is missing the entire operative prompt.
 
 ---
@@ -52,7 +52,7 @@
 
 - **Binary says** (bytes 94993840, 155728865): `disallowed-tools` is parsed. Description: "Tools removed from the model while this file is active. Comma-separated string or YAML list. Cleared when the user sends the next message." Also confirmed: `disallowedTools` is a canonical alias (`disallowed-tools`).
 - **LingXi has**: `SkillFrontmatter` has `allowed_tools` but no `disallowed_tools`. `SkillDescriptor` has no `disallowed_tools` field.
-- **File**: `lingxi-code/skill-api/src/model.rs:35-54`, `lingxi-code/tools/skill/src/skill.rs:78-127`
+- **File**: `lingxi-code/skill-api/src/model.rs:35-54`, `crates/tools/skill/src/skill.rs:78-127`
 
 ---
 

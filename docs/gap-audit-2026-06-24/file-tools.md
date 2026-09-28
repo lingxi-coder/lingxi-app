@@ -1,7 +1,7 @@
 # File Tools Parity Gap Audit — LingXi vs claude-code v2.1.186 (oracle binary)
 
 Oracle: `/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude` (216,811,232 bytes)
-LingXi: `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/tools/file/src/`
+LingXi: `/Users/luolingfeng/Projects/LingXi-Next/crates/tools/file/src/`
 Tools audited: Read, Write, Edit, NotebookEdit, Glob, Grep. (No MultiEdit tool in LingXi — see #1.)
 
 **CONFIRMED GAPS: 5 total — Critical: 1 · Important: 2 · Minor: 2**

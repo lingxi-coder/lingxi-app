@@ -45,7 +45,7 @@ export const NOTIFICATION_SCHEMA_VERSION = 1 as const;
 /**
  * `messageIdleNotifThresholdMs` default, byte-faithful to upstream's
  * `DEFAULT_GLOBAL_CONFIG` (and to the port's own CLI copy of it,
- * `lingxi-code/apps/cli/src/idle_notify.rs` `MESSAGE_IDLE_NOTIF_THRESHOLD_MS`).
+ * `crates/apps/cli/src/idle_notify.rs` `MESSAGE_IDLE_NOTIF_THRESHOLD_MS`).
  */
 export const DEFAULT_IDLE_NOTIF_THRESHOLD_MS = 60_000;
 

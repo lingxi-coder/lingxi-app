@@ -1,0 +1,102 @@
+[package]
+name = "tui"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tool-api = { workspace = true }
+# The backend-neutral core extracted from `tui` during the iocraft → ratatui
+# migration. `tui` renders it with ratatui; it must never depend on iocraft.
+tui-core = { path = "../tui-core" }
+permission = { workspace = true }
+# (fix round 1) `TurnEvent::ContextPressure`/`RateLimit` handling needs the
+# banner + subscription types the bridge events carry. Already in the graph via
+# tui-core (promoted from dev-dependencies; no new external dependency).
+platform-api = { workspace = true }
+# (fix round 1) `rate_limit_messages` reuses the existing 1:1
+# `formatResetTime` port instead of duplicating it (the old iocraft `tui`
+# reaches the SAME function through its `orchestrator` dependency).
+llm-runtime = { workspace = true }
+# Ratatui 0.29 uses crossterm 0.28 — the SAME major the workspace pins — so only
+# one crossterm version links (verified via `cargo tree -p tui -i crossterm`).
+# All three features are dependency-free cfg gates, also enabled by codex-rs/tui:
+# `scrolling-regions` unlocks `Backend::scroll_region_up/down` (bottom-anchored
+# custom terminal room-making); `unstable-widget-ref` unlocks `WidgetRef` and
+# `unstable-rendered-line-info` unlocks `Paragraph::line_count`, both needed by
+# the `renderable` height/render contract ported from codex.
+ratatui = { version = "0.29", features = [
+    "scrolling-regions",
+    "unstable-rendered-line-info",
+    "unstable-widget-ref",
+] }
+crossterm = { workspace = true }
+# Inline-image widget (kitty/iTerm2/sixel). v5 targets ratatui 0.29. Its default
+# `image-defaults` feature enables `image/default`, which pulls the AVIF codec
+# chain (avif-serialize/moxcms) that needs edition2024 / rustc 1.85 (> workspace
+# 1.82) — so default features are OFF and `image` is brought in directly with
+# only png+jpeg (pinned to 0.25.5 in Cargo.lock, below the 0.25.6 moxcms bump).
+ratatui-image = { version = "=5.0.0", default-features = false, features = ["crossterm"] }
+image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }
+# Clipboard IMAGE paste (Ctrl+V/Alt+V): bracketed paste only carries text, so
+# screenshots need a native clipboard read (codex-rs/tui `clipboard_paste`).
+arboard = { version = "3", features = ["wayland-data-control"] }
+tempfile = "3.13"
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+# Display-column width for CJK/wide-char-aware cursor positioning in the composer.
+unicode-width = "=0.1.14"
+uuid = { version = "1.10", features = ["v4"] }
+async-trait = { workspace = true }
+session = { workspace = true }
+protocol = { workspace = true }
+tracing = { workspace = true }
+# `/web` WebSearch-config port (screens/web_picker.rs + screens/web_config.rs
+# from the deleted iocraft `tui`): pure KeyCode->Outcome reducers over the
+# tool_web provider config + secret store + memory settings.
+tool-web = { workspace = true }
+# `/workflows` "Save dynamic workflow" (`s` chord) reuses the byte-exact save
+# logic (`save_dynamic_workflow` / `WorkflowScope` / `saved_feedback`) instead of
+# re-implementing the dir resolver + file modes. `tool-workflow` does not depend
+# on `tui`, so this introduces no dependency cycle.
+tool-workflow = { workspace = true }
+# `emit_workflow_saved` (`tengu_workflow_saved`) is fired at the save call site.
+telemetry = { workspace = true }
+# `.lingxi` dir name for the project-scope save preview path.
+branding = { workspace = true }
+secret = { workspace = true }
+memory = { workspace = true }
+# The bridge (`ChatWidget::run_core_command`) needs the `BuiltinCommandHandler`
+# trait + `CommandResult`/`ParsedSlashCommand` types to invoke `command-core`
+# handlers directly. Same path-style as the `command-core` entry above.
+command-api = { workspace = true, features = ["builtin-handlers"] }
+# Shared `CostSnapshot -> i6e()` cost-summary renderer (byte-exact `/cost`
+# block) — the `/usage` Stats tab renders the same block as the headless
+# `/usage` command via `cost::render::cost_summary_from_snapshot`. `cost`
+# does not depend on `tui`, so this introduces no dependency cycle.
+cost = { workspace = true }
+url = "2"
+dirs = "5"
+
+[dev-dependencies]
+# `orchestrator::test_support::MockOrchestratorHandle` — the reusable scripted
+# `OrchestratorHandle` test double the `command_core` handler tests use — drives
+# the behavioral tests for the OrchestratorHandle-backed slash commands. No such
+# mock exists in `tui`/`tui-core`; hand-rolling one would re-implement the
+# trait's ~16 non-defaulted methods. `orchestrator` does not depend on `tui`, so
+# this dev-only edge introduces no dependency cycle.
+orchestrator = { workspace = true }
+# Prompt-history persistence tests write a real `history.jsonl` in a tempdir.
+tempfile = "3.13"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+branding.workspace = true

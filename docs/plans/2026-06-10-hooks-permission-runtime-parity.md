@@ -426,12 +426,12 @@ GIT_MASTER=1 git commit -m "test(orchestrator): cover hook approval bypass" \
 ### Task 6: Desktop Composition Uses Policy Permission Gate Instead of NoOp
 
 **Files:**
-- Test: `lingxi-code/apps/engine-desktop/tests/permission_wiring_test.rs`
-- Modify: `lingxi-code/apps/engine-desktop/src/lib.rs`
+- Test: `crates/apps/engine-desktop/tests/permission_wiring_test.rs`
+- Modify: `crates/apps/engine-desktop/src/lib.rs`
 
 **Step 1: Write the failing test**
 
-Create `lingxi-code/apps/engine-desktop/tests/permission_wiring_test.rs`:
+Create `crates/apps/engine-desktop/tests/permission_wiring_test.rs`:
 
 - Use the desktop build entrypoint or the smallest exposed helper that constructs orchestrator dependencies.
 - Assert the permission gate is not `NoOpPermissionGate` in default desktop composition.
@@ -485,7 +485,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-GIT_MASTER=1 git add lingxi-code/apps/engine-desktop/src/lib.rs lingxi-code/apps/engine-desktop/tests/permission_wiring_test.rs
+GIT_MASTER=1 git add crates/apps/engine-desktop/src/lib.rs crates/apps/engine-desktop/tests/permission_wiring_test.rs
 GIT_MASTER=1 git commit -m "feat(engine-desktop): wire policy permission gate" \
   -m "Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)" \
   -m "Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>"
@@ -496,13 +496,13 @@ GIT_MASTER=1 git commit -m "feat(engine-desktop): wire policy permission gate" \
 ### Task 7: Desktop Composition Wires Hook Prompt Runner and Async Registry
 
 **Files:**
-- Test: `lingxi-code/apps/engine-desktop/tests/hook_executor_wiring_test.rs`
-- Modify: `lingxi-code/apps/engine-desktop/src/lib.rs`
-- Modify: `lingxi-code/apps/cli/src/main.rs` only if the actual orchestrator construction lives there
+- Test: `crates/apps/engine-desktop/tests/hook_executor_wiring_test.rs`
+- Modify: `crates/apps/engine-desktop/src/lib.rs`
+- Modify: `crates/apps/cli/src/main.rs` only if the actual orchestrator construction lives there
 
 **Step 1: Write the failing test**
 
-Create `lingxi-code/apps/engine-desktop/tests/hook_executor_wiring_test.rs`:
+Create `crates/apps/engine-desktop/tests/hook_executor_wiring_test.rs`:
 
 - Build the desktop hook executor helper with mock HTTP/runtime/process/sandbox/agent/prompt seams.
 - Assert resulting executor:
@@ -556,7 +556,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-GIT_MASTER=1 git add lingxi-code/apps/engine-desktop/src/lib.rs lingxi-code/apps/engine-desktop/tests/hook_executor_wiring_test.rs
+GIT_MASTER=1 git add crates/apps/engine-desktop/src/lib.rs crates/apps/engine-desktop/tests/hook_executor_wiring_test.rs
 GIT_MASTER=1 git commit -m "feat(engine-desktop): wire hook executor seams" \
   -m "Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)" \
   -m "Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>"

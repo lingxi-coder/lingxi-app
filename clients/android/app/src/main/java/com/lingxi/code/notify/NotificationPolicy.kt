@@ -58,7 +58,7 @@ object NotificationPolicy {
 /**
  * Upstream's `notificationType` discriminator, kept verbatim. The port's CLI
  * already uses these exact strings for the `Notification` hook
- * (`lingxi-code/apps/cli/src/idle_notify.rs`,
+ * (`crates/apps/cli/src/idle_notify.rs`,
  * `permission_prompt_notify.rs`), so a third spelling would be the drift this
  * file exists to prevent.
  */

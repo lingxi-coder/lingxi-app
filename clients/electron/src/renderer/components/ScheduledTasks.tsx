@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { UseBridge } from '../bridge/useBridge';
-import { scheduledTaskFromJob, scheduledTaskInput, formatScheduledTaskSchedule, type ScheduledCronJob, type ScheduledTaskDraft } from '../bridge/scheduledTaskDraft';
+import type { UseBridge } from '../bridge/bridgeTypes.js';
+import {
+  scheduledTaskFromJob,
+  scheduledTaskInput,
+  formatScheduledTaskSchedule,
+  type ScheduledCronJob,
+  type ScheduledTaskDraft,
+} from '../bridge/scheduledTaskDraft';
 import { useT } from '../theme/ThemeContext';
 import { ScheduledTaskSetup } from './ScheduledTaskSetup';
 import { Icon } from './Icon';

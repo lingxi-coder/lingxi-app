@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runningSubagentIds, emptyRuntimeCenterState, reduceRuntimeCenterEvent } from '../src/renderer/bridge/runtimeCenterState';
-import { stopSessionSubagents } from '../src/renderer/bridge/useBridge';
+import {
+  runningSubagentIds,
+  emptyRuntimeCenterState,
+  reduceRuntimeCenterEvent,
+} from '../src/renderer/bridge/runtimeCenterState';
+import { stopSessionSubagents } from '../src/renderer/bridge/bridgeConnection.js';
 import type { LingxiApi } from '../src/renderer/bridge/lingxi';
 
 test('stop targets only active children observed in the current session', () => {

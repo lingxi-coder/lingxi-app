@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { useBridge } from '../../src/renderer/bridge/useBridge';
+import { useBridge } from '../../src/renderer/bridge/useBridge.js';
 import { BetaSidebar } from '../../src/renderer/components/BetaDesktop';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';

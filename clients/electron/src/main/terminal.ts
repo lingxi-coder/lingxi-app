@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { resolveServerBin } from './bridge.js';
+import { resolveServerBin } from './bridgeDiscovery.js';
 import type { TerminalScope, TerminalSnapshot, TerminalEvent } from '../shared/terminal.js';
 
 const MAX_OUTPUT = 1024 * 1024;

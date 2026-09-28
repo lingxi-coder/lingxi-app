@@ -2,8 +2,9 @@
 
 Native shells for LingXi Code — a desktop **Electron** app, an **Android** app,
 and an **iOS** app — all driving the same Rust engine over the local
-`bridge-server` (Electron) or an in-process FFI binding (mobile). They share the
-`@lingxi/bridge-client` TypeScript SDK in [`shared/`](shared/).
+`bridge-server` (Electron) or an in-process FFI binding (mobile). The Electron host uses the
+`@lingxi/bridge-client` TypeScript SDK in [`shared/`](shared/); mobile clients use
+generated Swift/Kotlin FFI bindings.
 
 | Dir | What it is |
 |---|---|
@@ -11,9 +12,13 @@ and an **iOS** app — all driving the same Rust engine over the local
 | [`electron/`](electron/) | Desktop shell (Electron + Vite + React + TS). Spawns the Rust `bridge-server` and streams events to the renderer. |
 | [`android/`](android/) | Android app (Gradle + Kotlin). Links the engine via UniFFI JNI bindings. |
 | [`ios/`](ios/) | iOS app (XcodeGen + Swift). Links the engine via a UniFFI `.xcframework`. |
+| [`web/`](web/) | Web client (Vite + React). |
+| [`voice/`](voice/README.md) | Shared voice model and audio configuration sources and generators. |
 | [`translations/`](translations/) | Canonical i18n source (zh-Hans/zh-Hant/en/ja/ko) + the generator that emits both clients' localized resources. |
 
 ---
+
+Use npm and the checked-in `package-lock.json` in each JavaScript package.
 
 ## One-command setup (fresh clone)
 
@@ -31,7 +36,7 @@ That's the whole bootstrap. From a fresh clone it:
    `dist/` — without it the electron install / typecheck cannot resolve the dep.
 3. **Electron** — `(cd clients/electron && npm install)`.
 4. **Android** *(optional)* — if `cargo-ndk` **and** an Android NDK are present,
-   runs [`android/scripts/build-jni.sh`](android/scripts/build-jni.sh) to
+   runs [`android/scripts/build-mobile-linux-native.sh`](android/scripts/build-mobile-linux-native.sh) with `--variant play` to
    cross-compile the JNI libs + generate the Kotlin bindings. Otherwise it
    **skips** with guidance (install `cargo-ndk` + the NDK, then re-run).
 5. **iOS** *(optional)* — on macOS with `xcodebuild` **and** `xcodegen`, runs
@@ -49,11 +54,15 @@ one step; it never fails the whole run. The required core is `cargo` + `node`/`n
 ### After setup
 
 ```sh
-cd clients/electron && npm run dev   # desktop dev server
+cd clients/electron
+npm run package:mac:flare -- --launch   # signed macOS app
 ```
 
 - **Android** — open `clients/android` in Android Studio, build & run.
 - **iOS** — open `clients/ios/LingxiCode.xcodeproj` in Xcode, build & run.
+
+`npm run dev` is available for UI development; real macOS credentials and sessions
+require the signed app.
 
 Then in the app: open **Settings**, enter your Anthropic API key, and pick a
 model.
@@ -76,7 +85,7 @@ cd clients/shared && npm install && npm run build
 cd clients/electron && npm install
 
 # 4. Android bindings (needs cargo-ndk + an Android NDK)
-cd clients/android && bash scripts/build-jni.sh
+cd clients/android && bash scripts/build-mobile-linux-native.sh --variant play
 
 # 5. iOS framework + project (macOS + Xcode; needs xcodegen)
 cd clients/ios && bash scripts/build-xcframework.sh && xcodegen generate

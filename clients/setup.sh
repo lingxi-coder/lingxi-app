@@ -11,7 +11,7 @@
 #        → dist/  (REQUIRED before electron — electron depends on file:../shared).
 #   3. Electron shell      : (cd clients/electron && npm install)
 #   4. Android bindings    : if cargo-ndk + an Android NDK are present →
-#                            clients/android/scripts/build-jni.sh ; else SKIP.
+#                            clients/android/scripts/build-mobile-linux-native.sh --variant play ; else SKIP.
 #   5. iOS framework       : if on macOS with xcodebuild + xcodegen →
 #                            clients/ios/scripts/build-xcframework.sh +
 #                            xcodegen generate ; else SKIP.
@@ -128,7 +128,7 @@ record "electron   : npm install complete"
 # ===========================================================================
 # Step 4 — Android bindings (OPTIONAL): cargo-ndk + Android NDK required.
 # ===========================================================================
-header "Android bindings: build-jni.sh  (optional)"
+header "Android runtime and bindings: build-mobile-linux-native.sh  (optional)"
 ANDROID_NDK_DETECTED=""
 for candidate in "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}" "${NDK_HOME:-}"; do
   if [ -n "${candidate}" ] && [ -d "${candidate}" ]; then ANDROID_NDK_DETECTED="${candidate}"; break; fi
@@ -143,9 +143,9 @@ if have cargo-ndk && [ -n "${ANDROID_NDK_DETECTED}" ]; then
   info "cargo-ndk : $(command -v cargo-ndk)"
   info "NDK       : ${ANDROID_NDK_DETECTED}"
   export ANDROID_NDK_HOME="${ANDROID_NDK_DETECTED}"
-  ( cd "${ANDROID_DIR}" && bash scripts/build-jni.sh )
-  ok "Android JNI libs + Kotlin bindings generated"
-  record "android    : JNI libs + bindings built"
+  ( cd "${ANDROID_DIR}" && bash scripts/build-mobile-linux-native.sh --variant play )
+  ok "Android JNI libs, Kotlin bindings and native SDK support generated"
+  record "android    : JNI libs + bindings + native SDK support built"
 else
   if ! have cargo-ndk; then
     skip "cargo-ndk not found. Install it:  cargo install cargo-ndk  — then re-run."

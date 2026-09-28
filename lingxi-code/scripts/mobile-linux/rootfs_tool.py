@@ -3,7 +3,7 @@
 import pathlib
 import subprocess
 import sys
-resolver = pathlib.Path(__file__).resolve().parent.parent / "runtime_source.py"
+resolver = pathlib.Path(__file__).resolve().parent.parent / "mobile_linux_source.py"
 root = subprocess.check_output([sys.executable, str(resolver), "--root"], text=True).strip()
 args = sys.argv[1:]
 if "--repo-root" in args:

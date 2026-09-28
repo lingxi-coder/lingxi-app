@@ -11,9 +11,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Test pinned-source rejection cases
-        run: python3 lingxi-code/scripts/test_runtime_source.py
-      - name: Resolve the pinned runtime source
-        run: python3 lingxi-code/scripts/runtime_source.py --root
+        run: |
+          python3 lingxi-code/scripts/test_runtime_source.py
+          python3 lingxi-code/scripts/test_mobile_linux_source.py
+      - name: Validate both pinned runtime sources
+        run: python3 lingxi-code/scripts/check-runtime-dependency.py
       - name: Run every checked-in product gate
         working-directory: lingxi-code
         run: ./scripts/check-all.sh

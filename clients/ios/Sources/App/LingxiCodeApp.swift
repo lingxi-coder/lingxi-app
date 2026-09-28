@@ -7,6 +7,7 @@ struct LingxiCodeApp: App {
     @State private var voice = VoiceCapabilityModel()
 
     init() {
+        LXISHRuntimeResourceBootstrap.prepare()
         // M10 A2 / P2 link smoke: a reachable reference to the engine static
         // archive (LingxiCodeFFI.xcframework) so the linker resolves its FFI
         // symbols. Inert at runtime — no engine, no I/O, result discarded.

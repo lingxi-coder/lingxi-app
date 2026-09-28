@@ -1,4 +1,5 @@
 import Foundation
+import MobileLinuxNativeSupport
 import XCTest
 
 @testable import LingxiCode
@@ -6,8 +7,8 @@ import XCTest
 /// Opt in on a freshly launched physical-device test host with
 /// LINGXI_RUN_DEVICE_RUNTIME_SMOKE=1 in the test target's EnvironmentVariables.
 /// Run only this class with test timeouts enabled and a 600-second allowance.
-/// The native coordinator has no shutdown API: its unique scratch directory is
-/// intentionally retained until process exit, never removed while mounted.
+/// iSH kernel teardown requires process exit: the scratch directory is
+/// intentionally retained until then, never removed while mounted.
 final class LocalAppDeviceRuntimeSmokeTests: XCTestCase {
     func testBundledToolchainAndOfflineViteBuild() async throws {
         #if targetEnvironment(simulator)
@@ -36,7 +37,7 @@ final class LocalAppDeviceRuntimeSmokeTests: XCTestCase {
         guard !Thread.isMainThread else {
             throw SmokeFailure(message: "Synchronous native execution must not run on the main thread")
         }
-        guard lx_ish_native_is_available() else {
+        guard mlr_ish_is_available() else {
             throw SmokeFailure(message: "Physical-device native runtime bridge unavailable")
         }
         guard let seedPath = LocalAppsRuntimeDistribution.runtimeRoot else {
@@ -76,16 +77,20 @@ final class LocalAppDeviceRuntimeSmokeTests: XCTestCase {
         """#
         try script.write(to: workspace.appendingPathComponent("runtime-smoke.cjs"), atomically: true, encoding: .utf8)
         let manifest = LXISHRuntimeBundleMetadata.current()
-        let config = LXISHNativeConfig(
-            managedRoot: scratch.appendingPathComponent("managed", isDirectory: true).path,
-            workspaceHostPath: workspace.path,
-            stableWorkspaceId: identifier,
-            abi: "arm64",
-            rootfsVersion: manifest.rootfsVersion,
-            archiveSha256: manifest.archiveSha256,
-            authorizationFile: LXISHRuntimeBundleResources.authorizationManifestURL()?.path
-        )
-        let guestWorkspace = LXISHGuestPaths.workspace(identifier)
+        let managedRoot = scratch.appendingPathComponent("managed", isDirectory: true).path
+        let config: [String: Any] = [
+            "managed_root": managedRoot,
+            "workspace_host_path": workspace.path,
+            "stable_workspace_id": identifier,
+            "abi": "arm64",
+            "rootfs_version": manifest.rootfsVersion,
+            "archive_sha256": manifest.archiveSha256 as Any? ?? NSNull(),
+            "authorization_file": LXISHRuntimeBundleResources.authorizationManifestURL()?.path as Any? ?? NSNull(),
+            "rootfs_archive_path": LXISHRuntimeResourceBootstrap.rootfsArchiveURL(managedRoot: managedRoot)?.path as Any? ?? NSNull(),
+            "default_mount_path": LXISHRuntimeResourceBootstrap.defaultMountURL(managedRoot: managedRoot)?.path as Any? ?? NSNull(),
+            "rootfs_patch_path": LXISHRuntimeResourceBootstrap.rootfsPatchURL(managedRoot: managedRoot)?.path as Any? ?? NSNull(),
+        ]
+        let guestWorkspace = LingxiCode.LXISHGuestPaths.workspace(identifier)
         let command = #"""
         set -eux
         test "$(/usr/bin/node --version)" = "v26.9.0"
@@ -100,21 +105,23 @@ final class LocalAppDeviceRuntimeSmokeTests: XCTestCase {
         test -s dist/index.html
         echo OFFLINE_VITE_BUILD_OK
         """#
-        let request = LXISHRunRequest(
-            command: "/bin/sh", args: ["-c", command], cwd: guestWorkspace,
-            env: ["PATH": "/usr/local/bin:/usr/bin:/bin", "NODE_OPTIONS": "--jitless", "CI": "1"],
-            stdin: nil, timeoutMs: 300_000, network: "disabled", resourceLimits: nil,
-            mounts: [LXISHMountSpec(hostPath: workspace.path, guestPath: guestWorkspace, readOnly: false, purpose: "workspace")],
-            includeDefaultMounts: false
-        )
-        let configJSON = String(decoding: try LXISHBridgeJSON.encoder().encode(config), as: UTF8.self)
-        let requestJSON = String(decoding: try LXISHBridgeJSON.encoder().encode(request), as: UTF8.self)
+        let request: [String: Any] = [
+            "command": "/bin/sh", "args": ["-c", command], "cwd": guestWorkspace,
+            "env": ["PATH": "/usr/local/bin:/usr/bin:/bin", "NODE_OPTIONS": "--jitless", "CI": "1"],
+            "stdin": NSNull(), "timeout_ms": 300_000, "network": "disabled",
+            "resource_limits": NSNull(),
+            "mounts": [["host_path": workspace.path, "guest_path": guestWorkspace,
+                        "read_only": false, "purpose": "workspace"]],
+            "include_default_mounts": false,
+        ]
+        let configJSON = String(decoding: try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]), as: UTF8.self)
+        let requestJSON = String(decoding: try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]), as: UTF8.self)
         let response: String = try configJSON.withCString { configPointer in
             try requestJSON.withCString { requestPointer in
-                guard let pointer = lx_ish_native_run_sync_json(configPointer, requestPointer) else {
+                guard let pointer = mlr_ish_run_sync_json(configPointer, requestPointer) else {
                     throw SmokeFailure(message: "Native smoke returned a null response; scratch: \(scratch.path)")
                 }
-                defer { lx_ish_native_free_string(pointer) }
+                defer { mlr_ish_free_string(pointer) }
                 return String(cString: pointer)
             }
         }

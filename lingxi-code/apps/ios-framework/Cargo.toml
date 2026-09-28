@@ -45,7 +45,7 @@ uniffi = [
     "dep:uniffi",
     "dep:async-trait",
     "dep:client-protocol",
-    "dep:platform-ios-ish-runtime",
+    "dep:mobile-linux-ios",
     "dep:platform-posix-minimal",
     "dep:tokio",
     "dep:orchestrator",
@@ -101,7 +101,7 @@ async-trait = { workspace = true, optional = true }
 # is serialized to bytes the native side persists. Optional + pulled under `uniffi`.
 serde_json = { workspace = true, optional = true }
 client-protocol = { workspace = true, optional = true }
-platform-ios-ish-runtime = { path = "../../platforms/ios-ish-runtime", optional = true }
+mobile-linux-ios = { workspace = true, optional = true }
 platform-posix-minimal = { workspace = true, optional = true }
 orchestrator = { workspace = true, optional = true }
 # The engine's own app-id rule (`ids::is_valid_app_id`) — the boot-time cwd

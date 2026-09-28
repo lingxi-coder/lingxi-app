@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/lingxi-coder/mobile-linux-runtime.git",
+  "packages": [
+    "mobile-linux-api",
+    "mobile-linux-core",
+    "mobile-linux-android",
+    "mobile-linux-ios",
+    "mobile-linux-ffi",
+    "platform-pty",
+    "platform-android-libcap",
+    "platform-android-minijail",
+    "platform-android-shellbin"
+  ],
+  "vendored_packages": []
+}

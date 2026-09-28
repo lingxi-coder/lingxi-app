@@ -26,8 +26,6 @@ G1	.github/workflows/lingxi-release.yml	\.lingxi
 G1	assets/brand/lingxi-app-icon-mobius.svg	LingXi
 G1	clients/android/app/src/androidTest/java/com/lingxi/code/NativeSettingsEngineRoundtripTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/android/app/src/androidTest/java/com/lingxi/code/cron/CronNativeRoundtripTest.kt	\.lingxi(?![A-Za-z0-9_.\-])
-G1	clients/android/app/src/main/cpp/mobile_linux_policy_launcher.c	LINGXI_
-G1	clients/android/app/src/main/cpp/proot_lingxi_network_policy.c	LINGXI_
 G1	clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppCodeBrowser.kt	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppWebView.kt	LINGXI_
 G1	clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppWebView.kt	\.lingxi(?![A-Za-z0-9_.\-])
@@ -85,8 +83,6 @@ G1	clients/electron/test/terminal-manager.integration.test.ts	LINGXI_
 G1	clients/electron/test/validation.test.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/ios/Sources/App/RootView.swift	LINGXI_
 G1	clients/ios/Sources/Conversation/ConversationSource.swift	LINGXI_
-G1	clients/ios/Sources/LinuxRuntimeNative/LXISHNativeRootfs.swift	LINGXI_
-G1	clients/ios/Sources/LinuxRuntimeNative/LXISHRuntimeBundleManifest.swift	LINGXI_
 G1	clients/ios/Sources/LocalApps/LocalAppCodeBrowser.swift	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/ios/Sources/LocalApps/LocalAppWebView.swift	LINGXI_
 G1	clients/ios/Sources/LocalApps/LocalAppWebView.swift	\.lingxi(?![A-Za-z0-9_.\-])
@@ -193,7 +189,6 @@ G1	lingxi-code/apps/ios-framework/uniffi.toml	Lingxi
 G1	lingxi-code/npm/bin/lingxi.js	LINGXI
 G1	lingxi-code/npm/package.json	LingXi
 G1	lingxi-code/npm/scripts/build_npm_package.py	LingXi
-G1	lingxi-code/platforms/ios-ish-runtime/src/lib.rs	\.lingxi
 G1	lingxi-code/platforms/macos-credential-broker/BrokerCommon.swift	LingXi
 G1	lingxi-code/platforms/macos-credential-broker/BrokerCommon.swift	\.lingxi
 G1	lingxi-code/platforms/macos-credential-broker/CredentialBrokerIntegrationMain.swift	LingXi
@@ -366,8 +361,6 @@ G3	lingxi-code/apps/cli/tests/cli_resume.rs	LINGXI_CONFIG_DIR
 G3	lingxi-code/apps/cli/tests/mcp_serve.rs	.lingxi.json
 G3	lingxi-code/apps/cli/tests/mcp_serve.rs	LINGXI_CONFIG_DIR
 G3	lingxi-code/apps/ios-framework/src/lib.rs	.lingxi
-G3	lingxi-code/platforms/android-shellbin/build.rs	LINGXI.md (case)
-G3	lingxi-code/platforms/ios-ish-runtime/src/lib.rs	.lingxi
 G3	lingxi-code/tui-core/src/collapse/group.rs	.lingxi
 G3	lingxi-code/tui/src/bottom_pane/screen_view.rs	.lingxi
 G3	lingxi-code/tui/src/bottom_pane/screen_view.rs	LINGXI.md

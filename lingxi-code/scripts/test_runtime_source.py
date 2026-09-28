@@ -62,6 +62,13 @@ class RuntimeSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "local dependency"):
             self.inspect()
 
+    def test_rejects_host_path_into_the_cargo_checkout(self):
+        self.metadata["packages"].append({"name": "ios-framework", "dependencies": [
+            {"name": "protocol", "path": "/tmp/locked-harness/crates/protocol"},
+        ]})
+        with self.assertRaisesRegex(ValueError, "local dependency"):
+            self.inspect()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2028,7 +2028,6 @@
     <string name="voice_flow_exit_a11y">退出心流</string>
     <string name="voice_flow_hint_with_input">%1$s · 可繼續使用下方輸入框</string>
     <string name="voice_flow_listening_hint">說完後輕點結束辨識 · 也可以繼續說</string>
-    <string name="voice_flow_finalizing_hint">正在等待語音辨識完成…</string>
     <string name="voice_flow_listening_label">聆聽中</string>
     <string name="voice_flow_mode_label">心流模式</string>
     <string name="voice_flow_release_hint">鬆開傳送 · 上滑取消</string>
@@ -2162,8 +2161,16 @@
     <string name="voice_turn_max_turns">Agent 已達到最大輪數，請輕點重試</string>
     <string name="voice_voice_name">聲音</string>
     <string name="voice_waiting_permission">等待權限</string>
+    <string name="permission_prompt_auto_risk">自動模式可能在後續操作中不再徵求確認，請仔細檢查權限範圍。</string>
+    <string name="permission_prompt_bypass_risk">該模式可能存取或修改敏感資料。僅在信任目前工作階段時繼續。</string>
+    <string name="permission_prompt_general_summary">靈犀需要你的批准才能繼續。</string>
+    <string name="permission_prompt_once_risk">此決定僅套用於目前的請求。</string>
+    <string name="permission_prompt_plan_summary">靈犀想退出計畫模式並按計畫繼續。</string>
+    <string name="permission_prompt_rule_risk">一律允許會為此工作區儲存符合條件的規則，請確認你信任後續符合條件的操作。</string>
+    <string name="permission_prompt_tool_summary">靈犀想使用 %1$s。請先查看請求內容。</string>
     <string name="settings_provider_region">模型區域</string>
-    <string name="settings_provider_region_international">國際</string>
     <string name="settings_provider_region_china">中國大陸</string>
     <string name="settings_provider_region_help">預設使用國際區域。儲存後請在任務閒置時套用設定，變更目前執行區域。</string>
+    <string name="settings_provider_region_international">國際</string>
+    <string name="voice_flow_finalizing_hint">正在等待語音辨識完成…</string>
 </resources>

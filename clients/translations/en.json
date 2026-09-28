@@ -2147,7 +2147,7 @@
   "voice_flow_busy_wait_to_retry": "Please wait for the current reply or conversation switch to finish before retrying",
   "voice_flow_exit_a11y": "Exit flow mode",
   "voice_flow_hint_with_input": "%1$s · You can keep using the input box below",
-  "voice_flow_listening_hint": "Tap to stop recording when done · or keep talking",
+  "voice_flow_listening_hint": "Tap when done to finish recognition · or keep talking",
   "voice_flow_listening_label": "Listening",
   "voice_flow_mode_label": "Flow Mode",
   "voice_flow_release_hint": "Release to send · swipe up to cancel",
@@ -2285,5 +2285,17 @@
   "voice_turn_failed": "The agent's reply failed; please check your network or provider and try again",
   "voice_turn_max_turns": "The agent reached the maximum number of turns; please tap retry",
   "voice_voice_name": "Voice",
-  "voice_waiting_permission": "Waiting for Permission"
+  "voice_waiting_permission": "Waiting for Permission",
+  "permission_prompt_auto_risk": "Auto mode may approve future actions without asking. Review the permission scope carefully.",
+  "permission_prompt_bypass_risk": "This mode can expose or modify sensitive data. Continue only if you trust this session.",
+  "permission_prompt_general_summary": "LingXi needs your approval before it can continue.",
+  "permission_prompt_once_risk": "This decision applies only to the current request.",
+  "permission_prompt_plan_summary": "LingXi wants to leave plan mode and proceed with this plan.",
+  "permission_prompt_rule_risk": "Always Allow saves a matching rule for this workspace. Use it only when you trust future matching requests.",
+  "permission_prompt_tool_summary": "LingXi wants to use %1$s. Review the requested input before continuing.",
+  "settings_provider_region": "Model region",
+  "settings_provider_region_china": "China mainland",
+  "settings_provider_region_help": "Defaults to international. Apply saved settings when idle to change the running region.",
+  "settings_provider_region_international": "International",
+  "voice_flow_finalizing_hint": "Waiting for speech recognition to finish…"
 }

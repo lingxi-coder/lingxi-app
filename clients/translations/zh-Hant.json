@@ -2147,7 +2147,7 @@
   "voice_flow_busy_wait_to_retry": "請等待當前回覆或會話切換完成後重試",
   "voice_flow_exit_a11y": "退出心流",
   "voice_flow_hint_with_input": "%1$s · 可繼續使用下方輸入框",
-  "voice_flow_listening_hint": "說完輕點收音 · 或繼續",
+  "voice_flow_listening_hint": "說完後輕點結束辨識 · 也可以繼續說",
   "voice_flow_listening_label": "聆聽中",
   "voice_flow_mode_label": "心流模式",
   "voice_flow_release_hint": "鬆開傳送 · 上滑取消",
@@ -2285,5 +2285,17 @@
   "voice_turn_failed": "Agent 回覆失敗，請檢查網路或 Provider 後重試",
   "voice_turn_max_turns": "Agent 已達到最大輪數，請輕點重試",
   "voice_voice_name": "聲音",
-  "voice_waiting_permission": "等待權限"
+  "voice_waiting_permission": "等待權限",
+  "permission_prompt_auto_risk": "自動模式可能在後續操作中不再徵求確認，請仔細檢查權限範圍。",
+  "permission_prompt_bypass_risk": "該模式可能存取或修改敏感資料。僅在信任目前工作階段時繼續。",
+  "permission_prompt_general_summary": "靈犀需要你的批准才能繼續。",
+  "permission_prompt_once_risk": "此決定僅套用於目前的請求。",
+  "permission_prompt_plan_summary": "靈犀想退出計畫模式並按計畫繼續。",
+  "permission_prompt_rule_risk": "一律允許會為此工作區儲存符合條件的規則，請確認你信任後續符合條件的操作。",
+  "permission_prompt_tool_summary": "靈犀想使用 %1$s。請先查看請求內容。",
+  "settings_provider_region": "模型區域",
+  "settings_provider_region_china": "中國大陸",
+  "settings_provider_region_help": "預設使用國際區域。儲存後請在任務閒置時套用設定，變更目前執行區域。",
+  "settings_provider_region_international": "國際",
+  "voice_flow_finalizing_hint": "正在等待語音辨識完成…"
 }

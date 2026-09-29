@@ -119,7 +119,6 @@ G1	clients/web/src/pages/PublicPages.tsx	LINGXI_
 G1	crates/apps/android-aar/kotlin/build.gradle.kts	\.lingxi
 G1	crates/apps/android-aar/src/lib/tests/tests.rs	LINGXI
 G1	crates/apps/android-aar/src/lib/tests/tests.rs	\.lingxi
-G1	crates/apps/android-aar/src/probes.rs	\.lingxi
 G1	crates/apps/android-aar/uniffi.toml	\.lingxi
 G1	crates/apps/bridge-server/src/boot.rs	LINGXI
 G1	crates/apps/bridge-server/src/boot.rs	\.lingxi

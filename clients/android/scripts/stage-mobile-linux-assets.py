@@ -95,7 +95,9 @@ def stage(source, output, sdk, runtime, native):
             destination.mkdir(parents=True)
             for name in EVIDENCE_FILES:
                 shutil.copy2(source / abi / name, destination / name)
-            shutil.copy2(archive, destination / archive.name)
+            # Android's asset merger expands *.gz and drops that suffix. Keep
+            # the exact gzip bytes under an opaque APK asset name instead.
+            shutil.copy2(archive, destination / (archive.name + ".bin"))
             archives[abi] = dict(manifest["archive"])
         compatibility_pins = {
             "schema_version": 2,

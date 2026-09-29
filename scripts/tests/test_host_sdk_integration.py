@@ -62,9 +62,9 @@ class NativeIntegrationTests(unittest.TestCase):
         for abi in native.ABIS:
             rootfs = self.assets / "rootfs" / abi
             rootfs.mkdir(parents=True)
-            archive = rootfs / "rootfs.tar.gz"
+            archive = rootfs / "rootfs.tar.gz.bin"
             archive.write_bytes(f"{abi} rootfs".encode())
-            releases[abi] = {"filename": archive.name, "size_bytes": archive.stat().st_size,
+            releases[abi] = {"filename": "rootfs.tar.gz", "size_bytes": archive.stat().st_size,
                              "sha256": native.sha256(archive)}
             for name in apk.ROOTFS_EVIDENCE:
                 (rootfs / name).write_text("pinned")

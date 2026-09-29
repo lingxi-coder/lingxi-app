@@ -108,7 +108,7 @@ object LinuxRuntimeBridge {
         val manifestJson = assets.open("$assetDir/$ROOTFS_MANIFEST_FILE")
             .bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
         val identity = bundledRootfsIdentity(pinsJson, manifestJson, abi)
-        check(assets.list(assetDir)?.contains(identity.filename) == true) {
+        check(assets.list(assetDir)?.contains("${identity.filename}.bin") == true) {
             "Bundled rootfs archive ${identity.filename} is missing for ABI $abi"
         }
         cachedBundledIdentity = cacheKey to identity
@@ -200,9 +200,7 @@ object LinuxRuntimeBridge {
             "No pinned rootfs archive exists for ABI ${config.abi}"
         }
         val assetDir = "mobile-linux/rootfs/${config.abi}"
-        val archiveName = context.assets.list(assetDir)
-            ?.singleOrNull { it.endsWith(".tar.gz") }
-            ?: error("Bundled rootfs archive is missing for ${config.abi}")
+        val archiveName = bundledIdentity(context, config.abi).filename
         BundledRootfsInstaller.stage(
             managedRoot = File(config.managedRoot).canonicalFile,
             expectedRootfsVersion = config.rootfsVersion,
@@ -218,7 +216,7 @@ object LinuxRuntimeBridge {
                 .bufferedReader(StandardCharsets.UTF_8)
                 .use { it.readText() },
             copyArchive = { archive ->
-                context.assets.open("$assetDir/$archiveName").use { input ->
+                context.assets.open("$assetDir/$archiveName.bin").use { input ->
                     FileOutputStream(archive).use(input::copyTo)
                 }
             },

@@ -38,8 +38,9 @@ def staged_assets(assets_root, source):
         filename = release.get("filename")
         if not isinstance(filename, str) or filename in ("", ".", "..") or Path(filename).name != filename:
             raise ValueError(f"unsafe rootfs archive filename for {abi}")
-        required.update(f"rootfs/{abi}/{name}" for name in ROOTFS_EVIDENCE | {filename})
-        archive = assets_root / "rootfs" / abi / filename
+        asset_name = filename + ".bin"
+        required.update(f"rootfs/{abi}/{name}" for name in ROOTFS_EVIDENCE | {asset_name})
+        archive = assets_root / "rootfs" / abi / asset_name
         if archive.is_symlink() or not archive.is_file():
             raise ValueError(f"staged rootfs archive is missing for {abi}")
         if archive.stat().st_size != release.get("size_bytes") or native.sha256(archive) != release.get("sha256"):

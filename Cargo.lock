@@ -22,7 +22,7 @@ dependencies = [
 [[package]]
 name = "agent"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -720,12 +720,12 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 [[package]]
 name = "branding"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 
 [[package]]
 name = "bridge"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -743,7 +743,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.21.0",
  "tracing",
 ]
 
@@ -788,7 +788,7 @@ dependencies = [
  "telemetry",
  "tempfile",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.21.0",
  "tokio-util",
  "tool-api",
  "tool-computer-use",
@@ -1120,7 +1120,7 @@ dependencies = [
 [[package]]
 name = "client"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1169,7 +1169,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "command-api"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -1211,7 +1211,7 @@ dependencies = [
 [[package]]
 name = "compaction"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -1255,7 +1255,7 @@ dependencies = [
 [[package]]
 name = "configuration-admin"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "branding",
  "chrono",
@@ -1318,7 +1318,7 @@ dependencies = [
 [[package]]
 name = "coordinator"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "agent",
  "async-trait",
@@ -1343,7 +1343,7 @@ dependencies = [
 [[package]]
 name = "core"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "branding",
  "figment",
@@ -1409,7 +1409,7 @@ dependencies = [
 [[package]]
 name = "cost"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1444,7 +1444,7 @@ dependencies = [
 [[package]]
 name = "cron"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -2108,7 +2108,7 @@ dependencies = [
 [[package]]
 name = "fusion"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "core",
@@ -2322,7 +2322,7 @@ dependencies = [
 [[package]]
 name = "git2"
 version = "0.21.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "bitflags 2.11.1",
  "libc",
@@ -2440,7 +2440,7 @@ dependencies = [
 [[package]]
 name = "harness-runtime"
 version = "0.9.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "agent",
  "async-trait",
@@ -2614,7 +2614,7 @@ dependencies = [
 [[package]]
 name = "hooks"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "core",
@@ -2693,7 +2693,7 @@ dependencies = [
 [[package]]
 name = "http-client"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2714,7 +2714,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.21.0",
  "tokio-util",
  "tracing",
  "url",
@@ -3108,7 +3108,7 @@ dependencies = [
 [[package]]
 name = "jsonrpc"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3218,7 +3218,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libgit2-sys"
 version = "0.18.5+1.9.4"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "cc",
  "libc",
@@ -3295,7 +3295,7 @@ dependencies = [
 [[package]]
 name = "libssh2-sys"
 version = "0.3.1"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "cc",
  "libc",
@@ -3341,7 +3341,7 @@ dependencies = [
 [[package]]
 name = "lingxi-llm-client"
 version = "0.3.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=34c6be3e409000ffb31d6827797fe5b97a7cbfdb#34c6be3e409000ffb31d6827797fe5b97a7cbfdb"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=58740df6606d5eafa1b575fde2af940278f11d0b#58740df6606d5eafa1b575fde2af940278f11d0b"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3353,11 +3353,13 @@ dependencies = [
  "jsonschema",
  "reqwest",
  "ring",
+ "rustls 0.23.40",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "toml 0.8.23",
  "url",
 ]
@@ -3389,7 +3391,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "llm-runtime"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3419,7 +3421,7 @@ dependencies = [
 [[package]]
 name = "local-apps"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -3491,7 +3493,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "lsp"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "futures",
@@ -3572,7 +3574,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 [[package]]
 name = "mbedtls-sys"
 version = "3.6.2"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "cc",
 ]
@@ -3580,7 +3582,7 @@ dependencies = [
 [[package]]
 name = "mcp"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3643,7 +3645,7 @@ dependencies = [
 [[package]]
 name = "memory"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "branding",
  "glob",
@@ -3672,7 +3674,7 @@ checksum = "c2a86d3146ed3995b5913c414f6664344b9617457320782e64f0bb44afd49d74"
 [[package]]
 name = "migrations"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "branding",
  "llm-runtime",
@@ -3779,7 +3781,7 @@ dependencies = [
 [[package]]
 name = "msgqueue"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "protocol",
@@ -4481,7 +4483,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "orchestrator"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "agent",
  "async-trait",
@@ -4553,7 +4555,7 @@ dependencies = [
 [[package]]
 name = "outputstyles"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "protocol",
@@ -4666,7 +4668,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "permission"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -4871,7 +4873,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "platform-android"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "http-client",
@@ -4885,7 +4887,7 @@ dependencies = [
 [[package]]
 name = "platform-api"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -4913,7 +4915,7 @@ dependencies = [
 [[package]]
 name = "platform-common"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -4936,7 +4938,7 @@ dependencies = [
  "telemetry",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.21.0",
  "tracing",
  "url",
 ]
@@ -4944,7 +4946,7 @@ dependencies = [
 [[package]]
 name = "platform-ios"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "http-client",
  "mobile-linux-api",
@@ -4956,7 +4958,7 @@ dependencies = [
 [[package]]
 name = "platform-macos-computer-control"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "arboard",
  "async-trait",
@@ -4976,7 +4978,7 @@ dependencies = [
 [[package]]
 name = "platform-posix"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5015,7 +5017,7 @@ dependencies = [
 [[package]]
 name = "platform-posix-minimal"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "fs2",
@@ -5054,7 +5056,7 @@ dependencies = [
 [[package]]
 name = "platform-windows"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -5100,7 +5102,7 @@ dependencies = [
 [[package]]
 name = "plugin"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "agent",
  "async-trait",
@@ -5364,7 +5366,7 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 [[package]]
 name = "protocol"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "secrecy",
  "serde",
@@ -5377,7 +5379,7 @@ dependencies = [
 [[package]]
 name = "provider-config"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "cost",
  "llm-runtime",
@@ -6026,7 +6028,7 @@ dependencies = [
 [[package]]
 name = "sandbox"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -6046,7 +6048,7 @@ dependencies = [
 [[package]]
 name = "sandbox-runtime"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "base64 0.22.1",
  "branding",
@@ -6166,7 +6168,7 @@ dependencies = [
 [[package]]
 name = "secret"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "platform-api",
@@ -6326,7 +6328,7 @@ dependencies = [
 [[package]]
 name = "session"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -6403,7 +6405,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 [[package]]
 name = "sidequery"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6494,7 +6496,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 [[package]]
 name = "skill-api"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -6730,7 +6732,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 [[package]]
 name = "task-store"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "branding",
  "core",
@@ -6743,7 +6745,7 @@ dependencies = [
 [[package]]
 name = "tasks"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "agent",
  "async-trait",
@@ -6771,7 +6773,7 @@ dependencies = [
 [[package]]
 name = "telemetry"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "opentelemetry",
@@ -6795,7 +6797,7 @@ dependencies = [
 [[package]]
 name = "telemetry-macros"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7029,7 +7031,23 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.25.0",
- "tungstenite",
+ "tungstenite 0.21.0",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls 0.23.40",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tungstenite 0.24.0",
  "webpki-roots 0.26.11",
 ]
 
@@ -7175,7 +7193,7 @@ dependencies = [
 [[package]]
 name = "tool-agent"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "once_cell",
@@ -7195,7 +7213,7 @@ dependencies = [
 [[package]]
 name = "tool-android-use"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "once_cell",
@@ -7209,7 +7227,7 @@ dependencies = [
 [[package]]
 name = "tool-api"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -7218,6 +7236,7 @@ dependencies = [
  "core",
  "futures",
  "image 0.24.9",
+ "lingxi-llm-client",
  "lsp",
  "mcp",
  "mobile-linux-api",
@@ -7240,7 +7259,7 @@ dependencies = [
 [[package]]
 name = "tool-computer-use"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -7257,7 +7276,7 @@ dependencies = [
 [[package]]
 name = "tool-cron"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -7282,7 +7301,7 @@ dependencies = [
 [[package]]
 name = "tool-file"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7313,7 +7332,7 @@ dependencies = [
 [[package]]
 name = "tool-git-mobile"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "git2",
@@ -7345,7 +7364,7 @@ dependencies = [
 [[package]]
 name = "tool-lsp"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "lsp",
@@ -7366,7 +7385,7 @@ dependencies = [
 [[package]]
 name = "tool-mcp"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -7387,7 +7406,7 @@ dependencies = [
 [[package]]
 name = "tool-meta"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -7408,7 +7427,7 @@ dependencies = [
 [[package]]
 name = "tool-mobile"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -7424,7 +7443,7 @@ dependencies = [
 [[package]]
 name = "tool-plan"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "once_cell",
@@ -7443,7 +7462,7 @@ dependencies = [
 [[package]]
 name = "tool-shell"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7467,7 +7486,7 @@ dependencies = [
 [[package]]
 name = "tool-shell-mobile"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -7482,7 +7501,7 @@ dependencies = [
 [[package]]
 name = "tool-skill"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "command-api",
@@ -7505,7 +7524,7 @@ dependencies = [
 [[package]]
 name = "tool-task"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -7530,7 +7549,7 @@ dependencies = [
 [[package]]
 name = "tool-ui"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -7550,7 +7569,7 @@ dependencies = [
 [[package]]
 name = "tool-web"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -7574,7 +7593,7 @@ dependencies = [
 [[package]]
 name = "tool-workflow"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "branding",
@@ -7591,7 +7610,7 @@ dependencies = [
 [[package]]
 name = "tool-worktree"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -7876,6 +7895,26 @@ dependencies = [
  "sha1",
  "thiserror 1.0.69",
  "url",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.8.6",
+ "rustls 0.23.40",
+ "rustls-pki-types",
+ "sha1",
+ "thiserror 1.0.69",
  "utf-8",
 ]
 
@@ -9013,7 +9052,7 @@ dependencies = [
 [[package]]
 name = "workflow"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=5940a5156cc8ed39432601ac37694509817b705c#5940a5156cc8ed39432601ac37694509817b705c"
+source = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78#a7dce30bf9fcc71617fd4a1acf3cd29e84b98f78"
 dependencies = [
  "once_cell",
  "platform-api",

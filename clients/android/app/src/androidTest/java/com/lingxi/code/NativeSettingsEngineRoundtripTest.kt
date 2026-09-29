@@ -37,7 +37,7 @@ class NativeSettingsEngineRoundtripTest {
         try {
             suspend fun exercise(write: Boolean) {
                 val events = Channel<ClientEvent>(Channel.UNLIMITED)
-                val engine = buildAndroidEngineWithMobileLinux(
+                val engine = buildAndroidEngine(
                     config = AndroidEngineLaunchConfigFfi(
                         apiBase = "https://invalid.example", apiKey = "", model = "", sessionMode = SessionModeDto.CODE,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,

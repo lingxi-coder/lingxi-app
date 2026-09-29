@@ -46,7 +46,7 @@ class CronNativeExecutionTest {
             val server = LoopbackAnthropicServer()
             val events = Channel<ClientEvent>(Channel.UNLIMITED)
             try {
-                val engine = buildAndroidEngineWithMobileLinux(
+                val engine = buildAndroidEngine(
                     config = AndroidEngineLaunchConfigFfi(
                         apiBase = server.baseUrl, apiKey = "test-only-local", model = "anthropic/claude-sonnet-4-6", sessionMode = SessionModeDto.CODE,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,

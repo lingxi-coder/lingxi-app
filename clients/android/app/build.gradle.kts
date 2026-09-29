@@ -99,7 +99,7 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
-        // P5a (Android bundled shell): mksh/toybox ship as lib*.so under
+        // Android PRoot helpers ship as lib*.so under
         // jniLibs/<abi> and MUST be EXTRACTED to nativeLibraryDir so they exist
         // as real, executable files on disk — Android 10+ W^X only permits
         // `execve` of files there. Uncompressed-in-APK (the AGP default since
@@ -154,6 +154,7 @@ listOf("play", "direct").forEach { distribution ->
                 "--apk-dir", layout.buildDirectory.dir("outputs/apk/$distribution/$buildType").get().asFile,
                 "--source", layout.buildDirectory.dir("mobileLinuxNative/$distribution/native-support").get().asFile,
                 "--jni-root", file("src/$distribution/jniLibs"),
+                "--assets-source", layout.buildDirectory.dir("generated/mobileLinux/$distribution/assets/mobile-linux").get().asFile,
             )
         }
         tasks.matching { it.name == "pre${variantName}Build" }.configureEach {

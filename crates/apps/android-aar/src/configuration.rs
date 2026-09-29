@@ -9,23 +9,11 @@ use harness_runtime::mobile::{MobileEngineError, SessionModeDto};
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
 pub struct AndroidShellConfigFfi {
-    /// `ApplicationInfo.nativeLibraryDir`.
-    pub native_library_dir: String,
-    /// Directory the shell treats as `$HOME` / workspace.
-    pub shell_workspace_root: String,
-    /// App cache dir (`$TMPDIR`).
-    pub app_cache_root: String,
-    /// Application package name.
-    pub package_name: String,
-    /// `PackageInfo.longVersionCode`.
-    pub package_version_code: i64,
-    /// filesDir / cacheDir / codeCacheDir / noBackupFilesDir roots.
-    pub app_writable_roots: Vec<String>,
-    /// Master enable flag.
+    /// Whether the product exposes the guest shell tool.
     pub enable_shell: bool,
-    /// D11: host attests secrets are Keystore-backed.
+    /// Whether device secrets are persisted in Android Keystore.
     pub secrets_in_keystore: bool,
-    /// D11: explicit user acceptance of data exposure.
+    /// Whether the user accepted shell access to workspace data.
     pub shell_data_exposure_accepted: bool,
 }
 
@@ -66,7 +54,7 @@ pub struct AndroidGitConfigFfi {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone)]
 pub struct AndroidMobileLinuxConfigFfi {
-    /// Legacy backend vs mobile-linux backend selection.
+    /// The Android runtime is always PRoot.
     pub mode: MobileLinuxRuntimeModeFfi,
     /// App-private root where rootfs state is managed.
     pub managed_root: String,
@@ -82,10 +70,6 @@ pub struct AndroidMobileLinuxConfigFfi {
     pub rootfs_version: String,
     /// Expected rootfs archive sha256, if known.
     pub archive_sha256: Option<String>,
-    /// Retained for wire compatibility with phase-1 hosts. GPL distribution is
-    /// now an explicit Android product decision, so this path is informational
-    /// and is no longer a runtime capability gate.
-    pub authorization_file: Option<String>,
 }
 
 /// Android-provided multi-provider configuration for the mobile engine.

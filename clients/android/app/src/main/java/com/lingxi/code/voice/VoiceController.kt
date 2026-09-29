@@ -15,7 +15,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.ContextCompat
-import androidx.core.content.pm.PackageInfoCompat
 import com.lingxi.code.BuildConfig
 import com.lingxi.code.R
 import com.lingxi.code.bindings.AndroidEventListener
@@ -32,7 +31,7 @@ import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.SessionModeDto
 import com.lingxi.code.bindings.WorkflowProgressDto
-import com.lingxi.code.bindings.buildAndroidEngineWithMobileLinux
+import com.lingxi.code.bindings.buildAndroidEngine
 import com.lingxi.code.location.AndroidLocationAdapter
 import com.lingxi.code.computeruse.ComputerUseFeatureProvider
 import com.lingxi.code.model.SessionMode
@@ -206,7 +205,7 @@ fun buildVoiceEngine(
     visionDelegationEnabled: Boolean = true,
     projectWorkspace: ProjectWorkspace? = null,
     sessionMode: SessionMode = SessionMode.Code,
-    linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
+    linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
     launchMode: AndroidLaunchModeFfi = AndroidLaunchModeFfi.INTERACTIVE,
     onEvent: suspend (ClientEvent) -> Unit = { event ->
         Log.d(TAG, "engine event: ${event::class.simpleName}")
@@ -270,24 +269,8 @@ fun buildVoiceEngine(
             onPermission(request)
         }
     }
-    val shellWorkspace = projectWorkspace?.hostPath
-        ?.let { java.io.File(it) }
-        ?: java.io.File(appContext.filesDir, "shell/workspaces/default")
-    if (!shellWorkspace.exists() && !shellWorkspace.mkdirs()) {
-        Log.w(TAG, "Unable to create shell workspace at ${shellWorkspace.absolutePath}")
-    }
-    val packageInfo = runCatching {
-        appContext.packageManager.getPackageInfo(appContext.packageName, 0)
-    }.getOrNull()
-    val writableRoots = buildList {
-        add(appContext.filesDir.absolutePath)
-        add(appContext.cacheDir.absolutePath)
-        add(appContext.codeCacheDir.absolutePath)
-        add(appContext.noBackupFilesDir.absolutePath)
-        projectWorkspace?.hostPath?.let(::add)
-    }.distinct()
     return try {
-        buildAndroidEngineWithMobileLinux(
+        buildAndroidEngine(
             config = AndroidEngineLaunchConfigFfi(
                 apiBase = apiBase,
                 apiKey = apiKey,
@@ -326,24 +309,10 @@ fun buildVoiceEngine(
             // Direct builds inject the user-started Accessibility/MediaProjection
             // controller. Play builds return null, so `android_use` is absent.
             computerUse = ComputerUseFeatureProvider.engineHost(),
-            // This single registration seam selects the ProcessRunner supplied
-            // by AndroidPlatform: MobileLinux when explicitly selected, or the
-            // bundled minijail/mksh/toybox backend in Legacy mode. MobileLinux
-            // probe failures remain visible and never downgrade silently.
+            // The Agent Shell uses the same verified PRoot runtime as the terminal.
             shell = AndroidShellConfigFfi(
-                nativeLibraryDir = appContext.applicationInfo.nativeLibraryDir,
-                shellWorkspaceRoot = shellWorkspace.absolutePath,
-                appCacheRoot = appContext.cacheDir.absolutePath,
-                packageName = appContext.packageName,
-                packageVersionCode = packageInfo
-                    ?.let(PackageInfoCompat::getLongVersionCode)
-                    ?: 0L,
-                appWritableRoots = writableRoots,
                 enableShell = true,
                 secretsInKeystore = true,
-                // Shell-visible workspace data is an advertised capability of
-                // this Android distribution. Sensitive invocations still flow
-                // through AndroidPermissionSink.
                 shellDataExposureAccepted = true,
             ),
             // P4: Git-tool config not surfaced in the app UI yet — null keeps

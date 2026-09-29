@@ -25,7 +25,7 @@ class ConversationNotificationRouteInstrumentedTest {
                 projectId = null,
                 hostPath = null,
                 sessionMode = SessionMode.Code,
-                linuxRuntimeMode = LinuxRuntimeMode.Legacy,
+                linuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
                 workspaceKey = "global",
             ),
         )

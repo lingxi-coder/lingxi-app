@@ -27,7 +27,7 @@ class NativeAdminEngineRoundtripTest {
         val root = File(context.cacheDir, "native-admin-${UUID.randomUUID()}").apply { mkdirs() }
         val workspace = File(root, "projects/${UUID.randomUUID()}/workspace").apply { mkdirs() }
         val events = Channel<ClientEvent>(Channel.UNLIMITED)
-        val engine = buildAndroidEngineWithMobileLinux(
+        val engine = buildAndroidEngine(
             config = AndroidEngineLaunchConfigFfi(
                 apiBase = "https://invalid.example", apiKey = "", model = "", sessionMode = SessionModeDto.CODE,
                 visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,

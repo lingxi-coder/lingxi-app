@@ -156,58 +156,15 @@ pub use configuration::AndroidShellConfigFfi;
 #[cfg(test)]
 use host::android_git_gate;
 #[cfg(test)]
-use host::android_shell_gate;
+use host::android_guest_shell_enabled;
 #[cfg(feature = "uniffi")]
 pub use host::build_android_cron_store;
 #[cfg(feature = "uniffi")]
 pub use host::build_android_engine;
 #[cfg(feature = "uniffi")]
-pub use host::build_android_engine_with_mobile_linux;
 #[cfg(feature = "uniffi")]
 pub use host::build_mobile_engine;
 pub use host::PlatformImpls;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_boot;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_capability;
-#[cfg(test)]
-use linux_runtime::android_mobile_linux_capability_from_config;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_close_pty;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_configure_mounts;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_kill_process;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_list_tasks;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_open_pty;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_read_events;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_repair_rootfs;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_reset_rootfs;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_resize_pty;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_run_command;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_run_command_streaming;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_shutdown;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_spawn_background;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_status;
-#[cfg(test)]
-use linux_runtime::android_mobile_linux_status_from_config;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_task_status;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_verify_rootfs;
-#[cfg(feature = "uniffi")]
-pub use linux_runtime::android_mobile_linux_write_pty;
 #[cfg(feature = "uniffi")]
 pub use linux_runtime::build_android_mobile_linux_runtime_handle;
 #[cfg(feature = "uniffi")]
@@ -255,20 +212,9 @@ pub use linux_types::MobileLinuxTaskSnapshotFfi;
 #[cfg(feature = "uniffi")]
 pub use linux_types::MobileLinuxTaskStateFfi;
 #[cfg(feature = "uniffi")]
-pub use probes::android_bundled_shell_probe;
-#[cfg(feature = "uniffi")]
-pub use probes::android_bundled_shell_run_probe;
-#[cfg(feature = "uniffi")]
 pub use probes::android_git_probe;
 #[cfg(feature = "uniffi")]
 pub use probes::android_git_probe_authed;
-#[cfg(feature = "uniffi")]
-pub use probes::android_sandbox_capabilities;
-#[cfg(feature = "uniffi")]
-pub use probes::android_sandbox_run_probe;
-#[cfg(feature = "uniffi")]
-pub use probes::android_sandbox_smoke;
-
 // F3-04: the shared session host + its error type are DEFINED ONCE in
 // `harness-runtime::mobile` and re-exported here. Both FFI packager crates re-export the
 // SAME types so iOS and Android cannot drift (plan F3-04).

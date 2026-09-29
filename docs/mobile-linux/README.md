@@ -27,8 +27,9 @@ Android keeps one distribution dimension:
 - `play` maps to **Store** and compiles out policy-sensitive high-risk offloads.
 - `direct` maps to **Full** and compiles the complete permission-gated surface.
 
-Both distributions can contain MobileLinux. A MobileLinux failure must be
-reported explicitly and must never silently switch to the Legacy runtime.
+Both Android distributions use the PRoot MobileLinux runtime for Agent shell
+commands and terminal sessions. A missing rootfs or unavailable runtime is
+reported explicitly; there is no Android host-shell fallback.
 
 ## iOS (iSH ARM64)
 
@@ -94,8 +95,8 @@ the runtime's read-only mount.
 Native and rootfs outputs are generated under gitignored build/output
 directories. Reference-tree `.so`, loader, and rootfs binaries are never copied
 into a product artifact. `build-mobile-linux-native.sh` reconstructs PRoot,
-its unbundled read-only loader, the PTY bridge, the UniFFI library, mksh, and
-toybox from pinned source for both supported ABIs.
+its unbundled loader and network-policy launcher from pinned SDK source, then
+builds the product UniFFI library for both supported ABIs.
 
 A release evidence directory contains, per ABI:
 

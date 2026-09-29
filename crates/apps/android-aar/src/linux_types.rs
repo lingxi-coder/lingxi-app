@@ -3,14 +3,12 @@
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[derive(Debug, Clone, Copy)]
 pub enum MobileLinuxRuntimeModeFfi {
-    Legacy,
     MobileLinux,
 }
 
 impl From<MobileLinuxRuntimeModeFfi> for mobile_linux_api::MobileLinuxRuntimeMode {
     fn from(value: MobileLinuxRuntimeModeFfi) -> Self {
         match value {
-            MobileLinuxRuntimeModeFfi::Legacy => Self::Legacy,
             MobileLinuxRuntimeModeFfi::MobileLinux => Self::MobileLinux,
         }
     }
@@ -179,8 +177,6 @@ pub trait AndroidMobileLinuxStreamSink: Send + Sync {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
 pub enum MobileLinuxApiErrorFfi {
-    #[error("legacy backend selected")]
-    LegacySelected,
     #[error("mobile-linux runtime unavailable: {message}")]
     Unavailable { message: String },
     #[error("mobile-linux runtime license blocked: {message}")]

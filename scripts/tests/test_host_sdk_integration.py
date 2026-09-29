@@ -34,6 +34,7 @@ class NativeIntegrationTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.source = self.root / "sdk"
         self.jni = self.root / "jni"
+        self.assets = self.root / "assets"
         entries = []
         for abi, machine in native.ABIS.items():
             for name in native.SUPPORT | {"libandroid_aar.so"}:
@@ -48,22 +49,46 @@ class NativeIntegrationTests(unittest.TestCase):
                     entries.append({"path": path.relative_to(self.source).as_posix(), "abi": abi, "sha256": native.sha256(path)})
         self.manifest = {"kind": "native-support-only", "contains_rust_core": False, "artifacts": entries}
         self.save_manifest()
+        (self.root / "sdk-source.json").write_text('{"revision":"pinned"}')
+        self.assets.mkdir()
+        shutil.copy2(self.source / "native-manifest.json", self.assets / "native-manifest.json")
+        shutil.copy2(self.root / "sdk-source.json", self.assets / "mobile-linux-sdk-source.json")
+        for name in ("runtime-pins.json", "local-app-runtime-pins.json", "licenses/NOTICE.md",
+                     "licenses/GPL-3.0-only.txt", "licenses/GPL-2.0-or-later.txt"):
+            path = self.assets / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("pinned")
+        releases = {}
+        for abi in native.ABIS:
+            rootfs = self.assets / "rootfs" / abi
+            rootfs.mkdir(parents=True)
+            archive = rootfs / "rootfs.tar.gz"
+            archive.write_bytes(f"{abi} rootfs".encode())
+            releases[abi] = {"filename": archive.name, "size_bytes": archive.stat().st_size,
+                             "sha256": native.sha256(archive)}
+            for name in apk.ROOTFS_EVIDENCE:
+                (rootfs / name).write_text("pinned")
+        (self.assets / "mobile-linux-pins.json").write_text(json.dumps({"rootfs": {"release_archives": releases}}))
 
     def save_manifest(self):
         (self.source / "native-manifest.json").write_text(json.dumps(self.manifest))
 
-    def make_apk(self, compression=zipfile.ZIP_DEFLATED):
+    def make_apk(self, compression=zipfile.ZIP_DEFLATED, include_assets=True):
         target = self.root / "app.apk"
         with zipfile.ZipFile(target, "w", compression=compression) as archive:
             for abi in native.ABIS:
                 for name in native.SUPPORT | {"libandroid_aar.so"}:
                     root = self.source / "jniLibs" if name in native.SUPPORT else self.jni
                     archive.write(root / abi / name, f"lib/{abi}/{name}")
+            if include_assets:
+                for path in self.assets.rglob("*"):
+                    if path.is_file():
+                        archive.write(path, f"assets/mobile-linux/{path.relative_to(self.assets).as_posix()}")
         return target
 
     def test_native_only_and_final_apk(self):
         native.verify(self.source, self.jni)
-        apk.verify_apk(self.make_apk(), self.source, self.jni)
+        apk.verify_apk(self.make_apk(), self.source, self.jni, self.assets)
 
     def test_full_sdk_core_is_rejected(self):
         self.manifest["contains_rust_core"] = True
@@ -74,7 +99,7 @@ class NativeIntegrationTests(unittest.TestCase):
     def test_duplicate_host_native_helper_is_rejected(self):
         path = self.source / "jniLibs/arm64-v8a/libproot.so"
         shutil.copy2(path, self.jni / "arm64-v8a/libproot.so")
-        with self.assertRaisesRegex(ValueError, "duplicated"):
+        with self.assertRaisesRegex(ValueError, "host jniLibs must not contain"):
             native.verify(self.source, self.jni)
 
     def test_tampered_sdk_artifact_is_rejected(self):
@@ -95,13 +120,28 @@ class NativeIntegrationTests(unittest.TestCase):
 
     def test_uncompressed_helpers_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "useLegacyPackaging"):
-            apk.verify_apk(self.make_apk(zipfile.ZIP_STORED), self.source, self.jni)
+            apk.verify_apk(self.make_apk(zipfile.ZIP_STORED), self.source, self.jni, self.assets)
 
     def test_apk_changed_after_staging_is_rejected(self):
         archive = self.make_apk()
         (self.jni / "arm64-v8a/libandroid_aar.so").write_bytes((self.jni / "arm64-v8a/libandroid_aar.so").read_bytes() + b"different")
         with self.assertRaisesRegex(ValueError, "differs from verified staging"):
-            apk.verify_apk(archive, self.source, self.jni)
+            apk.verify_apk(archive, self.source, self.jni, self.assets)
+
+    def test_missing_rootfs_assets_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "rootfs assets are missing"):
+            apk.verify_apk(self.make_apk(), self.source, self.jni, self.root / "absent-assets")
+
+    def test_apk_without_rootfs_assets_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "assets differ from verified staging"):
+            apk.verify_apk(self.make_apk(include_assets=False), self.source, self.jni, self.assets)
+
+    def test_apk_with_removed_shell_helper_is_rejected(self):
+        archive = self.make_apk()
+        with zipfile.ZipFile(archive, "a") as bundle:
+            bundle.writestr("lib/arm64-v8a/libmksh.so", b"removed")
+        with self.assertRaisesRegex(ValueError, "removed Android host-shell helpers"):
+            apk.verify_apk(archive, self.source, self.jni, self.assets)
 
     def test_dirty_or_mismatched_maven_source_is_rejected(self):
         root = self.root / "maven"

@@ -1,5 +1,15 @@
 # Three-repository structure migration — validation record
 
+## Android PRoot-only candidate (2026-09-28)
+
+Android no longer links the Minijail, mksh, toybox, or JNI PTY host-shell packages. The Agent Shell and terminal use the same PRoot SDK runtime; the Agent requires a canonical workspace mount before exposing guest file tools. The old stateless Android Mobile Linux FFI calls and Kotlin compatibility wrapper were removed, and the Kotlin bindings were regenerated from the new `android-aar` library.
+
+The Android code pin is SDK `224f1fb1fd0f24b5e138c9095e22a6c20b375eb1` in both Harness and LingXi; LingXi pins Harness `5940a5156cc8ed39432601ac37694509817b705c`. SDK PR #4 later added only a test-inventory correction at `fa85819aba0258ab9f2eeaa433eb705c7134e7bd`; all of its CI checks passed, including both Android builds and the independent real-x86 job. Harness PR #4 passed its Android jobs, but the inherited structure branch still has failing brand, lint, parity, supply-chain, and Windows desktop checks. Neither PR is merged.
+
+Focused LingXi evidence: `android-aar` host tests (9), direct Kotlin compilation, three selected direct JVM suites, 20 host SDK integration tests, 11 source-identity tests, generated translation checks, Cargo formatting and source-identity gates passed. ARM64 and x86_64 direct JNI libraries were rebuilt, and the native-support AAR contains exactly PRoot, loader, and policy launcher for each ABI, with no second Rust core. A direct debug APK assembled and its native bytes passed the former helper-only check. The strengthened final APK gate now also requires the verified rootfs assets and rejects this APK: the isolated build lacks staged rootfs assets because the locked release closure is missing all 58 x86_64 APK files in the available cache. This APK is not a runnable or release-accepted artifact. `adb devices -l` found no connected device, so no new device smoke was run.
+
+The SDK source checkouts and product user-data directories were not modified. The new final APK gate has positive fixture coverage and negative checks for absent rootfs assets and reintroduced mksh. The PRoot-only branch remains a candidate until the rootfs closure, device execution, and blocked upstream PR checks are resolved.
+
 LingXi keeps product entrypoints and clients in its root workspace. Harness owns Agent, session, permission, tools, and platform composition. Mobile Linux SDK owns neutral execution interfaces, rootfs lifecycle, PTY, Android/iOS guest backends, and native support. Android/iOS host adapters retain native app capabilities while delegating Linux execution to the SDK.
 
 Pinned sources:

@@ -1297,7 +1297,7 @@ private fun Intent.snapshot(): ConversationBackgroundSnapshot? {
     )
     val runtimeMode = getStringExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE)
         ?.let { encoded -> LinuxRuntimeMode.entries.firstOrNull { it.name == encoded } }
-        ?: LinuxRuntimeMode.Legacy
+        ?: LinuxRuntimeMode.MobileLinux
     val recoverySpec = if (
         hasExtra(ConversationTurnService.EXTRA_LINUX_RUNTIME_MODE) ||
         hasExtra(ConversationTurnService.EXTRA_HOST_PATH) ||

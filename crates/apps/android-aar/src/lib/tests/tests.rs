@@ -284,38 +284,24 @@ fn create_session_no_longer_stubbed() {
     assert_eq!(session, 1);
 }
 
-/// P3-T5 + P5-T7: the Shell-tool registration gate is the conjunction of all
-/// six inputs — it is `true` ONLY when every input is `true`, and `false` if
-/// any single input is `false`. The sixth conjunct (`bundled_shell_ready`,
-/// P5-T7) makes the gate fail-closed when the bundled mksh+toybox bootstrap
-/// did not succeed: no system-sh fallback. Host-testable without a device.
 #[test]
-fn android_shell_gate_is_all_six_conjuncts() {
-    use super::android_shell_gate;
-
-    // All six true → enabled.
-    assert!(
-        android_shell_gate(true, true, true, true, true, true),
-        "gate must be enabled when all six conjuncts hold"
-    );
-
-    // Each single-false case → disabled. (input index, label) drives the row.
-    let cases = [
-        (0, "enable_shell"),
-        (1, "secrets_gate_satisfied"),
-        (2, "caps_available"),
-        (3, "seccomp_filter"),
-        (4, "net_deny_verified"),
-        (5, "bundled_shell_ready"),
-    ];
-    for (false_idx, label) in cases {
-        let mut args = [true; 6];
-        args[false_idx] = false;
-        assert!(
-            !android_shell_gate(args[0], args[1], args[2], args[3], args[4], args[5]),
-            "gate must be disabled when {label} is false"
-        );
-    }
+fn android_guest_shell_requires_explicit_policy() {
+    use super::{android_guest_shell_enabled, AndroidShellConfigFfi};
+    assert!(!android_guest_shell_enabled(None));
+    let mut shell = AndroidShellConfigFfi {
+        enable_shell: true,
+        secrets_in_keystore: true,
+        shell_data_exposure_accepted: true,
+    };
+    assert!(android_guest_shell_enabled(Some(&shell)));
+    shell.secrets_in_keystore = false;
+    assert!(!android_guest_shell_enabled(Some(&shell)));
+    shell.secrets_in_keystore = true;
+    shell.shell_data_exposure_accepted = false;
+    assert!(!android_guest_shell_enabled(Some(&shell)));
+    shell.shell_data_exposure_accepted = true;
+    shell.enable_shell = false;
+    assert!(!android_guest_shell_enabled(Some(&shell)));
 }
 
 /// P4-T10: the Git-tool registration gate is the conjunction of all three
@@ -478,89 +464,9 @@ fn ffi_mapping_disabled_when_enable_git_false() {
 }
 
 #[test]
-fn mobile_linux_legacy_config_reports_legacy_status() {
-    let status =
-        super::android_mobile_linux_status_from_config(Some(&super::AndroidMobileLinuxConfigFfi {
-            mode: super::MobileLinuxRuntimeModeFfi::Legacy,
-            managed_root: "/tmp/mobile-linux".to_string(),
-            app_sandbox_root: "/tmp".to_string(),
-            workspace_host_path: Some("/tmp/workspaces/default".to_string()),
-            stable_workspace_id: Some("default".to_string()),
-            abi: "arm64-v8a".to_string(),
-            rootfs_version: "v1".to_string(),
-            archive_sha256: None,
-            authorization_file: None,
-        }));
-    assert!(matches!(
-        status.state,
-        super::MobileLinuxRootfsStateFfi::Unsupported
-    ));
-    assert!(matches!(
-        status.mode,
-        super::MobileLinuxRuntimeModeFfi::Legacy
-    ));
-    assert_eq!(status.backend, "android-minijail");
-}
-
-#[test]
-fn mobile_linux_selected_is_not_blocked_by_distribution_license() {
-    let capability = super::android_mobile_linux_capability_from_config(Some(
-        &super::AndroidMobileLinuxConfigFfi {
-            mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
-            managed_root: "/tmp/mobile-linux".to_string(),
-            app_sandbox_root: "/tmp".to_string(),
-            workspace_host_path: Some("/tmp/workspaces/default".to_string()),
-            stable_workspace_id: Some("default".to_string()),
-            abi: "arm64-v8a".to_string(),
-            rootfs_version: "v1".to_string(),
-            archive_sha256: None,
-            authorization_file: None,
-        },
-    ));
-    assert!(!capability.available);
-    assert!(matches!(
-        capability.mode,
-        super::MobileLinuxRuntimeModeFfi::MobileLinux
-    ));
-    let reason = capability
-        .reason
-        .expect("unavailable capability carries reason");
-    assert!(!reason.contains("authorization"));
-    assert!(reason.contains("not linked"));
-}
-
-#[test]
-fn mobile_linux_boot_rejects_legacy_mode() {
-    let err = super::android_mobile_linux_boot(Some(super::AndroidMobileLinuxConfigFfi {
-        mode: super::MobileLinuxRuntimeModeFfi::Legacy,
-        managed_root: "/tmp/mobile-linux".to_string(),
-        app_sandbox_root: "/tmp".to_string(),
-        workspace_host_path: Some("/tmp/workspaces/default".to_string()),
-        stable_workspace_id: Some("default".to_string()),
-        abi: "arm64-v8a".to_string(),
-        rootfs_version: "v1".to_string(),
-        archive_sha256: None,
-        authorization_file: None,
-    }))
-    .expect_err("legacy mode must fail closed");
-    assert!(matches!(err, super::MobileLinuxApiErrorFfi::LegacySelected));
-}
-
-#[test]
 fn mobile_linux_run_command_rejects_empty_command() {
-    let err = super::android_mobile_linux_run_command(
-        Some(super::AndroidMobileLinuxConfigFfi {
-            mode: super::MobileLinuxRuntimeModeFfi::MobileLinux,
-            managed_root: "/tmp/mobile-linux".to_string(),
-            app_sandbox_root: "/tmp".to_string(),
-            workspace_host_path: Some("/tmp/workspaces/default".to_string()),
-            stable_workspace_id: Some("default".to_string()),
-            abi: "arm64-v8a".to_string(),
-            rootfs_version: "v1".to_string(),
-            archive_sha256: None,
-            authorization_file: None,
-        }),
-        super::MobileLinuxCommandRequestFfi {
+    let err =
+        super::linux_conversion::command_request_to_traits(super::MobileLinuxCommandRequestFfi {
             command: "   ".to_string(),
             args: vec![],
             cwd: None,
@@ -569,9 +475,8 @@ fn mobile_linux_run_command_rejects_empty_command() {
             timeout_ms: None,
             allow_network: false,
             mounts: vec![],
-        },
-    )
-    .expect_err("empty command must be rejected");
+        })
+        .expect_err("empty command must be rejected");
     assert!(matches!(
         err,
         super::MobileLinuxApiErrorFfi::InvalidRequest { .. }

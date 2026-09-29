@@ -67,12 +67,7 @@ pub(super) fn capability_to_ffi(
     MobileLinuxCapabilityFfi {
         available: capability.available,
         backend: mobile_linux_backend_name(capability.backend),
-        mode: match capability.mode {
-            mobile_linux_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux => {
-                MobileLinuxRuntimeModeFfi::MobileLinux
-            }
-        },
+        mode: MobileLinuxRuntimeModeFfi::MobileLinux,
         reason: capability.reason,
         streaming_output: capability.streaming_output,
         background_processes: capability.background_processes,
@@ -87,12 +82,7 @@ pub(super) fn status_to_ffi(status: mobile_linux_api::RootfsStatus) -> MobileLin
     MobileLinuxStatusFfi {
         state: rootfs_state_to_ffi(status.state),
         backend: mobile_linux_backend_name(status.backend),
-        mode: match status.mode {
-            mobile_linux_api::MobileLinuxRuntimeMode::Legacy => MobileLinuxRuntimeModeFfi::Legacy,
-            mobile_linux_api::MobileLinuxRuntimeMode::MobileLinux => {
-                MobileLinuxRuntimeModeFfi::MobileLinux
-            }
-        },
+        mode: MobileLinuxRuntimeModeFfi::MobileLinux,
         platform: status.platform,
         abi: status.abi,
         version: status.version,

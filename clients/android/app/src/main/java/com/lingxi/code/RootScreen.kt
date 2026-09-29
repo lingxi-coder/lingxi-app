@@ -332,7 +332,7 @@ fun RootScreen(
                             ?: "global",
                         sessionMode = activeSessionMode,
                         linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
-                            ?: com.lingxi.code.settings.LinuxRuntimeMode.Legacy,
+                            ?: com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux,
                     ),
                     savedState = createSavedStateHandle(),
                     sourceGeneration = reconnectToken,
@@ -353,7 +353,7 @@ fun RootScreen(
                             ?: "global",
                         sessionMode = activeSessionMode,
                         linuxRuntimeMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
-                            ?: com.lingxi.code.settings.LinuxRuntimeMode.Legacy,
+                            ?: com.lingxi.code.settings.LinuxRuntimeMode.MobileLinux,
                     )
             }
         }
@@ -372,7 +372,7 @@ fun RootScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val selectedLinuxMode = settingsStore?.state?.value?.linuxRuntime?.selectedMode
-        ?: LinuxRuntimeMode.Legacy
+        ?: LinuxRuntimeMode.MobileLinux
     LaunchedEffect(chatViewModel, selectedLinuxMode, reconnectToken) {
         if (selectedLinuxMode != LinuxRuntimeMode.MobileLinux) return@LaunchedEffect
         var cursor = runCatching {

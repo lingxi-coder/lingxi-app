@@ -56,7 +56,6 @@ branding.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
 
 # F3-04: optional UniFFI dep — pulled under the (default) `uniffi` feature so the
 # re-exported shared-host scaffolding lands in this crate's library. Pinned
@@ -81,21 +80,8 @@ tool-api = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 platform-android = { workspace = true }
-# P0a: the minijail smoke behind the `android_sandbox_smoke()` UniFFI export
-# (serialized to the instrumentation test as JSON via serde_json). Both only
-# named inside `cfg(target_os = "android")` blocks, so target-gated like
-# `platform-android` to keep host builds dep-minimal.
-platform-android-minijail = { workspace = true }
-# P4-T11: the real `GitTool` (libgit2 in-process) behind the
-# `android_git_probe()` UniFFI export. Target-gated to keep host builds
-# dep-minimal and to anchor the libgit2 cdylib link from a reachable crate
-# (the P2 libcap link-anchor lesson).
+# Git stays in-process and does not use a shell.
 tool-git-mobile = { workspace = true }
-# P5b-T7: the bundled-shell bootstrap (`bootstrap_bundled_shell`) sha256-hashes
-# `libmksh.so` for the runner's content-identity check and hex-encodes it.
-# Target-gated (android-only) like `platform-android` to keep host builds
-# dep-minimal. Pins match `platforms/android/Cargo.toml`.
-hex = "0.4"
 
 [dev-dependencies]
 # F3-04: a sandboxed cwd/claude_home root for the handle-host tests (the host

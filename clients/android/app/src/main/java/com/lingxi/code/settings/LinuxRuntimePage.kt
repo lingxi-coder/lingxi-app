@@ -52,28 +52,6 @@ fun LinuxRuntimePage(
     ) {
         Blurb(stringResource(R.string.settings_linux_blurb_android))
 
-        SettingsSection(label = stringResource(R.string.settings_linux_section_backend)) {
-            RadioList(
-                options = listOf(
-                    RadioOption(
-                        LinuxRuntimeMode.Legacy.name,
-                        "Legacy",
-                        stringResource(R.string.settings_linux_legacy_sub_android),
-                    ),
-                    RadioOption(
-                        LinuxRuntimeMode.MobileLinux.name,
-                        "Mobile Linux",
-                        stringResource(R.string.settings_linux_mobile_linux_sub_android),
-                    ),
-                ),
-                selected = runtime.selectedMode.name,
-                onSelect = { next ->
-                    val mode = LinuxRuntimeMode.valueOf(next)
-                    store.setLinuxRuntimeMode(mode)
-                },
-            )
-        }
-
         SettingsSection(label = stringResource(R.string.settings_linux_section_status)) {
             SettingsRow(
                 icon = LXIconName.Workflow,

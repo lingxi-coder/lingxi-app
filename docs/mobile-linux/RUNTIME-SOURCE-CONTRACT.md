@@ -16,8 +16,10 @@ The full SDK FFI library must never be linked into the same application.
 Android consumes `mobile-linux-installer` and `mobile-linux-native-support`
 through the local Maven repository at `clients/android/build/mobileLinuxSdk/maven`.
 The build wrapper asks the fixed SDK to publish these artifacts there, together
-with POM metadata and `sdk-artifacts.json`. The native-support AAR owns all six
-PRoot/PTY/legacy shell helper binaries; host `jniLibs` owns only the product FFI.
+with POM metadata and `sdk-artifacts.json`. The native-support AAR owns three
+PRoot helpers per ABI (PRoot, loader and network-policy launcher); host `jniLibs`
+owns only the product FFI. The previous JNI PTY, mksh, toybox and Minijail
+dependencies are absent from the Android build.
 The host gate verifies source revision, clean provenance, native hashes and
 final APK bytes. `useLegacyPackaging=true` remains required so helpers are
 extracted into `nativeLibraryDir` for execution. Play and Direct remain separate

@@ -16,14 +16,6 @@ import com.lingxi.code.bindings.MobileLinuxPtySizeFfi
 import com.lingxi.code.bindings.MobileLinuxRootfsStateFfi
 import com.lingxi.code.bindings.MobileLinuxStatusFfi
 import com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi
-import com.lingxi.code.bindings.androidMobileLinuxCapability
-import com.lingxi.code.bindings.androidMobileLinuxBoot
-import com.lingxi.code.bindings.androidMobileLinuxListTasks
-import com.lingxi.code.bindings.androidMobileLinuxRepairRootfs
-import com.lingxi.code.bindings.androidMobileLinuxResetRootfs
-import com.lingxi.code.bindings.androidMobileLinuxShutdown
-import com.lingxi.code.bindings.androidMobileLinuxStatus
-import com.lingxi.code.bindings.androidMobileLinuxVerifyRootfs
 import com.lingxi.code.bindings.buildAndroidMobileLinuxRuntimeHandle
 import com.lingxi.code.project.ProjectWorkspace
 import kotlinx.coroutines.Dispatchers
@@ -42,7 +34,7 @@ object LinuxRuntimeBridge {
     // Packaged assets are immutable for the APK lifetime; event polling must
     // not parse the full rootfs inventory on every request.
     @Volatile
-    private var cachedBundledIdentity: Pair<String, RootfsArtifactIdentity?>? = null
+    private var cachedBundledIdentity: Pair<String, RootfsArtifactIdentity>? = null
 
     private fun managedRoot(context: Context): String =
         File(context.applicationContext.filesDir, "mobile-linux/android-proot").absolutePath
@@ -69,12 +61,6 @@ object LinuxRuntimeBridge {
         return generated
     }
 
-    private fun authorizationFile(context: Context): String =
-        File(
-            context.applicationContext.filesDir,
-            "mobile-linux/authorization/AUTHORIZATION_MANIFEST.json",
-        ).absolutePath
-
     private fun abi(): String = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"
 
     fun configForWorkspace(
@@ -84,8 +70,12 @@ object LinuxRuntimeBridge {
     ): AndroidMobileLinuxConfigFfi {
         val workspaceID = workspace?.projectId ?: stableWorkspaceId(context)
         val hostPath = workspace?.hostPath ?: workspaceHostPath(context, workspaceID)
+        val hostDirectory = File(hostPath)
+        check(hostDirectory.isDirectory || hostDirectory.mkdirs()) {
+            "Android PRoot workspace is unavailable: $hostPath"
+        }
         val selectedAbi = abi()
-        val identity = bundledIdentity(context, selectedAbi, required = mode == LinuxRuntimeMode.MobileLinux)
+        val identity = bundledIdentity(context, selectedAbi)
         return mobileLinuxConfig(
             managedRoot = managedRoot(context),
             appSandboxRoot = appSandboxRoot(context),
@@ -94,31 +84,25 @@ object LinuxRuntimeBridge {
             abi = selectedAbi,
             rootfsIdentity = identity,
             mode = mode,
-            authorizationFile = authorizationFile(context),
         )
     }
 
-    private fun bundledIdentity(context: Context, abi: String, required: Boolean): RootfsArtifactIdentity? {
+    private fun bundledIdentity(context: Context, abi: String): RootfsArtifactIdentity {
         val application = context.applicationContext
         val cacheKey = "${application.packageName}|${application.applicationInfo.sourceDir}|$abi"
         cachedBundledIdentity?.takeIf { it.first == cacheKey }?.let {
-            check(!required || it.second != null) { "No bundled release rootfs for ABI $abi" }
             return it.second
         }
         val assets = application.assets
         val pinsName = "mobile-linux-pins.json"
         if (assets.list("mobile-linux")?.contains(pinsName) != true) {
-            check(!required) { "Mobile Linux release assets are missing from this application" }
-            cachedBundledIdentity = cacheKey to null
-            return null
+            error("Mobile Linux release assets are missing from this application")
         }
         val pinsJson = assets.open("mobile-linux/$pinsName").bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
         val pins = JSONObject(pinsJson)
         val releases = pins.getJSONObject("rootfs").optJSONObject("release_archives")
         if (releases?.has(abi) != true) {
-            check(!required) { "No bundled release rootfs for ABI $abi" }
-            cachedBundledIdentity = cacheKey to null
-            return null
+            error("No bundled release rootfs for ABI $abi")
         }
         val assetDir = "mobile-linux/rootfs/$abi"
         val manifestJson = assets.open("$assetDir/$ROOTFS_MANIFEST_FILE")
@@ -145,7 +129,6 @@ object LinuxRuntimeBridge {
             config.abi,
             config.rootfsVersion,
             config.archiveSha256,
-            config.authorizationFile,
         ).joinToString("|")
         cachedRuntime?.takeIf { it.first == key }?.let { return it.second }
         return buildAndroidMobileLinuxRuntimeHandle(config).also { cachedRuntime = key to it }
@@ -155,26 +138,22 @@ object LinuxRuntimeBridge {
         context: Context,
         mode: LinuxRuntimeMode,
     ): AndroidMobileLinuxRuntimeHandle {
-        check(mode == LinuxRuntimeMode.MobileLinux) {
-            "Mobile Linux operation rejected because the Legacy runtime is selected"
-        }
         return runtime(config(context, mode))
     }
 
     suspend fun load(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
         withContext(Dispatchers.IO) {
             val config = config(context, mode)
-            val persistent = mode == LinuxRuntimeMode.MobileLinux
-            val runtime = if (persistent) runtime(config) else null
-            val capability = runtime?.capability() ?: androidMobileLinuxCapability(config)
-            val status = runtime?.status() ?: androidMobileLinuxStatus(config)
+            val runtime = runtime(config)
+            val capability = runtime.capability()
+            val status = runtime.status()
             linuxRuntimeUiStateFrom(
                 mode = mode,
                 capability = capability,
                 status = status,
                 lastAction = LinuxRuntimeAction.Refresh,
                 tasks = runCatching {
-                    runtime?.listTasks() ?: androidMobileLinuxListTasks(config)
+                    runtime.listTasks()
                 }.getOrDefault(emptyList()),
             )
         }
@@ -182,9 +161,9 @@ object LinuxRuntimeBridge {
     suspend fun verify(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
         withContext(Dispatchers.IO) {
             val config = config(context, mode)
-            val runtime = if (mode == LinuxRuntimeMode.MobileLinux) runtime(config) else null
-            val capability = runtime?.capability() ?: androidMobileLinuxCapability(config)
-            val status = runtime?.verifyRootfs() ?: androidMobileLinuxVerifyRootfs(config)
+            val runtime = runtime(config)
+            val capability = runtime.capability()
+            val status = runtime.verifyRootfs()
             linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Verify)
         }
 
@@ -249,52 +228,52 @@ object LinuxRuntimeBridge {
     suspend fun repair(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
         withContext(Dispatchers.IO) {
             val config = config(context, mode)
-            val runtime = if (mode == LinuxRuntimeMode.MobileLinux) runtime(config) else null
-            val capability = runtime?.capability() ?: androidMobileLinuxCapability(config)
-            val status = runtime?.repairRootfs() ?: androidMobileLinuxRepairRootfs(config)
+            val runtime = runtime(config)
+            val capability = runtime.capability()
+            val status = runtime.repairRootfs()
             linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Repair)
         }
 
     suspend fun reset(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
         withContext(Dispatchers.IO) {
             val config = config(context, mode)
-            val runtime = if (mode == LinuxRuntimeMode.MobileLinux) runtime(config) else null
-            val capability = runtime?.capability() ?: androidMobileLinuxCapability(config)
-            val status = runtime?.resetRootfs() ?: androidMobileLinuxResetRootfs(config)
+            val runtime = runtime(config)
+            val capability = runtime.capability()
+            val status = runtime.resetRootfs()
             linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Reset)
         }
 
     suspend fun boot(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
         withContext(Dispatchers.IO) {
             val config = config(context, mode)
-            val runtime = if (mode == LinuxRuntimeMode.MobileLinux) runtime(config) else null
-            val capability = runtime?.capability() ?: androidMobileLinuxCapability(config)
-            val status = runtime?.boot() ?: androidMobileLinuxBoot(config)
+            val runtime = runtime(config)
+            val capability = runtime.capability()
+            val status = runtime.boot()
             linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Boot)
         }
 
     suspend fun shutdown(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
         withContext(Dispatchers.IO) {
             val config = config(context, mode)
-            val runtime = if (mode == LinuxRuntimeMode.MobileLinux) runtime(config) else null
-            if (runtime != null) runtime.shutdown() else androidMobileLinuxShutdown(config)
-            val capability = runtime?.capability() ?: androidMobileLinuxCapability(config)
-            val status = runtime?.status() ?: androidMobileLinuxStatus(config)
+            val runtime = runtime(config)
+            runtime.shutdown()
+            val capability = runtime.capability()
+            val status = runtime.status()
             linuxRuntimeUiStateFrom(mode, capability, status, LinuxRuntimeAction.Shutdown)
         }
 
     suspend fun refreshTasks(context: Context, mode: LinuxRuntimeMode): LinuxRuntimeUiState =
         withContext(Dispatchers.IO) {
             val config = config(context, mode)
-            val runtime = if (mode == LinuxRuntimeMode.MobileLinux) runtime(config) else null
-            val capability = runtime?.capability() ?: androidMobileLinuxCapability(config)
-            val status = runtime?.status() ?: androidMobileLinuxStatus(config)
+            val runtime = runtime(config)
+            val capability = runtime.capability()
+            val status = runtime.status()
             linuxRuntimeUiStateFrom(
                 mode = mode,
                 capability = capability,
                 status = status,
                 lastAction = LinuxRuntimeAction.RefreshTasks,
-                tasks = runtime?.listTasks() ?: androidMobileLinuxListTasks(config),
+                tasks = runtime.listTasks(),
             )
         }
 

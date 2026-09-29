@@ -11,7 +11,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 class LinuxRuntimeStateTest {
@@ -33,17 +32,14 @@ class LinuxRuntimeStateTest {
     }
 
     @Test
-    fun mobile_linux_config_rejects_missing_release_identity() {
+    fun mobile_linux_config_rejects_wrong_abi_identity() {
         assertThrows(IllegalStateException::class.java) {
-            mobileLinuxConfig("/tmp/runtime", "/tmp", "/tmp/workspace", "fixture", "arm64-v8a", LinuxRuntimeMode.MobileLinux)
+            mobileLinuxConfig(
+                "/tmp/runtime", "/tmp", "/tmp/workspace", "fixture", "arm64-v8a",
+                LinuxRuntimeMode.MobileLinux,
+                rootfsIdentity = RootfsArtifactIdentity("fixture-v1", "x86_64", "a".repeat(64), "rootfs.tar.gz", 123),
+            )
         }
-    }
-
-    @Test
-    fun legacy_config_does_not_invent_an_archive_identity() {
-        val config = mobileLinuxConfig("/tmp/runtime", "/tmp", "/tmp/workspace", "fixture", "arm64-v8a", LinuxRuntimeMode.Legacy)
-        assertNull(config.archiveSha256)
-        assertEquals("", config.rootfsVersion)
     }
 
     @Test
@@ -123,52 +119,27 @@ class LinuxRuntimeStateTest {
     }
 
     @Test
-    fun stale_runtime_completion_cannot_overwrite_a_new_mode() {
-        val store = SettingsStore()
-        assertTrue(
-            store.tryBeginLinuxRuntimeAction(
-                LinuxRuntimeAction.Refresh,
-                LinuxRuntimeMode.Legacy,
-            ),
-        )
-
-        store.setLinuxRuntimeMode(LinuxRuntimeMode.MobileLinux)
-        store.completeLinuxRuntimeAction(
-            LinuxRuntimeAction.Refresh,
-            LinuxRuntimeMode.Legacy,
-            LinuxRuntimeUiState(
-                selectedMode = LinuxRuntimeMode.Legacy,
-                backend = "stale-backend",
-            ),
-        )
-
-        assertEquals(LinuxRuntimeMode.MobileLinux, store.state.value.linuxRuntime.selectedMode)
-        assertEquals("android-minijail", store.state.value.linuxRuntime.backend)
-        assertEquals(null, store.state.value.linuxRuntime.busyAction)
-    }
-
-    @Test
     fun runtime_actions_are_serialized_until_the_active_action_finishes() {
         val store = SettingsStore()
         assertTrue(
             store.tryBeginLinuxRuntimeAction(
                 LinuxRuntimeAction.Verify,
-                LinuxRuntimeMode.Legacy,
+                LinuxRuntimeMode.MobileLinux,
             ),
         )
         assertFalse(
             store.tryBeginLinuxRuntimeAction(
                 LinuxRuntimeAction.Reset,
-                LinuxRuntimeMode.Legacy,
+                LinuxRuntimeMode.MobileLinux,
             ),
         )
 
-        store.cancelLinuxRuntimeAction(LinuxRuntimeAction.Verify, LinuxRuntimeMode.Legacy)
+        store.cancelLinuxRuntimeAction(LinuxRuntimeAction.Verify, LinuxRuntimeMode.MobileLinux)
 
         assertTrue(
             store.tryBeginLinuxRuntimeAction(
                 LinuxRuntimeAction.Reset,
-                LinuxRuntimeMode.Legacy,
+                LinuxRuntimeMode.MobileLinux,
             ),
         )
     }

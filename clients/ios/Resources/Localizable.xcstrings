@@ -47199,31 +47199,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mobile Linux 使用受管 Alpine rootfs 与 Android PRoot 后端。选择该模式后，运行时错误会直接显示，不会静默回退到 Legacy。"
+            "value": "Mobile Linux 使用受管 Alpine rootfs 与 Android PRoot 后端。运行时错误会直接显示。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mobile Linux 使用受管 Alpine rootfs 與 Android PRoot 後端。選擇該模式後，執行時錯誤會直接顯示，不會靜默回退到 Legacy。"
+            "value": "Mobile Linux 使用受管 Alpine rootfs 與 Android PRoot 後端。執行時錯誤會直接顯示。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mobile Linux uses a managed Alpine rootfs with an Android PRoot backend. Once selected, runtime errors are shown directly instead of silently falling back to Legacy."
+            "value": "Mobile Linux uses a managed Alpine rootfs with Android PRoot. Runtime errors are shown directly."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mobile Linux は管理された Alpine rootfs と Android PRoot バックエンドを使用します。このモードを選択すると、ランタイムエラーはそのまま表示され、Legacy へ黙って切り替わることはありません。"
+            "value": "Mobile Linux は管理された Alpine rootfs と Android PRoot バックエンドを使用します。実行時エラーはそのまま表示されます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mobile Linux는 관리형 Alpine rootfs와 Android PRoot 백엔드를 사용합니다. 이 모드를 선택하면 런타임 오류가 그대로 표시되며, Legacy로 조용히 대체되지 않습니다."
+            "value": "Mobile Linux는 관리형 Alpine rootfs와 Android PRoot 백엔드를 사용합니다. 런타임 오류는 그대로 표시됩니다."
           }
         }
       }
@@ -47398,40 +47398,6 @@
         }
       }
     },
-    "settings_linux_detail_legacy_android": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Minijail + 现有 shell 路径保持不变；Mobile Linux 迁移仅接入到 phase-1 管理面板。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Minijail + 現有 shell 路徑保持不變；Mobile Linux 遷移僅接入到 phase-1 管理面板。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Minijail plus the existing shell path stays unchanged; the Mobile Linux migration is only wired into the phase-1 management panel."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Minijail + 既存の shell パスは変更されません。Mobile Linux への移行は phase-1 の管理パネルにのみ接続されています。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Minijail + 기존 셸 경로는 그대로 유지됩니다. Mobile Linux 마이그레이션은 phase-1 관리 패널에만 연결되어 있습니다."
-          }
-        }
-      }
-    },
     "settings_linux_diagnose": {
       "localizations": {
         "zh-Hans": {
@@ -47539,31 +47505,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "PRoot 不是安全边界；真实边界仍是 Android App 沙箱与外层 Minijail 策略"
+            "value": "PRoot 不是安全边界；边界仍由 Android 应用沙盒和宿主策略提供"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "PRoot 不是安全邊界；真實邊界仍是 Android App 沙箱與外層 Minijail 策略"
+            "value": "PRoot 不是安全邊界；邊界仍由 Android 應用沙盒與宿主策略提供"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "PRoot isn't a security boundary — the real boundary is still the Android app sandbox and the outer Minijail policy"
+            "value": "PRoot is not a security boundary; the Android app sandbox and host policy remain the boundary"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "PRoot はセキュリティ境界ではありません。実際の境界は Android アプリのサンドボックスと外側の Minijail ポリシーです"
+            "value": "PRoot はセキュリティ境界ではありません。Android アプリのサンドボックスとホストポリシーが境界です"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "PRoot는 보안 경계가 아니며, 실제 경계는 여전히 Android 앱 샌드박스와 외부 Minijail 정책입니다"
+            "value": "PRoot는 보안 경계가 아닙니다. Android 앱 샌드박스와 호스트 정책이 경계를 제공합니다"
           }
         }
       }
@@ -47768,40 +47734,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Linux 백엔드를 비활성화하고 unavailable shell stub을 유지"
-          }
-        }
-      }
-    },
-    "settings_linux_legacy_sub_android": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "继续使用现有 Minijail + shell 执行层"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "繼續使用現有 Minijail + shell 執行層"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Keeps using the existing Minijail + shell execution layer"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "既存の Minijail + shell 実行レイヤーを引き続き使用"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "기존 Minijail + 셸 실행 계층을 계속 사용"
           }
         }
       }
@@ -49715,31 +49647,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "未授权或 runtime 未链接时必须 fail-closed；不会静默回退到 legacy shell"
+            "value": "停止选定的 PRoot guest 进程组；运行时不可用时拒绝执行"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "未授權或 runtime 未連結時必須 fail-closed；不會靜默回退到 legacy shell"
+            "value": "停止選定的 PRoot guest 行程群組；執行環境不可用時拒絕執行"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Must fail closed when unauthorized or the runtime isn't linked — never silently falls back to the legacy shell"
+            "value": "Stops the selected PRoot guest process group; unavailable runtime operations fail closed"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "許可がない、またはランタイムが未接続の場合は必ず fail-closed になります。legacy shell へ黙って切り替わることはありません"
+            "value": "選択した PRoot ゲストのプロセスグループを停止します。ランタイムが利用できない場合は実行を拒否します"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "권한이 없거나 runtime이 연결되지 않은 경우 반드시 fail-closed되며, legacy shell로 조용히 대체되지 않습니다"
+            "value": "선택한 PRoot 게스트 프로세스 그룹을 중지합니다. 런타임을 사용할 수 없으면 실행을 거부합니다"
           }
         }
       }
@@ -49885,31 +49817,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "缺少额外书面授权，Mobile Linux 后端被显式阻塞"
+            "value": "Android PRoot 运行时被分发策略阻止"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "缺少額外書面授權，Mobile Linux 後端被顯式阻塞"
+            "value": "Android PRoot 執行環境受到發行政策封鎖"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Missing additional written authorization — the Mobile Linux backend is explicitly blocked"
+            "value": "The Android PRoot runtime is blocked by a distribution policy"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "追加の書面による許諾がないため、Mobile Linux バックエンドは明示的にブロックされています"
+            "value": "Android PRoot ランタイムは配布ポリシーによりブロックされています"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "추가 서면 승인이 없어 Mobile Linux 백엔드가 명시적으로 차단되었습니다"
+            "value": "Android PRoot 런타임이 배포 정책에 의해 차단되었습니다"
           }
         }
       }
@@ -49982,74 +49914,6 @@
         }
       }
     },
-    "settings_linux_summary_legacy_android": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前仍使用 legacy Android 执行层"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "當前仍使用 legacy Android 執行層"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Still using the legacy Android execution layer"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在も legacy Android 実行レイヤーを使用しています"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 legacy Android 실행 계층을 사용 중입니다"
-          }
-        }
-      }
-    },
-    "settings_linux_summary_legacy_minijail": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "当前仍使用 legacy Minijail + 现有 shell 执行层"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "當前仍使用 legacy Minijail + 現有 shell 執行層"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Still using the legacy Minijail + existing shell execution layer"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "現在も legacy Minijail + 既存の shell 実行レイヤーを使用しています"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "현재 legacy Minijail + 기존 셸 실행 계층을 사용 중입니다"
-          }
-        }
-      }
-    },
     "settings_linux_summary_legacy_shell_stub": {
       "localizations": {
         "zh-Hans": {
@@ -50089,31 +49953,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "授权存在或模式已选中，但当前构建未链接 Android PRoot 运行时"
+            "value": "此构建未链接 Android PRoot 运行时"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "授權存在或模式已選中，但當前建置未連結 Android PRoot 執行時"
+            "value": "此版本未連結 Android PRoot 執行環境"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Authorization exists or the mode is selected, but this build doesn't link the Android PRoot runtime"
+            "value": "This build does not link the Android PRoot runtime"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "許諾はある、またはモードは選択されていますが、現在のビルドには Android PRoot ランタイムがリンクされていません"
+            "value": "このビルドには Android PRoot ランタイムがリンクされていません"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "승인은 존재하거나 모드가 선택되었지만, 현재 빌드에는 Android PRoot 런타임이 연결되지 않았습니다"
+            "value": "이 빌드에는 Android PRoot 런타임이 연결되지 않았습니다"
           }
         }
       }

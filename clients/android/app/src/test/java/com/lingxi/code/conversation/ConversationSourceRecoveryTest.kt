@@ -21,7 +21,7 @@ class ConversationSourceRecoveryTest {
         val source = RecoveringConversationSource(
             kotlinx.coroutines.CompletableDeferred<EngineConversationSource?>().apply { complete(null) },
             DefaultConversationStrings,
-            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.Legacy),
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
         )
         try {
             source.setModel("openai/gpt-5.6-sol")
@@ -39,7 +39,7 @@ class ConversationSourceRecoveryTest {
             projectId = "weather",
             hostPath = "/same/path",
             sessionMode = SessionMode.Chat,
-            linuxRuntimeMode = LinuxRuntimeMode.Legacy,
+            linuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
             workspaceKey = "app.weather",
         )
         val code = chat.copy(sessionMode = SessionMode.Code)
@@ -71,7 +71,7 @@ class ConversationSourceRecoveryTest {
                 projectId = null,
                 hostPath = null,
                 sessionMode = SessionMode.Code,
-                linuxRuntimeMode = LinuxRuntimeMode.Legacy,
+                linuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
             ),
         )
 
@@ -86,7 +86,7 @@ class ConversationSourceRecoveryTest {
     @Test
     fun secondUiClaimCannotOverwriteFirstInFlightResumeDisposition() {
         val owner = ConversationHeadlessRecovery.RecoveryOwner(
-            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.Legacy),
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
         )
 
         owner.claimForUi()
@@ -104,7 +104,7 @@ class ConversationSourceRecoveryTest {
     @Test
     fun retainedLiveAndColdWaitingUseDifferentUiResumeDisposition() {
         val retainedOwner = ConversationHeadlessRecovery.RecoveryOwner(
-            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.Legacy),
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
         ).apply {
             // monitorExisting hands off a live parked question from the UI.
             headlessExecutorActive = true
@@ -113,7 +113,7 @@ class ConversationSourceRecoveryTest {
         assertFalse(retainedOwner.uiAttachResumeRequired)
 
         val coldOwner = ConversationHeadlessRecovery.RecoveryOwner(
-            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.Legacy),
+            ConversationRecoverySpec(null, null, SessionMode.Code, LinuxRuntimeMode.MobileLinux),
         )
         coldOwner.claimForUi()
         assertTrue(coldOwner.uiAttachResumeRequired)

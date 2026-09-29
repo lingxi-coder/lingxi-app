@@ -338,18 +338,6 @@ class SettingsStore(
     }
 
     @Synchronized
-    fun setLinuxRuntimeMode(mode: LinuxRuntimeMode) {
-        val current = _state.value
-        if (current.linuxRuntime.selectedMode == mode) return
-        _state.value = current.copy(
-            linuxRuntime = current.linuxRuntime.copy(
-                selectedMode = mode,
-                busyAction = null,
-            ),
-        )
-    }
-
-    @Synchronized
     fun tryBeginLinuxRuntimeAction(
         action: LinuxRuntimeAction,
         mode: LinuxRuntimeMode,

@@ -9,8 +9,8 @@ import struct
 ABIS = {"arm64-v8a": 183, "x86_64": 62}
 SUPPORT = {
     "libproot.so", "libproot-loader.so", "libmobile_linux_policy_launcher.so",
-    "libpty_bridge.so", "libmksh.so", "libtoybox.so",
 }
+REMOVED_SUPPORT = {"libpty_bridge.so", "libmksh.so", "libtoybox.so"}
 
 
 def sha256(path):
@@ -35,7 +35,7 @@ def inventory(source):
             raise ValueError(f"SDK native artifact digest mismatch: {path}")
         entries[key] = entry
     if set(entries) != expected:
-        raise ValueError("SDK support must contain all six native artifacts for both Android ABIs")
+        raise ValueError("SDK support must contain all three PRoot artifacts for both Android ABIs")
     return entries
 
 
@@ -56,8 +56,8 @@ def verify(source, destination):
             verify_elf(artifact, machine)
             if name in SUPPORT and sha256(artifact) != entries[(abi, name)]["sha256"]:
                 raise ValueError(f"SDK artifact differs from the verified build: {artifact}")
-        if any((destination / abi / name).exists() for name in SUPPORT):
-            raise ValueError("native helpers must be supplied only by the SDK AAR, not duplicated in host jniLibs")
+        if any((destination / abi / name).exists() for name in SUPPORT | REMOVED_SUPPORT):
+            raise ValueError("host jniLibs must not contain SDK or removed shell helpers")
         for name in ("libmobile_linux_runtime.so", "libmobile_linux_ffi.so"):
             if (destination / abi / name).exists():
                 raise ValueError("full SDK FFI must not be packaged alongside libandroid_aar.so")

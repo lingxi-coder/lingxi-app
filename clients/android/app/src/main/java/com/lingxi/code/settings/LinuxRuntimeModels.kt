@@ -9,21 +9,12 @@ import com.lingxi.code.bindings.MobileLinuxRuntimeModeFfi
 import com.lingxi.code.bindings.MobileLinuxStatusFfi
 
 enum class LinuxRuntimeMode(val title: String) {
-    Legacy("Legacy"),
     MobileLinux("Mobile Linux");
 
-    fun toFfi(): MobileLinuxRuntimeModeFfi =
-        when (this) {
-            Legacy -> MobileLinuxRuntimeModeFfi.LEGACY
-            MobileLinux -> MobileLinuxRuntimeModeFfi.MOBILE_LINUX
-        }
+    fun toFfi(): MobileLinuxRuntimeModeFfi = MobileLinuxRuntimeModeFfi.MOBILE_LINUX
 
     companion object {
-        fun fromFfi(value: MobileLinuxRuntimeModeFfi): LinuxRuntimeMode =
-            when (value) {
-                MobileLinuxRuntimeModeFfi.LEGACY -> Legacy
-                MobileLinuxRuntimeModeFfi.MOBILE_LINUX -> MobileLinux
-            }
+        fun fromFfi(value: MobileLinuxRuntimeModeFfi): LinuxRuntimeMode = MobileLinux
     }
 }
 
@@ -84,8 +75,8 @@ data class LinuxRuntimeTerminalLaunchRequest(
 )
 
 data class LinuxRuntimeUiState(
-    val selectedMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
-    val backend: String = "android-minijail",
+    val selectedMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
+    val backend: String = "android-proot",
     val rootfsState: MobileLinuxRootfsStateFfi = MobileLinuxRootfsStateFfi.UNSUPPORTED,
     val version: String? = null,
     val managedRoot: String? = null,
@@ -98,9 +89,9 @@ data class LinuxRuntimeUiState(
     val repairAllowed: Boolean = false,
     val resetAllowed: Boolean = false,
     val writableGuestPaths: List<String> = emptyList(),
-    @StringRes val summaryRes: Int = R.string.settings_linux_summary_legacy_android,
+    @StringRes val summaryRes: Int = R.string.settings_linux_summary_unavailable,
     val detail: String? = null,
-    @StringRes val detailRes: Int = R.string.settings_linux_detail_legacy_android,
+    @StringRes val detailRes: Int = R.string.settings_linux_no_diagnostics,
     val lastAction: LinuxRuntimeAction? = null,
     val lastActionMessage: String? = null,
     val busyAction: LinuxRuntimeAction? = null,
@@ -112,7 +103,6 @@ data class LinuxRuntimeUiState(
     @get:StringRes
     val badgeRes: Int
         get() = when {
-            selectedMode == LinuxRuntimeMode.Legacy -> R.string.settings_badge_default
             rootfsState == MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE -> R.string.settings_linux_badge_blocked
             rootfsState == MobileLinuxRootfsStateFfi.UNSUPPORTED -> R.string.settings_linux_badge_not_linked
             available -> R.string.settings_status_available
@@ -145,13 +135,9 @@ fun mobileLinuxConfig(
     stableWorkspaceId: String,
     abi: String,
     mode: LinuxRuntimeMode,
-    authorizationFile: String? = null,
-    rootfsIdentity: RootfsArtifactIdentity? = null,
+    rootfsIdentity: RootfsArtifactIdentity,
 ): AndroidMobileLinuxConfigFfi {
-    if (mode == LinuxRuntimeMode.MobileLinux) {
-        checkNotNull(rootfsIdentity) { "Mobile Linux requires a bundled verified release rootfs for ABI $abi" }
-    }
-    check(rootfsIdentity == null || rootfsIdentity.abi == abi) { "Bundled rootfs identity ABI mismatch" }
+    check(rootfsIdentity.abi == abi) { "Bundled rootfs identity ABI mismatch" }
     return AndroidMobileLinuxConfigFfi(
         mode = mode.toFfi(),
         managedRoot = managedRoot,
@@ -159,9 +145,8 @@ fun mobileLinuxConfig(
         workspaceHostPath = workspaceHostPath,
         stableWorkspaceId = stableWorkspaceId,
         abi = abi,
-        rootfsVersion = rootfsIdentity?.version.orEmpty(),
-        archiveSha256 = rootfsIdentity?.sha256,
-        authorizationFile = authorizationFile,
+        rootfsVersion = rootfsIdentity.version,
+        archiveSha256 = rootfsIdentity.sha256,
     )
 }
 
@@ -174,8 +159,6 @@ fun linuxRuntimeUiStateFrom(
 ): LinuxRuntimeUiState {
     val detail = status.lastError ?: capability.reason
     val summaryRes = when {
-        mode == LinuxRuntimeMode.Legacy ->
-            R.string.settings_linux_summary_legacy_minijail
         status.state == MobileLinuxRootfsStateFfi.BLOCKED_BY_LICENSE ->
             R.string.settings_linux_summary_blocked_license_android
         status.state == MobileLinuxRootfsStateFfi.UNSUPPORTED ->
@@ -195,8 +178,7 @@ fun linuxRuntimeUiStateFrom(
         available = capability.available,
         terminalSupported = capability.pty,
         mountSupported = capability.bindMounts,
-        installAllowed = mode == LinuxRuntimeMode.MobileLinux &&
-            status.state == MobileLinuxRootfsStateFfi.MISSING,
+        installAllowed = status.state == MobileLinuxRootfsStateFfi.MISSING,
         verifyAllowed = capability.rootfsIntegrity,
         repairAllowed = capability.rootfsIntegrity,
         resetAllowed = capability.rootfsIntegrity,

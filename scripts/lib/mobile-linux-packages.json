@@ -6,10 +6,7 @@
     "mobile-linux-android",
     "mobile-linux-ios",
     "mobile-linux-ffi",
-    "platform-pty",
-    "platform-android-libcap",
-    "platform-android-minijail",
-    "platform-android-shellbin"
+    "platform-pty"
   ],
   "vendored_packages": []
 }

@@ -430,7 +430,7 @@ class EngineConversationSource private constructor(
             projectWorkspace: ProjectWorkspace? = null,
             workspaceKey: String? = null,
             sessionMode: SessionMode = SessionMode.Code,
-            linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.Legacy,
+            linuxRuntimeMode: LinuxRuntimeMode = LinuxRuntimeMode.MobileLinux,
             reuseProcessSource: Boolean = true,
         ): ConversationSource {
             val recoverySpec = ConversationRecoverySpec(

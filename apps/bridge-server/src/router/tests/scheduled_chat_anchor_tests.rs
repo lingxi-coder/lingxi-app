@@ -1,4 +1,8 @@
 use super::SessionStoreContext;
+#[cfg(unix)]
+use platform_posix::PosixFileSystem as NativeFileSystem;
+#[cfg(windows)]
+use platform_windows::WindowsFileSystem as NativeFileSystem;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -9,7 +13,7 @@ async fn scheduled_chat_anchor_is_listed_without_messages_and_is_idempotent() {
         std::fs::create_dir_all(&cwd).unwrap();
         let home = temp.path().join("home");
         let fs: Arc<dyn lingxi_core::host::FileSystem> =
-            Arc::new(platform_posix::PosixFileSystem::new(temp.path().into()));
+            Arc::new(NativeFileSystem::new(temp.path().into()));
         let store =
             SessionStoreContext::new(home.clone(), cwd.to_string_lossy().into_owned(), fs.clone());
         let id = "11111111-2222-3333-4444-555555555555";

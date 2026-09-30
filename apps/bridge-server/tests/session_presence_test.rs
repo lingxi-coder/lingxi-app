@@ -15,7 +15,10 @@ use lingxi_core::host::{
     AuthError, AuthHandle, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo,
     LoginInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
 };
-use platform_posix::PosixFileSystem;
+#[cfg(unix)]
+use platform_posix::PosixFileSystem as NativeFileSystem;
+#[cfg(windows)]
+use platform_windows::WindowsFileSystem as NativeFileSystem;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -310,7 +313,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
             .with_session_store(SessionStoreContext::new(
                 lingxi_home,
                 cwd,
-                Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+                Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
             ));
     let resumed_sink = Arc::new(Sink::default());
     resume_router

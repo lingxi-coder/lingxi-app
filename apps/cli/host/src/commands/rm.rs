@@ -755,7 +755,7 @@ mod worktree_delete {
 mod worktree_delete {
     use super::ManagedWorktreeBinding;
     use platform_pty::{
-        delete_windows_path_by_handle, enumerate_directory_by_handle, open_child_by_id,
+        delete_windows_path_by_handle, enumerate_directory_by_handle, open_directory_entry_by_handle,
         open_windows_reparse_guarded, windows_file_identity, WindowsFileIdentity,
     };
     use std::path::{Path, PathBuf};
@@ -836,7 +836,7 @@ mod worktree_delete {
 
     fn remove_dir_contents(dir: &std::fs::File) -> std::io::Result<()> {
         for entry in enumerate_directory_by_handle(dir)? {
-            let child_handle = open_child_by_id(dir, entry.file_id, true)?;
+            let child_handle = open_directory_entry_by_handle(dir, &entry, true)?;
             let child_identity = WorktreeIdentity {
                 file_id: windows_file_identity(&child_handle)?,
             };

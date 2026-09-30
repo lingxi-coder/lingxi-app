@@ -7,7 +7,16 @@ use lingxi_core::host::task_registry::{
     TaskRegistryHandle, TaskUpdatePatch,
 };
 use lingxi_core::host::{AuthError, AuthHandle, LoginInfo};
-use platform_posix::{PlainTextSecureStorage, PosixClock, PosixHttp};
+#[cfg(unix)]
+use platform_posix::{
+    PlainTextSecureStorage, PosixClock as NativeClock, PosixFileSystem as NativeFileSystem,
+    PosixHttp as NativeHttp,
+};
+#[cfg(windows)]
+use platform_windows::{
+    PlainTextSecureStorage, WindowsClock as NativeClock, WindowsFileSystem as NativeFileSystem,
+    WindowsHttp as NativeHttp,
+};
 use std::sync::Arc;
 
 struct SilentSink;
@@ -234,7 +243,7 @@ async fn cron_host_trust_allows_persisted_crud_and_untrusted_mutations_are_rejec
         .with_session_store(super::SessionStoreContext::new(
             home.clone(),
             cwd.to_string_lossy().into_owned(),
-            Arc::new(platform_posix::PosixFileSystem::new(cwd.clone())),
+            Arc::new(NativeFileSystem::new(cwd.clone())),
         ))
     };
     let router = trusted_router();
@@ -337,8 +346,8 @@ async fn setting_a_provider_credential_refreshes_the_fusion_catalog() {
     );
     let credentials = Arc::new(secret::CredentialManager::new(
         storage,
-        Arc::new(PosixClock::new()),
-        Arc::new(PosixHttp::new()),
+        Arc::new(NativeClock::new()),
+        Arc::new(NativeHttp::new()),
     ));
 
     // The boot availability map of a session that had neither provider
@@ -480,8 +489,8 @@ async fn deleting_a_provider_credential_clears_it_from_the_fusion_catalog() {
     );
     let credentials = Arc::new(secret::CredentialManager::new(
         storage,
-        Arc::new(PosixClock::new()),
-        Arc::new(PosixHttp::new()),
+        Arc::new(NativeClock::new()),
+        Arc::new(NativeHttp::new()),
     ));
 
     let availability = Arc::new(std::sync::RwLock::new(

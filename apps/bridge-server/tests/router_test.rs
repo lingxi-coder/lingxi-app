@@ -57,7 +57,16 @@ use lingxi_core::host::task_registry::{
 };
 use lingxi_core::host::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use orchestrator::test_support::MockOrchestratorHandle;
-use platform_posix::{PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp};
+#[cfg(unix)]
+use platform_posix::{
+    PlainTextSecureStorage, PosixClock as NativeClock, PosixFileSystem as NativeFileSystem,
+    PosixHttp as NativeHttp,
+};
+#[cfg(windows)]
+use platform_windows::{
+    PlainTextSecureStorage, WindowsClock as NativeClock, WindowsFileSystem as NativeFileSystem,
+    WindowsHttp as NativeHttp,
+};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
@@ -507,8 +516,8 @@ async fn router_with_credentials() -> (
     );
     let credentials = Arc::new(secret::CredentialManager::new(
         storage,
-        Arc::new(PosixClock::new()),
-        Arc::new(PosixHttp::new()),
+        Arc::new(NativeClock::new()),
+        Arc::new(NativeHttp::new()),
     ));
     let router = router_with(
         Arc::new(MockOrchestratorHandle::new()),
@@ -541,7 +550,7 @@ fn router_with_store_and_tasks(
     .with_session_store(SessionStoreContext::new(
         root.join(".lingxi"),
         cwd,
-        Arc::new(PosixFileSystem::new(root.to_path_buf())),
+        Arc::new(NativeFileSystem::new(root.to_path_buf())),
     ))
 }
 
@@ -934,8 +943,8 @@ async fn externally_owned_provider_credentials_stay_process_local() {
 async fn provider_credential_listing_reports_partial_success_without_erasing_unknown_state() {
     let credentials = Arc::new(secret::CredentialManager::new(
         Arc::new(SelectiveFailureStorage::default()),
-        Arc::new(PosixClock::new()),
-        Arc::new(PosixHttp::new()),
+        Arc::new(NativeClock::new()),
+        Arc::new(NativeHttp::new()),
     ));
     credentials
         .set_provider_key("deepseek", "sk-deepseek")
@@ -2530,7 +2539,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     .with_session_store(SessionStoreContext::new(
         root.path().join(".lingxi"),
         cwd,
-        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+        Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
     ));
     let sink = CapturingSink::arc();
 
@@ -2639,7 +2648,7 @@ async fn resume_session_sets_plan_state_before_replay() {
     .with_session_store(SessionStoreContext::new(
         root.path().join(".lingxi"),
         cwd,
-        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+        Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
     ));
     let sink = CapturingSink::arc();
 
@@ -2698,7 +2707,7 @@ async fn resume_session_rolls_back_plan_preset_when_plan_mode_enable_fails() {
     .with_session_store(SessionStoreContext::new(
         root.path().join(".lingxi"),
         cwd,
-        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+        Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
     ));
     let sink = CapturingSink::arc();
 
@@ -2751,7 +2760,7 @@ async fn resume_session_does_not_adopt_when_plan_permission_preset_fails() {
     .with_session_store(SessionStoreContext::new(
         root.path().join(".lingxi"),
         cwd,
-        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+        Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
     ));
     let sink = CapturingSink::arc();
 
@@ -2801,7 +2810,7 @@ async fn resume_session_rolls_back_plan_state_when_replay_fails() {
     .with_session_store(SessionStoreContext::new(
         root.path().join(".lingxi"),
         cwd,
-        Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+        Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
     ));
     let sink = CapturingSink::arc();
 

@@ -41,7 +41,7 @@ async fn resume_usage_snapshot_crosses_idle_websocket_and_late_usage_stays_filte
         .with_session_store(SessionStoreContext::new(
             home,
             cwd,
-            Arc::new(PosixFileSystem::new(root.path().to_path_buf())),
+            Arc::new(NativeFileSystem::new(root.path().to_path_buf())),
         ));
         let connection = BridgeConnection::new()
             .bind(

@@ -12,7 +12,7 @@ use std::pin::Pin;
 use tokio::sync::Notify;
 
 struct PauseAfterCompactBoundary {
-    inner: PosixFileSystem,
+    inner: NativeFileSystem,
     boundary_durable: Notify,
     finish_commit: Notify,
 }
@@ -112,7 +112,7 @@ async fn shutdown_finishes_real_compaction_after_durable_boundary_before_summary
         .join(format!("{session_id}.jsonl"));
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     let fs = Arc::new(PauseAfterCompactBoundary {
-        inner: PosixFileSystem::new(root.path().to_path_buf()),
+        inner: NativeFileSystem::new(root.path().to_path_buf()),
         boundary_durable: Notify::new(),
         finish_commit: Notify::new(),
     });

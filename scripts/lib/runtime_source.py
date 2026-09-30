@@ -68,14 +68,14 @@ def inspect_metadata(metadata, dependency, package_list, *, anchor="harness-runt
 
 def resolve_runtime(workspace=WORKSPACE):
     workspace = Path(workspace)
-    manifest = tomllib.loads((workspace / "Cargo.toml").read_text())
+    manifest = tomllib.loads((workspace / "Cargo.toml").read_text(encoding="utf-8"))
     dependency = manifest["workspace"]["dependencies"]["harness-runtime"]
-    package_list = json.loads(PACKAGE_LIST.read_text())
+    package_list = json.loads(PACKAGE_LIST.read_text(encoding="utf-8"))
     command = [
         "cargo", "metadata", "--locked", "--format-version=1", "--all-features",
         "--manifest-path", str(workspace / "Cargo.toml"),
     ]
-    result = subprocess.run(command, cwd=workspace, check=True, capture_output=True, text=True)
+    result = subprocess.run(command, cwd=workspace, check=True, capture_output=True, text=True, encoding="utf-8")
     resolved = inspect_metadata(json.loads(result.stdout), dependency, package_list)
     if not (Path(resolved["root"]) / "Cargo.toml").is_file():
         raise ValueError("resolved Harness checkout has no workspace manifest")

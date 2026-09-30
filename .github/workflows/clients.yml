@@ -134,6 +134,8 @@ jobs:
       # Installs the Android SDK + command-line tools and exports
       # ANDROID_HOME / ANDROID_SDK_ROOT for later steps.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       # Install a concrete NDK (>= the one the project expects) and export
       # ANDROID_NDK_HOME so build-jni.sh uses it directly instead of guessing
@@ -162,6 +164,19 @@ jobs:
         run: |
           bash apps/android/native/scripts/build-mobile-linux-native.sh --variant play
           bash apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
+
+      - name: Stage verified SDK release rootfs assets
+        run: |
+          python3 scripts/local-apps/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
+          sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
+          runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
+          for variant in play direct; do
+            python3 apps/android/native/scripts/stage-mobile-linux-assets.py \
+              --input "$RUNNER_TEMP/sdk-rootfs" \
+              --output "apps/android/native/app/build/generated/mobileLinux/$variant/assets/mobile-linux" \
+              --sdk-root "$sdk_root" --runtime-root "$runtime_root" \
+              --native-root "apps/android/native/app/build/mobileLinuxNative/$variant/native-support"
+          done
 
       # Unit tests + debug APK + androidTest APK. The androidTest APK is what
       # the emulator job (job 3) installs and runs.
@@ -215,6 +230,8 @@ jobs:
           java-version: "17"
 
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android NDK
         run: |
@@ -228,6 +245,16 @@ jobs:
       # here too before the on-device test compiles the engine.
       - name: Build Store native runtime from source
         run: bash apps/android/native/scripts/build-mobile-linux-native.sh --variant play
+
+      - name: Stage verified SDK release rootfs assets
+        run: |
+          python3 scripts/local-apps/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
+          python3 apps/android/native/scripts/stage-mobile-linux-assets.py \
+            --input "$RUNNER_TEMP/sdk-rootfs" \
+            --output apps/android/native/app/build/generated/mobileLinux/play/assets/mobile-linux \
+            --sdk-root "$(python3 scripts/lib/mobile_linux_source.py --root)" \
+            --runtime-root "$(python3 scripts/lib/runtime_source.py --root)" \
+            --native-root apps/android/native/app/build/mobileLinuxNative/play/native-support
 
       # api-level 30 (>= minSdk 26), x86_64 + google_apis for KVM-accelerated
       # boot. force-avd-creation + the headless/no-window emulator options are
@@ -271,12 +298,21 @@ jobs:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
       # xcodegen materializes apps/ios/native/project.yml into an .xcodeproj.
-      - name: Install xcodegen
-        run: brew install xcodegen
+      - name: Install Xcode project and native build tools
+        run: brew install xcodegen meson ninja
+
+      - name: Build native support and verified release rootfs
+        run: |
+          python3 scripts/local-apps/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
+          bash apps/ios/native/scripts/build-linux-runtime.sh --local-app-runtime \
+            --rootfs-archive "$RUNNER_TEMP/sdk-rootfs/arm64-v8a/rootfs.tar.gz"
+          bash apps/ios/native/scripts/install-sherpa-runtime.sh
 
       # Build the gitignored Generated/ Swift bindings + the
       # LingxiCodeFFI.xcframework that the Xcode project links against.
       - name: Build XCFramework + Swift bindings
+        env:
+          LINGXI_REUSE_STAGED_LINUX_RUNTIME: "1"
         run: bash apps/ios/native/scripts/build-xcframework.sh
 
       - name: Generate Xcode project

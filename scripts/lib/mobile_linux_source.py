@@ -24,15 +24,15 @@ def inspect_sdk_metadata(metadata, dependency, package_list):
 
 def resolve_sdk(workspace=WORKSPACE):
     workspace = Path(workspace).resolve()
-    manifest = tomllib.loads((workspace / "Cargo.toml").read_text())
+    manifest = tomllib.loads((workspace / "Cargo.toml").read_text(encoding="utf-8"))
     dependency = manifest["workspace"]["dependencies"]["mobile-linux-api"]
     result = subprocess.run(
         ["cargo", "metadata", "--locked", "--format-version=1", "--all-features",
          "--manifest-path", str(workspace / "Cargo.toml")],
-        cwd=workspace, check=True, capture_output=True, text=True,
+        cwd=workspace, check=True, capture_output=True, text=True, encoding="utf-8",
     )
     resolved = inspect_sdk_metadata(
-        json.loads(result.stdout), dependency, json.loads(PACKAGE_LIST.read_text()),
+        json.loads(result.stdout), dependency, json.loads(PACKAGE_LIST.read_text(encoding="utf-8")),
     )
     if not (Path(resolved["root"]) / "Cargo.toml").is_file():
         raise ValueError("resolved mobile Linux SDK has no workspace manifest")

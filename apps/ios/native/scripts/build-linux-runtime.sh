@@ -10,6 +10,7 @@ CLEAN=0
 CONFIGURATION=Release
 APK_DIR=""
 ALPINE_VERSION=""
+ROOTFS_ARCHIVE_INPUT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) CLEAN=1; shift ;;
@@ -17,6 +18,7 @@ while [[ $# -gt 0 ]]; do
     --release) CONFIGURATION=Release; shift ;;
     --simulator-only) SIMULATOR_ONLY=1; shift ;;
     --local-app-runtime) LOCAL_APP_RUNTIME=1; shift ;;
+    --rootfs-archive) ROOTFS_ARCHIVE_INPUT="${2:?missing rootfs archive}"; shift 2 ;;
     --apk-dir) APK_DIR="${2:?missing APK directory}"; shift 2 ;;
     --alpine-version) ALPINE_VERSION="${2:?missing Alpine version}"; shift 2 ;;
     -h|--help)
@@ -25,6 +27,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+[[ -z "${ROOTFS_ARCHIVE_INPUT}" || "${LOCAL_APP_RUNTIME}" == 1 ]] || { echo "--rootfs-archive requires --local-app-runtime" >&2; exit 2; }
 SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
 CACHE="${IOS_DIR}/build/mobile-linux-cache"
@@ -65,8 +68,25 @@ if [[ "${SIMULATOR_ONLY}" == 1 ]]; then
 fi
 if [[ "${LOCAL_APP_RUNTIME}" == 1 ]]; then
   ROOTFS_PROFILE=toolchain
-  bash "${REPO_ROOT}/scripts/local-apps/build-local-app-rootfs.sh" --arch aarch64
-  ARCHIVE="${IOS_DIR}/build/local-app-rootfs/aarch64/rootfs.tar.gz"
+  if [[ -n "${ROOTFS_ARCHIVE_INPUT}" ]]; then
+    ARCHIVE="$(python3 - "${ROOTFS_ARCHIVE_INPUT}" "${SDK_ROOT}" <<'VERIFY'
+import hashlib, json, pathlib, sys
+archive, sdk = map(pathlib.Path, sys.argv[1:])
+pins = json.loads((sdk / "docs/toolchains/runtime-pins.json").read_text(encoding="utf-8"))
+evidence = sdk / "docs/mobile-linux/releases" / pins["alpine"]["version"] / "arm64-v8a"
+record = json.loads((evidence / "rootfs-manifest.json").read_text(encoding="utf-8"))["archive"]
+if archive.is_symlink() or not archive.is_file() or archive.stat().st_size != record["size_bytes"]:
+    raise SystemExit("release rootfs archive missing or wrong size")
+with archive.open("rb") as file:
+    if hashlib.file_digest(file, "sha256").hexdigest() != record["sha256"]:
+        raise SystemExit("release rootfs archive differs from Cargo-locked SDK digest")
+print(archive.resolve())
+VERIFY
+)"
+  else
+    bash "${REPO_ROOT}/scripts/local-apps/build-local-app-rootfs.sh" --arch aarch64
+    ARCHIVE="${IOS_DIR}/build/local-app-rootfs/aarch64/rootfs.tar.gz"
+  fi
   VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["alpine"]["version"])' "${SDK_ROOT}/docs/toolchains/runtime-pins.json")"
   EXPECTED_ARCHIVE_SHA="$(python3 -c 'import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1],"rb"),"sha256").hexdigest())' "${ARCHIVE}")"
 else

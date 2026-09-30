@@ -44,6 +44,22 @@ Local Apps resource wiring, while the SDK verifies its own source and artifacts.
 Rootfs and node-module host wrappers pass explicit output/cache directories and
 the locked SDK root to Harness's profile adapters. Harness selects the product
 profile; the SDK receives explicit inputs and never reads Harness/LingXi files.
+LingXi owns the host release policy. Its product policy smoke composes host
+authorization, store compliance and integration checks with the pinned Harness
+authorization, SBOM/license and supply-chain gates and the SDK resource gates.
+Both upstream roots are resolved from the product's canonical Cargo pins before
+being passed to the gates. SDK resource contracts live at
+`scripts/checks/check-resource-contracts.sh`; rootfs tooling tests live at
+`scripts/rootfs/test-rootfs-tooling.sh`.
+
+The supply-chain wrapper passes the locked SDK root explicitly, including on
+macOS Bash 3.2. `test_local_app_policy.py` proves that host policy preserves gate
+ordering and failure propagation, requires release evidence and APK inputs, and
+rejects writable-root expansion, removal of host-managed helpers and disabled
+forbidden-feature gates in every locked runtime profile. Enabled releases still
+require authorization, real rootfs archive/evidence, approved licenses and APK
+validation.
+
 Source checkout directories are read-only inputs. The SDK receives local rootfs
 archives; host build/download or bundling policy controls how those files arrive.
 

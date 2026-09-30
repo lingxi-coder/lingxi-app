@@ -5,6 +5,7 @@
 //! module provides a single-controller rendezvous point for it.  Disconnecting
 //! the controller never implies that the PTY child should exit.
 
+#[cfg(unix)]
 use crate::agents_registry;
 use std::io;
 use std::path::{Path, PathBuf};

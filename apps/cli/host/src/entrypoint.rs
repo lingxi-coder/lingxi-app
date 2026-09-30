@@ -821,7 +821,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     let is_non_slash_print = parsed
         .prompt
         .as_deref()
-        .map_or(false, |p| !p.trim_start().starts_with('/'));
+        .is_some_and(|p| !p.trim_start().starts_with('/'));
     if parsed.is_json_output() && (is_non_slash_print || parsed.print) {
         let stream = Arc::new(stream_json::StreamJsonStream::new_json_mode_placeholder());
         let adapter: Arc<dyn lingxi_core::host::OutputStream> = stream.clone();

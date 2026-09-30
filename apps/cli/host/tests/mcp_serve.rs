@@ -1,3 +1,6 @@
+//! Process-level coverage for MCP stdio initialization, tool listing, cancellation,
+//! and scoped desktop configuration import.
+
 use assert_cmd::Command;
 use serde_json::Value;
 use std::process::Output;

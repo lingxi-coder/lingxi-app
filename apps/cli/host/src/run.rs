@@ -31,8 +31,6 @@ use fusion::{
     await_local_fusion_result, fusion_result_exit_code, fusion_spawn_failure_exit_code,
     local_fusion_task_id_to_await,
 };
-#[cfg(not(unix))]
-use lifecycle::print_shutdown_signal;
 use lifecycle::{
     finish_print_branch, run_print_owned, run_print_owned_with_cleanup,
     stop_background_agents_at_budget, stop_print_tasks, wind_down_print_tasks, PrintAuxTaskGroup,

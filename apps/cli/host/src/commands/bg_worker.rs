@@ -36,6 +36,10 @@
 use crate::agents_registry::{self, SessionRegistration};
 use crate::background_launch::{BackgroundLaunchKind, BackgroundLaunchSpec};
 use crate::exit_codes;
+#[cfg(unix)]
+use platform_posix::PosixFileSystem as HostFileSystem;
+#[cfg(windows)]
+use platform_windows::WindowsFileSystem as HostFileSystem;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -791,8 +795,7 @@ async fn load_exact_transcript(
 ) -> Result<Vec<session::jsonl::JsonlMessage>, String> {
     let canonical_path = validate_exact_transcript_path(config_home, launch)?;
     let cwd = nonempty_path(&launch.cwd)?;
-    let fs: Arc<dyn lingxi_core::host::FileSystem> =
-        Arc::new(platform_posix::PosixFileSystem::new(cwd));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(HostFileSystem::new(cwd));
     let reader = session::jsonl::JsonlReader::new(canonical_path, fs);
     let loaded = reader.read_routed().await.map_err(|e| e.to_string())?;
     let (chain, _) = session::jsonl::build_conversation_chain(&loaded, &launch.session_id);
@@ -901,6 +904,47 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_transcript_loads_recorded_session_with_native_host_filesystem() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("config");
+        let cwd = temp.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        seed_job(&home, "face0003", "resume me");
+        let mut launch = crate::background_launch::read_launch_spec(&home, "face0003").unwrap();
+        launch.cwd = cwd.display().to_string();
+        let transcript = session::jsonl::path::session_path(&home, &launch.cwd, &launch.session_id);
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        launch.transcript_path = transcript.display().to_string();
+        let line = serde_json::json!({
+            "type": "user",
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": launch.session_id,
+            "timestamp": "2026-09-30T00:00:00.000Z",
+            "cwd": launch.cwd,
+            "version": "0.12.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "user", "content": "resume me"},
+        });
+        std::fs::write(&transcript, format!("{line}\n")).unwrap();
+        let messages = load_exact_transcript(&home, &launch).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, launch.session_id);
+
+        // The platform adapter must still enforce the recorded transcript
+        // identity; a same-named file outside the private projects tree is refused.
+        let outside = cwd.join(format!("{}.jsonl", launch.session_id));
+        std::fs::copy(&transcript, &outside).unwrap();
+        launch.transcript_path = outside.display().to_string();
+        assert_eq!(
+            load_exact_transcript(&home, &launch).await.unwrap_err(),
+            "transcript path does not match the recorded session",
+        );
     }
 
     #[test]

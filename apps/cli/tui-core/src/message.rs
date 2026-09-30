@@ -311,9 +311,10 @@ pub enum RenderedMessage {
 }
 
 /// (M7-04) System message severity → marker/color mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SystemLevel {
     /// Plain dim body, no marker.
+    #[default]
     Info,
     /// `●` marker + yellow body.
     Warning,
@@ -321,14 +322,8 @@ pub enum SystemLevel {
     Error,
 }
 
-impl Default for SystemLevel {
-    fn default() -> Self {
-        Self::Info
-    }
-}
-
 /// (M7-04) Advisor block content kinds (claude-code `AdvisorMessage` subtypes).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AdvisorKind {
     /// `Advising` header (+ optional model / input descriptor).
     ServerToolUse {
@@ -343,18 +338,13 @@ pub enum AdvisorKind {
         text: String,
     },
     /// Redacted result — no expandable body.
+    #[default]
     RedactedResult,
     /// `Advisor unavailable ({error_code})`.
     Error {
         /// The error code reported by the advisor service.
         error_code: String,
     },
-}
-
-impl Default for AdvisorKind {
-    fn default() -> Self {
-        Self::RedactedResult
-    }
 }
 
 /// (M9-03) `UserTeammate` sub-type payloads (claude-code

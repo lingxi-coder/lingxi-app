@@ -45,6 +45,11 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
+#[cfg(unix)]
+pub(crate) use platform_posix::PosixFileSystem as HostFileSystem;
+#[cfg(windows)]
+pub(crate) use platform_windows::WindowsFileSystem as HostFileSystem;
+
 pub mod audio_bridge;
 pub mod boot;
 pub use configuration_admin::config_admin;

@@ -250,7 +250,7 @@ fn serialize_node(node: &AxNode, parent_role: Option<&str>) -> String {
     let acc = node.accessibility.as_ref();
 
     // (1) `n?.hidden` and `isHidden || display:none` → skip (empty string).
-    if acc.map_or(false, |a| a.hidden) || node.hidden {
+    if acc.is_some_and(|a| a.hidden) || node.hidden {
         return String::new();
     }
 

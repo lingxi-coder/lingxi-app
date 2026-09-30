@@ -155,6 +155,6 @@ mod tests {
     fn change_directory_outcome_carries_pathbuf() {
         // A ViewOutcome::ChangeDirectory must carry a PathBuf usable downstream.
         let out = ViewOutcome::ChangeDirectory(PathBuf::from("/x"));
-        assert!(matches!(out, ViewOutcome::ChangeDirectory(p) if p == PathBuf::from("/x")));
+        assert!(matches!(out, ViewOutcome::ChangeDirectory(p) if p == std::path::Path::new("/x")));
     }
 }

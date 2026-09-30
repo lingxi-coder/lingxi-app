@@ -5,12 +5,12 @@
 //! by `type`:
 //!
 //! - `user`   → the primary turn; role-checked + uuid-deduped + fed into the
-//!              orchestrator's sequential input loop.
+//!   orchestrator's sequential input loop.
 //! - `assistant` / `system` → ordered history seed entries.
 //! - `bash_command` → a sandboxed shell command executed between turns.
 //! - `keep_alive` → silently ignored.
 //! - `update_environment_variables` → applies the supplied string map to the
-//!              live process environment (SDK auth/config refresh parity).
+//!   live process environment (SDK auth/config refresh parity).
 //! - `control_request` → `request` field required; routed onto the control channel.
 //!   `control_cancel_request` is also routed to this control channel for active
 //!   permission round-trip cancellation.

@@ -32,6 +32,8 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-latest
+    env:
+      RUST_MIN_STACK: "16777216"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
@@ -66,7 +68,7 @@ jobs:
         # CVSS-4.0 advisory entries now present in the live RUSTSEC DB.
         run: cargo install cargo-deny --locked --version '^0.19'
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked --version '^0.21'
+        run: cargo install cargo-audit --locked --version 0.22.2
       - name: Install cargo-vet
         run: cargo install cargo-vet --locked --version '^0.10'
       - name: cargo deny check
@@ -81,7 +83,5 @@ jobs:
         run: cargo audit --deny warnings
       - name: cargo vet
         working-directory: .
-        # vet requires supply-chain/ directory with audits. If absent,
-        # `cargo vet check --locked` prints a setup hint without failing
-        # (the directory lives outside this plan's scope; M4 deliverable).
-        run: cargo vet check --locked || echo "::warning::cargo vet supply-chain/ not yet configured; v0.4.0 ships the workflow, M4 adds the audit data"
+        # Source review is a separate hard gate; vulnerability scans do not replace it.
+        run: cargo vet check --locked

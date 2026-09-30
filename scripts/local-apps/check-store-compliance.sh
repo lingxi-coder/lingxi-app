@@ -43,29 +43,36 @@ check_pattern() {
   local pattern="$2"
   shift 2
   local output
-  if output="$("${base_rg[@]}" -e "${pattern}" "$@" "${scan_paths[@]}" 2>/dev/null)"; then
+  if output="$("${base_rg[@]}" -e "${pattern}" "$@" "${scan_paths[@]}" 2>&1)"; then
     echo "forbidden ${label} pattern detected:" >&2
     echo "${output}" >&2
     exit 1
+  else
+    local status=$?
+    if [[ "${status}" != 1 ]]; then
+      echo "${label} compliance scan failed (rg exit ${status}): ${output}" >&2
+      exit 1
+    fi
   fi
 }
 
-check_pattern "Android self-update" 'REQUEST_INSTALL_PACKAGES|PackageInstaller|installPackage\\(|DexClassLoader|PathClassLoader|InMemoryDexClassLoader|pm install'
+check_pattern "Android self-update" 'REQUEST_INSTALL_PACKAGES|PackageInstaller|installPackage\(|DexClassLoader|PathClassLoader|InMemoryDexClassLoader|pm install'
 check_pattern "Android broad package visibility" 'QUERY_ALL_PACKAGES'
 if [[ "${mode}" == "play" ]]; then
-  check_pattern "Android privilege escalation" 'Shizuku|android\\.permission\\.BIND_ACCESSIBILITY_SERVICE|AccessibilityService|ACTION_MANAGE_OVERLAY_PERMISSION|SYSTEM_ALERT_WINDOW|FOREGROUND_SERVICE_MEDIA_PROJECTION|FOREGROUND_SERVICE_SPECIAL_USE'
+  check_pattern "Android privilege escalation" 'Shizuku|android\.permission\.BIND_ACCESSIBILITY_SERVICE|AccessibilityService|ACTION_MANAGE_OVERLAY_PERMISSION|SYSTEM_ALERT_WINDOW|FOREGROUND_SERVICE_MEDIA_PROJECTION'
 else
   check_pattern "Android forbidden privilege escalation" 'Shizuku|ACTION_MANAGE_OVERLAY_PERMISSION|SYSTEM_ALERT_WINDOW'
-  direct_manifest="${repo_root}/apps/android/native/app/src/direct/AndroidManifest.xml"
-  [[ -f "${direct_manifest}" ]] || { echo "missing Direct manifest" >&2; exit 1; }
-  rg -q 'BIND_ACCESSIBILITY_SERVICE' "${direct_manifest}" \
-    || { echo "Direct manifest is missing AccessibilityService binding" >&2; exit 1; }
-  rg -q 'foregroundServiceType="mediaProjection\\|specialUse"' "${direct_manifest}" \
-    || { echo "Direct manifest is missing the expected foreground service types" >&2; exit 1; }
 fi
+# specialUse is a normal FGS permission. Only reviewed service declarations and
+# their exact subtype/constant locations are allowed; all privilege scans remain.
+python3 "${script_dir}/check-android-special-use.py" \
+  --mode "${mode}" --repo-root "${repo_root}" "${scan_paths[@]}"
 check_pattern "Android battery bypass" 'ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS|REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
-check_pattern "Android fake media foreground service" 'foregroundServiceType\\s*=\\s*"mediaPlayback"|foregroundServiceType\\s*=\\s*".*mediaPlayback.*"|mediaPlayback'
-check_pattern "iOS background audio mode" 'UIBackgroundModes|<string>audio</string>|setCategory\\(\\.playback|setCategory\\([^\\n]*\\.playback|category\\s*=\\s*\\.playback'
+# Reject media FGS permissions/constants and declarations, not audio-player variable names.
+check_pattern "Android fake media foreground service" 'FOREGROUND_SERVICE(_TYPE)?_MEDIA_PLAYBACK|foregroundServiceType\s*=\s*"[^"]*mediaPlayback[^"]*"'
+# Validate actual background declarations; foreground playback/TTS is allowed.
+python3 "${script_dir}/check-ios-background-policy.py" \
+  --mode "${mode}" --repo-root "${repo_root}" "${scan_paths[@]}"
 
 if [[ -n "${native_library}" ]]; then
   [[ -f "${native_library}" ]] \

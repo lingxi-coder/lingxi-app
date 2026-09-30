@@ -28,7 +28,7 @@ pub fn mark(phase: &'static str) {
 }
 
 fn env_enabled() -> bool {
-    std::env::var("LINGXI_STARTUP_TRACE").map_or(false, |value| {
+    std::env::var("LINGXI_STARTUP_TRACE").is_ok_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on" | "startup"

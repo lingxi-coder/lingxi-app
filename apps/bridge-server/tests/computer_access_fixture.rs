@@ -34,6 +34,7 @@ use tool_computer_use::ComputerAccessResolver;
 /// result — the minimal fixture needed to exercise the computer-access wire
 /// round-trip without the real `computer` tool's `ComputerControl` backend.
 pub struct AccessRequestingTool {
+    /// Resolver used to submit the fixture's computer-access request.
     pub access_resolver: Arc<dyn ComputerAccessResolver>,
 }
 

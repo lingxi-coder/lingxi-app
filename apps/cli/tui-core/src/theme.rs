@@ -136,7 +136,7 @@ pub(crate) fn resolve_auto(
 /// in `0..=15`.
 #[must_use]
 fn colorfgbg_theme(colorfgbg: Option<&str>) -> Option<ThemeName> {
-    let bg = colorfgbg?.split(';').last()?;
+    let bg = colorfgbg?.split(';').next_back()?;
     if bg.is_empty() {
         return None;
     }

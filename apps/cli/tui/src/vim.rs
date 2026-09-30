@@ -15,11 +15,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::composer::Composer;
 
 /// The vim editing mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VimMode {
     /// Command mode: keys are motions/edits, not text.
     Normal,
     /// Insert mode: keys type text (handled by the app's composer path).
+    #[default]
     Insert,
     /// Visual mode: motions extend a selection; `d/x/y` operate on it.
     Visual,
@@ -42,12 +43,6 @@ pub struct VimState {
 /// Alias so `VimState { mode: ... }` reads naturally; the real enum is
 /// [`VimMode`].
 pub type Mode = VimMode;
-
-impl Default for VimMode {
-    fn default() -> Self {
-        Self::Insert
-    }
-}
 
 impl VimState {
     /// Enable vim starting in `Insert` mode (so behavior is unchanged until the

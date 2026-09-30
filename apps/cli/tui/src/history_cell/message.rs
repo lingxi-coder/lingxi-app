@@ -830,7 +830,7 @@ mod tests {
         let scrollback = cell.styled_lines_for_scrollback(80, &Theme::dark(), false, true, None);
         let normal_text: String = normal.iter().map(ToString::to_string).collect();
         let scrollback_text: String = scrollback.iter().map(StyledLine::plain_text).collect();
-        assert_eq!(normal_text, "⏺ See docs.");
+        assert_eq!(normal_text, format!("{ASSISTANT_MARKER}See docs."));
         assert!(scrollback_text.contains(&hyperlink("docs", "https://x.io/docs")));
         assert!(!normal_text.contains("\x1b]8;;") && !normal_text.contains("https://x.io/docs"));
     }

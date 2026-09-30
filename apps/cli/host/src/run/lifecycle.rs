@@ -157,6 +157,7 @@ pub(super) fn budget_halt_notice(total_usd: f64, max_budget_usd: f64) -> String 
 /// is awaited by the owning print future below; it must not call
 /// `std::process::exit` from a detached task because that bypasses durable
 /// response/outbox settlement.
+#[cfg(unix)]
 pub(super) fn install_print_mode_process_cleanup() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -183,7 +184,28 @@ pub(super) async fn print_shutdown_signal() -> i32 {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(super) async fn print_shutdown_signal() -> i32 {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
+    let (Ok(mut intr), Ok(mut brk), Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) = (
+        ctrl_c(),
+        ctrl_break(),
+        ctrl_close(),
+        ctrl_logoff(),
+        ctrl_shutdown(),
+    ) else {
+        return futures::future::pending().await;
+    };
+    tokio::select! {
+        _ = intr.recv() => 2,
+        _ = brk.recv() => 2,
+        _ = close.recv() => 15,
+        _ = logoff.recv() => 15,
+        _ = shutdown.recv() => 15,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(super) async fn print_shutdown_signal() -> i32 {
     futures::future::pending().await
 }
@@ -204,6 +226,7 @@ where
     F: std::future::Future<Output = i32>,
     C: std::future::Future<Output = ()>,
 {
+    #[cfg(unix)]
     install_print_mode_process_cleanup();
     let mut operation = Box::pin(operation);
     let outcome = tokio::select! {
@@ -218,7 +241,15 @@ where
             // any known usage to the retained settlement owner before the
             // lifecycle drain takes its FIFO fence.
             drop(operation);
+            #[cfg(unix)]
             platform_posix::process::kill_all_active_children();
+            // Windows foreground cancellation drops the native runner's tree
+            // guard (taskkill /T /F), or disconnects the shell supervisor. Its
+            // non-inherited KILL_ON_JOB_CLOSE job contains the shell descendants.
+            // Stop retained background handles through the task registry too;
+            // they deliberately survive a foreground future being dropped.
+            #[cfg(windows)]
+            stop_print_tasks(runtime).await;
             runtime.orchestrator.request_exit().await;
             128 + signal
         }

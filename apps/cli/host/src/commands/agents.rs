@@ -30,6 +30,14 @@
 //! an already-running session selected through connect/resume.
 
 use clap::{Args, Parser};
+#[cfg(unix)]
+use platform_posix::PosixProcess as HostProcess;
+#[cfg(unix)]
+use platform_posix::PosixSandbox as HostSandbox;
+#[cfg(windows)]
+use platform_windows::WindowsProcess as HostProcess;
+#[cfg(windows)]
+use platform_windows::WindowsSandbox as HostSandbox;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -269,10 +277,8 @@ impl NotificationWatcher {
                         as Arc<dyn lingxi_core::host::RuntimeSpawner>,
                 )
                 .with_process_runner(
-                    Arc::new(platform_posix::PosixProcess::new())
-                        as Arc<dyn lingxi_core::host::ProcessRunner>,
-                    Arc::new(platform_posix::PosixSandbox::new())
-                        as Arc<dyn lingxi_core::host::Sandbox>,
+                    Arc::new(HostProcess::new()) as Arc<dyn lingxi_core::host::ProcessRunner>,
+                    Arc::new(HostSandbox::new()) as Arc<dyn lingxi_core::host::Sandbox>,
                 ),
             )
         });

@@ -664,7 +664,7 @@ impl CommandRouter for EngineCommandRouter {
                     }
                 }
                 let cwd = status.cwd;
-                let fs = platform_posix::PosixFileSystem::new(cwd.clone());
+                let fs = crate::HostFileSystem::new(cwd.clone());
                 let result = harness_runtime::desktop::cron_management::manage(
                     &fs,
                     &cwd,
@@ -757,9 +757,11 @@ impl CommandRouter for EngineCommandRouter {
                     );
                 }
                 let applied = error.is_none();
-                let credential_previews = applied
-                    .then(|| HashMap::from([(provider_id.clone(), credential_preview)]))
-                    .unwrap_or_default();
+                let credential_previews = if applied {
+                    HashMap::from([(provider_id.clone(), credential_preview)])
+                } else {
+                    HashMap::new()
+                };
                 sink.emit(ClientEvent::ProviderCredentialStatus {
                     operation_id,
                     configured_provider_ids: applied

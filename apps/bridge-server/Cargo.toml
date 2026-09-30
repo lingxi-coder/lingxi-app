@@ -121,3 +121,6 @@ workspace = true
 
 [build-dependencies]
 branding.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+platform-windows = { workspace = true }

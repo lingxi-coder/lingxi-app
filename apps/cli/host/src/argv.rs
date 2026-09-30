@@ -1344,7 +1344,7 @@ impl Argv {
     /// fresh session, so it is excluded here too.
     #[must_use]
     pub fn is_repl_mode(&self) -> bool {
-        let no_prompt = self.prompt.as_deref().map_or(true, |s| s.trim().is_empty());
+        let no_prompt = self.prompt.as_deref().is_none_or(|s| s.trim().is_empty());
         no_prompt && self.resume.is_none() && !self.continue_session
     }
 

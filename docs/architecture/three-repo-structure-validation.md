@@ -107,3 +107,46 @@ Android final debug APK SHA-256 (generated artifacts remain ignored):
 | --- | --- |
 | Direct | `fb36906d55f90a8f0a89a8b525093ca20d4255e095bf97c381204c2b0664e800` |
 | Play | `960a02e3080400a6a7c5fe247aa2b72e2b0ada01c5b8ebc3f36226bc19babb86` |
+
+
+## Final source and CI repair follow-up (2026-09-30)
+
+The final dependency closure is Harness
+`0e8e54d6dfa671e2dbd76037ba243aba13cdf07a` and SDK
+`13ffbec5665cd586e1d6a97928cb9987393645c2`. The SDK patch starts from the previous
+224f1fb integration revision and exposes two already implemented Windows handle
+operations, with public documentation and an external consumer integration test.
+It is merged into SDK main; there is one canonical SDK identity and no local patch.
+Registry package versions and selected dependency edges are retained.
+
+Windows CLI and bridge-server use native filesystem/process/sandbox adapters.
+Print shutdown handles Windows console events and uses retained task cleanup plus
+native process/job ownership. CLI and bridge-server still forbid unsafe code.
+The complete bridge-server Windows GNU cross-check passes. Actual MSVC and the
+public Windows file-ID enumeration/reopen/delete test run in the desktop CI matrix.
+
+Strict product Clippy passes after 17 lint repairs. The Linux hyperlink fixture
+uses the platform's assistant marker while retaining all OSC 8 assertions. The
+new native-filesystem transcript test checks both real loading and refusal of a
+same-named file outside the recorded private projects tree; CLI library tests
+pass 1119/1119 after fixing that fixture's configuration directory.
+
+The three original mobile-policy CI steps pass locally with the configured
+`LINGXI_MOBILE_LINUX_ENABLED=0`. They include 33 policy tests and 20 host/SDK
+integration tests. Structured Android manifest checks allow only the declared
+non-exported conversation/control services and exact specialUse subtype/permission
+pairs. Structured iOS plist/source checks allow the declared processing identifiers,
+expiration cleanup and foreground TTS; background-audio entitlements and idle-audio
+loops remain rejected. These source gates do not certify Play/App Review approval.
+Enabled mobile-Linux release still requires authorization and external evidence.
+
+The final vulnerability/license graph includes all features and has no advisory
+ignores. MIT-0 is included for the existing permissive-license dependency set.
+Cargo-audit 0.22.2 supports the current advisory database. Cargo-vet is a real hard
+gate with pinned Mozilla/Google/Bytecode Alliance imports and no exemptions: 700
+locked product dependencies lack safe-to-deploy source review. The earlier warning
+fallback is removed. This source-review failure remains open.
+
+Earlier native/package checks and hashes above retain their original dependency
+revision. Final-pin Android/iOS/native support builds and GitHub CI are still being
+completed. Existing macOS app shutdown and physical-device approval remain pending.

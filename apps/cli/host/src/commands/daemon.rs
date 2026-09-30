@@ -1253,10 +1253,6 @@ fn run_supervisor<LP: LockProbe, PP: ProcProbe, WS: WorkerSpawner>(
     exit_codes::SUCCESS
 }
 
-/// One roster sweep: re-read, drop dead/recycled workers, spawn a detached
-/// worker for each pending `--bg` job, stamp our `supervisorPid` + a fresh
-/// `updatedAt`, and re-persist.
-
 /// Durable respawn-attempt counter writer (sibling of [`read_respawn_count`]).
 fn write_respawn_count(runtime_dir: &Path, short: &str, count: i64) {
     let dir = agents_registry::jobs_dir(runtime_dir).join(short);
@@ -1523,6 +1519,9 @@ fn signal_pty_tree<PP: ProcProbe>(
     }
 }
 
+/// One roster sweep: re-read, drop dead/recycled workers, spawn a detached
+/// worker for each pending `--bg` job, stamp our `supervisorPid` + a fresh
+/// `updatedAt`, and re-persist.
 fn heartbeat<PP: ProcProbe, WS: WorkerSpawner>(
     runtime_dir: &Path,
     pid: i32,

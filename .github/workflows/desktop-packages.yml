@@ -55,6 +55,8 @@ jobs:
             arch: x64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      RUST_MIN_STACK: "16777216"
 
     steps:
       - uses: actions/checkout@v4
@@ -87,7 +89,7 @@ jobs:
         working-directory: .
         run: |
           cargo check --locked -p bridge-server
-          cargo test --locked -p client-protocol
+          cargo test --locked -p client
           cargo build --locked --release -p bridge-server --bin bridge-server
 
       - name: Test POSIX secure storage
@@ -99,6 +101,11 @@ jobs:
         if: matrix.platform == 'win32'
         working-directory: .
         run: cargo test --locked -p platform-windows --lib
+
+      - name: Test public Windows file handle operations
+        if: matrix.platform == 'win32'
+        working-directory: .
+        run: cargo test --locked -p platform-pty --test windows_file_exports
 
       - name: Build and test shared SDK
         working-directory: packages/bridge-client

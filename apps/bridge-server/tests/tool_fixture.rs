@@ -20,6 +20,7 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 
+/// Read-only tool that accepts any input and returns `{ "ok": true }`.
 pub struct AlwaysOkTool;
 
 #[async_trait]

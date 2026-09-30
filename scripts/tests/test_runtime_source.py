@@ -16,10 +16,14 @@ class RuntimeSourceTests(unittest.TestCase):
         self.repository = "https://github.com/lingxi-coder/harness-runtime.git"
         self.dependency = {"git": self.repository, "rev": self.revision}
         self.source = f"git+{self.repository}?rev={self.revision}#{self.revision}"
-        self.inventory = {"repository": self.repository, "packages": ["harness-runtime", "protocol"], "vendored_packages": ["git2"]}
+        self.inventory = {"repository": self.repository, "packages": ["harness-runtime", "core", "platform-common", "platform-android", "platform-ios"], "vendored_packages": ["git2"]}
+        layouts = {"harness-runtime": "runtime", "core": "core",
+                   "platform-common": "platforms/common", "platform-android": "platforms/android",
+                   "platform-ios": "platforms/ios"}
         self.metadata = {"packages": [
-            {"name": name, "source": self.source, "manifest_path": f"/tmp/locked-harness/crates/{'runtime' if name == 'harness-runtime' else name}/Cargo.toml", "dependencies": []}
-            for name in ("harness-runtime", "protocol")
+            {"name": name, "source": self.source,
+             "manifest_path": f"/tmp/locked-harness/crates/{layout}/Cargo.toml", "dependencies": []}
+            for name, layout in layouts.items()
         ]}
 
     def inspect(self):
@@ -58,20 +62,36 @@ class RuntimeSourceTests(unittest.TestCase):
             self.inspect()
 
     def test_rejects_manifest_outside_checkout(self):
-        self.metadata["packages"][1]["manifest_path"] = "/tmp/other/protocol/Cargo.toml"
+        self.metadata["packages"][1]["manifest_path"] = "/tmp/other/core/Cargo.toml"
         with self.assertRaisesRegex(ValueError, "outside"):
             self.inspect()
 
     def test_rejects_inactive_host_path_dependency(self):
         self.metadata["packages"].append({"name": "ios-framework", "dependencies": [
-            {"name": "protocol", "path": "/tmp/old-lingxi/protocol", "target": "cfg(target_os = ios)"},
+            {"name": "core", "path": "/tmp/old-lingxi/core", "target": "cfg(target_os = ios)"},
         ]})
         with self.assertRaisesRegex(ValueError, "local dependency"):
             self.inspect()
 
+    def test_rejects_consolidated_platform_source_drift(self):
+        for index in (2, 3, 4):
+            metadata = copy.deepcopy(self.metadata)
+            metadata["packages"][index]["source"] = None
+            with self.subTest(package=metadata["packages"][index]["name"]):
+                with self.assertRaisesRegex(ValueError, "different source"):
+                    inspect_metadata(metadata, self.dependency, self.inventory)
+
+    def test_rejects_inactive_alternate_platform_edge(self):
+        self.metadata["packages"].append({"name": "android-aar", "dependencies": [
+            {"name": "platform-android", "source": "git+https://github.com/elsewhere/runtime",
+             "target": "cfg(target_os = android)"},
+        ]})
+        with self.assertRaisesRegex(ValueError, "another source"):
+            self.inspect()
+
     def test_rejects_host_path_into_the_cargo_checkout(self):
         self.metadata["packages"].append({"name": "ios-framework", "dependencies": [
-            {"name": "protocol", "path": "/tmp/locked-harness/crates/protocol"},
+            {"name": "core", "path": "/tmp/locked-harness/crates/core"},
         ]})
         with self.assertRaisesRegex(ValueError, "local dependency"):
             self.inspect()

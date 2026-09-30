@@ -22,6 +22,10 @@
 use async_trait::async_trait;
 use lingxi_core::host::bg_session_forker::{BgForkError, BgSessionForker};
 use lingxi_core::host::FileSystem;
+#[cfg(unix)]
+use platform_posix::PosixFileSystem as HostFileSystem;
+#[cfg(windows)]
+use platform_windows::WindowsFileSystem as HostFileSystem;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -96,8 +100,7 @@ impl CliBgSessionForker {
             &self.version,
             model,
         );
-        let fs: Arc<dyn FileSystem> =
-            Arc::new(platform_posix::PosixFileSystem::new(cwd_pb.clone()));
+        let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd_pb.clone()));
         let writer = session::jsonl::writer::JsonlWriter::new(session_path, fs);
         for line in &lines {
             writer

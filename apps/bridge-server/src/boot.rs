@@ -34,13 +34,13 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+use crate::HostFileSystem;
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use harness_runtime::desktop::{DesktopAudio, DesktopConfig, DesktopRuntime};
 use lingxi_core::host::{
     CredentialStoragePolicy, OrchestratorHandle, OutputStream, SlashCommandDispatcher,
 };
-use platform_posix::PosixFileSystem;
 
 use crate::audio_bridge::{new_audio_bridge, AudioBridge};
 use crate::driver::OrchestratorTurnDriver;
@@ -1040,7 +1040,7 @@ pub async fn list_sessions_json(cwd: &Path) -> Result<String, String> {
 
 async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<String, String> {
     let fs: Arc<dyn lingxi_core::host::FileSystem> =
-        Arc::new(PosixFileSystem::new(cwd.to_path_buf()));
+        Arc::new(HostFileSystem::new(cwd.to_path_buf()));
     let catalog = match session::jsonl::list_recent_sessions_with_diagnostics(
         lingxi_home,
         &cwd.to_string_lossy(),
@@ -1256,7 +1256,7 @@ pub async fn assemble_with_credentials(
     let session_store = SessionStoreContext::new(
         cfg.lingxi_home.clone(),
         cfg.cwd.to_string_lossy().into_owned(),
-        Arc::new(PosixFileSystem::new(cfg.cwd.clone())),
+        Arc::new(HostFileSystem::new(cfg.cwd.clone())),
     );
 
     // The layered-settings read path, captured from the SAME roots the engine

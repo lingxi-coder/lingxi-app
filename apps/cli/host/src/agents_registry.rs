@@ -166,7 +166,7 @@ pub(crate) fn lock_job_state(
         0o700,
         0o600,
     )
-    .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))
+    .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 fn with_job_state_lock<T>(

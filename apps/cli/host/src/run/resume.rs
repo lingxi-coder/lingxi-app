@@ -5,6 +5,10 @@ use crate::init::Runtime;
 use crate::output::OutputSink;
 use lingxi_core::host::{FileSystem, OrchestratorHandle};
 use permission;
+#[cfg(unix)]
+use platform_posix::PosixFileSystem as HostFileSystem;
+#[cfg(windows)]
+use platform_windows::WindowsFileSystem as HostFileSystem;
 use session::jsonl::loader::{
     list_recent_sessions, select_session_interactive, LoaderError, SessionMetadata,
 };
@@ -387,7 +391,7 @@ pub(super) async fn load_resume_rows_all() -> Result<Vec<SessionMetadata>, Loade
     let lingxi_home = lingxi_home_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.clone()));
+    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
     list_recent_sessions(&lingxi_home, &cwd_str, usize::MAX, fs).await
 }
 
@@ -1101,8 +1105,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
                 let lingxi_home = lingxi_home_dir();
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let cwd_str = cwd.to_string_lossy().into_owned();
-                let fs: Arc<dyn FileSystem> =
-                    Arc::new(platform_posix::PosixFileSystem::new(cwd.clone()));
+                let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.clone()));
                 let mut state = state;
                 let mount_target = match session::create_branch(
                     &lingxi_home,
@@ -1538,8 +1541,8 @@ pub(super) async fn run_resume_iocraft(argv: &Argv, sink: &dyn OutputSink) -> i3
 
 /// Load the recent-session rows for the current cwd via the M5-08 loader.
 /// Shared by the stdio + iocraft branches (DRY). Resolves `lingxi_home`
-/// (`$LINGXI_CONFIG_DIR` → `~/.claude`), the cwd, and a disk-backed
-/// [`PosixFileSystem`] — the same loader inputs M5-08 expects, then delegates
+/// (`$LINGXI_CONFIG_DIR` → `~/.claude`), the cwd, and the native disk-backed
+/// host filesystem — the same loader inputs M5-08 expects, then delegates
 /// to the pure [`load_resume_rows_from`].
 pub(super) async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderError> {
     let lingxi_home = lingxi_home_dir();
@@ -1549,7 +1552,7 @@ pub(super) async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderErr
 
 /// Production disk→[`SessionMetadata`] path with the inputs passed in (no env /
 /// process-cwd reads), so it is directly testable. Builds the same disk-backed
-/// [`platform_posix::PosixFileSystem`] the live branches use and
+/// native host filesystem the live branches use and
 /// asks the M5-08 loader for the complete sorted catalog. The picker itself
 /// exposes this in 50-row pages (`tui::resume::RESUME_PAGE_SIZE`), matching
 /// Claude Code 2.1.246's `allStatLogs` / `nextIndex` behavior.
@@ -1558,7 +1561,7 @@ pub(super) async fn load_resume_rows_from(
     cwd: &std::path::Path,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.to_path_buf()));
+    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.to_path_buf()));
     list_recent_sessions(lingxi_home, &cwd_str, usize::MAX, fs).await
 }
 
@@ -1625,14 +1628,14 @@ pub(super) async fn load_resume_entries(
     let lingxi_home = lingxi_home_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
+    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd));
     session::jsonl::load_session_entries_across_worktrees(&lingxi_home, &cwd_str, session_id, fs)
         .await
 }
 
 /// Production disk→`Vec<JsonlMessage>` load with the inputs passed in (no env /
 /// process-cwd reads) so it is directly testable. Builds the same disk-backed
-/// [`platform_posix::PosixFileSystem`] the row loader uses and asks the
+/// native host filesystem the row loader uses and asks the
 /// worktree-aware session loader for the session. This is deliberately the
 /// same sibling-worktree scope as [`list_recent_sessions`], so a row surfaced
 /// by either resume picker or title search is always loadable.
@@ -1642,7 +1645,7 @@ pub(crate) async fn load_resume_session_from(
     session_id: uuid::Uuid,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd.to_path_buf()));
+    let fs: Arc<dyn FileSystem> = Arc::new(HostFileSystem::new(cwd.to_path_buf()));
     session::jsonl::load_session_across_worktrees(lingxi_home, &cwd_str, session_id, fs).await
 }
 

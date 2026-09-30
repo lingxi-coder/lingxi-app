@@ -31,7 +31,7 @@ impl HostCronFirer {
             .get(id)
             .map(|(request, _)| request.clone());
         let result = if let Some(request) = request {
-            let fs = platform_posix::PosixFileSystem::new(self.cwd.clone());
+            let fs = crate::HostFileSystem::new(self.cwd.clone());
             cron::automation::bind_automation_run_session(&fs, &self.cwd, &request, session_id)
                 .await
         } else {

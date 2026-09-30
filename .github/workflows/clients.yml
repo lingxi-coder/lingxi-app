@@ -38,6 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Install source policy scan dependencies
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Validate mobile Linux authorization, rootfs, and store policy
         run: bash scripts/local-apps/smoke.sh
 

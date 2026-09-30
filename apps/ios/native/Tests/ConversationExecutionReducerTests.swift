@@ -1236,7 +1236,9 @@ import SwiftUI
                 autoModePrompt: nil
             )
 
-            await EnginePermissionSink(source: source).onRequest(request: request)
+            let listener = EngineListener(source: source)
+            await EnginePermissionSink(listener: listener).onRequest(request: request)
+            await listener.waitUntilIdle()
 
             XCTAssertFalse(source.model.streaming)
             XCTAssertEqual(source.model.pendingPermissions, [PendingPermission(request: request)])

@@ -15,7 +15,11 @@ export function usePersistentState<T>(
   });
 
   useEffect(() => {
-    window.localStorage.setItem(key, JSON.stringify(value));
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // Persistence failures must leave the current in-memory state usable.
+    }
   }, [key, value]);
 
   return [value, setValue];

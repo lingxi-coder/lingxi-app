@@ -103,6 +103,7 @@ interface CreateCredentialBrokerClientOptions {
   platform?: NodeJS.Platform;
   resourcesPath?: string;
   timeoutMs?: number;
+  spawnProcess?: SpawnProcess;
   transport?: CredentialBrokerTransport;
   channel?: 'development' | 'production';
 }
@@ -156,7 +157,8 @@ function parsePluginSecretAccount(account: string): PluginSecretRef | undefined 
 export async function resolveSessionLaunchPluginSecrets(
   credentialBroker?: ProviderCredentialBroker,
 ): Promise<Record<string, Record<string, string>>> {
-  if (!credentialBroker) return {};
+  const result: Record<string, Record<string, string>> = Object.create(null);
+  if (!credentialBroker) return result;
   const refs = await credentialBroker.listPluginSecrets();
   if (refs.length > 256) throw new Error('credential broker contains too many plugin secrets');
   const entries = await Promise.all(refs.map(async ({ pluginId, key }) => ({
@@ -164,10 +166,9 @@ export async function resolveSessionLaunchPluginSecrets(
     key,
     value: await credentialBroker.resolvePluginSecret(pluginId, key),
   })));
-  const result: Record<string, Record<string, string>> = {};
   for (const { pluginId, key, value } of entries) {
     if (value === undefined) continue;
-    (result[pluginId] ??= {})[key] = value;
+    (result[pluginId] ??= Object.create(null))[key] = value;
   }
   return result;
 }
@@ -441,9 +442,9 @@ class ChildProcessCredentialBrokerTransport implements CredentialBrokerTransport
         windowsHide: true,
       });
       let settled = false;
-      let stdout = '';
+      const stdout: Buffer[] = [];
       let stdoutBytes = 0;
-      let stderr = '';
+      const stderr: Buffer[] = [];
       let stderrBytes = 0;
       const finish = (action: () => void): void => {
         if (settled) return;
@@ -457,38 +458,36 @@ class ChildProcessCredentialBrokerTransport implements CredentialBrokerTransport
       }, this.timeoutMs);
       timer.unref();
       child.stdout.on('data', (chunk: Buffer | string) => {
-        const text = chunk.toString();
-        stdoutBytes += Buffer.byteLength(text);
+        if (settled) return;
+        const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+        stdoutBytes += bytes.length;
         if (stdoutBytes > MAX_RESPONSE_BYTES) {
           child.kill('SIGKILL');
           finish(() => reject(new Error('credential broker response too large')));
           return;
         }
-        stdout += text;
+        stdout.push(bytes);
       });
       child.stderr.on('data', (chunk: Buffer | string) => {
-        const text = chunk.toString();
-        if (stderrBytes >= MAX_STDERR_BYTES) return;
-        const remaining = MAX_STDERR_BYTES - stderrBytes;
-        const fragment = Buffer.byteLength(text) <= remaining
-          ? text
-          : text.slice(0, remaining);
-        stderr += fragment;
-        stderrBytes += Buffer.byteLength(fragment);
+        if (settled || stderrBytes >= MAX_STDERR_BYTES) return;
+        const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+        const fragment = bytes.subarray(0, MAX_STDERR_BYTES - stderrBytes);
+        stderr.push(fragment);
+        stderrBytes += fragment.length;
       });
       child.once('error', (error) => finish(() => reject(error instanceof Error ? error : new Error(String(error)))));
       child.stdin.once('error', (error) => finish(() => reject(error instanceof Error ? error : new Error(String(error)))));
       child.once('close', (code, signal) => {
         if (settled) return;
         if (code !== 0) {
-          const detail = truncateStderr(stderr);
+          const detail = truncateStderr(Buffer.concat(stderr, stderrBytes).toString('utf8'));
           finish(() => reject(new Error(
             `credential broker exited with ${signal ?? `code ${String(code)}`}${detail ? `: ${detail}` : ''}`,
           )));
           return;
         }
         try {
-          const parsed = JSON.parse(stdout) as BrokerResponse;
+          const parsed = JSON.parse(Buffer.concat(stdout, stdoutBytes).toString('utf8')) as BrokerResponse;
           if (!isRecord(parsed) || typeof parsed.ok !== 'boolean') {
             throw new Error('credential broker returned an invalid response envelope');
           }
@@ -735,5 +734,6 @@ export function createMacCredentialBrokerClient(
     ?? join(options.resourcesPath ?? process.resourcesPath, 'credential-broker', 'bin', CREDENTIAL_BROKER_BIN);
   return new CredentialBrokerClient(new ChildProcessCredentialBrokerTransport(binaryPath, {
     timeoutMs: options.timeoutMs,
+    spawnProcess: options.spawnProcess,
   }), channel);
 }

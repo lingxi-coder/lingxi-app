@@ -28,6 +28,7 @@ import type {
 import type { UseBridge } from '../bridge/bridgeTypes.js';
 import { isSideQuestionCommand } from '../bridge/sideQuestion';
 import type { ContextSummarySnapshot } from '../bridge/conversation';
+import { matchesComposerSubmission, type ComposerSubmissionSnapshot } from '../bridge/composerSubmission';
 import type { NativeAudioApi } from '../bridge/lingxi';
 import { orderedTasks } from '../bridge/desktopState';
 import { runningSubagentIds } from '../bridge/runtimeCenterState';
@@ -1668,6 +1669,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const imageAttachmentsRef = useRef<ImageAttachment[]>([]);
   const draftsBySession = useRef(new Map<string, ComposerDraft>());
   const draftSessionId = useRef<string | null>(null);
+  const imageDraftGeneration = useRef(0);
+  const composerDraftRevision = useRef(0);
   imageAttachmentsRef.current = imageAttachments;
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
   const audio = nativeAudioApi();
@@ -1969,6 +1972,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   }, [fileMenuOpen, filePicker?.source]);
 
   useEffect(() => () => {
+    imageDraftGeneration.current += 1;
     const previewUrls = new Set(imageAttachmentsRef.current.map((attachment) => attachment.previewUrl));
     for (const draft of draftsBySession.current.values()) {
       for (const attachment of draft.images) previewUrls.add(attachment.previewUrl);
@@ -2032,6 +2036,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const syncPromptState = () => {
     const editor = input.current;
     if (!editor) return { text: '', files: [] };
+    composerDraftRevision.current += 1;
     const snapshot = richPromptSnapshot(editor);
     setText(snapshot.text);
     setSelectedFiles((current) => (
@@ -2043,6 +2048,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   };
 
   useLayoutEffect(() => {
+    imageDraftGeneration.current += 1;
     const editor = input.current;
     if (!editor) return;
 
@@ -2292,7 +2298,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       bridge: {
         sendTrackedPrompt: bridge.sendTrackedPrompt,
         subscribeTrackedSpeech: bridge.subscribeTrackedSpeech,
-        cancel: bridge.cancel,
+        cancelTrackedPrompt: bridge.cancelTrackedPrompt,
       },
       getPreferences: () => voicePrefsRef.current,
       timers: {
@@ -2307,7 +2313,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       if (flowControllerRef.current === controller) flowControllerRef.current = null;
       controller.dispose();
     };
-  }, [audio, bridge.audioCancel, bridge.audioExecute, bridge.audioFinishListen, bridge.cancel, bridge.sendTrackedPrompt, bridge.subscribeTrackedSpeech]);
+  }, [audio, bridge.audioCancel, bridge.audioExecute, bridge.audioFinishListen, bridge.cancelTrackedPrompt, bridge.sendTrackedPrompt, bridge.subscribeTrackedSpeech]);
 
   useEffect(() => {
     const controller = flowControllerRef.current;
@@ -2391,12 +2397,17 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
   const addImageFiles = async (files: File[]) => {
     if (!ready) return;
+    const ownerSessionId = activeSessionId;
+    const ownerGeneration = imageDraftGeneration.current;
+    const ownsDraft = () => ownerSessionId === draftSessionId.current
+      && ownerGeneration === imageDraftGeneration.current;
     const remaining = MAX_IMAGE_ATTACHMENTS - imageAttachments.length;
     if (remaining <= 0) {
       setImageNotice(`最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`);
       return;
     }
     const candidates = files.slice(0, remaining);
+    if (candidates.length) composerDraftRevision.current += 1;
     const results = await Promise.all(candidates.map(async (file) => {
       try {
         return { attachment: await imageFileToAttachment(file) };
@@ -2405,6 +2416,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       }
     }));
     const attachments = results.flatMap((result) => result.attachment ? [result.attachment] : []);
+    if (!ownsDraft()) {
+      attachments.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+      return;
+    }
     const firstError = results.find((result) => result.error)?.error;
     if (files.length > candidates.length) {
       setImageNotice(`最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`);
@@ -2415,6 +2430,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     if (!attachments.length) return;
     setImageAttachments((current) => {
+      if (!ownsDraft()) {
+        attachments.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+        return current;
+      }
       const available = Math.max(0, MAX_IMAGE_ATTACHMENTS - current.length);
       const accepted = attachments.slice(0, available);
       attachments.slice(available).forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
@@ -2424,6 +2443,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
   const addFiles = async (files: File[]) => {
     if (!ready) return;
+    const ownerSessionId = activeSessionId;
+    const ownerGeneration = imageDraftGeneration.current;
     const images: File[] = [];
     let notice: string | null = null;
     for (const file of files) {
@@ -2440,10 +2461,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       }
     }
     if (images.length) await addImageFiles(images);
+    if (ownerSessionId !== draftSessionId.current || ownerGeneration !== imageDraftGeneration.current) return;
     if (notice || !images.length) setImageNotice(notice);
   };
 
   const removeImage = (id: string) => {
+    composerDraftRevision.current += 1;
     setImageAttachments((current) => {
       const removed = current.find((attachment) => attachment.id === id);
       if (removed) URL.revokeObjectURL(removed.previewUrl);
@@ -2451,21 +2474,25 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     });
   };
 
-  const clearComposer = (sessionId = draftSessionId.current) => {
+  const clearComposer = (sessionId = draftSessionId.current, submittedImageIds?: readonly string[]) => {
     const draft = sessionId ? draftsBySession.current.get(sessionId) : undefined;
     if (sessionId) draftsBySession.current.delete(sessionId);
     if (sessionId !== draftSessionId.current) {
       draft?.images.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
       return;
     }
+    imageDraftGeneration.current += 1;
+    composerDraftRevision.current += 1;
     input.current?.replaceChildren();
     savedEditorSelection.current = null;
     activeMentionRange.current = null;
     setText('');
     setSelectedFiles([]);
     setImageAttachments((current) => {
-      current.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
-      return [];
+      const removed = submittedImageIds ? new Set(submittedImageIds) : null;
+      current.filter((attachment) => !removed || removed.has(attachment.id))
+        .forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+      return removed ? current.filter((attachment) => !removed.has(attachment.id)) : [];
     });
     setImageNotice(null);
     setFilePicker(null);
@@ -2511,8 +2538,22 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     }
     const images: ImageRefDto[] = imageAttachments.map(({ media_type, base64 }) => ({ media_type, base64 }));
     const submittingSessionId = draftSessionId.current;
+    const submittedRevision = composerDraftRevision.current;
+    const submitted: ComposerSubmissionSnapshot = {
+      sessionId: submittingSessionId, generation: imageDraftGeneration.current,
+      html: input.current?.innerHTML, text: snapshot.text, files: [...snapshot.files],
+      imageIds: imageAttachments.map((attachment) => attachment.id),
+    };
+    const ownsVisibleDraft = () => draftSessionId.current === submitted.sessionId
+      && imageDraftGeneration.current === submitted.generation && composerDraftRevision.current === submittedRevision;
+    let submittedAutoplaySubscription: (() => void) | null = null;
+    let submittedAutoplayOwner: NativeAudioOwner | null = null;
     try {
       const supportsTrackedSend = typeof bridge.sendTrackedPrompt === 'function';
+      // Start retiring old playback before dispatch, but register this turn's
+      // listener without awaiting native cleanup: a fast reply can end meanwhile.
+      const previousAutoplayStopped = voicePrefs.autoPlayReplies && audio && supportsTrackedSend
+        ? cancelAutoplay() : Promise.resolve();
       const tracked = supportsTrackedSend
         ? bridge.sendTrackedPrompt(
             value,
@@ -2529,46 +2570,51 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         snapshot.files,
       );
       if (voicePrefs.autoPlayReplies && audio && tracked) {
-        await cancelAutoplay();
         const autoplayTokenOwner = { kind: 'autoplay', id: tracked.token.clientTurnId } satisfies NativeAudioOwner;
+        submittedAutoplayOwner = autoplayTokenOwner;
         autoplayOwner.current = autoplayTokenOwner;
         const offTrackedSpeech = bridge.subscribeTrackedSpeech(tracked.token, (event) => {
           if (event.type !== 'completion') return;
           offTrackedSpeech();
           if (autoplaySubscription.current === offTrackedSpeech) autoplaySubscription.current = null;
-          if (!shouldAutoplayTrackedReply(activeAudioSessionId.current, tracked.token.sessionId, document.hidden)) {
-            autoplayOwner.current = null;
-            return;
-          }
-          const spoken = sanitizeSpeakableText(event.text);
-          if (!spoken) {
-            autoplayOwner.current = null;
-            return;
-          }
-          void bridge.audioExecute({
-            type: 'speak',
-            text: spoken,
-            language: resolveAudioLanguage(voicePrefs.language, typeof navigator !== 'undefined' ? navigator.language : 'en-US'),
-            rate: voicePrefs.rate,
-            ...(voicePrefs.speech.voice ? {
-              voice: voicePrefs.speech.voice.source === 'offline'
-                ? `sherpa:${voicePrefs.speech.voice.modelId ?? voicePrefs.speech.offlineModelId ?? ''}:${voicePrefs.speech.voice.id}`
-                : `${voicePrefs.speech.voice.source}:${voicePrefs.speech.voice.id}`,
-            } : {}),
-          }, bridge.bootstrap?.settings.voiceRevision ?? 0).then(() => {
-            if (autoplayOwner.current?.id === autoplayTokenOwner.id) {
-              autoplayOwner.current = null;
-            }
-          }).catch(() => {
+          void previousAutoplayStopped.then(async () => {
+            if (autoplayOwner.current?.id !== autoplayTokenOwner.id) return;
+            if (event.terminal === 'stale' || !shouldAutoplayTrackedReply(activeAudioSessionId.current, tracked.token.sessionId, document.hidden)) return;
+            const spoken = sanitizeSpeakableText(event.text);
+            if (!spoken) return;
+            await bridge.audioExecute({
+              type: 'speak',
+              text: spoken,
+              language: resolveAudioLanguage(voicePrefs.language, typeof navigator !== 'undefined' ? navigator.language : 'en-US'),
+              rate: voicePrefs.rate,
+              ...(voicePrefs.speech.voice ? {
+                voice: voicePrefs.speech.voice.source === 'offline'
+                  ? `sherpa:${voicePrefs.speech.voice.modelId ?? voicePrefs.speech.offlineModelId ?? ''}:${voicePrefs.speech.voice.id}`
+                  : `${voicePrefs.speech.voice.source}:${voicePrefs.speech.voice.id}`,
+              } : {}),
+            }, bridge.bootstrap?.settings.voiceRevision ?? 0);
+          }).catch(() => undefined).finally(() => {
             if (autoplayOwner.current?.id === autoplayTokenOwner.id) autoplayOwner.current = null;
           });
         });
+        submittedAutoplaySubscription = offTrackedSpeech;
         autoplaySubscription.current = offTrackedSpeech;
       }
       await queued;
-      clearComposer(submittingSessionId);
+      if (ownsVisibleDraft()) {
+        const latest = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
+        if (matchesComposerSubmission(submitted, { ...latest, html: input.current?.innerHTML, images: imageAttachmentsRef.current })) {
+          clearComposer(submittingSessionId, submitted.imageIds);
+        }
+      } else if (submittingSessionId !== draftSessionId.current && submittingSessionId) {
+        const saved = draftsBySession.current.get(submittingSessionId);
+        if (saved && matchesComposerSubmission(submitted, saved)) clearComposer(submittingSessionId, submitted.imageIds);
+      }
     } catch {
-      setImageNotice('发送失败，图片附件已保留，可以重试。');
+      submittedAutoplaySubscription?.();
+      if (autoplaySubscription.current === submittedAutoplaySubscription) autoplaySubscription.current = null;
+      if (submittedAutoplayOwner && autoplayOwner.current?.id === submittedAutoplayOwner.id) autoplayOwner.current = null;
+      if (ownsVisibleDraft()) setImageNotice('发送失败，图片附件已保留，可以重试。');
     }
   };
 

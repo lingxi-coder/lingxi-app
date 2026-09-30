@@ -63,6 +63,7 @@ import type {
   BridgeManagerOptions,
   BridgeRuntimeVersions,
   ConnectionState,
+  HostPermissionRequest,
   ProviderConnectionTestResult,
   SequencedRuntimeEventEnvelope,
   SessionRef,
@@ -73,6 +74,7 @@ import {
   resolveModelCredentialProviderIds,
 } from './credential-broker.js';
 import { GitActivityTracker } from './git-activity.js';
+import { scheduledRunIdentity } from './scheduled-run-identity.js';
 import {
   DiagnosticBuffer,
   buildBridgeArguments,
@@ -119,6 +121,7 @@ interface PendingAskUserQuestionRequest {
 interface PendingSessionResume {
   sessionId: string;
   generation: number;
+  client: BridgeClient;
   sessionResumed: boolean;
   model?: string;
   hydrationStarted: boolean;
@@ -146,6 +149,7 @@ export class SessionRuntime {
   private restartChain: Promise<void> = Promise.resolve();
   private generation = 0;
   private launchDir: string | null = null;
+  private connectionLockfilePath: string | null = null;
   private adoptedPid: number | null = null;
   private adoptedProcessOwned = false;
   private activeWorkspace: string | undefined;
@@ -164,6 +168,10 @@ export class SessionRuntime {
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
   private readonly pendingScheduledTurns = new Map<string, { resolve: (summary: string) => void; reject: (error: Error) => void }>();
   private activeTurn = false;
+  private activeTurnGeneration: number | undefined;
+  private disconnectedForegroundPending = false;
+  private liveConnectionRecovered = false;
+  private lastKnownCost: Extract<ClientEvent, { type: 'turn_ended' }>['cost'] | undefined;
   private openAiOAuthActive = false;
   private preparingOpenAiOAuth = false;
   /**
@@ -189,7 +197,10 @@ export class SessionRuntime {
   private cancellingTurn = false;
   private lastRuntimeVersions: BridgeRuntimeVersions | undefined;
   /** Permission requests remain replayable until the engine reports a terminal resolution. */
-  private readonly pendingPermissionIds = new Map<number, PermissionRequest>();
+  private readonly pendingPermissionIds = new Map<number, HostPermissionRequest>();
+  private readonly backgroundPermissionIds = new Set<number>();
+  private readonly permissionScopeChecks = new Map<number, PermissionRequest>();
+  private foregroundInteractionEpoch = 0;
   /** Prevent a delayed duplicate permission frame from resurrecting a terminal request. */
   private readonly resolvedPermissionIds = new Set<number>();
   private readonly pendingComputerAccessIds = new Set<number>();
@@ -363,7 +374,7 @@ export class SessionRuntime {
     return promise;
   }
 
-  private readonly pendingPromptHydrations = new Set<symbol>();
+  private readonly pendingPromptHydrations = new Map<symbol, number | undefined>();
   private selectedModelReference: string | undefined;
   private pendingCredentialSettings: { promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
 
@@ -463,7 +474,7 @@ export class SessionRuntime {
   }
 
   beginArchive(): () => void {
-    if (this.archiving || this.turnActive || this.pendingInteractions > 0 || this.pendingCron.size > 0) throw new Error('Wait for active work and pending interactions before archiving this chat.');
+    if (this.archiving || this.hasActiveWork || this.pendingCron.size > 0) throw new Error('Wait for active work and pending interactions before archiving this chat.');
     this.archiving = true;
     return () => { this.archiving = false; };
   }
@@ -509,7 +520,7 @@ export class SessionRuntime {
     if (this.archiving) throw new Error('paused: The target chat is being archived.');
     const client = this.requireClient();
     const token = Symbol('scheduled hydration');
-    this.pendingPromptHydrations.add(token);
+    this.pendingPromptHydrations.set(token, undefined);
     const assertPreparing = () => {
       if (this.disposed || generation !== this.generation || client !== this.client) throw new Error('interrupted: Scheduled execution interrupted.');
       if (!this.pendingPromptHydrations.has(token)) throw new Error('cancelled: Scheduled execution was cancelled before starting.');
@@ -537,6 +548,7 @@ export class SessionRuntime {
       return await new Promise<string>((resolve, reject) => {
         this.pendingScheduledTurns.set(runId, { resolve, reject });
         this.activeTurn = true;
+        this.activeTurnGeneration = this.generation;
         this.sessionHasHistory = true;
         try {
           client.sendCommand({ type: 'scheduled_run_turn', run_id: runId, prompt: task.prompt, model: config.model, reasoning: config.reasoning });
@@ -581,8 +593,15 @@ export class SessionRuntime {
     return this.preparingOpenAiOAuth || this.activeTurn || this.pendingPromptHydrations.size > 0 || this.pendingModelSwitch !== undefined;
   }
 
+  get hasActiveWork(): boolean {
+    return this.turnActive || this.hasActiveAgents || this.pendingInteractions > 0;
+  }
+
   private readonly gitActivity = new GitActivityTracker();
   get hasActiveAgents(): boolean { return this.gitActivity.active; }
+
+  /** A same-process reconnect retains its in-memory session and background scopes. */
+  get recoveredLiveConnection(): boolean { return this.liveConnectionRecovered; }
 
   get hasOpenAiOAuth(): boolean { return this.openAiOAuthActive; }
   get isStarting(): boolean { return this.startPromise !== null; }
@@ -680,6 +699,7 @@ export class SessionRuntime {
 
   get pendingInteractions(): number {
     return this.pendingPermissionIds.size
+      + [...this.permissionScopeChecks.keys()].filter((id) => !this.pendingPermissionIds.has(id)).length
       + this.pendingComputerAccessIds.size
       + this.pendingAskUserQuestionIds.size;
   }
@@ -773,41 +793,188 @@ export class SessionRuntime {
     this.opts.onActivityChanged?.();
   }
 
-  /** Turn completion clears prompts, while successful recordings remain owner-scoped. */
-  private clearTurnInteractions(): void {
-    this.pendingPermissionIds.clear();
-    this.resolvedPermissionIds.clear();
+  /** A foreground terminal cannot settle independent background permission gates. */
+  private clearTurnInteractions(all = false): void {
+    ++this.foregroundInteractionEpoch;
+    for (const id of this.pendingPermissionIds.keys()) {
+      if (all || !this.backgroundPermissionIds.has(id)) this.clearPendingPermission(id);
+    }
+    if (all) {
+      this.permissionScopeChecks.clear();
+      this.backgroundPermissionIds.clear();
+      this.resolvedPermissionIds.clear();
+    }
     this.pendingComputerAccessIds.clear();
     for (const requestId of [...this.pendingAskUserQuestionIds]) {
       this.clearPendingAskUserQuestion(requestId);
     }
   }
 
+  private clearPendingPermission(id: number): void {
+    this.pendingPermissionIds.delete(id);
+    this.backgroundPermissionIds.delete(id);
+    this.permissionScopeChecks.delete(id);
+  }
+
+  private replayBackgroundPermissions(): void {
+    for (const id of this.backgroundPermissionIds) {
+      const request = this.pendingPermissionIds.get(id);
+      if (request) this.broadcast(CH_PERMISSION, request);
+    }
+  }
+
+  private async receivePermissionRequest(client: BridgeClient, generation: number, request: PermissionRequest): Promise<void> {
+    const id = request.request_id;
+    if (generation !== this.generation || client !== this.client || this.disposed
+      || !Number.isSafeInteger(id) || id < 0 || this.resolvedPermissionIds.has(id)) return;
+    if (!this.pendingPermissionIds.has(id) && !this.permissionScopeChecks.has(id)
+      && this.pendingPermissionIds.size + this.permissionScopeChecks.size >= MAX_PENDING_PERMISSIONS) {
+      this.diagnostics.add('warn', 'bridge', 'permission request limit reached');
+      return;
+    }
+    const foregroundEpoch = this.foregroundInteractionEpoch;
+    this.permissionScopeChecks.set(id, request);
+    this.notifyActivityChanged();
+    try {
+      // Scope comes from the actual pending SDK broker entry. Named and unnamed
+      // background runners have the same ownership; display labels confer none.
+      const scope = await client.requestPermissionScope(id);
+      if (this.permissionScopeChecks.get(id) !== request || generation !== this.generation
+        || client !== this.client || this.disposed || this.resolvedPermissionIds.has(id)) return;
+      if (!scope) return;
+      if (!scope.background_owned && (!this.activeTurn || this.cancellingTurn
+        || foregroundEpoch !== this.foregroundInteractionEpoch)) {
+        this.diagnostics.add('warn', 'bridge', `dropped permission request ${id}: foreground owner ended or is cancelling`);
+        return;
+      }
+      if (scope.background_owned) this.backgroundPermissionIds.add(id);
+      else this.backgroundPermissionIds.delete(id);
+      this.permissionScopeChecks.delete(id);
+      const scopedRequest: HostPermissionRequest = { ...request, backgroundOwned: scope.background_owned };
+      this.pendingPermissionIds.set(id, scopedRequest);
+      this.broadcast(CH_PERMISSION, scopedRequest);
+      this.opts.notifier?.permissionRequested(this.sessionId, id,
+        request.kind.type === 'tool_use_confirm' ? request.kind.tool_name : request.kind.type, this.notificationRef);
+      this.opts.notifier?.setDialogsOnScreen(this.sessionId, this.pendingInteractions, this.notificationRef);
+    } catch (error) {
+      if (generation === this.generation && client === this.client && this.permissionScopeChecks.get(id) === request) {
+        this.diagnostics.add('warn', 'bridge', `permission request ${id} scope unavailable: ${sanitizeDiagnostic(error)}`);
+      }
+    } finally {
+      if (this.permissionScopeChecks.get(id) === request) this.permissionScopeChecks.delete(id);
+      this.notifyActivityChanged();
+    }
+  }
+
   async start(): Promise<void> {
     if (this.disposed) throw new Error('SessionRuntime is disposed');
-    if (this.state.status === 'connected') return;
     if (this.startPromise) return this.startPromise;
-    if (this.child || this.client) return;
+    if (this.state.status === 'connected') return;
     if (this.opts.registerIpc !== false) this.registerIpc();
     const startedAt = Date.now();
-    this.startPromise = (async () => {
+    const starting = this.restartChain.catch(() => undefined).then(async () => {
       try {
-        await this.startInternal();
+        if (this.disposed) throw new Error('SessionRuntime is disposed');
+        // Explicit restart/stop operations and automatic connection recovery
+        // share one lifecycle queue, so only one sidecar can be started.
+        if (this.state.status === 'connected') return;
+        if (this.child || this.client || this.adoptedPid) await this.recoverConnection();
+        else await this.startInternal();
       } catch (error) {
-        // launchConfig runs before the child lifecycle begins. Surface failures
-        // such as an unreadable Keychain credential through the same renderer
-        // connection state as spawn/protocol failures.
         this.startupDiagnostic('bridge_start_failed', {
           durationMs: Date.now() - startedAt,
           error: sanitizeDiagnostic(error),
         });
-        if (this.state.status !== 'error') this.fail(error);
+        if (!this.disposed && this.state.status !== 'error') this.fail(error);
         throw error;
-      } finally {
-        this.startPromise = null;
       }
-    })();
-    return this.startPromise;
+    });
+    this.restartChain = starting;
+    const completion = starting.finally(() => {
+      if (this.startPromise === completion) this.startPromise = null;
+    });
+    this.startPromise = completion;
+    return completion;
+  }
+
+  private async recoverConnection(): Promise<void> {
+    this.liveConnectionRecovered = false;
+    const interruptedForeground = this.disconnectedForegroundPending || this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
+    const pid = this.child?.pid ?? this.adoptedPid;
+    if (!pid || !this.processIsAlive(pid)) {
+      await this.stopBridge();
+      if (this.disposed) throw new Error('SessionRuntime is disposed');
+      await this.startInternal();
+      return;
+    }
+    // Reconnect only the endpoint already authenticated for this runtime.
+    // A living managed or external sidecar must never be replaced merely
+    // because its transport disconnected or a retry handshake failed.
+    const lockfilePath = this.connectionLockfilePath;
+    if (!lockfilePath) throw new Error('The running bridge has no known connection endpoint; no replacement was started.');
+    validateBridgeLockfile(JSON.parse(readFileSync(lockfilePath, 'utf8')), pid, this.projectPath || this.activeWorkspace || '');
+    const client = this.client;
+    this.client = null;
+    if (client) this.closeDetachedClient(client);
+    const previousGeneration = this.generation++;
+    await this.teardownAudioGeneration(previousGeneration);
+    await this.oauthPersistence;
+    if (this.disposed) throw new Error('SessionRuntime is disposed');
+    this.clearPendingConnectionOperations();
+    try {
+      await this.connectBridgeClient(lockfilePath, this.generation, false, false);
+      const recoveredClient = this.requireClient();
+      const recoveredGeneration = this.generation;
+      await recoveredClient.requestRuntimeSnapshot((events) => {
+        // Apply at the response boundary, before later live frames. An old
+        // connection response must never overwrite a newer runtime's roster.
+        if (this.disposed || recoveredGeneration !== this.generation || recoveredClient !== this.client) {
+          throw new Error('Runtime background snapshot was interrupted.');
+        }
+        const roster = events.find((event) => event.type === 'session_agent_list');
+        if (roster?.type !== 'session_agent_list' || roster.session_id !== this.sessionId) {
+          throw new Error('Runtime background snapshot belongs to another session.');
+        }
+        this.gitActivity.replaceSnapshot(events);
+        for (const event of events) this.broadcastClientEvent(event);
+        this.notifyActivityChanged();
+      });
+      // Accepted hello follows the Rust connection-close join barrier. The
+      // previous foreground driver and its questions are gone; background
+      // agents still belong to this living process and must stay pinned.
+      const newForegroundStarted = this.activeTurnGeneration === this.generation;
+      if (!newForegroundStarted) {
+        this.activeTurn = false;
+        this.activeTurnGeneration = undefined;
+        this.activeTurnId = undefined;
+        this.cancellingTurn = false;
+        this.clearTurnInteractions();
+      }
+      this.liveConnectionRecovered = true;
+      this.disconnectedForegroundPending = false;
+      if (interruptedForeground && !newForegroundStarted) {
+        this.broadcastClientEvent({
+          type: 'turn_ended', outcome: { type: 'cancelled' },
+          cost: { ...(this.lastKnownCost ?? { total_usd: 0, input_tokens: 0, output_tokens: 0, api_calls: 0, session_duration_secs: 0 }), formatted: '' },
+        });
+        this.broadcastClientEvent({ type: 'system_notice', message: 'The previous turn was interrupted when its engine connection closed.', is_error: true });
+      }
+      this.notifyActivityChanged();
+      this.setState({ status: 'connected' });
+    } catch (error) {
+      const failedClient = this.client as BridgeClient | null;
+      this.client = null;
+      if (failedClient) this.closeDetachedClient(failedClient);
+      throw error;
+    }
+  }
+
+  private closeDetachedClient(client: BridgeClient): void {
+    client.removeAllListeners();
+    client.on('error', (error) => {
+      this.diagnostics.add('warn', 'bridge', `disconnected bridge transport: ${sanitizeDiagnostic(error)}`);
+    });
+    try { client.close(); } catch { /* a disconnected transport may already be closed */ }
   }
 
   restart(beforeRestart?: () => void | Promise<void>): Promise<void> {
@@ -843,6 +1010,7 @@ export class SessionRuntime {
   }
 
   private async startInternal(): Promise<void> {
+    this.liveConnectionRecovered = false;
     this.configuredCustomProviderIds = [];
     this.credentialRoutingSettings = undefined;
     this.selectedModelReference = undefined;
@@ -974,17 +1142,19 @@ export class SessionRuntime {
     ].filter((value): value is string => Boolean(value)));
 
     child.once('exit', (code, signal) => {
-      this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, generation));
-      if (generation !== this.generation) return;
+      if (this.child !== child) return;
+      const exitGeneration = this.generation;
+      this.diagnostics.add('info', 'host', childExitDiagnostic(code, signal, exitGeneration));
       this.child = null;
-      void this.teardownAudioGeneration(generation);
+      void this.teardownAudioGeneration(exitGeneration);
       if (!this.disposed) {
         this.setState({ status: 'disconnected', reason: `bridge-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})` });
       }
     });
     child.once('error', (error) => {
-      if (generation === this.generation) void this.teardownAudioGeneration(generation);
-      if (generation === this.generation && !this.disposed) this.fail(`failed to spawn bridge-server: ${error.message}`);
+      if (this.child !== child) return;
+      void this.teardownAudioGeneration(this.generation);
+      if (!this.disposed) this.fail(`failed to spawn bridge-server: ${error.message}`);
     });
 
     try {
@@ -1013,7 +1183,8 @@ export class SessionRuntime {
     }
   }
 
-  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true): Promise<void> {
+  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true): Promise<void> {
+    this.connectionLockfilePath = lockfilePath;
     this.setState({ status: 'connecting' });
     const startedAt = Date.now();
     this.startupDiagnostic('bridge_connect_started', { generation, restorePermission });
@@ -1073,7 +1244,7 @@ export class SessionRuntime {
       });
     }
     if (generation !== this.generation || this.disposed) return;
-    this.setState({ status: 'connected' });
+    if (publishConnected) this.setState({ status: 'connected' });
     this.startupDiagnostic('bridge_connect_completed', {
       durationMs: Date.now() - startedAt,
       generation,
@@ -1345,6 +1516,11 @@ export class SessionRuntime {
         return;
       }
       const resumedUsage = event.type === 'usage_update' && event.is_snapshot === true;
+      if (event.type === 'turn_ended') this.lastKnownCost = event.cost;
+      else if (event.type === 'cost_update') {
+        const { type: _type, ...cost } = event;
+        this.lastKnownCost = cost;
+      }
       this.gitActivity.accept(event);
       if (event.type === 'openai_oauth_updated') {
         this.oauthPersistence = this.oauthPersistence.then(async () => {
@@ -1381,6 +1557,7 @@ export class SessionRuntime {
         return;
       }
       if (event.type === 'cron_run_requested') {
+        const runIdentity = scheduledRunIdentity(event.run_id, event.task);
         this.activeCronExecutions++;
         this.notifyActivityChanged();
         void (async () => {
@@ -1400,8 +1577,9 @@ export class SessionRuntime {
             const deadline = Date.now() + 15_000;
             while (generation === this.generation && Date.now() < deadline) {
               const jobs = await this.manageCron({ action: 'history', id: event.task.id });
-              const run = jobs.find((job) => job.id === event.task.id)?.automation?.runs?.find((item) => item.id === event.run_id);
-              if (!run || run.status !== 'running') break;
+              const run = jobs.find((job) => job.id === event.task.id)?.automation?.runs?.find((item) => item.id === runIdentity.occurrenceId);
+              if (!run || run.status !== 'running'
+                || (runIdentity.claimGeneration !== null && run.claimGeneration !== runIdentity.claimGeneration)) break;
               await new Promise((resolve) => setTimeout(resolve, 50));
             }
           } catch { this.diagnostics.add('warn', 'bridge', 'Scheduled result connection closed before acknowledgement.'); }
@@ -1509,13 +1687,15 @@ export class SessionRuntime {
       if (event.type === 'turn_started') {
         if (!this.activeTurn) this.cancellingTurn = false;
         this.activeTurn = true;
+        this.activeTurnGeneration = generation;
         this.activeTurnId = event.turn_id;
       }
       if (event.type === 'turn_ended' || event.type === 'session_ended') {
         this.activeTurn = false;
+        this.activeTurnGeneration = undefined;
         this.activeTurnId = undefined;
         this.cancellingTurn = false;
-        this.clearTurnInteractions();
+        this.clearTurnInteractions(event.type === 'session_ended');
       }
       if (event.type === 'slash_command_result' && this.pendingModelSwitch?.slash && this.pendingModelSwitch.sent && event.turn_id === this.pendingModelSwitch.turnId) {
         const pending = this.pendingModelSwitch;
@@ -1564,7 +1744,7 @@ export class SessionRuntime {
       }
       if (event.type === 'permission_request_resolved') {
         this.resolvedPermissionIds.add(event.request_id);
-        this.pendingPermissionIds.delete(event.request_id);
+        this.clearPendingPermission(event.request_id);
       }
       if (
         event.type === 'turn_started'
@@ -1573,47 +1753,25 @@ export class SessionRuntime {
         || event.type === 'ask_user_question'
         || event.type === 'ask_user_question_resolved'
         || event.type === 'permission_request_resolved'
+        || event.type === 'task_row'
+        || event.type === 'task_status_changed'
+        || event.type === 'task_lifecycle'
+        || event.type === 'workflow_resumed'
+        || event.type === 'session_agent_list'
+        || event.type === 'session_agent_updated'
+        || event.type === 'coordinator_worker'
+        || event.type === 'coordinator_status'
       ) this.notifyActivityChanged();
       this.updateNotifier(event);
       this.broadcastClientEvent(event);
+      // Renderer terminal cleanup is foreground-scoped. Re-deliver retained
+      // background gates after that boundary using the existing permission IPC.
+      if (event.type === 'turn_ended') this.replayBackgroundPermissions();
     });
     client.on('permission', (request: PermissionRequest) => {
-      if (generation !== this.generation) return;
-      // NEVER drop one of these silently. The engine parks the tool for
-      // `DEFAULT_PERMISSION_TIMEOUT` (300s) waiting for an answer that a
-      // discarded request can never produce, then fails the tool closed with
-      // "permission request timed out" — a five-minute stall whose only trace,
-      // before this line existed, was the model being told its tool broke.
-      // `activeTurn` mirrors the engine's turn owner; it used to go stale for
-      // the whole of any turn the engine started by itself (a background-task
-      // rewake, a queue drain), which is exactly when this fired.
-      if (!this.activeTurn || this.cancellingTurn) {
-        this.diagnostics.add('warn', 'bridge', `dropped permission request ${request.request_id}: ${this.cancellingTurn ? 'turn is cancelling' : 'no active turn'}`);
-        return;
-      }
-      if (Number.isSafeInteger(request.request_id) && request.request_id >= 0) {
-        if (this.resolvedPermissionIds.has(request.request_id)) return;
-        if (!this.pendingPermissionIds.has(request.request_id) && this.pendingPermissionIds.size >= MAX_PENDING_PERMISSIONS) {
-          this.diagnostics.add('warn', 'bridge', 'permission request limit reached');
-          return;
-        }
-        this.pendingPermissionIds.set(request.request_id, request);
-        this.notifyActivityChanged();
-        this.broadcast(CH_PERMISSION, request);
-        // Armed only AFTER the forward. Every early return above is a request
-        // the renderer will never draw a prompt for, and a notification about
-        // a prompt that does not exist sends the user somewhere with nothing
-        // to do. Upstream's 6s delay means a prompt answered promptly — the
-        // common case when the window is already in front of you — fires
-        // nothing at all.
-        this.opts.notifier?.permissionRequested(
-          this.sessionId,
-          request.request_id,
-          request.kind.type === 'tool_use_confirm' ? request.kind.tool_name : request.kind.type,
-          this.notificationRef,
-        );
-        this.opts.notifier?.setDialogsOnScreen(this.sessionId, this.pendingInteractions, this.notificationRef);
-      }
+      void this.receivePermissionRequest(client, generation, request).catch((error) => {
+        this.diagnostics.add('warn', 'bridge', `permission forwarding failed: ${sanitizeDiagnostic(error)}`);
+      });
     });
     client.on('computerAccess', (request: ComputerAccessRequestDto) => {
       if (generation !== this.generation) return;
@@ -1637,10 +1795,12 @@ export class SessionRuntime {
       }
     });
     client.on('close', (code, reason) => {
+      if (generation === this.generation) this.permissionScopeChecks.clear();
       if (generation === this.generation) void this.teardownAudioGeneration(generation);
       if (generation === this.generation && !this.disposed) this.setState({ status: 'disconnected', reason: reason || `ws closed (code=${code})` });
     });
     client.on('error', (error) => {
+      if (generation === this.generation) this.permissionScopeChecks.clear();
       if (generation === this.generation) void this.teardownAudioGeneration(generation);
       if (generation === this.generation && !this.disposed) this.fail(error);
     });
@@ -1706,9 +1866,18 @@ export class SessionRuntime {
       client.sendCommand({ type: 'audio_response', identity: request.identity, result });
     } catch (error) {
       this.diagnostics.add('warn', 'bridge', `failed to return native audio result: ${sanitizeDiagnostic(error)}`);
-      void this.opts.audioService?.cancelAudioRequest(request.identity);
+      const rollbacks = [() => this.opts.audioService?.cancelAudioRequest(request.identity)];
       if (request.operation.type === 'start_recording' && result.type === 'recording_started') {
-        void this.opts.audioService?.endAudioOwner(request.owner);
+        rollbacks.push(() => this.opts.audioService?.endAudioOwner(request.owner));
+      }
+      // A closed result transport still owes cleanup of admitted native work.
+      // Observe every rollback and attempt them independently, even if one
+      // throws before returning its promise.
+      const cleanup = await Promise.allSettled(rollbacks.map(async (rollback) => rollback()));
+      for (const [index, outcome] of cleanup.entries()) {
+        if (outcome.status === 'rejected') {
+          this.diagnostics.add('warn', 'bridge', `native audio ${index === 0 ? 'cancellation' : 'recording owner teardown'} rollback failed: ${sanitizeDiagnostic(outcome.reason)}`);
+        }
       }
     }
   }
@@ -1800,7 +1969,8 @@ export class SessionRuntime {
     if (!origin || !origins.has(origin)) throw new Error('unauthorized IPC origin');
   }
 
-  sendPrompt(text: unknown, images: unknown = []): void | Promise<void> {
+  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown): void | Promise<void> {
+    const id = validateOptionalTurnId(turnId);
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
@@ -1808,7 +1978,7 @@ export class SessionRuntime {
       const generation = this.generation;
       const client = this.requireClient();
       const token = Symbol('prompt hydration');
-      this.pendingPromptHydrations.add(token);
+      this.pendingPromptHydrations.set(token, id);
       this.notifyActivityChanged();
       return (async () => {
         try {
@@ -1821,19 +1991,19 @@ export class SessionRuntime {
             this.diagnostics.add('warn', 'bridge', 'Optional Fusion credential preload failed.');
           });
           if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
-          this.sendPreparedPrompt(prompt, validatedImages);
+          this.sendPreparedPrompt(prompt, validatedImages, id);
         } finally {
           this.pendingPromptHydrations.delete(token);
           this.notifyActivityChanged();
         }
       })();
     }
-    this.sendPreparedPrompt(prompt, validatedImages);
+    this.sendPreparedPrompt(prompt, validatedImages, id);
   }
 
-  private sendPreparedPrompt(prompt: string, validatedImages: ReturnType<typeof validateImageRefs>): void {
+  private sendPreparedPrompt(prompt: string, validatedImages: ReturnType<typeof validateImageRefs>, turnId?: number): void {
     const needsIdentityCommit = !this.sessionIdentityCommitted;
-    this.requireClient().sendPrompt(prompt, { images: validatedImages });
+    this.requireClient().sendPrompt(prompt, { images: validatedImages, ...(turnId !== undefined ? { turnId } : {}) });
     this.sessionHasHistory = true;
     if (needsIdentityCommit && this.opts.onFirstPromptSent?.() !== false) {
       this.sessionIdentityCommitted = true;
@@ -1844,7 +2014,8 @@ export class SessionRuntime {
     // can fall through the same gap fixed in the Rust connection.
     if (!this.activeTurn) {
       this.activeTurn = true;
-      this.activeTurnId = undefined;
+      this.activeTurnGeneration = this.generation;
+      this.activeTurnId = turnId;
       this.cancellingTurn = false;
       this.notifyActivityChanged();
     }
@@ -1852,16 +2023,21 @@ export class SessionRuntime {
 
   cancelTurn(turnId: unknown): void {
     const id = validateOptionalTurnId(turnId);
-    ++this.fusionLifecycleEpoch;
+    if (id === undefined) ++this.fusionLifecycleEpoch;
     this.requireClient().cancel(id);
-    this.pendingModelSwitch?.fail(new Error('Model switch was cancelled.'));
-    if (this.pendingPromptHydrations.size > 0) {
-      this.pendingPromptHydrations.clear();
-      this.notifyActivityChanged();
+    if (id === undefined || this.pendingModelSwitch?.turnId === id) this.pendingModelSwitch?.fail(new Error('Model switch was cancelled.'));
+    let cancelledHydration = false;
+    for (const [token, owner] of this.pendingPromptHydrations) {
+      if (id === undefined || owner === id) {
+        this.pendingPromptHydrations.delete(token);
+        cancelledHydration = true;
+      }
     }
+    if (cancelledHydration) this.notifyActivityChanged();
     if (this.activeTurn && (id === undefined || id === this.activeTurnId)) {
       this.cancellingTurn = true;
       this.clearTurnInteractions();
+      this.replayBackgroundPermissions();
       this.notifyActivityChanged();
     }
   }
@@ -1871,7 +2047,7 @@ export class SessionRuntime {
     const permissionResponse = validatePermissionResponse(response);
     if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
     this.requireClient().approvePermission(id, permissionResponse);
-    this.pendingPermissionIds.delete(id);
+    this.clearPendingPermission(id);
     this.notifyActivityChanged();
   }
 
@@ -1879,7 +2055,7 @@ export class SessionRuntime {
     const id = validateRequestId(requestId);
     if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
     this.requireClient().denyPermission(id);
-    this.pendingPermissionIds.delete(id);
+    this.clearPendingPermission(id);
     this.notifyActivityChanged();
   }
 
@@ -1920,12 +2096,12 @@ export class SessionRuntime {
   private registerIpc(): void {
     if (this.ipcRegistered) return;
     this.ipcRegistered = true;
-    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, text: unknown, images: unknown) => {
+    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, text: unknown, images: unknown, turnId?: unknown) => {
       this.assertSender(event);
       // The engine owns provider credential resolution. The Electron host must
       // not reject a prompt merely because no secret crossed its stdin boundary;
       // CLI/TUI may already have populated the shared secure store.
-      return this.sendPrompt(text, images);
+      return this.sendPrompt(text, images, turnId);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -1933,14 +2109,14 @@ export class SessionRuntime {
       const permissionResponse = validatePermissionResponse(response);
       if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
       this.requireClient().approvePermission(id, permissionResponse);
-      this.pendingPermissionIds.delete(id);
+      this.clearPendingPermission(id);
     });
     ipcMain.handle(CH_DENY, (event: IpcMainInvokeEvent, requestId: unknown) => {
       this.assertSender(event);
       const id = validateRequestId(requestId);
       if (!this.pendingPermissionIds.has(id)) throw new Error('permission request is not pending');
       this.requireClient().denyPermission(id);
-      this.pendingPermissionIds.delete(id);
+      this.clearPendingPermission(id);
     });
     ipcMain.handle(CH_APPROVE_COMPUTER_ACCESS, (event: IpcMainInvokeEvent, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -2038,7 +2214,7 @@ export class SessionRuntime {
       let generation = this.generation;
       let client = this.requireClient();
       const token = Symbol('fusion credential hydration');
-      this.pendingPromptHydrations.add(token);
+      this.pendingPromptHydrations.set(token, undefined);
       this.notifyActivityChanged();
       try {
         await this.ensureFusionOAuth(token);
@@ -2176,7 +2352,7 @@ export class SessionRuntime {
           throw new Error('Fusion credential loading was interrupted.');
         }
         // The intentional restart clears old hydrations; continue on its new client.
-        this.pendingPromptHydrations.add(token);
+        this.pendingPromptHydrations.set(token, undefined);
       } finally {
         this.launchOAuthOverride = undefined;
         this.launchOAuthModel = undefined;
@@ -2263,20 +2439,20 @@ export class SessionRuntime {
     const generation = this.generation;
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.pendingSessionResume?.generation !== generation) return;
-        this.pendingSessionResume = null;
-        reject(new Error(`timed out resuming session ${this.sessionId}`));
+        this.rejectPendingSessionResume(new Error(`timed out resuming session ${this.sessionId}`), pending);
       }, this.opts.sessionResumeTimeoutMs ?? 15_000);
       timer.unref();
-      this.pendingSessionResume = {
+      const pending: PendingSessionResume = {
         sessionId: this.sessionId,
         generation,
+        client,
         sessionResumed: false,
         hydrationStarted: false,
         resolve,
         reject,
         timer,
       };
+      this.pendingSessionResume = pending;
       try {
         client.sendCommand({
           type: 'resume_session',
@@ -2284,12 +2460,19 @@ export class SessionRuntime {
           cwd: this.projectPath || this.activeWorkspace,
         });
       } catch (error) {
-        this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)));
+        this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)), pending);
       }
     }).then(async () => {
+      const assertCurrent = () => {
+        if (generation !== this.generation || client !== this.client || this.disposed) throw new Error('session resume was interrupted');
+      };
+      assertCurrent();
       await this.restoreModel();
+      assertCurrent();
       await this.restorePermissionMode();
+      assertCurrent();
       await this.restoreFastMode();
+      assertCurrent();
     });
   }
 
@@ -2298,9 +2481,9 @@ export class SessionRuntime {
     if (!pending?.sessionResumed || !pending.model || pending.hydrationStarted) return;
     pending.hydrationStarted = true;
     void this.ensureModelProviderCredential(pending.model).then(
-      () => this.resolvePendingSessionResume(),
+      () => this.resolvePendingSessionResume(pending),
       (error: unknown) => this.rejectPendingSessionResume(
-        error instanceof Error ? error : new Error(String(error)),
+        error instanceof Error ? error : new Error(String(error)), pending,
       ),
     );
   }
@@ -2309,17 +2492,17 @@ export class SessionRuntime {
     if (this.sessionHasHistory) await this.resumeOwnedSession();
   }
 
-  private resolvePendingSessionResume(): void {
-    const pending = this.pendingSessionResume;
-    if (!pending || pending.sessionId !== this.sessionId || pending.generation !== this.generation) return;
+  private resolvePendingSessionResume(pending: PendingSessionResume): void {
+    if (this.pendingSessionResume !== pending || pending.sessionId !== this.sessionId
+      || pending.generation !== this.generation || pending.client !== this.client || this.disposed) return;
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
     pending.resolve();
   }
 
-  private rejectPendingSessionResume(error: Error): void {
+  private rejectPendingSessionResume(error: Error, owner?: PendingSessionResume): void {
     const pending = this.pendingSessionResume;
-    if (!pending) return;
+    if (!pending || (owner && (owner !== pending || owner.generation !== this.generation || owner.client !== this.client))) return;
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
     pending.reject(error);
@@ -2367,6 +2550,7 @@ export class SessionRuntime {
   private setState(next: ConnectionState): void {
     this.state = next;
     if (next.status === 'disconnected' || next.status === 'error' || next.status === 'idle') {
+      this.disconnectedForegroundPending ||= this.activeTurn || this.pendingInteractions > 0 || this.pendingPromptHydrations.size > 0;
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
       this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
@@ -2377,6 +2561,7 @@ export class SessionRuntime {
       // restart and every rewriting git operation.
       if (this.pendingScheduledTurns.size > 0) {
         this.activeTurn = false;
+        this.activeTurnGeneration = undefined;
         this.activeTurnId = undefined;
       }
       for (const pending of this.pendingScheduledTurns.values()) pending.reject(new Error('interrupted: Scheduled connection closed.'));
@@ -2403,12 +2588,7 @@ export class SessionRuntime {
     this.setState({ status: 'error', message });
   }
 
-  private async stopBridge(): Promise<void> {
-    const stoppingGeneration = this.generation;
-    ++this.generation;
-    await this.teardownAudioGeneration(stoppingGeneration);
-    await this.oauthPersistence;
-    this.openAiOAuthActive = false;
+  private clearPendingConnectionOperations(): void {
     for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
     this.pendingCron.clear();
     for (const pending of this.pendingScheduledTurns.values()) pending.reject(new Error('Scheduled execution interrupted.'));
@@ -2423,7 +2603,7 @@ export class SessionRuntime {
     this.pendingCredentialSettings = undefined;
     this.credentialRoutingSettings = undefined;
     this.pendingPromptHydrations.clear();
-    this.clearTurnInteractions();
+    this.clearTurnInteractions(true);
     for (const pending of this.pendingCredentialOperations.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('bridge credential operation was interrupted'));
@@ -2435,6 +2615,16 @@ export class SessionRuntime {
       pending.reject(new Error('provider connection test was interrupted'));
     }
     this.pendingProviderConnectionTests.clear();
+  }
+
+  private async stopBridge(): Promise<void> {
+    const stoppingGeneration = this.generation;
+    ++this.generation;
+    await this.teardownAudioGeneration(stoppingGeneration);
+    await this.oauthPersistence;
+    this.openAiOAuthActive = false;
+    this.connectionLockfilePath = null;
+    this.clearPendingConnectionOperations();
     this.activeWorkspace = undefined;
     this.activeWorkspaceTrusted = false;
     this.runtimeCredentialProviders.clear();
@@ -2442,7 +2632,9 @@ export class SessionRuntime {
     this.activeCredentialProviders.clear();
     this.credentialStorageEncrypted = false;
     this.gitActivity.reset();
+    this.disconnectedForegroundPending = false;
     this.activeTurn = false;
+    this.activeTurnGeneration = undefined;
     this.activeTurnId = undefined;
     this.cancellingTurn = false;
     const client = this.client;

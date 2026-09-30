@@ -1135,6 +1135,36 @@ pub(crate) fn patch_job_state_if_matches(
     })
 }
 
+pub(crate) fn retarget_job_session_with_lock_held(
+    config_home: &Path,
+    short: &str,
+    session_id: &str,
+    cwd: &Path,
+) -> std::io::Result<()> {
+    let relative = PathBuf::from("jobs").join(short).join("state.json");
+    let body = lingxi_core::host::rooted_fs::read_to_string(config_home, &relative)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut value: Value = serde_json::from_str(&body)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let map = value.as_object_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "job state is not an object",
+        )
+    })?;
+    map.insert("sessionId".into(), Value::String(session_id.to_string()));
+    map.insert("cwd".into(), Value::String(cwd.display().to_string()));
+    let body = serde_json::to_vec(&value)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    lingxi_core::host::rooted_fs::atomic_write(
+        config_home,
+        &relative,
+        &body,
+        lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
+    )
+    .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
 pub(crate) fn patch_job_state_with_lock_held(
     config_home: &Path,
     short: &str,

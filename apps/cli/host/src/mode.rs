@@ -181,6 +181,104 @@ async fn start_host_turn(
     let _ = tx.send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()));
 }
 
+/// Serialize completion publication with a user-requested session reset.
+/// Captured before spawning, so work that starts late still owns its old generation.
+#[derive(Default)]
+struct TuiSessionEffects {
+    generation: std::sync::Mutex<u64>,
+}
+
+impl TuiSessionEffects {
+    fn capture(&self) -> u64 {
+        *self
+            .generation
+            .lock()
+            .expect("TUI session effect generation")
+    }
+
+    fn invalidate(&self) {
+        let mut generation = self
+            .generation
+            .lock()
+            .expect("TUI session effect generation");
+        *generation += 1;
+    }
+
+    fn publish(
+        &self,
+        generation: u64,
+        tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+        events: impl IntoIterator<Item = tui::TurnEvent>,
+    ) -> bool {
+        // Keep the check and sends under the same lock as invalidate. An old
+        // event is either enqueued before reset begins, or never enqueued.
+        let current = self
+            .generation
+            .lock()
+            .expect("TUI session effect generation");
+        if *current != generation {
+            return false;
+        }
+        for event in events {
+            let _ = tx.send(event);
+        }
+        true
+    }
+}
+
+async fn acquire_session_mutation<'a>(
+    gate: &'a tokio::sync::Mutex<()>,
+    effects: &TuiSessionEffects,
+    generation: u64,
+) -> Option<tokio::sync::MutexGuard<'a, ()>> {
+    let guard = gate.lock().await;
+    (effects.capture() == generation).then_some(guard)
+}
+
+async fn run_tui_bash(
+    runner: &dyn tool_api::bash_runner::BashRunner,
+    command: &str,
+    effects: &TuiSessionEffects,
+    generation: u64,
+    tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
+) -> bool {
+    if effects.capture() != generation {
+        return false;
+    }
+    // The pinned DesktopBashRunner only executes BashTool and returns output;
+    // it does not append model history or durable conversation messages.
+    let out = runner.run(command).await;
+    effects.publish(
+        generation,
+        tx,
+        [tui::TurnEvent::BashOutput {
+            stdout: out.stdout,
+            stderr: out.stderr,
+        }],
+    )
+}
+
+pub(crate) async fn clear_tui_backend(
+    orchestrator: &dyn OrchestratorHandle,
+    title: Option<&str>,
+) -> Result<String, String> {
+    // /clear [name] labels the conversation being left, matching Desktop.
+    if let Some(title) = title {
+        if let Err(error) = orchestrator.rename_session(title.to_string()).await {
+            tracing::warn!(%error, "conversation title could not be saved before clear");
+        }
+    }
+    orchestrator
+        .clear_session()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(orchestrator
+        .current_session_id()
+        .await
+        .as_uuid()
+        .to_string())
+}
+
 fn slash_model_prompt(
     result: lingxi_core::host::SlashDispatchResult,
     tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
@@ -1174,6 +1272,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // `/add-dir` effect widens; cloned before `tui_build.runtime` is consumed.
     let permission_session_cwd = tui_build.runtime.session_cwd.clone();
     let permission_mcp_registry = tui_build.runtime.mcp_registry.clone();
+    let permission_policy_gate = tui_build.runtime.enforcing_permission_gate.clone();
     // Native scrollback must resolve relative attachment paths against the
     // LIVE session cwd: `/cd` swaps this shared cell after the TUI mounts.
     // Keep the TUI independent of the concrete cell type by passing a small
@@ -1197,6 +1296,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let permission_turn_tx = turn_tx.clone();
     let bash_turn_tx = turn_tx.clone();
     let compact_turn_tx = turn_tx.clone();
+    let clear_tx = turn_tx.clone();
     let rename_turn_tx = turn_tx.clone();
     let fast_turn_tx = turn_tx.clone();
     let plan_turn_tx = turn_tx.clone();
@@ -1269,6 +1369,16 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // `on_submit` moves `orchestrator`/`handle` into its closure.
     let compact_orch = orchestrator.clone();
     let compact_handle = handle.clone();
+    let clear_handle = handle.clone();
+    let session_effects = Arc::new(TuiSessionEffects::default());
+    let bash_effects = session_effects.clone();
+    let compact_effects = session_effects.clone();
+    let summarize_effects = session_effects.clone();
+    let clear_effects = session_effects.clone();
+    let rename_effects = session_effects.clone();
+    let directory_effects = session_effects.clone();
+    let rename_session_gate = teammate_turn_gate.clone();
+    let directory_session_gate = teammate_turn_gate.clone();
     let summarize_orch = orchestrator.clone();
     let summarize_handle = handle.clone();
     let summarize_turn_tx = turn_tx.clone();
@@ -1690,9 +1800,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // (/permissions async effect) The editor returns a `PermissionAction`
     // synchronously from the blocking ratatui loop; the settings-file write is
     // async, so it is spawned onto the captured handle — same shape as
-    // `on_web_action` above. For an ADDED allow rule the effect also pushes
-    // into the gate's live `session_allow_rules` so it takes effect THIS
-    // session (deny/ask are effective-next-load). The result lands in the
+    // `on_web_action` above. Rule changes update the retained SDK policy and
+    // the transport's allow cache in the same settings layer. The result lands in the
     // transcript via `TurnEvent::SystemNotice`, and the shared snapshot slot is
     // refreshed so the next `/permissions` open reflects the edit.
     let permission_snapshot_cb = permission_snapshot.clone();
@@ -1703,8 +1812,25 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let snapshot = permission_snapshot_cb.clone();
         let session_cwd = permission_session_cwd.clone();
         let mcp_registry = permission_mcp_registry.clone();
+        let policy_gate = permission_policy_gate.clone();
         let orch = permission_orch.clone();
+        let effects = directory_effects.clone();
+        let generation = effects.capture();
+        let gate = directory_session_gate.clone();
         permission_handle.spawn(async move {
+            // Transcript relocation must finish before clear switches writers.
+            let _directory_guard = if matches!(
+                &action,
+                tui::bottom_pane::PermissionAction::ChangeDirectory { .. }
+            ) {
+                let Some(guard) = acquire_session_mutation(&gate, &effects, generation).await
+                else {
+                    return;
+                };
+                Some(guard)
+            } else {
+                None
+            };
             run_permission_action(
                 action,
                 paths,
@@ -1713,6 +1839,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 snapshot,
                 session_cwd,
                 mcp_registry,
+                policy_gate,
                 orch,
             )
             .await;
@@ -1726,12 +1853,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let on_bash = move |command: String| {
         let runner = bash_runner.clone();
         let tx = bash_turn_tx.clone();
+        let effects = bash_effects.clone();
+        let generation = effects.capture();
         bash_handle.spawn(async move {
-            let out = runner.run(&command).await;
-            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::BashOutput {
-                stdout: out.stdout,
-                stderr: out.stderr,
-            });
+            run_tui_bash(runner.as_ref(), &command, &effects, generation, &tx).await;
         });
     };
     // (/compact async effect) `/compact` returns `ChatOutcome::Compact` from the
@@ -1746,6 +1871,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let on_compact = move |args: String, cancel: CancellationToken| {
         let orch = compact_orch.clone();
         let tx = compact_turn_tx.clone();
+        let effects = compact_effects.clone();
+        let generation = effects.capture();
         compact_handle.spawn(async move {
             let custom = (!args.trim().is_empty()).then_some(args.as_str());
             let (body, is_error) = match orch
@@ -1765,10 +1892,15 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     )
                 }
             };
-            // Clear the spinner/bar first, then land the terminal line.
-            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactEnded);
-            let _ =
-                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
+            // Publish both old-session terminal effects before reset or drop both.
+            effects.publish(
+                generation,
+                &tx,
+                [
+                    tui::TurnEvent::CompactEnded,
+                    tui::TurnEvent::SystemNotice { body, is_error },
+                ],
+            );
         });
     };
     // `/rewind` → "Summarize from here" / "Summarize up to here". Runs off the
@@ -1783,6 +1915,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
                              cancel: CancellationToken| {
         let orch = summarize_orch.clone();
         let tx = summarize_turn_tx.clone();
+        let effects = summarize_effects.clone();
+        let generation = effects.capture();
         summarize_handle.spawn(async move {
             let (body, is_error) = match orch
                 .summarize_at(&message.to_string(), context.as_deref(), direction, cancel)
@@ -1803,9 +1937,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     )
                 }
             };
-            let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::CompactEnded);
-            let _ =
-                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
+            effects.publish(
+                generation,
+                &tx,
+                [
+                    tui::TurnEvent::CompactEnded,
+                    tui::TurnEvent::SystemNotice { body, is_error },
+                ],
+            );
         });
     };
     // `/rename [name]`: a bare invocation first runs the history-inert,
@@ -1815,28 +1954,34 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let orch = rename_orch.clone();
         let tx = rename_turn_tx.clone();
         let rename_reg = rename_reg.clone();
+        let effects = rename_effects.clone();
+        let generation = effects.capture();
+        let gate = rename_session_gate.clone();
         rename_handle.spawn(async move {
             let name = if requested_name.trim().is_empty() {
                 match orch.generate_session_name().await {
                     Ok(Some(name)) => name,
                     Ok(None) => {
-                        let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
+                        effects.publish(generation, &tx, [tui::TurnEvent::SystemNotice {
                             body: "Could not generate a name: no conversation context yet. Usage: /rename <name>".to_string(),
                             is_error: false,
-                        });
+                        }]);
                         return;
                     }
                     Err(_) => {
-                        let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
-                            body: "Error renaming session".to_string(),
-                            is_error: true,
-                        });
+                        effects.publish(generation, &tx, [tui::TurnEvent::SystemNotice {
+                            body: "Error renaming session".to_string(), is_error: true,
+                        }]);
                         return;
                     }
                 }
             } else {
                 requested_name.trim().to_string()
             };
+            // A generated name still belongs to the session whose history
+            // produced it. Serialize its durable write with clear and reject
+            // it when reset won the gate while the name was being generated.
+            let Some(_guard) = acquire_session_mutation(&gate, &effects, generation).await else { return; };
             let (body, is_error) = match orch.rename_session(name.clone()).await {
                 Ok(()) => {
                     let advertised = if let Some(dir) = lingxi_core::host::live_sessions::process_dir() {
@@ -1856,12 +2001,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
                                     );
                                 }
                                 if let Some(notice) = claim.notice {
-                                    let _ = tx.send(
-                                        tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
-                                            body: notice,
-                                            is_error: false,
-                                        },
-                                    );
+                                    effects.publish(generation, &tx, [tui::TurnEvent::SystemNotice {
+                                        body: notice, is_error: false,
+                                    }]);
                                     claim.name
                                 } else {
                                     claim.name
@@ -1876,8 +2018,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 }
                 Err(_e) => ("Error renaming session".to_string(), true),
             };
-            let _ =
-                tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice { body, is_error });
+            effects.publish(generation, &tx, [tui::TurnEvent::SystemNotice { body, is_error }]);
         });
     };
     // (/fast async effect) `/fast [on|off]` returns `ChatOutcome::FastMode` from
@@ -1999,6 +2140,68 @@ pub(crate) async fn run_ratatui_with_initial_state(
             }
             if let Some(mode) = orch.permission_mode().await {
                 let _ = tx.send(tui::TurnEvent::PermissionModeChanged(mode));
+            }
+        });
+    };
+    // Clear owns the same turn gate as foreground submission. The widget
+    // cancels old owners before asking and admits no new input until this ACK.
+    let clear_orch = concrete_orchestrator.clone();
+    let clear_gate = teammate_turn_gate.clone();
+    let clear_queue = prompt_queue.clone();
+    let clear_state = pending_slashes.clone();
+    let clear_registration = registration.clone();
+    let clear_home = tui_build.permission_paths.lingxi_home.clone();
+    let clear_cwd = tui_build.runtime.session_cwd.clone();
+    let on_clear_session = move |title: Option<String>| {
+        // Fence UI-only async producers immediately, before awaiting SDK owners.
+        clear_effects.invalidate();
+        let orch = clear_orch.clone();
+        let tx = clear_tx.clone();
+        let gate = clear_gate.clone();
+        let queue = clear_queue.clone();
+        let state = clear_state.clone();
+        let registration = clear_registration.clone();
+        let home = clear_home.clone();
+        let cwd = clear_cwd.clone();
+        clear_handle.spawn(async move {
+            let _guard = tokio::select! {
+                biased;
+                _ = state.shutdown.cancelled() => return,
+                guard = gate.lock() => guard,
+            };
+            queue.clear().await;
+            let old_session_id = orch.current_session_id().await.as_uuid().to_string();
+            match clear_tui_backend(orch.as_ref(), title.as_deref()).await {
+                Ok(session_id) => {
+                    ensure_live_messaging(&session_id, None, registration.as_ref());
+                    let cwd = cwd.cwd();
+                    let background_error =
+                        crate::background_launch::refresh_current_background_session(
+                            &old_session_id,
+                            &session_id,
+                            &cwd,
+                        )
+                        .err();
+                    // The SDK reset committed even if host bookkeeping fails.
+                    // ACK first so a following notice survives the UI clear.
+                    let _ = tx.send(tui::TurnEvent::SessionCleared {
+                        session_id,
+                        home,
+                        cwd,
+                    });
+                    if let Some(error) = background_error {
+                        let _ = tx.send(tui::TurnEvent::SystemNotice {
+                            body: format!("Could not update background session identity: {error}"),
+                            is_error: true,
+                        });
+                    }
+                    if let Some(host) = state.loop_host.get() {
+                        host.refresh_session().await;
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(tui::TurnEvent::SessionClearFailed(error));
+                }
             }
         });
     };
@@ -2604,6 +2807,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_fast_mode,
             on_plan_mode,
             on_set_permission_mode,
+            on_clear_session,
             on_sandbox_action,
             on_task_action,
             on_dispatch_slash,
@@ -2611,6 +2815,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         )
     })
     .await;
+    session_effects.invalidate();
     pump_shutdown.cancel();
     loop_host.shutdown().await;
     let _ = loop_queue_pump.await;
@@ -3213,18 +3418,47 @@ fn fail_current_background_job_after_cd_failure(detail: &str) {
     }
 }
 
+fn live_permission_rule_update(
+    update: &permission::PermissionUpdate,
+    remove: bool,
+) -> serde_json::Value {
+    use permission::{PermissionBehavior, PermissionUpdateDestination};
+    let destination = match update.destination {
+        PermissionUpdateDestination::UserSettings => "userSettings",
+        PermissionUpdateDestination::ProjectSettings => "projectSettings",
+        PermissionUpdateDestination::LocalSettings => "localSettings",
+        PermissionUpdateDestination::Session => "session",
+        PermissionUpdateDestination::CliArg => "cliArg",
+    };
+    let behavior = match update.rule.behavior {
+        PermissionBehavior::Allow => "allow",
+        PermissionBehavior::Deny => "deny",
+        PermissionBehavior::Ask => "ask",
+    };
+    let mut rule = serde_json::json!({"toolName": update.rule.value.tool_name});
+    if let Some(content) = &update.rule.value.rule_content {
+        rule["ruleContent"] = serde_json::json!(content);
+    }
+    serde_json::json!({
+        "type": if remove { "removeRules" } else { "addRules" },
+        "destination": destination,
+        "behavior": behavior,
+        "rules": [rule],
+    })
+}
+
 /// Run one `/permissions` [`tui::bottom_pane::PermissionAction`] to
 /// completion: merge the added/removed rule into its destination settings file
 /// via [`permission::persist_permission_update`] /
-/// [`permission::remove_permission_update`], and (for an ADDED allow rule) push
-/// it into the gate's live `session_allow_rules` so it takes effect this
-/// session. The snapshot slot is re-read from disk afterward so the next
+/// [`permission::remove_permission_update`], then update the SDK live policy
+/// and the transport cache for the edited settings layer. The snapshot slot
+/// is re-read from disk afterward so the next
 /// `/permissions` open reflects the edit, and the outcome is reported to the
 /// transcript via `TurnEvent::SystemNotice` — mirroring [`run_web_action`]'s
 /// off-loop shape.
-async fn run_permission_action(
+pub(crate) async fn run_permission_action(
     action: tui::bottom_pane::PermissionAction,
-    paths: permission::PermissionPaths,
+    mut paths: permission::PermissionPaths,
     session_allow_rules: std::sync::Arc<tokio::sync::Mutex<Vec<permission::PermissionRule>>>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
     snapshot: std::sync::Arc<
@@ -3235,6 +3469,7 @@ async fn run_permission_action(
     // arm to apply the add to the running session (file access + roots/list).
     session_cwd: std::sync::Arc<tool_api::SessionCwd>,
     mcp_registry: std::sync::Arc<mcp::McpRegistry>,
+    policy_gate: Option<std::sync::Arc<dyn permission::PermissionGate>>,
     // Used by the `AddDirectory` arm to fire the `DirectoryAdded` hook
     // (2.1.219) after a directory is actually added, and by `/cd` to persist
     // the transcript relocation against the concrete session writer.
@@ -3247,6 +3482,9 @@ async fn run_permission_action(
     use tui::bottom_pane::permissions_editor_view::PermissionsSnapshot;
     use tui::bottom_pane::PermissionAction;
     use tui_core::orchestrator_bridge::TurnEvent;
+
+    // Resolve at the action boundary, after any preceding /cd completed.
+    paths.cwd = session_cwd.cwd();
 
     let behavior_word = |b: PermissionBehavior| match b {
         PermissionBehavior::Allow => "allow",
@@ -3299,12 +3537,16 @@ async fn run_permission_action(
             };
             match persist_permission_update(&update, &paths).await {
                 Ok(written) => {
-                    // Live this-session effect for allow rules: mirror the
-                    // AllowAlways dialog's `session_allow_rules` push so the
-                    // rule short-circuits the gate immediately (deny/ask have
-                    // no live bucket → effective-next-load).
+                    if let Some(gate) = &policy_gate {
+                        gate.apply_permission_updates(&[live_permission_rule_update(
+                            &update, false,
+                        )]);
+                    }
                     if behavior == PermissionBehavior::Allow {
-                        session_allow_rules.lock().await.push(update.rule.clone());
+                        let mut rules = session_allow_rules.lock().await;
+                        if !rules.contains(&update.rule) {
+                            rules.push(update.rule.clone());
+                        }
                     }
                     refresh(&paths);
                     let body = if written {
@@ -3348,19 +3590,18 @@ async fn run_permission_action(
             };
             match remove_permission_update(&update, &paths).await {
                 Ok(removed) => {
-                    // Revoke the live this-session grant too: the Add branch
-                    // pushed allow rules into `session_allow_rules` (the gate's
-                    // step-1 short-circuit), so removing from disk alone would
-                    // leave an added-then-removed rule auto-approving for the
-                    // rest of the session. Drop every session allow rule whose
-                    // VALUE matches (independent of source, so a grant made via
-                    // the AllowAlways dialog is revoked too).
+                    if let Some(gate) = &policy_gate {
+                        gate.apply_permission_updates(&[live_permission_rule_update(
+                            &update, true,
+                        )]);
+                    }
+                    // A local revocation must preserve an independent user,
+                    // project or session grant with the same match value.
                     if behavior == PermissionBehavior::Allow {
-                        let target = update.rule.value.clone();
                         session_allow_rules
                             .lock()
                             .await
-                            .retain(|r| r.value != target);
+                            .retain(|rule| rule != &update.rule);
                     }
                     refresh(&paths);
                     let body = if removed {
@@ -3522,6 +3763,11 @@ async fn run_permission_action(
                     return;
                 }
             }
+            let live_paths = permission::PermissionPaths {
+                lingxi_home: paths.lingxi_home.clone(),
+                cwd: target,
+            };
+            refresh(&live_paths);
             command_api::builtins::cd::emit_command();
             let _ = turn_tx.send(TurnEvent::SystemNotice {
                 body: command_api::builtins::cd::result_message(&path),
@@ -4843,6 +5089,114 @@ async fn trust_gate() -> TrustGateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DelayedBashRunner {
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    #[async_trait::async_trait]
+    impl tool_api::bash_runner::BashRunner for DelayedBashRunner {
+        async fn run(&self, command: &str) -> tool_api::bash_runner::BashRunOutput {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            let _ = (&mut *self.release.lock().await).await;
+            tool_api::bash_runner::BashRunOutput {
+                stdout: command.to_string(),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn old_session_mutation_cannot_acquire_after_clear() {
+        let effects = Arc::new(TuiSessionEffects::default());
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let reset_guard = gate.lock().await;
+        let generation = effects.capture();
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let old_mutation = tokio::spawn({
+            let gate = gate.clone();
+            let effects = effects.clone();
+            async move {
+                started.send(()).unwrap();
+                acquire_session_mutation(&gate, &effects, generation)
+                    .await
+                    .is_some()
+            }
+        });
+        started_rx.await.unwrap();
+        effects.invalidate();
+        drop(reset_guard);
+        assert!(
+            !old_mutation.await.unwrap(),
+            "old rename/cwd authority cannot mutate the new session"
+        );
+        assert!(acquire_session_mutation(&gate, &effects, effects.capture())
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn old_bash_completion_cannot_cross_clear_ack() {
+        let effects = Arc::new(TuiSessionEffects::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let runner = Arc::new(DelayedBashRunner {
+            started: std::sync::Mutex::new(Some(started)),
+            release: tokio::sync::Mutex::new(release_rx),
+        });
+        let generation = effects.capture();
+        let task = tokio::spawn({
+            let effects = effects.clone();
+            let tx = tx.clone();
+            async move { run_tui_bash(runner.as_ref(), "old output", &effects, generation, &tx).await }
+        });
+        started_rx.await.unwrap();
+        effects.invalidate();
+        let home = tempfile::tempdir().unwrap();
+        tx.send(tui::TurnEvent::SessionCleared {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            home: home.path().to_owned(),
+            cwd: home.path().to_owned(),
+        })
+        .unwrap();
+        release.send(()).unwrap();
+        assert!(!task.await.unwrap(), "old Bash output was fenced");
+        assert!(matches!(
+            rx.recv().await,
+            Some(tui::TurnEvent::SessionCleared { .. })
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "old completion cannot enter the new transcript"
+        );
+        // A newly admitted bang command still publishes normally.
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        release.send(()).unwrap();
+        let runner = DelayedBashRunner {
+            started: std::sync::Mutex::new(None),
+            release: tokio::sync::Mutex::new(release_rx),
+        };
+        assert!(run_tui_bash(&runner, "new output", &effects, effects.capture(), &tx).await);
+        assert!(
+            matches!(rx.recv().await, Some(tui::TurnEvent::BashOutput { stdout, .. }) if stdout == "new output")
+        );
+        assert!(!effects.publish(
+            generation,
+            &tx,
+            [
+                tui::TurnEvent::CompactEnded,
+                tui::TurnEvent::SystemNotice {
+                    body: "old summary".into(),
+                    is_error: false
+                }
+            ]
+        ));
+        assert!(rx.try_recv().is_err());
+    }
 
     /// The `/rewind` summarize closure must call `summarize_at` and thread the
     /// DIRECTION and the user's context through it.

@@ -42,7 +42,13 @@ function Fixture() {
   // `useCallback` with empty deps keeps these referentially stable across
   // Fixture re-renders — `SettingsScreen` depends on `bridge.refreshSettingsSnapshot`'s
   // identity in an effect, and a fresh function every render would refire it forever.
-  const refreshSettingsSnapshot = useCallback(async () => { setRefreshCalls((n) => n + 1); }, []);
+  const refreshSettingsSnapshot = useCallback(async () => {
+    setRefreshCalls((n) => n + 1);
+    setSettingsSnapshotEvent((previous) => previous ?? {
+      type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}',
+      active_json: '{}', layers_json: '{"user":{},"project":{},"local":{}}',
+    } as SettingsSnapshotEvent);
+  }, []);
   // Task 18 fix round 1, Important: records its call so a scenario can
   // prove `Permissions.tsx` dispatches through `capturePermissionEdit`'s
   // exact shape end-to-end, not just that the pure function itself
@@ -355,6 +361,7 @@ function Fixture() {
       closeSettings: () => setOpen(false),
       focusOpener: () => (document.getElementById('opener') as HTMLButtonElement | null)?.focus(),
       state: () => ({
+        settingsSnapshotReady: settingsSnapshotEvent !== null,
         hasLayerSwitcher: Boolean(document.querySelector('[data-testid="layer-switcher"]')),
         userDisabled: (document.querySelector('[data-layer="user"]') as HTMLButtonElement | null)?.disabled ?? null,
         projectDisabled: (document.querySelector('[data-layer="project"]') as HTMLButtonElement | null)?.disabled ?? null,
@@ -382,7 +389,7 @@ function Fixture() {
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, credentialWrites, providerCredentials]);
+  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, credentialWrites, providerCredentials, settingsSnapshotEvent]);
 
   return (
     <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
@@ -431,6 +438,7 @@ declare global {
       closeSettings(): void;
       focusOpener(): void;
       state(): {
+        settingsSnapshotReady: boolean;
         hasLayerSwitcher: boolean;
         userDisabled: boolean | null;
         projectDisabled: boolean | null;

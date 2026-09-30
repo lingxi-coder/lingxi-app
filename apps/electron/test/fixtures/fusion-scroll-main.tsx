@@ -7,7 +7,9 @@ import '../../src/renderer/global.css';
 // No real sessions, credentials, engine, or persistence.
 const bridge = {
   activeSession: { sessionId: 'fixture', projectPath: '/fixture' },
-  connected: true, sessionLoading: false, settingsSnapshotEvent: null,
+  connected: true, sessionLoading: false,
+  settingsSnapshotEvent: { type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}',
+    layers_json: '{"user":{},"project":{},"local":{}}' },
   refreshSettingsSnapshot: async () => {},
   bootstrap: { settings: {}, workspace: {}, providerCredentials: [{ providerId: 'fixture', configured: true }] },
   desktop: { providerModelCatalog: [{ provider_id: 'fixture', provider_label: 'Configured provider',

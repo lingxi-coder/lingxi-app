@@ -274,6 +274,7 @@ async function main() {
 
     client = new BridgeClient({ lockfilePath, clientName: 'lingxi-e2e/0.1.0' });
     client.on('error', (err) => log(`client error: ${err.message}`));
+    const events = client.events();
 
     log('connecting + handshaking…');
     const hello = await client.connect();
@@ -297,7 +298,7 @@ async function main() {
     );
 
     const drain = (async () => {
-      for await (const ev of client.events()) {
+      for await (const ev of events) {
         process.stdout.write(`${describeEvent(ev)}\n`);
         if (ev.type === 'text_delta') {
           sawAnyText = true;

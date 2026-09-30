@@ -1,6 +1,7 @@
 package com.lingxi.code.project
 
 import com.lingxi.code.model.SessionMode
+import com.lingxi.code.conversation.completeSessionListCommand
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -16,6 +17,24 @@ class ProjectRepositorySessionModeTest {
         projectsRoot = File(temp.root, "projects"),
         now = { 1000L },
     )
+
+    @Test
+    fun `authoritative session listing keeps more than the SDK default five rows`() {
+        val command = completeSessionListCommand()
+        assertEquals(UInt.MAX_VALUE, command.limit)
+        val repository = repository()
+        val rows = (1..8).map { index ->
+            ProjectSessionSummary("session-$index", "Session $index", 2, "Now", index.toLong())
+        }.sortedByDescending { it.updatedAtEpochMillis }
+        repository.updateSessions(null, rows)
+
+        // Model the pinned SDK's truncation by the explicitly requested limit.
+        // The local index replacement must receive all confirmed rows.
+        repository.updateSessions(null, rows.take(command.limit!!.toLong().coerceAtMost(rows.size.toLong()).toInt()))
+
+        assertEquals(8, repository().load().globalSessions.size)
+        assertEquals(rows.map { it.sessionId }, repository.load().globalSessions.map { it.sessionId })
+    }
 
     @Test
     fun `global session index preserves session mode`() {

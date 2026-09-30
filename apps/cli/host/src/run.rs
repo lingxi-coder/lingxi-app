@@ -17,7 +17,7 @@ use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStrea
 use crate::stream_json_input::{
     content_to_prompt, control_frame_request_id, control_request_subtype, emit_raw_frame_queued,
     emit_replay_ack_queued, spawn_stdin_router, ControlPlaneWriter, StdinChannels,
-    StdinControlFrame, StreamInput,
+    StdinControlFrame, StdinReaderStatus, StreamInput,
 };
 use command_api::format_description_with_source;
 use control::{
@@ -540,10 +540,14 @@ pub async fn run_stream_json_input_loop(
             runtime,
             stream,
             permission_mode,
-            control_plane,
+            control_plane.clone(),
             auxiliary_tasks.clone(),
+            None,
         ),
-        auxiliary_tasks.abort_and_join(),
+        async {
+            control_plane.shutdown("Session ended").await;
+            auxiliary_tasks.abort_and_join().await;
+        },
     )
     .await
 }
@@ -555,6 +559,7 @@ async fn run_stream_json_input_loop_inner(
     permission_mode: permission::PermissionMode,
     control_plane: Arc<StdioControlPlane>,
     auxiliary_tasks: Arc<PrintAuxTaskGroup>,
+    stdin_channels: Option<StdinChannels>,
 ) -> i32 {
     // Collect the real session_id and model from the orchestrator after build.
     let (session_id_str, model_str) = {
@@ -679,12 +684,14 @@ async fn run_stream_json_input_loop_inner(
         mut input_rx,
         mut control_req_rx,
         mut control_resp_rx,
-    } = spawn_stdin_router(
+        status: reader_status,
+        reader,
+    } = stdin_channels.unwrap_or_else(|| spawn_stdin_router(
         argv.replay_user_messages,
         session_id_str.clone(),
         stream.outbound_tx(),
         queue_lifecycle.clone(),
-    );
+    ));
 
     // ORPHANED PERMISSION recovery channel. A late `control_response` whose
     // `can_use_tool` request was lost (process restart with `--resume`, or a
@@ -711,8 +718,25 @@ async fn run_stream_json_input_loop_inner(
         // gate awaiting a `can_use_tool` response does not hang forever
         // (claude-code StructuredIO rejects all pendingRequests at input close).
         resolver_plane
-            .fail_all_pending("Tool permission stream closed before response received")
+            .close_input("Tool permission stream closed before response received")
             .await;
+    }));
+
+    let fatal_plane = control_plane.clone();
+    let mut fatal_status = reader_status.clone();
+    auxiliary_tasks.push(tokio::spawn(async move {
+        loop {
+            let status = fatal_status.borrow_and_update().clone();
+            match status {
+                StdinReaderStatus::Failed(error) => {
+                    fatal_plane.shutdown(&error.to_string()).await;
+                    return;
+                }
+                StdinReaderStatus::Reading => {}
+                StdinReaderStatus::Eof | StdinReaderStatus::Stopped => return,
+            }
+            if fatal_status.changed().await.is_err() { return; }
+        }
     }));
 
     // ③ Phase 1: pre-collect initialization data for the `initialize` handler.
@@ -872,6 +896,7 @@ async fn run_stream_json_input_loop_inner(
                         &ctrl_file_suggestions,
                     )
                     .await;
+                    if subtype == "end_session" { break; }
                 }
             }
         }
@@ -900,9 +925,14 @@ async fn run_stream_json_input_loop_inner(
 
     let mut explicit_end_session = false;
     loop {
+        if let StdinReaderStatus::Failed(error) = reader_status.borrow().clone() {
+            last_turn_err = Some(orchestrator::OrchestratorError::Internal(error.to_string()));
+            break;
+        }
         let turn = tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                 if runtime.task_registry.has_pending_task_notifications_for(None).await {
+                    let _operation = control_plane.lock_operation().await;
                     let cancel = tokio_util::sync::CancellationToken::new();
                     control_plane.set_active_turn(cancel.clone()).await;
                     let result = runtime.orchestrator.run_task_notification_rewake(runtime.task_registry.as_ref(), cancel).await;
@@ -923,7 +953,13 @@ async fn run_stream_json_input_loop_inner(
             // concurrently with a turn, since both mutate `session.history`).
             recv = orphan_rx.recv(), if !orphan_closed => match recv {
                 Some(cmd) => {
-                    recover_orphaned_permission(runtime, cmd, &mut handled_orphans).await;
+                    let _operation = control_plane.lock_operation().await;
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    control_plane.set_active_turn(cancel.clone()).await;
+                    recover_orphaned_permission(runtime, cmd, &mut handled_orphans, cancel).await;
+                    // Cancel tools have unwound; Block tools and result writes
+                    // have completed before this owner releases cwd/admission.
+                    control_plane.clear_active_turn().await;
                     continue;
                 }
                 None => {
@@ -947,7 +983,11 @@ async fn run_stream_json_input_loop_inner(
                 }
                 Some(StreamInput::Bash(command)) => {
                     let input = format!("<bash-input>{}</bash-input>", command.command);
-                    let output = runtime.bash_runner.run(&command.command).await;
+                    let _operation = control_plane.lock_operation().await;
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    control_plane.set_active_turn(cancel.clone()).await;
+                    let output = runtime.bash_runner
+                        .run_with_cancel(&command.command, cancel).await;
                     // Oracle frame:
                     // `<bash-stdout>..</bash-stdout><bash-stderr>..</bash-stderr>
                     //  <bash-exit-code>N</bash-exit-code>`
@@ -971,6 +1011,9 @@ async fn run_stream_json_input_loop_inner(
                             &session_id_str,
                         );
                     }
+                    // Retain busy and the cwd lease through child settlement
+                    // AND its ordered transcript/output publication.
+                    control_plane.clear_active_turn().await;
                     continue;
                 }
                 None => break, // stdin closed or fatal error — exit the loop.
@@ -1061,6 +1104,7 @@ async fn run_stream_json_input_loop_inner(
         // the bridge would exit, and no later `interrupt` could reach the
         // token. Loop rather than await a single change so a `false` reset
         // racing the turn start does not retire the bridge either.
+        let _operation = control_plane.lock_operation().await;
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_clone = cancel.clone();
         let mut cancel_rx2 = cancel_tx.subscribe();
@@ -1170,6 +1214,9 @@ async fn run_stream_json_input_loop_inner(
         }
     }
 
+    if let StdinReaderStatus::Failed(error) = reader_status.borrow().clone() {
+        last_turn_err = Some(orchestrator::OrchestratorError::Internal(error.to_string()));
+    }
     if explicit_end_session || last_turn_err.is_some() {
         stop_print_tasks(runtime).await;
     } else {
@@ -1195,16 +1242,20 @@ async fn run_stream_json_input_loop_inner(
         }
     }
 
+    input_rx.close();
+    reader.stop();
+    control_plane.shutdown("Session ended").await;
+    if explicit_end_session || last_turn_err.is_some() {
+        auxiliary_tasks.abort_and_join().await;
+    } else {
+        auxiliary_tasks.join().await;
+    }
+
     // Stream teardown (binary `Hkm`): every uuid still queue-resident gets a
     // terminal `discarded` lifecycle — covers both stdin EOF and `end_session`.
     for uuid in queue_lifecycle.queued.drain_for_discard() {
         queue_lifecycle.emit(&uuid, crate::queued_commands::LIFECYCLE_DISCARDED);
     }
-
-    // Wait for the control dispatcher + response resolver to finish (they exit
-    // when their channels close, which happens when the stdin reader task
-    // finishes or drops the senders).
-    auxiliary_tasks.join().await;
 
     if let Some((cancel, mut handle)) = prompt_suggestion_task.take() {
         if tokio::time::timeout(std::time::Duration::from_secs(30), &mut handle)
@@ -1216,7 +1267,7 @@ async fn run_stream_json_input_loop_inner(
         }
     }
 
-    if !had_any_turn {
+    if !had_any_turn && last_turn_err.is_none() {
         // No user turns received — emit an empty-result envelope.
         let cost = runtime.orchestrator.snapshot_cost().await;
         stream
@@ -1491,3 +1542,11 @@ async fn run_slash_command_with_budget(
 #[cfg(test)]
 #[path = "run/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "run/stdio_lifecycle_tests.rs"]
+mod stdio_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "run/orphan_lifecycle_tests.rs"]
+mod orphan_lifecycle_tests;

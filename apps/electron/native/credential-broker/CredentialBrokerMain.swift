@@ -5,28 +5,23 @@ import Security
     func perform(_ requestData: NSData, withReply reply: @escaping (NSData?, NSString?) -> Void)
 }
 
-actor PayloadCache {
+actor CredentialStore {
     struct CacheKey: Hashable {
         let service: String
         let account: String
     }
 
-    private var values: [CacheKey: Data] = [:]
-
-    func value(for key: CacheKey) -> Data? { values[key] }
-    func set(_ value: Data, for key: CacheKey) { values[key] = value }
-    func remove(_ key: CacheKey) { values.removeValue(forKey: key) }
-}
-
-final class CredentialStore {
     private let manifest: BrokerManifest
-    private let cache = PayloadCache()
+    private var cache: [CacheKey: Data] = [:]
 
     init(manifest: BrokerManifest) {
         self.manifest = manifest
     }
 
-    func handle(_ request: BrokerRequest) async -> BrokerResponse {
+    // No suspension points: each Keychain operation and its cache mutation are
+    // one actor-isolated transaction, so a completed delete cannot be undone
+    // by an earlier in-flight retrieval.
+    func handle(_ request: BrokerRequest) -> BrokerResponse {
         do {
             switch request.op {
             case "health":
@@ -41,12 +36,12 @@ final class CredentialStore {
                     throw BrokerFailure.invalidRequest("invalid payload")
                 }
                 try store(data: data, service: service, account: account)
-                await cache.set(data, for: cacheKey(service: service, account: account))
+                cache[cacheKey(service: service, account: account)] = data
                 return successResponse()
             case "retrieve":
                 let service = try validatedService(request.service)
                 let account = try validatedAccount(request.account, service: service)
-                let payload = try await retrieve(service: service, account: account)
+                let payload = try retrieve(service: service, account: account)
                 return successResponse(
                     present: payload != nil,
                     payload: payload.flatMap { String(data: $0, encoding: .utf8) }
@@ -58,7 +53,7 @@ final class CredentialStore {
             case "preview":
                 let service = try validatedService(request.service)
                 let account = try validatedAccount(request.account, service: service)
-                let payload = try await retrieve(service: service, account: account)
+                let payload = try retrieve(service: service, account: account)
                 let value = payload.flatMap { String(data: $0, encoding: .utf8) }
                 return successResponse(
                     present: value != nil,
@@ -68,7 +63,7 @@ final class CredentialStore {
                 let service = try validatedService(request.service)
                 let account = try validatedAccount(request.account, service: service)
                 try delete(service: service, account: account)
-                await cache.remove(cacheKey(service: service, account: account))
+                cache.removeValue(forKey: cacheKey(service: service, account: account))
                 return successResponse()
             case "list":
                 let service = try validatedService(request.service)
@@ -83,8 +78,8 @@ final class CredentialStore {
         }
     }
 
-    private func cacheKey(service: String, account: String) -> PayloadCache.CacheKey {
-        PayloadCache.CacheKey(service: service, account: account)
+    private func cacheKey(service: String, account: String) -> CacheKey {
+        CacheKey(service: service, account: account)
     }
 
     private func validatedService(_ raw: String?) throws -> String {
@@ -137,9 +132,9 @@ final class CredentialStore {
         return query
     }
 
-    private func retrieve(service: String, account: String) async throws -> Data? {
+    private func retrieve(service: String, account: String) throws -> Data? {
         let key = cacheKey(service: service, account: account)
-        if let cached = await cache.value(for: key) { return cached }
+        if let cached = cache[key] { return cached }
         var query = query(service: service, account: account)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
@@ -152,7 +147,7 @@ final class CredentialStore {
         guard let data = item as? Data else {
             throw BrokerFailure.internalError("retrieved secure storage payload is invalid")
         }
-        await cache.set(data, for: key)
+        cache[key] = data
         return data
     }
 
@@ -292,6 +287,7 @@ final class BrokerDelegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
+#if !CREDENTIAL_BROKER_TESTING
 @main
 struct CredentialBrokerMain {
     static func main() throws {
@@ -305,3 +301,5 @@ struct CredentialBrokerMain {
         RunLoop.main.run()
     }
 }
+
+#endif

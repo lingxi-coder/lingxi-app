@@ -340,6 +340,9 @@ pub(super) async fn dispatch_control_request(
             } else {
                 permission::set_cwd::ResolvedPath::NotADirectory(display_str.clone())
             };
+            // A relocation must own the same lease as admitted operations,
+            // not just sample the busy token before an async transcript move.
+            let _cwd_operation = control_plane.try_lock_operation();
             let ctx = permission::set_cwd::SetCwdContext {
                 resolved,
                 current_cwd: session_cwd.cwd().to_string_lossy().into_owned(),
@@ -356,7 +359,7 @@ pub(super) async fn dispatch_control_request(
                     .map(|p| p.to_string_lossy().into_owned()),
                 // The control channel is served off the turn loop, so a
                 // concurrently running turn is exactly what this guards.
-                busy: control_plane.is_busy().await,
+                busy: _cwd_operation.is_none() || control_plane.is_busy().await,
             };
             match permission::set_cwd::decide_set_cwd(&request, &ctx) {
                 permission::set_cwd::SetCwdDecision::Respond(
@@ -555,7 +558,7 @@ pub(super) async fn dispatch_control_request(
         "end_session" => {
             // Cancel the actual owner too: idle notification turns do not use
             // the normal input turn's watch bridge.
-            control_plane.cancel_active_turn().await;
+            control_plane.shutdown("Session ended").await;
             let _ = cancel_tx.send(true);
             writer.reply_success(request_id, None);
             end_notify.notify_one();
@@ -801,6 +804,7 @@ pub(super) async fn recover_orphaned_permission(
     runtime: &Runtime,
     cmd: msgqueue::QueuedCommand,
     handled_orphans: &mut std::collections::HashSet<lingxi_core::types::ToolUseId>,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     let msgqueue::QueuedCommandContent::OrphanedPermission {
         tool_use_id,
@@ -820,7 +824,7 @@ pub(super) async fn recover_orphaned_permission(
     let decision = orphan_decision_from_payload(&permission_decision_json);
     match runtime
         .orchestrator
-        .run_orphaned_permission(&tool_use_id, decision)
+        .run_orphaned_permission_with_cancel(&tool_use_id, decision, cancel)
         .await
     {
         Ok(true) => {

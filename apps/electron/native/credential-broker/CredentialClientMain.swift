@@ -290,26 +290,47 @@ private func installOrResolveBrokerLocked(
         withIntermediateDirectories: true,
         attributes: [.posixPermissions: 0o700]
     )
-    let machService = BrokerSecurity.machService(channel: packaged.manifest.channel)
-    let launchAgentPath = launchAgentsDirectory.appendingPathComponent("\(machService).plist")
-    let rendered = renderedLaunchAgentPlist(
-        machService: machService,
-        executablePath: brokerAppExecutableURL(bundleURL: installedBundle).path
+    try registerBrokerLaunchAgent(
+        machService: BrokerSecurity.machService(channel: packaged.manifest.channel),
+        executablePath: brokerAppExecutableURL(bundleURL: installedBundle).path,
+        launchAgentsDirectory: launchAgentsDirectory,
+        reinstall: shouldInstall
     )
-    let existing = try? String(contentsOf: launchAgentPath, encoding: .utf8)
-    let shouldRegister = shouldInstall || existing != rendered
-    if shouldRegister {
-        try rendered.write(to: launchAgentPath, atomically: true, encoding: .utf8)
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: launchAgentPath.path)
-        let domain = "gui/\(getuid())"
-        if existing != nil {
-            _ = try? runLaunchctl(["bootout", "\(domain)/\(machService)"])
-        }
-        try runLaunchctl(["bootstrap", domain, launchAgentPath.path])
-        try runLaunchctl(["kickstart", "-k", "\(domain)/\(machService)"])
-    }
 
     return installedBundle
+}
+
+// A matching plist records desired configuration, not registration in the
+// current login's launchd domain. Probe the service so an interrupted or failed
+// bootstrap can be retried without changing the packaged app or saved plist.
+func registerBrokerLaunchAgent(
+    machService: String,
+    executablePath: String,
+    launchAgentsDirectory: URL,
+    reinstall: Bool,
+    launchctl: ([String]) throws -> Void = runLaunchctl
+) throws {
+    let launchAgentPath = launchAgentsDirectory.appendingPathComponent("\(machService).plist")
+    let rendered = renderedLaunchAgentPlist(machService: machService, executablePath: executablePath)
+    let existing = try? String(contentsOf: launchAgentPath, encoding: .utf8)
+    let domain = "gui/\(getuid())"
+    let serviceTarget = "\(domain)/\(machService)"
+    let registered: Bool
+    do {
+        try launchctl(["print", serviceTarget])
+        registered = true
+    } catch {
+        registered = false
+    }
+    guard reinstall || existing != rendered || !registered else { return }
+
+    try rendered.write(to: launchAgentPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: launchAgentPath.path)
+    if registered {
+        _ = try? launchctl(["bootout", serviceTarget])
+    }
+    try launchctl(["bootstrap", domain, launchAgentPath.path])
+    try launchctl(["kickstart", "-k", serviceTarget])
 }
 
 func performXpcCall(requestData: Data, teamId: String, channel: String) throws -> Data {
@@ -375,6 +396,7 @@ func performXpcCall(requestData: Data, teamId: String, channel: String) throws -
     return replyData
 }
 
+#if !CREDENTIAL_BROKER_TESTING
 @main
 struct CredentialClientEntry {
     static func main() {
@@ -411,3 +433,5 @@ struct CredentialClientEntry {
         }
     }
 }
+
+#endif

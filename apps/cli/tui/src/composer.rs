@@ -750,6 +750,11 @@ impl Composer {
     /// in-memory-before-disk merge order.
     pub fn seed_history(&mut self, entries: Vec<String>) {
         debug_assert!(self.history.is_empty(), "seed before live submissions");
+        self.replace_history(entries);
+    }
+
+    /// Replace recall candidates after an acknowledged session switch.
+    pub(crate) fn replace_history(&mut self, entries: Vec<String>) {
         self.history = entries;
         self.browse = None;
     }

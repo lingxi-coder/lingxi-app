@@ -87,6 +87,10 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// parked permission `check()`); the implementation streams its events out
     /// through the connection's [`ClientEventSink`] as a side effect.
     async fn run_turn(&self, prompt: String);
+    /// Mounted conversation identity for immutable permission owners.
+    async fn current_session_id(&self) -> Option<String> {
+        None
+    }
     /// Cancel session-local timers before replacing the conversation.
     async fn stop_dynamic_loop(&self) {}
 
@@ -131,6 +135,18 @@ pub trait TurnDriver: Send + Sync + 'static {
         cancel: CancellationToken,
     ) {
         self.run_turn_with_cancel(prompt, cancel).await;
+    }
+
+    /// Drive complete queued input after its predecessor has ended. Production
+    /// drivers announce this new turn before streaming or requesting approvals.
+    async fn run_queued_turn_with_images(
+        &self,
+        prompt: String,
+        images: Vec<ImageRefDto>,
+        cancel: CancellationToken,
+    ) {
+        self.run_turn_with_images_and_cancel(prompt, images, cancel)
+            .await;
     }
 
     /// A registry completion starts a machine turn, without a synthetic prompt.
@@ -189,15 +205,27 @@ type SharedFrameSink = Arc<Mutex<Option<FrameSink>>>;
 type SharedPermissionGate = Arc<StdMutex<Option<Weak<AdapterPermissionGate>>>>;
 type SharedComputerAccessBroker = Arc<StdMutex<Option<Weak<ComputerAccessBroker>>>>;
 type SharedAskUserQuestionBroker = Arc<StdMutex<Option<Weak<AskUserQuestionBroker>>>>;
+type QueuedPromptPayloads = Arc<Mutex<HashMap<String, QueuedPromptPayload>>>;
+type QuestionRejections = Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>;
+
+/// The SDK queue intentionally stores text only. Inputs carrying attachments
+/// or a client turn identity stay whole until a distinct follow-up turn owns
+/// them; they must never be folded into another turn's text-only input.
+struct QueuedPromptPayload {
+    images: Vec<ImageRefDto>,
+    turn_id: Option<u64>,
+}
 
 /// A [`ClientEventSink`] that forwards each lowered [`ClientEvent`] out as a
 /// [`Frame::Event`] on the connection's outbound channel.
 struct FrameEventSink {
     out: SharedFrameSink,
     pending_openai_oauth: Arc<Mutex<Option<ClientEvent>>>,
+    cron_requests: Arc<crate::cron_host::HostCronRequests>,
     handshaken: Arc<AtomicBool>,
     active_turn: ActiveTurnControl,
     ask_user_question_broker: SharedAskUserQuestionBroker,
+    question_rejections: QuestionRejections,
 }
 
 /// Event sink for connection-level command output (currently display-only slash
@@ -225,8 +253,6 @@ fn is_owned_turn_event(event: &ClientEvent) -> bool {
             | ClientEvent::ToolUseResult { .. }
             | ClientEvent::MessageComplete { .. }
             | ClientEvent::CostUpdate { .. }
-            | ClientEvent::CoordinatorStatus { .. }
-            | ClientEvent::CoordinatorWorker { .. }
             | ClientEvent::ThinkingDelta { .. }
             | ClientEvent::UsageUpdate { .. }
             | ClientEvent::ApiRetry { .. }
@@ -238,6 +264,16 @@ fn is_owned_turn_event(event: &ClientEvent) -> bool {
 #[async_trait]
 impl ClientEventSink for FrameEventSink {
     async fn emit(&self, mut event: ClientEvent) {
+        if matches!(&event, ClientEvent::CronRunRequested { .. }) {
+            let out = self.out.lock().await;
+            self.cron_requests
+                .enqueue(event, self.handshaken.load(Ordering::SeqCst), |event| {
+                    out.as_ref()
+                        .is_some_and(|sink| sink.send(Frame::Event(event)))
+                })
+                .await;
+            return;
+        }
         if matches!(&event, ClientEvent::OpenAiOAuthUpdated { .. }) {
             let out = self.out.lock().await;
             let mut pending = self.pending_openai_oauth.lock().await;
@@ -274,7 +310,19 @@ impl ClientEventSink for FrameEventSink {
                     .as_ref()
                     .and_then(Weak::upgrade);
                 if let Some(broker) = broker {
-                    broker.cancel(request.request_id).await;
+                    // The broker publishes while its request is IN_FLIGHT.
+                    // cancel() waits for publication to finish, so awaiting it
+                    // inside emit() would wait on ourselves. Register owned
+                    // cleanup before returning to the publisher; close joins it.
+                    let request_id = request.request_id;
+                    let mut rejections = self
+                        .question_rejections
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    rejections.retain(|task| !task.is_finished());
+                    rejections.push(tokio::spawn(async move {
+                        broker.cancel(request_id).await;
+                    }));
                 }
             }
             return;
@@ -320,13 +368,27 @@ struct FramePermissionSink {
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
     active_turn: ActiveTurnControl,
     gate: SharedPermissionGate,
+    handshaken: Arc<AtomicBool>,
 }
 
 #[async_trait]
 impl PermissionRequestSink for FramePermissionSink {
     async fn emit_request(&self, request: PermissionRequest) {
         let request_id = request.request_id;
-        if !self.active_turn.accepts_interactions() {
+        let gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade);
+        let Some(gate) = gate else {
+            return;
+        };
+        let Some(background_owned) = gate.request_is_background(request_id).await else {
+            return;
+        };
+        let owner_id = gate.request_owner_id(request_id).await;
+        if !background_owned && !self.active_turn.accepts_permission_owner(owner_id) {
             self.reject(request_id).await;
             return;
         }
@@ -344,13 +406,27 @@ impl PermissionRequestSink for FramePermissionSink {
         // this sink is called. Linearize the final ownership check and the send
         // under the turn-owner lock so a request never appears after cancel won.
         let out = self.out.lock().await;
-        let forwarded = self.active_turn.with_accepted_interaction(|| {
-            if let Some(sink) = out.as_ref() {
-                let _ = sink.send(Frame::PermissionRequest(request));
+        let mut delivered = false;
+        let still_pending = gate.request_is_background(request_id).await == Some(background_owned);
+        let send = || {
+            if !still_pending {
+                return;
             }
-        });
+            if !self.handshaken.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Some(sink) = out.as_ref() {
+                delivered = sink.send(Frame::PermissionRequest(request));
+            }
+        };
+        if background_owned {
+            send();
+        } else {
+            self.active_turn
+                .with_accepted_permission_owner(owner_id, send);
+        }
         drop(out);
-        if !forwarded {
+        if !delivered {
             self.tool_names.lock().await.remove(&request_id);
             self.reject(request_id).await;
         } else {
@@ -466,7 +542,12 @@ impl AudioRequestSink for FrameAudioSink {
 /// [`TurnDriver`] and yields the pump.
 pub struct BridgeConnection {
     out: SharedFrameSink,
+    /// Serialize socket admission with teardown without holding the send lock
+    /// across brokers whose cleanup emits an event back through that lock.
+    connection_admission: Mutex<()>,
     pending_openai_oauth: Arc<Mutex<Option<ClientEvent>>>,
+    cron_requests: Arc<crate::cron_host::HostCronRequests>,
+    queued_prompt_payloads: QueuedPromptPayloads,
     tool_names: Arc<Mutex<HashMap<u64, String>>>,
     gate: Option<Arc<AdapterPermissionGate>>,
     /// The `computer`-tool `request_access` broker (Electron-facing sibling of
@@ -486,6 +567,7 @@ pub struct BridgeConnection {
     permission_gate_ref: SharedPermissionGate,
     computer_access_broker_ref: SharedComputerAccessBroker,
     ask_user_question_broker_ref: SharedAskUserQuestionBroker,
+    question_rejections: QuestionRejections,
     driver: Option<Arc<dyn TurnDriver>>,
     /// The full command-routing seam (F2-08). When bound, every
     /// non-turn/non-permission [`ClientCommand`] (model, listings, slash, tasks,
@@ -535,6 +617,7 @@ pub struct BridgeConnection {
 struct ActiveTurnControl {
     next_generation: Arc<AtomicU64>,
     owner: Arc<StdMutex<Option<ActiveTurnOwner>>>,
+    permission_gate: SharedPermissionGate,
 }
 
 struct ActiveTurnOwner {
@@ -542,6 +625,7 @@ struct ActiveTurnOwner {
     turn_id: Option<u64>,
     cancel: CancellationToken,
     terminal: bool,
+    permission_owner_id: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -564,9 +648,11 @@ impl Default for TurnInteractions {
 }
 
 impl TurnInteractions {
-    async fn drain(&self) {
+    async fn drain(&self, permission_owner_id: Option<u64>) {
         if let Some(gate) = self.gate.as_ref() {
-            gate.drain().await;
+            if let Some(owner_id) = permission_owner_id {
+                gate.cancel_owner(owner_id).await;
+            }
         }
         if let Some(broker) = self.computer_access_broker.as_ref() {
             broker.drain().await;
@@ -574,11 +660,64 @@ impl TurnInteractions {
         if let Some(broker) = self.ask_user_question_broker.as_ref() {
             broker.drain().await;
         }
-        self.tool_names.lock().await.clear();
+        // Background permissions keep their tool names for later AllowAlways.
+        let ids = self
+            .tool_names
+            .lock()
+            .await
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for id in ids {
+            let background = match &self.gate {
+                Some(gate) => gate.request_is_background(id).await == Some(true),
+                None => false,
+            };
+            if !background {
+                self.tool_names.lock().await.remove(&id);
+            }
+        }
     }
 }
 
+/// Interaction cleanup and owner retirement are one handoff. A cancellation
+/// can await publication/resolution callbacks while the driver finishes; its
+/// owned interaction cleanup must complete before the next owner starts.
+async fn finish_turn(
+    active_turn: &ActiveTurnControl,
+    generation: u64,
+    interactions: &TurnInteractions,
+    turn_handoff: &Arc<Mutex<()>>,
+) {
+    let _handoff = turn_handoff.lock().await;
+    if active_turn.owns_generation(generation) {
+        interactions
+            .drain(active_turn.permission_owner_id(generation))
+            .await;
+        active_turn.finish(generation);
+    }
+}
+
+async fn begin_owned_turn(
+    active_turn: &ActiveTurnControl,
+    driver: &Arc<dyn TurnDriver>,
+    turn_id: Option<u64>,
+) -> (u64, CancellationToken) {
+    if let Some(gate) = active_turn.gate() {
+        gate.set_session_id(driver.current_session_id().await);
+    }
+    active_turn.begin(turn_id)
+}
+
 impl ActiveTurnControl {
+    fn gate(&self) -> Option<Arc<AdapterPermissionGate>> {
+        self.permission_gate
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade)
+    }
+
     fn begin(&self, turn_id: Option<u64>) -> (u64, CancellationToken) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = CancellationToken::new();
@@ -590,6 +729,7 @@ impl ActiveTurnControl {
             turn_id,
             cancel: cancel.clone(),
             terminal: false,
+            permission_owner_id: self.gate().map(|gate| gate.begin_main_turn(None, turn_id)),
         });
         (generation, cancel)
     }
@@ -603,8 +743,61 @@ impl ActiveTurnControl {
             .as_ref()
             .is_some_and(|active| active.generation == generation)
         {
+            let permission_owner_id = owner.as_ref().and_then(|owner| owner.permission_owner_id);
             *owner = None;
+            if let (Some(gate), Some(id)) = (self.gate(), permission_owner_id) {
+                gate.end_main_turn(id);
+            }
         }
+    }
+
+    fn permission_owner_id(&self, generation: u64) -> Option<u64> {
+        self.owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .filter(|owner| owner.generation == generation)
+            .and_then(|owner| owner.permission_owner_id)
+    }
+
+    fn accepts_permission_owner(&self, permission_owner_id: Option<u64>) -> bool {
+        self.owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .is_some_and(|owner| {
+                !owner.terminal
+                    && !owner.cancel.is_cancelled()
+                    && permission_owner_id.is_some()
+                    && owner.permission_owner_id == permission_owner_id
+            })
+    }
+
+    fn with_accepted_permission_owner(
+        &self,
+        permission_owner_id: Option<u64>,
+        send: impl FnOnce(),
+    ) {
+        let owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if owner.as_ref().is_some_and(|owner| {
+            !owner.terminal
+                && !owner.cancel.is_cancelled()
+                && permission_owner_id.is_some()
+                && owner.permission_owner_id == permission_owner_id
+        }) {
+            send();
+        }
+    }
+
+    fn owns_generation(&self, generation: u64) -> bool {
+        self.owner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .is_some_and(|owner| owner.generation == generation)
     }
 
     fn cancellation_target(&self, turn_id: Option<u64>) -> Option<(u64, CancellationToken)> {
@@ -711,6 +904,9 @@ impl ActiveTurnControl {
             .take();
         if let Some(owner) = owner {
             owner.cancel.cancel();
+            if let (Some(gate), Some(id)) = (self.gate(), owner.permission_owner_id) {
+                gate.end_main_turn(id);
+            }
         }
     }
 }
@@ -743,6 +939,39 @@ fn prompt_command(text: String) -> QueuedCommand {
     }
 }
 
+/// Snapshot a text-only batch under the same handoff that publishes complete
+/// queued prompts and cancels their identities. Taking metadata and queue
+/// snapshots separately lets a newly published attachment slip into a text batch.
+async fn batchable_prompt_snapshot(
+    queue: &Arc<MessageQueueManager>,
+    queued_prompt_payloads: &QueuedPromptPayloads,
+    turn_handoff: &Arc<tokio::sync::Mutex<()>>,
+) -> Vec<QueuedCommand> {
+    let _handoff = turn_handoff.lock().await;
+    let payload_ids = queued_prompt_payloads
+        .lock()
+        .await
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    if queue
+        .peek(|c| c.is_main_thread())
+        .await
+        .is_some_and(|head| !head.is_slash_command() && !payload_ids.contains(&head.uuid))
+    {
+        queue
+            .snapshot()
+            .await
+            .into_iter()
+            .filter(|c| {
+                c.is_main_thread() && !c.is_slash_command() && !payload_ids.contains(&c.uuid)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Drain every queued MAIN-THREAD prompt as a follow-up turn, coalescing
 /// consecutive prompts into one turn (twin of `joinPromptValues` /
 /// `drainCommandQueue`). Runs until no main-thread command remains.
@@ -752,24 +981,13 @@ async fn drain_main_thread(
     loop_runtime: &Arc<tool_cron::LoopRuntime>,
     active_turn: &ActiveTurnControl,
     interactions: &TurnInteractions,
+    queued_prompt_payloads: &QueuedPromptPayloads,
+    turn_handoff: &Arc<tokio::sync::Mutex<()>>,
 ) {
     loop {
         // Native hJe selects the head by priority, then Rr collects compatible
         // messages in insertion order. Each retains its own origin in the batch.
-        let batch = if queue
-            .peek(|c| c.is_main_thread())
-            .await
-            .is_some_and(|head| !head.is_slash_command())
-        {
-            queue
-                .snapshot()
-                .await
-                .into_iter()
-                .filter(|c| c.is_main_thread() && !c.is_slash_command())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let batch = batchable_prompt_snapshot(queue, queued_prompt_payloads, turn_handoff).await;
         let Some((joined, mut consumed)) = join_prompt_values(&batch) else {
             // No batchable (non-slash) prompt left. Pop the next main-thread
             // command and, if it carries prompt text (e.g. a slash command typed
@@ -779,8 +997,51 @@ async fn drain_main_thread(
             // consumed. (claude-code keeps queued slash commands and routes them
             // post-turn; running it here is the bridge's faithful equivalent
             // since the idle path also runs slash text through run_turn.)
-            match queue.dequeue_main_thread().await {
+            // Claim metadata-bearing input and its cancellation owner under
+            // the same handoff used by queued cancellation. There is no gap
+            // where an ID belongs to neither the queue nor an active turn.
+            let (command, payload, owned_turn) = {
+                let _handoff = turn_handoff.lock().await;
+                let command = queue.dequeue_main_thread().await;
+                let payload = match command.as_ref() {
+                    Some(command) => queued_prompt_payloads.lock().await.remove(&command.uuid),
+                    None => None,
+                };
+                let owned_turn = if command.as_ref().is_some_and(|command| {
+                    payload.is_some() || command.text().is_some_and(|text| !text.is_empty())
+                }) {
+                    Some(
+                        begin_owned_turn(
+                            active_turn,
+                            driver,
+                            payload.as_ref().and_then(|payload| payload.turn_id),
+                        )
+                        .await,
+                    )
+                } else {
+                    None
+                };
+                (command, payload, owned_turn)
+            };
+            match command {
                 Some(cmd) => {
+                    if let Some(payload) = payload {
+                        let (generation, cancel) = owned_turn.expect("complete prompt owns a turn");
+                        tag_loop_tick_in_flight(
+                            loop_runtime,
+                            false,
+                            cmd.text().unwrap_or_default(),
+                        );
+                        driver
+                            .run_queued_turn_with_images(
+                                cmd.text().unwrap_or_default().to_string(),
+                                payload.images,
+                                cancel,
+                            )
+                            .await;
+                        finish_turn(active_turn, generation, interactions, turn_handoff).await;
+                        continue;
+                    }
                     if let Some(t) = cmd.text() {
                         if !t.is_empty() {
                             tag_loop_tick_in_flight(
@@ -789,7 +1050,8 @@ async fn drain_main_thread(
                                     && cmd.uuid.starts_with("loop-wakeup-"),
                                 t,
                             );
-                            let (generation, cancel) = active_turn.begin(None);
+                            let (generation, cancel) =
+                                owned_turn.expect("nonempty queued prompt owns a turn");
                             driver
                                 .run_queued_turn(
                                     t.to_string(),
@@ -797,8 +1059,7 @@ async fn drain_main_thread(
                                     cancel,
                                 )
                                 .await;
-                            interactions.drain().await;
-                            active_turn.finish(generation);
+                            finish_turn(active_turn, generation, interactions, turn_handoff).await;
                         }
                     }
                     continue;
@@ -874,10 +1135,13 @@ async fn drain_main_thread(
                 continue;
             }
         }
-        queue
-            .consume(&consumed, "drained into follow-up turn")
-            .await;
-        let (generation, cancel) = active_turn.begin(None);
+        let (generation, cancel) = {
+            let _handoff = turn_handoff.lock().await;
+            queue
+                .consume(&consumed, "drained into follow-up turn")
+                .await;
+            begin_owned_turn(active_turn, driver, None).await
+        };
         let in_human_turn = batch.iter().any(|cmd| {
             consumed.contains(&cmd.uuid) && cmd.source == QueueSource::PromptInput && !cmd.is_meta
         });
@@ -885,8 +1149,7 @@ async fn drain_main_thread(
             loop_runtime.veto_tick(tool_cron::LoopFoldVeto::ForeignUserInput);
         }
         driver.run_queued_batch(inputs, cancel).await;
-        interactions.drain().await;
-        active_turn.finish(generation);
+        finish_turn(active_turn, generation, interactions, turn_handoff).await;
     }
 }
 
@@ -909,6 +1172,14 @@ impl Drop for BridgeConnection {
             handle.abort();
         }
         self.abort_active_turn_task();
+        for task in self
+            .question_rejections
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .drain(..)
+        {
+            task.abort();
+        }
         self.active_turn.clear();
     }
 }
@@ -922,7 +1193,10 @@ impl BridgeConnection {
     pub fn new() -> Self {
         Self {
             out: Arc::new(Mutex::new(None)),
+            connection_admission: Mutex::new(()),
             pending_openai_oauth: Arc::new(Mutex::new(None)),
+            cron_requests: Arc::new(crate::cron_host::HostCronRequests::default()),
+            queued_prompt_payloads: Arc::new(Mutex::new(HashMap::new())),
             tool_names: Arc::new(Mutex::new(HashMap::new())),
             gate: None,
             computer_access_broker: None,
@@ -931,6 +1205,7 @@ impl BridgeConnection {
             permission_gate_ref: Arc::new(StdMutex::new(None)),
             computer_access_broker_ref: Arc::new(StdMutex::new(None)),
             ask_user_question_broker_ref: Arc::new(StdMutex::new(None)),
+            question_rejections: Arc::new(StdMutex::new(Vec::new())),
             driver: None,
             router: None,
             handshaken: Arc::new(AtomicBool::new(false)),
@@ -973,6 +1248,7 @@ impl BridgeConnection {
         let handshaken = self.handshaken.clone();
         let active_turn = self.active_turn.clone();
         let active_task = self.active_turn_task.clone();
+        let queued_prompt_payloads = self.queued_prompt_payloads.clone();
         let loop_runtime = self.loop_runtime.clone();
         let interactions = TurnInteractions {
             gate: self.gate.clone(),
@@ -1025,26 +1301,48 @@ impl BridgeConnection {
                     running.store(false, Ordering::SeqCst);
                     continue;
                 }
-                let (driver, queue, running, active_turn, loop_runtime, interactions) = (
+                let (
+                    driver,
+                    queue,
+                    running,
+                    active_turn,
+                    loop_runtime,
+                    interactions,
+                    queued_prompt_payloads,
+                    turn_handoff,
+                ) = (
                     driver.clone(),
                     queue.clone(),
                     running.clone(),
                     active_turn.clone(),
                     loop_runtime.clone(),
                     interactions.clone(),
+                    queued_prompt_payloads.clone(),
+                    turn_handoff.clone(),
                 );
                 let registry = registry.clone();
                 let task = tokio::spawn(async move {
                     if let Some(registry) = registry {
                         if registry.has_pending_task_notifications_for(None).await {
-                            let (generation, cancel) = active_turn.begin(None);
+                            let (generation, cancel) = {
+                                let _handoff = turn_handoff.lock().await;
+                                begin_owned_turn(&active_turn, &driver, None).await
+                            };
                             driver.run_task_notification_turn(registry, cancel).await;
-                            interactions.drain().await;
-                            active_turn.finish(generation);
+                            finish_turn(&active_turn, generation, &interactions, &turn_handoff)
+                                .await;
                         }
                     }
-                    drain_main_thread(&driver, &queue, &loop_runtime, &active_turn, &interactions)
-                        .await;
+                    drain_main_thread(
+                        &driver,
+                        &queue,
+                        &loop_runtime,
+                        &active_turn,
+                        &interactions,
+                        &queued_prompt_payloads,
+                        &turn_handoff,
+                    )
+                    .await;
                     running.store(false, Ordering::SeqCst);
                 });
                 *task_slot = Some(task);
@@ -1062,9 +1360,11 @@ impl BridgeConnection {
         Arc::new(FrameEventSink {
             out: self.out.clone(),
             pending_openai_oauth: self.pending_openai_oauth.clone(),
+            cron_requests: self.cron_requests.clone(),
             handshaken: self.handshaken.clone(),
             active_turn: self.active_turn.clone(),
             ask_user_question_broker: self.ask_user_question_broker_ref.clone(),
+            question_rejections: self.question_rejections.clone(),
         })
     }
 
@@ -1098,6 +1398,7 @@ impl BridgeConnection {
             tool_names: self.tool_names.clone(),
             active_turn: self.active_turn.clone(),
             gate: self.permission_gate_ref.clone(),
+            handshaken: self.handshaken.clone(),
         })
     }
 
@@ -1120,6 +1421,11 @@ impl BridgeConnection {
     pub fn bind(mut self, gate: Arc<AdapterPermissionGate>, driver: Arc<dyn TurnDriver>) -> Self {
         *self
             .permission_gate_ref
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(&gate));
+        *self
+            .active_turn
+            .permission_gate
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(&gate));
         self.gate = Some(gate);
@@ -1214,6 +1520,10 @@ impl BridgeConnection {
         self.queue.clone()
     }
 
+    pub(crate) fn cron_requests_handle(&self) -> Arc<crate::cron_host::HostCronRequests> {
+        self.cron_requests.clone()
+    }
+
     /// A clone of this connection's dynamic-loop state.
     #[must_use]
     pub fn loop_runtime_handle(&self) -> Arc<tool_cron::LoopRuntime> {
@@ -1239,6 +1549,7 @@ impl BridgeConnection {
     /// Claim the single active-client slot, or confirm that `out` belongs to the
     /// client that already owns it.
     async fn claim_outbound(&self, out: &FrameSink) -> bool {
+        let _admission = self.connection_admission.lock().await;
         let mut cell = self.out.lock().await;
         match cell.as_ref() {
             Some(active) => active.same_channel(out),
@@ -1352,6 +1663,9 @@ impl BridgeConnection {
                         *pending = Some(event);
                     }
                 }
+                self.cron_requests
+                    .replay(|event| sink.send(Frame::Event(event)))
+                    .await;
             }
         }
     }
@@ -1486,11 +1800,16 @@ impl BridgeConnection {
                 } else {
                     None
                 };
-                if is_compact && self.turn_running.load(Ordering::SeqCst) {
+                if (is_compact || changes_session) && self.turn_running.load(Ordering::SeqCst) {
                     self.unscoped_event_sink()
                         .emit(ClientEvent::SlashCommandResult {
                             turn_id,
-                            display: "cannot compact the session while a turn is in flight".into(),
+                            display: if is_compact {
+                                "cannot compact the session while a turn is in flight"
+                            } else {
+                                "cannot replace the session while a turn is in flight"
+                            }
+                            .into(),
                             is_error: true,
                         })
                         .await;
@@ -1568,14 +1887,25 @@ impl BridgeConnection {
                 for event in authority_events {
                     self.unscoped_event_sink().emit(event).await;
                 }
+                self.refresh_permission_session().await;
             }
             command @ (ClientCommand::ClearSession
             | ClientCommand::NewSession { .. }
             | ClientCommand::ResumeSession { .. }) => {
                 let _handoff = self.turn_handoff.lock().await;
-                // The router accepts this transition whether or not a turn is
-                // running, so the old conversation's armed `/loop` timers and
-                // queued wakeups must be torn down unconditionally.
+                // The connection owns the actual run loop, including follow-ups.
+                // Never wait for the SDK turn gate from an ordinary callback:
+                // disconnect must finish that callback before draining prompts.
+                if self.turn_running.load(Ordering::SeqCst) {
+                    self.unscoped_event_sink()
+                        .emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Protocol,
+                            message: "cannot replace the session while a turn is in flight".into(),
+                        })
+                        .await;
+                    return;
+                }
+                // Only an admitted replacement owns timer teardown.
                 self.stop_loop_for_session_transition().await;
                 if let Some(router) = &self.router {
                     // Session transitions have no active turn. Their restored
@@ -1584,6 +1914,7 @@ impl BridgeConnection {
                     // late output from an old turn is still dropped.
                     router.route(command, self.unscoped_event_sink()).await;
                 }
+                self.refresh_permission_session().await;
             }
             // The FULL command surface (model, listings, slash, tasks, session
             // control) is delegated to the bound [`CommandRouter`] (F2-08), which
@@ -1618,10 +1949,9 @@ impl BridgeConnection {
     /// `check()`. The guard is on `SendPrompt` only; permission frames are never
     /// queued (see [`Self::resolve_permission`]).
     ///
-    /// Follow-up turns queued mid-flight are text-only (images ride only on the
-    /// directly-dispatched seed prompt) — matching claude-code, where a queued
-    /// command's images are carried as `pastedContents`/`ContentBlockParam[]`
-    /// but the bridge run loop here drives the text-only `run_turn` entry.
+    /// Follow-up input carrying images or a turn ID is retained as one whole
+    /// prompt. Plain uncorrelated text can still enter the SDK's mid-turn batch;
+    /// metadata-bearing input runs independently after the current turn.
     async fn stop_loop_for_session_transition(&self) {
         if let Some(driver) = &self.driver {
             driver.stop_dynamic_loop().await;
@@ -1685,7 +2015,18 @@ impl BridgeConnection {
                     .await;
                 return;
             }
-            self.queue.enqueue(prompt_command(text)).await;
+            let mut command = prompt_command(text);
+            if !images.is_empty() || turn_id.is_some() {
+                // `Later` is not consumed by the SDK's text-only mid-turn
+                // adapter. The connection restores this payload at follow-up
+                // admission instead of silently dropping images or correlation.
+                command.priority = QueuePriority::Later;
+                self.queued_prompt_payloads.lock().await.insert(
+                    command.uuid.clone(),
+                    QueuedPromptPayload { images, turn_id },
+                );
+            }
+            self.queue.enqueue(command).await;
             if !lingxi_core::host::env::background_tasks_disabled() {
                 if let Some(registry) = &self.task_notification_registry {
                     registry
@@ -1699,6 +2040,7 @@ impl BridgeConnection {
         }
 
         let queue = self.queue.clone();
+        let queued_prompt_payloads = self.queued_prompt_payloads.clone();
         let loop_runtime = self.loop_runtime.clone();
         let turn_running = self.turn_running.clone();
         let turn_handoff = self.turn_handoff.clone();
@@ -1711,7 +2053,7 @@ impl BridgeConnection {
         };
         // Claim the active owner before spawning. Cancel can now safely arrive
         // immediately after SendPrompt without missing the driver's token.
-        let (seed_generation, seed_cancel) = active_turn.begin(turn_id);
+        let (seed_generation, seed_cancel) = begin_owned_turn(&active_turn, &driver, turn_id).await;
         let scheduled_sink = self.unscoped_event_sink();
         let task = tokio::spawn(async move {
             // Seed turn — the prompt that won the loop (carries its images).
@@ -1735,16 +2077,23 @@ impl BridgeConnection {
                     .run_turn_with_images_and_cancel(text, images, seed_cancel)
                     .await;
             }
-            interactions.drain().await;
-            active_turn.finish(seed_generation);
+            finish_turn(&active_turn, seed_generation, &interactions, &turn_handoff).await;
 
             // Between-turn drain: run queued main-thread prompts as follow-up
             // turns until the queue is empty. Re-check after clearing the flag to
             // close the race where a prompt enqueues between the empty-check and
             // the flag clear (twin of print.ts recheckCommandQueue).
             loop {
-                drain_main_thread(&driver, &queue, &loop_runtime, &active_turn, &interactions)
-                    .await;
+                drain_main_thread(
+                    &driver,
+                    &queue,
+                    &loop_runtime,
+                    &active_turn,
+                    &interactions,
+                    &queued_prompt_payloads,
+                    &turn_handoff,
+                )
+                .await;
                 let _handoff = turn_handoff.lock().await;
                 turn_running.store(false, Ordering::SeqCst);
                 // If a prompt slipped in after the last drain but before the
@@ -1766,7 +2115,33 @@ impl BridgeConnection {
     }
 
     async fn cancel_active_turn(&self, turn_id: Option<u64>) {
-        let Some((generation, cancel)) = self.active_turn.cancellation_target(turn_id) else {
+        // The active token can be cancelled without waiting for an ordinary
+        // control's handoff. Queue lookup must re-check after acquiring that
+        // lock because the input may just have been promoted to its own turn;
+        // the matched owner's broker cleanup is fenced separately below.
+        let mut target = self.active_turn.cancellation_target(turn_id);
+        if target.is_none() {
+            if let Some(turn_id) = turn_id {
+                let _handoff = self.turn_handoff.lock().await;
+                target = self.active_turn.cancellation_target(Some(turn_id));
+                if target.is_none() {
+                    let mut payloads = self.queued_prompt_payloads.lock().await;
+                    let queued = payloads
+                        .iter()
+                        .filter(|(_, payload)| payload.turn_id == Some(turn_id))
+                        .map(|(uuid, _)| uuid.clone())
+                        .collect::<Vec<_>>();
+                    for uuid in &queued {
+                        payloads.remove(uuid);
+                    }
+                    drop(payloads);
+                    self.queue
+                        .remove(&queued, "queued client turn cancelled")
+                        .await;
+                }
+            }
+        }
+        let Some((generation, cancel)) = target else {
             tracing::debug!(?turn_id, "bridge-server: ignored stale or idle turn cancel");
             return;
         };
@@ -1780,8 +2155,10 @@ impl BridgeConnection {
             }
         }
         cancel.cancel();
-        // Awaiting a detach can finish the old turn. Never drain a newer
-        // owner's interaction requests when that happens.
+        // Deliver cancellation before waiting for the handoff, so it still
+        // bypasses an ordinary control. Cleanup shares owner retirement and
+        // admission: none of these awaited broker drains can reach a successor.
+        let _handoff = self.turn_handoff.lock().await;
         if self
             .active_turn
             .cancellation_target(None)
@@ -1799,7 +2176,7 @@ impl BridgeConnection {
             ask_user_question_broker: self.ask_user_question_broker.clone(),
             tool_names: self.tool_names.clone(),
         }
-        .drain()
+        .drain(self.active_turn.permission_owner_id(generation))
         .await;
     }
 
@@ -1810,6 +2187,7 @@ impl BridgeConnection {
         let Some(gate) = self.gate.as_ref() else {
             return;
         };
+        let background_owned = gate.request_is_background(request_id).await == Some(true);
         let tool_name = self
             .tool_names
             .lock()
@@ -1821,7 +2199,10 @@ impl BridgeConnection {
         // disconnected. Only the gate's successful removal proves that this
         // response owned a pending request, and the active-turn check preserves
         // terminal/disconnected state when cancellation won the race.
-        if resolved && self.active_turn.accepts_interactions() {
+        if resolved
+            && self.handshaken.load(Ordering::SeqCst)
+            && (background_owned || self.active_turn.accepts_interactions())
+        {
             lingxi_core::host::live_sessions::set_process_status("busy", None);
         }
         if !resolved {
@@ -1829,6 +2210,12 @@ impl BridgeConnection {
                 request_id,
                 "bridge-server: resolve for unknown / already-resolved permission id"
             );
+        }
+    }
+
+    async fn refresh_permission_session(&self) {
+        if let (Some(gate), Some(driver)) = (&self.gate, &self.driver) {
+            gate.set_session_id(driver.current_session_id().await);
         }
     }
 
@@ -1932,6 +2319,9 @@ impl FramePump for BridgeConnection {
         if request.method == "hello" {
             return false;
         }
+        if request.method == "permission_request_scope" {
+            return self.handshaken.load(Ordering::SeqCst);
+        }
         match serde_json::from_value::<ClientCommand>(request.params.clone()) {
             // A cancel for a prompt still queued behind a slow control must
             // remain behind that prompt. Otherwise it is ignored before the
@@ -1984,7 +2374,7 @@ impl FramePump for BridgeConnection {
                     }
                 }
             },
-            Frame::Request(BridgeRequest { id, params, .. }) => {
+            Frame::Request(BridgeRequest { id, method, params }) => {
                 if !self.handshaken.load(Ordering::SeqCst) {
                     let message = if self.handshake_refused.load(Ordering::SeqCst) {
                         "connection handshake was refused"
@@ -1993,6 +2383,62 @@ impl FramePump for BridgeConnection {
                     };
                     if let Some(sink) = self.out.lock().await.as_ref() {
                         let _ = sink.send(Self::error_response(id, message));
+                    }
+                    return;
+                }
+                if method == "permission_request_scope" {
+                    let request_id = params
+                        .as_object()
+                        .filter(|params| params.len() == 1)
+                        .and_then(|params| params.get("request_id"))
+                        .and_then(serde_json::Value::as_u64);
+                    let response = match request_id {
+                        Some(request_id) => {
+                            let scope = match &self.gate {
+                                Some(gate) => gate.request_is_background(request_id).await,
+                                None => None,
+                            };
+                            Frame::Response(BridgeResponse {
+                                id,
+                                result: Some(scope.map_or(serde_json::Value::Null, |background_owned| {
+                                    serde_json::json!({"request_id":request_id,"background_owned":background_owned})
+                                })),
+                                error: None,
+                            })
+                        }
+                        None => Self::error_response(id, "invalid permission request scope query"),
+                    };
+                    if let Some(sink) = self.out.lock().await.as_ref() {
+                        let _ = sink.send(response);
+                    }
+                    return;
+                }
+                if method == "desktop_runtime_snapshot" {
+                    // This router seam only reads state into a collector. Fence
+                    // its read and reply against live outbound pushes: a worker
+                    // mutation is either in the snapshot or delivered after it,
+                    // never sent before a stale snapshot can replace that fact.
+                    // No broker drain, turn-gate wait, or outbound callback is
+                    // allowed inside runtime_snapshot.
+                    let out = self.out.lock().await;
+                    let response = if params != serde_json::json!({"type":"list_session_agents"}) {
+                        Self::error_response(id, "invalid desktop runtime snapshot request")
+                    } else {
+                        let snapshot = match &self.router {
+                            Some(router) => router.runtime_snapshot().await,
+                            None => Err("desktop runtime snapshot is unavailable".into()),
+                        };
+                        match snapshot {
+                            Ok(events) => Frame::Response(BridgeResponse {
+                                id,
+                                result: Some(serde_json::json!({"events":events})),
+                                error: None,
+                            }),
+                            Err(error) => Self::error_response(id, error),
+                        }
+                    };
+                    if let Some(sink) = out.as_ref() {
+                        let _ = sink.send(response);
                     }
                     return;
                 }
@@ -2051,7 +2497,25 @@ impl BridgeConnection {
         }
     }
 
+    async fn join_question_rejections(&self) {
+        loop {
+            let tasks = std::mem::take(
+                &mut *self
+                    .question_rejections
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()),
+            );
+            if tasks.is_empty() {
+                break;
+            }
+            for task in tasks {
+                let _ = task.await;
+            }
+        }
+    }
+
     async fn close_connection(&self, closing: Option<&FrameSink>) {
+        let _admission = self.connection_admission.lock().await;
         let mut active = self.out.lock().await;
         if closing.is_some_and(|sink| {
             active
@@ -2060,15 +2524,20 @@ impl BridgeConnection {
         }) {
             return;
         }
-        *active = None;
-        drop(active);
+        // New sockets wait for the admission barrier through all cleanup.
+        // Release the send lock first: broker.drain() emits resolved events and
+        // must be able to reacquire it. Those events cannot reach a new socket.
         self.handshaken.store(false, Ordering::SeqCst);
         self.handshake_refused.store(false, Ordering::SeqCst);
+        self.cron_requests.disconnected().await;
+        *active = None;
+        drop(active);
         self.abort_and_join_active_turn_task().await;
         self.turn_running.store(false, Ordering::SeqCst);
         self.active_turn.clear();
         self.queue.clear_active_turn().await;
         self.queue.clear().await;
+        self.queued_prompt_payloads.lock().await.clear();
         self.loop_runtime.take_in_flight_prompt();
         self.tool_names.lock().await.clear();
 
@@ -2106,6 +2575,10 @@ impl BridgeConnection {
             }
         }
 
+        // Publication is now complete and the broker's pending map is empty.
+        // Join every deferred rejection before letting a new socket claim.
+        self.join_question_rejections().await;
+
         // Audio requests are drained on DISCONNECT only, never at end-of-turn
         // (they are not in `TurnInteractions`): an audio op is a device
         // operation, not a per-turn user interaction, and `is_recording` is
@@ -2127,6 +2600,18 @@ impl BridgeConnection {
 #[cfg(test)]
 #[path = "server/compact_admission_test.rs"]
 mod compact_admission_test;
+
+#[cfg(test)]
+#[path = "server/connection_regression_test.rs"]
+mod connection_regression_test;
+
+#[cfg(test)]
+#[path = "server/turn_handoff_regression_test.rs"]
+mod turn_handoff_regression_test;
+
+#[cfg(test)]
+#[path = "server/permission_owner_regression_test.rs"]
+mod permission_owner_regression_test;
 
 #[cfg(test)]
 mod tests {
@@ -2821,6 +3306,7 @@ mod tests {
 
     #[tokio::test]
     async fn permission_live_status_uses_cli_reason_and_ignores_stale_resolution() {
+        use super::connection_regression_test::{captured_sink, next_frame};
         let _serial = crate::driver::LOOP_KA_TEST_SERIAL
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -2841,6 +3327,9 @@ mod tests {
             notify: Arc::new(Notify::new()),
         });
         let connection = connection.bind(gate.clone(), driver);
+        let (endpoint, mut socket, sink) = captured_sink().await;
+        assert!(connection.claim_outbound(&sink).await);
+        connection.handshaken.store(true, Ordering::SeqCst);
         let (generation, _) = connection.active_turn.begin(Some(7));
 
         let check = tokio::spawn({
@@ -2857,6 +3346,10 @@ mod tests {
         })
         .await
         .expect("permission request is parked");
+        assert!(matches!(
+            next_frame(&mut socket).await,
+            bridge::wire::Frame::PermissionRequest(_)
+        ));
 
         let waiting = dir
             .list_live()
@@ -2898,6 +3391,7 @@ mod tests {
         assert_eq!(idle.status.as_deref(), Some("idle"));
         assert_eq!(idle.waiting_for, None);
         connection.active_turn.finish(generation);
+        endpoint.shutdown().await;
     }
 
     /// A driver whose FIRST turn parks on a barrier until the test releases it,
@@ -3106,6 +3600,8 @@ mod tests {
             &loop_runtime,
             &super::ActiveTurnControl::default(),
             &super::TurnInteractions::default(),
+            &Arc::new(Mutex::new(std::collections::HashMap::new())),
+            &Arc::new(Mutex::new(())),
         )
         .await;
         assert_eq!(
@@ -3155,6 +3651,8 @@ mod tests {
             &runtime,
             &super::ActiveTurnControl::default(),
             &super::TurnInteractions::default(),
+            &Arc::new(Mutex::new(std::collections::HashMap::new())),
+            &Arc::new(Mutex::new(())),
         )
         .await;
         assert_eq!(
@@ -3188,6 +3686,8 @@ mod tests {
             &runtime,
             &super::ActiveTurnControl::default(),
             &super::TurnInteractions::default(),
+            &Arc::new(Mutex::new(std::collections::HashMap::new())),
+            &Arc::new(Mutex::new(())),
         )
         .await;
         assert_eq!(runtime.in_flight_prompt(), None);
@@ -3221,6 +3721,8 @@ mod tests {
             &runtime,
             &super::ActiveTurnControl::default(),
             &super::TurnInteractions::default(),
+            &Arc::new(Mutex::new(std::collections::HashMap::new())),
+            &Arc::new(Mutex::new(())),
         )
         .await;
         assert_eq!(
@@ -3259,6 +3761,8 @@ mod tests {
             &loop_runtime,
             &super::ActiveTurnControl::default(),
             &super::TurnInteractions::default(),
+            &Arc::new(Mutex::new(std::collections::HashMap::new())),
+            &Arc::new(Mutex::new(())),
         )
         .await;
         assert_eq!(

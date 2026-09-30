@@ -28,10 +28,10 @@ final class OAuthPresentationContextProvider: NSObject, ASWebAuthenticationPrese
 /// on its own oneshot and is resolved later by `ApprovePermission` /
 /// `DenyPermission`.
 final class EnginePermissionSink: IosPermissionSink {
-    private weak var source: EngineConversationSource?
+    private let listener: EngineListener
 
-    init(source: EngineConversationSource) {
-        self.source = source
+    init(listener: EngineListener) {
+        self.listener = listener
     }
 
     func onRequest(request: PermissionRequest) async {
@@ -43,9 +43,10 @@ final class EnginePermissionSink: IosPermissionSink {
         // leaves every control unresponsive. Enqueue and return so the
         // engine can finish construction; the actor preserves UI state
         // mutation on the main thread.
-        Task { @MainActor [weak source] in
-            source?.enqueuePermission(request)
-        }
+        // Share the event listener's FIFO. A separately scheduled actor task
+        // can otherwise present this request after an earlier pump has already
+        // applied its cancellation/expiry event.
+        listener.enqueuePermission(request)
     }
 }
 #endif
@@ -59,6 +60,7 @@ final class EngineListener: IosEventListener {
     private static let drainBatchSize = 256
     private enum PendingItem {
         case event(ClientEvent)
+        case permission(PermissionRequest)
         case workflowProgress(
             originSessionId: String,
             taskId: String,
@@ -77,6 +79,12 @@ final class EngineListener: IosEventListener {
     private var queueHead = 0
     private var pumpScheduled = false
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
+    /// A gate can be cancelled after parking its entry but before notifying
+    /// Swift. IDs are monotonic for this listener's engine generation; retain
+    /// its terminal IDs until that listener is disposed, including across
+    /// transcript switches, so a late notification cannot revive a dead ask.
+    /// Evicting an ID early would admit an arbitrarily delayed notification.
+    @MainActor private var resolvedPermissionIDs: Set<UInt64> = []
     /// Test-only counters make the batch/yield contract deterministic to
     /// assert without exposing scheduling hooks to production callers.
     private(set) var pumpInvocationsForTesting = 0
@@ -94,6 +102,10 @@ final class EngineListener: IosEventListener {
 
     func onEvent(event: ClientEvent) async {
         enqueue(.event(event))
+    }
+
+    func enqueuePermission(_ request: PermissionRequest) {
+        enqueue(.permission(request))
     }
 
     func onWorkflowProgress(
@@ -185,7 +197,13 @@ final class EngineListener: IosEventListener {
             guard let source else { continue }
             switch item {
             case let .event(event):
+                if case let .permissionRequestResolved(requestId, _) = event {
+                    resolvedPermissionIDs.insert(requestId)
+                }
                 source.apply(event)
+            case let .permission(request):
+                guard !resolvedPermissionIDs.contains(request.requestId) else { continue }
+                source.enqueuePermission(request)
             case let .workflowProgress(originSessionId, taskId, runId, progress):
                 source.applyWorkflowProgress(
                     originSessionId: originSessionId,

@@ -352,29 +352,16 @@ function useBridgeSource(): string {
   return readFileSync(join(process.cwd(), 'src/renderer/bridge/useBridge.ts'), 'utf8');
 }
 
-test('configuration admin waits for the terminal event with the same domain and operation id', () => {
+test('configuration admin dispatch captures its owner before active UI projection', () => {
   const source = useBridgeSource();
-  const eventBody = sliceBetweenMarkers(
-    source,
-    "if (event.type === 'configuration_operation') {",
-    "if (event.type === 'error'",
-    'configuration operation event correlation',
-  );
-  assert.match(eventBody, /event\.status === 'succeeded' \|\| event\.status === 'failed'/);
-  assert.match(eventBody, /`\$\{event\.domain\}:\$\{event\.operation_id\}`/);
-  assert.match(eventBody, /pendingConfigurationOperations\.current\.get\(key\)/);
-  assert.match(eventBody, /pending\.resolve\(event\)/);
-  assert.match(eventBody, /pending\.reject\(new Error/);
-
-  const dispatchBody = sliceBetweenMarkers(
-    source,
-    'const runConfigurationAdmin = useCallback',
-    'const skillAdmin = useCallback',
-    'configuration admin dispatch waiter',
-  );
-  assert.match(dispatchBody, /pendingConfigurationOperations\.current\.set\(key, pending\)/);
-  assert.match(dispatchBody, /await command\(envelope\)/);
-  assert.match(dispatchBody, /return terminal/);
+  const settleAt = source.indexOf('settleConfigurationOperation(pendingConfigurationOperations.current, sessionId, event)');
+  const activeUiAt = source.indexOf("if (activeSessionIdRef.current === sessionId) {", settleAt);
+  assert.ok(settleAt > 0 && activeUiAt > settleAt);
+  const dispatchBody = sliceBetweenMarkers(source, 'const runConfigurationAdmin = useCallback',
+    'const skillAdmin = useCallback', 'configuration admin owner dispatch');
+  assert.match(dispatchBody, /const sessionId = activeSessionIdRef\.current/);
+  assert.match(dispatchBody, /requestConfigurationOperation\(/);
+  assert.match(dispatchBody, /host\.command\(sessionId, envelope\)/);
 });
 
 test('tracked prompts reserve a token before dispatch and keep sendPrompt as a compatibility wrapper', () => {
@@ -389,7 +376,7 @@ test('tracked prompts reserve a token before dispatch and keep sendPrompt as a c
   assert.match(trackedBody, /enqueueTrackedTurn\(pendingTrackedTurns\.current, token\)/);
   assert.match(trackedBody, /trackedTurnSequence\.current \+= 1/);
   assert.match(trackedBody, /Failed to queue the pending message/);
-  assert.match(trackedBody, /running: wasTurnActive/);
+  assert.match(trackedBody, /running: stillRunning\(\)/);
 
   // `Stage` renders "Not sent" for `delivery: 'failed'` and `conversation.ts`
   // sets and clears `'pending'`, but nothing ever produced `'failed'` — the

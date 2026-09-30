@@ -8,3 +8,6 @@
 # Plan B 的第一个任务就是填满它。
 
 apps/android/ffi/src/host.rs:LINGXI_GIT_SHA_SHORT  # Existing branding::ENV_PREFIX build metadata key now read by Host BuildInfo; option_env! requires a literal.
+
+scripts/tests/test_android_jni_promotion.py:LINGXI_ANDROID_JNILIBS_DIR  # Existing build-jni.sh output-override environment API; the fixture must clear this exact name to exercise default publication paths.
+scripts/tests/test_android_jni_promotion.py:LINGXI_KOTLIN_OUT  # Existing build-jni.sh binding-output environment API; clearing the actual override keeps the regression independent of the developer shell.

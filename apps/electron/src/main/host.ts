@@ -1032,13 +1032,14 @@ export class HostController {
       const runtime = this.bridge.get(sessionId);
       if (!runtime) throw new Error(`session runtime is not open: ${sessionId}`);
       const ref = { projectPath: runtime.projectPath, sessionId } satisfies SessionRef;
-      this.assertRestartAllowed(ref, runtime);
+      const recovering = runtime.connectionState.status !== 'connected';
+      this.assertRestartAllowed(ref, runtime, recovering);
       await this.bridge.restart(ref, () => {
         const current = this.bridge.get(sessionId);
         if (!current || current !== runtime) {
           throw new Error(`session runtime is no longer open: ${sessionId}`);
         }
-        this.assertRestartAllowed(ref, current);
+        this.assertRestartAllowed(ref, current, recovering);
       });
     });
     this.ipc.handle(CH_DIAGNOSTICS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.diagnostics.snapshot(); });
@@ -1499,21 +1500,39 @@ export class HostController {
     if (this.hasActiveWork()) throw new Error('cancel the active turn before changing engine settings');
   }
 
-  private assertRestartAllowed(ref: SessionRef, runtime: ReturnType<SessionRuntimeManager['get']>): void {
+  private assertRestartAllowed(ref: SessionRef, runtime: ReturnType<SessionRuntimeManager['get']>, recovering = false): void {
     if (!runtime) throw new Error(`session runtime is not open: ${ref.sessionId}`);
     const active = this.settings.getPublic().activeSession;
     if (!active || active.sessionId !== ref.sessionId || active.projectPath !== ref.projectPath) {
       throw new Error('the requested session is no longer active; credential was saved but the engine was not restarted');
     }
-    if (runtime.turnActive || runtime.pendingInteractions > 0 || this.bridge.hasActiveWork(ref.projectPath)) {
+    if (!recovering && (runtime.turnActive || runtime.pendingInteractions > 0 || this.bridge.hasActiveWork(ref.projectPath))) {
       throw new Error('cancel active turns and pending interactions before restarting the engine');
     }
   }
 
   private async restartIfConfigured(): Promise<void> {
     const ref = this.settings.getPublic().activeSession;
-    if (!ref || !this.bridge.get(ref.sessionId)) return;
-    await this.bridge.restart(ref);
+    if (!ref) return;
+    const runtime = this.bridge.get(ref.sessionId);
+    if (!runtime) return;
+    const recovering = runtime.connectionState.status !== 'connected' || runtime.isStarting;
+    const assertCurrent = () => {
+      const active = this.settings.getPublic().activeSession;
+      if (!active || active.sessionId !== ref.sessionId || active.projectPath !== ref.projectPath
+        || this.bridge.get(ref.sessionId) !== runtime) {
+        throw new Error('the requested session is no longer active; credential was saved but the engine was not restarted');
+      }
+    };
+    assertCurrent();
+    await this.bridge.restart(ref, assertCurrent);
+    assertCurrent();
+    if (recovering && runtime.recoveredLiveConnection) {
+      // Recovery preserves the living process. Launch-only material still
+      // needs a normal restart, whose active-work guard can safely refuse it.
+      await this.bridge.restart(ref, assertCurrent);
+      assertCurrent();
+    }
   }
 
   private requireCurrentRuntime() {
@@ -1608,6 +1627,7 @@ export class HostController {
         }
         const active = this.settings.getPublic().activeSession?.sessionId === ref.sessionId;
         const title = row?.title ?? this.catalogs.get(ref.projectPath)?.sessions.find((item) => item.uuid === ref.sessionId)?.title;
+        if (runtime.hasActiveWork) throw new Error('Wait for active work and pending interactions before archiving this chat.');
         this.settings.setSessionArchived(ref, true, title);
         await this.terminals?.closeScope(ref);
         await this.bridge.closeSession(ref);
@@ -1639,6 +1659,7 @@ export class HostController {
     }
     this.closingProjects.add(project);
     try {
+      if (this.bridge.hasActiveWork(project)) throw new Error('cancel active work and pending interactions before removing a project');
       await this.terminals?.closeProject(project);
       await this.bridge.closeProject(project);
       this.settings.removeProject(project);
@@ -1747,6 +1768,7 @@ export class HostController {
       const previous = await this.sessionCatalog.find(active.projectPath, active.sessionId);
       if (previous) await this.persistSessionTitle(active, name);
     }
+    if (this.hasActiveWork(active.projectPath)) throw new Error('cancel active work before clearing the session');
     await this.terminals?.closeScope(active);
     await this.bridge.closeSession(active);
     const replacement = await this.bridge.newSession(active.projectPath);

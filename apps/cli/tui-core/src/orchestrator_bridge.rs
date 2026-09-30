@@ -145,6 +145,17 @@ pub enum TurnEvent {
     },
     /// Authoritative permission mode after a live change attempt.
     PermissionModeChanged(String),
+    /// The host completed the owned backend reset; only now may the UI clear.
+    SessionCleared {
+        /// New backend session identity and history persistence scope.
+        session_id: String,
+        /// Config home for rebuilding the session's prompt-history store.
+        home: std::path::PathBuf,
+        /// Current tool cwd, independent of process cwd.
+        cwd: std::path::PathBuf,
+    },
+    /// Backend reset failed; preserve the previous conversation on screen.
+    SessionClearFailed(String),
     /// Streaming text chunk from the assistant.
     TextDelta(String),
     /// A completed assistant thinking block (M5 live streaming). The

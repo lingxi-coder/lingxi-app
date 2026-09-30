@@ -7,14 +7,21 @@ import type { ScheduledScope } from '../shared/scheduled.js';
 import type { SettingsStore } from './settings.js';
 import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
+import { scheduledRunIdentity } from './scheduled-run-identity.js';
 import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
 import type { ProjectSessionCatalog } from './session-catalog.js';
 import type { SessionRef } from '../shared/settings.js';
+
+type ScheduledRunResult = { sessionId: string; summary: string };
+
+const MAX_RECENT_SCHEDULED_RUNS = 500;
 
 /** Catalog discovery only: Rust remains the sole authority for due-time claims. */
 export class ScheduledTaskService {
   private readonly controllers = new Map<string, { ref: SessionRef; release: () => void }>();
   private readonly sessionQueues = new Map<string, Promise<unknown>>();
+  private readonly pendingRuns = new Map<string, Promise<ScheduledRunResult>>();
+  private readonly recentRuns = new Map<string, Promise<ScheduledRunResult>>();
   private timer?: ReturnType<typeof setInterval>;
   private syncing?: Promise<void>;
   private disposed = false;
@@ -181,8 +188,7 @@ export class ScheduledTaskService {
   private async validateTarget(path: string, sessionId?: string): Promise<void> {
     if (!isSessionId(sessionId)) throw new Error('paused: Select a valid target chat.');
     if (this.settings.isSessionArchived({ projectPath: path, sessionId })) throw new Error('paused: The target chat was archived. Select another chat.');
-    const catalog = await this.catalog.list(path);
-    if (!catalog.sessions.some((session) => session.uuid === sessionId)) throw new Error('paused: The target chat is unavailable. Select another chat.');
+    if (!(await this.catalog.find(path, sessionId))) throw new Error('paused: The target chat is unavailable. Select another chat.');
   }
 
   private async notifyOnce(key: string, title: string, body: string, ref?: SessionRef): Promise<void> {
@@ -217,19 +223,42 @@ export class ScheduledTaskService {
     await this.notificationWrites;
   }
 
-  async run(source: SessionRuntime, runId: string, task: CronJobDto): Promise<{ sessionId: string; summary: string }> {
+  run(source: SessionRuntime, runId: string, task: CronJobDto): Promise<ScheduledRunResult> {
+    // Rust advances the generation when a queued occurrence is claimed again.
+    const identity = scheduledRunIdentity(runId, task);
+    const key = JSON.stringify([source.projectPath, identity.occurrenceId, identity.claimGeneration]);
+    const existing = this.pendingRuns.get(key) ?? this.recentRuns.get(key);
+    if (existing) return existing;
+    const operation: Promise<ScheduledRunResult> = this.runOnce(source, runId, task, identity.occurrenceId, identity.hostAdmitted).finally(() => {
+      this.pendingRuns.delete(key);
+      this.recentRuns.set(key, operation);
+      while (this.recentRuns.size > MAX_RECENT_SCHEDULED_RUNS) {
+        this.recentRuns.delete(this.recentRuns.keys().next().value!);
+      }
+    });
+    this.pendingRuns.set(key, operation);
+    return operation;
+  }
+
+  private assertRunAllowed(): void {
+    if (this.disposed) throw new Error('cancelled: Scheduled task service is closed.');
+  }
+
+  private async runOnce(source: SessionRuntime, runId: string, task: CronJobDto, occurrenceId: string, hostAdmitted: boolean): Promise<ScheduledRunResult> {
     try {
+      this.assertRunAllowed();
+      if (hostAdmitted) throw new Error('interrupted: This scheduled run was already started, but its completion is unavailable. Retry the task to start a new run.');
       const result = await this.execute(source, runId, task);
-      if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${runId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', { projectPath: source.projectPath, sessionId: result.sessionId });
+      if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', { projectPath: source.projectPath, sessionId: result.sessionId });
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (task.automation?.notificationPolicy !== 'none' && !message.startsWith('busy:') && !message.startsWith('cancelled:')) await this.notifyOnce(`${source.projectPath}:${runId}`, 'Scheduled task needs attention', message);
+      if (task.automation?.notificationPolicy !== 'none' && !message.startsWith('busy:') && !message.startsWith('cancelled:')) await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, 'Scheduled task needs attention', message);
       throw error;
     }
   }
 
-  private async execute(source: SessionRuntime, runId: string, task: CronJobDto): Promise<{ sessionId: string; summary: string }> {
+  private async execute(source: SessionRuntime, runId: string, task: CronJobDto): Promise<ScheduledRunResult> {
     const config = task.automation;
     if (!config) throw new Error('paused: Scheduled task configuration is missing.');
     const path = source.projectPath;
@@ -240,11 +269,17 @@ export class ScheduledTaskService {
     const ref = { projectPath: path, sessionId: existing ?? randomUUID() };
     const previous = this.sessionQueues.get(ref.sessionId) ?? Promise.resolve();
     const operation = previous.catch(() => undefined).then(async () => {
-      // Revalidate after waiting: projects and targets may disappear while queued.
+      // Revalidate after waiting: the service, projects and targets may disappear while queued.
+      this.assertRunAllowed();
       if (!this.settings.isTrustedWorkspace(path)) throw new Error('paused: The project is unavailable.');
       if (existing) await this.validateTarget(path, existing);
+      this.assertRunAllowed();
       return this.bridge.withBackgroundSession(ref, !existing, config.model, async (runtime) => {
-        const summary = await runtime.runScheduledTurn(runId, task, () => source.markCronRunStarted(runId, ref.sessionId));
+        this.assertRunAllowed();
+        const summary = await runtime.runScheduledTurn(runId, task, () => {
+          this.assertRunAllowed();
+          return source.markCronRunStarted(runId, ref.sessionId);
+        });
         return { sessionId: ref.sessionId, summary };
       });
     });

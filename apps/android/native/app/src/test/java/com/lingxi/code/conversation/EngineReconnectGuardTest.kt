@@ -32,4 +32,29 @@ class EngineReconnectGuardTest {
         assertFalse(idle.copy(compaction = CompactionProgressUi(CompactionProgressStatus.Completed))
             .blocksEngineReconnect(hasPendingPermission = false))
     }
+
+    @Test fun pendingTransitionExceptionNeverAllowsLiveWorkReplacement() {
+        val pending = idle.copy(sessionTransitioning = true)
+        assertFalse(pending.blocksWorkspaceReplacement(false, replacePendingTransition = true))
+        assertTrue(pending.blocksWorkspaceReplacement(false, replacePendingTransition = false))
+        assertTrue(pending.copy(activeBackgroundTaskIds = setOf("task"))
+            .blocksWorkspaceReplacement(false, replacePendingTransition = true))
+        assertTrue(pending.blocksWorkspaceReplacement(true, replacePendingTransition = true))
+        assertTrue(pending.copy(cancellationInFlight = true)
+            .blocksWorkspaceReplacement(false, replacePendingTransition = true))
+    }
+
+    @Test fun taskWorkflowAndAgentStatusesBlockWorkspaceReplacementWithoutStreaming() {
+        val states = listOf(
+            idle.copy(backgroundTasks = mapOf("task" to BackgroundTaskUi(
+                "task", "agent", "Executing", TaskStatusDto.PENDING, false, null))),
+            idle.copy(workflowRuns = mapOf("run" to WorkflowRunUi("s", "task", "run"))),
+            idle.copy(sessionAgents = listOf(SessionAgentUi("agent", "Agent", "worker", null, "working", null))),
+        )
+        states.forEach { assertTrue(it.blocksWorkspaceReplacement(false, replacePendingTransition = true)) }
+        assertFalse(idle.copy(sessionAgents = listOf(SessionAgentUi("agent", "Agent", "worker", null, "completed", null)))
+            .blocksWorkspaceReplacement(false, replacePendingTransition = true))
+        assertFalse(idle.copy(workflowRuns = mapOf("run" to WorkflowRunUi("s", "task", "run", TaskStatusDto.COMPLETED)))
+            .blocksWorkspaceReplacement(false, replacePendingTransition = true))
+    }
 }

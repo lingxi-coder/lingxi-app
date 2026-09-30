@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { Toggle } from '../primitives';
@@ -72,21 +72,17 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
   const [saving, setSaving] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // The Critical fix: re-seed every draft from the NEWLY selected layer's
-  // own value whenever `editingLayer` changes, so a save can never carry a
-  // previous layer's text into the one now selected. Deliberately NOT
-  // depending on `enabledTools`/`outputStyle` themselves — those are
-  // recomputed on every snapshot refresh (including right after THIS page's
-  // own save), and resetting the draft then would fight typing/clobber an
-  // in-flight edit on the layer the user is actually still on.
+  const draftOwner = useRef({ layer: editingLayer, initialized: snapshot !== null });
   useEffect(() => {
+    if (draftOwner.current.layer === editingLayer && draftOwner.current.initialized) return;
+    draftOwner.current = { layer: editingLayer, initialized: snapshot !== null };
+    if (!snapshot) return;
     setToolsText(enabledTools.join(', '));
     setOutputStyleText(outputStyle);
     setOverrideFrom('');
     setOverrideTo('');
     setSaveError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingLayer]);
+  }, [editingLayer, snapshot, enabledTools, outputStyle]);
 
   const write = (patch: Record<string, unknown>, key: string) => {
     setSaving(key);
@@ -111,7 +107,7 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
             />
             <button
               type="button"
-              disabled={saving === 'enabledTools'}
+              disabled={!snapshot || saving === 'enabledTools'}
               onClick={() => write({ enabledTools: parseToolList(toolsText) }, 'enabledTools')}
               style={ghostButtonStyle(t, saving === 'enabledTools')}
             >
@@ -138,7 +134,7 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
         <Row title="outputStyle" desc="标量字段，后写入的层直接覆盖，不参与合并。" align="center">
           <div style={{ display: 'flex', gap: 7 }}>
             <input value={outputStyleText} onChange={(e) => setOutputStyleText(e.target.value)} placeholder="Explanatory" aria-label="outputStyle" style={inputStyle(t)} />
-            <button type="button" disabled={saving === 'outputStyle'} onClick={() => write({ outputStyle: outputStyleText.trim() || null }, 'outputStyle')} style={ghostButtonStyle(t, saving === 'outputStyle')}>保存</button>
+            <button type="button" disabled={!snapshot || saving === 'outputStyle'} onClick={() => write({ outputStyle: outputStyleText.trim() || null }, 'outputStyle')} style={ghostButtonStyle(t, saving === 'outputStyle')}>保存</button>
           </div>
         </Row>
       </Card>

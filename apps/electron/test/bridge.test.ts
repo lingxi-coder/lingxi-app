@@ -1201,7 +1201,7 @@ test('AskUserQuestion broker resolution clears replay state without a renderer a
   assert.equal((manager as any).pendingAskUserQuestionRequests.has(12), false);
 });
 
-test('permission resolutions clear every renderer and pending host state', () => {
+test('permission resolutions clear every renderer and pending host state', async () => {
   const runtime = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     sessionId: '44444444-5555-4666-8777-888888888888',
@@ -1210,6 +1210,7 @@ test('permission resolutions clear every renderer and pending host state', () =>
   } as any);
   const handlers = new Map<string, (...args: unknown[]) => void>();
   const client = {
+    requestPermissionScope: async (id: number) => ({ request_id: id, background_owned: false }),
     on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return client; },
   };
   const first: Array<{ channel: string; payload: unknown }> = [];
@@ -1217,10 +1218,11 @@ test('permission resolutions clear every renderer and pending host state', () =>
   const firstWindow = fakeWebContents(first);
   const secondWindow = fakeWebContents(second);
 
+  (runtime as any).client = client;
   (runtime as any).wireClient(client, 0);
   (runtime as any).activeTurn = true;
   runtime.registerWindow(firstWindow as any, 'app://desktop/index.html');
-  handlers.get('permission')!({ request_id: 17, kind: { type: 'exit_plan_mode', plan: '# plan' } });
+  await handlers.get('permission')!({ request_id: 17, kind: { type: 'exit_plan_mode', plan: '# plan' } });
 
   // A renderer that joins while the request is parked must receive the same
   // request; permission frames are not part of the sequenced event replay.
@@ -1240,16 +1242,17 @@ test('permission resolutions clear every renderer and pending host state', () =>
   assert.equal(second.filter((entry) => entry.channel === 'lingxi:event').length, 1);
 
   // A delayed duplicate frame must not resurrect the terminal request.
-  handlers.get('permission')!({ request_id: 17, kind: { type: 'exit_plan_mode', plan: '# stale' } });
+  await handlers.get('permission')!({ request_id: 17, kind: { type: 'exit_plan_mode', plan: '# stale' } });
   assert.equal(runtime.pendingInteractions, 0);
 });
 
-test('registerWindow replays pending AskUserQuestion requests to a reloaded renderer', () => {
+test('registerWindow replays pending AskUserQuestion requests to a reloaded renderer', async () => {
   const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
   const handlers = new Map<string, (...args: unknown[]) => void>();
   const fakeClient = {
+    requestPermissionScope: async (id: number) => ({ request_id: id, background_owned: false }),
     on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
   };
   const sent: Array<{ channel: string; payload: unknown }> = [];
@@ -1271,6 +1274,7 @@ test('registerWindow replays pending AskUserQuestion requests to a reloaded rend
     },
   };
 
+  (manager as any).client = fakeClient;
   (manager as any).wireClient(fakeClient, 0);
   (manager as any).activeTurn = true;
   handlers.get('event')!(event);
@@ -1280,7 +1284,7 @@ test('registerWindow replays pending AskUserQuestion requests to a reloaded rend
   assert.deepEqual(sent, [{ channel: 'lingxi:event', payload: event }]);
 });
 
-test('old bridge generations cannot repopulate turn or permission state', () => {
+test('old bridge generations cannot repopulate turn or permission state', async () => {
   const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
@@ -1294,14 +1298,14 @@ test('old bridge generations cannot repopulate turn or permission state', () => 
 
   (manager as any).wireClient(staleClient, 1);
   handlers.get('event')!({ type: 'turn_started', turn_id: 9 });
-  handlers.get('permission')!({ request_id: 9, kind: { type: 'exit_plan_mode' } });
+  await handlers.get('permission')!({ request_id: 9, kind: { type: 'exit_plan_mode' } });
 
   assert.equal(manager.turnActive, false);
   assert.equal((manager as any).pendingPermissionIds.size, 0);
   assert.deepEqual(broadcasts, []);
 });
 
-test('turn terminal owns release and rejects late interactive or tool events', () => {
+test('turn terminal owns release and rejects late interactive or tool events', async () => {
   const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
@@ -1309,12 +1313,14 @@ test('turn terminal owns release and rejects late interactive or tool events', (
   (manager as any).broadcast = (channel: string, payload: unknown) => broadcasts.push({ channel, payload });
   const handlers = new Map<string, (...args: unknown[]) => void>();
   const fakeClient = {
+    requestPermissionScope: async (id: number) => ({ request_id: id, background_owned: false }),
     on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
   };
 
+  (manager as any).client = fakeClient;
   (manager as any).wireClient(fakeClient, 0);
   handlers.get('event')!({ type: 'turn_started', turn_id: 7 });
-  handlers.get('permission')!({ request_id: 4, kind: { type: 'exit_plan_mode' } });
+  await handlers.get('permission')!({ request_id: 4, kind: { type: 'exit_plan_mode' } });
   handlers.get('event')!({ type: 'error', kind: { type: 'internal' }, message: 'non-terminal command error' });
   assert.equal(manager.turnActive, true, 'generic errors cannot release a running turn');
   assert.ok((manager as any).pendingPermissionIds.has(4));
@@ -1327,7 +1333,7 @@ test('turn terminal owns release and rejects late interactive or tool events', (
   assert.equal(manager.turnActive, false);
   assert.equal((manager as any).pendingPermissionIds.size, 0);
 
-  handlers.get('permission')!({ request_id: 5, kind: { type: 'exit_plan_mode' } });
+  await handlers.get('permission')!({ request_id: 5, kind: { type: 'exit_plan_mode' } });
   handlers.get('event')!({ type: 'tool_heartbeat', id: 'late', tool: 'WebSearch', elapsed_ms: 99_000 });
   handlers.get('event')!({
     type: 'ask_user_question',
@@ -1342,7 +1348,7 @@ test('turn terminal owns release and rejects late interactive or tool events', (
   );
 });
 
-test('cancelling turn rejects late interactions but keeps turn events flowing', () => {
+test('cancelling turn rejects late interactions but keeps turn events flowing', async () => {
   const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
   });
@@ -1350,13 +1356,15 @@ test('cancelling turn rejects late interactions but keeps turn events flowing', 
   (manager as any).broadcast = (channel: string, payload: unknown) => broadcasts.push({ channel, payload });
   const handlers = new Map<string, (...args: unknown[]) => void>();
   const fakeClient = {
+    requestPermissionScope: async (id: number) => ({ request_id: id, background_owned: false }),
     on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
   };
 
+  (manager as any).client = fakeClient;
   (manager as any).wireClient(fakeClient, 0);
   handlers.get('event')!({ type: 'turn_started', turn_id: 8 });
   (manager as any).cancellingTurn = true;
-  handlers.get('permission')!({ request_id: 8, kind: { type: 'exit_plan_mode' } });
+  await handlers.get('permission')!({ request_id: 8, kind: { type: 'exit_plan_mode' } });
   handlers.get('computerAccess')!({ request_id: 9, reason: 'late', apps: [] });
   handlers.get('event')!({
     type: 'ask_user_question',
@@ -1375,7 +1383,7 @@ test('cancelling turn rejects late interactions but keeps turn events flowing', 
   );
 });
 
-test('an engine-initiated turn re-arms the host and its permission prompts reach the user', () => {
+test('an engine-initiated turn re-arms the host and its permission prompts reach the user', async () => {
   const diagnostics = new DiagnosticBuffer();
   const manager = new SessionRuntime({
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
@@ -1385,9 +1393,11 @@ test('an engine-initiated turn re-arms the host and its permission prompts reach
   (manager as any).broadcast = (channel: string, payload: unknown) => broadcasts.push({ channel, payload });
   const handlers = new Map<string, (...args: unknown[]) => void>();
   const fakeClient = {
+    requestPermissionScope: async (id: number) => ({ request_id: id, background_owned: false }),
     on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
   };
 
+  (manager as any).client = fakeClient;
   (manager as any).wireClient(fakeClient, 0);
   handlers.get('event')!({ type: 'turn_started', turn_id: 3 });
   handlers.get('event')!({
@@ -1405,7 +1415,7 @@ test('an engine-initiated turn re-arms the host and its permission prompts reach
   // `AdapterOutputStream::emit_turn_started` impl, which did not exist and made
   // every such turn invisible here.
   const beforeReArm = diagnostics.snapshot().length;
-  handlers.get('permission')!({ request_id: 21, kind: { type: 'exit_plan_mode' } });
+  await handlers.get('permission')!({ request_id: 21, kind: { type: 'exit_plan_mode' } });
   assert.equal((manager as any).pendingPermissionIds.size, 0, 'no turn owns this request yet');
   assert.match(
     diagnostics.snapshot().slice(beforeReArm).map((entry) => entry.message).join('\n'),
@@ -1416,7 +1426,7 @@ test('an engine-initiated turn re-arms the host and its permission prompts reach
   handlers.get('event')!({ type: 'turn_started', turn_id: undefined });
   assert.equal(manager.turnActive, true, 'the engine-initiated turn owns the slot');
 
-  handlers.get('permission')!({ request_id: 22, kind: { type: 'exit_plan_mode' } });
+  await handlers.get('permission')!({ request_id: 22, kind: { type: 'exit_plan_mode' } });
   handlers.get('event')!({ type: 'tool_use_started', id: 'rewake', tool: 'Bash', view: {} });
 
   assert.ok((manager as any).pendingPermissionIds.has(22), 'its permission prompts reach the user');
@@ -1427,7 +1437,7 @@ test('an engine-initiated turn re-arms the host and its permission prompts reach
   );
 });
 
-test('prompt submission owns the pre-turn_started cancellation window', () => {
+test('prompt submission owns the pre-turn_started cancellation window', async () => {
   const calls: Array<{ type: string; value?: unknown }> = [];
   const manager = new SessionRuntime({
     accessState: () => ({ workspace: '/workspace', trusted: true }),
@@ -1435,12 +1445,14 @@ test('prompt submission owns the pre-turn_started cancellation window', () => {
   });
   const handlers = new Map<string, (...args: unknown[]) => void>();
   const fakeClient = {
+    requestPermissionScope: async (id: number) => ({ request_id: id, background_owned: false }),
     sendPrompt: (text: string, opts?: { images?: unknown[] }) => calls.push({ type: 'prompt', value: { text, images: opts?.images ?? [] } }),
     cancel: (turnId?: number) => calls.push({ type: 'cancel', value: turnId }),
     on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
   };
   (manager as any).client = fakeClient;
   (manager as any).activeWorkspace = '/workspace';
+  (manager as any).client = fakeClient;
   (manager as any).wireClient(fakeClient, 0);
 
   (manager as any).sendPrompt('hello');
@@ -1449,7 +1461,7 @@ test('prompt submission owns the pre-turn_started cancellation window', () => {
   assert.equal((manager as any).cancellingTurn, true);
 
   handlers.get('event')!({ type: 'turn_started', turn_id: 91 });
-  handlers.get('permission')!({ request_id: 91, kind: { type: 'exit_plan_mode' } });
+  await handlers.get('permission')!({ request_id: 91, kind: { type: 'exit_plan_mode' } });
 
   assert.equal((manager as any).cancellingTurn, true, 'turn_started must not undo an accepted cancel');
   assert.equal((manager as any).pendingPermissionIds.size, 0);

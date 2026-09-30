@@ -112,6 +112,12 @@ import type {
 } from './lingxi.js';
 import { saveProviderSettings } from './providerSettingsSave.js';
 import {
+  interruptConfigurationOperations,
+  requestConfigurationOperation,
+  settleConfigurationOperation,
+} from './configurationOperations.js';
+import type { PendingConfigurationOperation } from './configurationOperations.js';
+import {
   addRuntimeResources,
   closeRuntimeCenterItem,
   commitRuntimeResources,
@@ -141,6 +147,11 @@ import type { SubmittedSession } from './submittedSessionCatalog.js';
 import {
   MAX_TRACKED_SPEECH_SUBSCRIBERS,
   appendTrackedTurnDelta,
+  acceptTrackedMessages,
+  allocateTrackedTurnId,
+  identifyTrackedMessage,
+  sealTrackedMessage,
+  retractTrackedMessage,
   bindTrackedTurn,
   clearTrackedTurnState,
   completeTrackedTurn,
@@ -151,13 +162,6 @@ import {
   trackedListenerKey,
 } from './trackedTurns.js';
 import type { ActiveTrackedTurn, TrackedSpeechListener } from './trackedTurns.js';
-
-interface PendingConfigurationOperation {
-  domain: ConfigurationDomainDto;
-  resolve: (event: ConfigurationOperationEvent) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
 
 const CONFIGURATION_OPERATION_TIMEOUT_MS = 5 * 60_000;
 
@@ -209,6 +213,7 @@ export function useBridge(): UseBridge {
   const [configurationOperations, setConfigurationOperations] = useState<Partial<Record<ConfigurationDomainDto, ConfigurationOperationEvent>>>({});
   const pendingConfigurationOperations = useRef(new Map<string, PendingConfigurationOperation>());
   const turnActiveRefs = useRef(new Map<string, boolean>());
+  const engineTurnActiveRefs = useRef(new Map<string, boolean>());
   const slashPendingRefs = useRef(new Map<string, boolean>());
   const pendingFusionDispatches = useRef(new Map<string, { raw: string }>());
   const sideQuestionTurns = useRef(new Map<string, Set<number>>());
@@ -230,13 +235,11 @@ export function useBridge(): UseBridge {
   const pendingTrackedTurns = useRef(new Map<string, DesktopTurnToken[]>());
   const activeTrackedTurns = useRef(new Map<string, ActiveTrackedTurn>());
   const trackedSpeechListeners = useRef(new Map<string, Set<TrackedSpeechListener>>());
+  const cancelledTrackedTokens = useRef(new Set<string>());
+  const pendingTrackedDispatches = useRef(new Set<string>());
 
   useEffect(() => () => {
-    for (const pending of pendingConfigurationOperations.current.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('configuration operation was interrupted'));
-    }
-    pendingConfigurationOperations.current.clear();
+    interruptConfigurationOperations(pendingConfigurationOperations.current);
     for (const sessionId of new Set<string>([
       ...pendingTrackedTurns.current.keys(),
       ...activeTrackedTurns.current.keys(),
@@ -377,15 +380,23 @@ export function useBridge(): UseBridge {
     sessionId: string,
     requestId: number,
     kind: 'permission' | 'computerAccess' | 'askUserQuestion',
+    request: { request_id: number },
   ): void => {
     const summary = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId);
     updateRuntime(sessionId, (state) => {
+      const queue = kind === 'permission' ? state.permissionQueue
+        : kind === 'computerAccess' ? state.computerAccessQueue : state.askUserQuestionQueue;
+      const pending = queue.find((entry) => entry.request_id === requestId);
+      if (pending !== request) return state;
       const next: RuntimeState = { ...state };
       if (kind === 'permission') {
+        if (state.resolvedPermissionIds.has(requestId)) return state;
         next.permissionQueue = state.permissionQueue.filter((entry) => entry.request_id !== requestId);
+        next.resolvedPermissionIds = new Set(state.resolvedPermissionIds).add(requestId);
       } else if (kind === 'computerAccess') {
         next.computerAccessQueue = state.computerAccessQueue.filter((entry) => entry.request_id !== requestId);
       } else {
+        if (state.resolvedAskUserQuestionIds.has(requestId)) return state;
         next.askUserQuestionQueue = state.askUserQuestionQueue.filter((entry) => entry.request_id !== requestId);
         const resolvedAskUserQuestionIds = new Set(state.resolvedAskUserQuestionIds);
         resolvedAskUserQuestionIds.add(requestId);
@@ -395,15 +406,15 @@ export function useBridge(): UseBridge {
         + state.computerAccessQueue.length
         + state.askUserQuestionQueue.length;
       const fallbackPendingInteractions = Math.max(summary?.pendingInteractions ?? 0, localPendingInteractions);
-      next.pendingInteractionsOverride = pendingCountAfterResponse(
-        state.pendingInteractionsOverride,
-        fallbackPendingInteractions,
+      next.pendingInteractionsOverride = Math.max(
+        next.permissionQueue.length + next.computerAccessQueue.length + next.askUserQuestionQueue.length,
+        pendingCountAfterResponse(state.pendingInteractionsOverride, fallbackPendingInteractions),
       );
       if (kind === 'askUserQuestion') {
         const fallbackPendingQuestions = Math.max(summary?.pendingAskUserQuestions ?? 0, state.askUserQuestionQueue.length);
-        next.pendingAskUserQuestionsOverride = pendingCountAfterResponse(
-          state.pendingAskUserQuestionsOverride,
-          fallbackPendingQuestions,
+        next.pendingAskUserQuestionsOverride = Math.max(
+          next.askUserQuestionQueue.length,
+          pendingCountAfterResponse(state.pendingAskUserQuestionsOverride, fallbackPendingQuestions),
         );
       }
       return next;
@@ -422,7 +433,7 @@ export function useBridge(): UseBridge {
       // The snapshot is authoritative, so disposal markers have been
       // reconciled once it arrives and must not accumulate across sessions.
       removedRuntimeIds.current.clear();
-      pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, slashPendingRefs.current, pendingFusionDispatches.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
+      pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, engineTurnActiveRefs.current, slashPendingRefs.current, pendingFusionDispatches.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
       for (const sessionId of new Set<string>([
         ...pendingTrackedTurns.current.keys(),
         ...activeTrackedTurns.current.keys(),
@@ -450,6 +461,7 @@ export function useBridge(): UseBridge {
         else nextState.pendingAskUserQuestionsOverride = pendingAskUserQuestionsOverride;
         next.set(summary.sessionId, nextState);
         turnActiveRefs.current.set(summary.sessionId, summary.turnActive);
+        engineTurnActiveRefs.current.set(summary.sessionId, summary.turnActive);
       }
       const sessionId = pending?.sessionId ?? snapshot.activeSession?.sessionId ?? snapshot.settings.activeSession?.sessionId;
       if (!pending && sessionId && snapshot.pendingAskUserQuestions) {
@@ -580,8 +592,14 @@ export function useBridge(): UseBridge {
         }));
         return;
       }
-      if (event.type === 'turn_started') turnActiveRefs.current.set(sessionId, true);
-      if (event.type === 'turn_ended' || event.type === 'session_ended') turnActiveRefs.current.set(sessionId, false);
+      if (event.type === 'turn_started') {
+        turnActiveRefs.current.set(sessionId, true);
+        engineTurnActiveRefs.current.set(sessionId, true);
+      }
+      if (event.type === 'turn_ended' || event.type === 'session_ended') {
+        turnActiveRefs.current.set(sessionId, false);
+        engineTurnActiveRefs.current.set(sessionId, false);
+      }
       if (event.type === 'turn_started') {
         if (activeTrackedTurns.current.has(sessionId)) completeTrackedSpeech(sessionId, 'stale');
         bindTrackedTurn(pendingTrackedTurns.current, activeTrackedTurns.current, sessionId, event);
@@ -639,6 +657,15 @@ export function useBridge(): UseBridge {
         if (cancelling && task) clearCancellationRuntime(cancelling, task);
         updateRuntime(sessionId, (state) => ({ ...state, isCancelling: false }));
       }
+      if (event.type === 'text_delta' || event.type === 'tool_use_started' || event.type === 'tool_use_result'
+        || event.type === 'tool_heartbeat' || event.type === 'turn_ended') {
+        for (const accepted of acceptTrackedMessages(activeTrackedTurns.current, sessionId)) {
+          emitTrackedSpeech(trackedSpeechListeners.current, accepted);
+        }
+      }
+      if (event.type === 'message_identity') identifyTrackedMessage(activeTrackedTurns.current, sessionId, event.message_id);
+      if (event.type === 'message_retracted') retractTrackedMessage(activeTrackedTurns.current, sessionId, event.message_id);
+      if (event.type === 'message_complete') sealTrackedMessage(activeTrackedTurns.current, sessionId);
       if (event.type === 'text_delta') {
         const tracked = appendTrackedTurnDelta(activeTrackedTurns.current, sessionId, event.text);
         if (tracked) {
@@ -651,7 +678,6 @@ export function useBridge(): UseBridge {
           });
         }
       }
-      if (event.type === 'message_complete') completeTrackedSpeech(sessionId, 'message_complete');
       if (event.type === 'turn_ended' || event.type === 'session_ended' || event.type === 'session_started' || event.type === 'session_resumed') {
         completeTrackedSpeech(sessionId, event.type === 'turn_ended' ? 'turn_ended' : 'stale');
       }
@@ -668,12 +694,10 @@ export function useBridge(): UseBridge {
         }
         if (event.type === 'turn_started') next = { ...next, error: undefined };
         if (event.type === 'ask_user_question') {
-          const resolvedAskUserQuestionIds = new Set(state.resolvedAskUserQuestionIds);
-          resolvedAskUserQuestionIds.delete(event.request.request_id);
+          if (state.resolvedAskUserQuestionIds.has(event.request.request_id)) return next;
           const alreadyQueued = state.askUserQuestionQueue.some((entry) => entry.request_id === event.request.request_id);
           next = {
             ...next,
-            resolvedAskUserQuestionIds,
             askUserQuestionQueue: [
               ...state.askUserQuestionQueue.filter((entry) => entry.request_id !== event.request.request_id),
               event.request,
@@ -687,53 +711,83 @@ export function useBridge(): UseBridge {
           };
         }
         if (event.type === 'ask_user_question_resolved') {
+          if (state.resolvedAskUserQuestionIds.has(event.request_id)) return next;
           const resolvedAskUserQuestionIds = new Set(state.resolvedAskUserQuestionIds);
           resolvedAskUserQuestionIds.add(event.request_id);
           const summary = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId);
+          const questionWasQueued = state.askUserQuestionQueue.some((entry) => entry.request_id === event.request_id);
+          const remainingQuestions = state.askUserQuestionQueue.filter((entry) => entry.request_id !== event.request_id).length;
+          const pendingInteractions = questionWasQueued
+            ? pendingCountAfterResponse(
+                state.pendingInteractionsOverride,
+                Math.max(summary?.pendingInteractions ?? 0,
+                  state.permissionQueue.length + state.computerAccessQueue.length + state.askUserQuestionQueue.length),
+              )
+            : state.pendingInteractionsOverride;
+          const pendingQuestions = questionWasQueued
+            ? pendingCountAfterResponse(state.pendingAskUserQuestionsOverride,
+                Math.max(summary?.pendingAskUserQuestions ?? 0, state.askUserQuestionQueue.length))
+            : state.pendingAskUserQuestionsOverride;
           next = {
             ...next,
             askUserQuestionQueue: state.askUserQuestionQueue.filter((entry) => entry.request_id !== event.request_id),
             resolvedAskUserQuestionIds,
-            pendingInteractionsOverride: pendingCountAfterResponse(
-              state.pendingInteractionsOverride,
-              Math.max(
-                summary?.pendingInteractions ?? 0,
-                state.permissionQueue.length + state.computerAccessQueue.length + state.askUserQuestionQueue.length,
-              ),
-            ),
-            pendingAskUserQuestionsOverride: pendingCountAfterResponse(
-              state.pendingAskUserQuestionsOverride,
-              Math.max(summary?.pendingAskUserQuestions ?? 0, state.askUserQuestionQueue.length),
-            ),
+            pendingInteractionsOverride: pendingInteractions === undefined ? undefined
+              : Math.max(pendingInteractions, state.permissionQueue.length + state.computerAccessQueue.length + remainingQuestions),
+            pendingAskUserQuestionsOverride: pendingQuestions === undefined ? undefined : Math.max(pendingQuestions, remainingQuestions),
           };
         }
         if (event.type === 'permission_request_resolved') {
+          if (state.resolvedPermissionIds.has(event.request_id)) return next;
           const resolvedPermissionIds = new Set(state.resolvedPermissionIds);
           resolvedPermissionIds.add(event.request_id);
           const summary = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId);
+          const requestWasQueued = state.permissionQueue.some((entry) => entry.request_id === event.request_id);
+          const remainingInteractions = state.permissionQueue.filter((entry) => entry.request_id !== event.request_id).length
+            + state.computerAccessQueue.length + state.askUserQuestionQueue.length;
+          // The host can resolve a request whose scope check never admitted a
+          // card here. That resolution must not consume a different worker's
+          // pending count, nor hide any interactions we can still verify.
+          const pendingInteractions = requestWasQueued
+            ? pendingCountAfterResponse(
+                state.pendingInteractionsOverride,
+                Math.max(
+                  summary?.pendingInteractions ?? 0,
+                  state.permissionQueue.length + state.computerAccessQueue.length + state.askUserQuestionQueue.length,
+                ),
+              )
+            : state.pendingInteractionsOverride;
           next = {
             ...next,
             permissionQueue: state.permissionQueue.filter((entry) => entry.request_id !== event.request_id),
             resolvedPermissionIds,
-            pendingInteractionsOverride: pendingCountAfterResponse(
-              state.pendingInteractionsOverride,
-              Math.max(
-                summary?.pendingInteractions ?? 0,
-                state.permissionQueue.length + state.computerAccessQueue.length + state.askUserQuestionQueue.length,
-              ),
-            ),
+            pendingInteractionsOverride: pendingInteractions === undefined
+              ? undefined : Math.max(pendingInteractions, remainingInteractions),
           };
         }
         if (event.type === 'turn_ended' || event.type === 'session_ended') {
+          // A detached SDK worker owns a separate permission entry. Its card
+          // remains actionable after the foreground turn has already ended.
+          const permissionQueue = event.type === 'turn_ended'
+            ? state.permissionQueue.filter((entry) => entry.backgroundOwned === true)
+            : [];
+          const resolvedPermissionIds = event.type === 'session_ended' ? new Set<number>() : new Set(state.resolvedPermissionIds);
+          const resolvedAskUserQuestionIds = event.type === 'session_ended' ? new Set<number>() : new Set(state.resolvedAskUserQuestionIds);
+          if (event.type === 'turn_ended') {
+            for (const entry of state.permissionQueue) {
+              if (entry.backgroundOwned !== true) resolvedPermissionIds.add(entry.request_id);
+            }
+            for (const entry of state.askUserQuestionQueue) resolvedAskUserQuestionIds.add(entry.request_id);
+          }
           next = {
             ...next,
-            permissionQueue: [],
+            permissionQueue,
             computerAccessQueue: [],
             askUserQuestionQueue: [],
-            pendingInteractionsOverride: 0,
+            pendingInteractionsOverride: permissionQueue.length,
             pendingAskUserQuestionsOverride: 0,
-            resolvedPermissionIds: new Set(),
-            resolvedAskUserQuestionIds: new Set(),
+            resolvedPermissionIds,
+            resolvedAskUserQuestionIds,
             isCancelling: false,
           };
         }
@@ -757,6 +811,9 @@ export function useBridge(): UseBridge {
       if (event.type === 'settings_snapshot' && activeSessionIdRef.current === sessionId) setSettingsSnapshotEvent(event);
       if (event.type === 'mcp_servers' && activeSessionIdRef.current === sessionId) setMcpServersEvent(event);
       if (event.type === 'skills' && activeSessionIdRef.current === sessionId) setSkillsEvent(event);
+      if (event.type === 'configuration_operation') {
+        settleConfigurationOperation(pendingConfigurationOperations.current, sessionId, event);
+      }
       if (activeSessionIdRef.current === sessionId) {
         if (event.type === 'skill_catalog') setSkillCatalogEvent(event);
         if (event.type === 'skill_document') setSkillDocumentEvent(event);
@@ -764,16 +821,6 @@ export function useBridge(): UseBridge {
         if (event.type === 'plugin_catalog') setPluginCatalogEvent(event);
         if (event.type === 'configuration_operation') {
           setConfigurationOperations((previous) => ({ ...previous, [event.domain]: event }));
-          if (event.status === 'succeeded' || event.status === 'failed') {
-            const key = `${event.domain}:${event.operation_id}`;
-            const pending = pendingConfigurationOperations.current.get(key);
-            if (pending) {
-              clearTimeout(pending.timer);
-              pendingConfigurationOperations.current.delete(key);
-              if (event.status === 'succeeded') pending.resolve(event);
-              else pending.reject(new Error(event.message ?? `${event.domain} configuration operation failed`));
-            }
-          }
         }
       }
       if (event.type === 'error' && !/^force_compact failed:\s*/i.test(event.message)) {
@@ -784,6 +831,9 @@ export function useBridge(): UseBridge {
     const offState = host.onConnectionStateChanged((envelope) => {
       const sessionId = envelope.sessionId;
       const state = envelope.event;
+      if (state.status !== 'connected') {
+        interruptConfigurationOperations(pendingConfigurationOperations.current, sessionId);
+      }
       if (isRuntimeRemovedState(state)) {
         removedRuntimeIds.current.add(sessionId);
         setBootstrap((previous) => {
@@ -805,7 +855,7 @@ export function useBridge(): UseBridge {
           removeRuntimeFromMaps(sessionId, next);
           return next.size === previous.size ? previous : next;
         });
-        removeRuntimeFromMaps(sessionId, turnActiveRefs.current, slashPendingRefs.current, pendingFusionDispatches.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
+        removeRuntimeFromMaps(sessionId, turnActiveRefs.current, engineTurnActiveRefs.current, slashPendingRefs.current, pendingFusionDispatches.current, sideQuestionTurns.current, cancellingRefs.current, cancellationTasks.current);
         completeTrackedSpeech(sessionId, 'stale');
         return;
       }
@@ -853,6 +903,7 @@ export function useBridge(): UseBridge {
       });
       if (shouldClearPendingPermissions(state) && !pendingFusionDispatches.current.has(sessionId)) {
         turnActiveRefs.current.set(sessionId, false);
+        engineTurnActiveRefs.current.set(sessionId, false);
         // Same lockstep requirement as the session-event reset above: a
         // connection reset (respawn/disconnect/error/idle) clears the turn
         // claim, so the outstanding slash claim it may have been carrying
@@ -962,10 +1013,11 @@ export function useBridge(): UseBridge {
 
   const submittedSessionFor = useCallback((sessionId: string, text: string): SubmittedSession | undefined => {
     const ref = bootstrapRef.current?.runtimes.find((entry) => entry.sessionId === sessionId)
-      ?? (activeSession?.sessionId === sessionId ? activeSession : undefined);
+      ?? (activeSessionIdRef.current === sessionId
+        ? pendingSessionRef.current ?? bootstrapRef.current?.activeSession ?? bootstrapRef.current?.settings.activeSession : undefined);
     const saved = ref && bootstrapRef.current?.projectCatalogs[ref.projectPath]?.sessions.find((entry) => entry.uuid === sessionId);
     return firstSubmittedSession(ref, text, saved);
-  }, [activeSession]);
+  }, []);
 
   const sendTrackedPrompt = useCallback((
     text: string,
@@ -977,11 +1029,10 @@ export function useBridge(): UseBridge {
     const trimmed = text.trim();
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !trimmed || !host || !sessionId) return null;
-    const wasTurnActive = turnActiveRefs.current.get(sessionId) === true;
     turnActiveRefs.current.set(sessionId, true);
     runtimeResourceSendSequence.current += 1;
     trackedTurnSequence.current += 1;
-    const token = createDesktopTurnToken(sessionId, trackedTurnSequence.current, options.purpose ?? 'composer');
+    const token = createDesktopTurnToken(sessionId, trackedTurnSequence.current, options.purpose ?? 'composer', allocateTrackedTurnId());
     enqueueTrackedTurn(pendingTrackedTurns.current, token);
     const sendToken = `${sessionId}:${runtimeResourceSendSequence.current}`;
     const resources = promptRuntimeResources(sessionId, sendToken, images, imageNames, filePaths);
@@ -997,7 +1048,10 @@ export function useBridge(): UseBridge {
         runtimeCenter: addRuntimeResources(state.runtimeCenter, resources),
       };
     });
-    const queued = host.sendPrompt(sessionId, trimmed, images).then(() => {
+    pendingTrackedDispatches.current.add(token.clientTurnId);
+    const queued = host.sendPrompt(sessionId, trimmed, images, token.turnId).then(() => {
+      pendingTrackedDispatches.current.delete(token.clientTurnId);
+      cancelledTrackedTokens.current.delete(token.clientTurnId);
       if (removedRuntimeIds.current.has(sessionId)) return;
       updateRuntime(sessionId, (state) => ({
         ...state,
@@ -1005,23 +1059,27 @@ export function useBridge(): UseBridge {
         runtimeCenter: commitRuntimeResources(state.runtimeCenter, sendToken),
       }));
     }).catch((cause) => {
-      turnActiveRefs.current.set(sessionId, wasTurnActive);
+      pendingTrackedDispatches.current.delete(token.clientTurnId);
       dequeueTrackedTurn(pendingTrackedTurns.current, token);
       trackedSpeechListeners.current.delete(trackedListenerKey(token));
+      const stillRunning = () => engineTurnActiveRefs.current.get(sessionId) === true
+        || activeTrackedTurns.current.has(sessionId) || Boolean(pendingTrackedTurns.current.get(sessionId)?.length)
+        || slashPendingRefs.current.get(sessionId) === true;
+      turnActiveRefs.current.set(sessionId, stillRunning());
       if (!removedRuntimeIds.current.has(sessionId)) {
         updateRuntime(sessionId, (state) => ({
           ...state,
           conversation: {
             ...reduceEvent({ ...state.conversation, items: state.conversation.items.map((item) =>
-              item === promptItem && item.type === 'narration' ? { ...item, delivery: 'failed' as const } : item) }, wasTurnActive
+              item === promptItem && item.type === 'narration' ? { ...item, delivery: 'failed' as const } : item) }, stillRunning()
               ? { type: 'system_notice', message: 'Failed to queue the pending message.', is_error: true }
               : { type: 'error', kind: { type: 'transport' }, message: 'Failed to send the prompt to the engine.' }),
-            running: wasTurnActive,
+            running: stillRunning(),
           },
           runtimeCenter: rollbackRuntimeResources(state.runtimeCenter, sendToken),
         }));
       }
-      capture(cause);
+      if (!cancelledTrackedTokens.current.delete(token.clientTurnId) && activeSessionIdRef.current === sessionId) capture(cause);
       throw cause;
     });
     return { token, queued };
@@ -1053,6 +1111,29 @@ export function useBridge(): UseBridge {
       if (current.size === 0) trackedSpeechListeners.current.delete(key);
     };
   }, []);
+
+  /** Cancellation follows the submitted owner, including admission before turn_started. */
+  const cancelTrackedPrompt = useCallback(async (token: DesktopTurnToken): Promise<void> => {
+    if (!host || token.turnId === undefined || removedRuntimeIds.current.has(token.sessionId)) return;
+    const pending = pendingTrackedTurns.current.get(token.sessionId)?.some((entry) => entry.clientTurnId === token.clientTurnId);
+    const active = activeTrackedTurns.current.get(token.sessionId)?.token.clientTurnId === token.clientTurnId;
+    if (!pending && !active) return;
+    if (pendingTrackedDispatches.current.has(token.clientTurnId)) cancelledTrackedTokens.current.add(token.clientTurnId);
+    try { await host.cancel(token.sessionId, token.turnId); }
+    catch (cause) {
+      cancelledTrackedTokens.current.delete(token.clientTurnId);
+      throw cause;
+    }
+    if (pending) {
+      dequeueTrackedTurn(pendingTrackedTurns.current, token);
+      trackedSpeechListeners.current.delete(trackedListenerKey(token));
+      if (!activeTrackedTurns.current.has(token.sessionId) && !(pendingTrackedTurns.current.get(token.sessionId)?.length)
+        && engineTurnActiveRefs.current.get(token.sessionId) !== true && slashPendingRefs.current.get(token.sessionId) !== true) {
+        turnActiveRefs.current.set(token.sessionId, false);
+        updateRuntime(token.sessionId, (state) => ({ ...state, conversation: { ...state.conversation, running: false } }));
+      }
+    }
+  }, [host, updateRuntime]);
 
   const runSlashCommand = useCallback(async (raw: string) => {
     const command = raw.trim();
@@ -1167,16 +1248,25 @@ export function useBridge(): UseBridge {
       ? host.cancel(sessionId, turnId)
       : stopSessionSubagents(host, sessionId, agentIds);
     task = stop.then(() => {
-      updateRuntime(sessionId, (state) => ({
-        ...state,
-        permissionQueue: [],
-        computerAccessQueue: [],
-        askUserQuestionQueue: [],
-        pendingInteractionsOverride: 0,
-        pendingAskUserQuestionsOverride: 0,
-        resolvedPermissionIds: new Set(),
-        resolvedAskUserQuestionIds: new Set(),
-      }));
+      updateRuntime(sessionId, (state) => {
+        const permissionQueue = state.permissionQueue.filter((entry) => entry.backgroundOwned === true);
+        const resolvedPermissionIds = new Set(state.resolvedPermissionIds);
+        for (const entry of state.permissionQueue) {
+          if (entry.backgroundOwned !== true) resolvedPermissionIds.add(entry.request_id);
+        }
+        const resolvedAskUserQuestionIds = new Set(state.resolvedAskUserQuestionIds);
+        for (const entry of state.askUserQuestionQueue) resolvedAskUserQuestionIds.add(entry.request_id);
+        return {
+          ...state,
+          permissionQueue,
+          computerAccessQueue: [],
+          askUserQuestionQueue: [],
+          pendingInteractionsOverride: permissionQueue.length,
+          pendingAskUserQuestionsOverride: 0,
+          resolvedPermissionIds,
+          resolvedAskUserQuestionIds,
+        };
+      });
     }).catch((cause) => {
       if (taskRef.current === task) {
         cancelling.current = false;
@@ -1196,58 +1286,102 @@ export function useBridge(): UseBridge {
   }, [capture, host, updateRuntime]);
 
   const approve = useCallback(async (requestId: number, response?: PermissionResponseDto) => {
-    const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId) return;
-    try { await host.approve(sessionId, requestId, response); acknowledgeInteraction(sessionId, requestId, 'permission'); }
+    const sessionId = activeSessionId;
+    const permission = permissionQueue.find((entry) => entry.request_id === requestId);
+    if (!host || !sessionId || !permission || removedRuntimeIds.current.has(sessionId)
+      || runtimeStatesRef.current.get(sessionId)?.permissionQueue.find((entry) => entry.request_id === requestId) !== permission) return;
+    try { await host.approve(sessionId, requestId, response); acknowledgeInteraction(sessionId, requestId, 'permission', permission); }
     catch (cause) {
       if (isPermissionRequestGone(cause)) {
-        acknowledgeInteraction(sessionId, requestId, 'permission');
+        acknowledgeInteraction(sessionId, requestId, 'permission', permission);
         return;
       }
-      capture(cause);
+      if (!removedRuntimeIds.current.has(sessionId)) updateRuntime(sessionId, (state) => ({ ...state, error: messageFrom(cause) }));
+      if (activeSessionIdRef.current === sessionId) capture(cause);
+      throw cause;
     }
-  }, [acknowledgeInteraction, capture, host]);
+  }, [acknowledgeInteraction, activeSessionId, capture, host, permissionQueue, updateRuntime]);
 
   const deny = useCallback(async (requestId: number) => {
-    const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId) return;
-    try { await host.deny(sessionId, requestId); acknowledgeInteraction(sessionId, requestId, 'permission'); }
+    const sessionId = activeSessionId;
+    const permission = permissionQueue.find((entry) => entry.request_id === requestId);
+    if (!host || !sessionId || !permission || removedRuntimeIds.current.has(sessionId)
+      || runtimeStatesRef.current.get(sessionId)?.permissionQueue.find((entry) => entry.request_id === requestId) !== permission) return;
+    try { await host.deny(sessionId, requestId); acknowledgeInteraction(sessionId, requestId, 'permission', permission); }
     catch (cause) {
       if (isPermissionRequestGone(cause)) {
-        acknowledgeInteraction(sessionId, requestId, 'permission');
+        acknowledgeInteraction(sessionId, requestId, 'permission', permission);
         return;
       }
-      capture(cause);
+      if (!removedRuntimeIds.current.has(sessionId)) updateRuntime(sessionId, (state) => ({ ...state, error: messageFrom(cause) }));
+      if (activeSessionIdRef.current === sessionId) capture(cause);
+      throw cause;
     }
-  }, [acknowledgeInteraction, capture, host]);
+  }, [acknowledgeInteraction, activeSessionId, capture, host, permissionQueue, updateRuntime]);
 
   const approveComputerAccess = useCallback(async (requestId: number, response: ComputerAccessResponseDto) => {
-    const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId) return;
-    try { await host.approveComputerAccess(sessionId, requestId, response); acknowledgeInteraction(sessionId, requestId, 'computerAccess'); }
-    catch (cause) { capture(cause); }
-  }, [acknowledgeInteraction, capture, host]);
+    const sessionId = activeSessionId;
+    const request = computerAccessQueue.find((entry) => entry.request_id === requestId);
+    if (!host || !sessionId || !request || removedRuntimeIds.current.has(sessionId)
+      || runtimeStatesRef.current.get(sessionId)?.computerAccessQueue.find((entry) => entry.request_id === requestId) !== request) return;
+    try { await host.approveComputerAccess(sessionId, requestId, response); acknowledgeInteraction(sessionId, requestId, 'computerAccess', request); }
+    catch (cause) {
+      if (!removedRuntimeIds.current.has(sessionId)
+        && runtimeStatesRef.current.get(sessionId)?.computerAccessQueue.find((entry) => entry.request_id === requestId) === request) {
+        updateRuntime(sessionId, (state) => ({ ...state, error: messageFrom(cause) }));
+        if (activeSessionIdRef.current === sessionId) capture(cause);
+      }
+      throw cause;
+    }
+  }, [acknowledgeInteraction, activeSessionId, capture, computerAccessQueue, host, updateRuntime]);
 
   const denyComputerAccess = useCallback(async (requestId: number) => {
-    const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId) return;
-    try { await host.denyComputerAccess(sessionId, requestId); acknowledgeInteraction(sessionId, requestId, 'computerAccess'); }
-    catch (cause) { capture(cause); }
-  }, [acknowledgeInteraction, capture, host]);
+    const sessionId = activeSessionId;
+    const request = computerAccessQueue.find((entry) => entry.request_id === requestId);
+    if (!host || !sessionId || !request || removedRuntimeIds.current.has(sessionId)
+      || runtimeStatesRef.current.get(sessionId)?.computerAccessQueue.find((entry) => entry.request_id === requestId) !== request) return;
+    try { await host.denyComputerAccess(sessionId, requestId); acknowledgeInteraction(sessionId, requestId, 'computerAccess', request); }
+    catch (cause) {
+      if (!removedRuntimeIds.current.has(sessionId)
+        && runtimeStatesRef.current.get(sessionId)?.computerAccessQueue.find((entry) => entry.request_id === requestId) === request) {
+        updateRuntime(sessionId, (state) => ({ ...state, error: messageFrom(cause) }));
+        if (activeSessionIdRef.current === sessionId) capture(cause);
+      }
+      throw cause;
+    }
+  }, [acknowledgeInteraction, activeSessionId, capture, computerAccessQueue, host, updateRuntime]);
 
   const answerAskUserQuestion = useCallback(async (requestId: number, answers: Record<string, string>) => {
-    const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId) return;
-    try { await host.answerAskUserQuestion(sessionId, requestId, answers); acknowledgeInteraction(sessionId, requestId, 'askUserQuestion'); }
-    catch (cause) { capture(cause); }
-  }, [acknowledgeInteraction, capture, host]);
+    const sessionId = activeSessionId;
+    const request = askUserQuestionQueue.find((entry) => entry.request_id === requestId);
+    if (!host || !sessionId || !request || removedRuntimeIds.current.has(sessionId)
+      || runtimeStatesRef.current.get(sessionId)?.askUserQuestionQueue.find((entry) => entry.request_id === requestId) !== request) return;
+    try { await host.answerAskUserQuestion(sessionId, requestId, answers); acknowledgeInteraction(sessionId, requestId, 'askUserQuestion', request); }
+    catch (cause) {
+      if (!removedRuntimeIds.current.has(sessionId)
+        && runtimeStatesRef.current.get(sessionId)?.askUserQuestionQueue.find((entry) => entry.request_id === requestId) === request) {
+        updateRuntime(sessionId, (state) => ({ ...state, error: messageFrom(cause) }));
+        if (activeSessionIdRef.current === sessionId) capture(cause);
+      }
+      throw cause;
+    }
+  }, [acknowledgeInteraction, activeSessionId, askUserQuestionQueue, capture, host, updateRuntime]);
 
   const cancelAskUserQuestion = useCallback(async (requestId: number) => {
-    const sessionId = activeSessionIdRef.current;
-    if (sessionLoadingRef.current || !host || !sessionId) return;
-    try { await host.cancelAskUserQuestion(sessionId, requestId); acknowledgeInteraction(sessionId, requestId, 'askUserQuestion'); }
-    catch (cause) { capture(cause); }
-  }, [acknowledgeInteraction, capture, host]);
+    const sessionId = activeSessionId;
+    const request = askUserQuestionQueue.find((entry) => entry.request_id === requestId);
+    if (!host || !sessionId || !request || removedRuntimeIds.current.has(sessionId)
+      || runtimeStatesRef.current.get(sessionId)?.askUserQuestionQueue.find((entry) => entry.request_id === requestId) !== request) return;
+    try { await host.cancelAskUserQuestion(sessionId, requestId); acknowledgeInteraction(sessionId, requestId, 'askUserQuestion', request); }
+    catch (cause) {
+      if (!removedRuntimeIds.current.has(sessionId)
+        && runtimeStatesRef.current.get(sessionId)?.askUserQuestionQueue.find((entry) => entry.request_id === requestId) === request) {
+        updateRuntime(sessionId, (state) => ({ ...state, error: messageFrom(cause) }));
+        if (activeSessionIdRef.current === sessionId) capture(cause);
+      }
+      throw cause;
+    }
+  }, [acknowledgeInteraction, activeSessionId, askUserQuestionQueue, capture, host, updateRuntime]);
 
   const openSystemSettings = useCallback(async (pane: SystemSettingsPane) => {
     if (!host) return;
@@ -1937,28 +2071,19 @@ export function useBridge(): UseBridge {
     if (sessionLoadingRef.current || !host || !activeSessionIdRef.current) {
       throw new Error('Open a connected session before changing configuration.');
     }
-    const key = `${domain}:${operationId}`;
-    if (pendingConfigurationOperations.current.has(key)) {
-      throw new Error(`configuration operation ${operationId} is already pending`);
-    }
-    let pending!: PendingConfigurationOperation;
-    const terminal = new Promise<ConfigurationOperationEvent>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pendingConfigurationOperations.current.delete(key);
-        reject(new Error(`Timed out waiting for the ${domain} configuration operation.`));
-      }, CONFIGURATION_OPERATION_TIMEOUT_MS);
-      pending = { domain, resolve, reject, timer };
-      pendingConfigurationOperations.current.set(key, pending);
-    });
-    try {
-      await command(envelope);
-    } catch (cause) {
-      clearTimeout(pending.timer);
-      pendingConfigurationOperations.current.delete(key);
-      throw cause;
-    }
-    return terminal;
-  }, [command, host]);
+    const sessionId = activeSessionIdRef.current;
+    return requestConfigurationOperation(
+      pendingConfigurationOperations.current,
+      sessionId,
+      domain,
+      operationId,
+      () => host.command(sessionId, envelope).catch((cause: unknown) => {
+        if (activeSessionIdRef.current === sessionId) return capture(cause);
+        throw cause;
+      }),
+      CONFIGURATION_OPERATION_TIMEOUT_MS,
+    );
+  }, [capture, command, host]);
   const skillAdmin = useCallback(
     (adminCommand: SkillAdminCommandDto) => runConfigurationAdmin('skill', { type: 'skill_admin', command: adminCommand }),
     [runConfigurationAdmin],
@@ -2023,6 +2148,7 @@ export function useBridge(): UseBridge {
     clearError,
     sendTrackedPrompt,
     subscribeTrackedSpeech,
+    cancelTrackedPrompt,
     sendPrompt,
     runSlashCommand,
     beginLocalCommand,

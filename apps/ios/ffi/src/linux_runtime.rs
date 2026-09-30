@@ -25,6 +25,52 @@ use super::mobile_linux_sdk;
 use mobile_linux_api::MAX_MOBILE_LINUX_EVENT_BATCH;
 use std::sync::Arc;
 
+/// Preserve the raw journal watermark when lifecycle events have no stream
+/// representation. The payload-free reserved `runtime` event only advances a
+/// reader's cursor; terminal consumers ignore that stream and render no text.
+/// One bounded SDK page is read per call, with no public FFI DTO/ABI change.
+#[cfg(feature = "uniffi")]
+pub(super) async fn read_stream_event_page<F, Fut>(
+    after_sequence: Option<u64>,
+    limit: usize,
+    read_page: F,
+) -> Result<Vec<MobileLinuxStreamEventFfi>, mobile_linux_api::MobileLinuxError>
+where
+    F: FnOnce(Option<u64>, usize) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<
+            Vec<mobile_linux_api::MobileLinuxEvent>,
+            mobile_linux_api::MobileLinuxError,
+        >,
+    >,
+{
+    let limit = limit.min(MAX_MOBILE_LINUX_EVENT_BATCH);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let page = read_page(after_sequence, limit).await?;
+    let Some(newest_sequence) = page.iter().map(|event| event.sequence).max() else {
+        return Ok(Vec::new());
+    };
+    let mut events: Vec<_> = page.into_iter().filter_map(event_to_ffi).collect();
+    if events.iter().all(|event| event.sequence < newest_sequence) {
+        // At least one raw event was filtered, so this marker still fits the
+        // requested page limit. It must never signal an exit or an error.
+        events.push(MobileLinuxStreamEventFfi {
+            sequence: newest_sequence,
+            task_id: None,
+            stream_id: "runtime".to_string(),
+            source: MobileLinuxStreamSourceFfi::Run,
+            kind: MobileLinuxStreamEventKindFfi::StdoutLine,
+            text: None,
+            data: None,
+            exit_code: None,
+            timed_out: false,
+        });
+    }
+    Ok(events)
+}
+
 #[cfg(feature = "uniffi")]
 pub(super) fn ios_mobile_linux_status_from_config(
     config: Option<&IosMobileLinuxConfigFfi>,
@@ -525,14 +571,13 @@ impl IosMobileLinuxRuntimeHandle {
         if !capability.available {
             return Err(self.availability_error().await);
         }
-        self.runtime
-            .read_events(
-                after_sequence,
-                limit.unwrap_or(MAX_MOBILE_LINUX_EVENT_BATCH as u32) as usize,
-            )
-            .await
-            .map(|events| events.into_iter().filter_map(event_to_ffi).collect())
-            .map_err(mobile_linux_error_to_ffi)
+        read_stream_event_page(
+            after_sequence,
+            limit.unwrap_or(MAX_MOBILE_LINUX_EVENT_BATCH as u32) as usize,
+            |cursor, page_limit| self.runtime.read_events(cursor, page_limit),
+        )
+        .await
+        .map_err(mobile_linux_error_to_ffi)
     }
 
     pub async fn kill_task(
@@ -615,5 +660,164 @@ impl IosMobileLinuxRuntimeHandle {
             .await
             .map(status_to_ffi)
             .map_err(mobile_linux_error_to_ffi)
+    }
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod event_paging_tests {
+    use super::*;
+    use mobile_linux_api::{MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxTaskStatus};
+
+    fn lifecycle(sequence: u64) -> MobileLinuxEvent {
+        MobileLinuxEvent {
+            sequence,
+            task_id: Some("task-1".to_string()),
+            kind: MobileLinuxEventKind::TaskStatusChanged {
+                status: MobileLinuxTaskStatus::Running,
+                exit_code: None,
+                detail: None,
+            },
+        }
+    }
+
+    fn output(sequence: u64) -> MobileLinuxEvent {
+        MobileLinuxEvent {
+            sequence,
+            task_id: Some("pty-1".to_string()),
+            kind: MobileLinuxEventKind::PtyOutput {
+                session_id: "pty-1".to_string(),
+                data: b"ready\n".to_vec(),
+            },
+        }
+    }
+
+    fn journal_page(
+        journal: &[MobileLinuxEvent],
+        after: Option<u64>,
+        limit: usize,
+    ) -> Vec<MobileLinuxEvent> {
+        journal
+            .iter()
+            .filter(|event| event.sequence > after.unwrap_or(0))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn assert_watermark(event: &MobileLinuxStreamEventFfi, sequence: u64) {
+        assert_eq!(event.sequence, sequence);
+        assert_eq!(event.stream_id, "runtime");
+        assert!(matches!(
+            event.kind,
+            MobileLinuxStreamEventKindFfi::StdoutLine
+        ));
+        assert!(event.task_id.is_none());
+        assert!(event.text.is_none());
+        assert!(event.data.is_none());
+        assert!(event.exit_code.is_none());
+        assert!(!event.timed_out);
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_event_paging_limit_one_reaches_pty_output_on_next_read() {
+        let journal = vec![lifecycle(1), output(2)];
+        let mut requests = Vec::new();
+        let first = read_stream_event_page(None, 1, |after, limit| {
+            requests.push((after, limit));
+            std::future::ready(Ok(journal_page(&journal, after, limit)))
+        })
+        .await
+        .expect("first page");
+        assert_eq!(first.len(), 1);
+        assert_watermark(&first[0], 1);
+        let second = read_stream_event_page(Some(first[0].sequence), 1, |after, limit| {
+            requests.push((after, limit));
+            std::future::ready(Ok(journal_page(&journal, after, limit)))
+        })
+        .await
+        .expect("second page");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].sequence, 2);
+        assert_eq!(second[0].stream_id, "pty-1");
+        assert_eq!(second[0].data.as_deref(), Some(b"ready\n".as_slice()));
+        assert_eq!(requests, vec![(None, 1), (Some(1), 1)]);
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_event_paging_wholly_filtered_page_is_bounded_and_advances() {
+        let mut journal: Vec<_> = (1..=256).map(lifecycle).collect();
+        journal.push(output(257));
+        let mut requests = Vec::new();
+        let first = read_stream_event_page(None, 256, |after, limit| {
+            requests.push((after, limit));
+            std::future::ready(Ok(journal_page(&journal, after, limit)))
+        })
+        .await
+        .expect("filtered page");
+        assert_eq!(first.len(), 1);
+        assert_watermark(&first[0], 256);
+        assert_eq!(
+            requests.len(),
+            1,
+            "do not scan a concurrently growing journal"
+        );
+        let second = read_stream_event_page(Some(first[0].sequence), 256, |after, limit| {
+            requests.push((after, limit));
+            std::future::ready(Ok(journal_page(&journal, after, limit)))
+        })
+        .await
+        .expect("visible page");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].sequence, 257);
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_event_paging_preserves_filtered_tail_watermark_without_extra_output() {
+        let journal = vec![output(1), lifecycle(2), lifecycle(3)];
+        let page = read_stream_event_page(None, 3, |after, limit| {
+            std::future::ready(Ok(journal_page(&journal, after, limit)))
+        })
+        .await
+        .expect("mixed page");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].stream_id, "pty-1");
+        assert_watermark(&page[1], 3);
+        assert!(page.len() <= 3);
+
+        let journal = vec![lifecycle(1), output(2)];
+        let page = read_stream_event_page(None, 2, |after, limit| {
+            std::future::ready(Ok(journal_page(&journal, after, limit)))
+        })
+        .await
+        .expect("visible tail");
+        assert_eq!(
+            page.len(),
+            1,
+            "a visible tail already carries the raw watermark"
+        );
+        assert_eq!(page[0].sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn mobile_linux_event_paging_empty_zero_and_large_limits_preserve_bounds() {
+        let empty = read_stream_event_page(None, 1, |_, _| std::future::ready(Ok(Vec::new())))
+            .await
+            .expect("empty page");
+        assert!(empty.is_empty());
+        let zero = read_stream_event_page(None, 0, |_, _| {
+            panic!("zero-sized reads must not call the SDK");
+            #[allow(unreachable_code)]
+            std::future::ready(Ok(Vec::new()))
+        })
+        .await
+        .expect("zero-sized page");
+        assert!(zero.is_empty());
+        let page = read_stream_event_page(None, usize::MAX, |_, limit| {
+            assert_eq!(limit, MAX_MOBILE_LINUX_EVENT_BATCH);
+            std::future::ready(Ok((1..=limit as u64).map(output).collect()))
+        })
+        .await
+        .expect("clamped page");
+        assert_eq!(page.len(), MAX_MOBILE_LINUX_EVENT_BATCH);
     }
 }

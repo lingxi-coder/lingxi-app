@@ -127,6 +127,34 @@ final class TerminalSessionModelTests: XCTestCase {
         XCTAssertEqual(readsAfterSettling, readsAfterExit)
     }
 
+    func testPayloadFreeRuntimeWatermarkAdvancesCursorWithoutAffectingPty() async {
+        let client = Self.readyClient(eventBatches: [
+            [TerminalStreamEvent(
+                sequence: 256, taskId: nil, streamId: "runtime", source: .run,
+                kind: .stdoutLine, text: nil, data: nil, exitCode: nil, timedOut: false
+            )],
+            [TerminalStreamEvent(
+                sequence: 257, taskId: nil, streamId: "pty-1", source: .pty,
+                kind: .stdoutLine, text: "ready\n", data: nil, exitCode: nil, timedOut: false
+            )],
+        ])
+        let model = TerminalSessionModel(descriptor: Self.workspaceDescriptor(), client: client)
+
+        await model.startIfNeeded()
+        let receivedOutput = await Self.waitUntil { model.lastSequence == 257 }
+
+        XCTAssertTrue(receivedOutput)
+        XCTAssertEqual(model.buffer.plainText, "ready\n")
+        XCTAssertEqual(model.availability, .ready)
+        XCTAssertNil(model.lastExitStatus)
+        XCTAssertNil(model.lastError)
+        let cursors = await client.recordedEventReadCursors()
+        XCTAssertGreaterThanOrEqual(cursors.count, 2)
+        XCTAssertNil(cursors.first ?? nil)
+        if cursors.count >= 2 { XCTAssertEqual(cursors[1], 256) }
+        await model.close()
+    }
+
     func testPollingAdvancesGlobalCursorPastUnrelatedStreams() async {
         let client = FakeTerminalRuntimeClient(
             capability: TerminalCapabilitySnapshot(

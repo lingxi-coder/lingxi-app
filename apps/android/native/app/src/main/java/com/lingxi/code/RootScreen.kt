@@ -985,6 +985,12 @@ fun RootScreen(
     ): Boolean {
         val destination = target ?: SessionRef("new", resources.getString(R.string.chat_new_conversation))
         var persisted: ProjectStoreState? = null
+        var previousProjectId: String? = null
+        var previousScopeKey: String? = null
+        var previousStoredScopeKey: String? = null
+        var previousMode: SessionMode? = null
+        var selectionOwnerScope: ConversationScope? = null
+        var selectionOwnerMode: SessionMode? = null
         return chatViewModel.switchWorkspaceSource(
             projectId = (engineScope as? ConversationScope.Project)?.projectId,
             target = destination,
@@ -1009,9 +1015,29 @@ fun RootScreen(
                 )
             },
             persistSelection = {
+                selectionOwnerScope = chatViewModel.sourceScope.value
+                selectionOwnerMode = chatViewModel.engineSource.value.recoverySpec?.sessionMode
+                previousProjectId = projectStore.state.value.activeProjectId
+                previousStoredScopeKey = scopeStore.readActiveScopeKey()
+                previousScopeKey = previousStoredScopeKey ?: chatViewModel.sourceScope.value.persistenceKey()
+                previousMode = scopeStore.readActiveMode() ?: activeSessionMode
                 persisted = projectStore.persistActive((engineScope as? ConversationScope.Project)?.projectId)
                 scopeStore.persistActiveScope(engineScope.persistenceKey())
                 scopeStore.persistActiveMode(sessionModeOverride)
+            },
+            rollbackSelection = {
+                // Workspace transactions are serialized by the ViewModel.
+                // A later workspace/mode owner must keep its own selection;
+                // a same-workspace provider reconnect can still undo our write.
+                if (selectionOwnerScope == chatViewModel.sourceScope.value &&
+                    selectionOwnerMode == chatViewModel.engineSource.value.recoverySpec?.sessionMode &&
+                    scopeStore.readActiveScopeKey() in setOf(previousStoredScopeKey, engineScope.persistenceKey()) &&
+                    scopeStore.readActiveMode() in setOf(previousMode, sessionModeOverride)
+                ) {
+                    projectStore.persistActive(previousProjectId)
+                    previousScopeKey?.let { scopeStore.persistActiveScope(it) }
+                    previousMode?.let { scopeStore.persistActiveMode(it) }
+                }
             },
             onCommitted = {
                 projectStore.publishActive(checkNotNull(persisted))

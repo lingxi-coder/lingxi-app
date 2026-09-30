@@ -52,6 +52,7 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
             on_fast_mode: Box::new(|_| {}),
             on_plan_mode: Box::new(|_| {}),
             on_set_permission_mode: Box::new(|_| {}),
+            on_clear_session: Box::new(|_| {}),
             on_sandbox_action: Box::new(|_| {}),
             on_task_action: Box::new(|_| {}),
             on_dispatch_slash: Box::new(|_, _| {}),
@@ -437,22 +438,21 @@ fn palette_arrows_navigate_and_esc_dismisses_without_quitting() {
 #[test]
 fn typing_at_opens_file_completion_and_tab_completes_in_place() {
     let mut app = test_app(Vec::new());
-    // `@Carg` should match Cargo.toml in the tui-rata crate cwd.
-    typ(&mut app, "see @Carg");
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = directory.path().join("Cargo.toml");
+    std::fs::write(&manifest, "fixture manifest").unwrap();
+    typ(
+        &mut app,
+        &format!("see @{}/Carg", directory.path().display()),
+    );
     assert!(
         app.chat_widget.bottom_pane().completion().is_some(),
         "@ token opens file completion"
     );
     app.on_key(press(KeyCode::Tab));
-    // The @token is replaced in place, leaving the prefix intact.
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .composer()
-            .text()
-            .starts_with("see @Cargo.toml"),
-        "got: {}",
-        app.chat_widget.bottom_pane().composer().text()
+    assert_eq!(
+        app.chat_widget.bottom_pane().composer().text(),
+        format!("see @{}", manifest.display())
     );
 }
 
@@ -770,7 +770,14 @@ fn slash_clear_empties_messages() {
         is_error: false,
     }]);
     let outcome = submit_command(&mut app, "/clear");
-    assert!(matches!(outcome, ChatOutcome::Continue));
+    assert!(matches!(outcome, ChatOutcome::ClearSession(None)));
+    assert!(!cells(&app).is_empty(), "preserve until backend reset ACK");
+    let home = tempfile::tempdir().unwrap();
+    app.chat_widget.apply_turn_event(TurnEvent::SessionCleared {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        home: home.path().to_owned(),
+        cwd: home.path().to_owned(),
+    });
     assert!(cells(&app).is_empty());
     assert_eq!(app.chat_widget.transcript().committed_to_terminal(), 0);
 }

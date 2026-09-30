@@ -68,6 +68,10 @@ pub(super) async fn wind_down_print_tasks(
             .has_pending_task_notifications_for(None)
             .await
         {
+            let _operation = match control_plane {
+                Some(plane) => Some(plane.lock_operation().await),
+                None => None,
+            };
             let cancel = shutdown.child_token();
             if let Some(plane) = control_plane {
                 plane.set_active_turn(cancel.clone()).await;

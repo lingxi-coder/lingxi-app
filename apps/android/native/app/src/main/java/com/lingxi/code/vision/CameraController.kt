@@ -4,7 +4,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.util.Log
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -13,8 +14,6 @@ import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-
-private const val TAG = "CameraController"
 
 /**
  * Result of one native capture/pick, already encoded to JPEG + measured.
@@ -60,175 +59,184 @@ class CameraException(val failure: CameraFailure) : Exception(
  * Only one capture/pick is in flight at a time (the native UI is modal), so a
  * single pending continuation is sufficient.
  */
-object CameraController {
+internal class CameraResultHost(
+    val owner: Any,
+    val hasPermission: () -> Boolean,
+    val requestPermission: () -> Unit,
+    val takePicture: () -> Unit,
+    val pickMedia: () -> Unit,
+)
 
-    /** Launchers wired up by the host Activity; null when no Activity is attached. */
+internal class CameraResultCoordinator(private val post: (() -> Unit) -> Unit) {
+
+    internal enum class ResultKind { Permission, Picture, Media }
+    private class Pending(
+        val host: CameraResultHost,
+        val continuation: CancellableContinuation<CapturedImage>,
+        var kind: ResultKind,
+        var launched: Boolean = false,
+    )
+
+    private val lock = Any()
+    private var launchers: CameraResultHost? = null
+    // A cancelled launched operation remains here until its OS result drains.
+    private var pending: Pending? = null
+
+    fun attach(next: CameraResultHost) {
+        val retired = synchronized(lock) {
+            if (launchers?.owner === next.owner) return@synchronized null
+            val old = pending.takeIf { it?.host?.owner !== next.owner }
+            if (old != null) pending = null
+            launchers = next
+            old
+        }
+        retired?.let { fail(it, CameraFailure.Cancelled) }
+    }
+
+    fun detach(owner: Any) {
+        val retired = synchronized(lock) {
+            if (launchers?.owner === owner) launchers = null
+            pending?.takeIf { it.host.owner === owner }?.also { pending = null }
+        }
+        retired?.let { fail(it, CameraFailure.Cancelled) }
+    }
+
+    suspend fun capturePhoto(): CapturedImage {
+        val host = synchronized(lock) { launchers } ?: throw CameraException(CameraFailure.DeviceUnavailable)
+        val kind = if (host.hasPermission()) ResultKind.Picture else ResultKind.Permission
+        return awaitResult(host, kind)
+    }
+
+    suspend fun pickFromLibrary(): CapturedImage {
+        val host = synchronized(lock) { launchers } ?: throw CameraException(CameraFailure.DeviceUnavailable)
+        return awaitResult(host, ResultKind.Media)
+    }
+
+    private suspend fun awaitResult(host: CameraResultHost, kind: ResultKind): CapturedImage = suspendCancellableCoroutine { continuation ->
+        val request = Pending(host, continuation, kind)
+        val accepted = synchronized(lock) {
+            if (launchers !== host || pending != null) false else {
+                pending = request
+                true
+            }
+        }
+        if (!accepted) {
+            continuation.resumeWithException(CameraException(CameraFailure.Other("another camera request is already in flight")))
+            return@suspendCancellableCoroutine
+        }
+        continuation.invokeOnCancellation {
+            synchronized(lock) {
+                // Before launch there can be no result. After launch keep the
+                // dead owner's slot; Android cannot cancel the external UI.
+                if (pending === request && !request.launched) pending = null
+            }
+        }
+        launch(request)
+    }
+
+    private fun launch(request: Pending) {
+        post {
+            val admitted = synchronized(lock) {
+                if (pending !== request || launchers !== request.host) false
+                else if (!request.continuation.isActive) {
+                    pending = null
+                    false
+                } else {
+                    request.launched = true
+                    true
+                }
+            }
+            if (!admitted) return@post
+            runCatching {
+                when (request.kind) {
+                    ResultKind.Permission -> request.host.requestPermission()
+                    ResultKind.Picture -> request.host.takePicture()
+                    ResultKind.Media -> request.host.pickMedia()
+                }
+            }.onFailure { fail(request, CameraFailure.DeviceUnavailable) }
+        }
+    }
+
+    fun onCameraPermission(owner: Any, granted: Boolean) {
+        val request = synchronized(lock) {
+            pending?.takeIf { it.host.owner === owner && it.kind == ResultKind.Permission && it.launched }?.also {
+                // This OS result is consumed before possibly launching a photo.
+                it.launched = false
+                if (!it.continuation.isActive || !granted) pending = null
+                else it.kind = ResultKind.Picture
+            }
+        } ?: return
+        if (!request.continuation.isActive) return
+        if (!granted) fail(request, CameraFailure.PermissionDenied) else launch(request)
+    }
+
+    fun onResult(owner: Any, kind: ResultKind, image: () -> CapturedImage) {
+        val request = takeResult(owner, kind) ?: return
+        if (!request.continuation.isActive) return
+        runCatching(image).onSuccess { succeed(request, it) }.onFailure {
+            fail(request, if (it is CameraException) it.failure else CameraFailure.Other(it.message ?: "image read failed"))
+        }
+    }
+
+    private fun takeResult(owner: Any, kind: ResultKind): Pending? = synchronized(lock) {
+        pending?.takeIf { it.host.owner === owner && it.kind == kind && it.launched }?.also { pending = null }
+    }
+
+    private fun succeed(request: Pending, image: CapturedImage) {
+        if (request.continuation.isActive) request.continuation.resume(image)
+    }
+
+    private fun fail(request: Pending, failure: CameraFailure) {
+        synchronized(lock) { if (pending === request) pending = null }
+        if (request.continuation.isActive) request.continuation.resumeWithException(CameraException(failure))
+    }
+
+}
+
+object CameraController {
     private class Launchers(
-        val context: Context,
-        val requestCameraPermission: ActivityResultLauncher<String>,
+        val owner: Any, val context: Context,
+        val requestPermission: ActivityResultLauncher<String>,
         val takePicture: ActivityResultLauncher<Void?>,
         val pickMedia: ActivityResultLauncher<PickVisualMediaRequest>,
     )
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val coordinator = CameraResultCoordinator { operation -> mainHandler.post { operation() } }
 
-    @Volatile
-    private var launchers: Launchers? = null
-
-    /** The capture/pick awaiting a launcher result. */
-    @Volatile
-    private var pending: CancellableContinuation<CapturedImage>? = null
-
-    /** True once the user holds CAMERA grant for a pending capture. */
-    @Volatile
-    private var awaitingCameraPermission: Boolean = false
-
-    /**
-     * Register the host Activity's launchers. The contracts are:
-     *  - [ActivityResultContracts.RequestPermission] for runtime CAMERA grant,
-     *  - [ActivityResultContracts.TakePicturePreview] for capture (returns a
-     *    thumbnail [Bitmap]; no file provider needed),
-     *  - [ActivityResultContracts.PickVisualMedia] for the library pick (returns
-     *    a content [Uri]; READ_MEDIA_IMAGES is not required for the photo picker
-     *    on modern Android, but we declare it for the legacy gallery fallback).
-     */
-    fun attach(launchers: Any) {
-        // Typed via the concrete holder created in MainActivity to avoid leaking
-        // androidx launcher generics across the public API.
-        this.launchers = launchers as Launchers
+    fun attach(value: Any) {
+        val host = value as Launchers
+        activeContexts.clear()
+        activeContexts[host.owner] = host.context
+        coordinator.attach(CameraResultHost(host.owner, { hasCameraPermission(host.context) },
+            { host.requestPermission.launch(android.Manifest.permission.CAMERA) },
+            { host.takePicture.launch(null) },
+            { host.pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }))
     }
 
-    fun detach() {
-        launchers = null
-        pending?.let { if (it.isActive) it.resumeWithException(CameraException(CameraFailure.Cancelled)) }
-        pending = null
-        awaitingCameraPermission = false
+    fun detach(owner: Any) {
+        coordinator.detach(owner)
+        activeContexts.remove(owner)
     }
 
-    /**
-     * Build the launcher holder. Called by [MainActivity] which owns the
-     * `registerForActivityResult` results and routes them into [onCameraPermission],
-     * [onPictureTaken] and [onMediaPicked].
-     */
-    fun makeLaunchers(
-        context: Context,
-        requestCameraPermission: ActivityResultLauncher<String>,
-        takePicture: ActivityResultLauncher<Void?>,
-        pickMedia: ActivityResultLauncher<PickVisualMediaRequest>,
-    ): Any = Launchers(context, requestCameraPermission, takePicture, pickMedia)
+    fun makeLaunchers(owner: Any, context: Context, requestCameraPermission: ActivityResultLauncher<String>,
+        takePicture: ActivityResultLauncher<Void?>, pickMedia: ActivityResultLauncher<PickVisualMediaRequest>): Any =
+        Launchers(owner, context, requestCameraPermission, takePicture, pickMedia)
 
-    /** Capture a photo via the system camera UI, suspending for the result. */
-    suspend fun capturePhoto(front: Boolean, allowEditing: Boolean): CapturedImage {
-        val l = launchers ?: throw CameraException(CameraFailure.DeviceUnavailable)
-        if (!hasCameraPermission(l.context)) {
-            // Park, request CAMERA, and let onCameraPermission relaunch.
-            return suspendCancellableCoroutine { cont ->
-                bind(cont)
-                awaitingCameraPermission = true
-                cont.invokeOnCancellation { clearIfCurrent(cont) }
-                runCatching { l.requestCameraPermission.launch(android.Manifest.permission.CAMERA) }
-                    .onFailure { fail(cont, CameraFailure.DeviceUnavailable) }
-            }
-        }
-        return suspendCancellableCoroutine { cont ->
-            bind(cont)
-            cont.invokeOnCancellation { clearIfCurrent(cont) }
-            // TakePicturePreview ignores front/allowEditing (the system camera owns
-            // its own lens + edit UI); we pass them through the seam for callers
-            // that later swap in a CameraX impl honouring them.
-            runCatching { l.takePicture.launch(null) }
-                .onFailure { fail(cont, CameraFailure.DeviceUnavailable) }
-        }
+    suspend fun capturePhoto(front: Boolean, allowEditing: Boolean): CapturedImage = coordinator.capturePhoto()
+    suspend fun pickFromLibrary(): CapturedImage = coordinator.pickFromLibrary()
+    fun onCameraPermission(owner: Any, granted: Boolean) = coordinator.onCameraPermission(owner, granted)
+    fun onPictureTaken(owner: Any, bitmap: Bitmap?) = coordinator.onResult(owner, CameraResultCoordinator.ResultKind.Picture) {
+        if (bitmap == null) throw CameraException(CameraFailure.Cancelled)
+        encode(bitmap)
+    }
+    fun onMediaPicked(owner: Any, uri: Uri?) = coordinator.onResult(owner, CameraResultCoordinator.ResultKind.Media) {
+        if (uri == null) throw CameraException(CameraFailure.Cancelled)
+        // The launch owner controls the decoder context, including after a rebind.
+        val host = activeContexts[owner] ?: throw CameraException(CameraFailure.DeviceUnavailable)
+        decodeUri(host, uri)
     }
 
-    /** Pick an existing image from the system photo library. */
-    suspend fun pickFromLibrary(): CapturedImage {
-        val l = launchers ?: throw CameraException(CameraFailure.DeviceUnavailable)
-        return suspendCancellableCoroutine { cont ->
-            bind(cont)
-            cont.invokeOnCancellation { clearIfCurrent(cont) }
-            runCatching {
-                l.pickMedia.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                )
-            }.onFailure { fail(cont, CameraFailure.DeviceUnavailable) }
-        }
-    }
-
-    // --- Activity result sinks (called from MainActivity callbacks) ---
-
-    fun onCameraPermission(granted: Boolean) {
-        val cont = pending ?: return
-        if (!awaitingCameraPermission) return
-        awaitingCameraPermission = false
-        if (!granted) {
-            fail(cont, CameraFailure.PermissionDenied)
-            return
-        }
-        val l = launchers
-        if (l == null) {
-            fail(cont, CameraFailure.DeviceUnavailable)
-            return
-        }
-        runCatching { l.takePicture.launch(null) }
-            .onFailure { fail(cont, CameraFailure.DeviceUnavailable) }
-    }
-
-    fun onPictureTaken(bitmap: Bitmap?) {
-        val cont = pending ?: return
-        if (bitmap == null) {
-            fail(cont, CameraFailure.Cancelled)
-            return
-        }
-        val image = runCatching { encode(bitmap) }
-            .getOrElse {
-                fail(cont, CameraFailure.Other(it.message ?: "encode failed"))
-                return
-            }
-        succeed(cont, image)
-    }
-
-    fun onMediaPicked(uri: Uri?) {
-        val cont = pending ?: return
-        if (uri == null) {
-            fail(cont, CameraFailure.Cancelled)
-            return
-        }
-        val l = launchers
-        if (l == null) {
-            fail(cont, CameraFailure.DeviceUnavailable)
-            return
-        }
-        val image = runCatching { decodeUri(l.context, uri) }
-            .getOrElse {
-                fail(cont, CameraFailure.Other(it.message ?: "decode failed"))
-                return
-            }
-        succeed(cont, image)
-    }
-
-    // --- internals ---
-
-    private fun bind(cont: CancellableContinuation<CapturedImage>) {
-        // Drop any stale pending op (the modal UI guarantees one at a time, but
-        // be defensive if a prior launch never resolved).
-        pending?.let { if (it.isActive) it.resumeWithException(CameraException(CameraFailure.Cancelled)) }
-        pending = cont
-    }
-
-    private fun clearIfCurrent(cont: CancellableContinuation<CapturedImage>) {
-        if (pending === cont) pending = null
-    }
-
-    private fun succeed(cont: CancellableContinuation<CapturedImage>, image: CapturedImage) {
-        if (pending === cont) pending = null
-        if (cont.isActive) cont.resume(image)
-    }
-
-    private fun fail(cont: CancellableContinuation<CapturedImage>, failure: CameraFailure) {
-        if (pending === cont) pending = null
-        if (cont.isActive) cont.resumeWithException(CameraException(failure))
-        else Log.w(TAG, "camera failed after continuation closed: $failure")
-    }
-
+    private val activeContexts = java.util.IdentityHashMap<Any, Context>()
     private fun hasCameraPermission(context: Context): Boolean =
         androidx.core.content.ContextCompat.checkSelfPermission(
             context,

@@ -9,10 +9,10 @@ import type {
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
   ImageRefDto,
-  PermissionRequest,
   PermissionResponseDto,
   SessionRowDto,
 } from '@lingxi/bridge-client';
+import type { HostPermissionRequest } from '../../shared/permission.js';
 import type { AllowedClientCommand } from '../../shared/clientCommands.js';
 import type {
   NativeAudioCommand,
@@ -166,7 +166,7 @@ export interface LingxiApi {
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   clearSession(sessionId: string, name?: string): Promise<void>;
-  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
+  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[], turnId?: number): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(sessionId: string, requestId: number): Promise<void>;
   approveComputerAccess(sessionId: string, requestId: number, response: ComputerAccessResponseDto): Promise<void>;
@@ -180,7 +180,7 @@ export interface LingxiApi {
   command(sessionId: string, command: AllowedClientCommand): Promise<void>;
   connectionState(sessionId: string): Promise<ConnectionState>;
   onEvent(cb: (event: SequencedRuntimeEventEnvelope<ClientEvent>) => void): Unsubscribe;
-  onPermission(cb: (request: RuntimeEventEnvelope<PermissionRequest>) => void): Unsubscribe;
+  onPermission(cb: (request: RuntimeEventEnvelope<HostPermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
   audio: NativeAudioApi;

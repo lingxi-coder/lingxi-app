@@ -41,7 +41,7 @@ import {
   type PermissionResponseDto,
   type ServerHello,
 } from './protocol.js';
-import { validateClientEvent, validateServerHello } from './validation.js';
+import { validateClientEvent, validatePermissionScope, validateRuntimeSnapshot, validateServerHello } from './validation.js';
 import {
   discoverLatestLockfile,
   readLockfile,
@@ -83,6 +83,7 @@ export interface BridgeClientEvents {
 }
 
 interface QueueWaiter {
+  owner: symbol;
   resolve: (result: IteratorResult<ClientEvent>) => void;
   reject: (err: Error) => void;
 }
@@ -136,6 +137,7 @@ export class BridgeClient extends EventEmitter {
   /** Buffered inbound events + parked async-iterator waiters. */
   private readonly eventQueue: ClientEvent[] = [];
   private readonly eventWaiters: QueueWaiter[] = [];
+  private readonly eventStreams = new Set<symbol>();
   private streamClosed = false;
 
   /** Pending `Frame::Response` correlators keyed by request id. */
@@ -206,6 +208,17 @@ export class BridgeClient extends EventEmitter {
    * accepted; rejects on auth failure, transport error, or version mismatch.
    */
   async connect(): Promise<ServerHello> {
+    try {
+      return await this.connectInternal();
+    } catch (error) {
+      this.closeStream();
+      // A rejected hello must not leave an incompatible open connection.
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.close();
+      throw error;
+    }
+  }
+
+  private async connectInternal(): Promise<ServerHello> {
     const lockfile = this.resolveLockfile();
     this.lockfile = lockfile;
 
@@ -281,11 +294,15 @@ export class BridgeClient extends EventEmitter {
 
   /**
    * Send a `Frame::Request` and await the matching `Frame::Response`. The server
-   * matches `method === "hello"` specially; for every other method it decodes
-   * `params` as a {@link ClientCommand}, so the `method` string is informational
-   * for non-hello requests.
+   * matches `hello` and product scope/snapshot requests specially;
+   * other methods decode `params` as a {@link ClientCommand}.
    */
-  private request(method: string, params: unknown, timeoutMs = 30_000): Promise<unknown> {
+  private request(
+    method: string,
+    params: unknown,
+    timeoutMs = 30_000,
+    accept?: (result: unknown) => void,
+  ): Promise<unknown> {
     const id = this.nextRequestId++;
     const frame: Frame = { type: 'request', payload: { id, method, params } };
 
@@ -298,7 +315,14 @@ export class BridgeClient extends EventEmitter {
       this.pendingResponses.set(id, {
         resolve: (r) => {
           clearTimeout(timer);
-          resolve(r);
+          try {
+            // Apply authoritative snapshots inside the response boundary,
+            // before later live frames can overtake a Promise continuation.
+            accept?.(r);
+            resolve(r);
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
         },
         reject: (e) => {
           clearTimeout(timer);
@@ -314,6 +338,25 @@ export class BridgeClient extends EventEmitter {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+  }
+
+  /** Read the authenticated product runtime roster as one correlated response. */
+  requestRuntimeSnapshot(accept?: (events: readonly ClientEvent[]) => void): Promise<ClientEvent[]> {
+    let events: ClientEvent[] = [];
+    return this.request('desktop_runtime_snapshot', { type: 'list_session_agents' }, 30_000, (result) => {
+      events = validateRuntimeSnapshot(result);
+      accept?.(events);
+    }).then(() => events);
+  }
+
+  /** Read immutable SDK ownership while this permission ask is still pending. */
+  async requestPermissionScope(requestId: number): Promise<{
+    request_id: number; background_owned: boolean;
+  } | null> {
+    if (!Number.isSafeInteger(requestId) || requestId < 0) throw new Error('invalid permission request id');
+    return validatePermissionScope(
+      await this.request('permission_request_scope', { request_id: requestId }), requestId,
+    );
   }
 
   /** Fire-and-forget a {@link ClientCommand} as a `Frame::Request` (no reply awaited). */
@@ -455,6 +498,9 @@ export class BridgeClient extends EventEmitter {
   // ── Async event stream ──────────────────────────────────────────────────────
 
   private pushEvent(event: ClientEvent): void {
+    // EventEmitter consumers do not request a second, retained copy of every
+    // event. Buffer only while an async stream is explicitly subscribed.
+    if (this.streamClosed || this.eventStreams.size === 0) return;
     const waiter = this.eventWaiters.shift();
     if (waiter) {
       waiter.resolve({ value: event, done: false });
@@ -475,24 +521,44 @@ export class BridgeClient extends EventEmitter {
    * The live inbound {@link ClientEvent} feed as an `AsyncIterable`. Iteration
    * ends when the connection closes. Buffered events are delivered in order;
    * one stream is shared across all consumers (an event goes to whoever is
-   * waiting first).
+   * waiting first). Calling this method subscribes immediately; call it before
+   * connect/send to retain events arriving before the first `next()`. Events
+   * preceding the subscription are not replayed. Returning the last iterator
+   * releases its buffered events and disables buffering.
    */
   events(): AsyncIterableIterator<ClientEvent> {
     const self = this;
+    const owner = Symbol('bridge event stream');
+    let returned = false;
+    self.eventStreams.add(owner);
+    const unsubscribe = () => {
+      returned = true;
+      self.eventStreams.delete(owner);
+      for (let index = self.eventWaiters.length - 1; index >= 0; index -= 1) {
+        if (self.eventWaiters[index].owner === owner) {
+          const [waiter] = self.eventWaiters.splice(index, 1);
+          waiter.resolve({ value: undefined, done: true });
+        }
+      }
+      if (self.eventStreams.size === 0) self.eventQueue.length = 0;
+    };
     const iterator: AsyncIterableIterator<ClientEvent> = {
       next(): Promise<IteratorResult<ClientEvent>> {
+        if (returned) return Promise.resolve({ value: undefined, done: true });
         const buffered = self.eventQueue.shift();
         if (buffered !== undefined) {
           return Promise.resolve({ value: buffered, done: false });
         }
         if (self.streamClosed) {
+          unsubscribe();
           return Promise.resolve({ value: undefined, done: true });
         }
         return new Promise<IteratorResult<ClientEvent>>((resolve, reject) => {
-          self.eventWaiters.push({ resolve, reject });
+          self.eventWaiters.push({ owner, resolve, reject });
         });
       },
       return(): Promise<IteratorResult<ClientEvent>> {
+        unsubscribe();
         return Promise.resolve({ value: undefined, done: true });
       },
       [Symbol.asyncIterator]() {
@@ -506,6 +572,7 @@ export class BridgeClient extends EventEmitter {
 
   /** Close the WebSocket connection. */
   close(): void {
+    if (!this.ws) this.closeStream();
     this.ws?.close();
   }
 }

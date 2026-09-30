@@ -31,6 +31,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// keeps resolving. `TuiPermissionGate` (below) still constructs it.
 use tui_core::permission_bridge::PermissionExchange;
 
+type PolicyRuleAuthority = dyn Fn(&str, &serde_json::Value) -> bool + Send + Sync;
+
 /// Orchestrator-side permission gate that forwards each `check` call to
 /// the TUI over an mpsc channel and awaits a oneshot reply.
 pub struct TuiPermissionGate {
@@ -45,6 +47,8 @@ pub struct TuiPermissionGate {
     /// root wires these paths before the engine wraps this transport in its
     /// policy gate.
     persist_paths: Option<PermissionPaths>,
+    persist_cwd: std::sync::OnceLock<Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>>,
+    policy_rule_authority: std::sync::OnceLock<Arc<PolicyRuleAuthority>>,
     persistence_enabled: std::sync::atomic::AtomicBool,
 }
 
@@ -59,6 +63,8 @@ impl TuiPermissionGate {
             event_tx,
             session_allow_rules,
             persist_paths: None,
+            persist_cwd: std::sync::OnceLock::new(),
+            policy_rule_authority: std::sync::OnceLock::new(),
             persistence_enabled: std::sync::atomic::AtomicBool::new(true),
         }
     }
@@ -68,6 +74,28 @@ impl TuiPermissionGate {
     pub fn with_persist(mut self, paths: PermissionPaths) -> Self {
         self.persist_paths = Some(paths);
         self
+    }
+
+    /// Resolve project/local persistence from the same live cwd as file tools.
+    pub fn set_persistence_cwd_provider(
+        &self,
+        read: Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>,
+    ) {
+        let _ = self.persist_cwd.set(read);
+    }
+
+    /// When an outer policy owns rules, a delegated Ask must reach the human.
+    /// Its source/layer-aware decision takes precedence over this legacy cache.
+    pub fn set_policy_rule_authority(&self, read: Arc<PolicyRuleAuthority>) {
+        let _ = self.policy_rule_authority.set(read);
+    }
+
+    fn persistence_paths(&self) -> Option<PermissionPaths> {
+        let mut paths = self.persist_paths.clone()?;
+        if let Some(read) = self.persist_cwd.get() {
+            paths.cwd = read();
+        }
+        Some(paths)
     }
 }
 
@@ -184,7 +212,12 @@ impl TuiPermissionGate {
         // an older session rule.
         {
             let rules = self.session_allow_rules.lock().await;
-            if !suppress_always_allow_rule
+            let policy_owns_rules = self
+                .policy_rule_authority
+                .get()
+                .is_some_and(|read| read(name, input));
+            if !policy_owns_rules
+                && !suppress_always_allow_rule
                 && rules
                     .iter()
                     .any(|r| permission::call_matches_rule(r, name, input))
@@ -278,7 +311,7 @@ impl TuiPermissionGate {
             // (3c) Durably record the choice when a persist target is wired.
             // Best-effort: a write failure must not fail the check. Skip a
             // degenerate empty tool name so we never persist `allow: [""]`.
-            if let Some(paths) = self.persist_paths.as_ref().filter(|_| {
+            if let Some(paths) = self.persistence_paths().filter(|_| {
                 !name.is_empty()
                     && self
                         .persistence_enabled
@@ -288,7 +321,7 @@ impl TuiPermissionGate {
                     rule,
                     destination: suggestion.destination,
                 };
-                if let Err(e) = persist_permission_update(&update, paths).await {
+                if let Err(e) = persist_permission_update(&update, &paths).await {
                     tracing::warn!(error = %e, tool = name, "failed to persist AllowAlways permission rule");
                 }
             }
@@ -409,6 +442,60 @@ mod tests {
         assert_eq!(decision, PermissionDecision::Allow);
         // No event should have been sent to the TUI.
         assert!(event_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn allow_always_after_cd_writes_current_project() {
+        let home = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let gate = TuiPermissionGate::new(event_tx, Arc::new(Mutex::new(Vec::new()))).with_persist(
+            PermissionPaths {
+                lingxi_home: home.path().to_owned(),
+                cwd: first.path().to_owned(),
+            },
+        );
+        let cwd = tool_api::SessionCwd::new(first.path().to_owned(), vec![first.path().to_owned()]);
+        gate.set_persistence_cwd_provider({
+            let cwd = cwd.clone();
+            Arc::new(move || cwd.cwd())
+        });
+        cwd.change_cwd(second.path().to_owned());
+        let ctx = PermissionCheckContext {
+            permission_suggestions: Some(json!([{
+                "type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "git diff *"}],
+                "behavior": "allow", "destination": "localSettings"
+            }])),
+            ..Default::default()
+        };
+        let responder = tokio::spawn(async move {
+            let exchange = event_rx.recv().await.unwrap();
+            assert!(exchange.permission_persistence.is_some());
+            exchange
+                .resp_tx
+                .send(PermissionResponse::AllowAlways)
+                .unwrap();
+        });
+        let outcome = gate
+            .check_with_context("Bash", &json!({"command": "git diff --stat"}), &ctx)
+            .await;
+        assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
+        responder.await.unwrap();
+        assert!(!first
+            .path()
+            .join(branding::DOT_DIR)
+            .join("settings.local.json")
+            .exists());
+        let body = std::fs::read_to_string(
+            second
+                .path()
+                .join(branding::DOT_DIR)
+                .join("settings.local.json"),
+        )
+        .unwrap();
+        assert!(body.contains("Bash(git diff *)"), "{body}");
+        assert!(!home.path().join("settings.json").exists());
     }
 
     #[tokio::test]

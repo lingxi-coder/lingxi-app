@@ -1488,7 +1488,7 @@ final class EngineConversationSource: ConversationSource {
         let listener = EngineListener(source: self)
         // SHIP-BLOCKER #3: register a real permission sink so a tool that needs
         // approval surfaces a prompt instead of hanging the turn forever.
-        let permissionSink = EnginePermissionSink(source: self)
+        let permissionSink = EnginePermissionSink(listener: listener)
         let providerConfig = config.providerProfilesJson.map {
             IosProviderConfigFfi(
                 providerProfilesJson: $0,

@@ -43,8 +43,15 @@ pub struct CliBgSessionForker {
     version: String,
     /// Full interactive CLI launch context captured at composition time.
     launch_options: crate::background_launch::BackgroundLaunchOptions,
-    /// Foreground-resolved mode that already passed the bypass safety guard.
-    resolved_permission_mode: permission::PermissionMode,
+    live_context: RwLock<
+        Option<
+            Arc<
+                dyn Fn() -> Result<(PathBuf, permission::PermissionMode), BgForkError>
+                    + Send
+                    + Sync,
+            >,
+        >,
+    >,
 }
 
 impl CliBgSessionForker {
@@ -54,7 +61,7 @@ impl CliBgSessionForker {
         config_home: PathBuf,
         runtime_dir: PathBuf,
         launch_options: crate::background_launch::BackgroundLaunchOptions,
-        resolved_permission_mode: permission::PermissionMode,
+        _resolved_permission_mode: permission::PermissionMode,
     ) -> Self {
         Self {
             task_registry: RwLock::new(None),
@@ -62,14 +69,58 @@ impl CliBgSessionForker {
             runtime_dir,
             version: env!("CARGO_PKG_VERSION").to_string(),
             launch_options,
-            resolved_permission_mode,
+            live_context: RwLock::new(None),
         }
     }
 
-    fn launch_context(&self) -> crate::background_dispatch::ForkLaunchContext {
+    /// Bind the same runtime authority used by tools after assembly. A weak
+    /// orchestrator reference avoids retaining the runtime through its forker.
+    pub(crate) fn bind_runtime(
+        &self,
+        orchestrator: &Arc<orchestrator::ConversationOrchestrator>,
+        cwd: Arc<tool_api::SessionCwd>,
+    ) {
+        let orchestrator = Arc::downgrade(orchestrator);
+        *self.live_context.write().expect("background context lock") = Some(Arc::new(move || {
+            let runtime = orchestrator.upgrade().ok_or_else(|| {
+                BgForkError::Dispatch("foreground runtime is no longer available".into())
+            })?;
+            let mode = runtime.permission_mode().ok_or_else(|| {
+                BgForkError::Dispatch("foreground permission mode is unavailable".into())
+            })?;
+            Ok((
+                cwd.cwd(),
+                permission::permission_mode_from_cli_string(&mode),
+            ))
+        }));
+    }
+
+    pub(crate) fn launch_identity(
+        &self,
+    ) -> Result<(PathBuf, crate::background_dispatch::ForkLaunchContext), BgForkError> {
+        let live = self
+            .live_context
+            .read()
+            .expect("background context lock")
+            .clone();
+        let (cwd, mode) = match live {
+            Some(read) => read()?,
+            None => {
+                return Err(BgForkError::Dispatch(
+                    "foreground runtime authority is not bound".into(),
+                ))
+            }
+        };
+        Ok((cwd, self.launch_context(mode)))
+    }
+
+    fn launch_context(
+        &self,
+        mode: permission::PermissionMode,
+    ) -> crate::background_dispatch::ForkLaunchContext {
         crate::background_dispatch::ForkLaunchContext {
             options: Some(self.launch_options.clone()),
-            resolved_permission_mode: Some(self.resolved_permission_mode),
+            resolved_permission_mode: Some(mode),
             ..crate::background_dispatch::ForkLaunchContext::default()
         }
     }
@@ -82,9 +133,9 @@ impl CliBgSessionForker {
         model: &str,
         handoff: Option<&lingxi_core::host::BackgroundingSnapshot>,
     ) -> Result<String, BgForkError> {
-        // Resolve the LIVE cwd at fork time (a Bash `cd` may have moved it since
-        // boot) so the snapshot path and the recorded job cwd agree.
-        let cwd_pb = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Capture current permissions and the live tool cwd at the dispatch
+        // boundary; /cd and mode changes never mutate the process cwd/argv.
+        let (cwd_pb, mut launch_context) = self.launch_identity()?;
         let cwd = cwd_pb.display().to_string();
 
         // 1. Mint the new background session id.
@@ -110,7 +161,6 @@ impl CliBgSessionForker {
         }
 
         // 3. Dispatch a detached daemon worker that resumes the copied session.
-        let mut launch_context = self.launch_context();
         launch_context.model = Some(model.to_string());
         launch_context.handoff = handoff.cloned();
         let registry = self
@@ -218,14 +268,14 @@ impl BgSessionForker for CliBgSessionForker {
         // path (`list_resumable_sessions` enumerated it), so — unlike the fork
         // path — there is NO snapshot to write: dispatch a detached daemon that
         // resumes `session_id` directly via the same `Launch::Resume` machinery.
-        let cwd_pb = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let (cwd_pb, launch_context) = self.launch_identity()?;
         let cwd = cwd_pb.display().to_string();
         let short = crate::background_dispatch::dispatch_resumed_session_with_context(
             &self.config_home,
             &self.runtime_dir,
             &cwd,
             session_id,
-            &self.launch_context(),
+            &launch_context,
         )
         .map_err(|e| BgForkError::Dispatch(e.to_string()))?;
         // Same grounding caveat as `fork_to_background`: the 2.1.212 resume-as-bg
@@ -242,6 +292,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unbound_background_forker_rejects_startup_authority() {
+        let forker = CliBgSessionForker::new(
+            PathBuf::from("/tmp/config"),
+            PathBuf::from("/tmp/runtime"),
+            crate::background_launch::BackgroundLaunchOptions::default(),
+            permission::PermissionMode::AcceptEdits,
+        );
+        assert!(forker.launch_identity().is_err());
+    }
+
+    #[test]
     fn live_fork_context_preserves_launch_options_and_resolved_mode() {
         let forker = CliBgSessionForker::new(
             PathBuf::from("/tmp/config"),
@@ -256,7 +317,7 @@ mod tests {
             permission::PermissionMode::Plan,
         );
 
-        let context = forker.launch_context();
+        let context = forker.launch_context(permission::PermissionMode::Plan);
         let options = context.options.unwrap();
         assert_eq!(options.model.as_deref(), Some("captured-model"));
         assert_eq!(options.agent.as_deref(), Some("reviewer"));

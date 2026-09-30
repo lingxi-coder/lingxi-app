@@ -2,8 +2,8 @@ import type {
   AskUserQuestionRequestDto,
   ClientEvent,
   ComputerAccessRequestDto,
-  PermissionRequest,
 } from '@lingxi/bridge-client';
+import type { HostPermissionRequest } from '../../shared/permission.js';
 import { emptyConversation } from './conversation.js';
 import type { ConversationState } from './conversation.js';
 import { emptyDesktopState } from './desktopState.js';
@@ -41,7 +41,7 @@ export function shouldClearPendingPermissions(state: ConnectionState): boolean {
 export function resetBridgeRuntimeState(): {
   conversation: ConversationState;
   desktop: DesktopState;
-  permissionQueue: PermissionRequest[];
+  permissionQueue: HostPermissionRequest[];
   computerAccessQueue: ComputerAccessRequestDto[];
   askUserQuestionQueue: AskUserQuestionRequestDto[];
 } {
@@ -194,7 +194,7 @@ export interface RuntimeState {
   conversation: ConversationState;
   desktop: DesktopState;
   runtimeCenter: RuntimeCenterState;
-  permissionQueue: PermissionRequest[];
+  permissionQueue: HostPermissionRequest[];
   computerAccessQueue: ComputerAccessRequestDto[];
   askUserQuestionQueue: AskUserQuestionRequestDto[];
   pendingInteractionsOverride?: number;

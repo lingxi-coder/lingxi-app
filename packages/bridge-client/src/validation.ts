@@ -19,6 +19,7 @@ import type {
   ManagedLocalAppMcpServerDto,
   PluginStatusDto,
   ServerHello,
+  TaskRowDto,
 } from './protocol.js';
 
 function object(value: unknown, name = 'payload'): Record<string, unknown> {
@@ -49,6 +50,42 @@ function integer(value: unknown, name: string): number {
 
 function optionalString(value: unknown, name: string): string | undefined {
   return value === undefined ? undefined : string(value, name);
+}
+
+function taskRow(value: unknown): TaskRowDto {
+  const row = object(value, 'task row');
+  exactKeys(row, ['task_id', 'task_type', 'status', 'description', 'agent_id',
+    'awaiting_plan_approval', 'can_resume', 'started_at_ms', 'error', 'stage',
+    'kind', 'unread', 'model', 'effort'], 'task row');
+  string(row['task_id'], 'task id');
+  string(row['task_type'], 'task type');
+  const status = object(row['status'], 'task status');
+  exactKeys(status, ['type'], 'task status');
+  if (!['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'].includes(String(status['type']))) {
+    throw new Error('invalid task status');
+  }
+  if (typeof row['description'] !== 'string') throw new Error('invalid task description');
+  for (const key of ['agent_id', 'error', 'stage', 'kind', 'model', 'effort']) {
+    if (row[key] !== undefined && typeof row[key] !== 'string') throw new Error(`invalid task ${key}`);
+  }
+  for (const key of ['awaiting_plan_approval', 'can_resume', 'unread']) {
+    if (row[key] !== undefined) boolean(row[key], `task ${key}`);
+  }
+  if (row['started_at_ms'] !== undefined) integer(row['started_at_ms'], 'task start time');
+  return row as unknown as TaskRowDto;
+}
+
+/** Product-only scope lookup; request identity must match the pending ask. */
+export function validatePermissionScope(value: unknown, requestId: number): {
+  request_id: number; background_owned: boolean;
+} | null {
+  integer(requestId, 'permission request id');
+  if (value === null) return null;
+  const scope = object(value, 'permission scope');
+  exactKeys(scope, ['request_id', 'background_owned'], 'permission scope');
+  const id = integer(scope['request_id'], 'permission request id');
+  if (id !== requestId) throw new Error('permission scope request mismatch');
+  return { request_id: id, background_owned: boolean(scope['background_owned'], 'background permission scope') };
 }
 
 function stringArray(value: unknown, name: string): string[] {
@@ -591,6 +628,9 @@ export function validateClientEvent(value: unknown): ClientEvent {
     return { type, event: validateAppEvent(input['event']) } as ClientEvent;
   }
   switch (type) {
+    case 'task_row':
+      exactKeys(input, ['type', 'task'], 'client event');
+      return { type, task: taskRow(input['task']) };
     case 'task_list_complete':
       exactKeys(input, ['type', 'request_id', 'active_count', 'error'], 'client event');
       return { type, request_id: string(input['request_id'], 'request_id'),
@@ -696,4 +736,84 @@ export function validateServerHello(value: unknown): ServerHello {
       ...(capabilities['audio'] === undefined ? {} : { audio: audioCapabilities(capabilities['audio']) }),
     },
   };
+}
+
+/** A complete product roster; partial or unrelated responses cannot release ownership. */
+export function validateRuntimeSnapshot(value: unknown): ClientEvent[] {
+  const result = object(value, 'runtime snapshot');
+  exactKeys(result, ['events'], 'runtime snapshot');
+  if (!Array.isArray(result['events'])) throw new Error('invalid runtime snapshot events');
+  let rosters = 0;
+  let statuses = 0;
+  let taskCompletions = 0;
+  const tasks = new Set<string>();
+  const workers = new Set<string>();
+  const events = result['events'].map((value): ClientEvent => {
+    const event = object(value, 'runtime snapshot event');
+    switch (event['type']) {
+      case 'task_row': {
+        exactKeys(event, ['type', 'task'], 'task row event');
+        const task = taskRow(event['task']);
+        if (tasks.has(task.task_id)) throw new Error('duplicate runtime snapshot task');
+        tasks.add(task.task_id);
+        break;
+      }
+      case 'task_list_complete': {
+        const completion = validateClientEvent(event);
+        if (completion.type !== 'task_list_complete' || completion.request_id !== 'desktop-runtime-snapshot'
+          || completion.error !== undefined) throw new Error('invalid runtime snapshot task completion');
+        taskCompletions += 1;
+        break;
+      }
+      case 'session_agent_list':
+        exactKeys(event, ['type', 'session_id', 'agents'], 'session agent roster');
+        string(event['session_id'], 'roster session id');
+        if (!Array.isArray(event['agents'])) throw new Error('invalid session agents');
+        for (const value of event['agents']) {
+          const agent = object(value, 'session agent');
+          exactKeys(agent, ['agent_id', 'name', 'agent_type', 'model', 'model_profile', 'status',
+            'latest_activity', 'updated_at_ms'], 'session agent');
+          string(agent['agent_id'], 'agent id');
+          string(agent['status'], 'agent status');
+          for (const key of ['name', 'agent_type']) {
+            if (typeof agent[key] !== 'string') throw new Error(`invalid agent ${key}`);
+          }
+          for (const key of ['model', 'model_profile', 'latest_activity']) {
+            if (agent[key] !== undefined && typeof agent[key] !== 'string') throw new Error(`invalid agent ${key}`);
+          }
+          if (agent['updated_at_ms'] !== undefined) integer(agent['updated_at_ms'], 'agent updated time');
+        }
+        rosters += 1;
+        break;
+      case 'coordinator_worker': {
+        exactKeys(event, ['type', 'worker'], 'coordinator worker event');
+        const worker = object(event['worker'], 'coordinator worker');
+        exactKeys(worker, ['agent_id', 'name', 'agent_type', 'status'], 'coordinator worker');
+        const id = string(worker['agent_id'], 'worker id');
+        if (workers.has(id)) throw new Error('duplicate runtime snapshot worker');
+        workers.add(id);
+        string(worker['status'], 'worker status');
+        for (const key of ['name', 'agent_type']) {
+          if (typeof worker[key] !== 'string') throw new Error(`invalid worker ${key}`);
+        }
+        break;
+      }
+      case 'coordinator_status':
+        exactKeys(event, ['type', 'active_workers', 'team'], 'coordinator status');
+        integer(event['active_workers'], 'active worker count');
+        if (event['team'] !== undefined && typeof event['team'] !== 'string') throw new Error('invalid coordinator team');
+        statuses += 1;
+        break;
+      case 'error':
+        exactKeys(event, ['type', 'kind', 'message'], 'runtime snapshot warning');
+        string(object(event['kind'], 'snapshot warning kind')['type'], 'snapshot warning type');
+        string(event['message'], 'snapshot warning message');
+        break;
+      default:
+        throw new Error('unsupported runtime snapshot event');
+    }
+    return validateClientEvent(event);
+  });
+  if (rosters !== 1 || statuses !== 1 || taskCompletions !== 1) throw new Error('incomplete runtime snapshot');
+  return events;
 }

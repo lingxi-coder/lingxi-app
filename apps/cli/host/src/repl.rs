@@ -420,7 +420,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             permission::InteractivePromptingGate::new(shared, Arc::new(Mutex::new(stderr())));
         cfg.injected_permission_gate =
             Some(Arc::new(gate) as Arc<dyn permission::gate::PermissionGate>);
-        let result = crate::init::build_runtime_from_config(cfg, adapter).await;
+        let result = crate::init::build_cli_runtime_from_config(cfg, adapter, argv).await;
         if let Ok(runtime) = result.as_ref() {
             crate::init::auto_connect_ide_if_requested(argv, runtime).await;
         }
@@ -599,7 +599,20 @@ pub async fn run_repl(argv: &Argv) -> i32 {
         ended_via = ended_via,
     );
 
-    exit_code
+    finish_repl_lifecycle(&runtime, sink.as_ref(), exit_code).await
+}
+
+async fn finish_repl_lifecycle(runtime: &crate::init::Runtime, sink: &dyn OutputSink, exit_code: i32) -> i32 {
+    runtime.orchestrator.request_exit().await;
+    let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
+    for error in &shutdown.errors {
+        sink.error("session_shutdown", error).await;
+    }
+    if exit_code == exit_codes::SUCCESS && (!shutdown.complete || !shutdown.errors.is_empty()) {
+        exit_codes::RUNTIME_ERROR
+    } else {
+        exit_code
+    }
 }
 
 struct ReplGoalQueue(Arc<msgqueue::MessageQueueManager>);
@@ -933,5 +946,26 @@ mod tests {
             super::confirm_repl_exit(&scripted_reader(b""), &handle, &registry, &sink, false).await
         );
         assert_eq!(*registry.killed.lock().unwrap(), vec!["b1"]);
+    }
+}
+
+#[cfg(test)]
+mod retained_shutdown_tests {
+    use super::*;
+    #[tokio::test]
+    async fn repl_exit_requests_shutdown_and_closes_the_actual_session_writer() {
+        for code in [exit_codes::SUCCESS, exit_codes::SIGINT] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = crate::init::build_runtime_from_config(
+                harness_runtime::desktop::DesktopConfig {
+                    lingxi_home: root.path().join("home"), cwd: root.path().to_path_buf(),
+                    isolated_credential_storage: true, ..Default::default()
+                }, Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            ).await.unwrap();
+            runtime.session_state.flush().await.unwrap();
+            assert_eq!(finish_repl_lifecycle(&runtime, &PlainSink::new(), code).await, code);
+            assert!(runtime.orchestrator.current_should_exit());
+            assert!(runtime.session_state.flush().await.is_err(), "REPL cannot return before its writer admission closes");
+        }
     }
 }

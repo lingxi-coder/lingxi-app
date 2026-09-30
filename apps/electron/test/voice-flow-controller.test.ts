@@ -77,6 +77,8 @@ class FakeBridge {
   private readonly listeners = new Map<string, Set<(event: VoiceFlowTrackedSpeechEvent) => void>>();
   readonly sent: Array<{ text: string; token: VoiceFlowTurnToken }> = [];
   readonly cancelCalls: Array<number | undefined> = [];
+  readonly cancelledTokens: VoiceFlowTurnToken[] = [];
+  private readonly turnIds = new Map<string, number>();
   sendTrackedPrompt(text: string, _images = [], _imageNames = [], _filePaths = [], options: { purpose?: 'composer' | 'flow' } = {}) {
     this.sequence += 1;
     const token: VoiceFlowTurnToken = { sessionId: 'session-1', clientTurnId: `turn-${this.sequence}`, purpose: options.purpose ?? 'composer' };
@@ -94,8 +96,12 @@ class FakeBridge {
       if (next.size === 0) this.listeners.delete(token.clientTurnId);
     };
   }
-  async cancel(turnId?: number): Promise<void> { this.cancelCalls.push(turnId); }
+  async cancelTrackedPrompt(token: VoiceFlowTurnToken): Promise<void> {
+    this.cancelledTokens.push(token);
+    this.cancelCalls.push(token.turnId ?? this.turnIds.get(token.clientTurnId));
+  }
   emit(token: VoiceFlowTurnToken, event: Omit<VoiceFlowTrackedSpeechEvent, 'token'>): void {
+    if (event.turnId !== undefined) this.turnIds.set(token.clientTurnId, event.turnId);
     for (const listener of this.listeners.get(token.clientTurnId) ?? []) listener({ ...event, token });
   }
 }
@@ -140,7 +146,7 @@ test('Flow pins the saved audio revision through each spoken reply and refreshes
   const token = bridge.sent[0]!.token;
 
   current = preferences(5, { ...current.configuration, rate: 1.5 });
-  bridge.emit(token, { type: 'delta', text: '第一句已经到了。', turnId: 77 });
+  bridge.emit(token, { type: 'message', text: '第一句已经到了。', turnId: 77 });
   await flush();
   assert.deepEqual(audio.operations[1], {
     operation: {
@@ -279,7 +285,7 @@ test('interrupting cancels current UI audio and sends only the replacement promp
   });
   await controller.start();
   const originalToken = bridge.sent[0]!.token;
-  bridge.emit(originalToken, { type: 'delta', text: '先回答这个。', turnId: 91 });
+  bridge.emit(originalToken, { type: 'message', text: '先回答这个。', turnId: 91 });
   await flush();
   await controller.orb();
   await flush();
@@ -303,11 +309,11 @@ test('old reply completion does not start another listen during interruption', a
   const controller = new VoiceFlowController({ audio, bridge, timers, getPreferences: () => preferences(1), onStateChange: () => {} });
   await controller.start();
   const token = bridge.sent[0]!.token;
-  bridge.emit(token, { type: 'delta', text: '这句话已经说完了。', turnId: 91 });
+  bridge.emit(token, { type: 'message', text: '这句话已经说完了。', turnId: 91 });
   await flush();
   const interrupt = controller.orb();
   await flush();
-  bridge.emit(token, { type: 'completion', text: '这句话已经说完了。', turnId: 91 });
+  bridge.emit(token, { type: 'completion', terminal: 'turn_ended', text: '这句话已经说完了。', turnId: 91 });
   timers.advance(350);
   await flush();
   assert.deepEqual(audio.operations.map(({ operation }) => operation.type), ['listen', 'speak', 'listen']);
@@ -315,7 +321,7 @@ test('old reply completion does not start another listen during interruption', a
   interruption.resolve({ type: 'transcript', text: '替代问题' });
   await interrupt;
   assert.deepEqual(bridge.sent.map(({ text }) => text), ['原问题', '替代问题']);
-  assert.deepEqual(bridge.cancelCalls, [91]);
+  assert.deepEqual(bridge.cancelCalls, [], 'the matching terminal already released the old backend owner');
   controller.dispose();
 });
 
@@ -355,11 +361,11 @@ for (const failure of ['native_failure', 'model_missing', 'invalid_result', 'exc
       : failure === 'invalid_result'
         ? { type: 'transcript', text: 'unexpected' }
         : { type: 'failed', error: { kind: failure, message: 'playback failed' } });
-    bridge.emit(oldToken, { type: 'delta', text: '这是回复第一句。这是已经排队的第二句。', turnId: 91 });
+    bridge.emit(oldToken, { type: 'message', text: '这是回复第一句。这是已经排队的第二句。', turnId: 91 });
     await flush();
     const failedState = controller.getState();
     assert.equal(failedState.phase, failure === 'model_missing' ? 'configurationRequired' : 'failed');
-    bridge.emit(oldToken, { type: 'delta', text: '这是迟到的第三句。', turnId: 91 });
+    bridge.emit(oldToken, { type: 'message', text: '这是迟到的第三句。', turnId: 91 });
     bridge.emit(oldToken, { type: 'completion', text: '这是回复第一句。这是已经排队的第二句。这是迟到的第三句。', turnId: 91 });
     timers.advance(1000);
     await flush();
@@ -368,8 +374,8 @@ for (const failure of ['native_failure', 'model_missing', 'invalid_result', 'exc
 
     audio.queue({ type: 'transcript', text: 'retry question' }, { type: 'playback_completed', duration_ms: 1 });
     await controller.retry();
-    bridge.emit(oldToken, { type: 'delta', text: '重试后的旧回复。', turnId: 91 });
-    bridge.emit(bridge.sent[1]!.token, { type: 'delta', text: '这是重试后的新回复。', turnId: 92 });
+    bridge.emit(oldToken, { type: 'message', text: '重试后的旧回复。', turnId: 91 });
+    bridge.emit(bridge.sent[1]!.token, { type: 'message', text: '这是重试后的新回复。', turnId: 92 });
     await flush();
     assert.deepEqual(audio.operations.map(({ operation }) => operation.type), ['listen', 'speak', 'listen', 'speak']);
     assert.deepEqual(bridge.sent.map(({ text }) => text), ['first question', 'retry question']);
@@ -377,6 +383,142 @@ for (const failure of ['native_failure', 'model_missing', 'invalid_result', 'exc
     controller.dispose();
   });
 }
+
+test('TTS failure cancels its captured backend owner before Flow Stop or Retry can lose it', async () => {
+  const audio = new FakeAudio(), bridge = new FakeBridge(), timers = new FakeTimers();
+  audio.queue({ type: 'transcript', text: 'first question' },
+    { type: 'failed', error: { kind: 'native_failure', message: 'fake TTS failure' } });
+  const controller = new VoiceFlowController({ audio, bridge, timers, getPreferences: () => preferences(1), onStateChange: () => {} });
+  await controller.start();
+  const token = bridge.sent[0]!.token;
+  bridge.emit(token, { type: 'message', text: 'Accepted tool preamble.', turnId: 101 });
+  await flush();
+  assert.equal(controller.getState().phase, 'failed');
+  assert.deepEqual(bridge.cancelledTokens, [token]);
+  await controller.stop();
+  assert.equal(bridge.cancelledTokens.length, 1);
+  controller.dispose();
+});
+
+test('failed backend cancellation remains retryable and blocks a competing Flow prompt', async () => {
+  class RejectingBridge extends FakeBridge {
+    rejectsCancellation = true;
+    override async cancelTrackedPrompt(token: VoiceFlowTurnToken): Promise<void> {
+      await super.cancelTrackedPrompt(token);
+      if (this.rejectsCancellation) throw new Error('fake backend cancel rejected');
+    }
+  }
+  const audio = new FakeAudio(), bridge = new RejectingBridge(), timers = new FakeTimers();
+  audio.queue({ type: 'transcript', text: 'first question' },
+    { type: 'failed', error: { kind: 'native_failure', message: 'fake TTS failure' } });
+  const controller = new VoiceFlowController({ audio, bridge, timers, getPreferences: () => preferences(1), onStateChange: () => {} });
+  await controller.start();
+  const token = bridge.sent[0]!.token;
+  bridge.emit(token, { type: 'message', text: 'Accepted preamble.', turnId: 102 });
+  await flush();
+  assert.match(controller.getState().detail, /backend cancel rejected/);
+  await controller.stop();
+  await controller.retry();
+  assert.equal(bridge.sent.length, 1);
+  assert.deepEqual(audio.operations.map(({ operation }) => operation.type), ['listen', 'speak']);
+  assert.equal(bridge.cancelledTokens.length, 3);
+  assert.ok(bridge.cancelledTokens.every((entry) => entry === token));
+  bridge.rejectsCancellation = false;
+  audio.queue({ type: 'transcript', text: 'safe retry question' });
+  await controller.retry();
+  assert.equal(bridge.cancelledTokens.length, 4);
+  assert.deepEqual(bridge.sent.map(({ text }) => text), ['first question', 'safe retry question']);
+  assert.equal(controller.getState().phase, 'thinking');
+  controller.dispose();
+});
+
+test('an owned terminal after failed TTS releases cancellation without clobbering a newer prompt', async () => {
+  let rejectCancel!: (cause: Error) => void;
+  class DelayedCancelBridge extends FakeBridge {
+    override async cancelTrackedPrompt(token: VoiceFlowTurnToken): Promise<void> {
+      await super.cancelTrackedPrompt(token);
+      await new Promise<void>((_resolve, reject) => { rejectCancel = reject; });
+    }
+  }
+  const audio = new FakeAudio(), bridge = new DelayedCancelBridge(), timers = new FakeTimers();
+  audio.queue({ type: 'transcript', text: 'first question' },
+    { type: 'failed', error: { kind: 'native_failure', message: 'fake TTS failure' } });
+  const controller = new VoiceFlowController({ audio, bridge, timers, getPreferences: () => preferences(1), onStateChange: () => {} });
+  await controller.start();
+  const token = bridge.sent[0]!.token;
+  bridge.emit(token, { type: 'message', text: 'Accepted preamble.', turnId: 103 });
+  await flush();
+  bridge.emit(token, { type: 'completion', terminal: 'turn_ended', text: 'Accepted preamble.', turnId: 103 });
+  audio.queue({ type: 'transcript', text: 'new question' });
+  await controller.retry();
+  assert.equal(bridge.sent.length, 2);
+  rejectCancel(new Error('late old cancel failure'));
+  await flush();
+  assert.equal(controller.getState().phase, 'thinking');
+  assert.equal(controller.getState().detail, 'new question');
+  controller.dispose();
+  await flush();
+  rejectCancel(new Error('test teardown'));
+  await flush();
+});
+
+test('Stop invalidates Retry while the captured backend cancellation is still pending', async () => {
+  const cancellation = deferred<void>();
+  class DelayedCancelBridge extends FakeBridge {
+    override async cancelTrackedPrompt(token: VoiceFlowTurnToken): Promise<void> {
+      await super.cancelTrackedPrompt(token);
+      await cancellation.promise;
+    }
+  }
+  const audio = new FakeAudio(), bridge = new DelayedCancelBridge();
+  audio.queue({ type: 'transcript', text: 'first question' },
+    { type: 'failed', error: { kind: 'native_failure', message: 'fake TTS failure' } });
+  const controller = new VoiceFlowController({ audio, bridge, timers: new FakeTimers(),
+    getPreferences: () => preferences(1), onStateChange: () => {} });
+  await controller.start();
+  bridge.emit(bridge.sent[0]!.token, { type: 'message', text: 'Accepted preamble.', turnId: 104 });
+  await flush();
+  const retry = controller.retry();
+  const stop = controller.stop();
+  cancellation.resolve();
+  await Promise.all([retry, stop]);
+  assert.equal(controller.getState().phase, 'paused');
+  assert.deepEqual(audio.operations.map(({ operation }) => operation.type), ['listen', 'speak']);
+  assert.equal(bridge.sent.length, 1);
+  assert.equal(bridge.cancelledTokens.length, 1);
+  controller.dispose();
+});
+
+test('dispose can retry a failed captured cancellation without publishing to a disposed view', async () => {
+  class RejectingBridge extends FakeBridge {
+    rejectsCancellation = true;
+    override async cancelTrackedPrompt(token: VoiceFlowTurnToken): Promise<void> {
+      await super.cancelTrackedPrompt(token);
+      if (this.rejectsCancellation) throw new Error('fake backend cancel rejected');
+    }
+  }
+  const audio = new FakeAudio(), bridge = new RejectingBridge();
+  audio.queue({ type: 'transcript', text: 'first question' },
+    { type: 'failed', error: { kind: 'native_failure', message: 'fake TTS failure' } });
+  const published: string[] = [];
+  const controller = new VoiceFlowController({ audio, bridge, timers: new FakeTimers(),
+    getPreferences: () => preferences(1), onStateChange: ({ phase }) => { published.push(phase); } });
+  await controller.start();
+  const token = bridge.sent[0]!.token;
+  bridge.emit(token, { type: 'message', text: 'Accepted preamble.', turnId: 105 });
+  await flush();
+  const publishedBeforeDispose = published.length;
+  controller.dispose();
+  await flush();
+  assert.equal(bridge.cancelledTokens.length, 2);
+  bridge.rejectsCancellation = false;
+  controller.dispose();
+  await flush();
+  controller.dispose();
+  assert.equal(bridge.cancelledTokens.length, 3);
+  assert.ok(bridge.cancelledTokens.every((entry) => entry === token));
+  assert.equal(published.length, publishedBeforeDispose);
+});
 
 test('interrupt cancels a turn whose identity arrives during replacement listening', async () => {
   const audio = new FakeAudio();
@@ -389,7 +531,7 @@ test('interrupt cancels a turn whose identity arrives during replacement listeni
   const token = bridge.sent[0]!.token;
   const interruption = controller.orb();
   await flush();
-  bridge.emit(token, { type: 'delta', text: '原回答现在才开始。', turnId: 77 });
+  bridge.emit(token, { type: 'message', text: '原回答现在才开始。', turnId: 77 });
   replacement.resolve({ type: 'transcript', text: 'replacement' });
   await interruption;
   assert.deepEqual(bridge.cancelCalls, [77]);

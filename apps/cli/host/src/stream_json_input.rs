@@ -26,7 +26,7 @@
 //! ## Error handling
 //!
 //! A malformed JSON line is FATAL: print
-//! `Error parsing streaming input line: <line>: <err>` to stderr then return
+//! a sanitized parse diagnostic to stderr then return
 //! `Err(InputError::MalformedJson)` (caller exits 1). Role mismatch and a
 //! missing `control_request.request` field are also fatal.
 //!
@@ -53,7 +53,7 @@ use tokio::sync::mpsc;
 
 /// Fatal input-processing errors. The caller should print nothing extra —
 /// `process_line` already emitted the required error string to stderr.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputError {
     /// JSON parse failure (`Error parsing streaming input line: ...`).
     MalformedJson,
@@ -61,18 +61,19 @@ pub enum InputError {
     BadRole(String),
     /// `control_request` frame missing the `request` field.
     MissingRequest,
+    /// Stdin could not be read or its dedicated reader could not be started.
+    ReadFailed,
 }
 
 impl std::fmt::Display for InputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             InputError::MalformedJson => write!(f, "Error parsing streaming input line"),
-            InputError::BadRole(got) => {
-                write!(f, "Error: Expected message role 'user', got '{got}'")
-            }
+            InputError::BadRole(_) => write!(f, "Error: Expected message role 'user'"),
             InputError::MissingRequest => {
                 write!(f, "Error: Missing request on control_request")
             }
+            InputError::ReadFailed => write!(f, "Error reading streaming input"),
         }
     }
 }
@@ -194,7 +195,7 @@ pub fn process_line(
 
     // Parse JSON.
     let mut frame: Value = serde_json::from_str(line).map_err(|e| {
-        eprintln!("Error parsing streaming input line: {line}: {e}");
+        eprintln!("Error parsing streaming input line: invalid JSON at line {} column {}", e.line(), e.column());
         InputError::MalformedJson
     })?;
 
@@ -295,7 +296,7 @@ pub fn process_line(
                 .unwrap_or("");
             if role != "user" {
                 let got = role.to_string();
-                eprintln!("Error: Expected message role 'user', got '{got}'");
+                eprintln!("Error: Expected message role 'user'");
                 return Err(InputError::BadRole(got));
             }
 
@@ -646,7 +647,7 @@ pub fn read_input_turns(
     for line_result in reader.lines() {
         let line = line_result.map_err(|e| {
             eprintln!("Error reading stdin: {e}");
-            InputError::MalformedJson
+            InputError::ReadFailed
         })?;
         let line = line.trim_end_matches('\r'); // strip CRLF if any
         if line.trim().is_empty() {
@@ -691,6 +692,34 @@ pub enum StdinControlFrame {
     Cancel(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StdinReaderStatus {
+    Reading,
+    Eof,
+    Failed(InputError),
+    Stopped,
+}
+
+/// Owns publication by the dedicated stdin reader. A blocking OS read cannot
+/// be interrupted portably, so the thread is detached from Tokio's executor.
+/// Closing this scope prevents further publication and never makes runtime
+/// teardown wait for a peer that keeps stdin open.
+pub struct StdinReaderControl {
+    stop: tokio_util::sync::CancellationToken,
+    publication: Arc<std::sync::Mutex<()>>,
+}
+impl StdinReaderControl {
+    pub fn stop(&self) {
+        self.stop.cancel();
+        // Join the finite parsing/publication section, never the OS read or
+        // bounded channel send. No lifecycle/replay frame can land after this.
+        let _publication = self.publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+impl Drop for StdinReaderControl {
+    fn drop(&mut self) { self.stop(); }
+}
+
 pub struct StdinChannels {
     /// Receiver for ordered user/history/bash inputs.
     pub input_rx: mpsc::Receiver<StreamInput>,
@@ -698,12 +727,14 @@ pub struct StdinChannels {
     pub control_req_rx: mpsc::Receiver<StdinControlFrame>,
     /// Receiver for `control_response` frames (consumed by the pending-request resolver).
     pub control_resp_rx: mpsc::Receiver<Value>,
+    pub status: tokio::sync::watch::Receiver<StdinReaderStatus>,
+    pub reader: StdinReaderControl,
 }
 
 /// Spawn a background task that reads stdin line-by-line, routes each frame,
 /// and returns the three receiver channels.
 ///
-/// The stdin reader runs in a `spawn_blocking` thread (stdin is blocking I/O)
+/// The stdin reader runs in a dedicated OS thread (stdin is blocking I/O)
 /// forwarding frames onto bounded tokio mpsc channels. When stdin closes (EOF)
 /// or a fatal error occurs, all three channel senders are dropped, which signals
 /// EOF to every consumer.
@@ -733,22 +764,41 @@ pub fn spawn_stdin_router(
     out_tx: Arc<OutboundTx>,
     lifecycle: Arc<crate::queued_commands::QueueLifecycle>,
 ) -> StdinChannels {
+    spawn_stdin_router_from_reader(
+        std::io::BufReader::new(std::io::stdin()),
+        replay_user_messages, session_id, out_tx, lifecycle,
+    )
+}
+
+pub(crate) fn spawn_stdin_router_from_reader<R: BufRead + Send + 'static>(
+    reader: R,
+    replay_user_messages: bool,
+    session_id: String,
+    out_tx: Arc<OutboundTx>,
+    lifecycle: Arc<crate::queued_commands::QueueLifecycle>,
+) -> StdinChannels {
     // Bounded channels: 64 buffered frames each. Turn channel is 64 (max burst
     // before the turn loop catches up). Control channels are 64 each.
     let (input_tx, input_rx) = mpsc::channel::<StreamInput>(64);
     let (control_req_tx, control_req_rx) = mpsc::channel::<StdinControlFrame>(64);
     let (control_resp_tx, control_resp_rx) = mpsc::channel::<Value>(64);
 
-    tokio::task::spawn_blocking(move || {
-        let stdin = std::io::stdin();
-        let reader = std::io::BufReader::new(stdin.lock());
+    let (status_tx, status) = tokio::sync::watch::channel(StdinReaderStatus::Reading);
+    let reader_status = status_tx.clone();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let publication = Arc::new(std::sync::Mutex::new(()));
+    let reader_control = StdinReaderControl { stop: stop.clone(), publication: publication.clone() };
+    let spawned = std::thread::Builder::new().name("lingxi-stdin".into()).spawn(move || {
         let mut seen_uuids: HashSet<String> = HashSet::new();
+        let mut outcome = StdinReaderStatus::Eof;
 
         for line_result in reader.lines() {
+            if stop.is_cancelled() { outcome = StdinReaderStatus::Stopped; break; }
             let line = match line_result {
                 Ok(l) => l,
-                Err(e) => {
-                    eprintln!("Error reading stdin: {e}");
+                Err(_) => {
+                    eprintln!("Error reading streaming input");
+                    outcome = StdinReaderStatus::Failed(InputError::ReadFailed);
                     break;
                 }
             };
@@ -757,17 +807,25 @@ pub fn spawn_stdin_router(
                 continue;
             }
 
-            match process_line(&line, &mut seen_uuids) {
-                Ok(FrameAction::UserTurn(turn)) => {
-                    // msg_lifecycle_v1: register the uuid + emit its `queued`
-                    // lifecycle BEFORE the (possibly blocking) send, so an
-                    // interrupt receipt can already list a frame that is
-                    // stuck behind backpressure ("pending-dispatch" in the
-                    // binary's contract wording).
-                    if let Some(uuid) = turn.uuid.as_deref() {
-                        lifecycle.command_queued(uuid);
+            let action = {
+                let _publication = publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if stop.is_cancelled() { outcome = StdinReaderStatus::Stopped; break; }
+                let action = process_line(&line, &mut seen_uuids);
+                match &action {
+                    Ok(FrameAction::UserTurn(turn)) => {
+                        if let Some(uuid) = turn.uuid.as_deref() { lifecycle.command_queued(uuid); }
                     }
-                    // Block if the channel is full (backpressure).
+                    Ok(FrameAction::DuplicateUser { uuid, content, timestamp }) if replay_user_messages => {
+                        emit_replay_ack_queued(&out_tx, uuid, content, timestamp.as_deref(), &session_id);
+                    }
+                    _ => {}
+                }
+                action
+            };
+            match action {
+                Ok(FrameAction::UserTurn(turn)) => {
+                    // Backpressure stays outside the publication fence, so a
+                    // closed consumer always unblocks this reader on shutdown.
                     if input_tx.blocking_send(StreamInput::User(turn)).is_err() {
                         // Receiver dropped — turn driver has stopped; exit.
                         break;
@@ -786,26 +844,7 @@ pub fn spawn_stdin_router(
                         break;
                     }
                 }
-                Ok(FrameAction::DuplicateUser {
-                    uuid,
-                    content,
-                    timestamp,
-                }) => {
-                    eprintln!("Sending acknowledgment for duplicate user message: {uuid}");
-                    if replay_user_messages {
-                        // Route through the single-writer drain queue so this ack
-                        // stays FIFO-ordered with the data frames (never a direct
-                        // stdout write while the drain task owns stdout).
-                        emit_replay_ack_queued(
-                            &out_tx,
-                            &uuid,
-                            &content,
-                            timestamp.as_deref(),
-                            &session_id,
-                        );
-                    }
-                    // Duplicate — do NOT forward as a turn.
-                }
+                Ok(FrameAction::DuplicateUser { .. }) => {}
                 Ok(FrameAction::ControlRequest(frame)) => {
                     if control_req_tx
                         .blocking_send(StdinControlFrame::Request(frame))
@@ -829,20 +868,26 @@ pub fn spawn_stdin_router(
                     }
                 }
                 Ok(FrameAction::Consumed) => {}
-                Err(_input_err) => {
-                    // Fatal parse/role/missing-request error — already printed
-                    // to stderr. Break so all senders drop (signals EOF to consumers).
+                Err(error) => {
+                    outcome = StdinReaderStatus::Failed(error);
                     break;
                 }
             }
         }
-        // All senders dropped here → all receiver channels close.
+        // Publish the result before dropping data senders: EOF and fatal input
+        // must remain distinguishable when the last buffered input is consumed.
+        reader_status.send_replace(if stop.is_cancelled() { StdinReaderStatus::Stopped } else { outcome });
     });
+    if spawned.is_err() {
+        status_tx.send_replace(StdinReaderStatus::Failed(InputError::ReadFailed));
+    }
 
     StdinChannels {
         input_rx,
         control_req_rx,
         control_resp_rx,
+        status,
+        reader: reader_control,
     }
 }
 
@@ -1065,7 +1110,7 @@ mod tests {
         let err = InputError::BadRole("assistant".to_string());
         assert_eq!(
             err.to_string(),
-            "Error: Expected message role 'user', got 'assistant'"
+            "Error: Expected message role 'user'"
         );
     }
 

@@ -9,3 +9,11 @@ internal fun ChatState.blocksEngineReconnect(hasPendingPermission: Boolean): Boo
         backgroundTasks.values.any { it.status == TaskStatusDto.PENDING || it.status == TaskStatusDto.RUNNING } ||
         workflowRuns.values.any { it.status == TaskStatusDto.PENDING || it.status == TaskStatusDto.RUNNING } ||
         sessionAgents.any { it.status.lowercase() in setOf("running", "working", "pending", "queued", "initializing") }
+
+/** Recovery may replace an unconfirmed session transition, never live engine work. */
+internal fun ChatState.blocksWorkspaceReplacement(
+    hasPendingPermission: Boolean,
+    replacePendingTransition: Boolean,
+): Boolean = copy(
+    sessionTransitioning = sessionTransitioning && !replacePendingTransition,
+).blocksEngineReconnect(hasPendingPermission)

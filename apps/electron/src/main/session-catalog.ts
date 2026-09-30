@@ -176,8 +176,10 @@ export class ProjectSessionCatalog {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });
-      let stdout = '';
-      let stderr = '';
+      const stdout: Buffer[] = [];
+      let stdoutBytes = 0;
+      const stderr: Buffer[] = [];
+      let stderrBytes = 0;
       let settled = false;
       const timeout = setTimeout(() => {
         if (settled) return;
@@ -187,12 +189,32 @@ export class ProjectSessionCatalog {
       }, this.options.timeoutMs ?? 15_000);
       timeout.unref();
       child.stdout.on('data', (chunk: Buffer | string) => {
-        stdout += chunk.toString();
-        if (Buffer.byteLength(stdout, 'utf8') > MAX_OUTPUT_BYTES) child.kill();
+        if (settled) return;
+        const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+        stdoutBytes += bytes.length;
+        if (stdoutBytes > MAX_OUTPUT_BYTES) {
+          settled = true;
+          clearTimeout(timeout);
+          child.kill();
+          reject(new Error('session catalog output is too large'));
+          return;
+        }
+        stdout.push(bytes);
       });
       child.stderr.on('data', (chunk: Buffer | string) => {
-        stderr += chunk.toString();
-        if (Buffer.byteLength(stderr, 'utf8') > 16 * 1024) stderr = stderr.slice(-16 * 1024);
+        if (settled) return;
+        const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+        // Keep the same diagnostic tail as before, bounded in raw bytes.
+        const fragment = Buffer.from(bytes.subarray(Math.max(0, bytes.length - 16 * 1024)));
+        stderr.push(fragment);
+        stderrBytes += fragment.length;
+        while (stderrBytes > 16 * 1024) {
+          const first = stderr[0];
+          const removed = Math.min(first.length, stderrBytes - 16 * 1024);
+          if (removed === first.length) stderr.shift();
+          else stderr[0] = first.subarray(removed);
+          stderrBytes -= removed;
+        }
       });
       child.once('error', (error) => {
         if (settled) return;
@@ -205,11 +227,18 @@ export class ProjectSessionCatalog {
         settled = true;
         clearTimeout(timeout);
         if (code !== 0) {
-          reject(new Error(`session catalog failed (code=${code ?? 'null'}, signal=${signal ?? 'null'}): ${stderr.trim() || 'unknown error'}`));
+          const diagnosticBytes = Buffer.concat(stderr, stderrBytes);
+          let firstCodepoint = 0;
+          // A bounded tail can begin inside a codepoint; omit only those
+          // continuation bytes rather than manufacturing replacement text.
+          while (firstCodepoint < Math.min(3, diagnosticBytes.length)
+            && (diagnosticBytes[firstCodepoint] & 0xc0) === 0x80) firstCodepoint++;
+          const diagnostic = diagnosticBytes.toString('utf8', firstCodepoint).trim();
+          reject(new Error(`session catalog failed (code=${code ?? 'null'}, signal=${signal ?? 'null'}): ${diagnostic || 'unknown error'}`));
           return;
         }
         try {
-          resolve(parseCatalog(stdout));
+          resolve(parseCatalog(Buffer.concat(stdout, stdoutBytes).toString('utf8')));
         } catch (error) {
           reject(error instanceof Error ? error : new Error(String(error)));
         }

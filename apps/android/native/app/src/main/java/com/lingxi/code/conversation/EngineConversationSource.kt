@@ -244,7 +244,7 @@ class EngineConversationSource private constructor(
 
     override suspend fun refreshSessions() {
         try {
-            handle.submit(ClientCommand.ListSessions(limit = null))
+            handle.submit(completeSessionListCommand())
         } catch (t: Throwable) {
             sessions.value = EngineSessionState.error(
                 strings.resolve(
@@ -598,7 +598,7 @@ class EngineConversationSource private constructor(
                 // (`SessionList`) flows back through the listener into `sessions`,
                 // populating the drawer with real history.
                 try {
-                    handle.submit(ClientCommand.ListSessions(limit = null))
+                    handle.submit(completeSessionListCommand())
                 } catch (t: Throwable) {
                     sessions.value = EngineSessionState.error(
                         strings.resolve(

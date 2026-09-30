@@ -762,7 +762,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             // to be built FIRST — it is injected into the runtime config).
             let gate_handle = gate.clone();
             cfg.injected_permission_gate = Some(gate as Arc<dyn permission::gate::PermissionGate>);
-            let rt = match init::build_runtime_from_config(cfg, adapter).await {
+            let rt = match init::build_cli_runtime_from_config(cfg, adapter, &parsed).await {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("lingxi-cli: {e}");

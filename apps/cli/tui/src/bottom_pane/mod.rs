@@ -1155,6 +1155,17 @@ impl BottomPane {
         self.history_store = Some(store);
     }
 
+    /// Rebind persistence and recall after the backend committed a new session.
+    pub(crate) fn reset_prompt_history_store(
+        &mut self,
+        store: std::sync::Arc<session::prompt_history::PromptHistoryStore>,
+    ) {
+        let mut recall = store.recall_displays();
+        recall.reverse();
+        self.composer.replace_history(recall);
+        self.history_store = Some(store);
+    }
+
     /// Take the composer's submission: pushes non-blank text to history,
     /// clears the buffer, and returns the trimmed text. `None` (buffer
     /// untouched) when the composer is blank.
@@ -3526,13 +3537,18 @@ mod tests {
     #[test]
     fn at_file_completion_replaces_token_in_place() {
         let mut pane = pane();
-        typ(&mut pane, "see @Carg");
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("Cargo.toml");
+        std::fs::write(&manifest, "fixture manifest").unwrap();
+        typ(
+            &mut pane,
+            &format!("see @{}/Carg", directory.path().display()),
+        );
         assert!(pane.completion().is_some(), "@ token opens file completion");
         let _ = pane.handle_key(key(KeyCode::Tab));
-        assert!(
-            pane.composer().text().starts_with("see @Cargo.toml"),
-            "got: {}",
-            pane.composer().text()
+        assert_eq!(
+            pane.composer().text(),
+            format!("see @{}", manifest.display())
         );
     }
 
@@ -3569,6 +3585,41 @@ mod tests {
         // The submission was pushed to history.
         let _ = pane.handle_key(key(KeyCode::Up));
         assert_eq!(pane.composer().text(), "  hi there  ");
+    }
+
+    #[test]
+    fn clear_rebinds_prompt_history_after_live_submissions() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("project");
+        let old = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
+            home.path(),
+            &project,
+            Some("old-session".into()),
+        ));
+        let mut pane = super::BottomPane::new(Theme::dark());
+        pane.set_prompt_history_store(old.clone());
+        typ(&mut pane, "old prompt");
+        assert_eq!(pane.take_submission_state().as_deref(), Some("old prompt"));
+        assert!(old.flush());
+        let new = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
+            home.path(),
+            &project,
+            Some("new-session".into()),
+        ));
+        pane.reset_prompt_history_store(new.clone());
+        typ(&mut pane, "new prompt");
+        assert_eq!(pane.take_submission_state().as_deref(), Some("new prompt"));
+        assert!(new.flush());
+        let rows: Vec<serde_json::Value> =
+            std::fs::read_to_string(home.path().join("history.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["sessionId"], "old-session");
+        assert_eq!(rows[1]["sessionId"], "new-session");
+        assert_eq!(rows[1]["display"], "new prompt");
     }
 
     #[test]

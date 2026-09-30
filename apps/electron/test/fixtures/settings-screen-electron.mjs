@@ -730,7 +730,7 @@ async function main() {
     await window.loadURL(url);
     const { webContents } = window;
     webContents.focus();
-    await waitFor(webContents, 'Boolean(window.__settingsScreenTest && document.querySelector(\'[role="dialog"]\'))');
+    await waitFor(webContents, 'Boolean(window.__settingsScreenTest?.state().settingsSnapshotReady && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
     const result = scenario === 'provider-region' ? await runProviderRegionScenario(window, webContents)
       : scenario === 'configuration-navigation' ? await runConfigurationNavigation(window, webContents)

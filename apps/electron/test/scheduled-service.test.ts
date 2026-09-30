@@ -61,7 +61,10 @@ async function harness(t: TestContext) {
     activate: () => assert.fail('Scheduled tasks must not activate a foreground session'),
     newSession: () => assert.fail('Scheduled tasks must not create foreground drafts'),
   } as unknown as SessionRuntimeManager;
-  const catalog = { list: async (path: string) => ({ sessions: catalogRows.get(path) ?? [] }) } as unknown as ProjectSessionCatalog;
+  const catalog = {
+    list: async (path: string) => ({ sessions: (catalogRows.get(path) ?? []).slice(0, 200) }),
+    find: async (path: string, sessionId: string) => catalogRows.get(path)?.find((row) => row.uuid === sessionId),
+  } as unknown as ProjectSessionCatalog;
   const createService = () => new ScheduledTaskService(settings, manager, catalog, (title, body, ref) => notifications.push({ title, body, ref }), (error) => errors.push(error));
   const service = createService();
   t.after(async () => { service.dispose(); await rm(directory, { recursive: true, force: true }); });
@@ -234,4 +237,20 @@ test('pausing an invalid selected target still reaches the lifecycle endpoint', 
   await h.service.manage(h.project, { action: 'pause', id: 'task-1', automation: { ...task({ runMode: 'selected_session', targetSessionId: targetId }).automation!, statusReason: 'Target chat was archived.' } });
   const change = h.requests.find((request) => request.action === 'pause');
   assert.equal(change?.automation?.statusReason, 'Target chat was archived.');
+});
+
+test('selected and task-owned targets beyond the sidebar limit remain valid authoritative sessions', async (t) => {
+  const h = await harness(t);
+  h.catalogRows.set(h.project, Array.from({ length: 200 }, (_, index) => ({
+    uuid: `00000000-0000-4${String(index).padStart(3, '0')}-8000-${String(index).padStart(12, '0')}`,
+    title: `Newer chat ${index}`,
+  })).concat([{ uuid: targetId, title: 'Older persistent target' }]));
+  assert.ok(!(await h.service.context(h.project)).sessions.some((session) => session.uuid === targetId));
+  await h.service.manage(h.project, { action: 'create', automation: task({ runMode: 'selected_session', targetSessionId: targetId }).automation });
+  const selected = await h.service.run(h.source, 'old-selected', task({ runMode: 'selected_session', targetSessionId: targetId, notificationPolicy: 'none' }));
+  const owned = await h.service.run(h.source, 'old-task-owner', task({ runMode: 'task_session', ownedSessionId: targetId, notificationPolicy: 'none' }));
+  assert.equal(selected.sessionId, targetId);
+  assert.equal(owned.sessionId, targetId);
+  assert.equal(h.turns.length, 2);
+  assert.deepEqual(h.background.map(({ empty }) => empty), [false, false]);
 });

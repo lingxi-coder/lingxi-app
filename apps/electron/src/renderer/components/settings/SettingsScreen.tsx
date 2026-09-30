@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 
 import { dialogFocusTarget } from '../../bridge/bridgeRuntimeState.js';
 import type { SettingsSnapshotEvent, UseBridge } from '../../bridge/bridgeTypes.js';
@@ -499,6 +499,8 @@ export function SettingsScreen({
   const [query, setQuery] = useState('');
   const [editingLayer, setEditingLayer] = useState<EditableLayer>('user');
   const [layerLockCount, setLayerLockCount] = useState(0);
+  const [snapshotRequestError, setSnapshotRequestError] = useState<{ sessionId: string | undefined; message: string } | null>(null);
+  const snapshotRequestGeneration = useRef(0);
   const layerLocked = layerLockCount > 0;
 
   const panelRef = useRef<HTMLDivElement>(null);
@@ -533,10 +535,21 @@ export function SettingsScreen({
   // finishes (neither dependency changes), leaving the snapshot permanently
   // null. Depending on `bridge.connected` makes this effect re-run exactly
   // when loading finishes and the session is actually ready to answer.
+  const refreshSnapshot = useCallback(async () => {
+    const generation = ++snapshotRequestGeneration.current;
+    setSnapshotRequestError(null);
+    try { await bridge.refreshSettingsSnapshot(); }
+    catch (cause) {
+      if (generation === snapshotRequestGeneration.current) {
+        setSnapshotRequestError({ sessionId: activeSessionId, message: cause instanceof Error ? cause.message : '无法读取设置。' });
+      }
+    }
+  }, [activeSessionId, bridge.refreshSettingsSnapshot]);
   useEffect(() => {
     if (!activeSessionId || !bridge.connected || bridge.sessionLoading) return;
-    void bridge.refreshSettingsSnapshot().catch(() => undefined);
-  }, [activeSessionId, bridge.connected, bridge.sessionLoading, bridge.refreshSettingsSnapshot]);
+    void refreshSnapshot();
+    return () => { snapshotRequestGeneration.current += 1; };
+  }, [activeSessionId, bridge.connected, bridge.sessionLoading, refreshSnapshot]);
 
   // Focus management for a dialog that claims `aria-modal="true"`: claiming
   // it while leaving focus (and Tab) free to wander the background would be
@@ -588,6 +601,8 @@ export function SettingsScreen({
   // 或 `settings.activeProject`：它们是**界面**的当前项目，和引擎的可以不是同一个，
   // 拿它们顶上就会把「不知道」渲染成一个看起来确定、实际可能错的项目名。
   const projectDir = projectDirFromSnapshot(snapshot);
+  const requestError = snapshotRequestError && snapshotRequestError.sessionId === activeSessionId ? snapshotRequestError.message : null;
+  const settingsReadError = snapshotError ?? requestError;
 
   let body: ReactNode;
   // Whether the body actually has something a layer switcher could target.
@@ -603,30 +618,20 @@ export function SettingsScreen({
     body = <PagePlaceholder page={activePage} kind="not-implemented" />;
   } else if (activePage.needsEngine && !engineReady) {
     body = <EngineRequiredEmptyState page={activePage} />;
+  } else if (activePage.layered && !snapshot) {
+    canWriteHere = true;
+    body = settingsReadError
+      ? <div role="alert">设置尚未读取。<button type="button" onClick={() => void refreshSnapshot()}>重试</button></div>
+      : <div role="status" data-testid="settings-snapshot-loading">正在读取设置…</div>;
   } else {
     canWriteHere = true;
     const Component = PAGE_CONTENT[activePage.id];
     body = Component
       ? (
-        // `key={editingLayer}` (Task 18 fix round 2): this defect class —
-        // local draft state (form text, a ref, whatever the next page
-        // invents) surviving a layer switch and getting written into the
-        // WRONG layer — has now appeared three times by three different
-        // mechanisms (Task 17's read-`effective`-and-write-it-back;
-        // round 1's `useState` seeded once and never re-seeded; round 1's
-        // OWN fix for that introducing a `useRef` that itself survived a
-        // layer switch). Patching each instance loses — it is always one
-        // component behind. Remounting the whole page component on a layer
-        // change makes the class unrepresentable rather than something to
-        // keep re-discovering: every `useState`/`useRef`/anything a future
-        // page invents is discarded by construction. The individual
-        // `useEffect([editingLayer])` fixes already in `ToolsAgent.tsx` /
-        // `Plugins.tsx`'s `PluginConfigRow` / `PluginToggleRow` stay in
-        // place on purpose — belt AND suspenders, so the page is still
-        // correct even if a future edit removes this `key` without
-        // understanding why it's here.
+        // Drafts belong to both the session and the file layer. A new owner
+        // gets a fresh page; ordinary snapshot refreshes keep unsaved input.
         <Component
-          key={activePage.id === 'custom-providers' ? `${activeSessionId}:${editingLayer}` : editingLayer}
+          key={`${activeSessionId ?? 'no-session'}:${editingLayer}`}
           bridge={bridge}
           snapshot={snapshot}
           editingLayer={editingLayer}
@@ -661,11 +666,11 @@ export function SettingsScreen({
       }}
     >
       <div className="settings-window-drag-region drag-region" aria-hidden="true" />
-      {snapshotError && (
+      {settingsReadError && (
         <div data-testid="settings-snapshot-error" role="alert" style={{
           padding: '10px 18px', background: t.danger, color: '#fff', fontSize: 12.5, flexShrink: 0,
         }}>
-          设置读取失败：{snapshotError}
+          设置读取失败：{settingsReadError}
         </div>
       )}
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>

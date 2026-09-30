@@ -199,3 +199,72 @@ test('project catalog coalesces concurrent reads and invalidates after a mutatio
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+function chunkedChild(buffers: Buffer[], code = 0, stderr = false) {
+  const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill(): boolean };
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => true;
+  queueMicrotask(() => {
+    for (const buffer of buffers) (stderr ? child.stderr : child.stdout).emit('data', buffer);
+    child.emit('close', code, null);
+  });
+  return child;
+}
+
+test('catalog decodes split UTF-8 titles and transcript paths only after collecting raw bytes', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-unicode-'));
+  const row = { uuid: '11111111-2222-4333-8444-555555555555', title: '中文标题😀', path: '/session/会话.jsonl', modified_rfc3339: '', message_count: 1, empty_session: false };
+  const body = Buffer.from(JSON.stringify({ version: 1, sessions: [row] }));
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+    spawnProcess: (() => chunkedChild(Array.from(body, (byte) => Buffer.from([byte])))) as any });
+  try {
+    const listed = await catalog.list(project);
+    assert.equal(listed.sessions[0].title, row.title);
+    assert.equal(listed.sessions[0].path, row.path);
+    assert.equal((await catalog.find(project, row.uuid))?.path, row.path);
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('catalog failure diagnostics preserve Unicode across stderr chunk boundaries', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-unicode-error-'));
+  const message = '错误：会话目录不可用';
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server',
+    spawnProcess: (() => chunkedChild(Array.from(Buffer.from(message), (byte) => Buffer.from([byte])), 1, true)) as any });
+  try { await assert.rejects(catalog.list(project), (error) => error instanceof Error && error.message.endsWith(message)); }
+  finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('catalog rejects the raw stdout byte limit immediately even when the child never closes', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-limit-'));
+  let kills = 0;
+  const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill(): boolean };
+  child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => { kills++; return true; };
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => child) as any });
+  try {
+    const load = catalog.list(project);
+    const rejected = assert.rejects(load, /output is too large/);
+    child.stdout.emit('data', Buffer.alloc(8 * 1024 * 1024));
+    child.stdout.emit('data', Buffer.from('中'));
+    await rejected;
+    assert.equal(kills, 1);
+    child.stdout.emit('data', Buffer.alloc(1024));
+    assert.equal(kills, 1, 'late output cannot grow the settled response');
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});
+
+test('catalog retains a bounded UTF-8 stderr tail with the final diagnostic', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-stderr-tail-'));
+  const message = '错误：最终诊断';
+  const buffers = [Buffer.from('中文'.repeat(4000)), Buffer.from(message)];
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge-server', spawnProcess: (() => chunkedChild(buffers, 1, true)) as any });
+  try {
+    await assert.rejects(catalog.list(project), (error) => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.endsWith(message));
+      assert.ok(!error.message.includes('�'));
+      assert.ok(Buffer.byteLength(error.message) < 16 * 1024 + 80);
+      return true;
+    });
+  } finally { rmSync(project, { recursive: true, force: true }); }
+});

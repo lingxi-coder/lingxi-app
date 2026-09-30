@@ -184,6 +184,15 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// turn path lives on [`crate::server::TurnDriver`]).
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>);
 
+    /// Product-only correlated read: existing protocol events form one atomic
+    /// response rather than interleaving with live background status pushes.
+    /// The caller fences outbound delivery through this read. Implementations
+    /// must collect locally: never emit through the connection, mutate engine
+    /// state, drain an interaction broker, or wait for the SDK turn gate.
+    async fn runtime_snapshot(&self) -> Result<Vec<ClientEvent>, String> {
+        Err("desktop runtime snapshot is unavailable".into())
+    }
+
     /// Dispatch a raw `/<name> [args]` line and hand back the dispatch RESULT so
     /// the connection (which owns the [`crate::server::TurnDriver`] + queue) can
     /// decide whether to PRINT it (display-only `type: "local"` commands) or run
@@ -193,6 +202,19 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// then falls back to the display-only `route` path).
     async fn dispatch_slash(&self, _raw: &str) -> Option<SlashDispatchOutcome> {
         None
+    }
+}
+
+#[derive(Default)]
+struct RuntimeSnapshotEvents(std::sync::Mutex<Vec<ClientEvent>>);
+
+#[async_trait]
+impl ClientEventSink for RuntimeSnapshotEvents {
+    async fn emit(&self, event: ClientEvent) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(event);
     }
 }
 
@@ -250,6 +272,9 @@ pub struct EngineCommandRouter {
     /// foreground children and allocation before the first transcript write.
     session_agent_observer:
         Option<Arc<harness_runtime::desktop::session_agents::DesktopSessionAgentObserver>>,
+    /// Current coordinator ownership supplements persisted agent transcripts
+    /// when a host reconnects after missing background completion events.
+    team_registry: Option<Arc<dyn lingxi_core::host::team_registry::TeamRegistryHandle>>,
     /// Shared provider credential manager. Production bridge boot wires the
     /// exact manager used by the runtime; tests/embedded clients may omit it.
     catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
@@ -422,6 +447,7 @@ impl EngineCommandRouter {
             slash_registry,
             session_store: None,
             session_agent_observer: None,
+            team_registry: None,
             catalog_registry: harness_runtime::desktop::FusionCatalogRegistry::default(),
             credentials: None,
             provider_model_catalog_listings: Vec::new(),
@@ -486,6 +512,15 @@ impl EngineCommandRouter {
         observer: Arc<harness_runtime::desktop::session_agents::DesktopSessionAgentObserver>,
     ) -> Self {
         self.session_agent_observer = Some(observer);
+        self
+    }
+
+    #[must_use]
+    pub fn with_team_registry(
+        mut self,
+        registry: Arc<dyn lingxi_core::host::team_registry::TeamRegistryHandle>,
+    ) -> Self {
+        self.team_registry = Some(registry);
         self
     }
 
@@ -581,6 +616,41 @@ impl EngineCommandRouter {
 
 #[async_trait]
 impl CommandRouter for EngineCommandRouter {
+    async fn runtime_snapshot(&self) -> Result<Vec<ClientEvent>, String> {
+        if self.team_registry.is_none() {
+            return Err("desktop runtime snapshot is unavailable".into());
+        }
+        let events = RuntimeSnapshotEvents::default();
+        self.emit_session_agent_list(&events).await;
+        self.emit_coordinator_snapshot(&events).await;
+        tasks::emit_correlated_task_list(
+            self.tasks.as_ref(),
+            &events,
+            TaskListFilter::default(),
+            "desktop-runtime-snapshot".into(),
+        )
+        .await;
+        let events = events
+            .0
+            .into_inner()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if !events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::SessionAgentList { .. }))
+        {
+            return Err("session agent snapshot is unavailable".into());
+        }
+        if let Some(error) = events.iter().find_map(|event| match event {
+            ClientEvent::TaskListComplete {
+                error: Some(error), ..
+            } => Some(error),
+            _ => None,
+        }) {
+            return Err(format!("desktop task snapshot is unavailable: {error}"));
+        }
+        Ok(events)
+    }
+
     async fn dispatch_slash(&self, raw: &str) -> Option<SlashDispatchOutcome> {
         let before = self.capture_slash_authority().await;
         let result = match self.dispatch_desktop_slash(raw).await {
@@ -1693,6 +1763,10 @@ mod fusion_catalog_refresh_tests;
 #[cfg(test)]
 #[path = "router/tests/scheduled_chat_anchor_tests.rs"]
 mod scheduled_chat_anchor_tests;
+
+#[cfg(test)]
+#[path = "router/tests/runtime_snapshot_tests.rs"]
+mod runtime_snapshot_tests;
 
 mod catalog;
 mod configuration;

@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -46,6 +47,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 private const val ANDROID_COMPUTER_USE_TOOL = "android_use"
 
@@ -1331,12 +1333,17 @@ class ChatViewModel(
             ?: ConversationScope.Global,
         createSource: () -> ConversationSource,
         persistSelection: suspend () -> Unit = {},
+        rollbackSelection: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
     ): Boolean = workspaceSwitchMutex.withLock {
         if (!allowInactiveWaitingRecovery && refuseWhileDurableTurnParked()) return@withLock false
-        if (_state.value.streaming ||
-            (_state.value.sessionTransitioning && !replacePendingTransition)
-        ) {
+        val previous = source
+        fun replacementIsBlocked(): Boolean = source !== previous ||
+            _state.value.blocksWorkspaceReplacement(
+                hasPendingPermission = _pendingPermission.value != null,
+                replacePendingTransition = replacePendingTransition,
+            )
+        fun reportBlockedReplacement() {
             _state.update {
                 it.copy(
                     error = ChatError(
@@ -1348,6 +1355,9 @@ class ChatViewModel(
                     ),
                 )
             }
+        }
+        if (replacementIsBlocked()) {
+            reportBlockedReplacement()
             return@withLock false
         }
         val replacement = runCatching(createSource).getOrElse { error ->
@@ -1382,22 +1392,47 @@ class ChatViewModel(
             return@withLock false
         }
 
+        // Construction can publish callbacks before returning. A task/agent
+        // that became live during that work still belongs to the old source.
+        if (replacementIsBlocked()) {
+            if (replacement !== source) replacement.close()
+            reportBlockedReplacement()
+            return@withLock false
+        }
+
+        suspend fun rollbackPersistedSelection(): Throwable? = withContext(NonCancellable) {
+            runCatching { rollbackSelection() }.exceptionOrNull()
+        }
         val persisted = runCatching { persistSelection() }
         if (persisted.isFailure) {
-            replacement.close()
+            val rollbackError = rollbackPersistedSelection()
+            if (replacement !== source) replacement.close()
             val error = persisted.exceptionOrNull()
+            if (error is CancellationException) throw error
             _state.update {
                 it.copy(
                     error = ChatError(
                         message = strings.resolve(
                             R.string.chat_error_persist_active_project_failed,
                             "无法保存活动项目：%1\$s",
-                            "${error?.message ?: error?.let { it::class.simpleName }}",
+                            listOfNotNull(error?.message ?: error?.let { it::class.simpleName }, rollbackError?.message)
+                                .joinToString("; "),
                         ),
                         kind = classifyError(error?.message.orEmpty()),
                     ),
                 )
             }
+            return@withLock false
+        }
+
+        // Persistence yields to UI/event collectors. Recheck immediately
+        // before releasing callbacks/runtime ownership, and undo only this
+        // operation's durable selection if live work arrived while suspended.
+        if (replacementIsBlocked()) {
+            val rollbackError = rollbackPersistedSelection()
+            if (replacement !== source) replacement.close()
+            reportBlockedReplacement()
+            rollbackError?.let { reportHostError(it.message.orEmpty()) }
             return@withLock false
         }
 
@@ -1409,7 +1444,6 @@ class ChatViewModel(
             abandonPendingSessionTransition()
         }
 
-        val previous = source
         sourceGeneration++
         sourceBindingJob?.cancel()
         source = replacement

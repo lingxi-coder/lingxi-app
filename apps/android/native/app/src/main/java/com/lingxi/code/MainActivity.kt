@@ -69,6 +69,10 @@ import kotlinx.coroutines.launch
  * in [RootScreen] and let the Appearance page mutate the same store.
  */
 class MainActivity : ComponentActivity() {
+    private val cameraOwner = Any()
+    private val locationOwner = Any()
+    private val cameraResultKey = java.util.UUID.randomUUID().toString()
+    private val locationResultKey = java.util.UUID.randomUUID().toString()
     private lateinit var deviceReadPermissions: DeviceReadPermissionController
     private val pendingCronRunId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     private val pendingTerminalArgs =
@@ -119,15 +123,17 @@ class MainActivity : ComponentActivity() {
         // AndroidCamera adapter drives across the FFI seam (the device-vision
         // analog of how the mic is invoked for STT). Must run before super/
         // setContent so registerForActivityResult is valid.
-        val cameraPermLauncher = registerForActivityResult(
-            ActivityResultContracts.RequestPermission(),
-        ) { granted -> CameraController.onCameraPermission(granted) }
-        val takePictureLauncher = registerForActivityResult(
-            ActivityResultContracts.TakePicturePreview(),
-        ) { bitmap -> CameraController.onPictureTaken(bitmap) }
-        val pickMediaLauncher = registerForActivityResult(
-            ActivityResultContracts.PickVisualMedia(),
-        ) { uri -> CameraController.onMediaPicked(uri) }
+        // Unique registration keys stop saved old OS results being replayed
+        // into a replacement Activity's new operation.
+        val cameraPermLauncher = activityResultRegistry.register(
+            "$cameraResultKey:permission", this, ActivityResultContracts.RequestPermission(),
+        ) { granted -> CameraController.onCameraPermission(cameraOwner, granted) }
+        val takePictureLauncher = activityResultRegistry.register(
+            "$cameraResultKey:picture", this, ActivityResultContracts.TakePicturePreview(),
+        ) { bitmap -> CameraController.onPictureTaken(cameraOwner, bitmap) }
+        val pickMediaLauncher = activityResultRegistry.register(
+            "$cameraResultKey:media", this, ActivityResultContracts.PickVisualMedia(),
+        ) { uri -> CameraController.onMediaPicked(cameraOwner, uri) }
         // Android 13+ (TIRAMISU) gates posting on the POST_NOTIFICATIONS runtime
         // permission — declaring it in the manifest is NOT enough at targetSdk 33+.
         // Without this request the permission stays denied and EVERY notification
@@ -136,9 +142,9 @@ class MainActivity : ComponentActivity() {
         val notificationPermLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission(),
         ) { /* best-effort: nothing to do on grant/deny — posting self-gates */ }
-        val locationPermLauncher = registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions(),
-        ) { grants -> LocationController.onLocationPermission(grants) }
+        val locationPermLauncher = activityResultRegistry.register(
+            "$locationResultKey:permission", this, ActivityResultContracts.RequestMultiplePermissions(),
+        ) { grants -> LocationController.onLocationPermission(locationOwner, grants) }
         val deviceReadPermLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission(),
         ) { granted -> deviceReadPermissions.onPermissionResult(granted) }
@@ -152,6 +158,7 @@ class MainActivity : ComponentActivity() {
         )
         CameraController.attach(
             CameraController.makeLaunchers(
+                owner = cameraOwner,
                 context = applicationContext,
                 requestCameraPermission = cameraPermLauncher,
                 takePicture = takePictureLauncher,
@@ -179,6 +186,7 @@ class MainActivity : ComponentActivity() {
         // then owns Android's fine/coarse runtime permission and one-shot fix.
         LocationController.attach(
             LocationController.makeLaunchers(
+                owner = locationOwner,
                 context = applicationContext,
                 requestPermission = locationPermLauncher,
             ),
@@ -513,12 +521,12 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         // Drop the launcher references so a finishing Activity can't be leaked by
         // the process-global controller and any in-flight capture is cancelled.
-        CameraController.detach()
+        CameraController.detach(cameraOwner)
         ShareController.detach()
         NotificationController.detach()
         ClipboardController.detach()
         AndroidDeviceControlController.detach(deviceReadPermissions)
-        LocationController.detach()
+        LocationController.detach(locationOwner)
         NativeOffloadRuntime.detach()
         super.onDestroy()
     }

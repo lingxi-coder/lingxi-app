@@ -1488,6 +1488,138 @@ class ChatViewModelReducerTest {
     }
 
     @Test
+    fun workspaceSwitchRefusesRunningBackgroundTaskBeforeBuildingReplacement() = runTest(dispatcher) {
+        val original = StubSource()
+        val vm = ChatViewModel(original)
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("background", TaskStatusDto.RUNNING, null, null))
+        var built = false
+
+        val switched = vm.switchWorkspaceSource(
+            projectId = "project-b",
+            createSource = { built = true; SessionControlSource() },
+        )
+
+        assertFalse(switched)
+        assertFalse(built)
+        assertFalse(original.closed)
+        assertTrue(vm.state.value.activeBackgroundTaskIds.contains("background"))
+        assertSame(original, vm.engineSource.value)
+    }
+
+    @Test
+    fun backgroundWorkPublishedDuringBuildKeepsOriginalSource() = runTest(dispatcher) {
+        val original = StubSource()
+        val replacement = SessionControlSource()
+        val vm = ChatViewModel(original)
+        var persisted = false
+
+        val switched = vm.switchWorkspaceSource(
+            projectId = "project-b",
+            createSource = {
+                vm.reduceClientEvent(ClientEvent.TaskStatusChanged("background", TaskStatusDto.RUNNING, null, null))
+                replacement
+            },
+            persistSelection = { persisted = true },
+        )
+
+        assertFalse(switched)
+        assertFalse(persisted)
+        assertFalse(original.closed)
+        assertTrue(replacement.closed)
+        assertSame(original, vm.engineSource.value)
+    }
+
+    @Test
+    fun backgroundWorkArrivingDuringPersistenceRollsBackAndKeepsRuntime() = runTest(dispatcher) {
+        val original = StubSource()
+        val replacement = SessionControlSource()
+        val vm = ChatViewModel(original)
+        val persisted = CompletableDeferred<Unit>()
+        val releasePersistence = CompletableDeferred<Unit>()
+        var durableSelection = "global"
+        var rollbackCount = 0
+        val switch = async(start = CoroutineStart.UNDISPATCHED) {
+            vm.switchWorkspaceSource(
+                projectId = "project-b",
+                createSource = { replacement },
+                persistSelection = {
+                    durableSelection = "project-b"
+                    persisted.complete(Unit)
+                    releasePersistence.await()
+                },
+                rollbackSelection = { durableSelection = "global"; rollbackCount++ },
+            )
+        }
+        persisted.await()
+        vm.reduceClientEvent(ClientEvent.TaskStatusChanged("background", TaskStatusDto.RUNNING, null, null))
+        releasePersistence.complete(Unit)
+
+        assertFalse(switch.await())
+        assertEquals("global", durableSelection)
+        assertEquals(1, rollbackCount)
+        assertFalse(original.closed)
+        assertTrue(replacement.closed)
+        assertTrue(vm.state.value.activeBackgroundTaskIds.contains("background"))
+        assertSame(original, vm.engineSource.value)
+    }
+
+    @Test
+    fun failedPartialSelectionWriteInvokesRollbackWithoutClosingOriginal() = runTest(dispatcher) {
+        val original = StubSource()
+        val replacement = SessionControlSource()
+        val vm = ChatViewModel(original)
+        var selection = "global"
+
+        val switched = vm.switchWorkspaceSource(
+            projectId = "project-b",
+            createSource = { replacement },
+            persistSelection = { selection = "project-b"; error("injected scope write failure") },
+            rollbackSelection = { selection = "global" },
+        )
+
+        assertFalse(switched)
+        assertEquals("global", selection)
+        assertFalse(original.closed)
+        assertTrue(replacement.closed)
+        assertSame(original, vm.engineSource.value)
+    }
+
+    @Test
+    fun cancelledSelectionWriteRollsBackInNonCancellableContext() = runTest(dispatcher) {
+        val original = StubSource()
+        val replacement = SessionControlSource()
+        val vm = ChatViewModel(original)
+        val persisted = CompletableDeferred<Unit>()
+        var selection = "global"
+        var rolledBack = false
+        val switch = async(start = CoroutineStart.UNDISPATCHED) {
+            vm.switchWorkspaceSource(
+                projectId = "project-b",
+                createSource = { replacement },
+                persistSelection = {
+                    selection = "project-b"
+                    persisted.complete(Unit)
+                    CompletableDeferred<Unit>().await()
+                },
+                rollbackSelection = {
+                    kotlinx.coroutines.yield()
+                    selection = "global"
+                    rolledBack = true
+                },
+            )
+        }
+        persisted.await()
+        switch.cancel()
+        switch.join()
+
+        assertTrue(rolledBack)
+        assertEquals("global", selection)
+        assertFalse(original.closed)
+        assertTrue(replacement.closed)
+        assertSame(original, vm.engineSource.value)
+    }
+
+    @Test
     fun projectRecoveryReplacesWrongInitialResumeAfterProcessDeath() = runTest(dispatcher) {
         val savedState = SavedStateHandle(
             mapOf(

@@ -17,7 +17,7 @@
 # Swift and Kotlin share the pinned UniFFI 0.32 public generation pipeline.
 # Each Kotlin component has a configured package and native cross-component converters.
 #
-# Idempotent: regenerated dirs are cleaned first; safe to re-run. Prints output
+# Idempotent: generated artifacts are staged before replacement. Prints output
 # paths on success. NO secrets baked in (the LLM API key is read at runtime).
 
 set -euo pipefail
@@ -54,13 +54,13 @@ VOICE_MANIFEST="${REPO_ROOT}/resources/voice/models.json"
   exit 1
 }
 
-# Build into a gitignored staging directory, then atomically replace only this
-# script's Rust libraries after every ABI and binding step succeeds. A Rust
-# compile failure must not erase the last known-good app binaries.
+# Stage every ABI and Kotlin bindings before replacing owned artifacts. Each
+# destination uses a sibling rename and retains its previous value for rollback;
+# this is not a globally atomic replacement of multiple directories.
 # Optional output roots keep a complete JNI/bindings refresh isolated from
 # concurrent Gradle builds until the caller promotes the verified pair.
 FINAL_JNILIBS_DIR="${LINGXI_ANDROID_JNILIBS_DIR:-${ANDROID_DIR}/app/src/${VARIANT}/jniLibs}"
-JNILIBS_DIR="${ANDROID_DIR}/app/build/nativeStaging/${VARIANT}/jniLibs"
+STAGING_PARENT="${ANDROID_DIR}/app/build/nativeStaging/${VARIANT}"
 KOTLIN_OUT="${LINGXI_KOTLIN_OUT:-${ANDROID_DIR}/app/src/main/java}"   # bindgen writes <pkg-path>/*.kt under here
 
 PROFILE="release"
@@ -80,6 +80,90 @@ abi_of() {
 }
 
 log() { printf '\033[1;34m[build-jni]\033[0m %s\n' "$*"; }
+
+# These arrays own only the generated package and libandroid_aar.so per ABI.
+# Never move an entire Java or jniLibs root: it includes handwritten sources and
+# native support libraries published by other build steps.
+PROMOTION_COUNT=0
+PROMOTION_TARGETS=()
+PROMOTION_DIRS=()
+PROMOTION_ORIGINALS=()
+PROMOTION_APPLIED=()
+PROMOTION_KEEP=()
+PROMOTION_COMMITTED=false
+LOCK_COUNT=0
+PROMOTION_LOCKS=()
+
+finish_staging() {
+  local status=$? index
+  trap - EXIT HUP INT TERM
+  set +e
+  if [[ "${PROMOTION_COMMITTED}" == false ]]; then
+    index=$((PROMOTION_COUNT - 1))
+    while [[ ${index} -ge 0 ]]; do
+      if [[ "${PROMOTION_ORIGINALS[index]}" == 1 ]]; then
+        if [[ -e "${PROMOTION_DIRS[index]}/old" || -L "${PROMOTION_DIRS[index]}/old" ]]; then
+          if ! rm -rf "${PROMOTION_TARGETS[index]}" \
+            || ! mv "${PROMOTION_DIRS[index]}/old" "${PROMOTION_TARGETS[index]}"; then
+            PROMOTION_KEEP[index]=1
+            echo "ERROR: rollback could not restore ${PROMOTION_TARGETS[index]}; previous artifact retained at ${PROMOTION_DIRS[index]}/old" >&2
+            status=1
+          fi
+        elif [[ "${PROMOTION_APPLIED[index]}" == 1 ]]; then
+          PROMOTION_KEEP[index]=1
+          echo "ERROR: rollback backup is missing for ${PROMOTION_TARGETS[index]}" >&2
+          status=1
+        fi
+      elif [[ "${PROMOTION_APPLIED[index]}" == 1 ]]; then
+        if ! rm -rf "${PROMOTION_TARGETS[index]}"; then
+          PROMOTION_KEEP[index]=1
+          echo "ERROR: rollback could not remove ${PROMOTION_TARGETS[index]}" >&2
+          status=1
+        fi
+      fi
+      index=$((index - 1))
+    done
+  fi
+  index=0
+  while [[ ${index} -lt ${PROMOTION_COUNT} ]]; do
+    if [[ "${PROMOTION_KEEP[index]}" == 0 ]]; then
+      rm -rf "${PROMOTION_DIRS[index]}" || echo "WARN: could not remove staging directory ${PROMOTION_DIRS[index]}" >&2
+    fi
+    index=$((index + 1))
+  done
+  index=0
+  while [[ ${index} -lt ${LOCK_COUNT} ]]; do
+    rmdir "${PROMOTION_LOCKS[index]}" || echo "WARN: could not release JNI promotion lock ${PROMOTION_LOCKS[index]}" >&2
+    index=$((index + 1))
+  done
+  rm -rf "${STAGING_ROOT}" || echo "WARN: could not remove build staging directory ${STAGING_ROOT}" >&2
+  exit "${status}"
+}
+
+prepare_artifact() {
+  local source="$1" target="$2" temporary index=${PROMOTION_COUNT}
+  mkdir -p "$(dirname "${target}")"
+  temporary="$(mktemp -d "$(dirname "${target}")/.jni-stage.XXXXXX")"
+  PROMOTION_TARGETS[index]="${target}"
+  PROMOTION_DIRS[index]="${temporary}"
+  PROMOTION_ORIGINALS[index]=0
+  PROMOTION_APPLIED[index]=0
+  PROMOTION_KEEP[index]=0
+  PROMOTION_COUNT=$((PROMOTION_COUNT + 1))
+  cp -R "${source}" "${temporary}/new"
+}
+
+lock_promotion_root() {
+  local root="$1" lock="$1/.jni-promotion.lock" index=0
+  while [[ ${index} -lt ${LOCK_COUNT} ]]; do
+    [[ "${PROMOTION_LOCKS[index]}" != "${lock}" ]] || return 0
+    index=$((index + 1))
+  done
+  mkdir -p "${root}"
+  mkdir "${lock}" || { echo "ERROR: JNI output publication is locked: ${lock}" >&2; return 1; }
+  PROMOTION_LOCKS[LOCK_COUNT]="${lock}"
+  LOCK_COUNT=$((LOCK_COUNT + 1))
+}
 
 # ---------------------------------------------------------------------------
 # 0. Preflight — tools, NDK, Rust targets
@@ -146,23 +230,40 @@ fi
 #     checksum verification.
 # ---------------------------------------------------------------------------
 SHERPA_AAR="${ANDROID_DIR}/app/libs/${SHERPA_AAR_NAME}"
-if [[ ! -f "${SHERPA_AAR}" ]]; then
-  log "Downloading sherpa-onnx AAR v${SHERPA_AAR_VER} → ${SHERPA_AAR}"
+# A failed transfer/checksum must never become the next invocation's cache.
+# The subshell owns its temporary download and cleanup independently from the
+# later JNI/bindings promotion transaction.
+(
+  SHERPA_AAR_TEMP=""
+  trap '[[ -z "${SHERPA_AAR_TEMP}" ]] || rm -f "${SHERPA_AAR_TEMP}"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   mkdir -p "$(dirname "${SHERPA_AAR}")"
-  curl -fsSL "${SHERPA_AAR_URL}" -o "${SHERPA_AAR}" \
+  if [[ -f "${SHERPA_AAR}" ]]; then
+    ACTUAL_SHERPA_AAR_SHA256="$(shasum -a 256 "${SHERPA_AAR}" | awk '{print $1}')"
+    if [[ "${ACTUAL_SHERPA_AAR_SHA256}" == "${SHERPA_AAR_SHA256}" ]]; then
+      log "sherpa-onnx AAR present: ${SHERPA_AAR}"
+      exit 0
+    fi
+    log "Discarding invalid sherpa-onnx AAR cache: ${SHERPA_AAR}"
+    rm -f "${SHERPA_AAR}"
+  fi
+  log "Downloading sherpa-onnx AAR v${SHERPA_AAR_VER} → ${SHERPA_AAR}"
+  SHERPA_AAR_TEMP="$(mktemp "$(dirname "${SHERPA_AAR}")/.sherpa-aar-download.XXXXXX")"
+  curl -fsSL "${SHERPA_AAR_URL}" -o "${SHERPA_AAR_TEMP}" \
     || { echo "ERROR: failed to fetch sherpa-onnx AAR" >&2; exit 1; }
+  ACTUAL_SHERPA_AAR_SHA256="$(shasum -a 256 "${SHERPA_AAR_TEMP}" | awk '{print $1}')"
+  if [[ "${ACTUAL_SHERPA_AAR_SHA256}" != "${SHERPA_AAR_SHA256}" ]]; then
+    echo "ERROR: sherpa-onnx AAR checksum mismatch" >&2
+    echo "expected: ${SHERPA_AAR_SHA256}" >&2
+    echo "actual:   ${ACTUAL_SHERPA_AAR_SHA256}" >&2
+    exit 1
+  fi
+  mv -f "${SHERPA_AAR_TEMP}" "${SHERPA_AAR}"
+  SHERPA_AAR_TEMP=""
   log "  $(du -h "${SHERPA_AAR}" | awk '{print $1}')"
-else
-  log "sherpa-onnx AAR present: ${SHERPA_AAR}"
-fi
-
-ACTUAL_SHERPA_AAR_SHA256="$(shasum -a 256 "${SHERPA_AAR}" | awk '{print $1}')"
-if [[ "${ACTUAL_SHERPA_AAR_SHA256}" != "${SHERPA_AAR_SHA256}" ]]; then
-  echo "ERROR: sherpa-onnx AAR checksum mismatch" >&2
-  echo "expected: ${SHERPA_AAR_SHA256}" >&2
-  echo "actual:   ${ACTUAL_SHERPA_AAR_SHA256}" >&2
-  exit 1
-fi
+)
 
 # ---------------------------------------------------------------------------
 # 1. cargo-ndk cross-compile the cdylib into jniLibs/<abi>/
@@ -170,9 +271,14 @@ fi
 # `cargo ndk -t <abi> -o <jniLibs>` places each built `.so` under
 # <jniLibs>/<abi>/. We pass the Gradle ABI names; cargo-ndk maps them to triples.
 log "Cross-compiling ${CRATE} cdylib (${PROFILE}) for: ${TARGETS[*]/#/}"
-if [[ -d "${JNILIBS_DIR}" ]]; then
-  find "${JNILIBS_DIR}" -mindepth 1 -delete
-fi
+mkdir -p "${STAGING_PARENT}"
+STAGING_ROOT="$(mktemp -d "${STAGING_PARENT}/build.XXXXXX")"
+JNILIBS_DIR="${STAGING_ROOT}/jniLibs"
+BINDINGS_STAGE="${STAGING_ROOT}/kotlin"
+trap finish_staging EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 mkdir -p "${JNILIBS_DIR}"
 
 NDK_ABI_ARGS=()
@@ -218,12 +324,11 @@ INTROSPECT_LIB="${CARGO_TARGET_DIR}/aarch64-linux-android/${PROFILE_DIR}/${SONAM
 log "Building offline uniffi-bindgen bin (ios-framework --features cli)…"
 cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --features cli --bin uniffi-bindgen
 
-# Clean only the generated bindings package subtree (KOTLIN_OUT also holds any
-# hand-written app sources — never wipe the whole java/ root).
+# Generate into this invocation's staging tree. The existing Kotlin package
+# remains usable even if bindgen writes partial files and then fails.
 PKG_REL_PATH="com/lingxi/code/bindings"
 GEN_PKG_DIR="${KOTLIN_OUT}/${PKG_REL_PATH}"
-rm -rf "${GEN_PKG_DIR}"
-mkdir -p "${KOTLIN_OUT}"
+mkdir -p "${BINDINGS_STAGE}"
 
 log "Generating Kotlin bindings → ${GEN_PKG_DIR} (package com.lingxi.code.bindings)…"
 cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --features cli \
@@ -232,9 +337,9 @@ cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --
   --library "${INTROSPECT_LIB}" \
   --language kotlin \
   --config "${UNIFFI_CONFIG}" \
-  --out-dir "${KOTLIN_OUT}"
+  --out-dir "${BINDINGS_STAGE}"
 
-KT_COUNT="$(find "${KOTLIN_OUT}" -name '*.kt' -path "*${PKG_REL_PATH}*" 2>/dev/null | wc -l | tr -d ' ')"
+KT_COUNT="$(find "${BINDINGS_STAGE}/${PKG_REL_PATH}" -type f -name '*.kt' 2>/dev/null | wc -l | tr -d ' ')"
 [[ "${KT_COUNT}" -gt 0 ]] || { echo "ERROR: no Kotlin bindings generated under ${GEN_PKG_DIR}" >&2; exit 1; }
 
 # UniFFI metadata lives in linker sections that llvm-strip removes. Keep the
@@ -257,15 +362,33 @@ if [[ "${PROFILE}" == "release" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Done
+# Prepare all same-filesystem replacements before touching a live artifact.
+# Serialize publishers sharing either output root so rollback cannot overwrite
+# another invocation's successfully published pair. Gradle readers should use
+# isolated output roots when they need to avoid the brief promotion window.
 # ---------------------------------------------------------------------------
+lock_promotion_root "${KOTLIN_OUT}"
+lock_promotion_root "${FINAL_JNILIBS_DIR}"
+prepare_artifact "${BINDINGS_STAGE}/${PKG_REL_PATH}" "${GEN_PKG_DIR}"
 for t in "${TARGETS[@]}"; do
   abi="$(abi_of "${t}")"
-  mkdir -p "${FINAL_JNILIBS_DIR}/${abi}"
-  cp -f \
-    "${JNILIBS_DIR}/${abi}/${SONAME}" \
-    "${FINAL_JNILIBS_DIR}/${abi}/"
+  prepare_artifact "${JNILIBS_DIR}/${abi}/${SONAME}" "${FINAL_JNILIBS_DIR}/${abi}/${SONAME}"
 done
+
+index=0
+while [[ ${index} -lt ${PROMOTION_COUNT} ]]; do
+  if [[ -e "${PROMOTION_TARGETS[index]}" || -L "${PROMOTION_TARGETS[index]}" ]]; then
+    # Record intent before invoking mv so a command interrupted after its
+    # rename still restores the backup. A failed pre-rename leaves no backup
+    # and the original destination intact.
+    PROMOTION_ORIGINALS[index]=1
+    mv "${PROMOTION_TARGETS[index]}" "${PROMOTION_DIRS[index]}/old"
+  fi
+  PROMOTION_APPLIED[index]=1
+  mv "${PROMOTION_DIRS[index]}/new" "${PROMOTION_TARGETS[index]}"
+  index=$((index + 1))
+done
+PROMOTION_COMMITTED=true
 
 log "OK"
 echo "variant        : ${VARIANT}"

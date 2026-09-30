@@ -16,118 +16,161 @@ import Foundation
     import CoreLocation
 
     /// Native one-shot location over `CLLocationManager`.
-    final class LocationImpl: NSObject, IosLocation, CLLocationManagerDelegate, @unchecked Sendable {
-        /// The manager must outlive the request — a deallocated manager
-        /// silently never calls back.
-        private let manager = CLLocationManager()
+    @MainActor
+    final class LocationImpl: NSObject, IosLocation, CLLocationManagerDelegate {
+        private let managerFactory: @MainActor @Sendable () -> CLLocationManager
+        nonisolated private let locationServicesEnabled: @Sendable () -> Bool
+        private let sleep: @Sendable (UInt64) async throws -> Void
+        private let timeoutNanoseconds: UInt64
+        /// Core Location delivers callbacks on the manager's creation RunLoop.
+        /// Create and retain a fresh manager on MainActor for each request, so a
+        /// callback from a cancelled or timed-out request cannot finish its successor.
+        private var manager: CLLocationManager?
+        private var requestID: UUID?
         private var continuation: CheckedContinuation<LocationFixFfi, Error>?
         /// Set while we are waiting for `.notDetermined` to resolve, so the
         /// authorization callback knows whether to start a request or ignore.
         private var awaitingAuthorization = false
-        private let lock = NSLock()
-        /// Fires if neither a fix nor a denial arrives.
-        ///
-        /// `withCheckedThrowingContinuation` does not observe Task
-        /// cancellation, so when the engine's own 30s budget expires it
-        /// simply stops awaiting — leaving `continuation` non-nil forever and
-        /// every later request refused as "already in flight". Location was
-        /// then dead for the life of the process. Deliberately SHORTER than
-        /// the engine's budget so this side finishes first and reports a
-        /// real `Timeout` instead of being abandoned mid-call.
+        /// Finish independently if neither a fix nor a denial arrives, before
+        /// the engine's own 30s budget abandons the native callback.
         private var timeout: Task<Void, Never>?
         /// Must stay under `LOCATION_TIMEOUT` in `local_apps_host_device`.
-        private static let timeoutSeconds: UInt64 = 20
+        nonisolated private static let timeoutNanoseconds: UInt64 = 20_000_000_000
 
-        override init() {
+        /// Engine construction runs in a detached task. This initializer must
+        /// remain cheap and must not construct any RunLoop-bound native object.
+        nonisolated override init() {
+            managerFactory = { CLLocationManager() }
+            locationServicesEnabled = { CLLocationManager.locationServicesEnabled() }
+            sleep = { try await Task.sleep(nanoseconds: $0) }
+            timeoutNanoseconds = Self.timeoutNanoseconds
             super.init()
-            manager.delegate = self
-            manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
         }
 
-        func currentLocation() async throws -> LocationFixFfi {
-            guard CLLocationManager.locationServicesEnabled() else {
+        nonisolated init(
+            managerFactory: @escaping @MainActor @Sendable () -> CLLocationManager,
+            locationServicesEnabled: @escaping @Sendable () -> Bool,
+            timeoutNanoseconds: UInt64 = 20_000_000_000,
+            sleep: @escaping @Sendable (UInt64) async throws -> Void = {
+                try await Task.sleep(nanoseconds: $0)
+            }
+        ) {
+            self.managerFactory = managerFactory
+            self.locationServicesEnabled = locationServicesEnabled
+            self.timeoutNanoseconds = timeoutNanoseconds
+            self.sleep = sleep
+            super.init()
+        }
+
+        nonisolated func currentLocation() async throws -> LocationFixFfi {
+            try Task.checkCancellation()
+            // This system query may perform synchronous IPC; keep it off the
+            // UI executor while confining the RunLoop-bound manager to MainActor.
+            guard locationServicesEnabled() else {
                 throw LocationFfiError.Unavailable
             }
-            return try await withCheckedThrowingContinuation { cont in
-                lock.lock()
-                guard continuation == nil else {
-                    lock.unlock()
-                    cont.resume(throwing: LocationFfiError.Other(
-                        message: "another location request is already in flight"))
-                    return
-                }
-                continuation = cont
-                timeout = Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: Self.timeoutSeconds * 1_000_000_000)
-                    guard !Task.isCancelled else { return }
-                    self?.finish(.failure(LocationFfiError.Timeout))
-                }
-                lock.unlock()
+            return try await requestOnMainActor()
+        }
 
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    switch self.manager.authorizationStatus {
+        private func requestOnMainActor() async throws -> LocationFixFfi {
+            let id = UUID()
+            return try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await withCheckedThrowingContinuation { cont in
+                    guard continuation == nil else {
+                        cont.resume(throwing: LocationFfiError.Other(
+                            message: "another location request is already in flight"))
+                        return
+                    }
+                    let manager = managerFactory()
+                    self.manager = manager
+                    requestID = id
+                    continuation = cont
+                    manager.delegate = self
+                    manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+                    let sleep = self.sleep
+                    let duration = timeoutNanoseconds
+                    timeout = Task { [weak self] in
+                        do { try await sleep(duration) }
+                        catch { return }
+                        guard !Task.isCancelled else { return }
+                        self?.finish(id: id, .failure(LocationFfiError.Timeout))
+                    }
+                    switch manager.authorizationStatus {
                     case .notDetermined:
-                        self.awaitingAuthorization = true
-                        self.manager.requestWhenInUseAuthorization()
+                        awaitingAuthorization = true
+                        manager.requestWhenInUseAuthorization()
                     case .authorizedWhenInUse, .authorizedAlways:
-                        self.manager.requestLocation()
+                        manager.requestLocation()
                     default:
-                        self.finish(.failure(LocationFfiError.PermissionDenied))
+                        finish(id: id, .failure(LocationFfiError.PermissionDenied))
                     }
                 }
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    self?.finish(id: id, .failure(CancellationError()))
+                }
             }
         }
 
-        func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-            guard awaitingAuthorization else { return }
-            switch manager.authorizationStatus {
-            case .notDetermined:
-                return  // the sheet is still up
-            case .authorizedWhenInUse, .authorizedAlways:
-                awaitingAuthorization = false
-                manager.requestLocation()
-            default:
-                awaitingAuthorization = false
-                finish(.failure(LocationFfiError.PermissionDenied))
+        nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+            // Managers are created on MainActor, whose RunLoop receives these
+            // delegate calls. Keep the synchronous delegate requirements while
+            // asserting the same isolation as our request state.
+            MainActor.assumeIsolated {
+                guard manager === self.manager, awaitingAuthorization, let id = requestID else { return }
+                switch manager.authorizationStatus {
+                case .notDetermined:
+                    return  // the sheet is still up
+                case .authorizedWhenInUse, .authorizedAlways:
+                    awaitingAuthorization = false
+                    manager.requestLocation()
+                default:
+                    finish(id: id, .failure(LocationFfiError.PermissionDenied))
+                }
             }
         }
 
-        func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-            guard let location = locations.last else {
-                finish(.failure(LocationFfiError.Unavailable))
-                return
+        nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+            MainActor.assumeIsolated {
+                guard manager === self.manager, let id = requestID else { return }
+                guard let location = locations.last else {
+                    finish(id: id, .failure(LocationFfiError.Unavailable))
+                    return
+                }
+                finish(id: id, .success(LocationFixFfi(
+                    latitude: location.coordinate.latitude,
+                    longitude: location.coordinate.longitude,
+                    accuracyM: location.horizontalAccuracy >= 0 ? location.horizontalAccuracy : nil,
+                    timestampMs: UInt64(max(0, location.timestamp.timeIntervalSince1970 * 1000)))))
             }
-            finish(.success(LocationFixFfi(
-                latitude: location.coordinate.latitude,
-                longitude: location.coordinate.longitude,
-                accuracyM: location.horizontalAccuracy >= 0 ? location.horizontalAccuracy : nil,
-                timestampMs: UInt64(max(0, location.timestamp.timeIntervalSince1970 * 1000)))))
         }
 
-        func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-            let failure: LocationFfiError
-            switch (error as? CLError)?.code {
-            case .denied: failure = .PermissionDenied
-            case .locationUnknown: failure = .Unavailable
-            default: failure = .Other(message: error.localizedDescription)
+        nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+            MainActor.assumeIsolated {
+                guard manager === self.manager, let id = requestID else { return }
+                let failure: LocationFfiError
+                switch (error as? CLError)?.code {
+                case .denied: failure = .PermissionDenied
+                case .locationUnknown: failure = .Unavailable
+                default: failure = .Other(message: error.localizedDescription)
+                }
+                finish(id: id, .failure(failure))
             }
-            finish(.failure(failure))
         }
 
-        private func finish(_ result: Result<LocationFixFfi, Error>) {
-            lock.lock()
-            let cont = continuation
+        private func finish(id: UUID, _ result: Result<LocationFixFfi, Error>) {
+            guard requestID == id, let cont = continuation else { return }
+            requestID = nil
             continuation = nil
             awaitingAuthorization = false
             let pending = timeout
             timeout = nil
-            lock.unlock()
-            // Cancel AFTER clearing state: a timeout that fires concurrently
-            // finds `continuation` nil and becomes a no-op, so a late real
-            // fix and the deadline can never both resume.
+            let manager = self.manager
+            self.manager = nil
+            manager?.delegate = nil
+            manager?.stopUpdatingLocation()
             pending?.cancel()
-            guard let cont else { return }
             switch result {
             case let .success(fix): cont.resume(returning: fix)
             case let .failure(error): cont.resume(throwing: error)

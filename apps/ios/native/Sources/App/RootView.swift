@@ -1256,14 +1256,13 @@ struct RootView: View {
         }
     }
 
-    /// Copy for a refused `switchScope`, chosen from the two reasons its own
-    /// guard tests — read back here because the function returns a bare
-    /// `Bool`. Both keys already exist and are exactly what Android reports at
-    /// the matching two sites (`ChatViewModel.refuseWhileDurableTurnParked`
-    /// and `switchWorkspaceSource`'s streaming / pending-transition branch),
-    /// so the two clients say the same thing for the same refusal.
+    /// Explain a refused switch while preserving the source that still owns
+    /// background work, durable recovery, or the current cancellation barrier.
     private var scopeSwitchRefusalMessage: String {
-        ConversationSessionMutationPolicy.allowsCallerMutation(
+        if !ConversationSourceReplacementPolicy.allowsReplacement(of: source.model) {
+            return String(localized: "chat_error_finish_background_turn_first")
+        }
+        return ConversationSessionMutationPolicy.allowsCallerMutation(
             hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
             hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
             isCancelling: source.model.isCancelling
@@ -1725,6 +1724,7 @@ struct RootView: View {
     ) async throws {
         persistConversationScope()
         let old = source
+        try requireSourceReplacementAllowed(old)
         let replacement = makeSource(scope: activeScope, snapshot: snapshot, mode: activeMode)
         #if canImport(harness_runtimeFFI)
             installExternalEventHandler(on: replacement)
@@ -1733,7 +1733,9 @@ struct RootView: View {
         // failed provider/catalog rebuild must leave the live conversation
         // usable instead of parking a cancelled source in the root view.
         try await replacement.prepare()
+        try requireSourceReplacementAllowed(old)
         try await old.cancelAndWait()
+        try requireSourceReplacementAllowed(old)
         activeSession = confirmedSession
         pendingSessionRestoreID = confirmedSession.isEmpty ? nil : confirmedSession
         source.setSettingsActive(false)
@@ -1754,6 +1756,23 @@ struct RootView: View {
             )
         }
         old.handleBackground()
+    }
+
+    @MainActor
+    private func requireSourceReplacementAllowed(
+        _ previous: any ConversationSource,
+        allowInactiveRecovery: Bool = false
+    ) throws {
+        guard source === previous else { throw CancellationError() }
+        guard ConversationSourceReplacementPolicy.allowsReplacement(
+            of: previous.model,
+            allowInactiveRecovery: allowInactiveRecovery
+        ) else {
+            throw NSError(
+                domain: "ConversationSourceReplacement", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: String(localized: "chat_error_finish_background_turn_first")]
+            )
+        }
     }
 
     /// Thin project-flavored wrapper over `switchScope` — the drawer's
@@ -1933,6 +1952,15 @@ struct RootView: View {
                   isCancelling: source.model.isCancelling
               )
         else { return false }
+        if scope != activeScope || targetMode != activeMode {
+            guard ConversationSourceReplacementPolicy.allowsReplacement(
+                of: source.model,
+                allowInactiveRecovery: allowRecoveryRouting
+            ) else {
+                projectStore.errorMessage = String(localized: "chat_error_finish_background_turn_first")
+                return false
+            }
+        }
         voiceInteraction.handleContextChange()
         if let initialPrompt, resumeSessionID != nil || startNew {
             pendingInitKickoff = PendingInitKickoff(
@@ -1972,12 +2000,14 @@ struct RootView: View {
                 } else {
                     try await previousSource.cancelAndWait()
                 }
+                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
                 // Only a project/global switch moves the durable active-project
                 // selection. Entering a local-app scope leaves the project
                 // selection untouched — leaving the app returns to it.
                 if scope != activeScope, !scope.isLocalApp {
                     rollback = try await projectStore.persistActiveForSwitch(projectId: scope.projectID)
                 }
+                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
                 let replacement = makeSource(
                     scope: scope,
                     snapshot: providerRepository.makeLaunchSnapshot(),
@@ -1987,6 +2017,7 @@ struct RootView: View {
                     installExternalEventHandler(on: replacement)
                 #endif
                 try await replacement.prepare()
+                try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
                 activeScope = scope
                 // A kickoff armed for a DIFFERENT scope than the one we just
                 // entered has missed its window: it did not fire in the
@@ -2031,7 +2062,14 @@ struct RootView: View {
                 previousSource.handleBackground()
                 await cronRepository.refresh()
             } catch {
-                if let rollback { _ = try? await projectStore.rollbackActiveSwitch(rollback) }
+                if let rollback,
+                   ConversationSourceReplacementPolicy.shouldRollbackSelection(
+                       previousSourceIsCurrent: source === previousSource,
+                       currentProjectID: projectStore.activeProjectId,
+                       requestedProjectID: scope.projectID
+                   ) {
+                    _ = try? await projectStore.rollbackActiveSwitch(rollback)
+                }
                 projectStore.errorMessage = String(localized: "project_switch_failed_message \(error.localizedDescription)")
                 // The scope we armed the kickoff for is not the one we are in;
                 // leaving it armed would fire the create-flow opener into
@@ -2049,8 +2087,10 @@ struct RootView: View {
                    pending.sourceMode == targetMode {
                     rollbackPendingSessionFork(pending, message: nil)
                 }
-                previousSource.handleForeground()
-                previousSource.warmUp()
+                if source === previousSource {
+                    previousSource.handleForeground()
+                    previousSource.warmUp()
+                }
             }
             projectSwitching = false
             applyPendingConversationSelectionRestoreIfPossible()
@@ -2719,6 +2759,58 @@ enum ConversationSessionMutationPolicy {
         isCancelling: Bool
     ) -> Bool {
         !hasInactiveDurableRecovery && !hasUnresolvedTurnRecovery && !isCancelling
+    }
+}
+
+/// Replacing a native engine discards its connection-scoped callbacks. A
+/// foreground turn can be explicitly cancelled first, but detached work and
+/// its interactive requests must keep their original source until settled.
+enum ConversationSourceReplacementPolicy {
+    static func shouldRollbackSelection(
+        previousSourceIsCurrent: Bool,
+        currentProjectID: String?,
+        requestedProjectID: String?
+    ) -> Bool {
+        previousSourceIsCurrent && currentProjectID == requestedProjectID
+    }
+
+    @MainActor
+    static func allowsReplacement(
+        of model: ConversationModel,
+        allowInactiveRecovery: Bool = false
+    ) -> Bool {
+        if model.backgroundTasks.contains(where: { $0.status.requiresExecutionLease }) {
+            return false
+        }
+        if model.agentSummaries.contains(where: { agent in
+            guard agent.id != ConversationModel.mainAgentID else { return false }
+            let status = agent.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return AgentStatusPresentation(rawValue: status) == .running
+                || ["queued", "initializing"].contains(status)
+        }) {
+            return false
+        }
+        if model.items.contains(where: { item in
+            guard case let .run(run) = item else { return false }
+            return run.activeWorkers > 0
+        }) {
+            return false
+        }
+        // Includes idle shell/tool/compaction activity after the main stream
+        // ended. A live main stream is handled by the cancellation barrier.
+        if !model.streaming && model.requiresBackgroundExecution { return false }
+        let mayRouteInactiveRecovery = allowInactiveRecovery && model.hasInactiveDurableRecovery
+        if !model.streaming && !mayRouteInactiveRecovery && !model.pendingQuestions.isEmpty {
+            return false
+        }
+        #if canImport(harness_runtimeFFI)
+            if model.pendingPermissions.contains(where: {
+                $0.worker != nil || (!model.streaming && !mayRouteInactiveRecovery)
+            }) {
+                return false
+            }
+        #endif
+        return true
     }
 }
 

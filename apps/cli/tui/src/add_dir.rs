@@ -5,7 +5,7 @@
 //! The command adds a working directory to the session's
 //! `permissions.additionalDirectories`. This module ONLY resolves + validates
 //! the user-supplied path (expand a leading `~`, make it absolute against the
-//! process cwd, normalize away `.`/`..`/trailing-slash, then stat it). The
+//! supplied session cwd, normalize away `.`/`..`/trailing-slash, then stat it). The
 //! durable settings-file write is driven off-loop through
 //! [`crate::bottom_pane::PermissionAction::AddDirectory`] (see
 //! `apps/cli/src/mode.rs::run_permission_action`), reusing
@@ -68,22 +68,22 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 /// Resolve `input` to an absolute, normalized path and validate that it exists
-/// and is a directory. Relative inputs resolve against the process cwd (the
-/// session working directory), matching claude-code `resolve(expandPath(...))`.
+/// and is a directory. Relative inputs resolve against the supplied live
+/// session working directory, matching claude-code `resolve(expandPath(...))`.
 /// Network paths are refused **before** `stat`, matching `validateDirectoryForWorkspace`.
 #[must_use]
-pub fn resolve_and_validate(input: &str) -> AddDirValidation {
-    resolve_and_validate_inner(input, true)
+pub fn resolve_and_validate(input: &str, cwd: &Path) -> AddDirValidation {
+    resolve_and_validate_inner(input, cwd, true)
 }
 
 /// Like [`resolve_and_validate`] but does not refuse network paths. `/cd` reuses
 /// the expand/stat checks without the working-directory network gate.
 #[must_use]
-pub fn resolve_existing_directory(input: &str) -> AddDirValidation {
-    resolve_and_validate_inner(input, false)
+pub fn resolve_existing_directory(input: &str, cwd: &Path) -> AddDirValidation {
+    resolve_and_validate_inner(input, cwd, false)
 }
 
-fn resolve_and_validate_inner(input: &str, reject_network: bool) -> AddDirValidation {
+fn resolve_and_validate_inner(input: &str, cwd: &Path, reject_network: bool) -> AddDirValidation {
     if input.is_empty() {
         return AddDirValidation::EmptyPath;
     }
@@ -91,15 +91,12 @@ fn resolve_and_validate_inner(input: &str, reject_network: bool) -> AddDirValida
     let absolute = if expanded.is_absolute() {
         expanded
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(expanded)
+        cwd.join(expanded)
     };
     let absolute = normalize(&absolute);
     let absolute_str = absolute.to_string_lossy().to_string();
     if reject_network {
-        let cwd = std::env::current_dir().ok();
-        let cwd = cwd.as_deref().and_then(Path::to_str);
+        let cwd = cwd.to_str();
         if permission::is_network_working_directory_against(input, cwd)
             || permission::is_network_working_directory_against(&absolute_str, cwd)
         {
@@ -153,9 +150,50 @@ pub fn help_message(result: &AddDirValidation) -> String {
 mod tests {
     use super::*;
 
+    fn validate(input: &str) -> AddDirValidation {
+        resolve_and_validate(input, &std::env::temp_dir())
+    }
+
+    fn existing(input: &str) -> AddDirValidation {
+        resolve_existing_directory(input, &std::env::temp_dir())
+    }
+
+    #[test]
+    fn relative_directory_uses_supplied_live_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("live");
+        let child = live.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let expected = AddDirValidation::Success {
+            absolute: child.display().to_string(),
+        };
+        assert_eq!(resolve_and_validate("./child/../child", &live), expected);
+        assert_eq!(resolve_existing_directory("child", &live), expected);
+    }
+
+    #[test]
+    fn network_directory_check_uses_supplied_live_host() {
+        let network_cwd = Path::new("/net/lingxi-test-host/workspace");
+        // The SDK permits another directory on the session's existing host.
+        assert!(matches!(
+            resolve_and_validate("./missing-child", network_cwd),
+            AddDirValidation::PathNotFound { .. }
+        ));
+        assert_eq!(
+            resolve_and_validate("../../other-host/missing-child", network_cwd),
+            AddDirValidation::NetworkPath {
+                directory_path: "../../other-host/missing-child".into()
+            }
+        );
+        assert!(matches!(
+            resolve_existing_directory("./missing-child", network_cwd),
+            AddDirValidation::PathNotFound { .. }
+        ));
+    }
+
     #[test]
     fn empty_input_is_empty_path() {
-        assert_eq!(resolve_and_validate(""), AddDirValidation::EmptyPath);
+        assert_eq!(validate(""), AddDirValidation::EmptyPath);
     }
 
     #[test]
@@ -163,7 +201,7 @@ mod tests {
         // `std::env::temp_dir()` is always an existing directory.
         let dir = std::env::temp_dir();
         let input = dir.to_string_lossy().to_string();
-        match resolve_and_validate(&input) {
+        match validate(&input) {
             AddDirValidation::Success { absolute } => {
                 assert!(Path::new(&absolute).is_absolute());
                 assert!(Path::new(&absolute).is_dir());
@@ -176,8 +214,8 @@ mod tests {
     fn trailing_slash_is_normalized_away() {
         let dir = std::env::temp_dir();
         let with_slash = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
-        let no_slash = resolve_and_validate(dir.to_string_lossy().trim_end_matches('/'));
-        assert_eq!(resolve_and_validate(&with_slash), no_slash);
+        let no_slash = validate(dir.to_string_lossy().trim_end_matches('/'));
+        assert_eq!(validate(&with_slash), no_slash);
     }
 
     #[test]
@@ -186,7 +224,7 @@ mod tests {
             std::env::temp_dir().join(format!("lingxi-add-dir-missing-{}", std::process::id()));
         let input = missing.to_string_lossy().to_string();
         assert!(matches!(
-            resolve_and_validate(&input),
+            validate(&input),
             AddDirValidation::PathNotFound { .. }
         ));
     }
@@ -196,7 +234,7 @@ mod tests {
         let file = std::env::temp_dir().join(format!("lingxi-add-dir-file-{}", std::process::id()));
         std::fs::write(&file, b"x").unwrap();
         let input = file.to_string_lossy().to_string();
-        let result = resolve_and_validate(&input);
+        let result = validate(&input);
         std::fs::remove_file(&file).ok();
         assert!(matches!(result, AddDirValidation::NotADirectory { .. }));
     }
@@ -231,21 +269,18 @@ mod tests {
     #[test]
     fn unc_and_net_automount_are_refused_before_stat() {
         assert!(matches!(
-            resolve_and_validate("//fileserver/share"),
+            validate("//fileserver/share"),
             AddDirValidation::NetworkPath { .. }
         ));
         assert!(matches!(
-            resolve_and_validate("/net/somehost/data"),
+            validate("/net/somehost/data"),
             AddDirValidation::NetworkPath { .. }
         ));
         let missing =
             std::env::temp_dir().join(format!("lingxi-cd-missing-{}", std::process::id()));
         let input = missing.to_string_lossy().to_string();
         assert!(
-            matches!(
-                resolve_existing_directory(&input),
-                AddDirValidation::PathNotFound { .. }
-            ),
+            matches!(existing(&input), AddDirValidation::PathNotFound { .. }),
             "/cd still stats local paths rather than using the network gate"
         );
     }

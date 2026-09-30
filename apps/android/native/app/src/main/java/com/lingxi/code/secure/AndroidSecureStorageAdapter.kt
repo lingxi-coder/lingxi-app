@@ -3,11 +3,12 @@ package com.lingxi.code.secure
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Base64
 import com.lingxi.code.bindings.android.AndroidSecureStorage
 import com.lingxi.code.bindings.android.SecureStorageFfiException
 import java.io.File
+import java.nio.file.Files
 import java.security.KeyStore
+import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -32,16 +33,22 @@ import javax.crypto.spec.GCMParameterSpec
  * UniFFI callback interface and maps failures onto the flat `SecureStorageFfiException`
  * that Rust fans back out onto `traits::SecureStorageError`.
  */
-class AndroidSecureStorageAdapter(private val baseDir: File) : AndroidSecureStorage {
+class AndroidSecureStorageAdapter internal constructor(
+    private val baseDir: File,
+    private val keyProvider: () -> SecretKey,
+    private val writer: AtomicCredentialWriter,
+) : AndroidSecureStorage {
+
+    constructor(baseDir: File) : this(baseDir, { key() }, AtomicCredentialWriter())
 
     /** Convenience: root the store at `<filesDir>/secure-store` (the app-private dir). */
     constructor(context: Context) : this(File(context.applicationContext.filesDir, "secure-store"))
 
     override suspend fun store(service: String, account: String, blob: ByteArray) {
         try {
-            val f = fileFor(service, account)
-            f.parentFile?.mkdirs()
-            f.writeBytes(seal(blob))
+            synchronized(storeLock) {
+                writer.store(fileFor(service, account), seal(blob))
+            }
         } catch (e: SecureStorageFfiException) {
             throw e
         } catch (t: Throwable) {
@@ -51,8 +58,10 @@ class AndroidSecureStorageAdapter(private val baseDir: File) : AndroidSecureStor
 
     override suspend fun retrieve(service: String, account: String): ByteArray? {
         return try {
-            val f = fileFor(service, account)
-            if (!f.exists()) null else unseal(f.readBytes())
+            synchronized(storeLock) {
+                val f = fileFor(service, account)
+                if (!f.exists()) null else unseal(f.readBytes())
+            }
         } catch (e: SecureStorageFfiException) {
             throw e
         } catch (t: Throwable) {
@@ -63,7 +72,9 @@ class AndroidSecureStorageAdapter(private val baseDir: File) : AndroidSecureStor
     override suspend fun delete(service: String, account: String) {
         try {
             // Removing a non-existent entry is not an error (matches the trait).
-            fileFor(service, account).delete()
+            synchronized(storeLock) {
+                Files.deleteIfExists(fileFor(service, account).toPath())
+            }
         } catch (t: Throwable) {
             throw ioError("delete", t)
         }
@@ -71,10 +82,12 @@ class AndroidSecureStorageAdapter(private val baseDir: File) : AndroidSecureStor
 
     override suspend fun list(service: String): List<String> {
         return try {
-            val dir = File(baseDir, enc(service))
-            val files = dir.listFiles() ?: return emptyList()
-            files.filter { it.isFile && it.name.endsWith(SUFFIX) }
-                .map { dec(it.name.removeSuffix(SUFFIX)) }
+            synchronized(storeLock) {
+                val dir = File(baseDir, enc(service))
+                val files = dir.listFiles().orEmpty()
+                files.filter { it.isFile && it.name.endsWith(SUFFIX) }
+                    .map { dec(it.name.removeSuffix(SUFFIX)) }
+            }
         } catch (t: Throwable) {
             throw ioError("list", t)
         }
@@ -85,7 +98,7 @@ class AndroidSecureStorageAdapter(private val baseDir: File) : AndroidSecureStor
 
     private fun seal(plain: ByteArray): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORM)
-        cipher.init(Cipher.ENCRYPT_MODE, key())
+        cipher.init(Cipher.ENCRYPT_MODE, keyProvider())
         val iv = cipher.iv
         val ct = cipher.doFinal(plain)
         return iv + ct
@@ -95,7 +108,7 @@ class AndroidSecureStorageAdapter(private val baseDir: File) : AndroidSecureStor
         val iv = blob.copyOfRange(0, IV_LEN)
         val ct = blob.copyOfRange(IV_LEN, blob.size)
         val cipher = Cipher.getInstance(TRANSFORM)
-        cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, iv))
+        cipher.init(Cipher.DECRYPT_MODE, keyProvider(), GCMParameterSpec(TAG_BITS, iv))
         return cipher.doFinal(ct)
     }
 
@@ -103,6 +116,9 @@ class AndroidSecureStorageAdapter(private val baseDir: File) : AndroidSecureStor
         SecureStorageFfiException.Io("secure store $op failed: ${t.message ?: t.javaClass.simpleName}")
 
     private companion object {
+        // Multiple mobile engines construct adapters over the same directory.
+        // Keep key creation and each read/write/delete transaction ordered across them.
+        val storeLock = Any()
         const val ALIAS = "lingxi_secure_store_key"
         const val TRANSFORM = "AES/GCM/NoPadding"
         const val IV_LEN = 12
@@ -111,14 +127,11 @@ class AndroidSecureStorageAdapter(private val baseDir: File) : AndroidSecureStor
 
         /** URL-safe, padding-free Base64 so `(service, account)` are valid path components. */
         fun enc(s: String): String =
-            Base64.encodeToString(
-                s.toByteArray(Charsets.UTF_8),
-                Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
-            )
+            Base64.getUrlEncoder().withoutPadding().encodeToString(s.toByteArray(Charsets.UTF_8))
 
         fun dec(s: String): String =
             String(
-                Base64.decode(s, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING),
+                Base64.getUrlDecoder().decode(s),
                 Charsets.UTF_8,
             )
 

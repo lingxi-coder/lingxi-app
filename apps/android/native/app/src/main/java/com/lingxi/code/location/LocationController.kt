@@ -49,175 +49,187 @@ interface LocationClient {
  * runtime-permission UI and [LocationManager]. The engine has already approved
  * the local app's declared capability before this system permission is touched.
  */
-object LocationController : LocationClient {
-    private class Launchers(
-        val context: Context,
-        val requestPermission: ActivityResultLauncher<Array<String>>,
-    )
+internal class LocationResultHost(
+    val owner: Any,
+    val hasPermission: () -> Boolean,
+    val isEnabled: () -> Boolean,
+    val requestPermission: () -> Unit,
+    val requestFix: ((Result<DeviceLocationFix>) -> Unit) -> (() -> Unit),
+)
 
-    private data class Pending(
-        val continuation: CancellableContinuation<DeviceLocationFix>,
-        var cancellationSignal: CancellationSignal? = null,
-    )
-
-    private val stateLock = Any()
-    private val mainHandler = Handler(Looper.getMainLooper())
-
-    @Volatile
-    private var launchers: Launchers? = null
-
+/** Pure ownership protocol shared by the Android facade and coroutine tests. */
+internal class LocationResultCoordinator(
+    private val post: (() -> Unit) -> Unit,
+    private val postTimeout: (Runnable, Long) -> Unit,
+    private val removeTimeout: (Runnable) -> Unit,
+    private val timeoutMs: Long = LOCATION_TIMEOUT_MS,
+) : LocationClient {
+    private class Pending(val host: LocationResultHost, val continuation: CancellableContinuation<DeviceLocationFix>) {
+        var cancelFix: (() -> Unit)? = null
+        var timeout: Runnable? = null
+    }
+    private val lock = Any()
+    private var host: LocationResultHost? = null
     private var pending: Pending? = null
-    private var awaitingPermission = false
+    private var permissionResultOwner: Pending? = null
 
-    private val timeout = Runnable {
-        failCurrent(LocationFailure.Timeout)
+    fun attach(next: LocationResultHost) {
+        val retired = synchronized(lock) {
+            if (host?.owner === next.owner) return@synchronized null
+            val old = pending.takeIf { it?.host?.owner !== next.owner }
+            if (old != null) pending = null
+            if (permissionResultOwner?.host?.owner !== next.owner) permissionResultOwner = null
+            host = next
+            old
+        }
+        retired?.let { completeFailure(it, LocationFailure.Unavailable) }
     }
 
-    fun attach(value: Any) {
-        launchers = value as Launchers
-    }
-
-    fun makeLaunchers(
-        context: Context,
-        requestPermission: ActivityResultLauncher<Array<String>>,
-    ): Any = Launchers(context.applicationContext, requestPermission)
-
-    fun detach() {
-        launchers = null
-        failCurrent(LocationFailure.Unavailable)
+    fun detach(owner: Any) {
+        val retired = synchronized(lock) {
+            if (host?.owner === owner) host = null
+            if (permissionResultOwner?.host?.owner === owner) permissionResultOwner = null
+            pending?.takeIf { it.host.owner === owner }?.also { pending = null }
+        }
+        retired?.let { completeFailure(it, LocationFailure.Unavailable) }
     }
 
     override suspend fun currentLocation(): DeviceLocationFix {
-        val current = launchers ?: throw LocationException(LocationFailure.Unavailable)
-        val manager = current.context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-            ?: throw LocationException(LocationFailure.Unavailable)
-        if (!LocationManagerCompat.isLocationEnabled(manager)) {
-            throw LocationException(LocationFailure.Unavailable)
-        }
-
+        val current = synchronized(lock) { host } ?: throw LocationException(LocationFailure.Unavailable)
+        if (!current.isEnabled()) throw LocationException(LocationFailure.Unavailable)
         return suspendCancellableCoroutine { continuation ->
-            val accepted = synchronized(stateLock) {
-                if (pending != null) {
-                    false
-                } else {
-                    pending = Pending(continuation)
-                    true
-                }
+            val request = Pending(current, continuation)
+            val accepted = synchronized(lock) {
+                if (host !== current || pending != null || permissionResultOwner != null) false
+                else { pending = request; true }
             }
             if (!accepted) {
-                continuation.resumeWithException(
-                    LocationException(LocationFailure.Other("another location request is already in flight")),
-                )
+                continuation.resumeWithException(LocationException(LocationFailure.Other("another location request is already in flight")))
                 return@suspendCancellableCoroutine
             }
-
-            continuation.invokeOnCancellation {
-                cancelIfCurrent(continuation)
-            }
-            mainHandler.postDelayed(timeout, LOCATION_TIMEOUT_MS)
-
-            if (hasAnyLocationPermission(current.context)) {
-                requestFix(current, manager)
-            } else {
-                synchronized(stateLock) { awaitingPermission = true }
-                mainHandler.post {
-                    runCatching {
-                        current.requestPermission.launch(
-                            arrayOf(
-                                Manifest.permission.ACCESS_FINE_LOCATION,
-                                Manifest.permission.ACCESS_COARSE_LOCATION,
-                            ),
-                        )
-                    }.onFailure {
-                        failCurrent(LocationFailure.Other(it.message ?: "location permission request failed"))
+            continuation.invokeOnCancellation { retire(request) }
+            post {
+                if (!isCurrent(request)) return@post
+                val timeout = Runnable { fail(request, LocationFailure.Timeout) }
+                synchronized(lock) { request.timeout = timeout }
+                postTimeout(timeout, timeoutMs)
+                if (!isCurrent(request)) { removeTimeout(timeout); return@post }
+                if (current.hasPermission()) requestFix(request)
+                else {
+                    val ownsPermission = synchronized(lock) {
+                        if (pending !== request || !continuation.isActive) false
+                        else { permissionResultOwner = request; true }
+                    }
+                    if (!ownsPermission) return@post
+                    runCatching(current.requestPermission).onFailure {
+                        synchronized(lock) { if (permissionResultOwner === request) permissionResultOwner = null }
+                        fail(request, LocationFailure.Other(it.message ?: "location permission request failed"))
                     }
                 }
             }
         }
     }
 
-    /** Activity-result sink registered by [com.lingxi.code.MainActivity]. */
-    fun onLocationPermission(result: Map<String, Boolean>) {
-        val shouldHandle = synchronized(stateLock) {
-            if (!awaitingPermission || pending == null) {
-                false
-            } else {
-                awaitingPermission = false
-                true
-            }
-        }
-        if (!shouldHandle) return
-
-        val current = launchers
-        if (current == null) {
-            failCurrent(LocationFailure.Unavailable)
-            return
-        }
-        val granted = result[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-            result[Manifest.permission.ACCESS_COARSE_LOCATION] == true ||
-            hasAnyLocationPermission(current.context)
-        if (!granted) {
-            failCurrent(LocationFailure.PermissionDenied)
-            return
-        }
-        val manager = current.context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-        if (manager == null || !LocationManagerCompat.isLocationEnabled(manager)) {
-            failCurrent(LocationFailure.Unavailable)
-            return
-        }
-        requestFix(current, manager)
+    fun onPermissionResult(owner: Any, granted: Boolean) {
+        val request = synchronized(lock) {
+            permissionResultOwner?.takeIf { it.host.owner === owner }?.also { permissionResultOwner = null }
+        } ?: return
+        if (!isCurrent(request)) return
+        if (!granted || !request.host.hasPermission()) { fail(request, LocationFailure.PermissionDenied); return }
+        if (!request.host.isEnabled()) { fail(request, LocationFailure.Unavailable); return }
+        requestFix(request)
     }
 
-    private fun requestFix(current: Launchers, manager: LocationManager) {
-        val fine = hasPermission(current.context, Manifest.permission.ACCESS_FINE_LOCATION)
-        val provider = chooseProvider(manager, fine)
-        if (provider == null) {
-            failCurrent(LocationFailure.Unavailable)
-            return
-        }
-        val signal = CancellationSignal()
-        val registered = synchronized(stateLock) {
-            val active = pending
-            if (active == null) {
-                false
-            } else {
-                active.cancellationSignal = signal
-                true
-            }
-        }
-        if (!registered) return
-
+    private fun requestFix(request: Pending) {
+        if (!isCurrent(request)) return
         try {
-            LocationManagerCompat.getCurrentLocation(
-                manager,
-                provider,
-                signal,
-                ContextCompat.getMainExecutor(current.context),
-            ) { location ->
-                if (location == null) {
-                    failCurrent(LocationFailure.Unavailable)
-                } else {
-                    succeedCurrent(
-                        DeviceLocationFix(
-                            latitude = location.latitude,
-                            longitude = location.longitude,
-                            accuracyM = location.accuracy
-                                .takeIf { location.hasAccuracy() && it >= 0f }
-                                ?.toDouble(),
-                            timestampMs = location.time.coerceAtLeast(0L),
-                        ),
-                    )
+            val cancel = request.host.requestFix { result ->
+                result.onSuccess { succeed(request, it) }.onFailure {
+                    fail(request, if (it is LocationException) it.failure else LocationFailure.Other(it.message ?: "location request failed"))
                 }
             }
-        } catch (_: SecurityException) {
-            failCurrent(LocationFailure.PermissionDenied)
-        } catch (_: IllegalArgumentException) {
-            failCurrent(LocationFailure.Unavailable)
+            // A provider may call back synchronously, or cancellation may race
+            // startup. In either case close this request's newly returned handle.
+            val registered = synchronized(lock) {
+                if (pending !== request || !request.continuation.isActive) false
+                else { request.cancelFix = cancel; true }
+            }
+            if (!registered) cancel()
         } catch (error: Throwable) {
-            failCurrent(LocationFailure.Other(error.message ?: "location request failed"))
+            fail(request, if (error is LocationException) error.failure else LocationFailure.Other(error.message ?: "location request failed"))
         }
     }
 
+    private fun isCurrent(request: Pending): Boolean = synchronized(lock) {
+        pending === request && host === request.host && request.continuation.isActive
+    }
+
+    private fun retire(request: Pending): Boolean {
+        val owned = synchronized(lock) { if (pending !== request) false else { pending = null; true } }
+        if (owned) cleanup(request)
+        return owned
+    }
+    private fun cleanup(request: Pending) {
+        val resources = synchronized(lock) {
+            (request.timeout to request.cancelFix).also { request.timeout = null; request.cancelFix = null }
+        }
+        resources.first?.let { runCatching { removeTimeout(it) } }
+        resources.second?.let { runCatching(it) }
+    }
+    private fun succeed(request: Pending, fix: DeviceLocationFix) {
+        if (retire(request) && request.continuation.isActive) request.continuation.resume(fix)
+    }
+    private fun fail(request: Pending, failure: LocationFailure) {
+        if (retire(request)) completeFailure(request, failure)
+    }
+    private fun completeFailure(request: Pending, failure: LocationFailure) {
+        cleanup(request)
+        if (request.continuation.isActive) request.continuation.resumeWithException(LocationException(failure))
+    }
+}
+
+object LocationController : LocationClient {
+    private class Launchers(val owner: Any, val context: Context, val requestPermission: ActivityResultLauncher<Array<String>>)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val coordinator = LocationResultCoordinator(
+        post = { operation -> mainHandler.post { operation() } },
+        postTimeout = { callback, delay -> mainHandler.postDelayed(callback, delay) },
+        removeTimeout = mainHandler::removeCallbacks,
+    )
+
+    fun makeLaunchers(owner: Any, context: Context, requestPermission: ActivityResultLauncher<Array<String>>): Any =
+        Launchers(owner, context.applicationContext, requestPermission)
+
+    fun attach(value: Any) {
+        val host = value as Launchers
+        coordinator.attach(LocationResultHost(host.owner,
+            hasPermission = { hasAnyLocationPermission(host.context) },
+            isEnabled = { manager(host.context)?.let(LocationManagerCompat::isLocationEnabled) == true },
+            requestPermission = { host.requestPermission.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)) },
+            requestFix = { callback -> requestFix(host.context, callback) },
+        ))
+    }
+    fun detach(owner: Any) = coordinator.detach(owner)
+    override suspend fun currentLocation(): DeviceLocationFix = coordinator.currentLocation()
+    fun onLocationPermission(owner: Any, result: Map<String, Boolean>) = coordinator.onPermissionResult(owner,
+        result[Manifest.permission.ACCESS_FINE_LOCATION] == true || result[Manifest.permission.ACCESS_COARSE_LOCATION] == true)
+
+    private fun requestFix(context: Context, callback: (Result<DeviceLocationFix>) -> Unit): () -> Unit {
+        val manager = manager(context) ?: throw LocationException(LocationFailure.Unavailable)
+        val provider = chooseProvider(manager, hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION))
+            ?: throw LocationException(LocationFailure.Unavailable)
+        val signal = CancellationSignal()
+        try {
+            LocationManagerCompat.getCurrentLocation(manager, provider, signal, ContextCompat.getMainExecutor(context)) { location ->
+                if (location == null) callback(Result.failure(LocationException(LocationFailure.Unavailable)))
+                else callback(Result.success(DeviceLocationFix(location.latitude, location.longitude,
+                    location.accuracy.takeIf { location.hasAccuracy() && it >= 0f }?.toDouble(), location.time.coerceAtLeast(0L))))
+            }
+        } catch (_: SecurityException) { throw LocationException(LocationFailure.PermissionDenied) }
+        catch (_: IllegalArgumentException) { throw LocationException(LocationFailure.Unavailable) }
+        return { signal.cancel() }
+    }
+    private fun manager(context: Context): LocationManager? = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
     private fun chooseProvider(manager: LocationManager, fine: Boolean): String? {
         val criteria = Criteria().apply {
             accuracy = if (fine) Criteria.ACCURACY_FINE else Criteria.ACCURACY_COARSE
@@ -225,50 +237,8 @@ object LocationController : LocationClient {
             isCostAllowed = false
         }
         return runCatching { manager.getBestProvider(criteria, true) }.getOrNull()
-            ?: runCatching { manager.getProviders(true) }.getOrDefault(emptyList())
-                .firstOrNull { it != LocationManager.PASSIVE_PROVIDER }
+            ?: runCatching { manager.getProviders(true) }.getOrDefault(emptyList()).firstOrNull { it != LocationManager.PASSIVE_PROVIDER }
     }
-
-    private fun hasAnyLocationPermission(context: Context): Boolean =
-        hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ||
-            hasPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION)
-
-    private fun hasPermission(context: Context, permission: String): Boolean =
-        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
-
-    private fun cancelIfCurrent(continuation: CancellableContinuation<DeviceLocationFix>) {
-        val active = synchronized(stateLock) {
-            if (pending?.continuation !== continuation) return
-            val value = pending
-            pending = null
-            awaitingPermission = false
-            value
-        }
-        mainHandler.removeCallbacks(timeout)
-        active?.cancellationSignal?.cancel()
-    }
-
-    private fun succeedCurrent(fix: DeviceLocationFix) {
-        val active = takePending() ?: return
-        if (active.continuation.isActive) active.continuation.resume(fix)
-    }
-
-    private fun failCurrent(failure: LocationFailure) {
-        val active = takePending() ?: return
-        if (active.continuation.isActive) {
-            active.continuation.resumeWithException(LocationException(failure))
-        }
-    }
-
-    private fun takePending(): Pending? {
-        val active = synchronized(stateLock) {
-            val value = pending
-            pending = null
-            awaitingPermission = false
-            value
-        }
-        mainHandler.removeCallbacks(timeout)
-        active?.cancellationSignal?.cancel()
-        return active
-    }
+    private fun hasAnyLocationPermission(context: Context): Boolean = hasPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) || hasPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION)
+    private fun hasPermission(context: Context, permission: String): Boolean = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 }

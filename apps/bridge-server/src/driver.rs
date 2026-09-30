@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use client::adapter::{lowering::lower_cost_snapshot, ClientEventSink};
 use client::protocol::commands::ImageRefDto;
 use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
+use lingxi_core::host::OrchestratorHandle;
 // `ImageSource` is re-exported from the orchestrator (the canonical, FROZEN
 // `protocol` shape) so this library code can name it without taking a direct
 // `protocol` dependency.
@@ -880,6 +881,16 @@ impl OrchestratorTurnDriver {
 
 #[async_trait]
 impl TurnDriver for OrchestratorTurnDriver {
+    async fn current_session_id(&self) -> Option<String> {
+        Some(
+            self.orchestrator
+                .current_session_id()
+                .await
+                .as_uuid()
+                .to_string(),
+        )
+    }
+
     async fn stop_dynamic_loop(&self) {
         tool_cron::stop_dynamic_loop(self.wakeup_scheduler.as_ref()).await;
         if let Some(runtime) = &self.loop_runtime {
@@ -1001,6 +1012,17 @@ impl TurnDriver for OrchestratorTurnDriver {
             .await;
     }
 
+    async fn run_queued_turn_with_images(
+        &self,
+        prompt: String,
+        images: Vec<ImageRefDto>,
+        cancel: CancellationToken,
+    ) {
+        self.announce_engine_initiated_turn().await;
+        self.drive_turn(prompt, Self::to_image_sources(images), cancel, None, true)
+            .await;
+    }
+
     async fn run_task_notification_turn(
         &self,
         registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
@@ -1056,6 +1078,7 @@ mod tests {
 
     use client::adapter::{AdapterOutputStream, ClientEventSink, MockSink};
     use client::protocol::commands::ImageRefDto;
+    use client::protocol::events::ClientEvent;
     use lingxi_core::host::{BudgetError, WorkflowOutputScope, WorkflowOutputScopes};
     use lingxi_core::types::{ContentBlock, ConversationMessage};
     use orchestrator::conversation::ImageSource;
@@ -1364,6 +1387,41 @@ mod tests {
             Some(&client::protocol::events::ClientEvent::TurnStarted { turn_id: None }),
             "a queue-drained turn must open with TurnStarted; got {events:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn a_queued_multimodal_turn_announces_once_and_preserves_input() {
+        let streaming = streaming_one_turn();
+        let (driver, sink) = build_driver_with_sink(streaming.clone());
+        let image = ImageRefDto {
+            media_type: "image/png".into(),
+            base64: "aW1hZ2U=".into(),
+        };
+        driver
+            .run_queued_turn_with_images(
+                "queued image".into(),
+                vec![image.clone()],
+                CancellationToken::new(),
+            )
+            .await;
+        let events = sink.events().await;
+        assert_eq!(
+            events.first(),
+            Some(&ClientEvent::TurnStarted { turn_id: None })
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ClientEvent::TurnStarted { .. }))
+                .count(),
+            1
+        );
+        let calls = streaming.captured_calls().await;
+        let content = first_user_content(&calls[0].messages);
+        assert!(content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "queued image")));
+        assert!(content.iter().any(|block| matches!(block, ContentBlock::Image { source: ImageSource::Base64 { media_type, data } } if media_type == &image.media_type && data == &image.base64)));
     }
 
     /// The batched sibling of the test above: several queued commands joined

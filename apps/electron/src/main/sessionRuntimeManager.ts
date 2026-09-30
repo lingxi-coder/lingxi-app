@@ -222,7 +222,7 @@ export class SessionRuntimeManager {
       return pending.promise;
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
-    if (existing?.connectionState.status === 'connected') {
+    if (existing?.connectionState.status === 'connected' && !existing.isStarting) {
       if (activate) this.activate(existing);
       return Promise.resolve(existing);
     }
@@ -242,12 +242,14 @@ export class SessionRuntimeManager {
     let runtime: SessionRuntime | undefined;
     try {
       if (existing) {
-        await existing.restart();
+        // A disconnected transport does not authorize replacing its living
+        // session process, and its old foreground latch cannot gate recovery.
+        await existing.start();
         runtime = existing;
       } else {
         runtime = await this.ensure(ref, true);
       }
-      if (!empty) await runtime.resumeOwnedSession();
+      if (!empty && !runtime.recoveredLiveConnection) await runtime.resumeOwnedSession();
       return runtime;
     } catch (error) {
       if (!existing && runtime) {
@@ -344,12 +346,23 @@ export class SessionRuntimeManager {
 
   async restart(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
-    await runtime.restart(beforeRestart);
+    if (runtime.connectionState.status !== 'connected' || runtime.isStarting) {
+      beforeRestart?.();
+      await runtime.start();
+      beforeRestart?.();
+      if (!runtime.recoveredLiveConnection) await runtime.restoreOwnedSessionIfNeeded();
+      return;
+    }
+    await runtime.restart(() => {
+      if (runtime.hasActiveWork) throw new Error('Wait for active work and pending interactions before restarting this chat.');
+      beforeRestart?.();
+    });
     await runtime.restoreOwnedSessionIfNeeded();
   }
 
   async closeSession(ref: SessionRef): Promise<void> {
     const runtime = this.require(ref);
+    if (runtime.hasActiveWork) throw new Error('Wait for active work and pending interactions before closing this chat.');
     // Remove from the routable map BEFORE the first await, for the same reason
     // `closeProject` does: while `dispose()` is in flight `get()` would still
     // hand this runtime out, and `restart()` now rejects on a disposed runtime
@@ -391,7 +404,7 @@ export class SessionRuntimeManager {
   hasActiveWork(projectPath: string): boolean {
     return [...this.runtimes.values()].some((runtime) => (
       runtime.projectPath === projectPath
-      && (runtime.turnActive || runtime.pendingInteractions > 0)
+      && runtime.hasActiveWork
     ));
   }
 
@@ -476,9 +489,9 @@ export class SessionRuntimeManager {
       this.assertSender(event);
       return this.replaySnapshots;
     });
-    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown) => {
+    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown, turnId?: unknown) => {
       this.assertSender(event);
-      return this.requireById(sessionId).sendPrompt(text, images);
+      return this.requireById(sessionId).sendPrompt(text, images, turnId);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown, response: unknown) => {
       this.assertSender(event);

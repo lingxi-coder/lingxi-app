@@ -9,6 +9,9 @@ export interface ActiveTrackedTurn {
   sequence: number;
   turnId?: number;
   completed: boolean;
+  messageText?: string;
+  messageId?: string;
+  messages?: Array<{ id?: string; text: string; published: boolean }>;
 }
 
 export type TrackedSpeechListener = (event: TrackedSpeechEvent) => void;
@@ -17,8 +20,15 @@ export function createDesktopTurnToken(
   sessionId: string,
   sequence: number,
   purpose: TrackedPromptPurpose,
+  turnId?: number,
 ): DesktopTurnToken {
-  return { sessionId, clientTurnId: `${sessionId}:tracked:${sequence}`, purpose };
+  return { sessionId, clientTurnId: `${sessionId}:tracked:${sequence}`, purpose, ...(turnId === undefined ? {} : { turnId }) };
+}
+
+/** Random admission IDs remain distinct across renderer reloads and windows. */
+export function allocateTrackedTurnId(): number {
+  const words = crypto.getRandomValues(new Uint32Array(2));
+  return (words[0]! & 0x1fffff) * 0x100000000 + words[1]! || 1;
 }
 
 export function enqueueTrackedTurn(
@@ -68,9 +78,11 @@ export function bindTrackedTurn(
   const queue = pending.get(sessionId);
   if (!queue || queue.length === 0) return null;
   const explicitClientTurnId = eventClientTurnId(event);
+  const correlated = queue.some((entry) => entry.turnId !== undefined);
   const index = explicitClientTurnId
-    ? Math.max(0, queue.findIndex((entry) => entry.clientTurnId === explicitClientTurnId))
-    : 0;
+    ? queue.findIndex((entry) => entry.clientTurnId === explicitClientTurnId)
+    : correlated ? queue.findIndex((entry) => entry.turnId !== undefined && entry.turnId === event.turn_id) : 0;
+  if (index < 0) return null;
   const [token] = queue.splice(index, 1);
   if (!token) return null;
   if (queue.length === 0) pending.delete(sessionId);
@@ -88,8 +100,51 @@ export function appendTrackedTurnDelta(
   const tracked = active.get(sessionId);
   if (!tracked || tracked.completed) return null;
   tracked.text += text;
+  tracked.messageText = (tracked.messageText ?? '') + text;
   tracked.sequence += 1;
   return tracked;
+}
+
+export function identifyTrackedMessage(active: Map<string, ActiveTrackedTurn>, sessionId: string, messageId: string): void {
+  const tracked = active.get(sessionId);
+  if (tracked) tracked.messageId = messageId;
+}
+
+/** Boundaries seal one model response, while ownership stays with the whole turn. */
+export function sealTrackedMessage(active: Map<string, ActiveTrackedTurn>, sessionId: string): void {
+  const tracked = active.get(sessionId);
+  if (!tracked) return;
+  (tracked.messages ??= []).push({ id: tracked.messageId, text: tracked.messageText ?? '', published: false });
+  tracked.messageText = '';
+  tracked.messageId = undefined;
+}
+
+export function retractTrackedMessage(active: Map<string, ActiveTrackedTurn>, sessionId: string, messageId: string): void {
+  const tracked = active.get(sessionId);
+  if (!tracked) return;
+  tracked.messages = (tracked.messages ?? []).filter((message) => message.id !== messageId);
+  if (tracked.messageId === messageId) {
+    tracked.messageText = '';
+    tracked.messageId = undefined;
+  }
+  tracked.text = tracked.messages.map((message) => message.text).join('') + (tracked.messageText ?? '');
+}
+
+/**
+ * A retry retracts immediately after its boundary. A following response/tool
+ * event or turn terminal confirms that retained messages can enter playback.
+ */
+export function acceptTrackedMessages(active: Map<string, ActiveTrackedTurn>, sessionId: string): TrackedSpeechEvent[] {
+  const tracked = active.get(sessionId);
+  if (!tracked) return [];
+  const events: TrackedSpeechEvent[] = [];
+  for (const message of tracked.messages ?? []) {
+    if (message.published) continue;
+    message.published = true;
+    if (message.text) events.push({ type: 'message', token: tracked.token, text: message.text,
+      sequence: tracked.sequence, turnId: tracked.turnId });
+  }
+  return events;
 }
 
 export function completeTrackedTurn(

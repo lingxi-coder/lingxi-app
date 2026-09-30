@@ -12,10 +12,10 @@ import type {
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
   ImageRefDto,
-  PermissionRequest,
   PermissionResponseDto,
   SessionRowDto,
 } from '@lingxi/bridge-client';
+import type { HostPermissionRequest } from '../shared/permission.js';
 import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
 import type { AllowedClientCommand } from '../shared/clientCommands.js';
 import {
@@ -215,7 +215,7 @@ export interface LingxiApi {
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   clearSession(sessionId: string, name?: string): Promise<void>;
-  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[]): Promise<void>;
+  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[], turnId?: number): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(sessionId: string, requestId: number): Promise<void>;
   approveComputerAccess(sessionId: string, requestId: number, response: ComputerAccessResponseDto): Promise<void>;
@@ -236,7 +236,7 @@ export interface LingxiApi {
   command(sessionId: string, command: AllowedClientCommand): Promise<void>;
   connectionState(sessionId: string): Promise<ConnectionState>;
   onEvent(cb: (event: SequencedRuntimeEventEnvelope<ClientEvent>) => void): Unsubscribe;
-  onPermission(cb: (request: RuntimeEventEnvelope<PermissionRequest>) => void): Unsubscribe;
+  onPermission(cb: (request: RuntimeEventEnvelope<HostPermissionRequest>) => void): Unsubscribe;
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
   audio: NativeAudioApi;
@@ -318,7 +318,7 @@ const api: LingxiApi = {
   touchSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_TOUCH, projectPath, sessionId) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   renameSession: (projectPath, sessionId, title) => ipcRenderer.invoke(CH_SESSION_RENAME, projectPath, sessionId, title) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   clearSession: (sessionId, name) => ipcRenderer.invoke(CH_SESSION_CLEAR, sessionId, name) as Promise<void>,
-  sendPrompt: (sessionId, text, images) => ipcRenderer.invoke(CH_SEND_PROMPT, sessionId, text, images ?? []) as Promise<void>,
+  sendPrompt: (sessionId, text, images, turnId) => ipcRenderer.invoke(CH_SEND_PROMPT, sessionId, text, images ?? [], turnId) as Promise<void>,
   approve: (sessionId, requestId, response) => ipcRenderer.invoke(CH_APPROVE, sessionId, requestId, response) as Promise<void>,
   deny: (sessionId, requestId) => ipcRenderer.invoke(CH_DENY, sessionId, requestId) as Promise<void>,
   approveComputerAccess: (sessionId, requestId, response) => ipcRenderer.invoke(CH_APPROVE_COMPUTER_ACCESS, sessionId, requestId, response) as Promise<void>,

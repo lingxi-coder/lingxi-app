@@ -189,6 +189,8 @@ pub struct Runtime {
     /// The `/add-dir` off-loop effect calls `add_trusted_dir(...)` on it so a
     /// directory added mid-session is immediately accessible to the file tools.
     pub session_cwd: std::sync::Arc<tool_api::SessionCwd>,
+    /// CLI-owned forker retained for live authority binding and regression checks.
+    pub(crate) background_forker: Option<Arc<crate::bg_session_forker::CliBgSessionForker>>,
     /// (P1-08 runtime `/add-dir`) The live MCP registry, projected from
     /// [`harness_runtime::desktop::DesktopRuntime::mcp_registry`]. The `/add-dir` effect
     /// calls `add_root(...)` + `notify_roots_list_changed_all()` on it so every
@@ -1278,9 +1280,57 @@ pub async fn build_runtime(
     permission_mode: permission::PermissionMode,
 ) -> Result<Runtime, InitError> {
     let cfg = resolve_desktop_config(argv, permission_mode);
-    let runtime = build_runtime_from_config(cfg, output).await?;
+    let runtime = build_cli_runtime_from_config(cfg, output, argv).await?;
     auto_connect_ide_if_requested(argv, &runtime).await;
     Ok(runtime)
+}
+
+/// Build a CLI-owned runtime and bind its background forker to live authority.
+/// Callers that inject a custom permission transport use the same entrypoint.
+pub(crate) async fn build_cli_runtime_from_config(
+    mut cfg: DesktopConfig,
+    output: Arc<dyn OutputStream>,
+    argv: &Argv,
+) -> Result<Runtime, InitError> {
+    #[cfg(test)]
+    let test_home = isolate_test_runtime_config(&mut cfg)?;
+    let forker = cfg.bg_session_forker.as_ref().map(|_| {
+        Arc::new(crate::bg_session_forker::CliBgSessionForker::new(
+            cfg.lingxi_home.clone(),
+            cfg.lingxi_home.clone(),
+            crate::background_launch::BackgroundLaunchOptions::from_argv(argv),
+            cfg.permission_mode,
+        ))
+    });
+    if let Some(forker) = &forker {
+        cfg.bg_session_forker = Some(forker.clone());
+    }
+    let mut runtime = build_runtime_from_config(cfg, output).await?;
+    #[cfg(test)]
+    if test_home.is_some() {
+        runtime.test_home = test_home;
+    }
+    if let Some(forker) = &forker {
+        forker.bind_runtime(&runtime.orchestrator, runtime.session_cwd.clone());
+    }
+    runtime.background_forker = forker;
+    Ok(runtime)
+}
+
+fn bind_tui_permission_gate(gate: &tui::permission_gate::TuiPermissionGate, runtime: &Runtime) {
+    gate.set_persistence_cwd_provider({
+        let cwd = runtime.session_cwd.clone();
+        Arc::new(move || cwd.cwd())
+    });
+    if let Some(policy_gate) = &runtime.enforcing_permission_gate {
+        let policy_gate = Arc::downgrade(policy_gate);
+        gate.set_policy_rule_authority(Arc::new(move |name, input| {
+            policy_gate.upgrade().map_or(true, |gate| {
+                gate.check_noninteractive_with_allow_rules(name, input, &[])
+                    .is_some()
+            })
+        }));
+    }
 }
 
 /// Unit tests exercise the real engine assembly with the existing explicit
@@ -1407,6 +1457,7 @@ pub async fn build_runtime_from_config(
         oauth_connect_driver: rt.oauth_connect_driver,
         // P1-08 runtime `/add-dir` live-effect handles.
         session_cwd: rt.session_cwd,
+        background_forker: None,
         mcp_registry: rt.mcp_registry,
         ide_handle: rt.ide_handle,
     })
@@ -1542,10 +1593,11 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
             .with_persist(permission_paths.clone()),
     );
     cfg.injected_permission_gate =
-        Some(gate as std::sync::Arc<dyn permission::gate::PermissionGate>);
+        Some(gate.clone() as std::sync::Arc<dyn permission::gate::PermissionGate>);
 
     let flag_settings = cfg.flag_settings.clone();
-    let mut runtime = build_runtime_from_config(cfg, bridge).await?;
+    let mut runtime = build_cli_runtime_from_config(cfg, bridge, argv).await?;
+    bind_tui_permission_gate(&gate, &runtime);
     #[cfg(test)]
     {
         runtime.test_home = test_home;
@@ -1762,6 +1814,606 @@ mod tests {
             .contains("cli-fixture", "fresh")
             .await
             .unwrap());
+    }
+
+    async fn fixture_cli_runtime(home: &std::path::Path, cwd: &std::path::Path) -> Runtime {
+        fixture_cli_runtime_with_balance(home, cwd, None).await
+    }
+
+    async fn fixture_cli_runtime_with_balance(
+        home: &std::path::Path,
+        cwd: &std::path::Path,
+        opening_balance: Option<u64>,
+    ) -> Runtime {
+        let session_id = lingxi_core::types::SessionId::new();
+        if let Some(amount) = opening_balance {
+            // Seed the actual SDK durable journal before assembly hydrates the
+            // tracker. Legacy in-memory restore correctly rejects a live ledger.
+            let lease =
+                lingxi_core::host::live_sessions::LiveSessionDir::at_live(home.join("sessions"))
+                    .claim_session_id(&session_id.to_string(), std::process::id())
+                    .unwrap()
+                    .into_shared();
+            let coordinator =
+                harness_runtime::desktop::session_state::SessionStateCoordinator::open(
+                    home, session_id, lease,
+                )
+                .unwrap();
+            let writer = coordinator.start().await.unwrap();
+            cost::CostHydrator::hydrate(coordinator.as_ref(), session_id)
+                .await
+                .unwrap();
+            coordinator
+                .import_legacy_opening_balance(Some(amount))
+                .await
+                .unwrap();
+            coordinator.close_and_drain().await.unwrap();
+            writer.await.unwrap();
+            drop(coordinator);
+        }
+        let argv = argv_of(&["--permission-mode", "acceptEdits"]);
+        let cfg = DesktopConfig {
+            build_info: harness_runtime::desktop::BuildInfo::new(
+                env!("CARGO_PKG_VERSION"),
+                "cli-live-state-test",
+            ),
+            lingxi_home: home.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+            permission_mode: permission::PermissionMode::AcceptEdits,
+            session_id_override: Some(session_id.as_uuid().to_string()),
+            bg_session_forker: Some(Arc::new(crate::bg_session_forker::CliBgSessionForker::new(
+                home.to_path_buf(),
+                home.to_path_buf(),
+                crate::background_launch::BackgroundLaunchOptions::from_argv(&argv),
+                permission::PermissionMode::AcceptEdits,
+            ))),
+            ..Default::default()
+        };
+        build_cli_runtime_from_config(
+            cfg,
+            Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            &argv,
+        )
+        .await
+        .expect("isolated CLI runtime")
+    }
+
+    async fn fixture_permission_action(
+        runtime: &Runtime,
+        paths: permission::PermissionPaths,
+        action: tui::bottom_pane::PermissionAction,
+    ) {
+        let event = fixture_permission_action_with_rules(
+            runtime,
+            paths,
+            action,
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        )
+        .await;
+        assert!(
+            matches!(
+                event,
+                tui::TurnEvent::SystemNotice {
+                    is_error: false,
+                    ..
+                }
+            ),
+            "{event:?}"
+        );
+    }
+
+    async fn fixture_permission_action_with_rules(
+        runtime: &Runtime,
+        paths: permission::PermissionPaths,
+        action: tui::bottom_pane::PermissionAction,
+        rules: Arc<tokio::sync::Mutex<Vec<permission::PermissionRule>>>,
+    ) -> tui::TurnEvent {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let snapshot = Arc::new(std::sync::Mutex::new(
+            tui::bottom_pane::permissions_editor_view::PermissionsSnapshot::load(&paths),
+        ));
+        crate::mode::run_permission_action(
+            action,
+            paths,
+            rules,
+            tx,
+            snapshot,
+            runtime.session_cwd.clone(),
+            runtime.mcp_registry.clone(),
+            runtime.enforcing_permission_gate.clone(),
+            runtime.orchestrator.clone(),
+        )
+        .await;
+        rx.recv().await.expect("action completion")
+    }
+
+    async fn fixture_permission_runtime(
+        home: &std::path::Path,
+        cwd: &std::path::Path,
+        rules: Arc<tokio::sync::Mutex<Vec<permission::PermissionRule>>>,
+    ) -> (
+        Runtime,
+        tokio::sync::mpsc::Receiver<tui_core::permission_bridge::PermissionExchange>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let gate = Arc::new(tui::permission_gate::TuiPermissionGate::new(tx, rules));
+        let argv = argv_of(&["--permission-mode", "default"]);
+        let cfg = DesktopConfig {
+            lingxi_home: home.to_owned(),
+            cwd: cwd.to_owned(),
+            injected_permission_gate: Some(gate.clone()),
+            permission_mode: permission::PermissionMode::Default,
+            permission_mode_cli_explicit: true,
+            ..Default::default()
+        };
+        let runtime = build_cli_runtime_from_config(
+            cfg,
+            Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            &argv,
+        )
+        .await
+        .unwrap();
+        bind_tui_permission_gate(&gate, &runtime);
+        (runtime, rx)
+    }
+
+    async fn assert_live_permission_asks(
+        gate: &Arc<dyn permission::PermissionGate>,
+        rx: &mut tokio::sync::mpsc::Receiver<tui_core::permission_bridge::PermissionExchange>,
+        input: &serde_json::Value,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let check = gate.check("Bash", input);
+            tokio::pin!(check);
+            let exchange = tokio::select! {
+                decision = &mut check => panic!("expected a human prompt, got {decision:?}"),
+                exchange = rx.recv() => exchange.expect("permission channel"),
+            };
+            exchange
+                .resp_tx
+                .send(permission::PermissionResponse::Deny)
+                .unwrap();
+            assert!(matches!(
+                check.await,
+                permission::PermissionDecision::Deny { .. }
+            ));
+        })
+        .await
+        .expect("permission prompt resolved");
+    }
+
+    #[tokio::test]
+    async fn permission_editor_revokes_live_allow_without_erasing_other_sources() {
+        use lingxi_core::types::SettingsScope;
+        use permission::{PermissionBehavior, PermissionRuleSource, PermissionUpdateDestination};
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(branding::DOT_DIR)).unwrap();
+        let raw = r#"{"permissions":{"allow":["Bash"]}}"#;
+        std::fs::write(home.path().join("settings.json"), raw).unwrap();
+        for file in ["settings.json", "settings.local.json"] {
+            std::fs::write(project.path().join(branding::DOT_DIR).join(file), raw).unwrap();
+        }
+        let rules = Arc::new(tokio::sync::Mutex::new(
+            [
+                SettingsScope::User,
+                SettingsScope::Project,
+                SettingsScope::Local,
+            ]
+            .into_iter()
+            .flat_map(|scope| {
+                permission::permission_rules_from_settings_json(
+                    raw,
+                    PermissionRuleSource::Settings(scope),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>(),
+        ));
+        let (runtime, mut permission_rx) =
+            fixture_permission_runtime(home.path(), project.path(), rules.clone()).await;
+        let gate = runtime.enforcing_permission_gate.as_ref().unwrap().clone();
+        let input = serde_json::json!({"command": "touch permitted"});
+        let paths = permission::PermissionPaths {
+            lingxi_home: home.path().to_owned(),
+            cwd: project.path().to_owned(),
+        };
+        assert!(matches!(
+            gate.check("Bash", &input).await,
+            permission::PermissionDecision::Allow
+        ));
+        for (dest, removed_source, remaining) in [
+            (
+                PermissionUpdateDestination::LocalSettings,
+                SettingsScope::Local,
+                2,
+            ),
+            (
+                PermissionUpdateDestination::UserSettings,
+                SettingsScope::User,
+                1,
+            ),
+            (
+                PermissionUpdateDestination::ProjectSettings,
+                SettingsScope::Project,
+                0,
+            ),
+        ] {
+            let event = fixture_permission_action_with_rules(
+                &runtime,
+                paths.clone(),
+                tui::bottom_pane::PermissionAction::Remove {
+                    rule: "Bash".into(),
+                    behavior: PermissionBehavior::Allow,
+                    dest,
+                },
+                rules.clone(),
+            )
+            .await;
+            assert!(matches!(
+                event,
+                tui::TurnEvent::SystemNotice {
+                    is_error: false,
+                    ..
+                }
+            ));
+            let cached = rules.lock().await;
+            assert_eq!(cached.len(), remaining);
+            assert!(cached
+                .iter()
+                .all(|rule| rule.source != PermissionRuleSource::Settings(removed_source)));
+            drop(cached);
+            if remaining > 0 {
+                assert!(
+                    matches!(
+                        gate.check("Bash", &input).await,
+                        permission::PermissionDecision::Allow
+                    ),
+                    "other settings grants must remain live"
+                );
+            }
+        }
+        assert_live_permission_asks(&gate, &mut permission_rx, &input).await;
+        runtime.session_lifecycle.shutdown_and_drain().await;
+    }
+
+    #[tokio::test]
+    async fn permission_editor_live_ask_and_deny_override_cached_allow() {
+        use permission::{PermissionBehavior, PermissionRuleSource, PermissionUpdateDestination};
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(branding::DOT_DIR)).unwrap();
+        let raw = r#"{"permissions":{"allow":["Bash"]}}"#;
+        std::fs::write(
+            project
+                .path()
+                .join(branding::DOT_DIR)
+                .join("settings.local.json"),
+            raw,
+        )
+        .unwrap();
+        let rules = Arc::new(tokio::sync::Mutex::new(
+            permission::permission_rules_from_settings_json(
+                raw,
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
+            )
+            .unwrap(),
+        ));
+        let (runtime, mut permission_rx) =
+            fixture_permission_runtime(home.path(), project.path(), rules.clone()).await;
+        let gate = runtime.enforcing_permission_gate.as_ref().unwrap().clone();
+        let input = serde_json::json!({"command":"touch permitted"});
+        let paths = permission::PermissionPaths {
+            lingxi_home: home.path().to_owned(),
+            cwd: project.path().to_owned(),
+        };
+        assert!(matches!(
+            gate.check("Bash", &input).await,
+            permission::PermissionDecision::Allow
+        ));
+        for behavior in [PermissionBehavior::Ask, PermissionBehavior::Deny] {
+            let event = fixture_permission_action_with_rules(
+                &runtime,
+                paths.clone(),
+                tui::bottom_pane::PermissionAction::Add {
+                    rule: "Bash(touch *)".into(),
+                    behavior,
+                    dest: PermissionUpdateDestination::LocalSettings,
+                },
+                rules.clone(),
+            )
+            .await;
+            assert!(matches!(
+                event,
+                tui::TurnEvent::SystemNotice {
+                    is_error: false,
+                    ..
+                }
+            ));
+            assert_eq!(
+                rules.lock().await.len(),
+                1,
+                "the transport cache still contains its original allow"
+            );
+            if behavior == PermissionBehavior::Ask {
+                assert_live_permission_asks(&gate, &mut permission_rx, &input).await;
+            } else {
+                assert!(matches!(
+                    gate.check("Bash", &input).await,
+                    permission::PermissionDecision::Deny { .. }
+                ));
+                assert!(
+                    permission_rx.try_recv().is_err(),
+                    "an explicit deny must not prompt"
+                );
+            }
+            assert!(
+                matches!(
+                    gate.check("Bash", &serde_json::json!({"command":"mkdir unrelated"}))
+                        .await,
+                    permission::PermissionDecision::Allow
+                ),
+                "content-scoped updates cannot deny unrelated commands"
+            );
+        }
+        runtime.session_lifecycle.shutdown_and_drain().await;
+    }
+
+    #[tokio::test]
+    async fn permission_editor_failed_write_keeps_live_allow() {
+        use permission::{PermissionBehavior, PermissionRuleSource, PermissionUpdateDestination};
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(branding::DOT_DIR)).unwrap();
+        let path = project
+            .path()
+            .join(branding::DOT_DIR)
+            .join("settings.local.json");
+        let raw = r#"{"permissions":{"allow":["Bash"]}}"#;
+        std::fs::write(&path, raw).unwrap();
+        let rules = Arc::new(tokio::sync::Mutex::new(
+            permission::permission_rules_from_settings_json(
+                raw,
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
+            )
+            .unwrap(),
+        ));
+        let (runtime, _) =
+            fixture_permission_runtime(home.path(), project.path(), rules.clone()).await;
+        std::fs::write(&path, "broken JSON").unwrap();
+        let event = fixture_permission_action_with_rules(
+            &runtime,
+            permission::PermissionPaths {
+                lingxi_home: home.path().to_owned(),
+                cwd: project.path().to_owned(),
+            },
+            tui::bottom_pane::PermissionAction::Remove {
+                rule: "Bash".into(),
+                behavior: PermissionBehavior::Allow,
+                dest: PermissionUpdateDestination::LocalSettings,
+            },
+            rules.clone(),
+        )
+        .await;
+        assert!(matches!(
+            event,
+            tui::TurnEvent::SystemNotice { is_error: true, .. }
+        ));
+        assert_eq!(rules.lock().await.len(), 1);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "broken JSON");
+        assert!(matches!(
+            runtime
+                .enforcing_permission_gate
+                .as_ref()
+                .unwrap()
+                .check("Bash", &serde_json::json!({"command":"touch permitted"}))
+                .await,
+            permission::PermissionDecision::Allow
+        ));
+        runtime.session_lifecycle.shutdown_and_drain().await;
+    }
+
+    #[tokio::test]
+    async fn cli_background_fork_uses_live_permission_and_cd_authority() {
+        let home = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let runtime = fixture_cli_runtime(home.path(), first.path()).await;
+        let forker = runtime.background_forker.as_ref().unwrap().clone();
+        let paths = permission::PermissionPaths {
+            lingxi_home: home.path().to_owned(),
+            cwd: first.path().to_owned(),
+        };
+        fixture_permission_action(
+            &runtime,
+            paths,
+            tui::bottom_pane::PermissionAction::ChangeDirectory {
+                path: second.path().display().to_string(),
+            },
+        )
+        .await;
+        assert_eq!(runtime.session_cwd.cwd(), second.path());
+        runtime
+            .orchestrator
+            .set_permission_mode("plan")
+            .await
+            .unwrap();
+        let (cwd, context) = forker.launch_identity().unwrap();
+        assert_eq!(cwd, second.path());
+        assert_eq!(
+            context.resolved_permission_mode,
+            Some(permission::PermissionMode::Plan)
+        );
+        let mut argv = Argv::default();
+        let mut options = context.options.unwrap();
+        options.freeze_permission_mode(context.resolved_permission_mode.unwrap());
+        options.apply(&mut argv);
+        assert_eq!(argv.permission_mode.as_deref(), Some("plan"));
+        assert!(!argv.dangerously_skip_permissions);
+        // The same forker sees subsequent changes, rather than freezing the first read.
+        runtime
+            .orchestrator
+            .set_permission_mode("default")
+            .await
+            .unwrap();
+        assert_eq!(
+            forker.launch_identity().unwrap().1.resolved_permission_mode,
+            Some(permission::PermissionMode::Default)
+        );
+        let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
+        assert!(shutdown.complete, "{:?}", shutdown.errors);
+        drop(runtime);
+        tokio::task::yield_now().await;
+        assert!(
+            forker.launch_identity().is_err(),
+            "expired runtime must not restore boot privileges"
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_clear_resets_real_backend_history_cost_and_writer() {
+        use lingxi_core::host::OrchestratorHandle;
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let runtime =
+            fixture_cli_runtime_with_balance(home.path(), cwd.path(), Some(123_000_000)).await;
+        let orch = &runtime.orchestrator;
+        let old_id = orch.current_session_id().await;
+        orch.append_meta_user_message("old-conversation-marker")
+            .await
+            .unwrap();
+        assert!(!orch.snapshot_history().await.is_empty());
+        assert_eq!(orch.snapshot_cost().await.total_nano_usd, 123_000_000);
+        let old_path = session::jsonl::path::session_path(
+            home.path(),
+            &cwd.path().display().to_string(),
+            &old_id.as_uuid().to_string(),
+        );
+        assert!(std::fs::read_to_string(&old_path)
+            .unwrap()
+            .contains("old-conversation-marker"));
+        let new_id = crate::mode::clear_tui_backend(orch.as_ref(), Some("previous-conversation"))
+            .await
+            .unwrap();
+        assert_ne!(new_id, old_id.as_uuid().to_string());
+        assert!(std::fs::read_to_string(&old_path)
+            .unwrap()
+            .contains("previous-conversation"));
+        assert!(
+            orch.snapshot_history().await.is_empty(),
+            "SDK context is reset, not just widget rows"
+        );
+        let cost = orch.snapshot_cost().await;
+        assert_eq!(cost.session_id.as_uuid().to_string(), new_id);
+        assert_eq!(cost.total_nano_usd, 0);
+        let preserved_old = std::fs::read(&old_path).unwrap();
+        orch.append_meta_user_message("new-conversation-marker")
+            .await
+            .unwrap();
+        let new_path = session::jsonl::path::session_path(
+            home.path(),
+            &cwd.path().display().to_string(),
+            &new_id,
+        );
+        let new_body = std::fs::read_to_string(new_path).unwrap();
+        assert!(new_body.contains("new-conversation-marker"));
+        assert!(!new_body.contains("old-conversation-marker"));
+        assert!(!new_body.contains("previous-conversation"));
+        assert_eq!(
+            std::fs::read(old_path).unwrap(),
+            preserved_old,
+            "new messages cannot append to the cleared session"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_edit_after_cd_persists_to_live_project() {
+        use permission::{PermissionBehavior, PermissionUpdateDestination};
+        let home = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let runtime = fixture_cli_runtime(home.path(), first.path()).await;
+        let stale_paths = permission::PermissionPaths {
+            lingxi_home: home.path().to_owned(),
+            cwd: first.path().to_owned(),
+        };
+        fixture_permission_action(
+            &runtime,
+            stale_paths.clone(),
+            tui::bottom_pane::PermissionAction::ChangeDirectory {
+                path: second.path().display().to_string(),
+            },
+        )
+        .await;
+        for (rule, dest, file) in [
+            (
+                "Read",
+                PermissionUpdateDestination::LocalSettings,
+                "settings.local.json",
+            ),
+            (
+                "Glob",
+                PermissionUpdateDestination::ProjectSettings,
+                "settings.json",
+            ),
+        ] {
+            fixture_permission_action(
+                &runtime,
+                stale_paths.clone(),
+                tui::bottom_pane::PermissionAction::Add {
+                    rule: rule.into(),
+                    behavior: PermissionBehavior::Allow,
+                    dest,
+                },
+            )
+            .await;
+            assert!(!first.path().join(branding::DOT_DIR).join(file).exists());
+            assert!(
+                std::fs::read_to_string(second.path().join(branding::DOT_DIR).join(file))
+                    .unwrap()
+                    .contains(rule)
+            );
+        }
+        let granted = tempfile::tempdir().unwrap();
+        fixture_permission_action(
+            &runtime,
+            stale_paths.clone(),
+            tui::bottom_pane::PermissionAction::AddDirectory {
+                path: granted.path().display().to_string(),
+                dest: PermissionUpdateDestination::LocalSettings,
+            },
+        )
+        .await;
+        assert!(runtime
+            .session_cwd
+            .trusted_dirs()
+            .contains(&granted.path().to_owned()));
+        let saved = std::fs::read_to_string(
+            second
+                .path()
+                .join(branding::DOT_DIR)
+                .join("settings.local.json"),
+        )
+        .unwrap();
+        assert!(saved.contains(&granted.path().display().to_string()));
+        assert!(!first
+            .path()
+            .join(branding::DOT_DIR)
+            .join("settings.local.json")
+            .exists());
+        fixture_permission_action(
+            &runtime,
+            stale_paths,
+            tui::bottom_pane::PermissionAction::Add {
+                rule: "Grep".into(),
+                behavior: PermissionBehavior::Allow,
+                dest: PermissionUpdateDestination::UserSettings,
+            },
+        )
+        .await;
+        assert!(std::fs::read_to_string(home.path().join("settings.json"))
+            .unwrap()
+            .contains("Grep"));
     }
 
     #[tokio::test]

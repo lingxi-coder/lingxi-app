@@ -192,6 +192,8 @@ pub enum ChatOutcome {
     /// `OrchestratorHandle::set_permission_mode` so enforcement follows the
     /// indicator. The pane already updated its displayed mode.
     SetPermissionMode(String),
+    /// Reset the backend session off-loop; the UI waits for a success acknowledgment.
+    ClearSession(Option<String>),
     /// The `/resume` picker resolved to this session uuid. The caller must
     /// UNWIND the app loop (via `AppExit::SwitchSession`) and re-mount that
     /// session in-process so the JSONL writer is retargeted to `<uuid>.jsonl` —
@@ -367,6 +369,8 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         TurnEvent::PermissionRequest { .. }
         | TurnEvent::ModelChanged { .. }
         | TurnEvent::PermissionModeChanged(_)
+        | TurnEvent::SessionCleared { .. }
+        | TurnEvent::SessionClearFailed(_)
         | TurnEvent::ToolHeartbeat { .. }
         | TurnEvent::ToolHeartbeatBatch { .. }
         | TurnEvent::CostUpdated(_)
@@ -421,6 +425,7 @@ pub struct ChatWidget {
     /// true while cancellation is waiting for Block tools, and flips only at
     /// the terminal event so late tool events cannot resurrect idle UI state.
     accepts_turn_events: bool,
+    session_clear_pending: bool,
     /// Distinguishes the one resume-time session cost seed from a late
     /// post-terminal cost callback. It becomes true at the first owned turn and
     /// remains true for this widget/session lifetime.
@@ -698,6 +703,7 @@ impl ChatWidget {
             pending_slash_dispatches: Vec::new(),
             queued_prompt_owners: Vec::new(),
             accepts_turn_events: false,
+            session_clear_pending: false,
             has_seen_turn: false,
             current_compaction: None,
             queued_compact: None,
@@ -1003,6 +1009,18 @@ impl ChatWidget {
     /// returned intent, then surface the next queued permission if the key
     /// resolved the open prompt.
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatOutcome {
+        if self.session_clear_pending {
+            return if key.kind == crossterm::event::KeyEventKind::Press
+                && key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                && matches!(key.code, crossterm::event::KeyCode::Char('c' | 'C'))
+            {
+                ChatOutcome::Quit
+            } else {
+                ChatOutcome::Continue
+            };
+        }
         // Only an Esc/Ctrl-C the pane will NOT consume locally is a session
         // abort. `has_active_view()` reads the view stack alone, so without the
         // extra conjuncts an Esc that merely clears the composer, closes the
@@ -1297,6 +1315,17 @@ impl ChatWidget {
     /// escape, `SystemNotice`/`BashOutput` push system/bash-output rows — every
     /// bridge-emitted variant is handled (no wildcard drop).
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
+        if self.session_clear_pending
+            && (is_live_turn_event(&event)
+                || matches!(
+                    &event,
+                    TurnEvent::TurnStarted
+                        | TurnEvent::TurnStartedWithCancel(_)
+                        | TurnEvent::CostSnapshotUpdated(_)
+                ))
+        {
+            return;
+        }
         if let TurnEvent::TurnStartedWithCancel(cancel) = &event {
             self.current_turn = Some(cancel.clone());
         }
@@ -1319,6 +1348,59 @@ impl ChatWidget {
             return;
         }
         match event {
+            TurnEvent::SessionCleared {
+                session_id,
+                home,
+                cwd,
+            } => {
+                if !self.session_clear_pending {
+                    return;
+                }
+                self.session_clear_pending = false;
+                self.clear_transcript();
+                self.has_seen_turn = false;
+                self.current_turn = None;
+                self.current_compaction = None;
+                self.api_retry = None;
+                self.active_tool_elapsed_ms = None;
+                self.turn_started_at = None;
+                self.activity = None;
+                self.partial_assistant_text.clear();
+                self.active_tool_id = None;
+                self.active_tool_kinds.clear();
+                self.background_boundary_id = uuid::Uuid::new_v4();
+                let transcript_path = session::jsonl::path::session_path(
+                    &home,
+                    &cwd.display().to_string(),
+                    &session_id,
+                )
+                .display()
+                .to_string();
+                self.with_status_line(|status| {
+                    status.data.session_id = session_id.clone();
+                    status.data.transcript_path = transcript_path;
+                    status.data.cwd = cwd.clone();
+                    status.dirty = true;
+                });
+                if !session::prompt_history::PromptHistoryStore::disabled_by_env() {
+                    self.bottom_pane
+                        .reset_prompt_history_store(std::sync::Arc::new(
+                            session::prompt_history::PromptHistoryStore::new(
+                                &home,
+                                &cwd,
+                                Some(session_id),
+                            ),
+                        ));
+                }
+            }
+            TurnEvent::SessionClearFailed(error) => {
+                if !self.session_clear_pending {
+                    return;
+                }
+                self.session_clear_pending = false;
+                let _ =
+                    self.show_system_text(&format!("Could not clear conversation: {error}"), true);
+            }
             TurnEvent::TurnStarted | TurnEvent::TurnStartedWithCancel(_) => {
                 self.accepts_turn_events = true;
                 self.has_seen_turn = true;
@@ -2438,6 +2520,9 @@ impl ChatWidget {
     /// registered command (screen open, clear, exit, …), or `None` to fall
     /// through and send the input as a normal prompt.
     pub fn handle_slash(&mut self, input: &str) -> Option<ChatOutcome> {
+        if self.session_clear_pending {
+            return Some(ChatOutcome::Continue);
+        }
         if let Some((command, args)) = crate::command::resolve(input) {
             // Record the exact `/name` token typed so an alias-shared handler can
             // branch on the invoked alias (e.g. `/stats` → Stats tab).
@@ -3541,12 +3626,25 @@ impl ChatWidget {
     /// effect channel. Validation errors and a bare-invocation usage line
     /// render synchronously as system text (1:1 with claude-code's
     /// `addDirHelpMessage`).
+    fn directory_command_cwd(&self) -> std::path::PathBuf {
+        self.hyperlink_cwd_provider.as_ref().map_or_else(
+            || {
+                if self.session.doctor.cwd.is_empty() {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                } else {
+                    std::path::PathBuf::from(&self.session.doctor.cwd)
+                }
+            },
+            |read| read(),
+        )
+    }
+
     pub(crate) fn cmd_add_dir(&mut self, args: &str) -> ChatOutcome {
         let input = args.trim();
         if input.is_empty() {
             return self.show_system_text("Usage: /add-dir <path>", false);
         }
-        match crate::add_dir::resolve_and_validate(input) {
+        match crate::add_dir::resolve_and_validate(input, &self.directory_command_cwd()) {
             crate::add_dir::AddDirValidation::Success { absolute } => {
                 ChatOutcome::PermissionAction(PermissionAction::AddDirectory {
                     path: absolute,
@@ -3574,7 +3672,7 @@ impl ChatWidget {
         if input.is_empty() {
             return self.show_system_text("Usage: /cd <path>", false);
         }
-        match crate::add_dir::resolve_existing_directory(input) {
+        match crate::add_dir::resolve_existing_directory(input, &self.directory_command_cwd()) {
             crate::add_dir::AddDirValidation::Success { absolute } => {
                 self.bottom_pane
                     .show_cd_confirm(std::path::PathBuf::from(&absolute), absolute);
@@ -4163,9 +4261,14 @@ impl ChatWidget {
     /// identical notice would otherwise never reappear in the now-empty
     /// transcript. (`has_shown_overage_notification` deliberately NOT reset:
     /// the TS flag is component state, surviving transcript clears.)
-    pub(crate) fn cmd_clear(&mut self, _args: &str) -> ChatOutcome {
-        self.clear_transcript();
-        ChatOutcome::Continue
+    pub(crate) fn cmd_clear(&mut self, args: &str) -> ChatOutcome {
+        if self.session_clear_pending {
+            return ChatOutcome::Continue;
+        }
+        self.cancel_active_turn();
+        self.accepts_turn_events = false;
+        self.session_clear_pending = true;
+        ChatOutcome::ClearSession((!args.trim().is_empty()).then(|| args.trim().to_string()))
     }
 
     /// Shared `/clear` effect (slash path and [`CommandAction::ClearTranscript`]
@@ -4191,7 +4294,19 @@ impl ChatWidget {
         // total; the next turn's `CostUpdated` repopulates it from the now-reset
         // backend tracker.
         self.cost = None;
-        self.with_status_line(|s| s.data.cost = String::new());
+        self.bottom_pane.set_context_pressure(None);
+        self.with_status_line(|s| {
+            s.data.cost = String::new();
+            s.data.context_pct = 0.0;
+            s.data.used_tokens = 0;
+            s.data.total_input_tokens = 0;
+            s.data.total_output_tokens = 0;
+            s.data.total_api_duration_ms = 0;
+            s.data.total_lines_added = 0;
+            s.data.total_lines_removed = 0;
+            s.data.current_usage = None;
+            s.dirty = true;
+        });
         self.focus_projection = crate::bottom_pane::view::FocusProjection::default();
     }
 
@@ -5589,6 +5704,9 @@ impl ChatWidget {
     /// fresh per-turn cancellation token. Shared by the composer submit path
     /// and [`BottomPaneOutcome::SubmitPrompt`].
     pub(crate) fn submit_prompt(&mut self, text: String) -> ChatOutcome {
+        if self.session_clear_pending {
+            return ChatOutcome::Continue;
+        }
         self.transcript.push_message(RenderedMessage::UserText {
             body: text.clone(),
             timestamp: 0,
@@ -5620,10 +5738,7 @@ impl ChatWidget {
     /// [`BottomPaneOutcome::RunCommand`].
     fn run_command(&mut self, action: CommandAction) -> ChatOutcome {
         match action {
-            CommandAction::ClearTranscript => {
-                self.clear_transcript();
-                ChatOutcome::Continue
-            }
+            CommandAction::ClearTranscript => self.cmd_clear(""),
             CommandAction::OpenConnectPicker => self.cmd_connect(""),
             CommandAction::Quit => ChatOutcome::Quit,
             CommandAction::BackgroundAndExit => {
@@ -7968,6 +8083,59 @@ mod tests {
             _ => panic!("expected ChatOutcome::PermissionAction(ChangeDirectory)"),
         }
         assert!(!w.bottom_pane().view_stack().contains::<CdConfirmView>());
+    }
+
+    #[test]
+    fn directory_commands_follow_live_cwd_after_cd() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let target = second.join("child");
+        std::fs::create_dir_all(first.join("child")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let cwd = tool_api::SessionCwd::new(first.clone(), vec![first]);
+        let mut widget = widget();
+        widget.set_hyperlink_cwd_provider({
+            let cwd = cwd.clone();
+            std::sync::Arc::new(move || cwd.cwd())
+        });
+        cwd.change_cwd(second);
+        match widget.cmd_add_dir("child") {
+            ChatOutcome::PermissionAction(PermissionAction::AddDirectory { path, .. }) => {
+                assert_eq!(std::path::PathBuf::from(path), target);
+            }
+            _ => panic!("expected an add-directory action"),
+        }
+        widget.cmd_cd("child");
+        match widget.handle_key(press(KeyCode::Enter)) {
+            ChatOutcome::PermissionAction(PermissionAction::ChangeDirectory { path }) => {
+                assert_eq!(std::path::PathBuf::from(path), target);
+            }
+            _ => panic!("expected a change-directory action"),
+        }
+    }
+
+    #[test]
+    fn add_directory_network_check_uses_live_cwd() {
+        let mut widget = widget();
+        widget.set_hyperlink_cwd_provider(std::sync::Arc::new(|| {
+            std::path::PathBuf::from("/net/lingxi-test-host/workspace")
+        }));
+        assert!(matches!(
+            widget.cmd_add_dir("/net/lingxi-test-host/missing-child"),
+            ChatOutcome::Continue
+        ));
+        let notice = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
+        assert!(
+            notice.body().ends_with(" was not found."),
+            "{}",
+            notice.body()
+        );
+        // A different automount host still fails before stat.
+        widget.cmd_add_dir("../../other-host/missing-child");
+        let notice = cell::<crate::history_cell::system::SystemTextCell>(&widget, 1);
+        assert!(notice.body().contains("network path"), "{}", notice.body());
+        assert!(notice.is_error());
     }
 
     /// `/mcp` arg routing (2.1.206 `lJy`): bare `/mcp` and the `mke` menu
@@ -11404,6 +11572,153 @@ mod tests {
         assert!(!widget.turn_running(), "/copy starts no turn");
     }
 
+    fn acknowledge_session_clear(widget: &mut ChatWidget) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        widget.apply_turn_event(TurnEvent::SessionCleared {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            home: home.path().to_owned(),
+            cwd: home.path().to_owned(),
+        });
+        home
+    }
+
+    #[test]
+    fn clear_aliases_request_backend_reset_and_preserve_history_until_ack() {
+        for command in ["/clear", "/reset", "/new"] {
+            let mut widget = ChatWidget::new(
+                vec![RenderedMessage::UserText {
+                    body: "old context".into(),
+                    timestamp: 0,
+                }],
+                SessionInfo::default(),
+            );
+            assert!(
+                matches!(
+                    submit_command(&mut widget, command),
+                    ChatOutcome::ClearSession(None)
+                ),
+                "{command}"
+            );
+            assert_eq!(
+                widget.transcript().committed_cells().len(),
+                1,
+                "no optimistic deletion before SDK commit"
+            );
+            let _home = acknowledge_session_clear(&mut widget);
+            assert!(widget.transcript().is_empty());
+            assert!(matches!(
+                widget.submit_prompt("fresh prompt".into()),
+                ChatOutcome::Submit(_, _, _)
+            ));
+        }
+        let mut widget = widget();
+        assert!(
+            matches!(submit_command(&mut widget, "/clear previous conversation"),
+            ChatOutcome::ClearSession(Some(title)) if title == "previous conversation")
+        );
+    }
+
+    #[test]
+    fn clear_failure_preserves_transcript_and_allows_retry() {
+        let mut widget = ChatWidget::new(
+            vec![RenderedMessage::UserText {
+                body: "old context".into(),
+                timestamp: 0,
+            }],
+            SessionInfo::default(),
+        );
+        let old_turn = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(old_turn.clone()));
+        widget.apply_turn_event(TurnEvent::TextDelta("old partial reply".into()));
+        widget.apply_turn_event(TurnEvent::CostUpdated("$0.0123".into()));
+        assert!(matches!(
+            widget.cmd_clear(""),
+            ChatOutcome::ClearSession(None)
+        ));
+        assert!(old_turn.is_cancelled());
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
+        widget.apply_turn_event(TurnEvent::SessionClearFailed("writer unavailable".into()));
+        assert_eq!(widget.transcript().committed_cells().len(), 2);
+        assert_eq!(widget.cost.as_deref(), Some("$0.0123"));
+        let error = cell::<crate::history_cell::system::SystemTextCell>(&widget, 1);
+        assert!(error.is_error());
+        assert!(error.body().contains("writer unavailable"));
+        assert!(
+            !widget.turn_running(),
+            "failed clear cannot retain the canceled busy token"
+        );
+        assert!(widget.current_turn.is_none());
+        assert!(widget
+            .transcript()
+            .current_turn_assistant_text()
+            .contains("old partial reply"));
+        assert!(matches!(
+            widget.submit_prompt("next prompt after failure".into()),
+            ChatOutcome::Submit(_, _, _)
+        ));
+        assert!(matches!(
+            widget.cmd_clear(""),
+            ChatOutcome::ClearSession(None)
+        ));
+    }
+
+    #[test]
+    fn clear_waits_for_ack_blocks_prompts_and_discards_old_turn_events() {
+        let mut widget = ChatWidget::new(
+            vec![RenderedMessage::UserText {
+                body: "old context".into(),
+                timestamp: 0,
+            }],
+            SessionInfo::default(),
+        );
+        let old_turn = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(old_turn.clone()));
+        widget.apply_turn_event(TurnEvent::TextDelta("partial old reply".into()));
+        widget.apply_turn_event(TurnEvent::CostUpdated("$0.0123".into()));
+        let count = widget.transcript().committed_cells().len();
+        assert!(matches!(
+            widget.cmd_clear(""),
+            ChatOutcome::ClearSession(None)
+        ));
+        assert!(old_turn.is_cancelled());
+        assert!(matches!(
+            widget.submit_prompt("too early".into()),
+            ChatOutcome::Continue
+        ));
+        let stale = CancellationToken::new();
+        widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(stale));
+        widget.apply_turn_event(TurnEvent::TextDelta("stale old reply".into()));
+        widget.apply_turn_event(TurnEvent::CostUpdated("$9.9999".into()));
+        widget.apply_turn_event(TurnEvent::CostSnapshotUpdated(
+            lingxi_core::host::CostSnapshot {
+                input_tokens: 99,
+                ..Default::default()
+            },
+        ));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
+        assert_eq!(widget.transcript().committed_cells().len(), count);
+        assert_eq!(widget.cost.as_deref(), Some("$0.0123"));
+        assert!(!widget.turn_running());
+        let _home = acknowledge_session_clear(&mut widget);
+        assert!(widget.transcript().is_empty());
+        assert_eq!(widget.cost, None);
+        assert!(matches!(
+            widget.submit_prompt("new prompt".into()),
+            ChatOutcome::Submit(_, _, _)
+        ));
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::TextDelta("fresh reply".into()));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
+        assert_eq!(widget.transcript().committed_cells().len(), 2);
+        assert_eq!(cell::<AssistantTextCell>(&widget, 1).body(), "fresh reply");
+    }
+
     #[test]
     fn slash_clear_resets_transcript_and_commit_cursor() {
         let mut widget = ChatWidget::new(
@@ -11419,8 +11734,10 @@ mod tests {
         assert_eq!(widget.transcript().committed_to_terminal(), 1);
         assert!(matches!(
             submit_command(&mut widget, "/clear"),
-            ChatOutcome::Continue
+            ChatOutcome::ClearSession(None)
         ));
+        assert!(!widget.transcript().is_empty());
+        let _home = acknowledge_session_clear(&mut widget);
         assert!(widget.transcript().is_empty());
         assert_eq!(widget.transcript().committed_to_terminal(), 0);
 
@@ -12051,7 +12368,7 @@ mod tests {
             }
         }
 
-        // ClearTranscript empties the transcript.
+        // The view requests the same backend reset before clearing its transcript.
         let mut widget = ChatWidget::new(
             vec![RenderedMessage::SystemText {
                 body: "old".to_string(),
@@ -12065,8 +12382,9 @@ mod tests {
             .show_view(Box::new(CommandStub(Some(CommandAction::ClearTranscript))));
         assert!(matches!(
             widget.handle_key(press(KeyCode::Enter)),
-            ChatOutcome::Continue
+            ChatOutcome::ClearSession(None)
         ));
+        let _home = acknowledge_session_clear(&mut widget);
         assert!(widget.transcript().is_empty());
         assert!(
             widget.bottom_pane().view_stack().is_empty(),
@@ -12122,6 +12440,47 @@ mod tests {
     }
 
     #[test]
+    fn clear_ack_retargets_statusline_identity_and_usage() {
+        let mut widget = widget();
+        let slot = crate::status_line::new_slot(None);
+        {
+            let mut state = slot.lock().unwrap();
+            state.data.session_id = "old-session".into();
+            state.data.transcript_path = "/tmp/old.jsonl".into();
+            state.data.total_api_duration_ms = 500;
+            state.data.total_lines_added = 8;
+            state.data.total_input_tokens = 99;
+            state.data.used_tokens = 88;
+            state.data.context_pct = 0.75;
+        }
+        widget.set_status_line(slot.clone());
+        assert!(matches!(
+            widget.cmd_clear(""),
+            ChatOutcome::ClearSession(None)
+        ));
+        let home = tempfile::tempdir().unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        widget.apply_turn_event(TurnEvent::SessionCleared {
+            session_id: session_id.clone(),
+            home: home.path().to_owned(),
+            cwd: home.path().to_owned(),
+        });
+        let state = slot.lock().unwrap();
+        assert_eq!(state.data.session_id, session_id);
+        assert!(state
+            .data
+            .transcript_path
+            .ends_with(&format!("{session_id}.jsonl")));
+        assert_eq!(state.data.cwd, home.path());
+        assert_eq!(state.data.total_api_duration_ms, 0);
+        assert_eq!(state.data.total_lines_added, 0);
+        assert_eq!(state.data.total_input_tokens, 0);
+        assert_eq!(state.data.used_tokens, 0);
+        assert_eq!(state.data.context_pct, 0.0);
+        assert!(state.dirty);
+    }
+
+    #[test]
     fn clear_resets_the_status_row_cost() {
         // parity 2.1.212: `/clear` resets the session cost counter (claude-code
         // clearConversation → resetCostState), so the cached status-row cost
@@ -12135,7 +12494,16 @@ mod tests {
             "cost shows before clear"
         );
 
-        widget.cmd_clear("");
+        assert!(matches!(
+            widget.cmd_clear(""),
+            ChatOutcome::ClearSession(None)
+        ));
+        assert_eq!(
+            widget.cost.as_deref(),
+            Some("$0.0123"),
+            "preserve until backend ACK"
+        );
+        let _home = acknowledge_session_clear(&mut widget);
 
         assert_eq!(widget.cost, None, "clear drops the cached cost");
         let rows = rendered_rows(&mut widget, 90);
@@ -12319,8 +12687,11 @@ mod tests {
         // `/clear` resets the dedupe slot with the scrollback: the SAME
         // notice can reappear in the now-empty transcript.
         submit_command(&mut widget, "/clear");
+        let _home = acknowledge_session_clear(&mut widget);
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let fresh_turn_cells = cells(&widget).len();
         widget.apply_turn_event(rate_limit_rejected());
-        assert_eq!(cells(&widget).len(), 1);
+        assert_eq!(cells(&widget).len(), fresh_turn_cells + 1);
         assert_eq!(
             cell::<RateLimitCell>(&widget, 0).text(),
             "You've hit your session limit"
@@ -12364,12 +12735,19 @@ mod tests {
         );
         // The flag SURVIVES /clear (TS component state) — no repeat after it.
         submit_command(&mut widget, "/clear");
+        let _home = acknowledge_session_clear(&mut widget);
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let fresh_turn_cells = cells(&widget).len();
         widget.apply_turn_event(overage());
         assert!(
             widget.has_shown_overage_notification,
             "flag survives /clear"
         );
-        assert!(cells(&widget).is_empty(), "no repeat notice after /clear");
+        assert_eq!(
+            cells(&widget).len(),
+            fresh_turn_cells,
+            "no repeat notice after /clear"
+        );
         // Leaving overage resets the flag; re-entering fires again.
         widget.apply_turn_event(TurnEvent::RateLimit {
             status: Some("allowed".to_string()),
@@ -12386,7 +12764,7 @@ mod tests {
         });
         assert!(!widget.has_shown_overage_notification);
         widget.apply_turn_event(overage());
-        assert_eq!(cells(&widget).len(), 1);
+        assert_eq!(cells(&widget).len(), fresh_turn_cells + 1);
         assert_eq!(
             cell::<RateLimitCell>(&widget, 0).text(),
             "You're now using usage credits"

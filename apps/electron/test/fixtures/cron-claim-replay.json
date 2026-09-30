@@ -1,0 +1,88 @@
+[
+  {
+    "type": "cron_run_requested",
+    "run_id": "lingxi-cron-claim-v1:[\"retried-occurrence\",1]",
+    "task": {
+      "next_run_at": 1790776680000,
+      "automation": {
+        "version": 2,
+        "status": "active",
+        "model": "openai/test",
+        "reasoning": {
+          "type": "automatic"
+        },
+        "runMode": "new_session",
+        "notificationPolicy": "none",
+        "runs": [
+          {
+            "ownerPid": 99727,
+            "claimGeneration": 1,
+            "id": "retried-occurrence",
+            "taskId": "d00000001",
+            "scheduledAt": 0,
+            "startedAt": null,
+            "finishedAt": null,
+            "status": "running",
+            "model": "openai/test",
+            "reasoning": {
+              "type": "automatic"
+            },
+            "sessionId": null,
+            "summary": null,
+            "error": null
+          }
+        ]
+      },
+      "id": "d00000001",
+      "cron": "* * * * *",
+      "prompt": "scheduled prompt",
+      "recurring": false,
+      "durable": true,
+      "permanent": false,
+      "created_at": 0
+    }
+  },
+  {
+    "type": "cron_run_requested",
+    "run_id": "lingxi-cron-claim-v1:[\"retried-occurrence\",2]",
+    "task": {
+      "next_run_at": 1790776680000,
+      "automation": {
+        "version": 2,
+        "status": "active",
+        "model": "openai/test",
+        "reasoning": {
+          "type": "automatic"
+        },
+        "runMode": "new_session",
+        "notificationPolicy": "none",
+        "runs": [
+          {
+            "ownerPid": 99727,
+            "claimGeneration": 2,
+            "id": "retried-occurrence",
+            "taskId": "d00000001",
+            "scheduledAt": 0,
+            "startedAt": null,
+            "finishedAt": null,
+            "status": "running",
+            "model": "openai/test",
+            "reasoning": {
+              "type": "automatic"
+            },
+            "sessionId": null,
+            "summary": null,
+            "error": null
+          }
+        ]
+      },
+      "id": "d00000001",
+      "cron": "* * * * *",
+      "prompt": "scheduled prompt",
+      "recurring": false,
+      "durable": true,
+      "permanent": false,
+      "created_at": 0
+    }
+  }
+]

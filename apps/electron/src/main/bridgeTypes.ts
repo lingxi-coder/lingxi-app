@@ -13,6 +13,8 @@ import { DiagnosticBuffer } from './host-utils.js';
 import type { OpenAiOAuthSession } from './host-utils.js';
 import type { HostNotifier } from './notifications.js';
 
+export type { HostPermissionRequest } from '../shared/permission.js';
+
 export interface DesktopAudioService {
   getCapabilities(): AudioCapabilitySnapshotDto;
   initializeCapabilities(): Promise<void>;

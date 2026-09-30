@@ -59,6 +59,9 @@ pub struct StdioControlPlane {
     outbound_tx: Arc<OutboundTx>,
     /// CLI-originated requests awaiting a response, keyed by `request_id`.
     pending: Mutex<HashMap<String, PendingControlRequest>>,
+    input_closed: CancellationToken,
+    stopped: CancellationToken,
+    operation_gate: Arc<Mutex<()>>,
     /// Resolved tool_use_ids, for duplicate-response dedup (Phase 4).
     resolved_tool_use_ids: Mutex<VecDeque<String>>,
     /// The in-flight turn's cancellation token (for `deny+interrupt`).
@@ -87,6 +90,9 @@ impl StdioControlPlane {
         Arc::new(Self {
             outbound_tx,
             pending: Mutex::new(HashMap::new()),
+            input_closed: CancellationToken::new(),
+            stopped: CancellationToken::new(),
+            operation_gate: Arc::new(Mutex::new(())),
             resolved_tool_use_ids: Mutex::new(VecDeque::new()),
             active_turn_cancel: Mutex::new(None),
             orphan_tx: Mutex::new(None),
@@ -169,7 +175,18 @@ impl StdioControlPlane {
     /// permission response can abort the whole turn (§3.4). Called by the turn
     /// loop before each turn.
     pub async fn set_active_turn(&self, token: CancellationToken) {
-        *self.active_turn_cancel.lock().await = Some(token);
+        let mut active = self.active_turn_cancel.lock().await;
+        if self.stopped.is_cancelled() { token.cancel(); }
+        *active = Some(token);
+    }
+
+    /// Serialize cwd relocation with actual operation ownership. The busy
+    /// token is a cancellation handle; this lease closes check/start races.
+    pub async fn lock_operation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.operation_gate.clone().lock_owned().await
+    }
+    pub fn try_lock_operation(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.operation_gate.clone().try_lock_owned().ok()
     }
 
     /// Whether a turn is currently in flight.
@@ -247,6 +264,10 @@ impl StdioControlPlane {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
+            if self.input_closed.is_cancelled() {
+                let _ = tx.send(Err("Tool permission stream closed before response received".into()));
+                return (request_id, rx);
+            }
             pending.insert(
                 request_id.clone(),
                 PendingControlRequest {
@@ -254,13 +275,26 @@ impl StdioControlPlane {
                     tool_use_id,
                 },
             );
+            // Queue under the admission lock so input closure cannot reject
+            // this waiter and then publish its permission prompt afterward.
+            let _ = self.outbound_tx.send(OutboundMsg::Line(serialize_ndjson_line(&frame)));
         }
-        // Enqueue AFTER registering so a (theoretically) instant response can't
-        // race the insert. The drain task serializes to stdout.
-        let _ = self
-            .outbound_tx
-            .send(OutboundMsg::Line(serialize_ndjson_line(&frame)));
         (request_id, rx)
+    }
+
+    /// Close permission input admission and reject every accepted waiter. The
+    /// pending mutex serializes this fence with new request registration.
+    pub async fn close_input(&self, reason: &str) {
+        self.input_closed.cancel();
+        self.fail_all_pending(reason).await;
+    }
+
+    /// Stop the connection's active operation without discarding its busy owner.
+    /// The operation clears that owner only after its actual work has settled.
+    pub async fn shutdown(&self, reason: &str) {
+        self.stopped.cancel();
+        self.cancel_active_turn().await;
+        self.close_input(reason).await;
     }
 
     /// Resolve an inbound `control_response` against `pendingRequests`
@@ -269,6 +303,7 @@ impl StdioControlPlane {
     /// so the join key is the inner `response.request_id` and the payload is the
     /// inner `response.response` (the load-bearing double nesting).
     pub async fn resolve_response(&self, frame: &Value) {
+        if self.stopped.is_cancelled() { return; }
         let Some(response) = frame.get("response") else {
             return;
         };
@@ -2271,5 +2306,37 @@ mod tests {
             json!(["/extra"])
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod close_scope_tests {
+    use super::*;
+    #[tokio::test]
+    async fn closure_rejects_existing_and_future_permission_waiters() {
+        let (out, mut frames) = tokio::sync::mpsc::unbounded_channel();
+        let plane = StdioControlPlane::new(Arc::new(out));
+        let (_, first) = plane.send_request(json!({"subtype":"can_use_tool"}), None).await;
+        assert!(frames.recv().await.is_some());
+        plane.close_input("closed fixture").await;
+        assert!(first.await.unwrap().is_err());
+        let (_, later) = plane.send_request(json!({"subtype":"can_use_tool"}), None).await;
+        assert!(later.await.unwrap().is_err());
+        assert!(frames.try_recv().is_err(), "no prompt may be queued after closure");
+    }
+    #[tokio::test]
+    async fn shutdown_cancels_an_owner_without_releasing_its_cwd_lease() {
+        let (out, _) = tokio::sync::mpsc::unbounded_channel();
+        let plane = StdioControlPlane::new(Arc::new(out));
+        let lease = plane.lock_operation().await;
+        let token = CancellationToken::new();
+        plane.set_active_turn(token.clone()).await;
+        plane.shutdown("fixture").await;
+        assert!(token.is_cancelled());
+        assert!(plane.is_busy().await);
+        assert!(plane.try_lock_operation().is_none());
+        plane.clear_active_turn().await; drop(lease);
+        assert!(!plane.is_busy().await);
+        assert!(plane.try_lock_operation().is_some());
     }
 }

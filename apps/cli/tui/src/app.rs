@@ -165,6 +165,8 @@ pub struct AppCallbacks<'cb> {
     /// engine off-loop via `OrchestratorHandle::set_permission_mode` so
     /// enforcement follows the indicator the pane already updated.
     pub on_set_permission_mode: Box<dyn FnMut(String) + 'cb>,
+    /// Clear the backend first; acknowledge the reset before erasing scrollback.
+    pub on_clear_session: Box<dyn FnMut(Option<String>) + 'cb>,
     /// Executed on [`ChatOutcome::SandboxAction`]: the caller persists the
     /// toggled `sandbox.enabled` to user settings, or appends an `exclude`
     /// pattern to local settings, off-loop; the result returns via a
@@ -556,6 +558,9 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::SetPermissionMode(mode) => {
                         (self.callbacks.on_set_permission_mode)(mode);
                     }
+                    ChatOutcome::ClearSession(title) => {
+                        (self.callbacks.on_clear_session)(title);
+                    }
                     // `/sandbox`: the live toggle already flipped in the widget;
                     // persist the choice / append an exclude off-loop, result via
                     // `TurnEvent::SystemNotice`.
@@ -693,6 +698,7 @@ pub fn run_app(
     on_fast_mode: impl FnMut(Option<bool>),
     on_plan_mode: impl FnMut(String),
     on_set_permission_mode: impl FnMut(String),
+    on_clear_session: impl FnMut(Option<String>),
     on_sandbox_action: impl FnMut(crate::chat_widget::SandboxAction),
     on_task_action: impl FnMut(TaskAction),
     on_dispatch_slash: impl FnMut(String, crate::chat_widget::PendingSlashDispatch),
@@ -749,6 +755,7 @@ pub fn run_app(
             on_fast_mode: Box::new(on_fast_mode),
             on_plan_mode: Box::new(on_plan_mode),
             on_set_permission_mode: Box::new(on_set_permission_mode),
+            on_clear_session: Box::new(on_clear_session),
             on_sandbox_action: Box::new(on_sandbox_action),
             on_task_action: Box::new(on_task_action),
             on_dispatch_slash: Box::new(on_dispatch_slash),

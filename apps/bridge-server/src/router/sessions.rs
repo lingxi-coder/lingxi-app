@@ -166,6 +166,45 @@ pub(super) async fn read_session_agent_summary(
 }
 
 impl EngineCommandRouter {
+    /// A pull roster ends with its coordinator count, allowing the host to
+    /// reconcile missed worker completions without changing engine ownership.
+    pub(super) async fn emit_coordinator_snapshot(&self, sink: &dyn ClientEventSink) {
+        let Some(registry) = &self.team_registry else {
+            return;
+        };
+        let workers = registry.list_workers().await;
+        // Mirror TeamRegistry::active_worker_count from the same roster read:
+        // idle teammates still own their scope and can receive more work.
+        let active_workers = u32::try_from(
+            workers
+                .iter()
+                .filter(|worker| {
+                    matches!(
+                        worker.status.as_str(),
+                        "idle" | "working" | "awaiting_message"
+                    )
+                })
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        for worker in workers {
+            sink.emit(ClientEvent::CoordinatorWorker {
+                worker: client::protocol::listings::CoordinatorWorkerDto {
+                    agent_id: worker.agent_id,
+                    name: worker.name,
+                    agent_type: worker.agent_type,
+                    status: worker.status,
+                },
+            })
+            .await;
+        }
+        sink.emit(ClientEvent::CoordinatorStatus {
+            active_workers,
+            team: registry.team_name().await,
+        })
+        .await;
+    }
+
     /// Enumerate the real persisted JSONL catalog. A missing/empty store is a
     /// successful empty listing; other loader failures are surfaced as a
     /// recoverable client error without leaking filesystem details.

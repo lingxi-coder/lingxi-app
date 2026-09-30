@@ -1333,6 +1333,7 @@ pub async fn assemble_with_credentials(
     let cron_firer = Arc::new(crate::cron_host::HostCronFirer::new(
         event_sink.clone(),
         cfg.cwd.clone(),
+        connection.cron_requests_handle(),
     ));
     // Subagent lifecycle/message events use the same authenticated sink as the
     // main turn. `initialize_live_session` canonicalizes this id before this
@@ -1458,6 +1459,14 @@ pub async fn assemble_with_credentials(
          use_noop_permission_gate=false"
             .to_string()
     })?;
+    gate.set_session_id(Some(
+        runtime
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string(),
+    ));
 
     // §27 mid-turn drain + Now-abort wiring. The per-connection queue is shared
     // (Arc) across THREE consumers: (1) the orchestrator's mid-turn input source
@@ -1605,6 +1614,7 @@ pub async fn assemble_with_credentials(
         .with_http(runtime.http.clone())
         .with_session_store(session_store)
         .with_session_agent_observer(session_agent_observer)
+        .with_team_registry(runtime.coordinator.clone())
         .with_settings_context(settings_context)
         .with_mcp_paths(mcp_paths)
         .with_mcp_registry(runtime.mcp_registry.clone())

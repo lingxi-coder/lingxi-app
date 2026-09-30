@@ -16,7 +16,6 @@ import type {
   McpAdminCommandDto,
   PermissionBehaviorDto,
   PermissionModeId,
-  PermissionRequest,
   PermissionResponseDto,
   PluginAdminCommandDto,
   ReasoningSelectionDto,
@@ -34,6 +33,7 @@ import type {
   NativeAudioSnapshot,
 } from '../../shared/nativeAudio.js';
 import type { NotificationPreferences } from '../../shared/notificationPreferences.js';
+import type { HostPermissionRequest } from '../../shared/permission.js';
 import type { ScheduledContext, ScheduledScope } from '../../shared/scheduled.js';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings.js';
 import type { VoicePreferences } from '../../shared/voicePreferences.js';
@@ -91,12 +91,14 @@ export interface DesktopTurnToken {
   readonly sessionId: string;
   readonly clientTurnId: string;
   readonly purpose: TrackedPromptPurpose;
+  /** Correlates admission and cancellation before the first engine event. */
+  readonly turnId?: number;
 }
 
-export type TrackedSpeechTerminal = 'message_complete' | 'turn_ended' | 'stale';
+export type TrackedSpeechTerminal = 'turn_ended' | 'stale';
 
 export interface TrackedSpeechEvent {
-  readonly type: 'delta' | 'completion';
+  readonly type: 'delta' | 'message' | 'completion';
   readonly token: DesktopTurnToken;
   readonly text: string;
   readonly sequence: number;
@@ -132,7 +134,7 @@ export interface UseBridge {
   readonly usage: UsageSnapshot | null;
   readonly running: boolean;
   readonly isCancelling: boolean;
-  readonly pendingPermission: PermissionRequest | null;
+  readonly pendingPermission: HostPermissionRequest | null;
   readonly pendingComputerAccess: ComputerAccessRequestDto | null;
   readonly pendingAskUserQuestion: AskUserQuestionRequestDto | null;
   readonly error: string | null;
@@ -154,6 +156,7 @@ export interface UseBridge {
   /** Push a locally-produced command's own output into the transcript. */
   emitCommandOutput(output: string, isError: boolean): void;
   cancel(turnId?: number): Promise<void>;
+  cancelTrackedPrompt(token: DesktopTurnToken): Promise<void>;
   approve(requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(requestId: number): Promise<void>;
   approveComputerAccess(requestId: number, response: ComputerAccessResponseDto): Promise<void>;

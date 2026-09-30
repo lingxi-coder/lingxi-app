@@ -56,8 +56,6 @@ export function isTurnOwnedEvent(event: ClientEvent): boolean {
     'tool_use_result',
     'message_complete',
     'cost_update',
-    'coordinator_status',
-    'coordinator_worker',
     'usage_update',
     'api_retry',
   ].includes(event.type);

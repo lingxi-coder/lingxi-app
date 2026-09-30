@@ -215,7 +215,7 @@ impl BackgroundLaunchOptions {
         self.tmux = None;
     }
 
-    fn apply(&self, argv: &mut Argv) {
+    pub(crate) fn apply(&self, argv: &mut Argv) {
         argv.model.clone_from(&self.model);
         argv.fallback_model.clone_from(&self.fallback_model);
         argv.max_turns = self.max_turns;
@@ -700,6 +700,58 @@ pub fn refresh_current_background_launch_identity(
             agents_registry::update_job_cwd_with_lock_held(config_home, short, cwd)
         },
     )
+}
+
+/// Retarget a running background child's restart authority after /clear.
+pub(crate) fn refresh_current_background_session(
+    old_id: &str,
+    new_id: &str,
+    cwd: &Path,
+) -> std::io::Result<bool> {
+    let Ok(raw) = std::env::var("LINGXI_JOB_DIR") else {
+        return Ok(false);
+    };
+    let job_dir = PathBuf::from(raw);
+    let short = job_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "background job dir is malformed"))?;
+    let home = job_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "background job dir is malformed"))?;
+    retarget_background_session(home, short, old_id, new_id, cwd)
+}
+
+fn retarget_background_session(
+    home: &Path,
+    short: &str,
+    old_id: &str,
+    new_id: &str,
+    cwd: &Path,
+) -> std::io::Result<bool> {
+    validate_short(short)?;
+    uuid::Uuid::parse_str(new_id).map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+    let _lock = agents_registry::lock_job_state(home, short)?;
+    let mut spec = read_launch_spec(home, short)?;
+    if spec.session_id != old_id {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "background session identity changed concurrently",
+        ));
+    }
+    spec.session_id = new_id.to_string();
+    spec.cwd = cwd.display().to_string();
+    spec.transcript_path = session::jsonl::path::session_path(home, &spec.cwd, new_id)
+        .display()
+        .to_string();
+    spec.launch = BackgroundLaunchKind::Resume;
+    spec.initial_prompt = None;
+    spec.handoff = None;
+    spec.shell_handoff.clear();
+    write_launch_spec(home, short, &spec)?;
+    agents_registry::retarget_job_session_with_lock_held(home, short, new_id, cwd)?;
+    Ok(true)
 }
 
 pub fn reconcile_job_cwd_from_launch_spec(
@@ -1310,6 +1362,74 @@ mod tests {
         let argv = spec.tui_argv();
         assert_eq!(argv.permission_mode.as_deref(), Some("default"));
         assert!(!argv.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn clear_retargets_background_restart_without_replaying_old_prompt() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let short = "abcd1234";
+        let spec = sample(short, BackgroundLaunchKind::Fork);
+        seed_job(home.path(), short, &spec.session_id, &spec.cwd);
+        write_launch_spec(home.path(), short, &spec).unwrap();
+        let state_path = home.path().join("jobs").join(short).join("state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        state["futureField"] = serde_json::json!({"preserved": true});
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let new_id = uuid::Uuid::new_v4().to_string();
+        retarget_background_session(home.path(), short, &spec.session_id, &new_id, cwd.path())
+            .unwrap();
+        let updated = read_launch_spec(home.path(), short).unwrap();
+        assert_eq!(updated.session_id, new_id);
+        assert_eq!(updated.cwd, cwd.path().display().to_string());
+        assert_eq!(updated.launch, BackgroundLaunchKind::Resume);
+        assert_eq!(updated.initial_prompt, None);
+        assert!(updated.handoff.is_none());
+        assert!(updated.shell_handoff.is_empty());
+        assert_eq!(
+            updated.transcript_path,
+            session::jsonl::path::session_path(home.path(), &updated.cwd, &new_id)
+                .display()
+                .to_string()
+        );
+        assert_eq!(updated.tui_argv().resume.as_deref(), Some(new_id.as_str()));
+        let job = agents_registry::read_job(home.path(), short).unwrap();
+        assert_eq!(job.session_id.as_deref(), Some(new_id.as_str()));
+        assert_eq!(job.cwd.as_deref(), Some(updated.cwd.as_str()));
+        assert_eq!(job.worker_generation.as_deref(), Some("gen-1"));
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
+        assert_eq!(state["futureField"]["preserved"], true);
+    }
+
+    #[test]
+    fn clear_does_not_retarget_another_background_session() {
+        let home = tempfile::tempdir().unwrap();
+        let short = "abcd1234";
+        let spec = sample(short, BackgroundLaunchKind::Resume);
+        seed_job(home.path(), short, &spec.session_id, &spec.cwd);
+        write_launch_spec(home.path(), short, &spec).unwrap();
+        let before = std::fs::read(launch_spec_path(home.path(), short)).unwrap();
+        assert!(retarget_background_session(
+            home.path(),
+            short,
+            "another-session",
+            &uuid::Uuid::new_v4().to_string(),
+            Path::new("/tmp/new-project")
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(launch_spec_path(home.path(), short)).unwrap(),
+            before
+        );
+        assert_eq!(
+            agents_registry::read_job(home.path(), short)
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some(spec.session_id.as_str())
+        );
     }
 
     #[test]

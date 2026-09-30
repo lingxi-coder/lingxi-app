@@ -37,13 +37,15 @@ export interface VoiceFlowTurnToken {
   sessionId: string;
   clientTurnId: string;
   purpose: 'composer' | 'flow';
+  turnId?: number;
 }
 
 export interface VoiceFlowTrackedSpeechEvent {
-  type: 'delta' | 'completion';
+  type: 'delta' | 'message' | 'completion';
   token: VoiceFlowTurnToken;
   text: string;
   turnId?: number;
+  terminal?: 'turn_ended' | 'stale';
 }
 
 export interface VoiceFlowBridge {
@@ -55,7 +57,7 @@ export interface VoiceFlowBridge {
     options?: { purpose?: 'composer' | 'flow' },
   ): { token: VoiceFlowTurnToken; queued: Promise<void> } | null;
   subscribeTrackedSpeech(token: VoiceFlowTurnToken, listener: (event: VoiceFlowTrackedSpeechEvent) => void): () => void;
-  cancel(turnId?: number): Promise<void>;
+  cancelTrackedPrompt(token: VoiceFlowTurnToken): Promise<void>;
 }
 
 export interface VoiceFlowAudio {
@@ -106,12 +108,13 @@ export class VoiceFlowController {
   private offTrackedSpeech: (() => void) | null = null;
   private relistenTimer: unknown = null;
   private currentToken: VoiceFlowTurnToken | null = null;
+  private cancellationTask: { token: VoiceFlowTurnToken; promise: Promise<boolean> } | null = null;
   private currentTurnId: number | undefined;
-  private segmenter: StreamingSpeechSegmenter | null = null;
   private speechQueue: string[] = [];
   private currentSpeechSegment: string | null = null;
   private speechInFlight = false;
   private streamComplete = false;
+  private acceptedSpeechText = '';
   private interruptContext: InterruptContext | null = null;
   private listeningActive = false;
   private listeningFinalizeRequested = false;
@@ -128,6 +131,11 @@ export class VoiceFlowController {
 
   async start(): Promise<void> {
     if (this.listeningActive || this.disposed) return;
+    const generationBeforeCancellation = this.generation;
+    // A playback failure can leave the backend turn alive. Do not let Retry
+    // silently replace its cancellation handle with a competing submission.
+    if (this.currentToken && !await this.cancelOwnedTurn(this.currentToken)) return;
+    if (!this.isCurrent(generationBeforeCancellation) || this.listeningActive || this.currentToken) return;
     const generation = this.bumpGeneration();
     this.clearTimers();
     this.resetTurnState();
@@ -137,15 +145,16 @@ export class VoiceFlowController {
 
   async stop(): Promise<void> {
     const generation = this.bumpGeneration();
-    const turnId = this.currentTurnId;
+    const token = this.currentToken;
     this.clearTimers();
-    this.cleanupTrackedSpeech();
     this.listeningActive = false;
+    // Revoke a queued credential hydration immediately, even if native audio
+    // teardown is slow. Both cancellations retain the captured old owner.
+    const cancelTurn = token ? this.cancelOwnedTurn(token) : Promise.resolve(true);
     try { await this.options.audio.cancel(); } catch { /* best-effort owner teardown */ }
-    if (turnId !== undefined) {
-      try { await this.options.bridge.cancel(turnId); } catch { /* the runtime may already be closed */ }
-    }
-    if (!this.isCurrent(generation)) return;
+    const released = await cancelTurn;
+    if (!this.isCurrent(generation) || !released) return;
+    this.cleanupTrackedSpeech();
     this.resetTurnState();
     this.update({ phase: 'paused', detail: '轻点 Orb 开始聆听' });
   }
@@ -179,14 +188,17 @@ export class VoiceFlowController {
   }
 
   dispose(): void {
-    if (this.disposed) return;
+    if (this.disposed) {
+      if (this.currentToken) void this.cancelOwnedTurn(this.currentToken);
+      return;
+    }
     this.disposed = true;
-    const turnId = this.currentTurnId;
+    const token = this.currentToken;
     this.clearTimers();
     this.cleanupTrackedSpeech();
-    this.resetTurnState();
     void this.options.audio.cancel().catch(() => undefined);
-    if (turnId !== undefined) void this.options.bridge.cancel(turnId).catch(() => undefined);
+    if (token) void this.cancelOwnedTurn(token);
+    else this.resetTurnState();
   }
 
   private async startListening(generation: number, interrupting: boolean): Promise<void> {
@@ -236,7 +248,7 @@ export class VoiceFlowController {
       this.scheduleRelisten();
       return;
     }
-    this.beginTrackedPrompt(transcript);
+    await this.beginTrackedPrompt(transcript);
   }
 
   private async finishListening(generation: number): Promise<void> {
@@ -257,13 +269,16 @@ export class VoiceFlowController {
     }
   }
 
-  private beginTrackedPrompt(text: string): void {
+  private async beginTrackedPrompt(text: string): Promise<void> {
+    const generationBeforeCancellation = this.generation;
+    if (this.currentToken && !await this.cancelOwnedTurn(this.currentToken)) return;
+    if (!this.isCurrent(generationBeforeCancellation)) return;
     this.cleanupTrackedSpeech();
-    this.segmenter = new StreamingSpeechSegmenter();
     this.speechQueue = [];
     this.currentSpeechSegment = null;
     this.speechInFlight = false;
     this.streamComplete = false;
+    this.acceptedSpeechText = '';
     this.currentTurnId = undefined;
     const tracked = this.options.bridge.sendTrackedPrompt(text, [], [], [], { purpose: 'flow' });
     if (!tracked) {
@@ -283,16 +298,31 @@ export class VoiceFlowController {
   }
 
   private handleTrackedSpeech(event: VoiceFlowTrackedSpeechEvent, generation: number): void {
-    if (!this.isCurrent(generation) || !this.currentToken || event.token.clientTurnId !== this.currentToken.clientTurnId) return;
+    if (!this.ownsToken(event.token)) return;
+    if (event.type === 'completion') {
+      // Even a failed/stopped playback keeps this subscription until its
+      // captured backend owner is actually terminal or cancellation succeeds.
+      this.releaseOwnedTurn(event.token);
+    }
+    if (!this.isCurrent(generation)) return;
     if (event.turnId !== undefined) {
       this.currentTurnId = event.turnId;
       this.update({ activeTurnId: event.turnId });
     }
-    if (!this.segmenter) this.segmenter = new StreamingSpeechSegmenter();
-    const segments = event.type === 'delta'
-      ? this.segmenter.append(event.text)
-      : this.segmenter.finish(event.text);
-    if (event.type === 'completion') this.streamComplete = true;
+    // Raw deltas may belong to an attempt the SDK immediately retracts. Only
+    // confirmed message chunks enter playback; completion owns relistening.
+    if (event.type === 'delta') return;
+    if (event.type === 'completion' && event.terminal === 'stale') {
+      void this.stop();
+      return;
+    }
+    let text = event.text;
+    if (event.type === 'message') this.acceptedSpeechText += text;
+    else {
+      text = text.startsWith(this.acceptedSpeechText) ? text.slice(this.acceptedSpeechText.length) : text;
+      this.streamComplete = true;
+    }
+    const segments = new StreamingSpeechSegmenter().finish(text);
     if (segments.length > 0) {
       this.speechQueue.push(...segments);
       void this.maybeStartSpeaking(generation);
@@ -368,18 +398,17 @@ export class VoiceFlowController {
   }
 
   private async commitInterrupt(transcript: string): Promise<void> {
-    const turnId = this.currentTurnId ?? this.interruptContext?.turnId;
+    const token = this.currentToken;
     const replacementPreferences = this.turnPreferences;
     this.interruptContext = null;
-    this.cleanupTrackedSpeech();
-    this.resetTurnState();
-    this.turnPreferences = replacementPreferences;
     const generation = this.bumpGeneration();
-    if (turnId !== undefined) {
-      try { await this.options.bridge.cancel(turnId); } catch { /* turn already ended */ }
+    if (token) {
+      if (!await this.cancelOwnedTurn(token)) return;
       if (!this.isCurrent(generation)) return;
     }
-    this.beginTrackedPrompt(transcript);
+    this.resetTurnState();
+    this.turnPreferences = replacementPreferences;
+    await this.beginTrackedPrompt(transcript);
   }
 
   private resumeAfterEmptyInterrupt(): void {
@@ -414,27 +443,29 @@ export class VoiceFlowController {
   }
 
   private fail(detail: string, phase: 'failed' | 'configurationRequired' = 'failed'): void {
+    const token = this.currentToken;
     this.bumpGeneration();
     this.clearTimers();
-    this.cleanupTrackedSpeech();
-    this.segmenter = null;
     this.speechQueue = [];
     this.currentSpeechSegment = null;
     this.speechInFlight = false;
     this.streamComplete = false;
+    this.acceptedSpeechText = '';
     this.interruptContext = null;
     this.listeningActive = false;
     this.listeningFinalizeRequested = false;
     this.turnPreferences = null;
     this.update({ phase, detail });
+    if (token) void this.cancelOwnedTurn(token, detail);
+    else this.cleanupTrackedSpeech();
   }
 
   private resetTurnState(): void {
-    this.segmenter = null;
     this.speechQueue = [];
     this.currentSpeechSegment = null;
     this.speechInFlight = false;
     this.streamComplete = false;
+    this.acceptedSpeechText = '';
     this.currentToken = null;
     this.currentTurnId = undefined;
     this.interruptContext = null;
@@ -445,7 +476,39 @@ export class VoiceFlowController {
   private cleanupTrackedSpeech(): void {
     this.offTrackedSpeech?.();
     this.offTrackedSpeech = null;
+  }
+
+  private ownsToken(token: VoiceFlowTurnToken): boolean {
+    return this.currentToken?.sessionId === token.sessionId
+      && this.currentToken?.clientTurnId === token.clientTurnId;
+  }
+
+  private releaseOwnedTurn(token: VoiceFlowTurnToken): void {
+    if (!this.ownsToken(token)) return;
     this.currentToken = null;
+    this.cleanupTrackedSpeech();
+  }
+
+  private cancelOwnedTurn(token: VoiceFlowTurnToken, failureDetail?: string): Promise<boolean> {
+    if (!this.ownsToken(token)) return Promise.resolve(true);
+    if (this.cancellationTask?.token.sessionId === token.sessionId
+      && this.cancellationTask.token.clientTurnId === token.clientTurnId) return this.cancellationTask.promise;
+    const attempt = { token, promise: Promise.resolve(false) };
+    attempt.promise = this.options.bridge.cancelTrackedPrompt(token).then(() => {
+      this.releaseOwnedTurn(token);
+      return true;
+    }).catch((cause: unknown) => {
+      if (!this.ownsToken(token)) return true;
+      if (!this.disposed) {
+        const message = cause instanceof Error ? cause.message : '无法停止上一条心流问题。';
+        this.update({ phase: 'failed', detail: `${failureDetail ? `${failureDetail}；` : ''}停止上一条心流问题失败：${message}` });
+      }
+      return false;
+    }).finally(() => {
+      if (this.cancellationTask === attempt) this.cancellationTask = null;
+    });
+    this.cancellationTask = attempt;
+    return attempt.promise;
   }
 
   private clearTimers(): void {

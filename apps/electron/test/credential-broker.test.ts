@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import {
   createMacCredentialBrokerClient,
@@ -58,9 +61,12 @@ test('plugin secrets use an independent broker service and launch envelope map',
     },
   });
 
-  assert.deepEqual(await resolveSessionLaunchPluginSecrets(broker), {
+  const secrets = await resolveSessionLaunchPluginSecrets(broker);
+  assert.deepEqual(JSON.parse(JSON.stringify(secrets)), {
     'weather@official': { API_KEY: 'plugin-secret' },
   });
+  assert.equal(Object.getPrototypeOf(secrets), null);
+  assert.equal(Object.getPrototypeOf(secrets['weather@official']), null);
   assert.equal(requests[1]?.['service'], 'com.lingxi.plugin-secrets.v1');
   assert.equal(requests[2]?.['service'], 'com.lingxi.plugin-secrets.v1');
   assert.equal(requests[2]?.['account'], 'weather%40official/API_KEY');
@@ -306,4 +312,104 @@ test('Fusion credential routes require opt-in for normal prompts and include cus
   settings.fusion.enabled = true;
   assert.deepEqual(resolveFusionCredentialProviderIds(settings), ['custom', 'backup', 'kimi']);
   assert.deepEqual(resolveFusionCredentialProviderIds({ fusion: { enabled: true, panelModels: [null, 'broken', { profile: 42 }] } }), []);
+});
+
+
+test('plugin launch secrets preserve reserved property names without modifying inherited objects', async () => {
+  const broker = createMacCredentialBrokerClient({
+    transport: {
+      request: async (request) => {
+        if (request.op === 'health') return { ok: true, protocol_version: 1, build_version: 'test' };
+        if (request.op === 'list') return { ok: true, protocol_version: 1, accounts: [
+          'constructor/API_KEY', 'weather/__proto__', 'weather/constructor',
+        ] };
+        if (request.op === 'retrieve') return { ok: true, protocol_version: 1, present: true, payload: `fake:${request.account}` };
+        throw new Error('unexpected fake broker operation');
+      },
+    },
+  });
+  const inheritedDescriptor = Object.getOwnPropertyDescriptor(Object, 'API_KEY');
+  const secrets = await resolveSessionLaunchPluginSecrets(broker);
+  const decoded = JSON.parse(JSON.stringify(secrets));
+  assert.equal(decoded.constructor.API_KEY, 'fake:constructor/API_KEY');
+  assert.equal(decoded.weather.__proto__, 'fake:weather/__proto__');
+  assert.equal(decoded.weather.constructor, 'fake:weather/constructor');
+  assert.equal(Object.getPrototypeOf(secrets), null);
+  assert.equal(Object.getPrototypeOf(secrets['constructor']), null);
+  assert.equal(Object.getPrototypeOf(secrets['weather']), null);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(Object, 'API_KEY'), inheritedDescriptor);
+});
+
+function fakeCredentialChild(onRequest: (request: { op: string }, child: ChildProcessWithoutNullStreams) => void) {
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+  const stdin = new PassThrough();
+  Object.assign(child, {
+    stdin,
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: () => true,
+  });
+  const chunks: Buffer[] = [];
+  stdin.on('data', (chunk: Buffer) => chunks.push(chunk));
+  stdin.on('finish', () => onRequest(JSON.parse(Buffer.concat(chunks).toString('utf8')), child));
+  return child;
+}
+
+test('credential helper preserves Unicode payloads split at every stdout byte', async () => {
+  const fakeSecret = 'sëcret-密钥-🔑';
+  const broker = createMacCredentialBrokerClient({
+    platform: 'darwin', isPackaged: true, channel: 'development', binaryPath: '/fake-credential-helper',
+    spawnProcess: () => fakeCredentialChild((request, child) => {
+      const response = request.op === 'health'
+        ? { ok: true, protocol_version: 1, build_version: 'test' }
+        : { ok: true, protocol_version: 1, present: true, payload: fakeSecret };
+      for (const byte of Buffer.from(JSON.stringify(response))) child.stdout.emit('data', Buffer.from([byte]));
+      child.emit('close', 0, null);
+    }),
+  });
+  assert.equal(await broker!.resolve('openai'), fakeSecret);
+});
+
+test('credential helper enforces its raw response byte limit before decoding', async () => {
+  let killed = false;
+  const broker = createMacCredentialBrokerClient({
+    platform: 'darwin', isPackaged: true, channel: 'development', binaryPath: '/fake-credential-helper',
+    spawnProcess: () => {
+      const child = fakeCredentialChild((_request, process) => {
+        process.stdout.emit('data', Buffer.alloc(128 * 1024, 0xc3));
+        process.stdout.emit('data', Buffer.from([0xa9]));
+      });
+      child.kill = () => { killed = true; return true; };
+      return child;
+    },
+  });
+  await assert.rejects(broker!.health(), /response too large/);
+  assert.equal(killed, true);
+});
+
+test('credential helper joins split UTF-8 stderr bytes for error diagnostics', async () => {
+  const broker = createMacCredentialBrokerClient({
+    platform: 'darwin', isPackaged: true, channel: 'development', binaryPath: '/fake-credential-helper',
+    spawnProcess: () => fakeCredentialChild((_request, child) => {
+      for (const byte of Buffer.from('fake erreur: verrouillé')) child.stderr.emit('data', Buffer.from([byte]));
+      child.emit('close', 1, null);
+    }),
+  });
+  await assert.rejects(broker!.health(), /fake erreur: verrouillé/);
+});
+
+
+test('credential helper accepts a response exactly at its raw byte limit with a split Unicode character', async () => {
+  const health = Buffer.from(JSON.stringify({ ok: true, protocol_version: 1, build_version: 'tëst' }));
+  const response = Buffer.concat([health, Buffer.alloc(128 * 1024 - health.length, 0x20)]);
+  const split = response.indexOf(Buffer.from('ë')) + 1;
+  const broker = createMacCredentialBrokerClient({
+    platform: 'darwin', isPackaged: true, channel: 'development', binaryPath: '/fake-credential-helper',
+    spawnProcess: () => fakeCredentialChild((_request, child) => {
+      child.stdout.emit('data', response.subarray(0, split));
+      child.stdout.emit('data', response.subarray(split));
+      child.emit('close', 0, null);
+    }),
+  });
+  assert.deepEqual(await broker!.health(), { protocolVersion: 1, buildVersion: 'tëst' });
 });

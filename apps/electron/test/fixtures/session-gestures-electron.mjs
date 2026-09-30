@@ -83,6 +83,10 @@ async function main() {
     await down(gamma);
     await input('mouseMove', { x: gamma.x + 12, y: gamma.y }, { button: 'left', modifiers: ['leftButtonDown'] });
     await wait(`${selector('gamma')}.closest('.sidebar-tree-row')?.dataset.dragging === 'true'`);
+    // The feedback marks the source during initialization; the sensor accepts
+    // moves only after the renderer completes that phase. Advance rendered
+    // frames before sending the destination move instead of racing activation.
+    await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     await input('mouseMove', alpha, { button: 'left', modifiers: ['leftButtonDown'] });
     const alphaHit = await run(`(() => {
       const element = document.elementFromPoint(${alpha.x}, ${alpha.y});

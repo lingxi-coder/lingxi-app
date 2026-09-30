@@ -1,7 +1,7 @@
 # Code Optimizer — 剩余待改清单
 
 日期：2026-08-25
-范围：`lingxi-code/` + `clients/`（排除 `third_party`、`claude-code`、`claw-code`、`codex`、`target`）
+范围：`lingxi-code/` + `apps/`（排除 `third_party`、`claude-code`、`claw-code`、`codex`、`target`）
 来源：`/code-optimizer` 审计 + 已落地的 batch 1 / batch 2。
 
 本文原列剩余待改项。2026-08-25 续做一轮后，文中 16 条「建议改」中 15 条已落地；Grep 自定义正则上限因与 Claude Code 2.1.245 的 ripgrep 默认值不一致而撤回（见下方说明）。
@@ -39,7 +39,7 @@
 | | |
 |---|---|
 | **严重度** | HIGH |
-| **文件** | `crates/apps/cli/src/init.rs`（约 411–589 行） |
+| **文件** | `apps/cli/host/src/init.rs`（约 411–589 行） |
 | **现状** | `load_provider_profiles`、`load_settings_ax_screen_reader`、`load_always_thinking_enabled`、`load_settings_model`、`load_settings_plans_directory`、`load_settings_api_key_helper`、`load_settings_company_announcements`、`load_settings_emoji_completion_enabled`、`load_lingxi_md_excludes`、`load_routing` 各自 `Settings::load_scoped`，启动时反复读盘解析同一套 JSON。 |
 | **建议** | 仿 `engine-desktop` 的 `load_merged_settings`：按 `(project_dir, include_user, include_project)` 缓存一次 `EffectiveSettings`，各 helper 只取字段。 |
 | **参考** | `crates/apps/engine-desktop/src/lib.rs` `load_merged_settings`（约 4265 行）已做。 |
@@ -122,7 +122,7 @@
 | | |
 |---|---|
 | **严重度** | MEDIUM |
-| **文件** | `crates/tui-core/src/render/markdown.rs` `render_with_width`（约 163 行） |
+| **文件** | `apps/cli/tui-core/src/render/markdown.rs` `render_with_width`（约 163 行） |
 | **现状** | transcript 已有 committed wrap cache（`tui/src/transcript.rs`）。wrap cache 在 `committed_len` 变化时整表失效，每个 cell 会再走一遍 pulldown-cmark。 |
 | **建议** | 在 `render_with_width` 做 LRU（约 64 条），key = `(text hash, width, theme)`。`StyledLine` 已 `Clone`。 |
 | **验证** | `tui-core` markdown 渲染测试；确认 theme 切换不会串色。 |
@@ -132,7 +132,7 @@
 | | |
 |---|---|
 | **严重度** | MEDIUM |
-| **文件** | `crates/apps/cli/src/stream_json.rs`（`OutboundTx` / `enqueue_line` / `spawn_drain_task`） |
+| **文件** | `apps/cli/host/src/stream_json.rs`（`OutboundTx` / `enqueue_line` / `spawn_drain_task`） |
 | **现状** | `mpsc::unbounded_channel`。`--include-partial-messages` 的 `stream_event` 在 stdout 慢时会无限堆积。heartbeat 已有 `CoalescedHeartbeatLines`。 |
 | **建议** | **不要**把 result/init/assistant 改成可丢。对 `stream_event` 单独做 pending cap（例如 8192）：`Arc<AtomicUsize>` 在 enqueue +1、drain -1，超限丢新的 stream_event。协议帧保持 FIFO。 |
 | **验证** | `stream_json` 里 `stream_event_*` 测试；确认 result 帧从不丢。 |
@@ -163,7 +163,7 @@
 | | |
 |---|---|
 | **严重度** | MEDIUM |
-| **文件** | `clients/ios/Sources/Conversation/ConversationSource.swift` |
+| **文件** | `apps/ios/native/Sources/Conversation/ConversationSource.swift` |
 | **现状** | 流式替换走 `streamingIndex`（已优化）。`replaceMessage` 仍 `messages.firstIndex { $0.id == id }` + `items.firstIndex` 扫 message case（约 2043–2073 行）。长会话每次 token/替换都是 O(n)。 |
 | **建议** | `ConversationModel` 维护 `[UUID: Int]`：`messageIndexByID`、`itemIndexByMessageID`。`messages`/`items` 的 `didSet` 重建；`indexOfMessage` 命中则校验下标仍指向同一 id，否则 rebuild。先替换这两处，tools/phases 等小数组可后做。 |
 | **验证** | iOS conversation 单测；确认 streaming 稳定 id 不被 SwiftUI 整表刷新。 |
@@ -173,27 +173,27 @@
 | | |
 |---|---|
 | **严重度** | LOW |
-| **文件** | `clients/electron/src/renderer/components/BetaDesktop.tsx` |
+| **文件** | `apps/electron/src/renderer/components/BetaDesktop.tsx` |
 | **现状** | `richPromptText`（约 273–284）在 DOM 子节点上 `value +=`；语音 `onresult`（约 627–631）对 `event.results` 做 `transcript +=`。 |
 | **建议** | 改成 `string[]` + `join('')`。markdown.ts 的 list continuation `+=` 可以不管。 |
-| **验证** | `clients/electron` 的 markdown / conversation 测试。 |
+| **验证** | `apps/electron` 的 markdown / conversation 测试。 |
 
 ### 15. Electron 未打 asar
 
 | | |
 |---|---|
 | **严重度** | MEDIUM（包体积 / 启动 IO） |
-| **文件** | `clients/electron/scripts/package-mac.mjs`（约 141–144 行） |
+| **文件** | `apps/electron/scripts/package-mac.mjs`（约 141–144 行） |
 | **现状** | 把 `out/` 和 `node_modules` 拷进 `Contents/Resources/app/` 未打包。已删 `default_app.asar`。 |
 | **建议** | 加 devDependency `@electron/asar`，`createPackage(appDir, resources/app.asar)` 后删未打包 `app/`。`bridge-server` 继续放 `Resources/bin/`（不要进 asar）。 |
-| **验证** | `clients/electron/test/packaging.test.mjs` + `verify:package`。 |
+| **验证** | `apps/electron/test/packaging.test.mjs` + `verify:package`。 |
 
 ### 16. Android release 未开 R8
 
 | | |
 |---|---|
 | **严重度** | MEDIUM（APK 体积） |
-| **文件** | `clients/android/app/build.gradle.kts`（约 61–71 行）、`proguard-rules.pro` |
+| **文件** | `apps/android/native/app/build.gradle.kts`（约 61–71 行）、`proguard-rules.pro` |
 | **现状** | `release { isMinifyEnabled = false }`。UniFFI/JNI/JNA keep rules 已准备好，但尚未通过 minified release 的真机/模拟器冒烟。 |
 | **建议** | `isMinifyEnabled = true`（先不要 `isShrinkResources`）。keep：`native` 方法、`uniffi.**`、`com.lingxi.code.**`、JNA。真机/模拟器跑 UniFFI 冒烟后再考虑 shrinkResources。 |
 | **风险** | UniFFI 反射/JNI 被 strip 会运行时崩。没过设备验证不要合。 |

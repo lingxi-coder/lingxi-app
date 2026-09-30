@@ -34,15 +34,15 @@ to be byte-identical binaries.
 
 - `platform-api`, `orchestrator`, and `client-adapter`: emit actual preparing,
   summarizing, restoring, complete, error, and cancelled lifecycle events.
-- `client-protocol` and `clients/shared`: append `compaction_status` without
+- `client-protocol` and `packages/bridge-client`: append `compaction_status` without
   changing existing variant ordinals or the legacy SDK stream sequence.
 - `apps/bridge-server`: deliver manual compact events even without an active turn.
 - `tui-core` and `tui`: start the percentage only at summarizing, preserve the
   clock across repeated phases, and retain the manual command guard until return.
-- `clients/electron`: reduce lifecycle events into one compact row, preserve the
+- `apps/electron`: reduce lifecycle events into one compact row, preserve the
   clock across component remounts, enrich the row with completion metrics, and
   settle it on cancellation, error, or disconnect.
-- `clients/android` and `clients/ios`: consume the same lifecycle, retain the
+- `apps/android/native` and `apps/ios/native`: consume the same lifecycle, retain the
   summary clock, and stop the indicator on all terminal outcomes. iOS accepts
   connection-scoped compaction events outside an active turn.
 

@@ -4,22 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-LingXi's product repository: CLI/TUI, desktop and mobile hosts, native clients and
-product resources. The shared agent runtime is a pinned Git dependency from
+LingXi's product repository, checked out as `~/lingxi/lingxi-app`: CLI/TUI,
+desktop and mobile hosts, native clients and product resources. The shared agent runtime is a pinned Git dependency from
 `lingxi-coder/harness-runtime`, not a local collection of engine crates.
 
 ## Repo navigation
 
-- `Cargo.toml` / `crates/` — eight Rust workspace members: product entrypoints, TUI and product tools.
-- `clients/` — Electron, iOS, Android, Web, shared TypeScript SDK, translations and voice configuration.
+- `Cargo.toml` — eight Rust workspace members across product entrypoints, shared packages and tools.
+- `apps/` — Electron and Web; iOS/Android `native/` applications with sibling `ffi/` Rust wrappers; CLI `host/`, `tui/` and `tui-core/`; Bridge server.
+- `packages/` — private TypeScript Bridge client and Rust configuration requirements.
+- `tools/ios-use/` — product iOS control tool.
+- `resources/` — shared translations, voice models and audio configuration.
+- `build-support/` — shared Rust build metadata.
 - `docs/` — current architecture and guides; historical notes are identified in `docs/README.md`.
 - `packaging/` — npm and Python distribution packaging.
 - `assets/brand/` — design source assets; absence of a runtime import does not make them disposable.
 - `scripts/`, `.github/` — repository tooling and CI.
 
-Root `claude-code/`, `codex/`, `backups/`, `output/` and code-intelligence indexes
-are ignored local material. Scope sweeps to tracked product files; do not recurse
-into reference checkouts or delete user state and signed release artifacts.
+Local reference checkouts and historical/generated material are organized under
+`~/lingxi/.references/` and `~/lingxi/.local-state/lingxi-app/`; see the multi-repo
+guide and migration audit for the layout. Active `.claude/` and `.claire/` trees,
+runtime state, `.codegraph/` indexes, package caches and signed client artifacts
+remain local to the product checkout. Scope sweeps to tracked product files; preserve local state
+and reference repository history.
 
 ## Build and test
 
@@ -41,24 +48,30 @@ Resolve upstream sources with `python3 scripts/lib/runtime_source.py --root`. Ru
 ### Clients
 
 ```bash
-./clients/setup.sh          # idempotent bootstrap for a fresh clone
+./apps/setup.sh          # idempotent bootstrap for a fresh clone
 ```
 
-`clients/shared` (`@lingxi/bridge-client`) **must be built before electron** — electron resolves it via `file:../shared` and consumes the compiled `dist/`.
+`packages/bridge-client` (`@lingxi/bridge-client`) **must be built before electron** — electron resolves it via `file:../../packages/bridge-client` and consumes the compiled `dist/`.
 
 ```bash
-cd clients/shared  && npm install && npm run build
-cd clients/electron && npm install && npm run typecheck && npm test
-node --import ../shared/node_modules/tsx/dist/loader.mjs --test test/<one>.test.ts
+cd ~/lingxi/lingxi-app
+npm --prefix packages/bridge-client install
+npm --prefix packages/bridge-client run build
+npm --prefix apps/electron install
+npm --prefix apps/electron run typecheck
+npm --prefix apps/electron test
+# One Electron test, from the Electron package directory:
+cd apps/electron
+node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test test/<one>.test.ts
 ```
 
-Mobile builds are optional in `setup.sh` and skip cleanly without their toolchains: Android needs `cargo-ndk` + NDK (`clients/android/scripts/build-jni.sh`); iOS needs `xcodebuild` + `xcodegen` (`clients/ios/scripts/build-xcframework.sh`, then `xcodegen generate`).
+Mobile builds are optional in `setup.sh` and skip cleanly without their toolchains: Android needs `cargo-ndk` + NDK (`apps/android/native/scripts/build-jni.sh`); iOS needs `xcodebuild` + `xcodegen` (`apps/ios/native/scripts/build-xcframework.sh`, then `xcodegen generate`).
 
 ## Architecture
 
 ### Product and runtime ownership
 
-`crates/apps/cli`, `crates/apps/bridge-server`, `crates/apps/ios-framework` and `crates/apps/android-aar`
+`apps/cli/host`, `apps/bridge-server`, `apps/ios/ffi` and `apps/android/ffi`
 consume the fixed upstream `harness-runtime` desktop/mobile profiles. Shared
 orchestration, tools, permissions, sessions and protocol types live upstream.
 The local `scripts/checks/check-runtime-dependency.sh` verifies the common Git identity;
@@ -92,7 +105,7 @@ Key flows (turn loop, tool dispatch, compaction, subagent spawn) are sketched in
 
 From `AGENTS.md`, which governs this and should be read in full before packaging:
 
-- Always package through `npm run package:mac:flare` (or `scripts/package-macos-flare.sh`) from `clients/electron`. Do **not** bypass the wrapper with `npm run package:mac`.
+- Always package through `npm run package:mac:flare` (or `scripts/package-macos-flare.sh`) from `apps/electron`. Do **not** bypass the wrapper with `npm run package:mac`.
 - Team: Flare App, Inc., `AZ4AX7J833` — the same as iOS. The wrapper rejects a different Team ID and selects the valid `Apple Development` identity by certificate hash.
 - Development packaging uses the isolated `development` credential channel and needs **Mac** App Development profiles for `com.lingxi.code.development` and `com.lingxi.code.credential-broker.development`. An iOS Xcode Managed Profile is not a substitute.
 - Missing profiles are created through the checked-in provisioning bootstrap target with Xcode Automatic Signing (`-allowProvisioningUpdates -allowProvisioningDeviceRegistration`) — never by automating the Apple Developer website.
@@ -104,6 +117,6 @@ From `AGENTS.md`, which governs this and should be read in full before packaging
 ## Things that will cost you time
 
 - **`cargo check` is blind to test modules.** Use `cargo build --tests --keep-going` to surface every error at once, and `--all-features` — a feature-gated subsystem (mobile UniFFI) is invisible without it.
-- **Generated artifacts are not sources.** `clients/ios/Generated/` and the Android JNI bindings are gitignored build output — change a wire DTO without regenerating and the clients cannot compile. `clients/ios/Resources/Localizable.xcstrings` and Android `strings.xml` are generated from `clients/translations/*.json` by `generate.py`; edit the JSON.
+- **Generated artifacts are not sources.** `apps/ios/native/Generated/` and the Android JNI bindings are gitignored build output — change a wire DTO without regenerating and the clients cannot compile. `apps/ios/native/Resources/Localizable.xcstrings` and Android `strings.xml` are generated from `resources/translations/*.json` by `generate.py`; edit the JSON.
 - **`client-protocol --features uniffi` has a metadata budget.** The upstream runtime suite runs `cargo test -p client-protocol --features uniffi --test uniffi_metadata_budget_test`; blowing it breaks both mobile builds while ordinary gates stay green.
 - **A green test run is not a green commit.** Uncommitted changes can make the working tree compile while the committed tree does not; and a falling test *count* at zero failures means a binary aborted early, not that everything passed.

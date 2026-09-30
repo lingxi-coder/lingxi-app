@@ -220,7 +220,7 @@ TurnLoopState 每次入口调用新建，不能提升到 session/runtime。模�
 
 ### 7.1 原生产物必须来自待验收源码
 
-Xcode 链接 `clients/ios/Frameworks/LingxiCodeFFI.xcframework`，Gradle 从 `app/src/<play|direct>/jniLibs` 打包 Rust 库；普通客户端构建不会自动重编 Rust。原生验证固定为以下依赖顺序，任何一步未完成，后续结果不能算作整条链路通过：
+Xcode 链接 `apps/ios/native/Frameworks/LingxiCodeFFI.xcframework`，Gradle 从 `app/src/<play|direct>/jniLibs` 打包 Rust 库；普通客户端构建不会自动重编 Rust。原生验证固定为以下依赖顺序，任何一步未完成，后续结果不能算作整条链路通过：
 
 1. 记录当前待验收源码指纹，包含影响构建的未提交与未跟踪文件、Cargo.lock、构建脚本及 feature/target；只记 HEAD 不足以标识当前脏工作区。
 2. 从该源码通过仓库现有脚本构建库、头文件和生成绑定，记录退出码、构建日志、输出路径与 SHA-256。成套产物成功后才能用于客户端构建，不能把新绑定与旧库混用。构建输入在过程中改变时，重新构建受影响产物。
@@ -231,20 +231,20 @@ Xcode 链接 `clients/ios/Frameworks/LingxiCodeFFI.xcframework`，Gradle 从 `ap
 
 ### 7.2 iOS 执行矩阵
 
-- 完整原生产物使用 `bash clients/ios/scripts/build-xcframework.sh`（仓库根目录）。本机仅做 Apple Silicon 模拟器验证时可使用 `LINGXI_SIM_ARM64_ONLY=1`，必须将证据标为 simulator-only；这不能代表设备 slice 已构建或通过。
+- 完整原生产物使用 `bash apps/ios/native/scripts/build-xcframework.sh`（仓库根目录）。本机仅做 Apple Silicon 模拟器验证时可使用 `LINGXI_SIM_ARM64_ONLY=1`，必须将证据标为 simulator-only；这不能代表设备 slice 已构建或通过。
 - 脚本支持 LINGXI_GENERATED_DIR、LINGXI_FRAMEWORKS_DIR、LINGXI_XCFRAMEWORK_BUILD_DIR，用于隔离生成。使用隔离路径时，先验证绑定/框架成套成功，再成套用于目标工程；不能让 Xcode 仍链接默认目录的旧库。
-- 源文件拆分后从 `clients/ios` 运行 `xcodegen generate`，核对 Sources/Generated/framework 引用。用独立 DerivedData 构建，避免旧链接结果混入验收。
+- 源文件拆分后从 `apps/ios/native` 运行 `xcodegen generate`，核对 Sources/Generated/framework 引用。用独立 DerivedData 构建，避免旧链接结果混入验收。
 - 使用本机实际可用的模拟器 UDID，运行项目 `LingxiCode.xcodeproj` 的 `LingxiCodeStore / StoreDebug` 和 `LingxiCodeFull / FullDebug` 构建及相关测试；沿用 scheme 的 zh-Hans 测试语言。不能使用未安装的固定设备名称作为默认前提。
 - 至少包含现有 EngineRoundtripTests、SessionResumeTests、ConversationTurnCompletionTests、IOSAudioServiceTests，以及此次变更触及的会话恢复/监听器测试。核对 FFI 条件编译实际启用和测试数量，保留每个 scheme 的结果文件；模拟器未覆盖的设备专属行为单独报告。
 
 ### 7.3 Android 执行矩阵
 
-每种变体各自完成“原生构建 → 客户端构建 → 安装测试”的链路；下列 Gradle 命令从 `clients/android` 执行，JNI 脚本从仓库根目录执行：
+每种变体各自完成“原生构建 → 客户端构建 → 安装测试”的链路；下列 Gradle 命令从 `apps/android/native` 执行，JNI 脚本从仓库根目录执行：
 
 | 变体 | 原生产物 | 编译、单测与静态检查 | 设备/模拟器测试 |
 |---|---|---|---|
-| Play | `bash clients/android/scripts/build-jni.sh --variant play` | `./gradlew :app:assemblePlayDebug :app:testPlayDebugUnitTest :app:lintPlayDebug` | `./gradlew :app:connectedPlayDebugAndroidTest` |
-| Direct | `bash clients/android/scripts/build-jni.sh --variant direct` | `./gradlew :app:assembleDirectDebug :app:testDirectDebugUnitTest :app:lintDirectDebug` | `./gradlew :app:connectedDirectDebugAndroidTest` |
+| Play | `bash apps/android/native/scripts/build-jni.sh --variant play` | `./gradlew :app:assemblePlayDebug :app:testPlayDebugUnitTest :app:lintPlayDebug` | `./gradlew :app:connectedPlayDebugAndroidTest` |
+| Direct | `bash apps/android/native/scripts/build-jni.sh --variant direct` | `./gradlew :app:assembleDirectDebug :app:testDirectDebugUnitTest :app:lintDirectDebug` | `./gradlew :app:connectedDirectDebugAndroidTest` |
 
 脚本分别构建 arm64-v8a 与 x86_64；Direct 启用 android-computer-use，Play 不启用。记录两种变体产物及被测试设备的 ABI。生成 Kotlin 路径由两种变体共用，因此顺序执行并核对绑定与各自库匹配，不能假设最后生成的一份天然适用于所有变体。脚本的 LINGXI_ANDROID_JNILIBS_DIR / LINGXI_KOTLIN_OUT 可用于隔离完整产物，之后仍需核对真实 Gradle 输入。
 

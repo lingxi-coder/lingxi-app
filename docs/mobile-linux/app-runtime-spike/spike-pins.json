@@ -16,10 +16,10 @@
   },
   "proot": {
     "source": "built locally from the pinned OpenMinis PRoot fork — never downloaded",
-    "build_command": "clients/android/scripts/build-mobile-linux-native.sh --variant <play|direct>",
+    "build_command": "apps/android/native/scripts/build-mobile-linux-native.sh --variant <play|direct>",
     "artifacts": [
-      "clients/android/app/src/<variant>/jniLibs/arm64-v8a/libproot.so",
-      "clients/android/app/src/<variant>/jniLibs/arm64-v8a/libproot-loader.so"
+      "apps/android/native/app/src/<variant>/jniLibs/arm64-v8a/libproot.so",
+      "apps/android/native/app/src/<variant>/jniLibs/arm64-v8a/libproot-loader.so"
     ],
     "pin_source": "docs/mobile-linux/mobile-linux-pins.json (components.proot, components.openminis)"
   },

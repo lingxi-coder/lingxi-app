@@ -42,7 +42,7 @@ find "${INSTALL_STAGED}" -mindepth 1 -type d -exec chmod 0555 {} +
 chmod 0755 "${INSTALL_STAGED}"
 
 for _ in 1 2; do
-  "${REPO_ROOT}/clients/ios/scripts/install-staged-local-app-runtime.sh" \
+  "${REPO_ROOT}/apps/ios/native/scripts/install-staged-local-app-runtime.sh" \
     --staged "${INSTALL_STAGED}" \
     --destination "${INSTALL_DEST}"
 done
@@ -55,11 +55,11 @@ expect_rejection "second install nested the staged runtime inside the previous c
 test -f "${INSTALL_DEST}/runtime-manifest.json"
 test -f "${INSTALL_DEST}/node_modules/vite/bin/vite.js"
 expect_rejection "a missing staged runtime to fail the install" \
-  "${REPO_ROOT}/clients/ios/scripts/install-staged-local-app-runtime.sh" \
+  "${REPO_ROOT}/apps/ios/native/scripts/install-staged-local-app-runtime.sh" \
   --staged "${TEMP_ROOT}/install-src/absent" \
   --destination "${INSTALL_DEST}" 2>/dev/null
 
-RUNTIME_ASSET_VALIDATOR="${REPO_ROOT}/clients/ios/scripts/validate-local-app-build-assets.sh"
+RUNTIME_ASSET_VALIDATOR="${REPO_ROOT}/apps/ios/native/scripts/validate-local-app-build-assets.sh"
 ROOTFS_MANIFEST="${TEMP_ROOT}/ios-rootfs-manifest.json"
 printf '{"local_app_runtime":false}\n' > "${ROOTFS_MANIFEST}"
 expect_rejection "FullDebug iphoneos to reject a bare rootfs" \

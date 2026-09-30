@@ -1,7 +1,7 @@
 # Slash-commands + CLI Surface Parity Audit — v2.1.186 vs LingXi
 **Audit date:** 2026-06-24
 **Oracle binary:** `/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude` (v2.1.186)
-**LingXi CLI:** `crates/apps/cli/src/argv.rs`
+**LingXi CLI:** `apps/cli/host/src/argv.rs`
 **LingXi commands:** `lingxi-code/command-api/src/builtin_support/names.rs`
 
 ## Summary: 28 confirmed gaps (8 critical, 12 medium, 8 low) + 0 slash-command roster gaps

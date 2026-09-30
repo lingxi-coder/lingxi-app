@@ -9,10 +9,10 @@ rebuilding them — ended up COMMITTED, because:
      trailing slash (`Generated/`, `app/src/main/jniLibs/`), which matches a
      DIRECTORY ONLY, so a symlink at the same path slipped past and surfaced as
      untracked; and
-  2. a broad `git add clients/` then swept it into the index.
+  2. a broad `git add apps/` then swept it into the index.
 
 The blob that lands is mode 120000 whose content is an absolute path on one
-machine. For `clients/android/app/libs` the target was its own checked-out path,
+machine. For `apps/android/native/app/libs` the target was its own checked-out path,
 so checking it out replaced the real build inputs with a self-referential link
 and every tree walk afterwards died with ELOOP — `check-brand-leaks.sh` stopped
 reporting and started crashing, which masked 21 real findings until the loop was
@@ -34,7 +34,7 @@ import sys
 def main() -> int:
     # From the REPO ROOT, not the caller's cwd. The wrapper runs this from
     # the repository root, and `git ls-files` is scoped to the current directory: the
-    # first version of this gate therefore never looked at `clients/`, which is
+    # first version of this gate therefore never looked at `apps/`, which is
     # where both real incidents happened, and printed "OK: 0 tracked symlinks"
     # while the offending symlink sat in the index. A comparator whose coverage
     # was silently truncated reports all-clear in exactly the same words as a

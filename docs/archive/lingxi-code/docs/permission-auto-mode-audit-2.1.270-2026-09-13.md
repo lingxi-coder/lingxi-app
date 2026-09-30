@@ -707,7 +707,7 @@ strings in the iOS/Android cron UI. They are recorded here only so the finding
 is not lost, because they are **not on main and not this session's files**:
 
 ```
-git show HEAD:clients/android/.../cron/CronScreen.kt | grep -c 'Text(\s*"\|text = "'   →  1
+git show HEAD:apps/android/native/.../cron/CronScreen.kt | grep -c 'Text(\s*"\|text = "'   →  1
 the working copy of the same file                                                    → 15
 ```
 
@@ -733,7 +733,7 @@ as your own backlog unless you check `originSessionId`.
 
 Four hazards for whoever does it, each confirmed from two independent records:
 
-1. `clients/translations/*.json` is the SOURCE. The iOS `.xcstrings` and Android
+1. `resources/translations/*.json` is the SOURCE. The iOS `.xcstrings` and Android
    `strings.xml` catalogs are GENERATED — editing a catalog directly is
    overwritten.
 2. iOS keeps placeholders in the KEY and Android in the VALUE, so one visible

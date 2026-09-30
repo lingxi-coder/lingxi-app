@@ -49,7 +49,7 @@ Mac:
 - PRoot binaries built from the pinned fork (one-time):
 
   ```sh
-  clients/android/scripts/build-mobile-linux-native.sh --variant direct
+  apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
   ```
 
 Device:
@@ -79,7 +79,7 @@ filled from `spike-pins.candidate.json` on the first staging run.
 | Artifact | Source | sha256 | Staged how |
 | --- | --- | --- | --- |
 | Alpine minirootfs 3.21.3 aarch64 | `https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz` | pinned (`ead8a4b3…`, inherited from `mobile-linux-pins.json`) | curl on Mac → adb push → device-side `sha256sum` re-check → `tar -xzf` on device (toybox tar preserves the busybox applet symlinks; `adb push` of an extracted tree would not) |
-| PRoot + unbundled loader | built locally by `build-mobile-linux-native.sh` from the pinned OpenMinis fork (`mobile-linux-pins.json` components) — never downloaded | pinned via source commits; ELF `e_machine==183` checked at pack | copied from `clients/android/app/src/<variant>/jniLibs/arm64-v8a/{libproot.so,libproot-loader.so}` → `adb push` as `bin/proot`, `bin/loader` |
+| PRoot + unbundled loader | built locally by `build-mobile-linux-native.sh` from the pinned OpenMinis fork (`mobile-linux-pins.json` components) — never downloaded | pinned via source commits; ELF `e_machine==183` checked at pack | copied from `apps/android/native/app/src/<variant>/jniLibs/arm64-v8a/{libproot.so,libproot-loader.so}` → `adb push` as `bin/proot`, `bin/loader` |
 | Node runtime (`nodejs` apk + shared-library closure) | Alpine v3.21 aarch64 repos, `https://dl-cdn.alpinelinux.org/alpine/v3.21/<repo>/aarch64/<name>-<version>.apk`; closure resolved once via `docker run --platform linux/arm64 alpine:3.21.3 apk fetch --recursive nodejs` | placeholder per file until first run | apk files pushed into `rootfs/spike/apks/`, installed **offline** in the guest: `apk add --no-network --no-cache /spike/apks/*.apk` (signatures still verified against the rootfs `/etc/apk/keys`). `npm-*`/`corepack-*`/`yarn-*`/`pnpm-*` file names are rejected at verify AND at push. |
 | Next.js 16 template deps (`node_modules`) | npm registry, resolved on the Mac from [`template/package.json`](template/package.json) (`next ^16.0.0`, `react ^19.0.0`); pinned by committing `template/package-lock.json` (npm sha512 integrity entries) after the first fetch | lockfile integrity | `npm ci --ignore-scripts` into staging → tarred with symlinks (`--format gnutar`) → pushed → extracted by device tar into `rootfs/root/hello-next/` |
 | `@next/swc-linux-arm64-musl` native binding | `https://registry.npmjs.org/@next/swc-linux-arm64-musl/-/swc-linux-arm64-musl-<version>.tgz`, version forced equal to the resolved `next` version (npm on macOS skips this platform-specific optional dep, so it is fetched explicitly and grafted) | placeholder until first run | unpacked over `node_modules/@next/swc-linux-arm64-musl/` at pack time; all other `@next/swc-*` platform dirs are pruned from the payload |
@@ -95,7 +95,7 @@ All commands from the repo root. `SPIKE=docs/mobile-linux/app-runtime-spike`.
 SPIKE=docs/mobile-linux/app-runtime-spike
 
 # one-time: PRoot binaries from the pinned fork
-clients/android/scripts/build-mobile-linux-native.sh --variant direct
+apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
 
 # fetch + verify + pack (first run: expect UNPINNED warnings)
 "$SPIKE/scripts/mac/stage-spike.sh" --step all --variant direct --allow-unpinned

@@ -23,8 +23,8 @@ These results were read from the generated test programs of the corresponding co
 | engine-desktop | 432 passed again after final cleanup, including the revised blocking-holder test |
 | CLI Fusion evaluation tests | 2 passed |
 | Full CLI | 1,185 passed; 19 environment-blocked failures, detailed below |
-| clients/shared | 59 passed; typecheck and build passed |
-| clients/electron | 802 passed; 1 native-window failure; typecheck and build passed |
+| packages/bridge-client | 59 passed; typecheck and build passed |
+| apps/electron | 802 passed; 1 native-window failure; typecheck and build passed |
 
 The two Desktop evidence tests and four Desktop live-host integration tests were also run independently and passed; they are included in, not additional to, the 432 Desktop tests.
 

@@ -7,4 +7,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-exec python3 clients/translations/generate.py --check
+exec python3 resources/translations/generate.py --check

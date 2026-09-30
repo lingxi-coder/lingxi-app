@@ -12,10 +12,10 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
 runtime_root="$(python3 "${script_dir}/../lib/runtime_source.py" --root)"
 declare -a scan_paths=(
-  "${repo_root}/clients/android"
-  "${repo_root}/clients/ios"
-  "${repo_root}/crates/apps/android-aar"
-  "${repo_root}/crates/apps/ios-framework"
+  "${repo_root}/apps/android/native"
+  "${repo_root}/apps/ios/native"
+  "${repo_root}/apps/android/ffi"
+  "${repo_root}/apps/ios/ffi"
   "${runtime_root}/crates/platforms/android"
   "${runtime_root}/crates/platforms/ios"
 )
@@ -56,7 +56,7 @@ if [[ "${mode}" == "play" ]]; then
   check_pattern "Android privilege escalation" 'Shizuku|android\\.permission\\.BIND_ACCESSIBILITY_SERVICE|AccessibilityService|ACTION_MANAGE_OVERLAY_PERMISSION|SYSTEM_ALERT_WINDOW|FOREGROUND_SERVICE_MEDIA_PROJECTION|FOREGROUND_SERVICE_SPECIAL_USE'
 else
   check_pattern "Android forbidden privilege escalation" 'Shizuku|ACTION_MANAGE_OVERLAY_PERMISSION|SYSTEM_ALERT_WINDOW'
-  direct_manifest="${repo_root}/clients/android/app/src/direct/AndroidManifest.xml"
+  direct_manifest="${repo_root}/apps/android/native/app/src/direct/AndroidManifest.xml"
   [[ -f "${direct_manifest}" ]] || { echo "missing Direct manifest" >&2; exit 1; }
   rg -q 'BIND_ACCESSIBILITY_SERVICE' "${direct_manifest}" \
     || { echo "Direct manifest is missing AccessibilityService binding" >&2; exit 1; }

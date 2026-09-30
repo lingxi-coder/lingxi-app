@@ -14,7 +14,7 @@ contain its single Rust runtime and preserve the product UniFFI namespaces.
 The full SDK FFI library must never be linked into the same application.
 
 Android consumes `mobile-linux-installer` and `mobile-linux-native-support`
-through the local Maven repository at `clients/android/build/mobileLinuxSdk/maven`.
+through the local Maven repository at `apps/android/native/build/mobileLinuxSdk/maven`.
 The build wrapper asks the fixed SDK to publish these artifacts there, together
 with POM metadata and `sdk-artifacts.json`. The native-support AAR owns three
 PRoot helpers per ABI (PRoot, loader and network-policy launcher); host `jniLibs`
@@ -31,7 +31,7 @@ unavailable. Product workspace preferences, bundled resource selection and old
 call-site compatibility live in `Sources/RuntimeIntegration`. The old
 `Sources/LinuxRuntimeNative` implementation is excluded from compilation.
 Native framework builds and rootfs conversion are SDK tools; all generated
-outputs and caches remain under the host's `clients/ios/build`.
+outputs and caches remain under the host's `apps/ios/native/build`.
 
 `mobile-linux-native-pins.json` records the SDK interface and Maven version,
 not duplicate native source hashes. SDK Android/iOS source pins are independent;

@@ -1,8 +1,14 @@
 # LingXi repository instructions
 
+## Development checkout
+
+- Use `~/lingxi/lingxi-app` as the canonical product checkout and start repository commands from this real directory.
+- `/Users/luolingfeng/Projects/LingXi-Next` is a compatibility symlink to the same checkout; changes and Git configuration are already shared between these paths.
+- The product `origin` is `git@github.com-lingxi-coder:lingxi-coder/lingxi-app.git`. Keep the repository-owner SSH alias for fetch and push.
+
 ## macOS Electron packaging
 
-- Always package the signed macOS Desktop app through `npm run package:mac:flare` from `clients/electron`, or invoke `clients/electron/scripts/package-macos-flare.sh` directly. Do not bypass this wrapper with `npm run package:mac` during normal development or release preparation.
+- Always package the signed macOS Desktop app through `npm run package:mac:flare` from `apps/electron`, or invoke `apps/electron/scripts/package-macos-flare.sh` directly. Do not bypass this wrapper with `npm run package:mac` during normal development or release preparation.
 - Use the same Apple Developer team as iOS: Flare App, Inc., Team ID `AZ4AX7J833`. The wrapper rejects a different Team ID and selects the currently valid `Apple Development: lingfeng luo (KQ7KX8LCYL)` identity by certificate hash.
 - Development packaging uses the isolated `development` credential channel and requires Mac App Development profiles authorizing `com.lingxi.code.development` and `com.lingxi.code.credential-broker.development`. An iOS Xcode Managed Profile is not a substitute for a macOS profile.
 - When either profile is missing, the wrapper must use the checked-in provisioning bootstrap target with Xcode Automatic Signing and `-allowProvisioningUpdates -allowProvisioningDeviceRegistration`. This reuses the Flare account already configured in Xcode; do not automate the Apple Developer website with a browser.

@@ -317,7 +317,7 @@
         "rank": 40,
         "task": "Filter hidden/internal/disabled commands out of the slash palette and help screen (apply isHidden/isEnabled gating; wire the INTENTIONALLY_DISABLED/STUBS tables to a runtime consumer)",
         "subsystem": "slash-commands",
-        "files": "crates/tui/src/components/prompt_input/palette.rs (67-85), command-api/src/builtin_support/help_render.rs (24-58)",
+        "files": "apps/cli/tui/src/components/prompt_input/palette.rs (67-85), command-api/src/builtin_support/help_render.rs (24-58)",
         "severity": "medium",
         "risk": "medium"
       },

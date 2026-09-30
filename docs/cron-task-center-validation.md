@@ -74,9 +74,9 @@ Android Play and x86_64 builds were not run on a device.
 
 Final development artifacts:
 
-- macOS: `clients/electron/dist/LingXi-Code-0.1.0-mac-arm64.zip`
-- Android Direct: `clients/android/app/build/outputs/apk/direct/debug/app-direct-debug.apk`
-- Android Play: `clients/android/app/build/outputs/apk/play/debug/app-play-debug.apk`
+- macOS: `apps/electron/dist/LingXi-Code-0.1.0-mac-arm64.zip`
+- Android Direct: `apps/android/native/app/build/outputs/apk/direct/debug/app-direct-debug.apk`
+- Android Play: `apps/android/native/app/build/outputs/apk/play/debug/app-play-debug.apk`
 
 After the fourth review corrections, the macOS app and ZIP were rebuilt through `npm run package:mac:flare`, signed with
 Flare's development identity and passed static package verification. The updated

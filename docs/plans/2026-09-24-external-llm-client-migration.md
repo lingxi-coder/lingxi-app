@@ -77,7 +77,7 @@ must remain intact.
   renderer/sidecar, terminal, Git, Keychain persistence across restart,
   authenticated localhost model requests, permissions and scheduled tasks.
   The verified application was launched from
-  `clients/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app`.
+  `apps/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app`.
 
 The wire client remains responsible for its own protocol tests. Host projection
 regressions now assert its intentional contracts: native blocks survive replay,

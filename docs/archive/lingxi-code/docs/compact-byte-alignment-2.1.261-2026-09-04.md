@@ -55,7 +55,7 @@ Main implementation entry points:
   [`stream_json.rs`](../apps/cli/src/stream_json.rs),
   [`stream_json_input.rs`](../apps/cli/src/stream_json_input.rs), and
   [`session/src/jsonl/transcript_compact.rs`](../session/src/jsonl/transcript_compact.rs).
-- [`Desktop command dispatch`](../../clients/electron/src/renderer/bridge/desktopCommands.ts)
+- [`Desktop command dispatch`](../../apps/electron/src/renderer/bridge/desktopCommands.ts)
   and its bridge callbacks. Shared DTO callers received the corresponding
   optional fields; regression tests cover each changed boundary.
 

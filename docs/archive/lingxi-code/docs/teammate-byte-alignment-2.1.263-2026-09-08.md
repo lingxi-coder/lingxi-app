@@ -137,7 +137,7 @@ No dependencies or legacy compatibility paths were added. The earlier byte-parit
 
 Files changed for this follow-up (other pending worktree changes are outside this fix):
 
-- `clients/electron/src/renderer/bridge/runtimeCenterState.ts`, `clients/electron/test/runtime-center-state.test.ts`.
+- `apps/electron/src/renderer/bridge/runtimeCenterState.ts`, `apps/electron/test/runtime-center-state.test.ts`.
 - `lingxi-code/apps/cli/src/init.rs`, `mode.rs`, `teammate_worker.rs`.
 - `lingxi-code/apps/engine-desktop/src/lib.rs`, `pane_teammate.rs`, `lingxi-code/apps/engine-desktop/tests/coordinator_activation.rs`.
 - `lingxi-code/coordinator/src/implicit_team.rs`, `team_file.rs`, `team_registry.rs`, `tool_send_message.rs`.

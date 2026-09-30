@@ -2,7 +2,9 @@
 
 运行时位于独立仓库 `lingxi-coder/harness-runtime`。LingXi 的 Rust workspace 保留产品入口，通过根 `workspace.dependencies` 和 `Cargo.lock` 固定上游提交；所有共享类型来自同一 Cargo package identity。
 
-## 归属与接口
+当前产品仓库为 `~/lingxi/lingxi-app/`，根 Cargo workspace 保留 8 个产品 crate。当前目录和开发入口见[多仓开发指南](../development/multi-repo-workflow.md)。本篇保留运行时首次提取时的归属、提交、数量与验证记录；后续结构及资源归属已经演进，当前依赖以根 `Cargo.toml`、`Cargo.lock` 和来源检查输出为准。
+
+## 归属与接口（提取时记录）
 
 - 从 `01dcc428ba0c12522f6ee29b6474f3a4e0891c47` 提取 78 个 workspace package，包含运行时依赖闭包、`mock_stdio_mcp` 与 `apply-seccomp`；另迁移四个 vendored Git/TLS Cargo package 和对应原生源码。
 - LingXi 保留 `cli`、`bridge-server`、`ios-framework`、`android-aar`、`tui`、`tui-core`、`config-requirements`、`platform-android-shellbin`、`platform-ios-ish-runtime`、`tool-ios-use`。mksh/toybox、应用资源、原生回调和发行包装仍属于宿主。
@@ -10,22 +12,22 @@
 - `api`、`models`、`desktop`、`mobile`、既有 feature 和线协议保持不变。宿主通过 Rust `BuildInfo` 注入自己的版本及提交号，`runtime_build_info()` 单独表示运行时身份。
 - `llm-client` 继续固定在 `9b0323f10f76c5834acafedaa04470c4e96346f2`。迁移没有升级 registry dependency；保留了所有宿主依赖的 feature、optional 和 default-features 语义。
 
-当前宿主固定运行时代码提交 `36dd3c1295ae13bde59f6131705dbf86a244ae52`。上游 PR 为 https://github.com/lingxi-coder/harness-runtime/pull/1，后续 `0fe594a610bc46e7db11a19bdcaa9f39bee61680` 与 `36436caf643efcaa5b3fd58b81f37ac30beb86ba` 只调整 CI 和验证脚本，没有遗漏未被宿主引用的运行时修复。
+提取时宿主固定运行时代码提交 `36dd3c1295ae13bde59f6131705dbf86a244ae52`。上游 PR 为 https://github.com/lingxi-coder/harness-runtime/pull/1，后续 `0fe594a610bc46e7db11a19bdcaa9f39bee61680` 与 `36436caf643efcaa5b3fd58b81f37ac30beb86ba` 只调整 CI 和验证脚本，没有遗漏未被宿主引用的运行时修复。
 
 ## 使用固定来源
 
-在 `lingxi-code/` 执行：
+在当前产品仓库根目录 `~/lingxi/lingxi-app/` 执行：
 
 ```sh
-python3 scripts/runtime_source.py --json
-python3 scripts/check-runtime-dependency.py
+python3 scripts/lib/runtime_source.py --json
+python3 scripts/checks/check-runtime-dependency.py
 ```
 
-解析器使用 `cargo metadata --locked --all-features`，校验统一 Git URL、完整 SHA、包身份和源码包含关系。它不扫描缓存猜测版本，也不回退到相邻本地 checkout。当前宿主依赖图含 79 个来自上游的运行时与 vendor package；其余迁出包属于独立测试或辅助程序。
+解析器使用 `cargo metadata --locked --all-features`，校验统一 Git URL、完整 SHA、包身份和源码包含关系。它不扫描缓存猜测版本，也不回退到相邻本地 checkout。提取时宿主依赖图含 79 个来自上游的运行时与 vendor package；其余迁出包属于独立测试或辅助程序。当前解析包数由上述来源检查输出。
 
-宿主测试中确需编译期嵌入的三个 oracle 资源以 `scripts/runtime-fixture-mirrors.json` 声明，并由协议门禁逐字节对照锁定上游。Swift/Kotlin/Electron 的其他协议 fixture 通过固定来源解析或构建时 staging 获取。
+宿主测试中确需编译期嵌入的三个 oracle 资源以 `scripts/lib/runtime-fixture-mirrors.json` 声明，并由协议门禁逐字节对照锁定上游。Swift/Kotlin/Electron 的其他协议 fixture 通过固定来源解析或构建时 staging 获取。
 
-## 构建与资源
+## 构建与资源（提取时记录）
 
 运行时内置插件、模板、技能镜像、预算、pins、SBOM 与通用供应链门禁属于上游。宿主的 Android launcher、iSH patch、原生源码 pin、Swift 注入和资源安装验证继续在 LingXi 运行。
 

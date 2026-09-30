@@ -1,4 +1,4 @@
-# Client apps CI — gates the LingXi-Next CLIENT applications on every PR and on
+# Client apps CI — gates the LingXi app CLIENT applications on every PR and on
 # push to `main`. This is the app-layer counterpart to ci.yml (which already
 # covers the pure-Rust engine, including the `cross-compile-mobile` Rust check):
 # nothing here re-runs cargo checks — these jobs build/test the gradle, xcode,
@@ -49,7 +49,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 1. node-clients — shared TS SDK + Electron typecheck (ubuntu).
-  #    The Electron app depends on the shared SDK via `file:../shared`, so the
+  #    The Electron app depends on the shared SDK via `file:../../packages/bridge-client`, so the
   #    shared package MUST be built (tsc emit) before electron's typecheck can
   #    resolve `@lingxi/bridge-client`. Both steps therefore live in one job and
   #    run sequentially: shared first, electron second.
@@ -66,22 +66,22 @@ jobs:
           # Both client packages keep their own lockfile; cache keys off both so
           # a change in either invalidates only the relevant restore.
           cache-dependency-path: |
-            clients/shared/package-lock.json
-            clients/electron/package-lock.json
+            packages/bridge-client/package-lock.json
+            apps/electron/package-lock.json
 
       # shared SDK: install, build (tsc emit — produces the dist/ that electron
       # links against), then run its node:test suite.
       - name: shared — install, build, test
-        working-directory: clients/shared
+        working-directory: packages/bridge-client
         run: |
           npm ci
           npm run build
           npm test
 
       # electron: install, then typecheck. REQUIRES the shared build above
-      # (file:../shared dependency); npm ci re-links the local file: dep.
+      # (file:../../packages/bridge-client dependency); npm ci re-links the local file: dep.
       - name: electron — install, typecheck
-        working-directory: clients/electron
+        working-directory: apps/electron
         run: |
           npm ci
           npm run typecheck
@@ -136,7 +136,7 @@ jobs:
       # Kotlin UniFFI bindings) that the Gradle project links against.
       - name: Verify pinned MobileLinux sources and release metadata
         run: |
-          bash clients/android/scripts/verify-mobile-linux-pins.sh
+          bash apps/android/native/scripts/verify-mobile-linux-pins.sh
           bash scripts/tests/test-rootfs-tooling.sh
           sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
           rootfs_version="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["alpine"]["version"])' "$sdk_root/docs/toolchains/runtime-pins.json")"
@@ -146,13 +146,13 @@ jobs:
 
       - name: Build Store and Full native runtimes from source
         run: |
-          bash clients/android/scripts/build-mobile-linux-native.sh --variant play
-          bash clients/android/scripts/build-mobile-linux-native.sh --variant direct
+          bash apps/android/native/scripts/build-mobile-linux-native.sh --variant play
+          bash apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
 
       # Unit tests + debug APK + androidTest APK. The androidTest APK is what
       # the emulator job (job 3) installs and runs.
       - name: Gradle — Store/Full tests and APKs
-        working-directory: clients/android
+        working-directory: apps/android/native
         run: |
           ./gradlew \
             :app:testPlayDebugUnitTest :app:testDirectDebugUnitTest \
@@ -210,7 +210,7 @@ jobs:
       # this job never ran job 2's build steps, so the artifacts must be made
       # here too before the on-device test compiles the engine.
       - name: Build Store native runtime from source
-        run: bash clients/android/scripts/build-mobile-linux-native.sh --variant play
+        run: bash apps/android/native/scripts/build-mobile-linux-native.sh --variant play
 
       # api-level 30 (>= minSdk 26), x86_64 + google_apis for KVM-accelerated
       # boot. force-avd-creation + the headless/no-window emulator options are
@@ -224,7 +224,7 @@ jobs:
           force-avd-creation: true
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          working-directory: clients/android
+          working-directory: apps/android/native
           script: ./gradlew :app:connectedPlayDebugAndroidTest
 
   # ---------------------------------------------------------------------------
@@ -250,17 +250,17 @@ jobs:
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
-      # xcodegen materializes clients/ios/project.yml into an .xcodeproj.
+      # xcodegen materializes apps/ios/native/project.yml into an .xcodeproj.
       - name: Install xcodegen
         run: brew install xcodegen
 
       # Build the gitignored Generated/ Swift bindings + the
       # LingxiCodeFFI.xcframework that the Xcode project links against.
       - name: Build XCFramework + Swift bindings
-        run: bash clients/ios/scripts/build-xcframework.sh
+        run: bash apps/ios/native/scripts/build-xcframework.sh
 
       - name: Generate Xcode project
-        working-directory: clients/ios
+        working-directory: apps/ios/native
         run: xcodegen generate
 
       # Pick a concrete, currently-available iPhone simulator by name rather
@@ -278,7 +278,7 @@ jobs:
 
       # Run EngineRoundtripTests on the simulator under the LingxiCode scheme.
       - name: xcodebuild test (simulator round-trip)
-        working-directory: clients/ios
+        working-directory: apps/ios/native
         run: |
           xcodebuild test \
             -scheme LingxiCode \

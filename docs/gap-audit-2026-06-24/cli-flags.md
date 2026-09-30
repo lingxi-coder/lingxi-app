@@ -69,10 +69,10 @@
 
 ## Files changed
 
-- `crates/apps/cli/src/argv.rs` — +524 lines (flag defs, is_json_output(), system-prompt wiring)
-- `crates/apps/cli/src/init.rs` — updated to use `Argv::default()`
-- `crates/apps/cli/src/lib.rs` — output-format wire-up
-- `crates/apps/cli/src/mode.rs` — is_json_output() consumption
-- `crates/apps/cli/src/run.rs` — system-prompt wire-up
+- `apps/cli/host/src/argv.rs` — +524 lines (flag defs, is_json_output(), system-prompt wiring)
+- `apps/cli/host/src/init.rs` — updated to use `Argv::default()`
+- `apps/cli/host/src/lib.rs` — output-format wire-up
+- `apps/cli/host/src/mode.rs` — is_json_output() consumption
+- `apps/cli/host/src/run.rs` — system-prompt wire-up
 - `crates/apps/engine-desktop/src/lib.rs` — system_prompt_override/append_system_prompt fields + build() injection
-- `crates/apps/bridge-server/src/boot.rs` — Argv::default() update
+- `apps/bridge-server/src/boot.rs` — Argv::default() update

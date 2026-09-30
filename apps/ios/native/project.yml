@@ -1,0 +1,360 @@
+name: LingxiCode
+options:
+  bundleIdPrefix: com.lingxi
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  developmentLanguage: "zh-Hans"
+
+attributes:
+  knownRegions:
+    - zh-Hans
+    - zh-Hant
+    - en
+    - ja
+    - ko
+
+configs:
+  StoreDebug: debug
+  StoreRelease: release
+  FullDebug: debug
+  FullRelease: release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    # The company team the user configured in Xcode (2026-08-09) — kept in the
+    # generator source so `xcodegen generate` stops resetting code signing.
+    DEVELOPMENT_TEAM: "AZ4AX7J833"
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad (NavigationSplitView goes multi-column on iPad)
+    CFBundleLocalizations:
+      - zh-Hans
+      - zh-Hant
+      - en
+      - ja
+      - ko
+
+targets:
+  LingxiCode:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: Sources
+        excludes:
+          - LocalAppsWidget/**
+          - LinuxRuntimeNative/**
+      # Generated UniFFI Swift bindings (reproduce via scripts/build-xcframework.sh).
+      # Gitignored; compiled directly into this app target. They import the
+      # per-namespace C/FFI clang modules from LingxiCodeFFI.xcframework below.
+      - path: Generated
+      - path: Resources
+    dependencies:
+      - target: LocalAppsWidget
+        embed: true
+      # UniFFI FFI static-library xcframework: exports the harness_runtime /
+      # client_protocol C symbols the generated bindings call, and ships the
+      # clang modulemap (module.modulemap) that defines the *FFI modules the
+      # generated Swift imports via `#if canImport(...)`. Static archive →
+      # link into the binary, do NOT embed (no dylib to copy).
+      - framework: Frameworks/LingxiCodeFFI.xcframework
+        embed: false
+        link: true
+      # Native support contains Swift/ObjC/C iSH glue, with no second Rust core.
+      - framework: Frameworks/MobileLinuxNativeSupport.xcframework
+        embed: false
+        link: true
+      - framework: Frameworks/sherpa-onnx.xcframework
+        embed: false
+        link: true
+      - framework: Frameworks/onnxruntime.xcframework
+        embed: false
+        link: true
+      # Native Rust dependencies reference the platform zlib/iconv supplied by
+      # the iOS SDK; static XCFrameworks cannot encode these transitive links.
+      - sdk: libz.tbd
+      - sdk: libiconv.tbd
+      - sdk: libbz2.tbd
+      - sdk: libc++.tbd
+      # Device-only iSH uses SQLite-backed fakefs, the host resolver, and
+      # SystemConfiguration for live DNS updates. The iSH archives themselves
+      # are supplied by the fixed SDK's native-support framework. Its simulator
+      # slices report unavailable and contain no iSH kernel.
+      - sdk: libsqlite3.tbd
+      - sdk: libresolv.tbd
+      - sdk: SystemConfiguration.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_FILE: Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/LingxiCode-Bridging-Header.h
+        ENABLE_PREVIEWS: true
+        GENERATE_INFOPLIST_FILE: false
+        CODE_SIGN_ENTITLEMENTS: Widget.entitlements
+        MARKETING_VERSION: "2.4.1"
+        CURRENT_PROJECT_VERSION: "8721"
+        OTHER_LDFLAGS: "$(inherited) -ObjC"
+        # The Cargo-locked SDK lives outside SRCROOT; the build scripts only
+        # write generated products under this app's build/ and Frameworks/.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+      configs:
+        StoreDebug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
+        StoreRelease:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
+        FullDebug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
+        FullRelease:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
+    preBuildScripts:
+      - name: Stage Alpine rootfs
+        basedOnDependencyAnalysis: false
+        script: |
+          if [ "${PLATFORM_NAME}" != "iphoneos" ]; then
+            exit 0
+          fi
+          RUNTIME_STAGE_ROOT="${SRCROOT}/build/linux-runtime/openminis"
+          RUNTIME_RESOURCES="${SRCROOT}/build/linux-runtime/openminis/resources"
+          ROOTFS_ARCHIVE="${RUNTIME_RESOURCES}/alpine-rootfs.zip"
+          if [ ! -f "${ROOTFS_ARCHIVE}" ]; then
+            echo "error: Alpine rootfs is missing. Run apps/ios/native/scripts/build-linux-runtime.sh first."
+            exit 1
+          fi
+          DESTINATION="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          mkdir -p "${DESTINATION}"
+          cp "${ROOTFS_ARCHIVE}" "${DESTINATION}/alpine-rootfs.zip"
+          if [ -d "${RUNTIME_RESOURCES}/default_mount" ]; then
+            rm -rf "${DESTINATION}/default_mount"
+            cp -R "${RUNTIME_RESOURCES}/default_mount" "${DESTINATION}/default_mount"
+          fi
+          if [ -f "${RUNTIME_RESOURCES}/libvdso.so.elf" ]; then
+            cp "${RUNTIME_RESOURCES}/libvdso.so.elf" "${DESTINATION}/libvdso.so.elf"
+          fi
+          if [ -f "${RUNTIME_STAGE_ROOT}/manifest.json" ]; then
+            cp "${RUNTIME_STAGE_ROOT}/manifest.json" "${DESTINATION}/linux-runtime-manifest.json"
+          elif [ -f "${RUNTIME_RESOURCES}/runtime-manifest.json" ]; then
+            cp "${RUNTIME_RESOURCES}/runtime-manifest.json" "${DESTINATION}/linux-runtime-manifest.json"
+          else
+            echo "error: Linux runtime manifest is missing; rebuild the Alpine runtime."
+            exit 1
+          fi
+          # Refuse to package a rootfs with no Node toolchain for a build that
+          # exposes local apps. This gate existed but had ZERO call sites, so a
+          # FullDebug-iphoneos build shipped local_app_runtime=false with a
+          # busybox-only rootfs: `create_local_app` then died on
+          # `/usr/bin/pnpm: not found`, no build ever produced dist/, and the
+          # preview stayed "not ready" forever. Validate the manifest actually
+          # being packaged, not the staging copy. `--rootfs-only` because no
+          # build phase populates a staged local-app node_modules tree.
+          # `|| exit 1` and not bare: every other check in this phase fails
+          # closed explicitly, so the phase does not rely on `set -e`. A
+          # swallowed non-zero here would leave the trailing `cp` as the
+          # phase's status and ship the bare rootfs anyway — exactly the
+          # zero-call-sites failure this gate exists to prevent.
+          # Device development builds (including StoreDebug, which preserves the
+          # installed app identity/data) exercise Local App creation and need the
+          # complete toolchain. StoreRelease retains its distribution policy.
+          # Ship the resolved dependency tree so the FIRST create_local_app on a
+          # device does not resolve 169 packages over the network inside the
+          # emulated guest. The engine matches the seed's
+          # runtime-manifest.json `pnpm_lock_sha256` against the app's own
+          # lockfile and, on a match, publishes it straight into the dependency
+          # snapshot cache -- no pnpm, no guest, no network.
+          #
+          # This is the producer stage `validate-local-app-build-assets.sh` has
+          # always named in its failure text ("Set LINGXI_LOCAL_APP_NODE_MODULES
+          # and rebuild"), and which nothing in the repository supplied: the
+          # phase was removed by 1a4385f09 with a directive not to reintroduce a
+          # bundled seed "without revisiting bundle-size and build-cache
+          # invariants". Revisited: the tree is 125 MB expanded / ~27 MB
+          # compressed, replaces a 141 MB pnpm store that cannot be seeded at
+          # all (pnpm 11 keeps a SQLite index and fails read-only with
+          # ERR_SQLITE_ERROR), and is content-addressed by the lockfile digest
+          # so a drifted app lockfile declines it instead of installing the
+          # wrong packages.
+          #
+          # Include the seed wherever the development/full toolchain is required.
+          case "${CONFIGURATION}" in
+            Full*|StoreDebug)
+              STAGED_RUNTIME="${SRCROOT}/build/local-app-runtime/full"
+              if [ ! -f "${STAGED_RUNTIME}/node_modules/vite/bin/vite.js" ]; then
+                echo "error: the staged local-app dependency seed is missing: ${STAGED_RUNTIME}"
+                echo "       Run, from the repository root:"
+                echo "         scripts/local-apps/build-local-app-node-modules.sh --arch aarch64"
+                echo "         apps/ios/native/scripts/stage-local-app-runtime.sh --variant full \\"
+                echo "           --node-modules apps/ios/native/build/local-app-node-modules/aarch64/node_modules"
+                exit 1
+              fi
+              "${SRCROOT}/scripts/install-staged-local-app-runtime.sh" \
+                --staged "${STAGED_RUNTIME}" \
+                --destination "${DESTINATION}/local-app-runtime" || exit 1
+              "${SRCROOT}/scripts/validate-local-app-build-assets.sh" \
+                --configuration "${CONFIGURATION}" \
+                --platform "${PLATFORM_NAME}" \
+                --staged "${DESTINATION}/local-app-runtime" \
+                --rootfs-manifest "${DESTINATION}/linux-runtime-manifest.json" || exit 1
+              ;;
+          esac
+          # iSH's FsApplyOverlay does
+          #   [NSBundle bundleWithURL:[mainBundle URLForResource:@"RootfsPatch" ...]]
+          # and only then checks the RESULT for nil — but URLForResource:
+          # returns nil when the bundle is absent, and +bundleWithURL: RAISES on
+          # a nil URL. Shipping this bundle is the supported configuration of
+          # the vendored component; without it the app aborts inside
+          # -[ISHKernel bootWithRootPath:] the first time a terminal opens.
+          # Fail the build rather than the device.
+          PATCH_BUNDLE="${RUNTIME_RESOURCES}/RootfsPatch.bundle"
+          if [ ! -d "${PATCH_BUNDLE}" ]; then
+            echo "error: RootfsPatch.bundle is missing; iSH FsApplyOverlay raises on a nil bundle URL and aborts the app at boot."
+            exit 1
+          fi
+          rm -rf "${DESTINATION}/RootfsPatch.bundle"
+          cp -R "${PATCH_BUNDLE}" "${DESTINATION}/RootfsPatch.bundle"
+          AUTH_MANIFEST="${SRCROOT}/../../../docs/mobile-linux/authorization/AUTHORIZATION_MANIFEST.json"
+          if [ -f "${AUTH_MANIFEST}" ]; then
+            cp "${AUTH_MANIFEST}" "${DESTINATION}/AUTHORIZATION_MANIFEST.json"
+          fi
+
+  # XCTest simulator e2e (M10 A2 / P4): builds the in-process engine via
+  # `buildIosEngine`, submits a prompt, and asserts the streamed ClientEvent path
+  # reaches a test `IosEventListener` — proving SwiftUI→UniFFI→engine→listener
+  # in-process. Passes KEYLESS: with no ANTHROPIC_API_KEY the turn surfaces a
+  # terminal `.error` event. Hosted in the app target so it shares the app's
+  # compiled UniFFI bindings; also links the FFI xcframework so the per-namespace
+  # `harness_runtimeFFI` clang module is importable here.
+  LingxiCodeTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: Tests
+    preBuildScripts:
+      - name: Stage pinned Harness protocol fixtures
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          export PATH="${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+          python3 "${SRCROOT}/scripts/stage-protocol-fixtures.py" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/HarnessProtocolFixtures"
+    dependencies:
+      - target: LingxiCode
+      - framework: Frameworks/LingxiCodeFFI.xcframework
+        embed: false
+        link: true
+      - sdk: libz.tbd
+      - sdk: libiconv.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.tests
+        GENERATE_INFOPLIST_FILE: true
+        # The locked Cargo resolver reads its immutable checkout outside SRCROOT.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+  LocalAppsWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: Sources/LocalAppsWidget
+      - path: Sources/LocalAppsWidgetShared
+      # The Live Activity's status chips are localized in the EXTENSION, whose
+      # `Bundle.main` is this bundle — not the app's. Only the catalog is added
+      # (not all of `Resources/`), so no app asset is duplicated into the
+      # extension. `ConversationLiveActivityWidget` reads it through
+      # `NSLocalizedString(_:value:)`, so the surface degrades to English, never
+      # to raw keys, if this line is ever lost.
+      - path: Resources/Localizable.xcstrings
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.widget
+        INFOPLIST_FILE: Sources/LocalAppsWidget/Info.plist
+        GENERATE_INFOPLIST_FILE: false
+        SKIP_INSTALL: false
+        CODE_SIGN_ENTITLEMENTS: Widget.entitlements
+        MARKETING_VERSION: "2.4.1"
+        CURRENT_PROJECT_VERSION: "8721"
+      configs:
+        FullDebug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full.widget
+        FullRelease:
+          PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full.widget
+
+  LingxiCodeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: UITests
+    dependencies:
+      - target: LingxiCode
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.uitests
+        GENERATE_INFOPLIST_FILE: true
+
+# Run the unit tests under the app scheme so `xcodebuild -scheme LingxiCode test`
+# executes the engine round-trip suite.
+schemes:
+  LingxiCode:
+    build:
+      targets:
+        LingxiCode: all
+        LingxiCodeTests: [test]
+        LingxiCodeUITests: [test]
+    test:
+      config: StoreDebug
+      targets:
+        - LingxiCodeTests
+        - LingxiCodeUITests
+      gatherCoverageData: false
+      # Unit tests assert business logic that now returns catalog-resolved
+      # copy (String(localized:)), not the pre-i18n Chinese literal — without
+      # this, results depend on whatever language the host Mac/simulator
+      # happens to be set to. Pinning to the catalog's source language keeps
+      # the suite deterministic and matches every test's existing zh-Hans
+      # expected values, which were never rewritten for i18n.
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
+    run:
+      config: StoreDebug
+
+  LingxiCodeStore:
+    build:
+      targets:
+        LingxiCode: all
+        LingxiCodeTests: [test]
+        LingxiCodeUITests: [test]
+    test:
+      config: StoreDebug
+      targets:
+        - LingxiCodeTests
+        - LingxiCodeUITests
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
+    run:
+      config: StoreDebug
+    archive:
+      config: StoreRelease
+
+  LingxiCodeFull:
+    build:
+      targets:
+        LingxiCode: all
+        LingxiCodeTests: [test]
+        LingxiCodeUITests: [test]
+    test:
+      config: FullDebug
+      targets:
+        - LingxiCodeTests
+        - LingxiCodeUITests
+      commandLineArguments:
+        "-AppleLanguages (zh-Hans)": true
+    run:
+      config: FullDebug
+    archive:
+      config: FullRelease

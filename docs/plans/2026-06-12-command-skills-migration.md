@@ -87,10 +87,10 @@ Run both test commands again and expect PASS.
 
 **Files:**
 - Test: `lingxi-code/commands/core/src/register.rs`
-- Test: `crates/tui/src/screens/skills.rs`
+- Test: `apps/cli/tui/src/screens/skills.rs`
 - Modify: `lingxi-code/commands/core/src/interactive_only.rs`
 - Modify: `lingxi-code/commands/core/src/register.rs`
-- Modify: `crates/tui/src/screens/skills.rs`
+- Modify: `apps/cli/tui/src/screens/skills.rs`
 
 **Step 1: Write failing tests**
 

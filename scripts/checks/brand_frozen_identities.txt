@@ -7,4 +7,4 @@
 # Plan A 阶段本清单为空：Plan A 不改名，所以还没有需要冻结的东西。
 # Plan B 的第一个任务就是填满它。
 
-crates/apps/android-aar/src/host.rs:LINGXI_GIT_SHA_SHORT  # Existing branding::ENV_PREFIX build metadata key now read by Host BuildInfo; option_env! requires a literal.
+apps/android/ffi/src/host.rs:LINGXI_GIT_SHA_SHORT  # Existing branding::ENV_PREFIX build metadata key now read by Host BuildInfo; option_env! requires a literal.

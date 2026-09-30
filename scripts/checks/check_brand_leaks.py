@@ -272,12 +272,13 @@ if _ARRIVING_VS_KEEP:
     )
 
 # G1 的 needle 集合按区域不同。一张全局表会立刻淹没在按 spec §1.1 判定为
-# 保留的东西上（clients/ 的 336 处 LingXi、1335 处 com.lingxi、483 处 灵犀），
+# 保留的东西上（原 clients/ 的 336 处 LingXi、1335 处 com.lingxi、483 处 灵犀），
 # 而把它们全塞进豁免清单会让清单失去信号价值 —— 一份两千条的豁免清单等于
 # 没有清单。
 FULL_NEEDLES = [r"\.lingxi", r"LINGXI", r"LingXi", r"Lingxi", r"灵犀"] + CLAUDE_NEEDLES
 
-# clients/ 只查命名空间面。com.lingxi.* / LingxiCode* /
+# 原 clients/ 的 native/UI、bridge-client 与共享资源只查命名空间面。
+# com.lingxi.* / LingxiCode* /
 # LingXiAccessibilityService / 灵犀 按 spec §1.1 保留，不进 needle 表也就
 # 不需要豁免条目。
 #
@@ -291,8 +292,15 @@ CLIENT_NEEDLES = [
 
 AREAS = [
     # (路径前缀, needle 正则列表)
+    # Rust 产品宿主沿用原 crates/ 的完整规则；必须先于 apps/ 匹配。
+    ("apps/cli/", FULL_NEEDLES),
+    ("apps/bridge-server/", FULL_NEEDLES),
+    ("apps/ios/ffi/", FULL_NEEDLES),
+    ("apps/android/ffi/", FULL_NEEDLES),
+    ("apps/", CLIENT_NEEDLES),
+    ("packages/bridge-client/", CLIENT_NEEDLES),
+    ("resources/", CLIENT_NEEDLES),
     ("crates/", FULL_NEEDLES),
-    ("clients/", CLIENT_NEEDLES),
     (".github/", FULL_NEEDLES),
     ("scripts/", FULL_NEEDLES),
     ("tools/", FULL_NEEDLES),
@@ -414,7 +422,7 @@ ENV_READ_SECOND_ARG = re.compile(
 FAKE_ORACLE_CITATION = re.compile(r"(?:process\.env\.|env\.)(LINGXI_[A-Z0-9_]+)")
 
 # 字符串字面量。**必须同时认单引号** —— TypeScript 里普遍用单引号，而
-# clients/shared/src/lockfile.ts:35 的 `join(homedir(), '.lingxi', 'bridge')`
+# packages/bridge-client/src/lockfile.ts:35 的 `join(homedir(), '.lingxi', 'bridge')`
 # 正是这个门最该抓到的那个缺陷（B16）。只认双引号的版本会漏掉它。
 STRING_LITERAL = re.compile(r'"([^"\\]|\\.)*"' r"|'([^'\\]|\\.)*'")
 
@@ -777,6 +785,19 @@ SELFTEST_FILES = {
     ),
 }
 
+# 结构迁移不能把 Rust 宿主误分类成 native/UI，也不能收紧原客户端规则。
+_LAYOUT_FULL_PATHS = (
+    "apps/cli/host/st.rs", "apps/cli/tui/st.rs", "apps/cli/tui-core/st.rs",
+    "apps/bridge-server/st.rs", "apps/ios/ffi/st.rs", "apps/android/ffi/st.rs",
+    "packages/config-requirements/st.rs", "tools/ios-use/st.rs", "build-support/st.sh",
+)
+_LAYOUT_CLIENT_PATHS = (
+    "apps/electron/st.ts", "apps/ios/native/st.swift", "apps/android/native/st.kt",
+    "packages/bridge-client/st.ts", "resources/voice/st.sh", "resources/translations/st.py",
+)
+for _path in (*_LAYOUT_FULL_PATHS, *_LAYOUT_CLIENT_PATHS):
+    SELFTEST_FILES[_path] = 'const name = "LingXi";\n'
+
 SELFTEST_CASES = [
     # (用例名, 必须出现的 (rule, path, needle-substring[, 行号]), 必须不出现的同形项)
     # 第四个元素是**可选的行号**。凡是规则真正守的东西是位置而不是存在性的
@@ -809,6 +830,16 @@ SELFTEST_CASES = [
     # 那个版本的 mutant 全绿。行号才是这条规则真正守的东西。
     ("text_lines does not split on U+2028 (G1 still spans the quotes, line 2)",
      [("G1", "crates/st/u2028.rs", r"\.claude(?!", 2)], []),
+]
+
+
+SELFTEST_CASES += [
+    (f"G1 keeps FULL coverage at {path}", [("G1", path, "LingXi")], [])
+    for path in _LAYOUT_FULL_PATHS
+]
+SELFTEST_CASES += [
+    (f"G1 keeps client display-name policy at {path}", [], [("G1", path, "LingXi")])
+    for path in _LAYOUT_CLIENT_PATHS
 ]
 
 

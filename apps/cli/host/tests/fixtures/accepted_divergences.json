@@ -1,0 +1,24 @@
+{
+  "_doc": [
+    "Host-owned accepted divergences. Runtime-owned entries live in the pinned harness-runtime repository.",
+    "Checked by tests/parity_accepted_divergences.rs without requiring a local runtime checkout."
+  ],
+  "divergences": [
+    {
+      "id": "cloud-runner-git-flags",
+      "kind": "divergence",
+      "finding": "`--use-anthropic-git-proxy`, `--configure-git` and `--git-host-rewrite`.",
+      "reason": "A cloud-runner surface. The flags' own help text says to run them only under a dedicated runner account or container, and the remote-control surface is already deferred wholesale.",
+      "decided_on": "2026-09-10",
+      "decided_by": "user",
+      "status": "active",
+      "anchors": [
+        {
+          "kind": "absent",
+          "path": "apps/cli/host/src",
+          "text": "--use-anthropic-git-proxy"
+        }
+      ]
+    }
+  ]
+}

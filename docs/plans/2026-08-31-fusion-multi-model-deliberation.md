@@ -537,7 +537,7 @@ sink 实现：展示 + `ConversationMessage::user_meta` 一条 fusion-result（X
 **Files:**
 - Create: `lingxi-code/commands/core/src/fusion.rs`（或 `apps/engine-desktop` 扩展 handler，只要 **不** 写入 `BUILTIN_COMMAND_NAMES`）
 - Modify: `lingxi-code/commands/core/src/lib.rs` / desktop 扩展注册
-- Modify: `crates/tui/src/command.rs` 广告 `/fusion`（否则 CLI 有、TUI 补全没有）
+- Modify: `apps/cli/tui/src/command.rs` 广告 `/fusion`（否则 CLI 有、TUI 补全没有）
 - 移动端：不注册，或 unavailable handler
 
 语法：

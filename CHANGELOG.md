@@ -359,7 +359,7 @@ behavior. 9 sub-plans M6-01..M6-09 delivered these components.
 ### Version bump
 
 All 42 `Cargo.toml` files: `0.6.0 → 0.7.0`. New entry:
-`lingxi-code/crates/tui/Cargo.toml` (introduced by M6-01).
+`lingxi-code/apps/cli/tui/Cargo.toml` (introduced by M6-01).
 
 ## [0.6.0] — M5 Execution Engine 全集
 

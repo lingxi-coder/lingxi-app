@@ -88,13 +88,13 @@ ANDROID_PAIR_SUFFIX = "_fmt"
 FORBIDDEN_GENERATE_ARGS = ("--ios-out", "--android-out")
 
 # 源码引用扫描的根目录，相对仓库根。
-IOS_SOURCE_ROOT = "clients/ios/Sources"
-ANDROID_SOURCE_ROOT = "clients/android/app/src/main/java"
+IOS_SOURCE_ROOT = "apps/ios/native/Sources"
+ANDROID_SOURCE_ROOT = "apps/android/native/app/src/main/java"
 
 # 手工维护、不经 generate.py 的姊妹资源文件——它们的 key 也算「已知」，
 # 否则每一条被这份文件 RESTORE 回来的 key 都会被误报成 orphan。
 ANDROID_COMPANION_STRINGS_FILES = (
-    "clients/android/app/src/main/res/values/strings_local_apps_v3.xml",
+    "apps/android/native/app/src/main/res/values/strings_local_apps_v3.xml",
 )
 
 # strings_local_apps_v3.xml 是手工维护的姊妹文件，不经 generate.py 生成，所以
@@ -113,7 +113,7 @@ ANDROID_LOCALE_DIR = {
     "ko": "values-ko",
 }
 ANDROID_COMPANION_STRINGS_BASENAME = "strings_local_apps_v3.xml"
-ANDROID_RES_ROOT = "clients/android/app/src/main/res"
+ANDROID_RES_ROOT = "apps/android/native/app/src/main/res"
 
 # 只匹配字面量 key（无 `\(...)` 插值）。插值调用会被 Swift 编译成复合 key
 # （`"foo %lld"` 等），那一半已经由上面的 `_fmt` 配对逻辑覆盖，这里再匹配
@@ -347,7 +347,7 @@ def compare(base, now):
 def main():
     ap = argparse.ArgumentParser(prog="check-i18n-pairing")
     here = Path(__file__).resolve()
-    ap.add_argument("--dir", default=str(here.parents[2] / "clients" / "translations"))
+    ap.add_argument("--dir", default=str(here.parents[2] / "resources" / "translations"))
     ap.add_argument("--repo-root", default=str(here.parents[2]))
     ap.add_argument("--baseline", default=str(here.parent / "i18n_pairing_baseline.json"))
     ap.add_argument("--update-baseline", action="store_true")

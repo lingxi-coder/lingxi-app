@@ -32,7 +32,7 @@ TypeScript 模块引用、重复文件内容、翻译生成源和根目录临时
 - `third_party/mksh`、`third_party/toybox` 和 OpenMinis 参考子模块参与移动端构建。
 - 原生平台中的同内容头像、图标和生成 Swift 文件分别由平台资源编译器或生成器消费；
   内容相同不代表冗余。
-- `assets/brand` 和 `clients/.design-reference` 保存设计源文件，不能用是否被 import 判废。
+- `assets/brand` 和 `apps/.design-reference` 保存设计源文件，不能用是否被 import 判废。
 - 历史运行时审计保留用于证据追溯；用文档导航区分当前说明和历史布局。
 - 签名桌面包、依赖缓存、本地参考仓库、账号/会话状态和备份保持原样。
 

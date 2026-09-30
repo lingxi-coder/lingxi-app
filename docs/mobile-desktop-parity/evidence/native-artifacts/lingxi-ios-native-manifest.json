@@ -6,13 +6,13 @@
   ],
   "source_fingerprint_sha256": "0195ada58c77866b830241e2df28069a960efe64d25bdcd1790262a8d366949c",
   "source_files": {
-    "clients/android/scripts/build-jni.sh": "7c80ee8c218f381b3b34994e60fe960b4a33a48c589ba757ff050560300408bc",
-    "clients/ios/scripts/build-xcframework.sh": "aef4177d725adeeab772b870f72d3add89eb223607c1389633fcfd71b2dd5d77",
+    "apps/android/native/scripts/build-jni.sh": "7c80ee8c218f381b3b34994e60fe960b4a33a48c589ba757ff050560300408bc",
+    "apps/ios/native/scripts/build-xcframework.sh": "aef4177d725adeeab772b870f72d3add89eb223607c1389633fcfd71b2dd5d77",
     "Cargo.lock": "266f02c0f7a1caefeee5e1b0e4738506f711508a88920b34a0465c234055d605",
     "Cargo.toml": "6cad72b43051fc427dc73e1bae06e8e3a356d94a04f1b0ae4a2f37f10801b046",
-    "crates/apps/android-aar/Cargo.toml": "77c86d1cf46a4c06d5580691a646ec9041e9756e9c49b309c57c7e7dfc4a15cb",
-    "crates/apps/android-aar/src/lib.rs": "18d5fd8b9c2664002bdb214e2bf10fe76a912834fd264bb170da4463962f200d",
-    "crates/apps/android-aar/uniffi.toml": "b13ead0af637eb3b72d60dc641c454f609a49d622ad17d4321e7082a5f766948",
+    "apps/android/ffi/Cargo.toml": "77c86d1cf46a4c06d5580691a646ec9041e9756e9c49b309c57c7e7dfc4a15cb",
+    "apps/android/ffi/src/lib.rs": "18d5fd8b9c2664002bdb214e2bf10fe76a912834fd264bb170da4463962f200d",
+    "apps/android/ffi/uniffi.toml": "b13ead0af637eb3b72d60dc641c454f609a49d622ad17d4321e7082a5f766948",
     "crates/apps/engine-mobile/Cargo.toml": "a288fa8ae62e7e9f1cfe2e1bab6eb3f75f2bdb0294ad2d4ab93db097978015bf",
     "crates/apps/engine-mobile/build.rs": "5374f34f027083384b86803f7f864230590e24223b2af2ef50b8557ec8eb3939",
     "crates/apps/engine-mobile/src/agent_resume.rs": "082eeab2b741d8bb608d6657b01c2d37fb6995a3ebbb7028ed7accbaf358ce5d",
@@ -50,10 +50,10 @@
     "crates/apps/engine-mobile/tests/mobile_shell_gating.rs": "b1331dc72aab37096626a9480087bb559c31669451e771b06da9422f9c42b77f",
     "crates/apps/engine-mobile/tests/mobile_tool_list_snapshot.rs": "1dd225ba2c01f6de56ba51677584f205a46ff16e8a322f16d6418c534212b2cd",
     "crates/apps/engine-mobile/tests/skeleton_test.rs": "e2d0f059e97ac3a5078dbf6f183ccd4d041f739b3049d5b188c8f1b794756374",
-    "crates/apps/ios-framework/Cargo.toml": "619c743883627964fe182488259d3fb40984abe6113ea5251da1a1f760597940",
-    "crates/apps/ios-framework/src/bin/uniffi-bindgen.rs": "e3106776268c19696f58be50f752f9fc6d6ec02e9d9bac2bf96157be53ea360c",
-    "crates/apps/ios-framework/src/lib.rs": "b26dff65c6ce78e2bb829a5b0152b6065b0e2cd2eb1ca83f86a9c566d5aed69f",
-    "crates/apps/ios-framework/uniffi.toml": "83585f66af55f627aaf3d142af2e1bcb7b8327fe5613f9f13fef728921500bf8",
+    "apps/ios/ffi/Cargo.toml": "619c743883627964fe182488259d3fb40984abe6113ea5251da1a1f760597940",
+    "apps/ios/ffi/src/bin/uniffi-bindgen.rs": "e3106776268c19696f58be50f752f9fc6d6ec02e9d9bac2bf96157be53ea360c",
+    "apps/ios/ffi/src/lib.rs": "b26dff65c6ce78e2bb829a5b0152b6065b0e2cd2eb1ca83f86a9c566d5aed69f",
+    "apps/ios/ffi/uniffi.toml": "83585f66af55f627aaf3d142af2e1bcb7b8327fe5613f9f13fef728921500bf8",
     "lingxi-code/client-protocol/Cargo.toml": "462175036bb2e3a6e6610245e11bcb3da32e5e1e020f0eb8d6be80eba53d8403",
     "lingxi-code/client-protocol/src/ask_user_question.rs": "3d3de9dbfcda68eab70fdbf27da683b63687dbf97f53d384b34e799f2551c58a",
     "lingxi-code/client-protocol/src/commands.rs": "8f06c884b4becc65b03e4f823fbeaf988ff131c8cb46a4e1661c23ebc4477569",
@@ -105,91 +105,91 @@
     "lingxi-code/mcp/src/registry.rs": "05bd93a74e11b5960800ad5a77a3dff0b938af272531f04454c130cb372c275a"
   },
   "artifacts": {
-    "clients/ios/Generated/client_adapter.swift": {
+    "apps/ios/native/Generated/client_adapter.swift": {
       "sha256": "fe0184a6b9dd61f38fa16ad8c04063d6bd21271641ab98c7b5a0e66afcb6edb7",
       "bytes": 15385
     },
-    "clients/ios/Generated/client_adapterFFI.h": {
+    "apps/ios/native/Generated/client_adapterFFI.h": {
       "sha256": "45f8108991e5016ed7474e8e5924afc92e3d1f7317a04769d53592b20524e856",
       "bytes": 23426
     },
-    "clients/ios/Generated/client_protocol.swift": {
+    "apps/ios/native/Generated/client_protocol.swift": {
       "sha256": "5fe18d2c3314852f678bff1ca2cfec43d04e9a5915f2c0e6a5b08087c424e3e7",
       "bytes": 763325
     },
-    "clients/ios/Generated/client_protocolFFI.h": {
+    "apps/ios/native/Generated/client_protocolFFI.h": {
       "sha256": "3e366bf590313a53176436aae365ab550605e61b1ba708e2483152e6611ba631",
       "bytes": 21524
     },
-    "clients/ios/Generated/engine_mobile.swift": {
+    "apps/ios/native/Generated/engine_mobile.swift": {
       "sha256": "7ac1945119f22566873864d46764021a5b3c1196f2f650059c8db0e0f126c2e5",
       "bytes": 120642
     },
-    "clients/ios/Generated/engine_mobileFFI.h": {
+    "apps/ios/native/Generated/engine_mobileFFI.h": {
       "sha256": "e9f602fc8ca7213d4085309f7622d419243ff8bdec1c86f9db13b4bc8f2c6968",
       "bytes": 41692
     },
-    "clients/ios/Generated/ios_framework.swift": {
+    "apps/ios/native/Generated/ios_framework.swift": {
       "sha256": "19a0e8141d08a0200019fcd1a8fbee169ca6130977d309793c5e77f8c7bbb8ee",
       "bytes": 267069
     },
-    "clients/ios/Generated/ios_frameworkFFI.h": {
+    "apps/ios/native/Generated/ios_frameworkFFI.h": {
       "sha256": "9108a879f9c9dcae5ccedb2ab2f542515b42490d9ad16b102f961791c6ac9a50",
       "bytes": 71958
     },
-    "clients/ios/Generated/module.modulemap": {
+    "apps/ios/native/Generated/module.modulemap": {
       "sha256": "f436081fbe2d8837265fe5eb90eafca99a376e6fdb42f1232bf9fcdccd10255f",
       "bytes": 298
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/Info.plist": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/Info.plist": {
       "sha256": "acdbc27d4bb68909145fad7d046178482b0395115020a6ef3be62be15a799242",
       "bytes": 1280
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/client_adapterFFI.h": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/client_adapterFFI.h": {
       "sha256": "45f8108991e5016ed7474e8e5924afc92e3d1f7317a04769d53592b20524e856",
       "bytes": 23426
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/client_protocolFFI.h": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/client_protocolFFI.h": {
       "sha256": "3e366bf590313a53176436aae365ab550605e61b1ba708e2483152e6611ba631",
       "bytes": 21524
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/engine_mobileFFI.h": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/engine_mobileFFI.h": {
       "sha256": "e9f602fc8ca7213d4085309f7622d419243ff8bdec1c86f9db13b4bc8f2c6968",
       "bytes": 41692
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/ios_frameworkFFI.h": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/ios_frameworkFFI.h": {
       "sha256": "9108a879f9c9dcae5ccedb2ab2f542515b42490d9ad16b102f961791c6ac9a50",
       "bytes": 71958
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/module.modulemap": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/Headers/module.modulemap": {
       "sha256": "f436081fbe2d8837265fe5eb90eafca99a376e6fdb42f1232bf9fcdccd10255f",
       "bytes": 298
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/libios_framework.a": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64/libios_framework.a": {
       "sha256": "c4b8d8aa1e365757522fb0a88739545ee496f09b7636a3162a5d53817b37d219",
       "bytes": 635736968
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/client_adapterFFI.h": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/client_adapterFFI.h": {
       "sha256": "45f8108991e5016ed7474e8e5924afc92e3d1f7317a04769d53592b20524e856",
       "bytes": 23426
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/client_protocolFFI.h": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/client_protocolFFI.h": {
       "sha256": "3e366bf590313a53176436aae365ab550605e61b1ba708e2483152e6611ba631",
       "bytes": 21524
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/engine_mobileFFI.h": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/engine_mobileFFI.h": {
       "sha256": "e9f602fc8ca7213d4085309f7622d419243ff8bdec1c86f9db13b4bc8f2c6968",
       "bytes": 41692
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/ios_frameworkFFI.h": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/ios_frameworkFFI.h": {
       "sha256": "9108a879f9c9dcae5ccedb2ab2f542515b42490d9ad16b102f961791c6ac9a50",
       "bytes": 71958
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap": {
       "sha256": "f436081fbe2d8837265fe5eb90eafca99a376e6fdb42f1232bf9fcdccd10255f",
       "bytes": 298
     },
-    "clients/ios/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/libios_framework.a": {
+    "apps/ios/native/Frameworks/LingxiCodeFFI.xcframework/ios-arm64_x86_64-simulator/libios_framework.a": {
       "sha256": "a8c962df719750604f807d8ffe5e908f5a9f2cfa8a12fc40de4f4fbf4408ac8a",
       "bytes": 1266239016
     }

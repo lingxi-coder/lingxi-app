@@ -5,7 +5,7 @@
 # 那条路径一个字节都不比对，输出与真检查逐字节相同，退出码都是 0。
 # 真检查是不带 out 参数的那个：
 #
-#     python3 clients/translations/generate.py --check
+#     python3 resources/translations/generate.py --check
 #
 # 本脚本是它的补充,不是替代:它管的是 key 齐了之后仍然会静默丢失的三类东西。
 set -euo pipefail

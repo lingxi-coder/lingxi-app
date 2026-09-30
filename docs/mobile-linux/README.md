@@ -34,7 +34,7 @@ reported explicitly; there is no Android host-shell fallback.
 ## iOS (iSH ARM64)
 
 iOS device builds use the pinned OpenMinis iSH ARM64 source and Alpine aarch64
-fakefs rootfs. `clients/ios/scripts/build-linux-runtime.sh` reconstructs all
+fakefs rootfs. `apps/ios/native/scripts/build-linux-runtime.sh` reconstructs all
 native-support framework and rootfs through the locked SDK; simulator slices
 compile the same API and report unavailable without linking the iSH kernel.
 Full local-app release builds pass `--local-app-runtime --apk-dir <closure>`;
@@ -48,8 +48,8 @@ closed when it is absent, so produce it first:
 
 ```text
 scripts/local-apps/build-local-app-node-modules.sh --arch aarch64
-clients/ios/scripts/stage-local-app-runtime.sh --variant full \
-  --node-modules clients/ios/build/local-app-node-modules/aarch64/node_modules
+apps/ios/native/scripts/stage-local-app-runtime.sh --variant full \
+  --node-modules apps/ios/native/build/local-app-node-modules/aarch64/node_modules
 ```
 
 The tree must be resolved **inside the rootfs**, which is what the first script
@@ -69,13 +69,13 @@ the Alpine package notices/SBOM, and corresponding source for the exact pins.
 Build and verification entrypoints:
 
 ```text
-clients/android/scripts/verify-mobile-linux-pins.sh
-clients/android/scripts/build-mobile-linux-native.sh --variant play
-clients/android/scripts/build-mobile-linux-native.sh --variant direct
-clients/android/scripts/verify-mobile-linux-native.sh --variant <play|direct>
-clients/android/scripts/stage-mobile-linux-assets.sh --variant <play|direct> --input <evidence> --apk-dir <closure>
-clients/android/scripts/verify-local-app-supply-chain.sh [--release --apk-dir <closure>]
-clients/ios/scripts/verify-local-app-supply-chain.sh [--release --apk-dir <closure>]
+apps/android/native/scripts/verify-mobile-linux-pins.sh
+apps/android/native/scripts/build-mobile-linux-native.sh --variant play
+apps/android/native/scripts/build-mobile-linux-native.sh --variant direct
+apps/android/native/scripts/verify-mobile-linux-native.sh --variant <play|direct>
+apps/android/native/scripts/stage-mobile-linux-assets.sh --variant <play|direct> --input <evidence> --apk-dir <closure>
+apps/android/native/scripts/verify-local-app-supply-chain.sh [--release --apk-dir <closure>]
+apps/ios/native/scripts/verify-local-app-supply-chain.sh [--release --apk-dir <closure>]
 ```
 
 The local-app release check is fail-closed. Native ARM64 builds verify the

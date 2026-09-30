@@ -14,6 +14,6 @@ while [[ $# -gt 0 ]]; do
 done
 exec bash "${RUNTIME_ROOT}/scripts/local-apps/build-local-app-node-modules.sh" \
   --sdk-root "${SDK_ROOT}" \
-  --rootfs "${HOST_ROOT}/clients/ios/build/local-app-rootfs/${ARCH}/rootfs.tar.gz" \
-  --output-dir "${HOST_ROOT}/clients/ios/build/local-app-node-modules/${ARCH}" \
-  --cache-dir "${HOST_ROOT}/clients/ios/build/local-app-cache" "${ARGS[@]}"
+  --rootfs "${HOST_ROOT}/apps/ios/native/build/local-app-rootfs/${ARCH}/rootfs.tar.gz" \
+  --output-dir "${HOST_ROOT}/apps/ios/native/build/local-app-node-modules/${ARCH}" \
+  --cache-dir "${HOST_ROOT}/apps/ios/native/build/local-app-cache" "${ARGS[@]}"

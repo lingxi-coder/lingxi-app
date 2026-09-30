@@ -1,5 +1,7 @@
 # LingXi Code 与 Claude Code 2.1.207 全局 Parity 审计
 
+> Historical milestone/audit record. Paths and validation describe the recorded version; use [the current product layout](development/multi-repo-workflow.md) for navigation and build instructions.
+
 > 审计日期：2026-07-13  
 > Claude Code 基线：`2.1.207`  
 > 审计对象：`lingxi-code`  
@@ -283,12 +285,12 @@ Claude Code 2.1.205 专门修改后台 task notification，要求明确声明没
 
 #### 证据链
 
-- [`apps/cli/src/background_dispatch.rs:19`](../crates/apps/cli/src/background_dispatch.rs#L19) 明确没有 control socket/live background protocol。
-- [`apps/cli/src/commands/bg_worker.rs:31`](../crates/apps/cli/src/commands/bg_worker.rs#L31) 明确没有 PTY、IPC、respawn、watchdog 和 upgrade takeover。
+- [`apps/cli/src/background_dispatch.rs:19`](../apps/cli/host/src/background_dispatch.rs#L19) 明确没有 control socket/live background protocol。
+- [`apps/cli/src/commands/bg_worker.rs:31`](../apps/cli/host/src/commands/bg_worker.rs#L31) 明确没有 PTY、IPC、respawn、watchdog 和 upgrade takeover。
 - worker 只执行一次 `run_turn`。
-- [`apps/cli/src/commands/daemon.rs:314`](../crates/apps/cli/src/commands/daemon.rs#L314) 将 worker crash 直接标记为永久 failed，不恢复。
-- [`apps/cli/src/commands/agents.rs:484`](../crates/apps/cli/src/commands/agents.rs#L484) 的 attach 实际启动第二个 `--resume` CLI 进程，而不是连接原 worker。
-- [`apps/cli/src/background_dispatch.rs:200`](../crates/apps/cli/src/background_dispatch.rs#L200) 将 dispatch env 固定为空 map。
+- [`apps/cli/src/commands/daemon.rs:314`](../apps/cli/host/src/commands/daemon.rs#L314) 将 worker crash 直接标记为永久 failed，不恢复。
+- [`apps/cli/src/commands/agents.rs:484`](../apps/cli/host/src/commands/agents.rs#L484) 的 attach 实际启动第二个 `--resume` CLI 进程，而不是连接原 worker。
+- [`apps/cli/src/background_dispatch.rs:200`](../apps/cli/host/src/background_dispatch.rs#L200) 将 dispatch env 固定为空 map。
 
 #### 影响
 

@@ -64,7 +64,7 @@ conversion and protocol fixtures, not as a production execution alternative.
   package checks and packaged-app smoke checks (renderer/sidecar, terminal, Git,
   Keychain restart persistence, authenticated localhost inference, permissions
   and scheduled tasks). The verified application was launched from
-  `clients/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app`.
+  `apps/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app`.
 - Final `cargo check --workspace --all-targets --locked --offline` passed.
   Existing workspace documentation/mobile warnings remain unchanged.
 

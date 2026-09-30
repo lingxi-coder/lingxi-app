@@ -498,7 +498,7 @@ GIT_MASTER=1 git commit -m "feat(engine-desktop): wire policy permission gate" \
 **Files:**
 - Test: `crates/apps/engine-desktop/tests/hook_executor_wiring_test.rs`
 - Modify: `crates/apps/engine-desktop/src/lib.rs`
-- Modify: `crates/apps/cli/src/main.rs` only if the actual orchestrator construction lives there
+- Modify: `apps/cli/host/src/main.rs` only if the actual orchestrator construction lives there
 
 **Step 1: Write the failing test**
 

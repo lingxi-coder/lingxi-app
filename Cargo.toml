@@ -1,25 +1,25 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tools/ios-use",
-    "crates/config-requirements",
-    "crates/apps/ios-framework",
-    "crates/apps/android-aar",
-    "crates/apps/bridge-server",
-    "crates/apps/cli",
-    "crates/tui-core",
-    "crates/tui",
+    "tools/ios-use",
+    "packages/config-requirements",
+    "apps/ios/ffi",
+    "apps/android/ffi",
+    "apps/bridge-server",
+    "apps/cli/host",
+    "apps/cli/tui-core",
+    "apps/cli/tui",
 ]
 
 # Default builds target desktop product packages. Mobile FFI and platform
 # adapters remain workspace members for explicit cross-platform builds.
 default-members = [
-    "crates/tools/ios-use",
-    "crates/config-requirements",
-    "crates/apps/bridge-server",
-    "crates/apps/cli",
-    "crates/tui-core",
-    "crates/tui",
+    "tools/ios-use",
+    "packages/config-requirements",
+    "apps/bridge-server",
+    "apps/cli/host",
+    "apps/cli/tui-core",
+    "apps/cli/tui",
 ]
 
 [workspace.package]

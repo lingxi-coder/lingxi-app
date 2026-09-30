@@ -482,7 +482,7 @@
     "result": "passed",
     "signing_team": "AZ4AX7J833",
     "zip_sha256": "63893a8dfd5934d66150a913bef5a5481a5b1c9ff9a286ac89d1933d101fdd52",
-    "artifact": "clients/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+    "artifact": "apps/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
     "source_checkout_restored": true
   },
   "independent_runtime_test_cases": [
@@ -609,9 +609,9 @@
     "bindings": "/tmp/harness-ios-validation/Generated",
     "artifact_sha256_manifest": "/tmp/harness-ios-validation/final-provenance.json",
     "rootfs": {
-      "manifest": "/Users/luolingfeng/Projects/LingXi-Next/clients/ios/build/linux-runtime/openminis/manifest.json",
+      "manifest": "/Users/luolingfeng/Projects/LingXi-Next/apps/ios/native/build/linux-runtime/openminis/manifest.json",
       "manifest_sha256": "1604b45684d01b3883d39dbd2a6bd22b021e1e5da6c68ed6f69660231768e540",
-      "zip": "/Users/luolingfeng/Projects/LingXi-Next/clients/ios/build/linux-runtime/openminis/resources/alpine-rootfs.zip",
+      "zip": "/Users/luolingfeng/Projects/LingXi-Next/apps/ios/native/build/linux-runtime/openminis/resources/alpine-rootfs.zip",
       "zip_sha256": "c7c4f3f7fcc8b7f646e19856d4ebee4b4e89fb4d8561ae2d029092445dbb5b54",
       "alpine_version": "3.24.2",
       "local_app_runtime": true,

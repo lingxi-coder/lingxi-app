@@ -1,0 +1,32 @@
+# Generated UniFFI integration artifacts (reproduce with scripts/build-jni.sh).
+# The Rust cdylib .so (per-ABI, ~20MB each) and the uniffi-bindgen Kotlin
+# bindings are build outputs, not source — mirrors apps/ios/native's Generated/.
+#
+# NO TRAILING SLASH, deliberately. A trailing slash matches a DIRECTORY only, so
+# when these paths are SYMLINKS — which is how every git worktree gets them,
+# pointed at the primary checkout so a worktree need not rebuild 20MB per ABI —
+# the rule missed them, they surfaced as untracked, and a `git add apps/`
+# committed five absolute symlinks whose targets were their own checked-out
+# paths. Checking that out replaced the real build inputs with self-referential
+# links and made every tree walk fail with ELOOP.
+app/src/main/jniLibs
+app/src/direct/jniLibs
+app/src/play/jniLibs
+app/src/main/java/com/lingxi/code/bindings
+app/libs
+
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+.kotlin/
+captures/
+*.apk
+
+# Device-acceptance secret: the write-scoped PAT for the Git auth tests is
+# written here locally and read by the test runner — never committed.
+.gittoken
+app/libs/*.aar

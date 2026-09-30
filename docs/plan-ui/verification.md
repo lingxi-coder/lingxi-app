@@ -4,10 +4,10 @@ Implemented on Desktop, Android and iOS: lightbulb status, bounded Markdown prev
 
 ## Main files
 
-- Desktop: `PlanDocument.tsx`, `Stage.tsx`, `RuntimeCenter.tsx`, `MarkdownContent.tsx`, `App.tsx`, `bridge/planDocuments.ts` under `clients/electron/src/renderer`.
-- Android: `conversation/PlanDocument.kt`, transcript/message/tool projections and permission previews under `clients/android/app/src/main/java/com/lingxi/code`.
-- iOS: `Conversation/PlanDocumentView.swift`, message/tool/history projections, session details and `App/RootView.swift` under `clients/ios/Sources`.
-- Shared localized labels: `clients/translations/*.json`; platform resources produced by `generate.py`.
+- Desktop: `PlanDocument.tsx`, `Stage.tsx`, `RuntimeCenter.tsx`, `MarkdownContent.tsx`, `App.tsx`, `bridge/planDocuments.ts` under `apps/electron/src/renderer`.
+- Android: `conversation/PlanDocument.kt`, transcript/message/tool projections and permission previews under `apps/android/native/app/src/main/java/com/lingxi/code`.
+- iOS: `Conversation/PlanDocumentView.swift`, message/tool/history projections, session details and `App/RootView.swift` under `apps/ios/native/Sources`.
+- Shared localized labels: `resources/translations/*.json`; platform resources produced by `generate.py`.
 
 ## Verification (2026-09-12)
 

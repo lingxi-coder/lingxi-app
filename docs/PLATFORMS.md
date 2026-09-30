@@ -1,5 +1,7 @@
 # Platform support matrix (v0.3.0)
 
+> Historical milestone/audit record. Paths and validation describe the recorded version; use [the current product layout](development/multi-repo-workflow.md) for navigation and build instructions.
+
 LingXi Code's behavioral parity with claude-code targets desktop OS releases.
 This document is the authoritative per-OS capability table; it mirrors
 `docs/ARCHITECTURE.md#capability-matrix` and adds setup notes.

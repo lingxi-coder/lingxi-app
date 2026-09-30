@@ -13,8 +13,8 @@
 ## Context
 
 - Design spec: `docs/superpowers/specs/2026-06-30-web-config-screen-design.md`.
-- Existing UI pattern: `crates/tui/src/screens/connect_picker.rs`, `connect.rs`, and `root.rs::pump_store_provider_key`.
-- Existing settings-write patterns: `crates/tui/src/theme_persist.rs`, `recent_models.rs`.
+- Existing UI pattern: `apps/cli/tui/src/screens/connect_picker.rs`, `connect.rs`, and `root.rs::pump_store_provider_key`.
+- Existing settings-write patterns: `apps/cli/tui/src/theme_persist.rs`, `recent_models.rs`.
 - Existing web runtime: `crates/tools/web/src/web_search_client.rs`, `web_search.rs`.
 - Existing credential store: `secret::CredentialManager::{set_provider_key,get_provider_key}` via `/connect`.
 
@@ -217,8 +217,8 @@ git commit -m "feat(web): resolve active search provider from config"
 ### Task 3: `/web` picker pure reducer + detail lines
 
 **Files:**
-- Create: `crates/tui/src/screens/web_picker.rs`
-- Modify: `crates/tui/src/screens/mod.rs`
+- Create: `apps/cli/tui/src/screens/web_picker.rs`
+- Modify: `apps/cli/tui/src/screens/mod.rs`
 - Test: `cargo test -p tui --lib web_picker`
 
 **Step 1: Write failing reducer/detail tests**
@@ -277,7 +277,7 @@ Expected: EXIT=0.
 **Step 5: Commit**
 
 ```bash
-git add crates/tui/src/screens/web_picker.rs crates/tui/src/screens/mod.rs
+git add apps/cli/tui/src/screens/web_picker.rs apps/cli/tui/src/screens/mod.rs
 git commit -m "feat(tui): add pure /web provider picker"
 ```
 
@@ -286,8 +286,8 @@ git commit -m "feat(tui): add pure /web provider picker"
 ### Task 4: `/web` config screen pure reducer
 
 **Files:**
-- Create: `crates/tui/src/screens/web_config.rs`
-- Modify: `crates/tui/src/screens/mod.rs`
+- Create: `apps/cli/tui/src/screens/web_config.rs`
+- Modify: `apps/cli/tui/src/screens/mod.rs`
 - Test: `cargo test -p tui --lib web_config`
 
 **Step 1: Write failing reducer tests**
@@ -346,7 +346,7 @@ Expected: EXIT=0.
 **Step 5: Commit**
 
 ```bash
-git add crates/tui/src/screens/web_config.rs crates/tui/src/screens/mod.rs
+git add apps/cli/tui/src/screens/web_config.rs apps/cli/tui/src/screens/mod.rs
 git commit -m "feat(tui): add pure /web provider config screen"
 ```
 
@@ -355,11 +355,11 @@ git commit -m "feat(tui): add pure /web provider config screen"
 ### Task 5: TUI root/app wiring + persistence/test pumps
 
 **Files:**
-- Modify: `crates/tui/src/screens/mod.rs`
-- Modify: `crates/tui/src/app.rs`
-- Modify: `crates/tui/src/root.rs`
-- Modify: `crates/tui/src/state.rs`
-- Modify: `crates/tui/src/session.rs`
+- Modify: `apps/cli/tui/src/screens/mod.rs`
+- Modify: `apps/cli/tui/src/app.rs`
+- Modify: `apps/cli/tui/src/root.rs`
+- Modify: `apps/cli/tui/src/state.rs`
+- Modify: `apps/cli/tui/src/session.rs`
 - Modify: `crates/tools/web/src/web_search_client.rs` (runtime load path if needed)
 - Test: `cargo test -p tui --lib web_` and targeted root/app tests
 
@@ -439,7 +439,7 @@ Expected: EXIT=0.
 **Step 7: Commit**
 
 ```bash
-git add crates/tui/src/screens/mod.rs crates/tui/src/app.rs crates/tui/src/root.rs crates/tui/src/state.rs crates/tui/src/session.rs crates/tools/web/src/web_search_client.rs
+git add apps/cli/tui/src/screens/mod.rs apps/cli/tui/src/app.rs apps/cli/tui/src/root.rs apps/cli/tui/src/state.rs apps/cli/tui/src/session.rs crates/tools/web/src/web_search_client.rs
 git commit -m "feat(tui): wire /web picker config persistence and test search"
 ```
 
@@ -512,7 +512,7 @@ git commit -m "feat(web): use persisted /web configuration at runtime"
 ### Task 7: Verification, PTY smoke, final build
 
 **Files:**
-- Optional create: `crates/tui/tests/web_config_pty.py`
+- Optional create: `apps/cli/tui/tests/web_config_pty.py`
 - Modify only if PTY is practical.
 
 **Step 1: Run full targeted test suite**
@@ -557,7 +557,7 @@ Expected: EXIT=0. If not practical, document limitation in final report.
 **Step 4: Commit final verification artifacts**
 
 ```bash
-git add crates/tui/tests/web_config_pty.py
+git add apps/cli/tui/tests/web_config_pty.py
 git commit -m "test(tui): PTY smoke for /web provider config" || true
 ```
 

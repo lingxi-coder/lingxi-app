@@ -89,7 +89,7 @@ jobs:
           export RELEASE_VERSION="${RELEASE_VERSION#v}"
           node --input-type=module <<'EOF'
           import { join, resolve } from 'node:path';
-          import { buildCredentialBrokerResources, signAppBundle, signBinary, validateProvisioningProfile, verifyIdentifier, verifySignedEntitlements, writeEntitlements, BROKER_BUNDLE_ID, BROKER_CLIENT_IDENTIFIER } from './clients/electron/scripts/credential-broker.mjs';
+          import { buildCredentialBrokerResources, signAppBundle, signBinary, validateProvisioningProfile, verifyIdentifier, verifySignedEntitlements, writeEntitlements, BROKER_BUNDLE_ID, BROKER_CLIENT_IDENTIFIER } from './apps/electron/scripts/credential-broker.mjs';
 
           const target = process.env['TARGET_TRIPLE'];
           const identity = process.env['LINGXI_CODESIGN_IDENTITY'];
@@ -138,7 +138,7 @@ jobs:
           esac
           harness="$RUNNER_TEMP/lingxi-credential-broker-integration"
           xcrun swiftc -O -parse-as-library -target "$swift_target" \
-            clients/electron/native/credential-broker/CredentialBrokerIntegrationMain.swift \
+            apps/electron/native/credential-broker/CredentialBrokerIntegrationMain.swift \
             -o "$harness"
           /usr/bin/codesign --force --sign "${LINGXI_CODESIGN_IDENTITY}" \
             --options runtime --timestamp -i com.lingxi.code.cli "$harness"
@@ -177,8 +177,7 @@ jobs:
       - name: Reassemble target/<triple>/release layout
         shell: bash
         run: |
-          cd .
-          for d in ../artifacts/bin-*; do
+          for d in artifacts/bin-*; do
             t="$(basename "$d" | sed 's/^bin-//')"
             mkdir -p "target/$t"
             cp -R "$d/." "target/$t/"
@@ -196,7 +195,7 @@ jobs:
         working-directory: .
         run: |
           for p in lingxi lingxi-linux-x64 lingxi-linux-arm64 lingxi-darwin-x64 lingxi-darwin-arm64 lingxi-win32-x64 lingxi-win32-arm64; do
-            python3 npm/scripts/build_npm_package.py --package "$p" --release-version "${{ steps.ver.outputs.v }}" --staging-dir "/tmp/npm/$p" --vendor-src target
+            python3 packaging/npm/scripts/build_npm_package.py --package "$p" --release-version "${{ steps.ver.outputs.v }}" --staging-dir "/tmp/npm/$p" --vendor-src target
           done
       - name: Build wheels (one per target/tag)
         working-directory: packaging/pypi
@@ -221,9 +220,9 @@ jobs:
             ext=""; [[ "$t" == *windows* ]] && ext=".exe"
             rm -rf src/lingxi_cli_bin/bin && mkdir -p src/lingxi_cli_bin/bin
             rm -rf src/lingxi_cli_bin/credential-broker
-            cp "../target/$t/release/lingxi-cli$ext" "src/lingxi_cli_bin/bin/lingxi$ext"
-            if [ -d "../target/$t/credential-broker" ]; then
-              cp -R "../target/$t/credential-broker" "src/lingxi_cli_bin/credential-broker"
+            cp "../../target/$t/release/lingxi-cli$ext" "src/lingxi_cli_bin/bin/lingxi$ext"
+            if [ -d "../../target/$t/credential-broker" ]; then
+              cp -R "../../target/$t/credential-broker" "src/lingxi_cli_bin/credential-broker"
             fi
             printf '{"target":"%s"}' "$t" > src/lingxi_cli_bin/lingxi-package.json
             for tag in ${TAGS[$t]}; do

@@ -12,7 +12,7 @@
 
 The shared contract is now active on both mobile clients:
 
-- `clients/voice/models.json` is the canonical Sherpa 1.13.2 runtime/model
+- `resources/voice/models.json` is the canonical Sherpa 1.13.2 runtime/model
   manifest. Checked generators emit the committed Kotlin and Swift catalogs,
   and the drift test validates both outputs.
 - Android settings, Flow, ordinary-chat auto-play, FFI STT/TTS, and Direct
@@ -35,7 +35,7 @@ The shared contract is now active on both mobile clients:
   data across cancellation/interruption.
 
 For a fresh iOS checkout, run
-`clients/ios/scripts/install-sherpa-runtime.sh` before `xcodegen generate` or an
+`apps/ios/native/scripts/install-sherpa-runtime.sh` before `xcodegen generate` or an
 Xcode build. The script downloads the pinned runtime artifact, verifies its
 checksum, and stages the gitignored Sherpa and ONNX Runtime XCFrameworks.
 
@@ -207,7 +207,7 @@ Runtime precedence is:
 ### Runtime version
 
 The first iOS integration pins Sherpa to **1.13.2**, matching the Android AAR
-already fetched by `clients/android/scripts/build-jni.sh`. The two platforms
+already fetched by `apps/android/native/scripts/build-jni.sh`. The two platforms
 must upgrade in the same change after both build and benchmark successfully.
 
 - Android continues to consume the pinned static-link ONNX Runtime AAR.
@@ -224,7 +224,7 @@ publishes an iOS XCFramework/Swift package. See the
 
 ### Catalog
 
-Create one canonical `clients/voice/models.json` and a small checked generator
+Create one canonical `resources/voice/models.json` and a small checked generator
 that emits Kotlin and Swift catalog types. The manifest owns:
 
 - runtime version and binary checksums;

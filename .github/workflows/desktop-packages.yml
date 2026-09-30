@@ -4,24 +4,28 @@ on:
   pull_request:
     paths:
       - '.github/workflows/desktop-packages.yml'
-      - 'clients/electron/**'
-      - 'clients/shared/**'
+      - 'apps/**'
+      - 'packages/**'
+      - 'resources/**'
+      - 'tools/**'
+      - 'build-support/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - 'crates/**'
       - 'scripts/**'
       - 'packaging/**'
   push:
     branches: [main]
     paths:
       - '.github/workflows/desktop-packages.yml'
-      - 'clients/electron/**'
-      - 'clients/shared/**'
+      - 'apps/**'
+      - 'packages/**'
+      - 'resources/**'
+      - 'tools/**'
+      - 'build-support/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
-      - 'crates/**'
       - 'scripts/**'
       - 'packaging/**'
   workflow_dispatch:
@@ -62,8 +66,8 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: |
-            clients/shared/package-lock.json
-            clients/electron/package-lock.json
+            packages/bridge-client/package-lock.json
+            apps/electron/package-lock.json
 
       - name: Remap build-machine paths
         shell: bash
@@ -71,11 +75,11 @@ jobs:
           echo "RUSTFLAGS=--remap-path-prefix=${GITHUB_WORKSPACE}=/workspace --remap-path-prefix=${CARGO_HOME}=/cargo" >> "$GITHUB_ENV"
 
       - name: Install shared SDK
-        working-directory: clients/shared
+        working-directory: packages/bridge-client
         run: npm ci
 
       - name: Install Desktop dependencies
-        working-directory: clients/electron
+        working-directory: apps/electron
         run: npm ci
 
       - name: Check and test native Rust host
@@ -97,13 +101,13 @@ jobs:
         run: cargo test --locked -p platform-windows --lib
 
       - name: Build and test shared SDK
-        working-directory: clients/shared
+        working-directory: packages/bridge-client
         run: |
           npm run build
           npm test
 
       - name: Typecheck, test, and build Desktop
-        working-directory: clients/electron
+        working-directory: apps/electron
         run: |
           npm run typecheck
           npm test
@@ -111,7 +115,7 @@ jobs:
 
       - name: Package native Desktop target
         shell: bash
-        working-directory: clients/electron
+        working-directory: apps/electron
         run: node scripts/package-desktop.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
         env:
           # Explicitly test package layout without pretending an ad-hoc build
@@ -121,12 +125,12 @@ jobs:
 
       - name: Static audit and packaged runtime smoke
         shell: bash
-        working-directory: clients/electron
+        working-directory: apps/electron
         run: node scripts/verify-desktop-package.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
 
       - name: Keyless packaged sidecar and cleanup smoke
         shell: bash
-        working-directory: clients/electron
+        working-directory: apps/electron
         run: node scripts/packaged-sidecar-smoke.mjs --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}'
 
       - uses: actions/upload-artifact@v4
@@ -134,8 +138,8 @@ jobs:
           name: lingxi-code-${{ matrix.platform }}-${{ matrix.arch }}
           if-no-files-found: error
           path: |
-            clients/electron/dist/${{ matrix.platform }}-${{ matrix.arch }}.*
-            clients/electron/dist/${{ matrix.platform }}-${{ matrix.arch }}.build-metadata.json
+            apps/electron/dist/${{ matrix.platform }}-${{ matrix.arch }}.*
+            apps/electron/dist/${{ matrix.platform }}-${{ matrix.arch }}.build-metadata.json
 
   signed-credential-broker:
     name: signed-development-credential-broker
@@ -185,7 +189,7 @@ jobs:
             verifyIdentifier,
             verifySignedEntitlements,
             writeEntitlements,
-          } from './clients/electron/scripts/credential-broker.mjs';
+          } from './apps/electron/scripts/credential-broker.mjs';
           const ids = brokerIdentifiers('development');
           const root = process.env.BROKER_OUTPUT;
           const profile = process.env.BROKER_PROFILE;
@@ -206,7 +210,7 @@ jobs:
           EOF
           harness="$RUNNER_TEMP/lingxi-development-broker-integration"
           xcrun swiftc -O -parse-as-library -target arm64-apple-macos13.0 \
-            clients/electron/native/credential-broker/CredentialBrokerIntegrationMain.swift \
+            apps/electron/native/credential-broker/CredentialBrokerIntegrationMain.swift \
             -o "$harness"
           /usr/bin/codesign --force --sign "$LINGXI_DEV_IDENTITY" --options runtime \
             --timestamp -i com.lingxi.code.cli.development "$harness"

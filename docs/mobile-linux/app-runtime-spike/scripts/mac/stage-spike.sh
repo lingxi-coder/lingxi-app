@@ -272,10 +272,10 @@ step_pack() {
   local next_version
   next_version="$(resolved_next_version)"
 
-  local proot_src="${REPO_ROOT}/clients/android/app/src/${VARIANT}/jniLibs/arm64-v8a"
+  local proot_src="${REPO_ROOT}/apps/android/native/app/src/${VARIANT}/jniLibs/arm64-v8a"
   if [[ ! -f "${proot_src}/libproot.so" || ! -f "${proot_src}/libproot-loader.so" ]]; then
     echo "PRoot binaries missing under ${proot_src}." >&2
-    echo "Build them first: clients/android/scripts/build-mobile-linux-native.sh --variant ${VARIANT}" >&2
+    echo "Build them first: apps/android/native/scripts/build-mobile-linux-native.sh --variant ${VARIANT}" >&2
     exit 1
   fi
 

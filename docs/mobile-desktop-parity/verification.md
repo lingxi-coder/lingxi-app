@@ -68,8 +68,8 @@ Swift concurrency/deprecation and Rust warning output is retained in logs. Andro
   test results and screenshot locations.
 - `.omx/state/mobile-desktop-parity/android-final/`: Android unit/native/UI logs,
   screenshots and native artifact readback.
-- Shared test corpus: `clients/shared/fixtures/native-conversation-parity.json`;
-  identity vectors: `clients/shared/fixtures/agent-avatar-identities.json`.
+- Shared test corpus: `packages/bridge-client/fixtures/native-conversation-parity.json`;
+  identity vectors: `packages/bridge-client/fixtures/agent-avatar-identities.json`.
 
 Signed iOS simulator tests use `CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=-` so
 Keychain entitlements are valid. Android instrumentation uses an isolated

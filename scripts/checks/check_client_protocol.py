@@ -4,11 +4,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FILES = [
-    "clients/ios/Sources/LocalApps/LocalAppsModels.swift",
-    "clients/ios/Sources/LocalApps/LocalAppsProtocolAdapter.swift",
-    "clients/ios/Sources/LocalApps/LocalAppsStore.swift",
-    "clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppsContract.kt",
-    "clients/android/app/src/main/java/com/lingxi/code/localapps/LocalAppsViewModel.kt",
+    "apps/ios/native/Sources/LocalApps/LocalAppsModels.swift",
+    "apps/ios/native/Sources/LocalApps/LocalAppsProtocolAdapter.swift",
+    "apps/ios/native/Sources/LocalApps/LocalAppsStore.swift",
+    "apps/android/native/app/src/main/java/com/lingxi/code/localapps/LocalAppsContract.kt",
+    "apps/android/native/app/src/main/java/com/lingxi/code/localapps/LocalAppsViewModel.kt",
 ]
 FORBIDDEN = ("RuntimeProfileSelection", "runtimeProfileSelection", "app_runtime_profile_selection_requested")
 for relative in FILES:

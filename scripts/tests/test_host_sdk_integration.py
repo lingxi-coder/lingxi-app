@@ -21,10 +21,10 @@ def module(name, path):
     return result
 
 
-native = module("native", HOST / "clients/android/scripts/mobile-linux-native.py")
-apk = module("apk", HOST / "clients/android/scripts/verify-mobile-linux-apk.py")
+native = module("native", HOST / "apps/android/native/scripts/mobile-linux-native.py")
+apk = module("apk", HOST / "apps/android/native/scripts/verify-mobile-linux-apk.py")
 policy = module("policy", (Path(__file__).resolve().parent / "../local-apps/verify-local-app-host.py"))
-assets = module("assets", HOST / "clients/android/scripts/stage-mobile-linux-assets.py")
+assets = module("assets", HOST / "apps/android/native/scripts/stage-mobile-linux-assets.py")
 
 
 class NativeIntegrationTests(unittest.TestCase):
@@ -217,7 +217,7 @@ class ActiveRootfsEvidenceTests(unittest.TestCase):
             self.inspect()
 
     def test_ios_base_reader_uses_active_source_pin(self):
-        script = (HOST / "clients/ios/scripts/build-linux-runtime.sh").read_text()
+        script = (HOST / "apps/ios/native/scripts/build-linux-runtime.sh").read_text()
         reader = script.split("<<'FETCH'\n", 1)[1].split("\nFETCH", 1)[0]
         pins = self.root / "runtime-pins.json"
         pins.write_text(json.dumps({"alpine": {"version": "3.24.2", "minirootfs": {"aarch64": {

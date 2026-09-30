@@ -2,8 +2,13 @@
 
 ## Current product and runtime boundary
 
-LingXi retains ten Rust workspace members under `lingxi-code/`: CLI, Bridge,
-iOS/Android FFI entrypoints, TUI, configuration requirements and host adapters.
+LingXi retains eight Rust workspace members in the root Cargo workspace: CLI host,
+TUI and TUI core under `apps/cli/`, Bridge under `apps/bridge-server/`,
+iOS/Android wrappers under `apps/{ios,android}/ffi/`, configuration requirements
+under `packages/config-requirements/`, and the host adapter under `tools/ios-use/`.
+Native mobile interfaces and platform build scripts live in the sibling `native/`
+directories. Shared TypeScript client code lives in `packages/bridge-client/`,
+while translations and voice configuration live in `resources/`.
 Shared runtime crates live in the pinned `harness-runtime` Git dependency.
 
 ```text
@@ -18,9 +23,9 @@ Electron / Web / iOS / Android / CLI + TUI
 
 The authoritative source layout and resource ownership are documented in
 [Harness extraction](architecture/harness-runtime-extraction.md).
-Use [the source resolver](../lingxi-code/scripts/runtime_source.py) to locate the
+Use [the source resolver](../scripts/lib/runtime_source.py) to locate the
 locked runtime checkout. Workspace membership comes from
-[`Cargo.toml`](../lingxi-code/Cargo.toml), not the historical map below.
+[`Cargo.toml`](../Cargo.toml), not the historical map below.
 
 ## Historical architecture notes
 

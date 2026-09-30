@@ -102,7 +102,7 @@ Wiring and repair:
 | `561cd8260` | Escape could not stop background subagents; "Not sent" had no producer |
 | `adba8a34d` | the stop button, the No-project chat list, the agent activity line |
 | `b3c363157` | modal overlays did not cover the window; settings dragged it |
-| `31e09ec3b` | three reds in `clients/shared` — the wire validator was a major version behind |
+| `31e09ec3b` | three reds in `packages/bridge-client` — the wire validator was a major version behind |
 | `d0f326a4a` | the engine's invented `idle` agent status |
 | `0a92eff81`, `bc625abf4`, `6fbca00d7` | the coverage those changes lacked |
 
@@ -133,7 +133,7 @@ has moved on. Verified against `cargo test -p cron -p bridge-server`, the
 combination that actually reproduced it: 8 consecutive runs green, three
 mutations each red on exactly this test.
 
-`clients/electron/test/git-workflows.test.ts` failed all 17 of its cases as a
+`apps/electron/test/git-workflows.test.ts` failed all 17 of its cases as a
 block once, with "Commit or explicitly stash your changes before switching
 branches". Not reproduced since: 4 runs of that file alone and every subsequent
 full-suite run are green. One observation is not a diagnosis, so it is recorded
@@ -149,12 +149,12 @@ nothing about whether the committed tree is green.
 
 Two details make that isolation real rather than nominal:
 
-- `@lingxi/bridge-client` is a relative symlink to `clients/shared`. Symlinking
-  `node_modules` wholesale resolves it back to the LIVE `clients/shared`, and
+- `@lingxi/bridge-client` is a relative symlink to `packages/bridge-client`. Symlinking
+  `node_modules` wholesale resolves it back to the LIVE `packages/bridge-client`, and
   `dist/` is gitignored — so types would come from a build of somebody else's
   uncommitted wire changes. The extract's `node_modules` is linked entry by
   entry (including `.bin`, which a glob misses), `@lingxi` points at the
-  extract's own `clients/shared`, and that copy is built there.
+  extract's own `packages/bridge-client`, and that copy is built there.
 - `npm run typecheck` is `node && web`. A failing node half short-circuits and
   the web half never runs, so both halves are run separately.
 
@@ -242,7 +242,7 @@ honestly re-pinned in `bf9ea9d0c`.
 
 ## Left alone, and why
 
-- The **`CommandResultPanel`** cluster in `clients/electron` appeared in the
+- The **`CommandResultPanel`** cluster in `apps/electron` appeared in the
   working tree during this session. It is being written right now.
 - The Skills/MCP **settings page split** (`configuration-navigation` and
   `provider-session-isolation` fixtures) is in progress.

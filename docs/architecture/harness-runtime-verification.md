@@ -105,7 +105,7 @@ Kotlin 绑定由新构建的 `android-aar` 宿主动态库生成，沿用项目�
 
 ## macOS 签名包装
 
-已按仓库要求从 `clients/electron` 执行：
+已按仓库要求从 `apps/electron` 执行：
 
 ```sh
 npm run package:mac:flare -- --check
@@ -116,7 +116,7 @@ Flare 团队 `AZ4AX7J833` 的 development 签名预检通过。包装完成了�
 
 包装命令最终退出码为 1：`verify:package:smoke` 检测到已有 LingXi 实例运行，按其保护条件拒绝启动第二个实例。本次未自行关闭当前应用，因此尚不能将 macOS 包标记为完成全部包装验收。完成运行验证仍需退出当前实例后执行 `npm run verify:package`。
 
-产物位置：`clients/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app`；日志：`/tmp/lingxi-harness-mac-package.log`。
+产物位置：`apps/electron/dist/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app`；日志：`/tmp/lingxi-harness-mac-package.log`。
 
 ## 本机日志
 

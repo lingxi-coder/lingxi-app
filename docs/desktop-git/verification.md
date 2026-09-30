@@ -4,9 +4,9 @@ Git management is available from the branch indicator in the chat header. Change
 
 ## Implementation
 
-- `clients/electron/src/main/git.ts` and `git/command.ts`: system Git service, repository/worktree discovery, serialized mutations, bounded subprocesses, file watchers and snapshot validation. No additional dependencies or model connection required.
-- `clients/electron/src/shared/git.ts`, host and preload: structured desktop-only API, trusted main-frame and session checks. Background agent tracking prevents worktree-changing operations during active work.
-- `clients/electron/src/renderer/components/GitReview.tsx`, `GitReview.css` and `gitDiff.ts`: branch search/create/switch, grouped and nested file navigation, unified/split diffs, complete-hunk staging, staged commits, history, stash and conflict resolution. Review integrates into App/BetaDesktop/RuntimeCenter.
+- `apps/electron/src/main/git.ts` and `git/command.ts`: system Git service, repository/worktree discovery, serialized mutations, bounded subprocesses, file watchers and snapshot validation. No additional dependencies or model connection required.
+- `apps/electron/src/shared/git.ts`, host and preload: structured desktop-only API, trusted main-frame and session checks. Background agent tracking prevents worktree-changing operations during active work.
+- `apps/electron/src/renderer/components/GitReview.tsx`, `GitReview.css` and `gitDiff.ts`: branch search/create/switch, grouped and nested file navigation, unified/split diffs, complete-hunk staging, staged commits, history, stash and conflict resolution. Review integrates into App/BetaDesktop/RuntimeCenter.
 - Destructive confirmations retain the reviewed snapshot. Rename unstaging includes both paths. Deleted conflict sides remain distinct from empty files. Merge ownership is tied to MERGE_HEAD. Session request generations prevent stale A-to-B-to-A responses from replacing current state.
 
 ## Verification

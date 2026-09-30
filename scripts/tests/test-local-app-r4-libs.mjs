@@ -102,7 +102,7 @@ for (const family of families.filter((name) => name !== 'react-dom')) {
 // Execute the checked-in iOS Host API, so scalar helper tests exercise the
 // production request encoder rather than a duplicate of its argument shape.
 function nativeHost() {
-  const swift = readFileSync(new URL('../../clients/ios/Sources/LocalApps/LocalAppWebView.swift', import.meta.url), 'utf8');
+  const swift = readFileSync(new URL('../../apps/ios/native/Sources/LocalApps/LocalAppWebView.swift', import.meta.url), 'utf8');
   const start = swift.indexOf('      const pending = new Map();');
   const end = swift.indexOf('    })();', start);
   assert.ok(start !== -1 && end > start);

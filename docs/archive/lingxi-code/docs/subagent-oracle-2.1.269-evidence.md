@@ -118,9 +118,9 @@ The concurrent cron schema introduced an optional automation configuration while
 | `lingxi-code/apps/engine-desktop/src/session_agents.rs` | Process-owned observations, allocation/session fencing, atomic activity guards and observer regressions. |
 | `lingxi-code/apps/bridge-server/src/boot.rs`, `router.rs` | Share the observer with the roster and reconcile historical rows with current facts. |
 | `lingxi-code/apps/bridge-server/tests/router_test.rs`, `router_test/session_agent_liveness.rs` | Restart, reconnect, no-first-write, foreign-session, terminal and idle/resume regression cases. |
-| `clients/electron/src/renderer/components/RuntimeCenter.tsx`, `Stage.tsx`, `transcriptRows.ts` | Display explicit activity without hiding true reasoning or active tools. |
-| `clients/electron/test/runtime-center-render.test.ts` | Feedback, interrupted state and live-reasoning rendering regressions. |
-| `lingxi-code/tools/cron/src/schedule_cron.rs`, `apps/engine-desktop/src/lib.rs`, `clients/electron/src/shared/clientCommands.ts`, `lingxi-code/client-protocol/src/events.rs` | Compatibility with concurrently introduced scheduling fields and retained provider ownership. |
+| `apps/electron/src/renderer/components/RuntimeCenter.tsx`, `Stage.tsx`, `transcriptRows.ts` | Display explicit activity without hiding true reasoning or active tools. |
+| `apps/electron/test/runtime-center-render.test.ts` | Feedback, interrupted state and live-reasoning rendering regressions. |
+| `lingxi-code/tools/cron/src/schedule_cron.rs`, `apps/engine-desktop/src/lib.rs`, `apps/electron/src/shared/clientCommands.ts`, `lingxi-code/client-protocol/src/events.rs` | Compatibility with concurrently introduced scheduling fields and retained provider ownership. |
 
 The file references in sources 19–23 link to the principal implementation and regression files. Existing unrelated changes in these shared files were preserved.
 
@@ -134,9 +134,9 @@ The final targeted test runs passed 616 tests with no test failures:
 | Desktop observer, including hidden input and process/session ownership | 10 passed | `cargo test -p engine-desktop --lib session_agents::tests` |
 | Bridge router integration, including stale task versus idle/resume observations | 69 passed | `cargo test -p bridge-server --test router_test` |
 | Desktop renderer, runtime state/polling, command coverage and Electron startup interaction | 52 passed | Seven targeted Electron test files: `runtime-center-render`, `runtime-center-state`, `runtime-center-poll`, `transcript-agents`, `transcript-rows`, `welcome-startup-interaction`, and `client-commands` |
-| Shared TypeScript declarations | Passed | `npm run build` in `clients/shared` |
-| Desktop Node and renderer type checking | Passed | `npm run typecheck` in `clients/electron` |
-| Electron production build | Passed | `npm run build` in `clients/electron` |
+| Shared TypeScript declarations | Passed | `npm run build` in `packages/bridge-client` |
+| Desktop Node and renderer type checking | Passed | `npm run typecheck` in `apps/electron` |
+| Electron production build | Passed | `npm run build` in `apps/electron` |
 | Reference binary and bounded source excerpts | Passed | Binary SHA-256 plus all 18 offset/length/SHA-256 anchors |
 
 The stop, restart and stalled-provider resume regressions failed before their corresponding fixes, then passed. The saturation regression verifies both nonblocking production and retained lifecycle order; no pre-fix execution result is claimed for that test. Runtime tests use controlled providers and temporary stores. Production transcripts were read for diagnosis and were not rewritten.
@@ -175,6 +175,6 @@ The independently inspected logs establish process shutdown/restart and the abse
 19. [Bridge roster reconciliation](/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/apps/bridge-server/src/router.rs), `read_session_agent_summary` and session-agent listing; [roster regressions](/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/apps/bridge-server/tests/router_test/session_agent_liveness.rs).
 20. [Desktop observer](/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/apps/engine-desktop/src/session_agents.rs), allocation receipt, snapshot, session owner, terminal, progress and retry handlers.
 21. [Persistent spawn and stop](/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/agent/src/handle.rs), `PoolSubagentSpawner::stop`, persistent progress forwarding, and corresponding regression tests.
-22. [Thinking fallback rows](/Users/luolingfeng/Projects/LingXi-Next/clients/electron/src/renderer/components/transcriptRows.ts) and [Stage activity input](/Users/luolingfeng/Projects/LingXi-Next/clients/electron/src/renderer/components/Stage.tsx).
+22. [Thinking fallback rows](/Users/luolingfeng/Projects/LingXi-Next/apps/electron/src/renderer/components/transcriptRows.ts) and [Stage activity input](/Users/luolingfeng/Projects/LingXi-Next/apps/electron/src/renderer/components/Stage.tsx).
 
 23. [Observer handoff and saturation regression](/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/agent/src/api.rs), `ObserverEventSink` and `observer_saturation_preserves_lifecycle_fifo_without_blocking_producer`; [resume and notification input publication](/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/agent/src/runner.rs).

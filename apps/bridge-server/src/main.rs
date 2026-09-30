@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     // the endpoint. It outlives the pump and drains all accepted work before
     // the session claim and discovery record are released.
     let session_lifecycle = bound.session_lifecycle();
+    let requested_exit = bound.wait_for_exit_requested();
 
     // (3) Start the loopback WebSocket endpoint on an ephemeral port.
     let endpoint =
@@ -192,7 +193,10 @@ async fn main() -> anyhow::Result<()> {
     // Desktop hosts terminate sidecars with SIGTERM on Unix. Listen for both
     // interactive Ctrl-C and host termination so the lockfile guard and socket
     // endpoint always receive a graceful teardown opportunity.
-    let shutdown_signal = match wait_for_shutdown_signal().await {
+    let shutdown_signal = match tokio::select! {
+        signal = wait_for_shutdown_signal() => signal,
+        () = requested_exit => Ok("request-exit"),
+    } {
         Ok(signal) => signal,
         Err(error) => {
             endpoint.shutdown().await;

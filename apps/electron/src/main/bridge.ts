@@ -2447,15 +2447,30 @@ export class SessionRuntime {
     this.cancellingTurn = false;
     const client = this.client;
     this.client = null;
+    const closeClient = (): void => {
+      try { client?.close(); } catch { /* a half-open channel can already be closed */ }
+    };
+    // Windows Node kill() forcibly terminates the process for every signal.
+    // Keep the authenticated channel alive until a managed sidecar drains and
+    // exits through its existing RequestExit command. External peers are only
+    // disconnected; this runtime has no authority to shut them down.
+    const ownsProcess = Boolean(this.child || (this.adoptedPid && this.adoptedProcessOwned));
+    let requestedExit = false;
     if (client) {
       try {
         client.removeAllListeners();
-        client.close();
-      } catch {
-        // A half-open socket may throw while closing.
+        if (process.platform === 'win32' && ownsProcess) {
+          client.on('error', (error) => this.diagnostics.add('warn', 'host', error));
+          client.sendCommand({ type: 'request_exit' });
+          requestedExit = true;
+        } else closeClient();
+      } catch (error) {
+        this.diagnostics.add('warn', 'host', error);
+        closeClient();
       }
     }
 
+    const stopTimeoutMs = this.opts.stopTimeoutMs ?? (process.platform === 'win32' ? 30_000 : 2_000);
     const child = this.child;
     this.child = null;
     if (child && child.exitCode === null && child.signalCode === null) await new Promise<void>((resolve) => {
@@ -2468,18 +2483,21 @@ export class SessionRuntime {
         resolve();
       };
       child.once('exit', finish);
-      try { this.signalChildTree(child, 'SIGINT'); } catch { finish(); return; }
+      if (!requestedExit) {
+        try { this.signalChildTree(child, 'SIGINT'); } catch { finish(); return; }
+      }
       timer = setTimeout(() => {
         try { this.signalChildTree(child, 'SIGKILL'); } catch { /* already gone */ }
         finish();
-      }, this.opts.stopTimeoutMs ?? 2_000);
+      }, stopTimeoutMs);
       timer.unref();
     });
     const adoptedPid = this.adoptedPid;
     const adoptedProcessOwned = this.adoptedProcessOwned;
     this.adoptedPid = null;
     this.adoptedProcessOwned = false;
-    if (adoptedPid && adoptedProcessOwned) await this.stopAdoptedBridge(adoptedPid);
+    if (adoptedPid && adoptedProcessOwned) await this.stopAdoptedBridge(adoptedPid, requestedExit);
+    if (requestedExit) closeClient();
     if (!adoptedPid || adoptedProcessOwned) this.removeLaunchDirectory();
     else this.launchDir = null;
   }
@@ -2488,7 +2506,7 @@ export class SessionRuntime {
     return processIsAlive(pid);
   }
 
-  private async stopAdoptedBridge(pid: number): Promise<void> {
+  private async stopAdoptedBridge(pid: number, requestedExit = false): Promise<void> {
     const signal = (value: NodeJS.Signals): boolean => {
       try {
         if (process.platform !== 'win32') process.kill(-pid, value);
@@ -2498,8 +2516,8 @@ export class SessionRuntime {
         return false;
       }
     };
-    if (!signal('SIGINT')) return;
-    const deadline = Date.now() + (this.opts.stopTimeoutMs ?? 2_000);
+    if (!requestedExit && !signal('SIGINT')) return;
+    const deadline = Date.now() + (this.opts.stopTimeoutMs ?? (process.platform === 'win32' ? 30_000 : 2_000));
     while (this.processIsAlive(pid) && Date.now() < deadline) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 50);

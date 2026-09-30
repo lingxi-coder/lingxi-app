@@ -2874,3 +2874,76 @@ test('optional Fusion credential loading cannot delay or reject a normal prompt'
     assert.equal(sentBeforeCredential, true, 'ordinary chat must not wait for optional Fusion keys');
   }
 });
+
+test('Windows managed child exits through the authenticated command before its channel closes', async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  try {
+    const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }), stopTimeoutMs: 100 });
+    const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null as NodeJS.Signals | null, pid: 4242 });
+    const actions: string[] = [];
+    const client = Object.assign(new EventEmitter(), {
+      sendCommand: (command: { type: string }) => {
+        actions.push(command.type);
+        setTimeout(() => { child.exitCode = 0; actions.push('exit'); child.emit('exit', 0, null); }, 10);
+      },
+      close: () => { assert.equal(child.exitCode, 0); actions.push('close'); },
+    });
+    (runtime as any).child = child;
+    (runtime as any).client = client;
+    (runtime as any).signalChildTree = () => { throw new Error('graceful Windows exit must not force-kill the child'); };
+    await (runtime as any).stopBridge();
+    assert.deepEqual(actions, ['request_exit', 'exit', 'close']);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.deepEqual(actions, ['request_exit', 'exit', 'close'], 'clean exit clears the forced-termination deadline');
+  } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
+test('Windows externally reused peer is disconnected without requesting its exit', async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  try {
+    const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
+    const actions: string[] = [];
+    (runtime as any).client = Object.assign(new EventEmitter(), {
+      sendCommand: () => { throw new Error('unowned peer must not receive RequestExit'); },
+      close: () => actions.push('close'),
+    });
+    (runtime as any).adoptedPid = 4242;
+    (runtime as any).adoptedProcessOwned = false;
+    (runtime as any).stopAdoptedBridge = () => { throw new Error('unowned peer must not be terminated'); };
+    await (runtime as any).stopBridge();
+    assert.deepEqual(actions, ['close']);
+  } finally { Object.defineProperty(process, 'platform', platform); }
+});
+
+test('Windows owned adopted process drains after RequestExit without a synthetic signal', async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const originalKill = process.kill;
+  const keepAlive = setInterval(() => {}, 10);
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  process.kill = ((_pid: number, signal?: NodeJS.Signals | number) => { signals.push(signal); return true; }) as typeof process.kill;
+  try {
+    const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }), stopTimeoutMs: 150 });
+    const actions: string[] = [];
+    let alive = true;
+    (runtime as any).adoptedPid = 4242;
+    (runtime as any).adoptedProcessOwned = true;
+    (runtime as any).processIsAlive = () => alive;
+    (runtime as any).client = Object.assign(new EventEmitter(), {
+      sendCommand: (command: { type: string }) => {
+        actions.push(command.type);
+        setTimeout(() => { alive = false; actions.push('exit'); }, 10);
+      },
+      close: () => { assert.equal(alive, false); actions.push('close'); },
+    });
+    await (runtime as any).stopBridge();
+    assert.deepEqual(signals, []);
+    assert.deepEqual(actions, ['request_exit', 'exit', 'close']);
+  } finally {
+    clearInterval(keepAlive);
+    process.kill = originalKill;
+    Object.defineProperty(process, 'platform', platform);
+  }
+});

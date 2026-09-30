@@ -827,6 +827,22 @@ impl BoundServer {
     pub fn session_lifecycle(&self) -> Arc<harness_runtime::desktop::DesktopSessionLifecycle> {
         self.runtime.session_lifecycle.clone()
     }
+
+    /// Observe the existing authenticated RequestExit command without exposing
+    /// the runtime's broad handles or borrowing the moved connection.
+    pub fn wait_for_exit_requested(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let orchestrator = self.runtime.orchestrator.clone();
+        Box::pin(async move {
+            loop {
+                if orchestrator.current_should_exit() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+    }
 }
 
 /// Process-local live-session registration owned by a bridge runtime.
@@ -2474,6 +2490,20 @@ mod tests {
             ),
             "assemble must retain the live slash-command registry on DesktopRuntime"
         );
+
+        let mut requested_exit = bound.wait_for_exit_requested();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut requested_exit)
+                .await
+                .is_err(),
+            "an idle session must not request process exit"
+        );
+        bound.runtime.orchestrator.request_exit().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), requested_exit)
+            .await
+            .expect("authenticated RequestExit must wake host teardown");
+        let report = bound.session_lifecycle().shutdown_and_drain().await;
+        assert!(report.complete, "shutdown errors: {:?}", report.errors);
     }
 }
 

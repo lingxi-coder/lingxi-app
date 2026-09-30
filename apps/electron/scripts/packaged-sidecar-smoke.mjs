@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { BridgeClient } from '@lingxi/bridge-client';
 
 import {
   desktopArtifactPaths,
@@ -47,7 +48,18 @@ function sanitizedEnvironment(tempRoot) {
   return env;
 }
 
-async function terminate(child) {
+async function terminate(child, lockfilePath) {
+  if (process.platform === 'win32') {
+    const client = new BridgeClient({ lockfilePath });
+    try {
+      await client.connect();
+      client.sendCommand({ type: 'request_exit' });
+      await waitFor(() => child.exitCode !== null || child.signalCode !== null,
+        'authenticated sidecar exit', 30_000);
+      assert.equal(child.exitCode, 0, 'RequestExit must complete graceful process teardown');
+    } finally { client.close(); }
+    return;
+  }
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill('SIGTERM');
   await Promise.race([
@@ -97,7 +109,7 @@ export async function runPackagedSidecarSmoke(root, platform, arch) {
     );
     assert.ok(lockfile, 'packaged sidecar must publish a discovery lockfile');
     assert.equal(child.exitCode, null, `packaged sidecar exited early: ${stderr}`);
-    await terminate(child);
+    await terminate(child, join(bridgeDir, lockfile));
     await waitFor(
       () => readdirSync(bridgeDir).every((entry) => !entry.endsWith('.lock') && !entry.startsWith('launch-')),
       'packaged sidecar runtime cleanup',

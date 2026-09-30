@@ -369,7 +369,7 @@ impl BottomPaneView for RewindPickerView {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use platform_api::SummarizeDirection;
+    use lingxi_core::host::SummarizeDirection;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

@@ -60,7 +60,7 @@ pub(crate) fn is_full_tty() -> bool {
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -182,10 +182,10 @@ async fn start_host_turn(
 }
 
 fn slash_model_prompt(
-    result: platform_api::SlashDispatchResult,
+    result: lingxi_core::host::SlashDispatchResult,
     tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
 ) -> Option<String> {
-    use platform_api::SlashDispatchResult;
+    use lingxi_core::host::SlashDispatchResult;
     match result {
         SlashDispatchResult::RunAsTurn { prompt } => Some(prompt),
         SlashDispatchResult::Handled { display } | SlashDispatchResult::Unknown { display, .. } => {
@@ -490,7 +490,7 @@ async fn drain_teammate_prompts(
         if let Err(error) = result {
             let _ = turn_tx.send(tui::TurnEvent::TextDelta(error.to_string()));
             let _ = turn_tx.send(tui::TurnEvent::TurnEnded(
-                platform_api::TurnOutcome::EndTurn,
+                lingxi_core::host::TurnOutcome::EndTurn,
             ));
         }
         if let Some(host) = pending_slashes.loop_host.get() {
@@ -562,30 +562,32 @@ fn format_price(value: Option<f64>) -> Option<String> {
     })
 }
 
-fn reasoning_summary(spec: &platform_api::ReasoningControlSpec) -> Option<String> {
+fn reasoning_summary(spec: &lingxi_core::host::ReasoningControlSpec) -> Option<String> {
     let labels = spec
         .available
         .iter()
         .filter_map(|selection| match selection {
-            platform_api::ReasoningSelection::Automatic => Some("auto".to_string()),
-            platform_api::ReasoningSelection::Disabled => Some("off".to_string()),
-            platform_api::ReasoningSelection::Enabled => Some("on".to_string()),
-            platform_api::ReasoningSelection::Level { id } => Some(id.clone()),
-            platform_api::ReasoningSelection::TokenBudget { tokens } => Some(format!("{tokens}t")),
+            lingxi_core::host::ReasoningSelection::Automatic => Some("auto".to_string()),
+            lingxi_core::host::ReasoningSelection::Disabled => Some("off".to_string()),
+            lingxi_core::host::ReasoningSelection::Enabled => Some("on".to_string()),
+            lingxi_core::host::ReasoningSelection::Level { id } => Some(id.clone()),
+            lingxi_core::host::ReasoningSelection::TokenBudget { tokens } => {
+                Some(format!("{tokens}t"))
+            }
         })
         .collect::<Vec<_>>();
     (!labels.is_empty()).then(|| labels.join(", "))
 }
 
-fn pricing_summary(pricing: Option<&platform_api::ModelPricing>) -> String {
+fn pricing_summary(pricing: Option<&lingxi_core::host::ModelPricing>) -> String {
     let Some(pricing) = pricing else {
         return "价格 未提供".to_string();
     };
     match pricing.billing_mode {
-        platform_api::ModelBillingMode::Subscription => "价格 套餐/订阅内".to_string(),
-        platform_api::ModelBillingMode::Free => "价格 免费".to_string(),
-        platform_api::ModelBillingMode::Unknown => "价格 未提供".to_string(),
-        platform_api::ModelBillingMode::PerToken => match (
+        lingxi_core::host::ModelBillingMode::Subscription => "价格 套餐/订阅内".to_string(),
+        lingxi_core::host::ModelBillingMode::Free => "价格 免费".to_string(),
+        lingxi_core::host::ModelBillingMode::Unknown => "价格 未提供".to_string(),
+        lingxi_core::host::ModelBillingMode::PerToken => match (
             format_price(pricing.input_per_million),
             format_price(pricing.output_per_million),
         ) {
@@ -595,7 +597,7 @@ fn pricing_summary(pricing: Option<&platform_api::ModelPricing>) -> String {
     }
 }
 
-fn build_model_details(m: &platform_api::ModelListing) -> Vec<String> {
+fn build_model_details(m: &lingxi_core::host::ModelListing) -> Vec<String> {
     let mut summary_bits = Vec::new();
     let mut details = Vec::new();
 
@@ -787,10 +789,10 @@ async fn run_tui(argv: &Argv) -> i32 {
             Some(initial_session_id.to_string()).as_deref(),
             display,
         ));
-        let dir = platform_api::live_sessions::LiveSessionDir::at_live(
+        let dir = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
             crate::agents_registry::sessions_dir(&home),
         );
-        let claim = platform_api::live_sessions::install_process(
+        let claim = lingxi_core::host::live_sessions::install_process(
             dir,
             &initial_session_id.to_string(),
             user_name,
@@ -803,7 +805,7 @@ async fn run_tui(argv: &Argv) -> i32 {
             };
             reg.set_name(&claim.name, source);
         } else if let Some(derived) = display {
-            platform_api::live_sessions::set_process_name(derived);
+            lingxi_core::host::live_sessions::set_process_name(derived);
         }
         ensure_live_messaging(&initial_session_id.to_string(), user_name, Some(&reg));
         reg
@@ -852,13 +854,13 @@ pub(crate) fn ensure_live_messaging(
     registration: Option<&Arc<crate::agents_registry::SessionRegistration>>,
 ) {
     let home = crate::run::lingxi_home_dir();
-    let dir = platform_api::live_sessions::LiveSessionDir::at_live(
+    let dir = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
         crate::agents_registry::sessions_dir(&home),
     );
-    let previous_session_id = platform_api::live_sessions::process_session_id();
-    if platform_api::live_sessions::process_dir().is_none() {
+    let previous_session_id = lingxi_core::host::live_sessions::process_session_id();
+    if lingxi_core::host::live_sessions::process_dir().is_none() {
         let claim =
-            platform_api::live_sessions::install_process(dir.clone(), session_id, user_name);
+            lingxi_core::host::live_sessions::install_process(dir.clone(), session_id, user_name);
         if let Some(claim) = claim {
             if let Some(reg) = registration {
                 reg.set_name(
@@ -872,10 +874,10 @@ pub(crate) fn ensure_live_messaging(
             }
         }
     } else if let Some(name) = user_name.filter(|s| !s.is_empty()) {
-        platform_api::live_sessions::set_process_name(name);
+        lingxi_core::host::live_sessions::set_process_name(name);
     }
     let mut derived_name: Option<String> = None;
-    if platform_api::live_sessions::process_name()
+    if lingxi_core::host::live_sessions::process_name()
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -891,13 +893,13 @@ pub(crate) fn ensure_live_messaging(
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             })
         {
-            platform_api::live_sessions::set_process_name(derived.clone());
+            lingxi_core::host::live_sessions::set_process_name(derived.clone());
             derived_name = Some(derived);
         }
     }
-    let path = match platform_api::uds_inbox::process_socket_path() {
+    let path = match lingxi_core::host::uds_inbox::process_socket_path() {
         Some(_) if previous_session_id.as_deref() != Some(session_id) => {
-            match platform_api::uds_inbox::retarget_process_inbox(session_id) {
+            match lingxi_core::host::uds_inbox::retarget_process_inbox(session_id) {
                 Ok(path) => Some(path),
                 Err(error) => {
                     tracing::warn!(%error, "cross-session inbox could not follow session switch");
@@ -912,11 +914,11 @@ pub(crate) fn ensure_live_messaging(
         None => {
             // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` overrides the
             // auto-generated `mum()` path; absent, the oracle's own default
-            // applies (`platform_api::uds_inbox::default_socket_path`).
+            // applies (`lingxi_core::host::uds_inbox::default_socket_path`).
             let sock = messaging_socket_override().unwrap_or_else(|| {
-                platform_api::uds_inbox::default_socket_path(std::process::id())
+                lingxi_core::host::uds_inbox::default_socket_path(std::process::id())
             });
-            match platform_api::uds_inbox::start_process_inbox_for_session(sock, session_id) {
+            match lingxi_core::host::uds_inbox::start_process_inbox_for_session(sock, session_id) {
                 Ok(path) => Some(path),
                 Err(error) => {
                     tracing::warn!(%error, "cross-session inbox unavailable");
@@ -926,7 +928,7 @@ pub(crate) fn ensure_live_messaging(
             }
         }
     };
-    platform_api::live_sessions::set_process_session_id(session_id);
+    lingxi_core::host::live_sessions::set_process_session_id(session_id);
     let name_source = derived_name.as_deref().map(|_| "derived");
     if let Some(reg) = registration {
         if let Some(path) = path.as_deref() {
@@ -936,17 +938,17 @@ pub(crate) fn ensure_live_messaging(
         if let Some(name) = derived_name.as_deref().filter(|s| !s.trim().is_empty()) {
             reg.set_name(name, "derived");
         }
-        if let Some(class) = platform_api::live_sessions::process_permission_class() {
+        if let Some(class) = lingxi_core::host::live_sessions::process_permission_class() {
             reg.set_permission_class(&class);
         }
     }
     let identity_result = dir.upsert_identity(
         std::process::id(),
         session_id,
-        platform_api::live_sessions::process_name().as_deref(),
+        lingxi_core::host::live_sessions::process_name().as_deref(),
         name_source,
         path.as_deref(),
-        platform_api::live_sessions::process_permission_class().as_deref(),
+        lingxi_core::host::live_sessions::process_permission_class().as_deref(),
     );
     if path.is_none() {
         if let Err(error) = dir.clear_messaging_socket_if_session(std::process::id(), session_id) {
@@ -1082,7 +1084,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
     resumed_messages: Vec<tui::RenderedMessage>,
     initial_prompt: Option<String>,
-    handoff: Option<platform_api::BackgroundingSnapshot>,
+    handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
 ) -> RunOutcome {
     let session_lifecycle = tui_build.runtime.session_lifecycle.clone();
     let exit_task_registry = tui_build.runtime.task_registry.clone();
@@ -1123,7 +1125,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let bypass_available = tui_build.bypass_available;
     // `I1(e)` — whether Shift+Tab may land on `auto` (claude-code `sKe`).
     let auto_available = tui_build.auto_available;
-    platform_api::live_sessions::set_process_permission_mode(
+    lingxi_core::host::live_sessions::set_process_permission_mode(
         initial_permission_mode.wire_str(),
         bypass_available,
     );
@@ -1307,8 +1309,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // (/tasks) The live background-task registry (already `TaskRegistryHandle`),
     // cloned as a trait object for the widget's snapshot read; plus a handle +
     // tx clone for the off-loop stop effect (mirrors the sandbox triplet).
-    let task_registry_handle: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle> =
-        tui_build.runtime.task_registry.clone();
+    let task_registry_handle: std::sync::Arc<
+        dyn lingxi_core::host::task_registry::TaskRegistryHandle,
+    > = tui_build.runtime.task_registry.clone();
     if let Some(workflow_events) = workflow_events {
         spawn_workflow_event_forwarder(
             workflow_events,
@@ -1481,7 +1484,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // the feed, like the announcement, rather than below the replayed history
     // where it would read as part of the old conversation.
     if let Some(body) =
-        platform_api::fusion_setup::startup_notice(&fusion_settings.lock().unwrap().roles)
+        lingxi_core::host::fusion_setup::startup_notice(&fusion_settings.lock().unwrap().roles)
     {
         let notice = tui::RenderedMessage::SystemText {
             body,
@@ -1563,7 +1566,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     // clear.
                     let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
                     let _ = tx.send(tui::TurnEvent::TurnEnded(
-                        platform_api::TurnOutcome::EndTurn,
+                        lingxi_core::host::TurnOutcome::EndTurn,
                     ));
                 }
                 if let Some(host) = pending_slashes.loop_host.get() {
@@ -1592,10 +1595,10 @@ pub(crate) async fn run_ratatui_with_initial_state(
             let publication = PendingPromptEnqueue::new(&pending_slashes, &command.uuid, owner);
             queued_prompt_handle.spawn(async move {
                 queue.enqueue(command).await;
-                if !platform_api::env::background_tasks_disabled() {
+                if !lingxi_core::host::env::background_tasks_disabled() {
                     task_registry
                         .background_all_tasks_with_reason(
-                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                            lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                         )
                         .await;
                 }
@@ -1775,7 +1778,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // and re-mounts against a truncated transcript, and there would be nothing
     // left for the summarizer to read.
     let on_summarize = move |message: uuid::Uuid,
-                             direction: platform_api::SummarizeDirection,
+                             direction: lingxi_core::host::SummarizeDirection,
                              context: Option<String>,
                              cancel: CancellationToken| {
         let orch = summarize_orch.clone();
@@ -1836,12 +1839,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
             };
             let (body, is_error) = match orch.rename_session(name.clone()).await {
                 Ok(()) => {
-                    let advertised = if let Some(dir) = platform_api::live_sessions::process_dir() {
-                        let sid = platform_api::live_sessions::process_session_id()
+                    let advertised = if let Some(dir) = lingxi_core::host::live_sessions::process_dir() {
+                        let sid = lingxi_core::host::live_sessions::process_session_id()
                             .unwrap_or_default();
                         match dir.claim_unique_name(&name, &sid, std::process::id()) {
                             Ok(claim) => {
-                                platform_api::live_sessions::set_process_name(claim.name.clone());
+                                lingxi_core::host::live_sessions::set_process_name(claim.name.clone());
                                 if let Some(reg) = rename_reg.as_ref() {
                                     reg.set_name(
                                         &claim.name,
@@ -1981,12 +1984,17 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 });
             } else {
                 crate::permission_mode_preference::remember(&mode);
-                platform_api::live_sessions::set_process_permission_mode(&mode, bypass_available);
+                lingxi_core::host::live_sessions::set_process_permission_mode(
+                    &mode,
+                    bypass_available,
+                );
                 if let Some(reg) = set_mode_reg.as_ref() {
-                    reg.set_permission_class(platform_api::live_sessions::permission_class_for(
-                        &mode,
-                        bypass_available,
-                    ));
+                    reg.set_permission_class(
+                        lingxi_core::host::live_sessions::permission_class_for(
+                            &mode,
+                            bypass_available,
+                        ),
+                    );
                 }
             }
             if let Some(mode) = orch.permission_mode().await {
@@ -2067,7 +2075,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             let turn_gate = dispatch_turn_gate.clone();
             let cancel_reason = dispatch_cancel_reason.clone();
             dispatch_handle.spawn(async move {
-                use platform_api::SlashCommandDispatcher;
+                use lingxi_core::host::SlashCommandDispatcher;
                 // Keep dispatch cancellation independent from the active turn. A
                 // completed token also lets the widget discard its pending slot.
                 let completion = control.completed.drop_guard();
@@ -2118,7 +2126,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 {
                     let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
                     let _ = tx.send(tui::TurnEvent::TurnEnded(
-                        platform_api::TurnOutcome::EndTurn,
+                        lingxi_core::host::TurnOutcome::EndTurn,
                     ));
                 }
                 if let Some(host) = pending_slashes.loop_host.get() {
@@ -2246,7 +2254,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         loop {
             interval.tick().await;
             let Ok(records) = agent_status_registry
-                .list(platform_api::task_registry::TaskListFilter::default())
+                .list(lingxi_core::host::task_registry::TaskListFilter::default())
                 .await
             else {
                 continue;
@@ -2441,11 +2449,11 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
                 }
                 if queue.has_main_thread_commands().await
-                    && !platform_api::env::background_tasks_disabled()
+                    && !lingxi_core::host::env::background_tasks_disabled()
                 {
                     registry
                         .background_all_tasks_with_reason(
-                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                            lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                         )
                         .await;
                 }
@@ -2475,7 +2483,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 {
                     let _ = tx.send(tui::TurnEvent::TextDelta(error.to_string()));
                     let _ = tx.send(tui::TurnEvent::TurnEnded(
-                        platform_api::TurnOutcome::EndTurn,
+                        lingxi_core::host::TurnOutcome::EndTurn,
                     ));
                 }
                 loop_host.finish(&cancel).await;
@@ -2625,9 +2633,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
         )) | Ok(Err(_))
             | Err(_)
     ) {
-        if let Ok(tasks) = platform_api::task_registry::TaskRegistryHandle::list(
+        if let Ok(tasks) = lingxi_core::host::task_registry::TaskRegistryHandle::list(
             exit_task_registry.as_ref(),
-            platform_api::task_registry::TaskListFilter::default(),
+            lingxi_core::host::task_registry::TaskListFilter::default(),
         )
         .await
         {
@@ -2755,7 +2763,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
 /// Render the same plan file used by the plan-mode reminder. The defensive
 /// character cap prevents an unexpectedly large or replaced file from flooding
 /// the TUI event channel while preserving valid UTF-8 boundaries.
-fn render_plan_snapshot(plan: &platform_api::PlanSnapshot) -> String {
+fn render_plan_snapshot(plan: &lingxi_core::host::PlanSnapshot) -> String {
     const MAX_PLAN_CHARS: usize = 1_000_000;
     let content: String = plan.content.chars().take(MAX_PLAN_CHARS).collect();
     format!("Current Plan\n{}\n\n{content}", plan.path.display())
@@ -3257,13 +3265,13 @@ async fn run_permission_action(
     // the live `session_allow_rules` citation on an allow add).
     let dest_source = |d: PermissionUpdateDestination| match d {
         PermissionUpdateDestination::UserSettings => {
-            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         }
         PermissionUpdateDestination::ProjectSettings => {
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
         }
         PermissionUpdateDestination::LocalSettings => {
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local)
         }
         PermissionUpdateDestination::Session => PermissionRuleSource::Session,
         PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
@@ -3555,7 +3563,7 @@ fn fusion_max_panel_setting() -> u8 {
             .as_ref()
             .and_then(|fusion| fusion.max_panel)
     })
-    .unwrap_or(platform_api::FUSION_MAX_PANEL)
+    .unwrap_or(lingxi_core::host::FUSION_MAX_PANEL)
 }
 
 /// Persist one finished `/fusion setup` and report the result.
@@ -3585,7 +3593,7 @@ fn run_fusion_setup_action(
             let summary = roles
                 .panels
                 .iter()
-                .map(platform_api::FusionModelChoice::route)
+                .map(lingxi_core::host::FusionModelChoice::route)
                 .collect::<Vec<_>>()
                 .join(", ");
             if let Ok(mut guard) = snapshot.lock() {
@@ -3619,7 +3627,7 @@ fn run_fusion_setup_action(
 async fn run_web_action(
     action: tui::bottom_pane::WebAction,
     key_store: Arc<secret::CredentialManager>,
-    http: Arc<dyn platform_api::HttpTransport>,
+    http: Arc<dyn lingxi_core::host::HttpTransport>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
     snapshot: std::sync::Arc<std::sync::Mutex<tui::web::picker::WebConfigSnapshot>>,
 ) {
@@ -3985,7 +3993,7 @@ fn forward_desktop_workflow_event(
 
 fn spawn_workflow_event_forwarder(
     mut src: tokio::sync::mpsc::UnboundedReceiver<harness_runtime::desktop::DesktopWorkflowEvent>,
-    registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+    registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
 ) {
     use std::collections::HashMap;
@@ -4224,7 +4232,7 @@ fn spawn_status_computer_access_forwarder(
 /// TUI loop starts, mirroring the iocraft screens' capture-at-open contract.
 async fn build_session_info(
     orch: &dyn OrchestratorHandle,
-    default_model_provenance: platform_api::ModelProvenance,
+    default_model_provenance: lingxi_core::host::ModelProvenance,
 ) -> tui::session::SessionInfo {
     use tui::session::{DoctorInfo, InfoRow, ModelRow, SessionInfo};
 
@@ -4232,7 +4240,12 @@ async fn build_session_info(
     let mcp_connected = u32::try_from(
         servers
             .iter()
-            .filter(|s| matches!(s.status, platform_api::orchestrator::McpStatus::Connected))
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    lingxi_core::host::orchestrator::McpStatus::Connected
+                )
+            })
             .count(),
     )
     .unwrap_or(u32::MAX);
@@ -4241,9 +4254,11 @@ async fn build_session_info(
         .into_iter()
         .map(|s| {
             let status = match &s.status {
-                platform_api::orchestrator::McpStatus::Connected => "connected".to_string(),
-                platform_api::orchestrator::McpStatus::Disconnected => "disconnected".to_string(),
-                platform_api::orchestrator::McpStatus::Error(e) => format!("error: {e}"),
+                lingxi_core::host::orchestrator::McpStatus::Connected => "connected".to_string(),
+                lingxi_core::host::orchestrator::McpStatus::Disconnected => {
+                    "disconnected".to_string()
+                }
+                lingxi_core::host::orchestrator::McpStatus::Error(e) => format!("error: {e}"),
             };
             InfoRow::new(s.name, Some(format!("{} · {status}", s.transport)))
         })
@@ -4314,7 +4329,7 @@ async fn build_session_info(
                 provenance: if is_current {
                     default_model_provenance
                 } else {
-                    platform_api::ModelProvenance::ProviderCatalogTier
+                    lingxi_core::host::ModelProvenance::ProviderCatalogTier
                 },
                 supports_reasoning: m.supports_reasoning,
                 supports_multimodal,
@@ -4474,7 +4489,7 @@ struct ResolvedStatusLineConfigs {
 /// checked before any process creation.
 /// Answers: which status-line config is used when several tiers define one.
 ///
-/// One of several orderings over these rungs; `protocol::scope`'s module docs index them all and say which question each answers.
+/// One of several orderings over these rungs; `lingxi_core::types::scope`'s module docs index them all and say which question each answers.
 fn read_status_line_configs_from(
     lingxi_home: &std::path::Path,
     project_dir: &std::path::Path,
@@ -4494,19 +4509,19 @@ fn read_status_line_configs_from(
         (
             source_scope.0,
             lingxi_home.join("settings.json"),
-            StatusLineSource::Known(protocol::Scope::User),
+            StatusLineSource::Known(lingxi_core::types::Scope::User),
         ),
         (
             source_scope.1,
             project_dir.join(branding::DOT_DIR).join("settings.json"),
-            StatusLineSource::Known(protocol::Scope::Project),
+            StatusLineSource::Known(lingxi_core::types::Scope::Project),
         ),
         (
             source_scope.2,
             project_dir
                 .join(branding::DOT_DIR)
                 .join("settings.local.json"),
-            StatusLineSource::Known(protocol::Scope::Local),
+            StatusLineSource::Known(lingxi_core::types::Scope::Local),
         ),
     ];
     for (enabled, path, source) in file_layers {
@@ -4538,13 +4553,13 @@ fn read_status_line_configs_from(
         if let Some(value) = flag.status_line.as_ref() {
             status_line = Some((
                 value.clone(),
-                StatusLineSource::Known(protocol::Scope::Flag),
+                StatusLineSource::Known(lingxi_core::types::Scope::Flag),
             ));
         }
         if let Some(value) = flag.subagent_status_line.as_ref() {
             subagent_status_line = Some((
                 value.clone(),
-                StatusLineSource::Known(protocol::Scope::Flag),
+                StatusLineSource::Known(lingxi_core::types::Scope::Flag),
             ));
         }
         if let Some(value) = flag.disable_all_hooks {
@@ -4562,13 +4577,13 @@ fn read_status_line_configs_from(
         if let Some(value) = map.get("statusLine") {
             status_line = Some((
                 value.clone(),
-                StatusLineSource::Known(protocol::Scope::Managed),
+                StatusLineSource::Known(lingxi_core::types::Scope::Managed),
             ));
         }
         if let Some(value) = map.get("subagentStatusLine") {
             subagent_status_line = Some((
                 value.clone(),
-                StatusLineSource::Known(protocol::Scope::Managed),
+                StatusLineSource::Known(lingxi_core::types::Scope::Managed),
             ));
         }
         if let Some(value) = map
@@ -4914,27 +4929,27 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OrchestratorHandle for RecordingHostTurns {
-        async fn current_session_id(&self) -> protocol::SessionId {
+        async fn current_session_id(&self) -> lingxi_core::types::SessionId {
             unreachable!("unused recording handle method")
         }
-        async fn clear_session(&self) -> Result<(), platform_api::HandleError> {
+        async fn clear_session(&self) -> Result<(), lingxi_core::host::HandleError> {
             unreachable!("unused recording handle method")
         }
         async fn force_compact(
             &self,
-        ) -> Result<platform_api::CompactionSummary, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::CompactionSummary, lingxi_core::host::HandleError> {
             unreachable!("unused recording handle method")
         }
-        async fn snapshot_cost(&self) -> platform_api::CostSnapshot {
+        async fn snapshot_cost(&self) -> lingxi_core::host::CostSnapshot {
             unreachable!("unused recording handle method")
         }
         async fn switch_model(
             &self,
             model: &str,
             _profile: Option<&str>,
-        ) -> Result<(), platform_api::HandleError> {
+        ) -> Result<(), lingxi_core::host::HandleError> {
             if model == "blocked-model" {
-                return Err(platform_api::HandleError::ActionFailed(
+                return Err(lingxi_core::host::HandleError::ActionFailed(
                     "blocked by hook".into(),
                 ));
             }
@@ -4949,35 +4964,38 @@ mod tests {
         }
         async fn open_memory_editor(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
             unreachable!("unused recording handle method")
         }
-        async fn list_mcp_servers(&self) -> Vec<platform_api::McpServerInfo> {
+        async fn list_mcp_servers(&self) -> Vec<lingxi_core::host::McpServerInfo> {
             unreachable!("unused recording handle method")
         }
-        async fn list_skills(&self) -> Vec<platform_api::SkillInfo> {
+        async fn list_skills(&self) -> Vec<lingxi_core::host::SkillInfo> {
             unreachable!("unused recording handle method")
         }
-        async fn list_hooks(&self) -> Vec<platform_api::HookInfo> {
+        async fn list_hooks(&self) -> Vec<lingxi_core::host::HookInfo> {
             unreachable!("unused recording handle method")
         }
-        async fn list_agents(&self) -> Vec<platform_api::AgentInfo> {
+        async fn list_agents(&self) -> Vec<lingxi_core::host::AgentInfo> {
             unreachable!("unused recording handle method")
         }
-        async fn run_doctor_checks(&self) -> platform_api::DoctorReport {
+        async fn run_doctor_checks(&self) -> lingxi_core::host::DoctorReport {
             unreachable!("unused recording handle method")
         }
-        async fn get_status_snapshot(&self) -> platform_api::StatusSnapshot {
+        async fn get_status_snapshot(&self) -> lingxi_core::host::StatusSnapshot {
             unreachable!("unused recording handle method")
         }
         async fn edit_config_file(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
             unreachable!("unused recording handle method")
         }
         async fn edit_permissions_file(
             &self,
-        ) -> Result<platform_api::MemoryEditorOutcome, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::MemoryEditorOutcome, lingxi_core::host::HandleError>
+        {
             unreachable!("unused recording handle method")
         }
         async fn list_available_models(&self) -> Vec<String> {
@@ -4987,9 +5005,9 @@ mod tests {
             &self,
             prompt: &str,
             _cancel: CancellationToken,
-        ) -> Result<platform_api::TurnOutcome, platform_api::HandleError> {
+        ) -> Result<lingxi_core::host::TurnOutcome, lingxi_core::host::HandleError> {
             self.0.lock().unwrap().push(prompt.to_string());
-            Ok(platform_api::TurnOutcome::EndTurn)
+            Ok(lingxi_core::host::TurnOutcome::EndTurn)
         }
     }
 
@@ -5392,7 +5410,7 @@ mod tests {
     fn local_slash_result_does_not_end_the_active_model_turn() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         assert!(slash_model_prompt(
-            platform_api::SlashDispatchResult::Handled {
+            lingxi_core::host::SlashDispatchResult::Handled {
                 display: "Stopped".into()
             },
             &tx,
@@ -5402,13 +5420,15 @@ mod tests {
             matches!(rx.try_recv().unwrap(), tui::TurnEvent::SystemNotice { body, .. } if body == "Stopped")
         );
         assert!(rx.try_recv().is_err());
-        assert!(
-            slash_model_prompt(platform_api::SlashDispatchResult::NotASlashCommand, &tx).is_none()
-        );
+        assert!(slash_model_prompt(
+            lingxi_core::host::SlashDispatchResult::NotASlashCommand,
+            &tx
+        )
+        .is_none());
         assert!(rx.try_recv().is_err());
         assert_eq!(
             slash_model_prompt(
-                platform_api::SlashDispatchResult::RunAsTurn {
+                lingxi_core::host::SlashDispatchResult::RunAsTurn {
                     prompt: "queued".into()
                 },
                 &tx
@@ -5440,7 +5460,7 @@ mod tests {
         .await;
         assert!(rx.try_recv().is_err());
         tx.send(tui::TurnEvent::TurnEnded(
-            platform_api::TurnOutcome::EndTurn,
+            lingxi_core::host::TurnOutcome::EndTurn,
         ))
         .unwrap();
         drop(previous_turn);
@@ -5765,7 +5785,7 @@ mod tests {
     #[tokio::test]
     async fn store_key_connect_action_makes_the_provider_visible_to_fusion() {
         use async_trait::async_trait;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
         use std::collections::HashMap;
@@ -5776,7 +5796,7 @@ mod tests {
 
         #[derive(Default)]
         struct MemStorage {
-            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+            map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
         }
         #[async_trait]
         impl SecureStorage for MemStorage {
@@ -5784,7 +5804,7 @@ mod tests {
                 &self,
                 service: &str,
                 account: &str,
-                data: protocol::SecureStorageData,
+                data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 self.map
                     .lock()
@@ -5796,7 +5816,8 @@ mod tests {
                 &self,
                 service: &str,
                 account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 Ok(self
                     .map
                     .lock()
@@ -5944,7 +5965,7 @@ filter in THIS process — /model and the turn loop already route it"
     #[tokio::test]
     async fn connect_action_announces_the_provider_before_the_catalog_re_probe() {
         use async_trait::async_trait;
-        use platform_api::{
+        use lingxi_core::host::{
             Clock, HttpTransport, SecureStorage, SecureStorageBackend, SecureStorageError,
         };
         use std::collections::HashMap;
@@ -5963,7 +5984,7 @@ filter in THIS process — /model and the turn loop already route it"
         /// `set_provider_key` is never the thing that stalls.
         #[derive(Default)]
         struct StallingStorage {
-            map: StdMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+            map: StdMutex<HashMap<(String, String), lingxi_core::types::SecureStorageData>>,
             armed: AtomicBool,
             released: AtomicBool,
             reads_while_stalled: AtomicUsize,
@@ -5998,7 +6019,7 @@ filter in THIS process — /model and the turn loop already route it"
                 &self,
                 service: &str,
                 account: &str,
-                data: protocol::SecureStorageData,
+                data: lingxi_core::types::SecureStorageData,
             ) -> Result<(), SecureStorageError> {
                 self.map
                     .lock()
@@ -6011,7 +6032,8 @@ filter in THIS process — /model and the turn loop already route it"
                 &self,
                 service: &str,
                 account: &str,
-            ) -> Result<Option<protocol::SecureStorageData>, SecureStorageError> {
+            ) -> Result<Option<lingxi_core::types::SecureStorageData>, SecureStorageError>
+            {
                 self.park_if_stalled().await;
                 Ok(self
                     .map
@@ -6418,12 +6440,12 @@ detached catalog refresh"
             read_status_line_configs_from(&home, &project, &[], true, None, (true, true, true));
         assert_eq!(
             configs.main.unwrap().source,
-            StatusLineSource::Known(protocol::Scope::User)
+            StatusLineSource::Known(lingxi_core::types::Scope::User)
         );
         let subagent = configs.subagent.unwrap();
         assert_eq!(
             subagent.source,
-            StatusLineSource::Known(protocol::Scope::Local)
+            StatusLineSource::Known(lingxi_core::types::Scope::Local)
         );
         assert_eq!(subagent.command, "local-agent");
         assert!(subagent.should_run(true));
@@ -6442,7 +6464,7 @@ detached catalog refresh"
         let subagent = configs.subagent.unwrap();
         assert_eq!(
             subagent.source,
-            StatusLineSource::Known(protocol::Scope::Managed)
+            StatusLineSource::Known(lingxi_core::types::Scope::Managed)
         );
         assert!(subagent.should_run(true));
         assert!(
@@ -6470,7 +6492,10 @@ detached catalog refresh"
             (false, false, false),
         );
         let main = configs.main.unwrap();
-        assert_eq!(main.source, StatusLineSource::Known(protocol::Scope::Flag));
+        assert_eq!(
+            main.source,
+            StatusLineSource::Known(lingxi_core::types::Scope::Flag)
+        );
         assert_eq!(main.command, "flag-main");
         assert!(
             configs.subagent.is_none(),
@@ -6533,7 +6558,7 @@ detached catalog refresh"
 
     #[test]
     fn plan_snapshot_renders_path_and_utf8_body() {
-        let plan = platform_api::PlanSnapshot {
+        let plan = lingxi_core::host::PlanSnapshot {
             path: PathBuf::from("/tmp/session-plan.md"),
             content: "步骤一\n步骤二".to_string(),
         };

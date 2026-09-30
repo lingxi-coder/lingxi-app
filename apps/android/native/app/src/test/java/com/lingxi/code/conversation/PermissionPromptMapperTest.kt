@@ -1,10 +1,10 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.AutoModePromptDto
-import com.lingxi.code.bindings.PermissionKindDto
-import com.lingxi.code.bindings.PermissionOwnerDto
-import com.lingxi.code.bindings.PermissionRequest
-import com.lingxi.code.bindings.WorkerInfoDto
+import com.lingxi.code.bindings.client.AutoModePromptDto
+import com.lingxi.code.bindings.client.PermissionKindDto
+import com.lingxi.code.bindings.client.PermissionOwnerDto
+import com.lingxi.code.bindings.client.PermissionRequest
+import com.lingxi.code.bindings.client.WorkerInfoDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue

@@ -18,7 +18,7 @@ use ratatui_image::protocol::StatefulProtocol;
 /// graphics protocol).
 #[must_use]
 pub fn make_picker() -> Picker {
-    Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)))
+    Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
 }
 
 /// Decode the image at `path` into a resize protocol via `picker`. Returns

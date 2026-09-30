@@ -2,9 +2,9 @@ package com.lingxi.code.model
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
-import com.lingxi.code.bindings.ModelBillingModeDto
-import com.lingxi.code.bindings.ModelDetailsDto
-import com.lingxi.code.bindings.ImageRefDto
+import com.lingxi.code.bindings.client.ModelBillingModeDto
+import com.lingxi.code.bindings.client.ModelDetailsDto
+import com.lingxi.code.bindings.client.ImageRefDto
 import java.util.UUID
 
 /**
@@ -135,11 +135,11 @@ data class ModelMetadata(
             if (options.isEmpty()) return null
             val labels = options.mapNotNull { option ->
                 when (val selection = option.selection) {
-                    is com.lingxi.code.bindings.ReasoningSelectionDto.Automatic -> "自动"
-                    is com.lingxi.code.bindings.ReasoningSelectionDto.Disabled -> "关闭"
-                    is com.lingxi.code.bindings.ReasoningSelectionDto.Enabled -> "开启"
-                    is com.lingxi.code.bindings.ReasoningSelectionDto.Level -> selection.id
-                    is com.lingxi.code.bindings.ReasoningSelectionDto.TokenBudget ->
+                    is com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic -> "自动"
+                    is com.lingxi.code.bindings.client.ReasoningSelectionDto.Disabled -> "关闭"
+                    is com.lingxi.code.bindings.client.ReasoningSelectionDto.Enabled -> "开启"
+                    is com.lingxi.code.bindings.client.ReasoningSelectionDto.Level -> selection.id
+                    is com.lingxi.code.bindings.client.ReasoningSelectionDto.TokenBudget ->
                         "${formatTokenCount(selection.tokens)} 预算"
                 }
             }
@@ -182,7 +182,7 @@ data class ModelMetadata(
 data class CatalogReasoningOption(
     val label: String,
     val persistable: Boolean,
-    val selection: com.lingxi.code.bindings.ReasoningSelectionDto = com.lingxi.code.bindings.ReasoningSelectionDto.Automatic,
+    val selection: com.lingxi.code.bindings.client.ReasoningSelectionDto = com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic,
 )
 
 data class CatalogModelPricingTier(
@@ -298,13 +298,13 @@ data class CatalogModelDetails(
         }
 
         private fun selectionLabel(
-            selection: com.lingxi.code.bindings.ReasoningSelectionDto,
+            selection: com.lingxi.code.bindings.client.ReasoningSelectionDto,
         ): String? = when (selection) {
-            is com.lingxi.code.bindings.ReasoningSelectionDto.Automatic -> "自动"
-            is com.lingxi.code.bindings.ReasoningSelectionDto.Disabled -> "关闭"
-            is com.lingxi.code.bindings.ReasoningSelectionDto.Enabled -> "开启"
-            is com.lingxi.code.bindings.ReasoningSelectionDto.Level -> selection.id
-            is com.lingxi.code.bindings.ReasoningSelectionDto.TokenBudget ->
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic -> "自动"
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.Disabled -> "关闭"
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.Enabled -> "开启"
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.Level -> selection.id
+            is com.lingxi.code.bindings.client.ReasoningSelectionDto.TokenBudget ->
                 "${formatTokenCount(selection.tokens)} 预算"
         }
 

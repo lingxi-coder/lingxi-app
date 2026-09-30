@@ -1103,7 +1103,7 @@ async fn run_evaluation(
         return Ok((
             AggregateResult {
                 schema_version: RESULT_SCHEMA_VERSION,
-                claude_version: platform_api::CLAUDE_CODE_VERSION.to_string(),
+                claude_version: lingxi_core::host::CLAUDE_CODE_VERSION.to_string(),
                 started_at,
                 duration_seconds: 0.0,
                 cost_usd: 0.0,
@@ -1301,7 +1301,7 @@ async fn run_evaluation(
     Ok((
         AggregateResult {
             schema_version: RESULT_SCHEMA_VERSION,
-            claude_version: platform_api::CLAUDE_CODE_VERSION.to_string(),
+            claude_version: lingxi_core::host::CLAUDE_CODE_VERSION.to_string(),
             started_at,
             duration_seconds: started.elapsed().as_secs_f64(),
             cost_usd: total_cost,
@@ -1655,11 +1655,11 @@ fn prepare_mock_runtime(
                 "env": launch_env,
             }),
         );
-        let normalized_server = protocol::normalize_name_for_mcp(&server.registered_name);
+        let normalized_server = lingxi_core::types::normalize_name_for_mcp(&server.registered_name);
         mocked_tools.extend(server.spec.tools.iter().map(|tool| {
             format!(
                 "mcp__{normalized_server}__{}",
-                protocol::normalize_name_for_mcp(&tool.name)
+                lingxi_core::types::normalize_name_for_mcp(&tool.name)
             )
         }));
         call_logs.push(call_log);
@@ -5484,10 +5484,26 @@ arms:
     /// rather than discovering a malformed case only when a paid run starts.
     #[test]
     fn the_shipped_fusion_corpus_parses_and_is_shaped_for_a_paired_delta() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../evals/fusion")
-            .canonicalize()
-            .expect("the fusion eval corpus ships in-tree");
+        // The shipped corpus belongs to the immutable runtime checkout.
+        let resolved = std::process::Command::new("python3")
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../scripts/lib/runtime_source.py"),
+            )
+            .arg("--root")
+            .output()
+            .expect("resolve the pinned runtime source");
+        assert!(
+            resolved.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resolved.stderr)
+        );
+        let root = Path::new(
+            std::str::from_utf8(&resolved.stdout)
+                .expect("runtime path")
+                .trim(),
+        )
+        .join("evals/fusion");
         let mut cases = Vec::new();
         for entry in fs::read_dir(&root).expect("corpus root is readable") {
             let dir = entry.expect("corpus entry").path();

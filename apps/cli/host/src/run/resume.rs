@@ -3,8 +3,8 @@ use crate::argv::Argv;
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
+use lingxi_core::host::{FileSystem, OrchestratorHandle};
 use permission;
-use platform_api::{FileSystem, OrchestratorHandle};
 use session::jsonl::loader::{
     list_recent_sessions, select_session_interactive, LoaderError, SessionMetadata,
 };
@@ -599,7 +599,7 @@ pub(crate) async fn mount_background_resumed_tui(
     messages: Vec<JsonlMessage>,
     registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
     initial_prompt: Option<String>,
-    handoff: Option<platform_api::BackgroundingSnapshot>,
+    handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: &crate::background_launch::BackgroundLaunchSpec,
 ) -> crate::mode::RunOutcome {
     mount_resumed_tui_inner(
@@ -622,7 +622,7 @@ pub(super) async fn mount_resumed_tui_inner(
     carried_state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
     initial_prompt: Option<String>,
-    handoff: Option<platform_api::BackgroundingSnapshot>,
+    handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: Option<&crate::background_launch::BackgroundLaunchSpec>,
 ) -> crate::mode::RunOutcome {
     // A cold resume inherits the last persisted assistant effort unless the
@@ -905,7 +905,7 @@ pub(super) async fn drive_tui_switch_loop_inner(
     struct InboxShutdown;
     impl Drop for InboxShutdown {
         fn drop(&mut self) {
-            if let Err(error) = platform_api::uds_inbox::stop_process_inbox_checked() {
+            if let Err(error) = lingxi_core::host::uds_inbox::stop_process_inbox_checked() {
                 eprintln!("lingxi-cli: cross-session inbox drain failed: {error}");
             }
         }
@@ -1402,11 +1402,11 @@ pub(crate) async fn seed_orchestrator_session(
 
 pub(super) fn resume_has_model_override(
     argv: &Argv,
-    provenance: platform_api::ModelProvenance,
+    provenance: lingxi_core::host::ModelProvenance,
 ) -> bool {
     argv.model.is_some()
         || argv.agent.is_some()
-        || provenance != platform_api::ModelProvenance::ProviderCatalogTier
+        || provenance != lingxi_core::host::ModelProvenance::ProviderCatalogTier
 }
 
 pub(super) fn resume_has_permission_mode_override(argv: &Argv) -> bool {

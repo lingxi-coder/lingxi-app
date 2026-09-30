@@ -31,14 +31,14 @@ pub struct ActiveTurn {
     /// never appends to the previous turn's final message).
     text_idx: Option<usize>,
     /// Tool ids started but not yet resulted, in start order.
-    running_tools: Vec<protocol::ToolUseId>,
+    running_tools: Vec<lingxi_core::types::ToolUseId>,
     /// Latest heartbeat age for each running tool. Kept outside the transcript
     /// so periodic liveness updates never grow scrollback.
-    tool_heartbeats: HashMap<protocol::ToolUseId, u64>,
+    tool_heartbeats: HashMap<lingxi_core::types::ToolUseId, u64>,
     /// Tool-call inputs stashed by id at `ToolUseStart`, consumed at
     /// `ToolUseResult` to derive the diff fields (`old_string`/`new_string`/
     /// `file_path`) the result renderer uses for Edit/Write.
-    tool_inputs: HashMap<protocol::ToolUseId, serde_json::Value>,
+    tool_inputs: HashMap<lingxi_core::types::ToolUseId, serde_json::Value>,
 }
 
 impl ActiveTurn {
@@ -57,7 +57,7 @@ impl ActiveTurn {
     /// Whether the tool call `id` has started but not yet returned (drives the
     /// renderer's running indicator on the matching tool-use row).
     #[must_use]
-    pub fn is_tool_running(&self, id: &protocol::ToolUseId) -> bool {
+    pub fn is_tool_running(&self, id: &lingxi_core::types::ToolUseId) -> bool {
         self.running_tools.contains(id)
     }
 
@@ -69,7 +69,7 @@ impl ActiveTurn {
 
     /// Latest elapsed time reported for a running tool, if any.
     #[must_use]
-    pub fn tool_elapsed_ms(&self, id: &protocol::ToolUseId) -> Option<u64> {
+    pub fn tool_elapsed_ms(&self, id: &lingxi_core::types::ToolUseId) -> Option<u64> {
         self.tool_heartbeats.get(id).copied()
     }
 
@@ -195,9 +195,13 @@ pub use client::presentation::tool_display::diff_inputs_for;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::TurnOutcome;
+    use lingxi_core::host::TurnOutcome;
 
-    fn start_tool(id: &protocol::ToolUseId, tool: &str, input: serde_json::Value) -> TurnEvent {
+    fn start_tool(
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        input: serde_json::Value,
+    ) -> TurnEvent {
         TurnEvent::ToolUseStart {
             id: id.clone(),
             tool: tool.to_string(),
@@ -240,7 +244,7 @@ mod tests {
     fn tool_start_marks_running_and_result_clears_it() {
         let mut at = ActiveTurn::new();
         let mut msgs = Vec::new();
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         at.apply(TurnEvent::TurnStarted, &mut msgs);
         at.apply(
             start_tool(&id, "Read", serde_json::json!({"file_path": "/tmp/x"})),
@@ -272,7 +276,7 @@ mod tests {
     fn heartbeat_updates_live_state_without_growing_transcript() {
         let mut at = ActiveTurn::new();
         let mut msgs = Vec::new();
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         at.apply(TurnEvent::TurnStarted, &mut msgs);
         at.apply(start_tool(&id, "Bash", serde_json::json!({})), &mut msgs);
         let before = msgs.len();
@@ -301,7 +305,7 @@ mod tests {
     fn text_after_tool_result_starts_a_new_block() {
         let mut at = ActiveTurn::new();
         let mut msgs = Vec::new();
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         at.apply(TurnEvent::TurnStarted, &mut msgs);
         at.apply(TurnEvent::TextDelta("before".into()), &mut msgs);
         at.apply(start_tool(&id, "Read", serde_json::json!({})), &mut msgs);
@@ -331,7 +335,7 @@ mod tests {
     fn edit_result_carries_diff_fields_from_the_stashed_input() {
         let mut at = ActiveTurn::new();
         let mut msgs = Vec::new();
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         at.apply(TurnEvent::TurnStarted, &mut msgs);
         at.apply(
             start_tool(
@@ -393,7 +397,7 @@ mod tests {
     fn turn_ended_clears_streaming_and_dangling_running_tools() {
         let mut at = ActiveTurn::new();
         let mut msgs = Vec::new();
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         at.apply(TurnEvent::TurnStarted, &mut msgs);
         at.apply(start_tool(&id, "Bash", serde_json::json!({})), &mut msgs);
         assert!(at.is_streaming());

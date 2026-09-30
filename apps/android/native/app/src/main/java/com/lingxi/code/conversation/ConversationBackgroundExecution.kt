@@ -21,9 +21,9 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.lingxi.code.MainActivity
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.TaskStatusDto
-import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.TaskStatusDto
+import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.model.sessionModeFromWireValue

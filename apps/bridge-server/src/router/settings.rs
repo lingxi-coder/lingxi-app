@@ -49,14 +49,16 @@ impl EngineCommandRouter {
             .as_ref()
             .map(|store| store.lingxi_home.join("settings.json"))
     }
-    pub(super) fn persisted_reasoning_selection(&self) -> Option<platform_api::ReasoningSelection> {
+    pub(super) fn persisted_reasoning_selection(
+        &self,
+    ) -> Option<lingxi_core::host::ReasoningSelection> {
         self.reasoning_settings_path().and_then(|path| {
             command_api::builtins::effort::load_reasoning_default_selection_at(&path)
         })
     }
     pub(super) fn persist_reasoning_selection(
         &self,
-        selection: &platform_api::ReasoningSelection,
+        selection: &lingxi_core::host::ReasoningSelection,
     ) -> Result<(), String> {
         let Some(path) = self.reasoning_settings_path() else {
             return Ok(());

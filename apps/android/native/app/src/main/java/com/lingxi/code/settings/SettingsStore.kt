@@ -5,7 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.graphics.Color
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ProviderModelCatalogEntryDto
+import com.lingxi.code.bindings.client.ProviderModelCatalogEntryDto
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig

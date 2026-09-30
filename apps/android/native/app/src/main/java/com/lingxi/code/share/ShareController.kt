@@ -33,7 +33,7 @@ class ShareException(val failure: ShareFailure) : Exception(
 )
 
 /**
- * Process-global bridge between the (Rust-driven) `com.lingxi.code.bindings.AndroidShare`
+ * Process-global bridge between the (Rust-driven) `com.lingxi.code.bindings.android.AndroidShare`
  * callback interface and the Android share sheet, which is launched off a live
  * [Context].
  *

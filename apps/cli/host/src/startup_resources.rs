@@ -140,15 +140,16 @@ async fn materialize_files(specs: &[String]) -> Result<(), String> {
 
     let mut committed: Vec<PathBuf> = Vec::new();
     for (relative, bytes) in prepared {
-        let options = platform_api::rooted_fs::AtomicWriteOptions {
+        let options = lingxi_core::host::rooted_fs::AtomicWriteOptions {
             overwrite: false,
             create_parents: true,
-            ..platform_api::rooted_fs::AtomicWriteOptions::default()
+            ..lingxi_core::host::rooted_fs::AtomicWriteOptions::default()
         };
-        if let Err(error) = platform_api::rooted_fs::atomic_write(&cwd, &relative, &bytes, options)
+        if let Err(error) =
+            lingxi_core::host::rooted_fs::atomic_write(&cwd, &relative, &bytes, options)
         {
             for path in &committed {
-                let _ = platform_api::rooted_fs::remove_file(&cwd, path);
+                let _ = lingxi_core::host::rooted_fs::remove_file(&cwd, path);
             }
             return Err(format!(
                 "install `{}`: {error}",

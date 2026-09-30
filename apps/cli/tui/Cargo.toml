@@ -10,6 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+core = { workspace = true }
 tool-api = { workspace = true }
 # The backend-neutral core extracted from `tui` during the iocraft → ratatui
 # migration. `tui` renders it with ratatui; it must never depend on iocraft.
@@ -18,7 +19,6 @@ permission = { workspace = true }
 # (fix round 1) `TurnEvent::ContextPressure`/`RateLimit` handling needs the
 # banner + subscription types the bridge events carry. Already in the graph via
 # tui-core (promoted from dev-dependencies; no new external dependency).
-platform-api = { workspace = true }
 # (fix round 1) `rate_limit_messages` reuses the existing 1:1
 # `formatResetTime` port instead of duplicating it (the old iocraft `tui`
 # reaches the SAME function through its `orchestrator` dependency).
@@ -30,18 +30,15 @@ llm-runtime = { workspace = true }
 # custom terminal room-making); `unstable-widget-ref` unlocks `WidgetRef` and
 # `unstable-rendered-line-info` unlocks `Paragraph::line_count`, both needed by
 # the `renderable` height/render contract ported from codex.
-ratatui = { version = "0.29", features = [
+ratatui = { version = "0.30.2", features = [
     "scrolling-regions",
     "unstable-rendered-line-info",
     "unstable-widget-ref",
 ] }
 crossterm = { workspace = true }
-# Inline-image widget (kitty/iTerm2/sixel). v5 targets ratatui 0.29. Its default
-# `image-defaults` feature enables `image/default`, which pulls the AVIF codec
-# chain (avif-serialize/moxcms) that needs edition2024 / rustc 1.85 (> workspace
-# 1.82) — so default features are OFF and `image` is brought in directly with
-# only png+jpeg (pinned to 0.25.5 in Cargo.lock, below the 0.25.6 moxcms bump).
-ratatui-image = { version = "=5.0.0", default-features = false, features = ["crossterm"] }
+# Inline terminal images use the maintained Ratatui 0.30 adapter.
+# Enable only the existing PNG/JPEG formats through the direct image dependency.
+ratatui-image = { version = "=11.0.2", default-features = false, features = ["crossterm"] }
 image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }
 # Clipboard IMAGE paste (Ctrl+V/Alt+V): bracketed paste only carries text, so
 # screenshots need a native clipboard read (codex-rs/tui `clipboard_paste`).
@@ -55,7 +52,6 @@ unicode-width = "=0.1.14"
 uuid = { version = "1.10", features = ["v4"] }
 async-trait = { workspace = true }
 session = { workspace = true }
-protocol = { workspace = true }
 tracing = { workspace = true }
 # `/web` WebSearch-config port (screens/web_picker.rs + screens/web_config.rs
 # from the deleted iocraft `tui`): pure KeyCode->Outcome reducers over the

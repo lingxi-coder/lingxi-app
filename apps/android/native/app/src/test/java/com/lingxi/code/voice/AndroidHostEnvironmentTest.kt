@@ -1,7 +1,7 @@
 package com.lingxi.code.voice
 
-import com.lingxi.code.bindings.AndroidDeviceClassFfi
-import com.lingxi.code.bindings.AndroidExecutionTargetFfi
+import com.lingxi.code.bindings.android.AndroidDeviceClassFfi
+import com.lingxi.code.bindings.android.AndroidExecutionTargetFfi
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

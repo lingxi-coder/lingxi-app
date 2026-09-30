@@ -1,7 +1,7 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.ErrorKindDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState

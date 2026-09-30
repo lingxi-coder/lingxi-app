@@ -31,17 +31,15 @@ function isChoice(value: unknown): value is FusionModelChoice {
     && typeof record.model === 'string' && record.model.trim().length > 0;
 }
 
-/** 读出某一层自己写的 `fusion` 对象里的三个模型角色。格式不对的条目读作「未配置」。 */
+/** 读出某一层自己写的 `fusion` 对象里的panel 和 analyst 角色。格式不对的条目读作「未配置」。 */
 export function rolesFromFusionObject(fusion: Record<string, unknown>): {
   panels: FusionModelChoice[];
   analyst: FusionModelChoice | null;
-  synthesizer: FusionModelChoice | null;
 } {
   const raw = fusion.panelModels;
   return {
     panels: Array.isArray(raw) ? raw.filter(isChoice) : [],
     analyst: isChoice(fusion.analystModel) ? fusion.analystModel : null,
-    synthesizer: isChoice(fusion.synthesizerModel) ? fusion.synthesizerModel : null,
   };
 }
 
@@ -50,7 +48,6 @@ export function missingRoles(roles: ReturnType<typeof rolesFromFusionObject>): s
   const missing: string[] = [];
   if (roles.panels.length < FUSION_MIN_PANEL) missing.push('panel 模型');
   if (!roles.analyst) missing.push('analyst 模型');
-  if (!roles.synthesizer) missing.push('synthesizer 模型');
   return missing;
 }
 
@@ -200,7 +197,7 @@ export function ChoiceSelect({
 }
 
 /**
- * 编辑 `fusion` 设置里的三个模型角色（`panelModels` / `analystModel` /
+ * 编辑 `fusion` 设置里的panel 和 analyst 角色（`panelModels` / `analystModel` /
  * `synthesizerModel`）以及主开关 `fusion.enabled`。
  *
  * Fusion 没有自动选择回落：引擎要求三个角色都被显式配置，否则运行前就以
@@ -367,20 +364,8 @@ export function Fusion({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
         )}
       </Card>
 
-      <Card title="Synthesizer 模型 (fusion.synthesizerModel)">
-        <Row
-          title="合成最终答案的模型"
-          desc="读 analyst 的分析并写出你看到的那份答案。通常就选你平时对话用的模型。"
-          align="center"
-        >
-          <ChoiceSelect
-            value={roles.synthesizer}
-            rows={candidates}
-            placeholder="选择 synthesizer…"
-            onPick={(choice) => write({ synthesizerModel: choice ?? undefined }, 'synthesizerModel')}
-            disabled={saving !== null}
-          />
-        </Row>
+      <Card title="最终答案">
+        <Row title="当前会话模型" desc="当前会话会结合 panel 结果与 analyst 分析继续生成答案。">{null}</Row>
       </Card>
 
       {saveError && <div role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{saveError}</div>}

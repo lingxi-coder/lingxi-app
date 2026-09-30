@@ -34,7 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
-import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.bindings.client.TaskStatusDto
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.theme.LingXiTheme
 

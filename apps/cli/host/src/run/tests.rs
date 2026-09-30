@@ -521,7 +521,7 @@ async fn seed_orchestrator_session_restores_saved_model_and_profile() {
 
 #[test]
 fn resume_keeps_explicit_and_saved_model_selections() {
-    use platform_api::ModelProvenance::{
+    use lingxi_core::host::ModelProvenance::{
         ManagedAdministratorDefault, ProviderCatalogTier, UserOrEnv,
     };
     let mut argv = tui_argv();
@@ -635,7 +635,7 @@ async fn seed_orchestrator_session_replays_history_and_id() {
         assert!(s.history.is_empty(), "fresh session starts empty");
         assert_ne!(
             s.session_id,
-            protocol::SessionId::from_uuid(resumed_id),
+            lingxi_core::types::SessionId::from_uuid(resumed_id),
             "fresh id differs from the resumed id we will seed"
         );
     }
@@ -659,22 +659,22 @@ async fn seed_orchestrator_session_replays_history_and_id() {
     let s = handle.lock().await;
     assert_eq!(
         s.session_id,
-        protocol::SessionId::from_uuid(resumed_id),
+        lingxi_core::types::SessionId::from_uuid(resumed_id),
         "seed overrides the session id with the resumed id"
     );
     assert_eq!(s.history.len(), 2, "both transcript lines replayed");
     match &s.history[0] {
-        protocol::ConversationMessage::User { content, .. } => {
+        lingxi_core::types::ConversationMessage::User { content, .. } => {
             assert!(matches!(
                 content.first(),
-                Some(protocol::ContentBlock::Text { text }) if text == "hello from the past"
+                Some(lingxi_core::types::ContentBlock::Text { text }) if text == "hello from the past"
             ));
         }
         other => panic!("expected first history entry User, got {other:?}"),
     }
     assert!(matches!(
         &s.history[1],
-        protocol::ConversationMessage::Assistant { .. }
+        lingxi_core::types::ConversationMessage::Assistant { .. }
     ));
 }
 
@@ -975,7 +975,7 @@ fn pure_get_binary_version_shape() {
     else {
         panic!("expected success payload");
     };
-    assert_eq!(payload["version"], platform_api::CLAUDE_CODE_VERSION);
+    assert_eq!(payload["version"], lingxi_core::host::CLAUDE_CODE_VERSION);
     assert!(payload.get("buildTime").is_some());
 }
 
@@ -1684,7 +1684,7 @@ fn managed_cloud_env_forces_not_first_party() {
         "xn()'s provider chain, in binary order"
     );
 
-    let listings = vec![platform_api::orchestrator::ModelListing {
+    let listings = vec![lingxi_core::host::orchestrator::ModelListing {
         display_model: "Opus".to_string(),
         request_model: "claude-opus-4-8".to_string(),
         provider_id: "anthropic".to_string(),
@@ -1723,7 +1723,7 @@ fn managed_cloud_env_forces_not_first_party() {
 #[test]
 fn session_model_first_party_uses_catalog_provider() {
     let listings = vec![
-        platform_api::orchestrator::ModelListing {
+        lingxi_core::host::orchestrator::ModelListing {
             display_model: "Opus".to_string(),
             request_model: "claude-opus-4-8".to_string(),
             provider_id: "anthropic".to_string(),
@@ -1736,7 +1736,7 @@ fn session_model_first_party_uses_catalog_provider() {
             fusion_analyst_capable: false,
             connection: Default::default(),
         },
-        platform_api::orchestrator::ModelListing {
+        lingxi_core::host::orchestrator::ModelListing {
             display_model: "GPT-4o".to_string(),
             request_model: "gpt-4o".to_string(),
             provider_id: "openai".to_string(),
@@ -2358,7 +2358,7 @@ fn fusion_state(
         effective_timeout_ms: None,
         planned_panels: None,
         fusion_activation_deadline: None,
-        publication_status: platform_api::FusionPublicationStatus::Published,
+        publication_status: lingxi_core::host::FusionPublicationStatus::Published,
         publication_error: None,
     })
 }
@@ -2516,13 +2516,13 @@ async fn fusion_accounting_failure_keeps_answer_and_waits_for_publication() {
     let tasks::state::TaskState::LocalFusion(fusion) = &mut pending else {
         unreachable!();
     };
-    fusion.publication_status = platform_api::FusionPublicationStatus::Pending;
+    fusion.publication_status = lingxi_core::host::FusionPublicationStatus::Pending;
     assert!(!fusion_result_ready(&pending));
     let mut published = pending.clone();
     let tasks::state::TaskState::LocalFusion(fusion) = &mut published else {
         unreachable!();
     };
-    fusion.publication_status = platform_api::FusionPublicationStatus::Published;
+    fusion.publication_status = lingxi_core::host::FusionPublicationStatus::Published;
     assert!(fusion_result_ready(&published));
     let lookup = ScriptedLookup::new(vec![Some(pending), Some(published)]);
     let sink = RecordingFusionSink::default();
@@ -2564,7 +2564,7 @@ fn unsupported_publication_is_ready_but_fails_with_the_answer_retained() {
     let tasks::state::TaskState::LocalFusion(fusion) = &mut state else {
         unreachable!("fusion_state always builds a LocalFusion state");
     };
-    fusion.publication_status = platform_api::FusionPublicationStatus::NotRequired;
+    fusion.publication_status = lingxi_core::host::FusionPublicationStatus::NotRequired;
 
     assert!(fusion_result_ready(&state));
     let outcome = fusion_print_outcome(&state);
@@ -2626,7 +2626,7 @@ async fn await_local_fusion_result_reports_durable_queue_without_failing() {
     let tasks::state::TaskState::LocalFusion(fusion) = &mut queued else {
         unreachable!("fusion_state always builds a LocalFusion state");
     };
-    fusion.publication_status = platform_api::FusionPublicationStatus::Queued;
+    fusion.publication_status = lingxi_core::host::FusionPublicationStatus::Queued;
     let lookup = ScriptedLookup::new(vec![Some(queued)]);
     let sink = RecordingFusionSink::default();
 
@@ -2669,7 +2669,7 @@ async fn await_local_fusion_result_keeps_answer_but_fails_on_storage_error() {
     let tasks::state::TaskState::LocalFusion(fusion) = &mut failed_publication else {
         unreachable!("fusion_state always builds a LocalFusion state");
     };
-    fusion.publication_status = platform_api::FusionPublicationStatus::StorageFailure;
+    fusion.publication_status = lingxi_core::host::FusionPublicationStatus::StorageFailure;
     fusion.publication_error = Some("append failed".to_string());
     let lookup = ScriptedLookup::new(vec![Some(failed_publication)]);
     let sink = RecordingFusionSink::default();
@@ -2755,11 +2755,11 @@ async fn await_local_fusion_result_polls_until_terminal_then_prints() {
 #[tokio::test]
 async fn await_local_fusion_result_waits_for_publish_before_reporting_completed() {
     let unpublished = tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
-        publication_status: platform_api::FusionPublicationStatus::Pending,
+        publication_status: lingxi_core::host::FusionPublicationStatus::Pending,
         ..completed_fusion_state("not yet on disk")
     });
     let published = tasks::state::TaskState::LocalFusion(tasks::state::LocalFusionTaskState {
-        publication_status: platform_api::FusionPublicationStatus::Published,
+        publication_status: lingxi_core::host::FusionPublicationStatus::Published,
         ..completed_fusion_state("not yet on disk")
     });
     let lookup = ScriptedLookup::new(vec![
@@ -3062,7 +3062,7 @@ fn fusion_print_deadline_safely_unbounds_on_instant_overflow() {
 }
 #[test]
 fn print_winddown_waits_for_jobs_but_not_monitor_subscriptions_or_parked_agents() {
-    let mut task = platform_api::task_registry::TaskRecord {
+    let mut task = lingxi_core::host::task_registry::TaskRecord {
         task_type: "local_bash".into(),
         status: "running".into(),
         ..Default::default()
@@ -3154,7 +3154,7 @@ async fn end_session_cancels_idle_notification_owner_without_a_watch_bridge() {
 }
 #[tokio::test]
 async fn print_branch_boundary_tears_down_tasks_on_error_and_budget_exit() {
-    use platform_api::task_registry::{TaskCreateInput, TaskRegistryHandle};
+    use lingxi_core::host::task_registry::{TaskCreateInput, TaskRegistryHandle};
     let build = crate::init::build_runtime_for_tui(&tui_argv())
         .await
         .expect("runtime");

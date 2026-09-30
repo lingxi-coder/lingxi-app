@@ -133,7 +133,7 @@ pub struct SubagentStatusLineConfig {
 /// `Unknown` is a sentinel, not a rung: the parser cannot attribute a command
 /// it read in isolation, and the composition root must replace it. It is kept
 /// as its own variant rather than folded into `Option` or into
-/// [`protocol::Provenance`] because [`StatusLineExecutionPolicy::allows`] gates
+/// [`lingxi_core::types::Provenance`] because [`StatusLineExecutionPolicy::allows`] gates
 /// child-process creation on this value, and an unattributed command must never
 /// compare equal to a managed one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -143,7 +143,7 @@ pub enum StatusLineSource {
     Unknown,
     /// Attributed to a settings rung — `User`, `Project`, `Local`, `Flag` or
     /// `Managed` in practice.
-    Known(protocol::Scope),
+    Known(lingxi_core::types::Scope),
 }
 
 /// Spawn-time policy for status-line commands.
@@ -174,7 +174,7 @@ impl StatusLineExecutionPolicy {
         self.workspace_trusted
             && !self.disable_all_hooks
             && (!self.managed_hooks_only
-                || source == StatusLineSource::Known(protocol::Scope::Managed))
+                || source == StatusLineSource::Known(lingxi_core::types::Scope::Managed))
     }
 }
 
@@ -405,7 +405,7 @@ pub struct StatusLineInputs<'a> {
     /// Cumulative output tokens across successful requests.
     pub total_output_tokens: u64,
     /// Most recent successful model-response usage.
-    pub current_usage: Option<&'a platform_api::CurrentUsageSnapshot>,
+    pub current_usage: Option<&'a lingxi_core::host::CurrentUsageSnapshot>,
     /// Raw context token estimate (the auto-compact gate's input estimate) —
     /// `context_window.total_input_tokens` + the `exceeds_200k_tokens`
     /// derivation. `0` = no usage yet (percentages go `null`, binary `o2n`).
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn build_status_line_input_shape() {
-        let current_usage = platform_api::CurrentUsageSnapshot {
+        let current_usage = lingxi_core::host::CurrentUsageSnapshot {
             input_tokens: 1_000,
             output_tokens: 200,
             cache_read_input_tokens: 300,

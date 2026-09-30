@@ -119,7 +119,7 @@ fn record_still_belongs_to(path: &Path, record: &LiveSessionRecord) -> bool {
 /// Keep this derivation narrow: only canonical `<pid>.json` files immediately
 /// below a `sessions` directory are eligible, and the existing config root
 /// and sessions directory must already exist. Invalid paths fail closed.
-fn lock_live_record(path: &Path) -> Option<platform_api::rooted_fs::RootedFileLock> {
+fn lock_live_record(path: &Path) -> Option<lingxi_core::host::rooted_fs::RootedFileLock> {
     let file_name = path.file_name()?.to_str()?;
     let pid_text = file_name.strip_suffix(".json")?;
     let pid = pid_text.parse::<u32>().ok()?;
@@ -135,7 +135,7 @@ fn lock_live_record(path: &Path) -> Option<platform_api::rooted_fs::RootedFileLo
         return None;
     }
     let lock_relative = Path::new("sessions").join(format!(".{pid}.json.lock"));
-    platform_api::rooted_fs::lock_exclusive(&config_home, &lock_relative, 0o700, 0o600).ok()
+    lingxi_core::host::rooted_fs::lock_exclusive(&config_home, &lock_relative, 0o700, 0o600).ok()
 }
 
 /// `sessions/` under the config home — one `<pid>.json` per live process.
@@ -159,9 +159,14 @@ fn job_lock_relative(short: &str) -> PathBuf {
 pub(crate) fn lock_job_state(
     config_home: &Path,
     short: &str,
-) -> std::io::Result<platform_api::rooted_fs::RootedFileLock> {
-    platform_api::rooted_fs::lock_exclusive(config_home, &job_lock_relative(short), 0o700, 0o600)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))
+) -> std::io::Result<lingxi_core::host::rooted_fs::RootedFileLock> {
+    lingxi_core::host::rooted_fs::lock_exclusive(
+        config_home,
+        &job_lock_relative(short),
+        0o700,
+        0o600,
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))
 }
 
 fn with_job_state_lock<T>(
@@ -1625,7 +1630,7 @@ fn deliver_idle_notifications(path: &Path, record: &LiveSessionRecord, exited: b
     let Some(session_id) = record.session_id.as_deref() else {
         return;
     };
-    let dir = platform_api::live_sessions::LiveSessionDir::at(root);
+    let dir = lingxi_core::host::live_sessions::LiveSessionDir::at(root);
     let Ok(subscriptions) = dir.drain_idle_subscriptions(session_id) else {
         return;
     };
@@ -1646,7 +1651,7 @@ fn deliver_idle_notifications(path: &Path, record: &LiveSessionRecord, exited: b
             _ if exited => format!("{from} exited"),
             _ => format!("{from} is idle"),
         });
-        let msg = platform_api::live_sessions::PeerMessage {
+        let msg = lingxi_core::host::live_sessions::PeerMessage {
             from: from.clone(),
             from_session_id: from_session_id.clone(),
             content: if exited {
@@ -1929,7 +1934,7 @@ mod tests {
         ));
         let pid = std::process::id();
         let path = sessions_dir(tmp.path()).join(format!("{pid}.json"));
-        let live_dir = Arc::new(platform_api::live_sessions::LiveSessionDir::at(
+        let live_dir = Arc::new(lingxi_core::host::live_sessions::LiveSessionDir::at(
             sessions_dir(tmp.path()),
         ));
 
@@ -2045,10 +2050,10 @@ mod tests {
     fn idle_notification_fires_once_on_busy_to_idle_edge() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = SessionRegistration::register(tmp.path(), Some("target-session"), Some("peer"));
-        let dir = platform_api::live_sessions::LiveSessionDir::at(sessions_dir(tmp.path()));
+        let dir = lingxi_core::host::live_sessions::LiveSessionDir::at(sessions_dir(tmp.path()));
         dir.append_idle_subscription(
             "target-session",
-            &platform_api::live_sessions::IdleNotificationRequest {
+            &lingxi_core::host::live_sessions::IdleNotificationRequest {
                 from: "lead".to_string(),
                 from_session_id: "subscriber-session".to_string(),
                 summary: Some("review finished".to_string()),
@@ -2073,7 +2078,7 @@ mod tests {
 
         dir.append_idle_subscription(
             "target-session",
-            &platform_api::live_sessions::IdleNotificationRequest {
+            &lingxi_core::host::live_sessions::IdleNotificationRequest {
                 from: "lead".to_string(),
                 from_session_id: "subscriber-session".to_string(),
                 summary: None,

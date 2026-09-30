@@ -55,7 +55,7 @@ import com.lingxi.code.components.ModelDetailsDialog
 import com.lingxi.code.components.ModelDetailsInfoButton
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
-import com.lingxi.code.bindings.ImageRefDto
+import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.ModelOption

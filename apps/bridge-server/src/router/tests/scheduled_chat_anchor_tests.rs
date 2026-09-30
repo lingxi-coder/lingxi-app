@@ -8,7 +8,7 @@ async fn scheduled_chat_anchor_is_listed_without_messages_and_is_idempotent() {
         let cwd = temp.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
         let home = temp.path().join("home");
-        let fs: Arc<dyn platform_api::FileSystem> =
+        let fs: Arc<dyn lingxi_core::host::FileSystem> =
             Arc::new(platform_posix::PosixFileSystem::new(temp.path().into()));
         let store =
             SessionStoreContext::new(home.clone(), cwd.to_string_lossy().into_owned(), fs.clone());

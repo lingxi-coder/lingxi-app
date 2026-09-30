@@ -2,11 +2,11 @@ package com.lingxi.code.settings
 
 import androidx.annotation.StringRes
 import com.lingxi.code.R
-import com.lingxi.code.bindings.AndroidMobileLinuxConfigFfi
-import com.lingxi.code.bindings.MobileLinuxCapabilityFfi
-import com.lingxi.code.bindings.MobileLinuxRootfsStateFfi
-import com.lingxi.code.bindings.MobileLinuxRuntimeModeFfi
-import com.lingxi.code.bindings.MobileLinuxStatusFfi
+import com.lingxi.code.bindings.android.AndroidMobileLinuxConfigFfi
+import com.lingxi.code.bindings.android.MobileLinuxCapabilityFfi
+import com.lingxi.code.bindings.android.MobileLinuxRootfsStateFfi
+import com.lingxi.code.bindings.android.MobileLinuxRuntimeModeFfi
+import com.lingxi.code.bindings.android.MobileLinuxStatusFfi
 
 enum class LinuxRuntimeMode(val title: String) {
     MobileLinux("Mobile Linux");
@@ -155,7 +155,7 @@ fun linuxRuntimeUiStateFrom(
     capability: MobileLinuxCapabilityFfi,
     status: MobileLinuxStatusFfi,
     lastAction: LinuxRuntimeAction? = null,
-    tasks: List<com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi> = emptyList(),
+    tasks: List<com.lingxi.code.bindings.android.MobileLinuxTaskSnapshotFfi> = emptyList(),
 ): LinuxRuntimeUiState {
     val detail = status.lastError ?: capability.reason
     val summaryRes = when {
@@ -205,17 +205,17 @@ fun linuxRuntimeUiStateFrom(
                 id = it.taskId,
                 label = it.command.ifBlank { "guest task" },
                 stateRes = when (it.status) {
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.QUEUED -> R.string.settings_linux_task_queued
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.RUNNING -> R.string.settings_linux_task_running
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.BACKGROUNDED -> R.string.settings_linux_task_backgrounded
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.COMPLETED -> R.string.chat_status_completed
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.FAILED -> R.string.settings_linux_task_failed
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.CANCELLED -> R.string.chat_status_cancelled
-                    com.lingxi.code.bindings.MobileLinuxTaskStateFfi.TIMED_OUT -> R.string.settings_linux_task_timed_out
+                    com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.QUEUED -> R.string.settings_linux_task_queued
+                    com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.RUNNING -> R.string.settings_linux_task_running
+                    com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.BACKGROUNDED -> R.string.settings_linux_task_backgrounded
+                    com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.COMPLETED -> R.string.chat_status_completed
+                    com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.FAILED -> R.string.settings_linux_task_failed
+                    com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.CANCELLED -> R.string.chat_status_cancelled
+                    com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.TIMED_OUT -> R.string.settings_linux_task_timed_out
                 },
                 stateDetail = it.detail,
-                stoppable = it.status == com.lingxi.code.bindings.MobileLinuxTaskStateFfi.RUNNING
-                    || it.status == com.lingxi.code.bindings.MobileLinuxTaskStateFfi.BACKGROUNDED,
+                stoppable = it.status == com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.RUNNING
+                    || it.status == com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi.BACKGROUNDED,
             )
         },
         terminal = LinuxRuntimeTerminalUiState(

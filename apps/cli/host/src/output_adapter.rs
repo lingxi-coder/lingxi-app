@@ -1,4 +1,4 @@
-//! Adapter that bridges [`platform_api::OutputStream`] emissions from
+//! Adapter that bridges [`lingxi_core::host::OutputStream`] emissions from
 //! the orchestrator into the CLI's [`crate::output::OutputSink`].
 //!
 //! Wired in M5-12 Task 9: when the orchestrator emits a `Text` content
@@ -8,7 +8,7 @@
 
 use crate::output::OutputSink;
 use async_trait::async_trait;
-use platform_api::{CostSnapshot, OutputStream};
+use lingxi_core::host::{CostSnapshot, OutputStream};
 use std::sync::Arc;
 
 /// Concrete adapter — owns an `Arc<dyn OutputSink>` and projects every
@@ -39,7 +39,7 @@ impl OutputStream for SinkAdapter {
     }
     async fn emit_tool_call(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
     ) {
@@ -51,14 +51,19 @@ impl OutputStream for SinkAdapter {
     }
     async fn emit_tool_result(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         tool: &str,
         _model_text: &str,
         result: &serde_json::Value,
     ) {
         self.sink.tool_result(tool, result).await;
     }
-    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+    async fn emit_tool_heartbeat(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        elapsed_ms: u64,
+    ) {
         self.sink
             .tool_heartbeat(id.as_str(), tool, elapsed_ms)
             .await;

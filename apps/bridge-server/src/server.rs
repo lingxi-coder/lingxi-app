@@ -136,7 +136,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// A registry completion starts a machine turn, without a synthetic prompt.
     async fn run_task_notification_turn(
         &self,
-        _registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        _registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
         _cancel: CancellationToken,
     ) {
     }
@@ -354,9 +354,9 @@ impl PermissionRequestSink for FramePermissionSink {
             self.tool_names.lock().await.remove(&request_id);
             self.reject(request_id).await;
         } else {
-            platform_api::live_sessions::set_process_status(
+            lingxi_core::host::live_sessions::set_process_status(
                 "waiting",
-                Some(platform_api::live_sessions::PERMISSION_PROMPT_WAITING_FOR),
+                Some(lingxi_core::host::live_sessions::PERMISSION_PROMPT_WAITING_FOR),
             );
         }
     }
@@ -527,7 +527,8 @@ pub struct BridgeConnection {
     /// emit onto a newly-claimed outbound sink.
     active_turn_task: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>,
     queue_wakeup_task: Option<tokio::task::AbortHandle>,
-    task_notification_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+    task_notification_registry:
+        Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
 }
 
 #[derive(Clone, Default)]
@@ -956,7 +957,7 @@ impl BridgeConnection {
     /// Wake an idle main loop when teammates enqueue a noninterrupting prompt.
     pub fn with_task_notification_registry(
         mut self,
-        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     ) -> Self {
         self.task_notification_registry = Some(registry);
         self
@@ -991,12 +992,12 @@ impl BridgeConnection {
                         })
                         .await
                         .is_empty()
-                    && !platform_api::env::background_tasks_disabled()
+                    && !lingxi_core::host::env::background_tasks_disabled()
                 {
                     if let Some(registry) = &registry {
                         registry
                             .background_all_tasks_with_reason(
-                                platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                                lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                             )
                             .await;
                     }
@@ -1510,7 +1511,7 @@ impl BridgeConnection {
                     .map(|outcome| outcome.authority_events.clone())
                     .unwrap_or_default();
                 match outcome.map(|outcome| outcome.result) {
-                    Some(platform_api::SlashDispatchResult::RunAsTurn { prompt }) => {
+                    Some(lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt }) => {
                         // Run the expanded prompt exactly like a direct user
                         // prompt (enqueue-or-spawn; no images).
                         drop(_handoff);
@@ -1523,7 +1524,7 @@ impl BridgeConnection {
                     // `handle()` (and any of its `EmitEffects`/`InjectMessage`
                     // side effects) twice and discard the first result. Reuse
                     // the already-computed disposition instead.
-                    Some(platform_api::SlashDispatchResult::Handled { display }) => {
+                    Some(lingxi_core::host::SlashDispatchResult::Handled { display }) => {
                         self.unscoped_event_sink()
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -1532,7 +1533,7 @@ impl BridgeConnection {
                             })
                             .await;
                     }
-                    Some(platform_api::SlashDispatchResult::Unknown { display, .. }) => {
+                    Some(lingxi_core::host::SlashDispatchResult::Unknown { display, .. }) => {
                         self.unscoped_event_sink()
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -1541,7 +1542,7 @@ impl BridgeConnection {
                             })
                             .await;
                     }
-                    Some(platform_api::SlashDispatchResult::NotASlashCommand) => {
+                    Some(lingxi_core::host::SlashDispatchResult::NotASlashCommand) => {
                         self.unscoped_event_sink()
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
@@ -1685,11 +1686,11 @@ impl BridgeConnection {
                 return;
             }
             self.queue.enqueue(prompt_command(text)).await;
-            if !platform_api::env::background_tasks_disabled() {
+            if !lingxi_core::host::env::background_tasks_disabled() {
                 if let Some(registry) = &self.task_notification_registry {
                     registry
                         .background_all_tasks_with_reason(
-                            platform_api::task_registry::TaskBackgroundReason::DeliverMessage,
+                            lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                         )
                         .await;
                 }
@@ -1769,11 +1770,11 @@ impl BridgeConnection {
             tracing::debug!(?turn_id, "bridge-server: ignored stale or idle turn cancel");
             return;
         };
-        if !platform_api::env::background_tasks_disabled() {
+        if !lingxi_core::host::env::background_tasks_disabled() {
             if let Some(registry) = &self.task_notification_registry {
                 registry
                     .background_all_tasks_with_reason(
-                        platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                        lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort,
                     )
                     .await;
             }
@@ -1821,7 +1822,7 @@ impl BridgeConnection {
         // response owned a pending request, and the active-turn check preserves
         // terminal/disconnected state when cancellation won the race.
         if resolved && self.active_turn.accepts_interactions() {
-            platform_api::live_sessions::set_process_status("busy", None);
+            lingxi_core::host::live_sessions::set_process_status("busy", None);
         }
         if !resolved {
             tracing::debug!(
@@ -2137,7 +2138,7 @@ mod tests {
     use client::protocol::commands::{ClientCommand, ImageRefDto};
     use client::protocol::events::ClientEvent;
     use client::protocol::permission::{PermissionRequest, PermissionResponseDto};
-    use platform_api::{PermissionDecision, PermissionGate};
+    use lingxi_core::host::{PermissionDecision, PermissionGate};
     use tokio::sync::{Mutex, Notify};
     use tokio_util::sync::CancellationToken;
 
@@ -2301,15 +2302,15 @@ mod tests {
 
     struct PendingNotificationRegistry(AtomicBool, AtomicBool, Notify);
     #[async_trait]
-    impl platform_api::task_registry::TaskRegistryHandle for PendingNotificationRegistry {
+    impl lingxi_core::host::task_registry::TaskRegistryHandle for PendingNotificationRegistry {
         async fn background_all_tasks_with_reason(
             &self,
-            reason: platform_api::task_registry::TaskBackgroundReason,
+            reason: lingxi_core::host::task_registry::TaskBackgroundReason,
         ) -> usize {
             if self.1.swap(false, Ordering::SeqCst) {
                 assert_eq!(
                     reason,
-                    platform_api::task_registry::TaskBackgroundReason::DeliverMessage
+                    lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage
                 );
                 self.2.notify_one();
                 1
@@ -2319,16 +2320,16 @@ mod tests {
         }
         async fn has_pending_task_notifications_for(
             &self,
-            recipient: Option<protocol::AgentId>,
+            recipient: Option<lingxi_core::types::AgentId>,
         ) -> bool {
             recipient.is_none() && self.0.load(Ordering::SeqCst)
         }
         async fn create(
             &self,
-            _i: platform_api::task_registry::TaskCreateInput,
+            _i: lingxi_core::host::task_registry::TaskCreateInput,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -2336,27 +2337,27 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            Option<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Option<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
         async fn list(
             &self,
-            _f: platform_api::task_registry::TaskListFilter,
+            _f: lingxi_core::host::task_registry::TaskListFilter,
         ) -> Result<
-            Vec<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Vec<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
         async fn update(
             &self,
             _id: &str,
-            _p: platform_api::task_registry::TaskUpdatePatch,
+            _p: lingxi_core::host::task_registry::TaskUpdatePatch,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -2365,8 +2366,8 @@ mod tests {
             _id: &str,
             _s: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -2374,8 +2375,8 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -2384,8 +2385,8 @@ mod tests {
             _id: &str,
             _o: Option<u64>,
         ) -> Result<
-            platform_api::task_registry::TaskOutputChunk,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskOutputChunk,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -2402,7 +2403,7 @@ mod tests {
         }
         async fn run_task_notification_turn(
             &self,
-            _: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+            _: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
             cancel: CancellationToken,
         ) {
             self.started.notify_one();
@@ -2553,7 +2554,7 @@ mod tests {
     /// reaches `handle_send_prompt` (driving the [`TurnDriver`]) while a display-
     /// only result instead goes through `route`.
     struct StubRouter {
-        result: platform_api::SlashDispatchResult,
+        result: lingxi_core::host::SlashDispatchResult,
         routed: Arc<AtomicBool>,
     }
 
@@ -2588,7 +2589,7 @@ mod tests {
         });
         let routed = Arc::new(AtomicBool::new(false));
         let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
-            result: platform_api::SlashDispatchResult::RunAsTurn {
+            result: lingxi_core::host::SlashDispatchResult::RunAsTurn {
                 prompt: "EXPANDED /loop prompt".to_string(),
             },
             routed: routed.clone(),
@@ -2631,7 +2632,7 @@ mod tests {
         });
         let routed = Arc::new(AtomicBool::new(false));
         let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
-            result: platform_api::SlashDispatchResult::Handled {
+            result: lingxi_core::host::SlashDispatchResult::Handled {
                 display: "help text".to_string(),
             },
             routed: routed.clone(),
@@ -2824,13 +2825,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().expect("live-session tempdir");
-        let dir = platform_api::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let dir =
+            lingxi_core::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
         let session_id = "11111111-2222-4333-8444-555555555555";
         let pid = std::process::id();
         dir.upsert_identity(pid, session_id, Some("bridge"), None, None, None)
             .unwrap();
-        platform_api::live_sessions::set_process_dir(dir.clone());
-        platform_api::live_sessions::set_process_session_id(session_id);
+        lingxi_core::host::live_sessions::set_process_dir(dir.clone());
+        lingxi_core::host::live_sessions::set_process_session_id(session_id);
 
         let connection = BridgeConnection::new();
         let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
@@ -2865,7 +2867,7 @@ mod tests {
         assert_eq!(waiting.status.as_deref(), Some("waiting"));
         assert_eq!(
             waiting.waiting_for.as_deref(),
-            Some(platform_api::live_sessions::PERMISSION_PROMPT_WAITING_FOR)
+            Some(lingxi_core::host::live_sessions::PERMISSION_PROMPT_WAITING_FOR)
         );
 
         connection

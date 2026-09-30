@@ -28,7 +28,7 @@ use crate::history_cell::{cell_for_message, HistoryCell, RenderMode};
 pub struct Transcript {
     turn_start: usize,
     response_start: usize,
-    assistant_message_ids: std::collections::HashMap<usize, protocol::MessageId>,
+    assistant_message_ids: std::collections::HashMap<usize, lingxi_core::types::MessageId>,
     terminal_replay_required: bool,
     /// Finalized cells, in commit order.
     committed: Vec<Box<dyn HistoryCell>>,
@@ -68,7 +68,7 @@ impl Transcript {
     }
 
     /// Associate only narrative/reasoning cells with a completed response.
-    pub fn identify_assistant_response(&mut self, id: protocol::MessageId) {
+    pub fn identify_assistant_response(&mut self, id: lingxi_core::types::MessageId) {
         use crate::history_cell::message::{AssistantTextCell, RedactedThinkingCell, ThinkingCell};
         for index in self.response_start..self.committed.len() {
             let cell = self.committed[index].as_any();
@@ -83,7 +83,7 @@ impl Transcript {
     }
 
     /// Remove one identified response, preserving unrelated timeline cells.
-    pub fn retract_assistant_response(&mut self, id: protocol::MessageId) {
+    pub fn retract_assistant_response(&mut self, id: lingxi_core::types::MessageId) {
         let old_ids = std::mem::take(&mut self.assistant_message_ids);
         let mut old_index = 0;
         let mut new_index = 0;
@@ -202,7 +202,7 @@ impl Transcript {
     ///
     /// # Errors
     /// Propagates the first terminal IO error from the history insertion.
-    pub fn flush_to_native_scrollback<B: Backend + Write>(
+    pub fn flush_to_native_scrollback<B: Backend<Error = std::io::Error> + Write>(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
         width: u16,
@@ -216,7 +216,9 @@ impl Transcript {
     /// caller owns terminal capability detection; keeping that decision out of
     /// [`Transcript`] makes this state container deterministic in tests and
     /// leaves alternate-screen rendering escape-free.
-    pub fn flush_to_native_scrollback_with_hyperlinks<B: Backend + Write>(
+    pub fn flush_to_native_scrollback_with_hyperlinks<
+        B: Backend<Error = std::io::Error> + Write,
+    >(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
         width: u16,
@@ -237,7 +239,9 @@ impl Transcript {
     /// working directory. The process current directory is deliberately not
     /// consulted here because multiple embedded sessions may have different
     /// working directories.
-    pub fn flush_to_native_scrollback_with_hyperlinks_and_cwd<B: Backend + Write>(
+    pub fn flush_to_native_scrollback_with_hyperlinks_and_cwd<
+        B: Backend<Error = std::io::Error> + Write,
+    >(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
         width: u16,
@@ -560,8 +564,8 @@ mod tests {
     #[test]
     fn retracts_only_identified_assistant_cells_and_preserves_later_response() {
         let mut transcript = Transcript::new();
-        let failed = protocol::MessageId::new();
-        let retained = protocol::MessageId::new();
+        let failed = lingxi_core::types::MessageId::new();
+        let retained = lingxi_core::types::MessageId::new();
         transcript.push_message(system("before"));
         transcript.start_assistant_response();
         transcript.push_committed(assistant_cell("failed"));
@@ -570,7 +574,7 @@ mod tests {
         transcript.push_committed(assistant_cell("retained"));
         transcript.identify_assistant_response(retained);
         transcript.committed_to_terminal = transcript.committed.len();
-        transcript.retract_assistant_response(protocol::MessageId::new());
+        transcript.retract_assistant_response(lingxi_core::types::MessageId::new());
         assert_eq!(transcript.committed.len(), 4);
         transcript.retract_assistant_response(failed);
         assert_eq!(transcript.committed.len(), 3);

@@ -1,7 +1,7 @@
 package com.lingxi.code.voice.audio
 
 import android.content.Context
-import com.lingxi.code.bindings.maxAudioPayloadBytes
+import com.lingxi.code.bindings.runtime.maxAudioPayloadBytes
 import com.lingxi.code.voice.AndroidVoiceRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

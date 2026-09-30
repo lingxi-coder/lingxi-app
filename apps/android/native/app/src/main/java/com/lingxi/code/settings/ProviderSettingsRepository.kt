@@ -3,9 +3,9 @@ package com.lingxi.code.settings
 import android.content.Context
 import android.content.SharedPreferences
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.ProviderCredentialSecretDto
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ProviderCredentialSecretDto
 import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
@@ -97,7 +97,7 @@ class EngineProviderCredentialClient(
             onPermission = {},
         )
     }
-    private val handle: com.lingxi.code.bindings.MobileEngineHandle?
+    private val handle: com.lingxi.code.bindings.runtime.MobileEngineHandle?
         get() = handleDelegate.value
 
     override suspend fun list(providerIds: List<String>): ProviderCredentialSnapshot =
@@ -177,7 +177,7 @@ class EngineProviderCredentialClient(
     }
 
     private suspend fun runOperation(
-        submit: suspend (com.lingxi.code.bindings.MobileEngineHandle, ULong) -> Unit,
+        submit: suspend (com.lingxi.code.bindings.runtime.MobileEngineHandle, ULong) -> Unit,
     ): ProviderCredentialSnapshot {
         if (closed.get()) {
             return unavailableSnapshot("provider credential client is closed")

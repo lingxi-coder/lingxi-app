@@ -9,7 +9,7 @@
 //! ## How the events reach the client
 //!
 //! The driver does NOT hold the [`client::adapter::AdapterOutputStream`] directly —
-//! the orchestrator already owns it as its [`platform_api::OutputStream`] (wired at
+//! the orchestrator already owns it as its [`lingxi_core::host::OutputStream`] (wired at
 //! construction, by `harness_runtime::desktop::build` in production or by the test harness).
 //! Because that output stream lowers every callback into a
 //! [`client::protocol::events::ClientEvent`] and forwards it through the
@@ -118,7 +118,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 }
 
 struct PendingWakeup {
-    handle: platform_api::BackgroundTaskHandle,
+    handle: lingxi_core::host::BackgroundTaskHandle,
     prompt: String,
     command_id: String,
     cancel: CancellationToken,
@@ -128,7 +128,7 @@ struct PendingWakeup {
 /// of the `/loop` dynamic-mode one-shot self-wakeup seam (Phase 2).
 ///
 /// Twin of [`MsgQueueMidTurnInput`]: it lives in the bridge (which owns the
-/// per-connection queue + the [`platform_api::RuntimeSpawner`]) so the `tool-cron`
+/// per-connection queue + the [`lingxi_core::host::RuntimeSpawner`]) so the `tool-cron`
 /// crate — and the orchestrator — keep NO knowledge of how a wakeup is delivered.
 /// [`WakeupScheduler::schedule`] spawns ONE background task that
 /// [`RuntimeSpawner::sleep`]s for `delay`, resolves the autonomous sentinel via
@@ -146,7 +146,7 @@ struct PendingWakeup {
 /// empty → the tool is an honest no-op.
 pub struct MsgQueueWakeupScheduler {
     queue: Arc<msgqueue::MessageQueueManager>,
-    runtime: Arc<dyn platform_api::RuntimeSpawner>,
+    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     loop_runtime: Arc<tool_cron::LoopRuntime>,
     /// Wakeups armed but not yet fired (the binary's `kind:"loop"` cron
     /// entries), each paired with the prompt it will re-inject. A new schedule
@@ -167,7 +167,7 @@ impl MsgQueueWakeupScheduler {
     #[must_use]
     pub fn new(
         queue: Arc<msgqueue::MessageQueueManager>,
-        runtime: Arc<dyn platform_api::RuntimeSpawner>,
+        runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     ) -> Self {
         Self {
             queue,
@@ -183,7 +183,7 @@ impl MsgQueueWakeupScheduler {
     #[must_use]
     pub fn with_loop_runtime(
         queue: Arc<msgqueue::MessageQueueManager>,
-        runtime: Arc<dyn platform_api::RuntimeSpawner>,
+        runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
         loop_runtime: Arc<tool_cron::LoopRuntime>,
     ) -> Self {
         Self {
@@ -672,7 +672,7 @@ impl OrchestratorTurnDriver {
     /// the client through this same [`client::adapter::AdapterOutputStream`], so
     /// announcing it here as well would double-emit.
     async fn announce_engine_initiated_turn(&self) {
-        use platform_api::OutputStream;
+        use lingxi_core::host::OutputStream;
         if let Some(output) = &self.message_output {
             output.emit_turn_started().await;
         }
@@ -688,7 +688,9 @@ impl OrchestratorTurnDriver {
         prompt: String,
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
-        notification_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+        notification_registry: Option<
+            Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+        >,
         in_human_turn: bool,
     ) {
         self.drive_turn_with_inputs(
@@ -707,11 +709,13 @@ impl OrchestratorTurnDriver {
         prompt: String,
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
-        notification_registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+        notification_registry: Option<
+            Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+        >,
         in_human_turn: bool,
         inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
     ) {
-        platform_api::live_sessions::set_process_status("busy", None);
+        lingxi_core::host::live_sessions::set_process_status("busy", None);
         if let Some(output) = &self.message_output {
             output.reset_message_buffer().await;
         }
@@ -870,7 +874,7 @@ impl OrchestratorTurnDriver {
                 }
             }
         }
-        platform_api::live_sessions::set_process_status("idle", None);
+        lingxi_core::host::live_sessions::set_process_status("idle", None);
     }
 }
 
@@ -911,7 +915,7 @@ impl TurnDriver for OrchestratorTurnDriver {
         reasoning: client::protocol::controls::ReasoningSelectionDto,
         cancel: CancellationToken,
     ) -> Result<String, String> {
-        use platform_api::OrchestratorHandle;
+        use lingxi_core::host::OrchestratorHandle;
         if !self.orchestrator.workspace_trusted().await {
             return Err("paused:Trust this workspace before running scheduled tasks".into());
         }
@@ -960,8 +964,13 @@ impl TurnDriver for OrchestratorTurnDriver {
                 .await
                 .iter()
                 .rev()
-                .find(|message| matches!(message, protocol::ConversationMessage::Assistant { .. }))
-                .map(protocol::ConversationMessage::text_content)
+                .find(|message| {
+                    matches!(
+                        message,
+                        lingxi_core::types::ConversationMessage::Assistant { .. }
+                    )
+                })
+                .map(lingxi_core::types::ConversationMessage::text_content)
                 .unwrap_or_default()),
             orchestrator::conversation::TurnOutcome::Cancelled => {
                 Err("cancelled:Scheduled run cancelled".into())
@@ -994,7 +1003,7 @@ impl TurnDriver for OrchestratorTurnDriver {
 
     async fn run_task_notification_turn(
         &self,
-        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
         cancel: CancellationToken,
     ) {
         self.drive_turn(String::new(), Vec::new(), cancel, Some(registry), false)
@@ -1047,6 +1056,8 @@ mod tests {
 
     use client::adapter::{AdapterOutputStream, ClientEventSink, MockSink};
     use client::protocol::commands::ImageRefDto;
+    use lingxi_core::host::{BudgetError, WorkflowOutputScope, WorkflowOutputScopes};
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
     use orchestrator::conversation::ImageSource;
     use orchestrator::test_support::{
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
@@ -1055,8 +1066,6 @@ mod tests {
     };
     use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
     use permission::gate::PermissionGate;
-    use platform_api::{BudgetError, WorkflowOutputScope, WorkflowOutputScopes};
-    use protocol::{ContentBlock, ConversationMessage};
 
     use super::OrchestratorTurnDriver;
     use crate::server::TurnDriver;
@@ -1081,7 +1090,7 @@ mod tests {
     fn build_driver(streaming: Arc<MockStreamingApiClient>) -> OrchestratorTurnDriver {
         let batched = Arc::new(MockApiClient::new(Vec::new()));
         let sink = MockSink::arc();
-        let output: Arc<dyn platform_api::OutputStream> =
+        let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(AdapterOutputStream::new(sink as Arc<dyn ClientEventSink>));
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
@@ -1104,8 +1113,8 @@ mod tests {
     impl WorkflowOutputScopes for RejectingOutputScopes {
         async fn begin_turn(
             &self,
-            _: protocol::SessionId,
-            _: protocol::MessageId,
+            _: lingxi_core::types::SessionId,
+            _: lingxi_core::types::MessageId,
             _: Option<u64>,
         ) -> Result<WorkflowOutputScope, BudgetError> {
             Err(BudgetError::Internal(
@@ -1113,7 +1122,10 @@ mod tests {
             ))
         }
 
-        fn capture(&self, _: protocol::SessionId) -> Result<WorkflowOutputScope, BudgetError> {
+        fn capture(
+            &self,
+            _: lingxi_core::types::SessionId,
+        ) -> Result<WorkflowOutputScope, BudgetError> {
             Err(BudgetError::Internal(
                 "output persistence is unavailable".into(),
             ))
@@ -1300,7 +1312,7 @@ mod tests {
         let batched = Arc::new(MockApiClient::new(Vec::new()));
         let sink = MockSink::arc();
         let message_output = AdapterOutputStream::new(sink.clone() as Arc<dyn ClientEventSink>);
-        let output: Arc<dyn platform_api::OutputStream> = Arc::new(message_output.clone());
+        let output: Arc<dyn lingxi_core::host::OutputStream> = Arc::new(message_output.clone());
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig::default(),
@@ -1508,7 +1520,7 @@ mod tests {
     async fn mid_turn_adapter_scopes_to_main_thread() {
         let queue = Arc::new(MessageQueueManager::new());
         let mut sub = user_cmd("sub", QueuePriority::Next, "subagent input");
-        sub.agent_id = Some(protocol::AgentId::new());
+        sub.agent_id = Some(lingxi_core::types::AgentId::new());
         queue.enqueue(sub).await;
         let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
         assert_eq!(adapter.take_mid_turn_input().await, None);
@@ -1562,15 +1574,15 @@ mod tests {
     /// spawns the future on the current tokio runtime and uses real `sleep`.
     struct TestRuntime;
     #[async_trait::async_trait]
-    impl platform_api::RuntimeSpawner for TestRuntime {
+    impl lingxi_core::host::RuntimeSpawner for TestRuntime {
         async fn spawn(
             &self,
             name: &str,
             task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<platform_api::BackgroundTaskHandle, platform_api::runtime::RuntimeError>
+        ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::runtime::RuntimeError>
         {
             tokio::spawn(task);
-            Ok(platform_api::BackgroundTaskHandle {
+            Ok(lingxi_core::host::BackgroundTaskHandle {
                 task_name: name.to_string(),
                 task_id: 0,
             })
@@ -1580,8 +1592,8 @@ mod tests {
         }
         async fn cancel(
             &self,
-            _handle: &platform_api::BackgroundTaskHandle,
-        ) -> Result<(), platform_api::runtime::RuntimeError> {
+            _handle: &lingxi_core::host::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_core::host::runtime::RuntimeError> {
             Ok(())
         }
     }
@@ -1598,7 +1610,7 @@ mod tests {
         tool_cron::reset_autonomous_loop_delivered();
 
         let queue = Arc::new(MessageQueueManager::new());
-        let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(TestRuntime);
+        let runtime: Arc<dyn lingxi_core::host::RuntimeSpawner> = Arc::new(TestRuntime);
         let sched = MsgQueueWakeupScheduler::new(queue.clone(), runtime);
 
         // Schedule a 0-delay wakeup carrying the autonomous sentinel — it must be
@@ -1631,10 +1643,10 @@ mod tests {
         assert!(cmd.skip_slash_commands);
         assert_eq!(cmd.source, msgqueue::QueueSource::Cron);
         assert_eq!(cmd.scheduled_task_id.as_deref().unwrap().len(), 8);
-        assert!(
-            protocol::MessageId::parse_prefixed(cmd.scheduled_fire_id.as_deref().unwrap())
-                .is_some()
-        );
+        assert!(lingxi_core::types::MessageId::parse_prefixed(
+            cmd.scheduled_fire_id.as_deref().unwrap()
+        )
+        .is_some());
         assert!(cmd
             .uuid
             .ends_with(cmd.scheduled_fire_id.as_deref().unwrap()));
@@ -1728,7 +1740,7 @@ mod tests {
         use tool_cron::WakeupScheduler;
 
         let queue = Arc::new(MessageQueueManager::new());
-        let runtime: Arc<dyn platform_api::RuntimeSpawner> = Arc::new(TestRuntime);
+        let runtime: Arc<dyn lingxi_core::host::RuntimeSpawner> = Arc::new(TestRuntime);
         let sched = MsgQueueWakeupScheduler::new(queue.clone(), runtime);
         sched
             .schedule(

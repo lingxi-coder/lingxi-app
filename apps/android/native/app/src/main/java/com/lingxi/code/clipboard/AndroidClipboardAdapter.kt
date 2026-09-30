@@ -1,7 +1,7 @@
 package com.lingxi.code.clipboard
 
-import com.lingxi.code.bindings.AndroidClipboard
-import com.lingxi.code.bindings.ClipboardFfiException
+import com.lingxi.code.bindings.android.AndroidClipboard
+import com.lingxi.code.bindings.android.ClipboardFfiException
 
 /**
  * Adapts the native [ClipboardController] to the generated UniFFI callback

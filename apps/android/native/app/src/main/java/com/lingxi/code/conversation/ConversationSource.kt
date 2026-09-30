@@ -1,12 +1,12 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.ImageRefDto
-import com.lingxi.code.bindings.MobileEngineHandle
-import com.lingxi.code.bindings.PermissionRequest
-import com.lingxi.code.bindings.PermissionResponseDto
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.runtime.MobileEngineHandle
+import com.lingxi.code.bindings.client.PermissionRequest
+import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.MCPServer

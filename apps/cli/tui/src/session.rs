@@ -38,9 +38,9 @@ pub struct ModelRow {
     /// Provider header (e.g. "Anthropic", "GitHub Copilot").
     pub provider_label: String,
     /// Provenance of this row's current/default selection. Catalog rows use
-    /// [`platform_api::ModelProvenance::ProviderCatalogTier`]; only the row
+    /// [`lingxi_core::host::ModelProvenance::ProviderCatalogTier`]; only the row
     /// imposed by managed policy carries the administrator provenance.
-    pub provenance: platform_api::ModelProvenance,
+    pub provenance: lingxi_core::host::ModelProvenance,
     /// Whether this row is the currently active model.
     pub is_current: bool,
     /// Whether this model supports extended thinking. `false` renders a dim
@@ -160,8 +160,8 @@ pub fn connected_model_rows_restricted(
                 || current_provider.as_deref() == Some(profile);
             eligible
                 && !m.is_deprecated()
-                && (platform_api::is_curated_model(profile, &m.request_model)
-                    || !platform_api::provider_has_curated_list(profile))
+                && (lingxi_core::host::is_curated_model(profile, &m.request_model)
+                    || !lingxi_core::host::provider_has_curated_list(profile))
                 // Managed allowlist gate: a barred model is not selectable.
                 && llm_runtime::model::allowlist::is_model_allowed(
                     &m.request_model,
@@ -253,7 +253,7 @@ pub struct SessionInfo {
     pub models: Vec<ModelRow>,
     /// Provenance of the active/default model at TUI startup. This is kept
     /// separately from provider identity: managed policy is provider-neutral.
-    pub model_provenance: platform_api::ModelProvenance,
+    pub model_provenance: lingxi_core::host::ModelProvenance,
     /// Managed `availableModels` allowlist (parity 2.1.207 H-BIN-08): when an
     /// enterprise policy tier restricts model selection, the `/model` picker
     /// filters out barred rows (keeping the current model selectable). `None`
@@ -300,21 +300,21 @@ mod tests {
         assert_eq!(s.doctor.term_size, (0, 0));
         assert_eq!(
             s.model_provenance,
-            platform_api::ModelProvenance::ProviderCatalogTier
+            lingxi_core::host::ModelProvenance::ProviderCatalogTier
         );
     }
 
     #[test]
     fn model_provenance_serialization_is_stable_and_backward_safe() {
-        let managed = platform_api::ModelProvenance::ManagedAdministratorDefault;
+        let managed = lingxi_core::host::ModelProvenance::ManagedAdministratorDefault;
         assert_eq!(
             serde_json::to_string(&managed).expect("serialize model provenance"),
             "\"managed_administrator_default\""
         );
         assert_eq!(
-            serde_json::from_str::<platform_api::ModelProvenance>("\"provider_catalog_tier\"")
+            serde_json::from_str::<lingxi_core::host::ModelProvenance>("\"provider_catalog_tier\"")
                 .expect("deserialize catalog provenance"),
-            platform_api::ModelProvenance::ProviderCatalogTier
+            lingxi_core::host::ModelProvenance::ProviderCatalogTier
         );
     }
 
@@ -324,7 +324,7 @@ mod tests {
             request_model: request.to_string(),
             profile: (!provider.is_empty()).then(|| provider.to_string()),
             provider_label: provider.to_string(),
-            provenance: platform_api::ModelProvenance::default(),
+            provenance: lingxi_core::host::ModelProvenance::default(),
             is_current: current,
             supports_reasoning: true,
             supports_multimodal: false,

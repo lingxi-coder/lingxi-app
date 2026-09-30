@@ -3,11 +3,11 @@
 //! their production implementations.
 
 use super::*;
+use lingxi_core::host::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use orchestrator::test_support::{
     noop_hook_executor, with_scripted_compactor, MockApiClient, MockOutputStream,
     NoOpPermissionGate, StaticMemoryProvider,
 };
-use platform_api::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::pin::Pin;
 use tokio::sync::Notify;
 

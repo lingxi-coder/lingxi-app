@@ -1,6 +1,6 @@
 package com.lingxi.code.settings
 
-import com.lingxi.code.bindings.AndroidSecureStorage
+import com.lingxi.code.bindings.android.AndroidSecureStorage
 import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
 import org.junit.Assert.*

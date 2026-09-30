@@ -1,18 +1,18 @@
 package com.lingxi.code.conversation
 
 import androidx.compose.runtime.Immutable
-import com.lingxi.code.bindings.CodeSegmentDto
-import com.lingxi.code.bindings.DiffLineKindDto
-import com.lingxi.code.bindings.DiffRowDto
-import com.lingxi.code.bindings.HeadlineKindDto
-import com.lingxi.code.bindings.PlanTaskDto
-import com.lingxi.code.bindings.PlanTaskStateDto
-import com.lingxi.code.bindings.StructuredDiffDto
-import com.lingxi.code.bindings.SyntaxClassDto
-import com.lingxi.code.bindings.ToolHeaderDto
-import com.lingxi.code.bindings.ToolResultDisplayDto
-import com.lingxi.code.bindings.ToolSubLineDto
-import com.lingxi.code.bindings.ToolVerbDto
+import com.lingxi.code.bindings.client.CodeSegmentDto
+import com.lingxi.code.bindings.client.DiffLineKindDto
+import com.lingxi.code.bindings.client.DiffRowDto
+import com.lingxi.code.bindings.client.HeadlineKindDto
+import com.lingxi.code.bindings.client.PlanTaskDto
+import com.lingxi.code.bindings.client.PlanTaskStateDto
+import com.lingxi.code.bindings.client.StructuredDiffDto
+import com.lingxi.code.bindings.client.SyntaxClassDto
+import com.lingxi.code.bindings.client.ToolHeaderDto
+import com.lingxi.code.bindings.client.ToolResultDisplayDto
+import com.lingxi.code.bindings.client.ToolSubLineDto
+import com.lingxi.code.bindings.client.ToolVerbDto
 
 /**
  * The client-side render model for a tool call's PRE-DERIVED presentation.

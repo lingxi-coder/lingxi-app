@@ -12,7 +12,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import com.lingxi.code.voice.resolveSpeechVoiceOverride
 import com.lingxi.code.settings.VersionedAudioConfiguration
-import com.lingxi.code.bindings.AudioOperationResultDto
+import com.lingxi.code.bindings.client.AudioOperationResultDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

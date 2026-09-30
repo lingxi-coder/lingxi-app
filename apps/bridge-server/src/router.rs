@@ -11,8 +11,8 @@
 //! non-turn/non-permission command to — exactly the way
 //! [`crate::server::TurnDriver`] abstracts the turn entry. The production server
 //! binds an [`EngineCommandRouter`] wrapping the real engine handles
-//! ([`platform_api::OrchestratorHandle`], [`platform_api::AuthHandle`],
-//! [`platform_api::task_registry::TaskRegistryHandle`], and the slash dispatcher); a
+//! ([`lingxi_core::host::OrchestratorHandle`], [`lingxi_core::host::AuthHandle`],
+//! [`lingxi_core::host::task_registry::TaskRegistryHandle`], and the slash dispatcher); a
 //! test binds the SAME router over the engine's `MockOrchestratorHandle` / mock
 //! task + auth handles, so the routing-and-lowering path under test is the
 //! production one (no test-only router shim).
@@ -82,10 +82,10 @@ use client::protocol::listings::{AuthStateDto, SessionModeDto};
 use command_api::model::CommandSource;
 use command_api::parser::parse_slash_command;
 use command_api::registry::CommandRegistry;
-use platform_api::auth::{AuthHandle, LoginInfo};
-use platform_api::orchestrator::OrchestratorHandle;
-use platform_api::task_registry::{TaskListFilter, TaskRegistryHandle};
-use platform_api::SlashCommandDispatcher;
+use lingxi_core::host::auth::{AuthHandle, LoginInfo};
+use lingxi_core::host::orchestrator::OrchestratorHandle;
+use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
+use lingxi_core::host::SlashCommandDispatcher;
 use tokio::sync::RwLock;
 
 use crate::mcp_bridge::McpPaths;
@@ -103,13 +103,13 @@ const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
 pub struct SessionStoreContext {
     lingxi_home: PathBuf,
     session_cwd: String,
-    fs: Arc<dyn platform_api::FileSystem>,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
 }
 
 impl SessionStoreContext {
     /// Retain a zero-message conversation that owns a durable scheduled task.
     async fn ensure_scheduled_chat(&self, session_id: &str) -> Result<(), String> {
-        let session_uuid = protocol::SessionId::parse_prefixed(session_id)
+        let session_uuid = lingxi_core::types::SessionId::parse_prefixed(session_id)
             .ok_or("Invalid scheduled task chat identity")?
             .as_uuid()
             .to_string();
@@ -135,7 +135,9 @@ impl SessionStoreContext {
                     title.clone_from(existing);
                 }
             }
-            Err(session::jsonl::reader::ReaderError::Fs(platform_api::FsError::NotFound(_))) => {}
+            Err(session::jsonl::reader::ReaderError::Fs(lingxi_core::host::FsError::NotFound(
+                _,
+            ))) => {}
             Err(error) => {
                 // The desktop filesystem may wrap ENOENT as FsError::Io.
                 // Verify absence without treating permission/corruption errors as empty.
@@ -156,7 +158,7 @@ impl SessionStoreContext {
     pub fn new(
         lingxi_home: PathBuf,
         session_cwd: String,
-        fs: Arc<dyn platform_api::FileSystem>,
+        fs: Arc<dyn lingxi_core::host::FileSystem>,
     ) -> Self {
         Self {
             lingxi_home,
@@ -200,7 +202,7 @@ pub trait CommandRouter: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct SlashDispatchOutcome {
     /// The single engine dispatch result for the submitted command.
-    pub result: platform_api::SlashDispatchResult,
+    pub result: lingxi_core::host::SlashDispatchResult,
     /// Full authoritative state/catalog events produced by that dispatch.
     pub authority_events: Vec<ClientEvent>,
 }
@@ -217,9 +219,9 @@ fn lower_auth_state(info: Option<LoginInfo>) -> AuthStateDto {
 }
 
 fn provider_model_catalog_from_listings(
-    listings: &[platform_api::ModelListing],
+    listings: &[lingxi_core::host::ModelListing],
 ) -> Vec<client::protocol::listings::ProviderModelCatalogEntryDto> {
-    platform_api::provider_model_catalog(listings)
+    lingxi_core::host::provider_model_catalog(listings)
         .iter()
         .map(lower_provider_model_catalog_entry)
         .collect()
@@ -254,13 +256,13 @@ pub struct EngineCommandRouter {
     credentials: Option<Arc<secret::CredentialManager>>,
     /// Settings-visible provider model directory assembled from the full
     /// provider config, including providers not currently routable.
-    provider_model_catalog_listings: Vec<platform_api::ModelListing>,
+    provider_model_catalog_listings: Vec<lingxi_core::host::ModelListing>,
     /// Packaged Desktop owns persistence in its signed credential broker; in
     /// that mode bridge credential mutations update only this process cache.
     provider_credentials_ephemeral: bool,
     /// HTTP transport used by provider connection probes. Production boot
     /// supplies the same guarded transport as the runtime's LLM clients.
-    http: Option<Arc<dyn platform_api::HttpTransport>>,
+    http: Option<Arc<dyn lingxi_core::host::HttpTransport>>,
     /// Optional layered-settings context backing the `Settings` listing.
     /// Production boot wires it from the desktop composition root; lightweight
     /// users of the routing seam may omit it, in which case the listing
@@ -279,7 +281,7 @@ pub struct EngineCommandRouter {
     /// Live hook registry for source-scoped hot swaps.
     hook_registry: Option<Arc<RwLock<hooks::HookRegistry>>>,
     /// Existing repo-root catalog reloader used for skills/plugins live refresh.
-    repo_root_reloader: Option<Arc<dyn platform_api::RepoRootReloader>>,
+    repo_root_reloader: Option<Arc<dyn lingxi_core::host::RepoRootReloader>>,
     /// FileChanged watcher controller used to replace watch matchers after hook edits.
     file_changed_watcher:
         Option<harness_runtime::desktop::file_changed_watch::FileChangedWatcherController>,
@@ -305,8 +307,8 @@ impl EngineCommandRouter {
     /// this record must therefore never unregister/release the old writer.
     async fn refresh_process_session_presence(
         &self,
-        previous: protocol::SessionId,
-        current: protocol::SessionId,
+        previous: lingxi_core::types::SessionId,
+        current: lingxi_core::types::SessionId,
     ) -> Option<String> {
         if let Some(observer) = &self.session_agent_observer {
             observer.set_session_id(current.as_uuid().to_string());
@@ -331,7 +333,10 @@ impl EngineCommandRouter {
         (!problems.is_empty()).then(|| format!("session switched, but {}", problems.join("; ")))
     }
 
-    async fn dispatch_desktop_slash(&self, raw: &str) -> Option<platform_api::SlashDispatchResult> {
+    async fn dispatch_desktop_slash(
+        &self,
+        raw: &str,
+    ) -> Option<lingxi_core::host::SlashDispatchResult> {
         let parsed = parse_slash_command(raw)?;
         match parsed.name.as_str() {
             "diff" => {
@@ -343,14 +348,14 @@ impl EngineCommandRouter {
                         "Inspect the current working tree and show the user the uncommitted diff, focusing on: {focus}. Do not modify any files."
                     )
                 };
-                Some(platform_api::SlashDispatchResult::RunAsTurn { prompt })
+                Some(lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt })
             }
             "plan" => Some(self.dispatch_desktop_plan(&parsed.raw_args).await),
             _ => None,
         }
     }
 
-    async fn dispatch_desktop_plan(&self, args: &str) -> platform_api::SlashDispatchResult {
+    async fn dispatch_desktop_plan(&self, args: &str) -> lingxi_core::host::SlashDispatchResult {
         let previous_permission = self
             .handle
             .permission_mode()
@@ -360,22 +365,22 @@ impl EngineCommandRouter {
 
         if previous_permission != "plan" {
             if let Err(error) = self.handle.set_permission_mode("plan").await {
-                return platform_api::SlashDispatchResult::Handled {
+                return lingxi_core::host::SlashDispatchResult::Handled {
                     display: format!("Could not enable plan mode: {error}"),
                 };
             }
-            platform_api::live_sessions::set_process_permission_mode("plan", false);
+            lingxi_core::host::live_sessions::set_process_permission_mode("plan", false);
         }
         if !was_plan_mode {
             if let Err(error) = self.handle.set_plan_mode(true).await {
                 if previous_permission != "plan" {
                     let _ = self.handle.set_permission_mode(&previous_permission).await;
-                    platform_api::live_sessions::set_process_permission_mode(
+                    lingxi_core::host::live_sessions::set_process_permission_mode(
                         &previous_permission,
                         previous_permission == "bypassPermissions",
                     );
                 }
-                return platform_api::SlashDispatchResult::Handled {
+                return lingxi_core::host::SlashDispatchResult::Handled {
                     display: format!("Could not enable plan mode: {error}"),
                 };
             }
@@ -388,11 +393,11 @@ impl EngineCommandRouter {
             } else {
                 "Plan mode enabled. The next request will be planned before any changes are made."
             };
-            platform_api::SlashDispatchResult::Handled {
+            lingxi_core::host::SlashDispatchResult::Handled {
                 display: display.to_string(),
             }
         } else {
-            platform_api::SlashDispatchResult::RunAsTurn {
+            lingxi_core::host::SlashDispatchResult::RunAsTurn {
                 prompt: request.to_string(),
             }
         }
@@ -452,7 +457,7 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_provider_model_catalog_listings(
         mut self,
-        listings: Vec<platform_api::ModelListing>,
+        listings: Vec<lingxi_core::host::ModelListing>,
     ) -> Self {
         self.provider_model_catalog_listings = listings;
         self
@@ -469,7 +474,7 @@ impl EngineCommandRouter {
     /// Attach the runtime's provider HTTP transport for low-cost connection
     /// probes from Desktop settings.
     #[must_use]
-    pub fn with_http(mut self, http: Arc<dyn platform_api::HttpTransport>) -> Self {
+    pub fn with_http(mut self, http: Arc<dyn lingxi_core::host::HttpTransport>) -> Self {
         self.http = Some(http);
         self
     }
@@ -543,7 +548,7 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_repo_root_reloader(
         mut self,
-        repo_root_reloader: Arc<dyn platform_api::RepoRootReloader>,
+        repo_root_reloader: Arc<dyn lingxi_core::host::RepoRootReloader>,
     ) -> Self {
         self.repo_root_reloader = Some(repo_root_reloader);
         self
@@ -886,7 +891,7 @@ impl CommandRouter for EngineCommandRouter {
                 match self.handle.set_permission_mode(&mode).await {
                     Ok(()) => {
                         let active = self.handle.permission_mode().await.unwrap_or(mode);
-                        platform_api::live_sessions::set_process_permission_mode(
+                        lingxi_core::host::live_sessions::set_process_permission_mode(
                             &active,
                             active == "bypassPermissions",
                         );
@@ -907,7 +912,7 @@ impl CommandRouter for EngineCommandRouter {
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
-                let (model_id, profile) = platform_api::parse_model_ref(&model, &listings);
+                let (model_id, profile) = lingxi_core::host::parse_model_ref(&model, &listings);
                 match self
                     .handle
                     .switch_model(&model_id, profile.as_deref())
@@ -915,7 +920,7 @@ impl CommandRouter for EngineCommandRouter {
                 {
                     Ok(()) => {
                         let selected =
-                            platform_api::qualified_model_ref(&model_id, profile.as_deref());
+                            lingxi_core::host::qualified_model_ref(&model_id, profile.as_deref());
                         sink.emit(ClientEvent::ModelChanged { model: selected })
                             .await;
                         if self.persisted_reasoning_selection().is_some() {
@@ -923,20 +928,20 @@ impl CommandRouter for EngineCommandRouter {
                                 let _ = self
                                     .handle
                                     .set_reasoning_selection(
-                                        platform_api::ReasoningSelection::Automatic,
+                                        lingxi_core::host::ReasoningSelection::Automatic,
                                     )
                                     .await;
                             }
                         } else if let Some(controls) = self.handle.conversation_controls().await {
                             if controls.requested_reasoning_selection
-                                != platform_api::ReasoningSelection::Automatic
+                                != lingxi_core::host::ReasoningSelection::Automatic
                                 && controls.requested_reasoning_selection
                                     != controls.effective_reasoning_selection
                             {
                                 let _ = self
                                     .handle
                                     .set_reasoning_selection(
-                                        platform_api::ReasoningSelection::Automatic,
+                                        lingxi_core::host::ReasoningSelection::Automatic,
                                     )
                                     .await;
                             }
@@ -985,25 +990,25 @@ impl CommandRouter for EngineCommandRouter {
                             controls.reasoning_spec.selections_persistable,
                         )
                     })
-                    .unwrap_or((platform_api::ReasoningSelection::Automatic, true));
+                    .unwrap_or((lingxi_core::host::ReasoningSelection::Automatic, true));
                 let persisted_default = if persistable {
                     effective
                 } else {
-                    platform_api::ReasoningSelection::Automatic
+                    lingxi_core::host::ReasoningSelection::Automatic
                 };
                 if let Err(error) = self.persist_reasoning_selection(&persisted_default) {
                     let rollback = previous
                         .as_ref()
                         .map(|(requested, _, _)| requested.clone())
-                        .unwrap_or(platform_api::ReasoningSelection::Automatic);
+                        .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
                     let _ = self.handle.set_reasoning_selection(rollback).await;
                     let previous_default = previous.as_ref().map_or(
-                        platform_api::ReasoningSelection::Automatic,
+                        lingxi_core::host::ReasoningSelection::Automatic,
                         |(_, effective, persistable)| {
                             if *persistable {
                                 effective.clone()
                             } else {
-                                platform_api::ReasoningSelection::Automatic
+                                lingxi_core::host::ReasoningSelection::Automatic
                             }
                         },
                     );
@@ -1037,16 +1042,20 @@ impl CommandRouter for EngineCommandRouter {
                 if let Some(dispatcher) = self.dispatcher.as_ref() {
                     let before = self.capture_slash_authority().await;
                     let (display, is_error) = match dispatcher.dispatch(&raw).await {
-                        platform_api::SlashDispatchResult::Handled { display } => (display, false),
-                        platform_api::SlashDispatchResult::Unknown { display, .. } => {
+                        lingxi_core::host::SlashDispatchResult::Handled { display } => {
+                            (display, false)
+                        }
+                        lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
                             (display, true)
                         }
                         // A `type: "prompt"` command reached the display-only
                         // fallback (the connection should have intercepted it via
                         // `dispatch_slash` and run it as a turn). Surface the
                         // expanded prompt so nothing is silently dropped.
-                        platform_api::SlashDispatchResult::RunAsTurn { prompt } => (prompt, false),
-                        platform_api::SlashDispatchResult::NotASlashCommand => {
+                        lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
+                            (prompt, false)
+                        }
+                        lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
                             (format!("not a slash command: {raw}"), true)
                         }
                     };
@@ -1274,7 +1283,7 @@ impl CommandRouter for EngineCommandRouter {
 
                 if let Some(model) = model {
                     let listings = self.handle.list_model_listings().await;
-                    let (model_id, profile) = platform_api::parse_model_ref(&model, &listings);
+                    let (model_id, profile) = lingxi_core::host::parse_model_ref(&model, &listings);
                     if let Err(error) = self
                         .handle
                         .switch_model(&model_id, profile.as_deref())
@@ -1399,11 +1408,11 @@ impl CommandRouter for EngineCommandRouter {
                 if let Err(error) = self
                     .handle
                     .resume_session(
-                        protocol::SessionId::from_uuid(uuid),
+                        lingxi_core::types::SessionId::from_uuid(uuid),
                         replayed.state.history,
                         replayed.last_message_uuid.map(|value| value.to_string()),
                         replayed.state.active_goal.clone().map(|goal| {
-                            platform_api::ActiveGoalSnapshot {
+                            lingxi_core::host::ActiveGoalSnapshot {
                                 condition: goal.condition,
                                 set_at: goal.set_at,
                                 last_reason: goal.last_reason,
@@ -1439,7 +1448,7 @@ impl CommandRouter for EngineCommandRouter {
                 let presence_warning = self
                     .refresh_process_session_presence(
                         previous_session_id,
-                        protocol::SessionId::from_uuid(uuid),
+                        lingxi_core::types::SessionId::from_uuid(uuid),
                     )
                     .await;
 
@@ -1471,7 +1480,7 @@ impl CommandRouter for EngineCommandRouter {
                 .await;
                 if !status.model.is_empty() {
                     sink.emit(ClientEvent::ModelChanged {
-                        model: platform_api::qualified_model_ref(
+                        model: lingxi_core::host::qualified_model_ref(
                             &status.model,
                             status.model_profile.as_deref(),
                         ),
@@ -1650,11 +1659,11 @@ fn provider_id_is_valid(value: &str) -> bool {
 fn command_source_string(source: CommandSource) -> &'static str {
     match source {
         CommandSource::Builtin => "builtin",
-        CommandSource::Settings(protocol::SettingsScope::User) => "user",
-        CommandSource::Settings(protocol::SettingsScope::Project) => "project",
-        CommandSource::Settings(protocol::SettingsScope::Local) => "local",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::User) => "user",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Project) => "project",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Local) => "local",
         CommandSource::Plugin => "plugin",
-        CommandSource::Settings(protocol::SettingsScope::Managed) => "managed",
+        CommandSource::Settings(lingxi_core::types::SettingsScope::Managed) => "managed",
         CommandSource::Mcp => "mcp",
         CommandSource::Bundled => "bundled",
     }

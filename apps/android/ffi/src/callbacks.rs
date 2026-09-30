@@ -3,7 +3,7 @@ use harness_runtime::mobile::ClientEventListener;
 
 /// FFI error surface for the Android share callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`platform_api::ShareError`].
+/// fans it back out onto the richer [`lingxi_core::host::ShareError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -20,7 +20,7 @@ pub enum ShareFfiError {
 }
 
 /// FFI carrier for the outcome of a native share — whether the user completed
-/// or dismissed the system share sheet. Mapped to [`platform_api::ShareResult`].
+/// or dismissed the system share sheet. Mapped to [`lingxi_core::host::ShareResult`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[derive(Debug, Clone)]
@@ -33,7 +33,7 @@ pub enum ShareResultFfi {
 
 /// Crate-local foreign callback interface for native sharing — the Kotlin app
 /// implements it over the system `Intent.ACTION_SEND` share sheet. Bridged to
-/// [`platform_api::SharingService`] by [`AndroidShareBridge`]. The payload crosses the
+/// [`lingxi_core::host::SharingService`] by [`AndroidShareBridge`]. The payload crosses the
 /// seam as three flat optionals (`text` / `url` / `image_bytes`).
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -50,10 +50,10 @@ pub trait AndroidShare: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidShare`] callback interface to the shared
-/// [`platform_api::SharingService`] seam the engine consumes. Destructures
-/// [`platform_api::SharePayload`] into the flat `text` / `url` / `image_bytes` args
+/// [`lingxi_core::host::SharingService`] seam the engine consumes. Destructures
+/// [`lingxi_core::host::SharePayload`] into the flat `text` / `url` / `image_bytes` args
 /// and fans [`ShareResultFfi`] / [`ShareFfiError`] back out onto
-/// [`platform_api::ShareResult`] / [`platform_api::ShareError`].
+/// [`lingxi_core::host::ShareResult`] / [`lingxi_core::host::ShareError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(super) struct AndroidShareBridge {
@@ -62,21 +62,23 @@ pub(super) struct AndroidShareBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::SharingService for AndroidShareBridge {
+impl lingxi_core::host::SharingService for AndroidShareBridge {
     async fn share(
         &self,
-        payload: platform_api::SharePayload,
-    ) -> Result<platform_api::ShareResult, platform_api::ShareError> {
-        let platform_api::SharePayload {
+        payload: lingxi_core::host::SharePayload,
+    ) -> Result<lingxi_core::host::ShareResult, lingxi_core::host::ShareError> {
+        let lingxi_core::host::SharePayload {
             text,
             url,
             image_bytes,
         } = payload;
         match self.inner.share(text, url, image_bytes).await {
-            Ok(ShareResultFfi::Success) => Ok(platform_api::ShareResult::Success),
-            Ok(ShareResultFfi::Cancelled) => Ok(platform_api::ShareResult::Cancelled),
-            Err(ShareFfiError::Unsupported) => Err(platform_api::ShareError::Unsupported),
-            Err(ShareFfiError::Other { message }) => Err(platform_api::ShareError::Other(message)),
+            Ok(ShareResultFfi::Success) => Ok(lingxi_core::host::ShareResult::Success),
+            Ok(ShareResultFfi::Cancelled) => Ok(lingxi_core::host::ShareResult::Cancelled),
+            Err(ShareFfiError::Unsupported) => Err(lingxi_core::host::ShareError::Unsupported),
+            Err(ShareFfiError::Other { message }) => {
+                Err(lingxi_core::host::ShareError::Other(message))
+            }
         }
     }
 }
@@ -136,24 +138,26 @@ pub(super) struct AndroidLocationBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::LocationProvider for AndroidLocationBridge {
+impl lingxi_core::host::LocationProvider for AndroidLocationBridge {
     async fn current_location(
         &self,
-    ) -> Result<platform_api::LocationFix, platform_api::LocationError> {
+    ) -> Result<lingxi_core::host::LocationFix, lingxi_core::host::LocationError> {
         match self.inner.current_location().await {
-            Ok(fix) => Ok(platform_api::LocationFix {
+            Ok(fix) => Ok(lingxi_core::host::LocationFix {
                 latitude: fix.latitude,
                 longitude: fix.longitude,
                 accuracy_m: fix.accuracy_m,
                 timestamp_ms: fix.timestamp_ms,
             }),
             Err(LocationFfiError::PermissionDenied) => {
-                Err(platform_api::LocationError::PermissionDenied)
+                Err(lingxi_core::host::LocationError::PermissionDenied)
             }
-            Err(LocationFfiError::Unavailable) => Err(platform_api::LocationError::Unavailable),
-            Err(LocationFfiError::Timeout) => Err(platform_api::LocationError::Timeout),
+            Err(LocationFfiError::Unavailable) => {
+                Err(lingxi_core::host::LocationError::Unavailable)
+            }
+            Err(LocationFfiError::Timeout) => Err(lingxi_core::host::LocationError::Timeout),
             Err(LocationFfiError::Other { message }) => {
-                Err(platform_api::LocationError::Other(message))
+                Err(lingxi_core::host::LocationError::Other(message))
             }
         }
     }
@@ -161,7 +165,7 @@ impl platform_api::LocationProvider for AndroidLocationBridge {
 
 /// FFI error surface for the Android notification callback interface. A flat
 /// enum so `UniFFI` can render it for an async `callback_interface` method; the
-/// bridge fans it back out onto the richer [`platform_api::NotificationError`].
+/// bridge fans it back out onto the richer [`lingxi_core::host::NotificationError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -179,7 +183,7 @@ pub enum NotificationFfiError {
 
 /// Crate-local foreign callback interface for native notifications — the Kotlin
 /// app implements it over the system `NotificationManager`. Bridged to
-/// [`platform_api::NotificationService`] by [`AndroidNotificationBridge`]. The request
+/// [`lingxi_core::host::NotificationService`] by [`AndroidNotificationBridge`]. The request
 /// crosses the seam as the flat `title` / `body` / `tag` args.
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -196,10 +200,10 @@ pub trait AndroidNotification: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidNotification`] callback interface to the
-/// shared [`platform_api::NotificationService`] seam the engine consumes.
-/// Destructures [`platform_api::NotificationRequest`] into the flat `title` / `body`
+/// shared [`lingxi_core::host::NotificationService`] seam the engine consumes.
+/// Destructures [`lingxi_core::host::NotificationRequest`] into the flat `title` / `body`
 /// / `tag` args and fans [`NotificationFfiError`] back out onto
-/// [`platform_api::NotificationError`].
+/// [`lingxi_core::host::NotificationError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(super) struct AndroidNotificationBridge {
@@ -208,19 +212,19 @@ pub(super) struct AndroidNotificationBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::NotificationService for AndroidNotificationBridge {
+impl lingxi_core::host::NotificationService for AndroidNotificationBridge {
     async fn notify(
         &self,
-        req: platform_api::NotificationRequest,
-    ) -> Result<(), platform_api::NotificationError> {
-        let platform_api::NotificationRequest { title, body, tag } = req;
+        req: lingxi_core::host::NotificationRequest,
+    ) -> Result<(), lingxi_core::host::NotificationError> {
+        let lingxi_core::host::NotificationRequest { title, body, tag } = req;
         match self.inner.notify(title, body, tag).await {
             Ok(()) => Ok(()),
             Err(NotificationFfiError::PermissionDenied) => {
-                Err(platform_api::NotificationError::PermissionDenied)
+                Err(lingxi_core::host::NotificationError::PermissionDenied)
             }
             Err(NotificationFfiError::Other { message }) => {
-                Err(platform_api::NotificationError::Other(message))
+                Err(lingxi_core::host::NotificationError::Other(message))
             }
         }
     }
@@ -228,7 +232,7 @@ impl platform_api::NotificationService for AndroidNotificationBridge {
 
 /// FFI error surface for the Android clipboard callback interface. A flat enum
 /// so `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`platform_api::ClipboardError`].
+/// fans it back out onto the richer [`lingxi_core::host::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -248,7 +252,7 @@ pub enum ClipboardFfiError {
 /// Crate-local foreign callback interface for native clipboard access — the
 /// Kotlin app implements it over the system `ClipboardManager` (set via
 /// `ClipData.newPlainText` + `setPrimaryClip`; get via
-/// `primaryClip.getItemAt(0).coerceToText`). Bridged to [`platform_api::Clipboard`]
+/// `primaryClip.getItemAt(0).coerceToText`). Bridged to [`lingxi_core::host::Clipboard`]
 /// by [`AndroidClipboardBridge`]. `get_text` returns `None` when the clipboard
 /// is empty or a read is not permitted by the platform.
 #[cfg(feature = "uniffi")]
@@ -263,8 +267,8 @@ pub trait AndroidClipboard: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidClipboard`] callback interface to the shared
-/// [`platform_api::Clipboard`] seam the engine consumes. One forwarding hop per call;
-/// maps [`ClipboardFfiError`] back out onto [`platform_api::ClipboardError`].
+/// [`lingxi_core::host::Clipboard`] seam the engine consumes. One forwarding hop per call;
+/// maps [`ClipboardFfiError`] back out onto [`lingxi_core::host::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(super) struct AndroidClipboardBridge {
@@ -273,14 +277,14 @@ pub(super) struct AndroidClipboardBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::Clipboard for AndroidClipboardBridge {
-    async fn set_text(&self, text: String) -> Result<(), platform_api::ClipboardError> {
+impl lingxi_core::host::Clipboard for AndroidClipboardBridge {
+    async fn set_text(&self, text: String) -> Result<(), lingxi_core::host::ClipboardError> {
         self.inner
             .set_text(text)
             .await
             .map_err(clipboard_error_from_ffi)
     }
-    async fn get_text(&self) -> Result<Option<String>, platform_api::ClipboardError> {
+    async fn get_text(&self) -> Result<Option<String>, lingxi_core::host::ClipboardError> {
         self.inner
             .get_text()
             .await
@@ -289,13 +293,13 @@ impl platform_api::Clipboard for AndroidClipboardBridge {
 }
 
 /// Fan a flat [`ClipboardFfiError`] back out onto the richer
-/// [`platform_api::ClipboardError`].
+/// [`lingxi_core::host::ClipboardError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub(super) fn clipboard_error_from_ffi(e: ClipboardFfiError) -> platform_api::ClipboardError {
+pub(super) fn clipboard_error_from_ffi(e: ClipboardFfiError) -> lingxi_core::host::ClipboardError {
     match e {
-        ClipboardFfiError::Unsupported => platform_api::ClipboardError::Unsupported,
-        ClipboardFfiError::Other { message } => platform_api::ClipboardError::Other(message),
+        ClipboardFfiError::Unsupported => lingxi_core::host::ClipboardError::Unsupported,
+        ClipboardFfiError::Other { message } => lingxi_core::host::ClipboardError::Other(message),
     }
 }
 
@@ -319,7 +323,7 @@ pub enum DeviceControlFfiError {
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
 pub trait AndroidDeviceControl: Send + Sync {
-    /// Return a JSON-encoded bounded [`platform_api::DeviceStatus`] record.
+    /// Return a JSON-encoded bounded [`lingxi_core::host::DeviceStatus`] record.
     async fn status_json(&self) -> Result<String, DeviceControlFfiError>;
     /// Trigger one host-approved style.
     async fn trigger_haptic(&self, style: String) -> Result<(), DeviceControlFfiError>;
@@ -339,34 +343,38 @@ pub(super) struct AndroidDeviceControlBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::DeviceStatusProvider for AndroidDeviceControlBridge {
-    async fn status(&self) -> Result<platform_api::DeviceStatus, platform_api::DeviceStatusError> {
+impl lingxi_core::host::DeviceStatusProvider for AndroidDeviceControlBridge {
+    async fn status(
+        &self,
+    ) -> Result<lingxi_core::host::DeviceStatus, lingxi_core::host::DeviceStatusError> {
         let body = self
             .inner
             .status_json()
             .await
             .map_err(device_control_error)?;
         serde_json::from_str(&body).map_err(|error| {
-            platform_api::DeviceStatusError::Other(format!("invalid native device status: {error}"))
+            lingxi_core::host::DeviceStatusError::Other(format!(
+                "invalid native device status: {error}"
+            ))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::HapticService for AndroidDeviceControlBridge {
+impl lingxi_core::host::HapticService for AndroidDeviceControlBridge {
     async fn trigger(
         &self,
-        style: platform_api::HapticStyle,
-    ) -> Result<(), platform_api::HapticError> {
+        style: lingxi_core::host::HapticStyle,
+    ) -> Result<(), lingxi_core::host::HapticError> {
         self.inner
             .trigger_haptic(haptic_style_to_wire(style).to_string())
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => platform_api::HapticError::Unavailable,
+                DeviceControlFfiError::Unavailable => lingxi_core::host::HapticError::Unavailable,
                 DeviceControlFfiError::Rejected { message }
                 | DeviceControlFfiError::Other { message } => {
-                    platform_api::HapticError::Other(message)
+                    lingxi_core::host::HapticError::Other(message)
                 }
             })
     }
@@ -374,8 +382,8 @@ impl platform_api::HapticService for AndroidDeviceControlBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::DeepLinkOpener for AndroidDeviceControlBridge {
-    async fn open(&self, url: String) -> Result<(), platform_api::DeepLinkError> {
+impl lingxi_core::host::DeepLinkOpener for AndroidDeviceControlBridge {
+    async fn open(&self, url: String) -> Result<(), lingxi_core::host::DeepLinkError> {
         self.inner
             .open_deep_link(url)
             .await
@@ -385,80 +393,84 @@ impl platform_api::DeepLinkOpener for AndroidDeviceControlBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::CalendarProvider for AndroidDeviceControlBridge {
+impl lingxi_core::host::CalendarProvider for AndroidDeviceControlBridge {
     async fn list_events(
         &self,
-        query: platform_api::CalendarQuery,
-    ) -> Result<Vec<platform_api::CalendarEvent>, platform_api::CalendarError> {
+        query: lingxi_core::host::CalendarQuery,
+    ) -> Result<Vec<lingxi_core::host::CalendarEvent>, lingxi_core::host::CalendarError> {
         let request = serde_json::to_string(&query)
-            .map_err(|error| platform_api::CalendarError::Other(error.to_string()))?;
+            .map_err(|error| lingxi_core::host::CalendarError::Other(error.to_string()))?;
         let body = self
             .inner
             .calendar_json(request)
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => platform_api::CalendarError::Unavailable,
+                DeviceControlFfiError::Unavailable => lingxi_core::host::CalendarError::Unavailable,
                 DeviceControlFfiError::Rejected { .. } => {
-                    platform_api::CalendarError::PermissionDenied
+                    lingxi_core::host::CalendarError::PermissionDenied
                 }
                 DeviceControlFfiError::Other { message } => {
-                    platform_api::CalendarError::Other(message)
+                    lingxi_core::host::CalendarError::Other(message)
                 }
             })?;
         serde_json::from_str(&body).map_err(|error| {
-            platform_api::CalendarError::Other(format!("invalid native calendar response: {error}"))
+            lingxi_core::host::CalendarError::Other(format!(
+                "invalid native calendar response: {error}"
+            ))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::ContactsProvider for AndroidDeviceControlBridge {
+impl lingxi_core::host::ContactsProvider for AndroidDeviceControlBridge {
     async fn search(
         &self,
-        query: platform_api::ContactsQuery,
-    ) -> Result<Vec<platform_api::Contact>, platform_api::ContactsError> {
+        query: lingxi_core::host::ContactsQuery,
+    ) -> Result<Vec<lingxi_core::host::Contact>, lingxi_core::host::ContactsError> {
         let request = serde_json::to_string(&query)
-            .map_err(|error| platform_api::ContactsError::Other(error.to_string()))?;
+            .map_err(|error| lingxi_core::host::ContactsError::Other(error.to_string()))?;
         let body = self
             .inner
             .contacts_json(request)
             .await
             .map_err(|error| match error {
-                DeviceControlFfiError::Unavailable => platform_api::ContactsError::Unavailable,
+                DeviceControlFfiError::Unavailable => lingxi_core::host::ContactsError::Unavailable,
                 DeviceControlFfiError::Rejected { .. } => {
-                    platform_api::ContactsError::PermissionDenied
+                    lingxi_core::host::ContactsError::PermissionDenied
                 }
                 DeviceControlFfiError::Other { message } => {
-                    platform_api::ContactsError::Other(message)
+                    lingxi_core::host::ContactsError::Other(message)
                 }
             })?;
         serde_json::from_str(&body).map_err(|error| {
-            platform_api::ContactsError::Other(format!("invalid native contacts response: {error}"))
+            lingxi_core::host::ContactsError::Other(format!(
+                "invalid native contacts response: {error}"
+            ))
         })
     }
 }
 
 #[cfg(feature = "uniffi")]
-pub(super) fn haptic_style_to_wire(style: platform_api::HapticStyle) -> &'static str {
+pub(super) fn haptic_style_to_wire(style: lingxi_core::host::HapticStyle) -> &'static str {
     match style {
-        platform_api::HapticStyle::Light => "light",
-        platform_api::HapticStyle::Medium => "medium",
-        platform_api::HapticStyle::Heavy => "heavy",
-        platform_api::HapticStyle::Success => "success",
-        platform_api::HapticStyle::Warning => "warning",
-        platform_api::HapticStyle::Error => "error",
+        lingxi_core::host::HapticStyle::Light => "light",
+        lingxi_core::host::HapticStyle::Medium => "medium",
+        lingxi_core::host::HapticStyle::Heavy => "heavy",
+        lingxi_core::host::HapticStyle::Success => "success",
+        lingxi_core::host::HapticStyle::Warning => "warning",
+        lingxi_core::host::HapticStyle::Error => "error",
     }
 }
 
 #[cfg(feature = "uniffi")]
 pub(super) fn device_control_error(
     error: DeviceControlFfiError,
-) -> platform_api::DeviceStatusError {
+) -> lingxi_core::host::DeviceStatusError {
     match error {
-        DeviceControlFfiError::Unavailable => platform_api::DeviceStatusError::Unavailable,
+        DeviceControlFfiError::Unavailable => lingxi_core::host::DeviceStatusError::Unavailable,
         DeviceControlFfiError::Rejected { message } | DeviceControlFfiError::Other { message } => {
-            platform_api::DeviceStatusError::Other(message)
+            lingxi_core::host::DeviceStatusError::Other(message)
         }
     }
 }
@@ -466,19 +478,21 @@ pub(super) fn device_control_error(
 #[cfg(feature = "uniffi")]
 pub(super) fn device_control_error_for_deep_link(
     error: DeviceControlFfiError,
-) -> platform_api::DeepLinkError {
+) -> lingxi_core::host::DeepLinkError {
     match error {
-        DeviceControlFfiError::Unavailable => platform_api::DeepLinkError::Unavailable,
+        DeviceControlFfiError::Unavailable => lingxi_core::host::DeepLinkError::Unavailable,
         DeviceControlFfiError::Rejected { message } => {
-            platform_api::DeepLinkError::Rejected(message)
+            lingxi_core::host::DeepLinkError::Rejected(message)
         }
-        DeviceControlFfiError::Other { message } => platform_api::DeepLinkError::Other(message),
+        DeviceControlFfiError::Other { message } => {
+            lingxi_core::host::DeepLinkError::Other(message)
+        }
     }
 }
 
 /// FFI error surface for the Android secure-storage callback interface. A flat
 /// enum so `UniFFI` can render it for an async `callback_interface` method; the
-/// bridge fans it back out onto the richer [`platform_api::SecureStorageError`].
+/// bridge fans it back out onto the richer [`lingxi_core::host::SecureStorageError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -506,7 +520,7 @@ pub enum SecureStorageFfiError {
 /// Crate-local foreign callback interface for the native Android Keystore-backed
 /// secure store. The engine's serialized `SecureStorageData` crosses the seam as
 /// an opaque `blob` keyed by `(service, account)`; the Kotlin side persists it in
-/// the Keystore / EncryptedSharedPreferences. Bridged to [`platform_api::SecureStorage`]
+/// the Keystore / EncryptedSharedPreferences. Bridged to [`lingxi_core::host::SecureStorage`]
 /// by [`AndroidSecureStorageBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
@@ -532,7 +546,7 @@ pub trait AndroidSecureStorage: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidSecureStorage`] (opaque-blob FFI) to the
-/// shared [`platform_api::SecureStorage`] seam: serde-encodes `SecureStorageData` to a
+/// shared [`lingxi_core::host::SecureStorage`] seam: serde-encodes `SecureStorageData` to a
 /// blob on store, decodes on retrieve, and reports the Keystore as an encrypted
 /// backend so the engine persists secrets there.
 #[cfg(all(feature = "uniffi", target_os = "android"))]
@@ -542,15 +556,15 @@ pub(super) struct AndroidSecureStorageBridge {
 
 #[cfg(all(feature = "uniffi", target_os = "android"))]
 #[async_trait::async_trait]
-impl platform_api::SecureStorage for AndroidSecureStorageBridge {
+impl lingxi_core::host::SecureStorage for AndroidSecureStorageBridge {
     async fn store(
         &self,
         service: &str,
         account: &str,
-        data: protocol::SecureStorageData,
-    ) -> Result<(), platform_api::SecureStorageError> {
+        data: lingxi_core::types::SecureStorageData,
+    ) -> Result<(), lingxi_core::host::SecureStorageError> {
         let blob = serde_json::to_vec(&data)
-            .map_err(|e| platform_api::SecureStorageError::Io(format!("serialize: {e}")))?;
+            .map_err(|e| lingxi_core::host::SecureStorageError::Io(format!("serialize: {e}")))?;
         self.inner
             .store(service.to_string(), account.to_string(), blob)
             .await
@@ -560,7 +574,8 @@ impl platform_api::SecureStorage for AndroidSecureStorageBridge {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+    ) -> Result<Option<lingxi_core::types::SecureStorageData>, lingxi_core::host::SecureStorageError>
+    {
         match self
             .inner
             .retrieve(service.to_string(), account.to_string())
@@ -569,7 +584,7 @@ impl platform_api::SecureStorage for AndroidSecureStorageBridge {
         {
             Some(blob) => {
                 let data = serde_json::from_slice(&blob).map_err(|e| {
-                    platform_api::SecureStorageError::Io(format!("deserialize: {e}"))
+                    lingxi_core::host::SecureStorageError::Io(format!("deserialize: {e}"))
                 })?;
                 Ok(Some(data))
             }
@@ -580,13 +595,16 @@ impl platform_api::SecureStorage for AndroidSecureStorageBridge {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<(), platform_api::SecureStorageError> {
+    ) -> Result<(), lingxi_core::host::SecureStorageError> {
         self.inner
             .delete(service.to_string(), account.to_string())
             .await
             .map_err(securestorage_error_from_ffi)
     }
-    async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+    async fn list(
+        &self,
+        service: &str,
+    ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
         self.inner
             .list(service.to_string())
             .await
@@ -595,30 +613,30 @@ impl platform_api::SecureStorage for AndroidSecureStorageBridge {
     fn is_encrypted(&self) -> bool {
         true
     }
-    fn backend(&self) -> platform_api::SecureStorageBackend {
-        platform_api::SecureStorageBackend::AndroidKeystore
+    fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+        lingxi_core::host::SecureStorageBackend::AndroidKeystore
     }
 }
 
-/// Fan a flat [`SecureStorageFfiError`] back out onto [`platform_api::SecureStorageError`].
+/// Fan a flat [`SecureStorageFfiError`] back out onto [`lingxi_core::host::SecureStorageError`].
 #[cfg(all(feature = "uniffi", target_os = "android"))]
 pub(super) fn securestorage_error_from_ffi(
     e: SecureStorageFfiError,
-) -> platform_api::SecureStorageError {
+) -> lingxi_core::host::SecureStorageError {
     match e {
         SecureStorageFfiError::PermissionDenied { message } => {
-            platform_api::SecureStorageError::PermissionDenied(message)
+            lingxi_core::host::SecureStorageError::PermissionDenied(message)
         }
         SecureStorageFfiError::BackendUnavailable { message } => {
-            platform_api::SecureStorageError::BackendUnavailable(message)
+            lingxi_core::host::SecureStorageError::BackendUnavailable(message)
         }
-        SecureStorageFfiError::Io { message } => platform_api::SecureStorageError::Io(message),
+        SecureStorageFfiError::Io { message } => lingxi_core::host::SecureStorageError::Io(message),
     }
 }
 
 /// FFI error surface for the Android camera callback interface. A flat enum so
 /// `UniFFI` can render it for an async `callback_interface` method; the bridge
-/// fans it back out onto the richer [`platform_api::CameraError`].
+/// fans it back out onto the richer [`lingxi_core::host::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[derive(Debug, thiserror::Error)]
@@ -656,7 +674,7 @@ pub struct CapturedImageFfi {
 
 /// Crate-local foreign callback interface for native camera access — the Kotlin
 /// app implements it over `CameraX` (capture) and the system photo picker
-/// (library). Bridged to [`platform_api::CameraControl`] by [`AndroidCameraBridge`].
+/// (library). Bridged to [`lingxi_core::host::CameraControl`] by [`AndroidCameraBridge`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
 #[async_trait::async_trait]
@@ -674,10 +692,10 @@ pub trait AndroidCamera: Send + Sync {
 }
 
 /// Adapts the crate-local [`AndroidCamera`] callback interface to the shared
-/// [`platform_api::CameraControl`] seam the engine consumes. Maps
-/// [`platform_api::CameraPosition`] onto the flat `front` bool, threads
+/// [`lingxi_core::host::CameraControl`] seam the engine consumes. Maps
+/// [`lingxi_core::host::CameraPosition`] onto the flat `front` bool, threads
 /// `allow_editing`, and fans [`CameraFfiError`] back out onto
-/// [`platform_api::CameraError`].
+/// [`lingxi_core::host::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(super) struct AndroidCameraBridge {
@@ -686,12 +704,12 @@ pub(super) struct AndroidCameraBridge {
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::CameraControl for AndroidCameraBridge {
+impl lingxi_core::host::CameraControl for AndroidCameraBridge {
     async fn capture_photo(
         &self,
-        opts: platform_api::CapturePhotoOpts,
-    ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
-        let front = matches!(opts.position, platform_api::CameraPosition::Front);
+        opts: lingxi_core::host::CapturePhotoOpts,
+    ) -> Result<lingxi_core::host::CapturedImage, lingxi_core::host::CameraError> {
+        let front = matches!(opts.position, lingxi_core::host::CameraPosition::Front);
         match self.inner.capture_photo(front, opts.allow_editing).await {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
@@ -699,7 +717,7 @@ impl platform_api::CameraControl for AndroidCameraBridge {
     }
     async fn pick_from_library(
         &self,
-    ) -> Result<platform_api::CapturedImage, platform_api::CameraError> {
+    ) -> Result<lingxi_core::host::CapturedImage, lingxi_core::host::CameraError> {
         match self.inner.pick_from_library().await {
             Ok(img) => Ok(captured_image_from_ffi(img)),
             Err(e) => Err(camera_error_from_ffi(e)),
@@ -707,26 +725,26 @@ impl platform_api::CameraControl for AndroidCameraBridge {
     }
 }
 
-/// Convert an FFI [`CapturedImageFfi`] into the shared [`platform_api::CapturedImage`].
+/// Convert an FFI [`CapturedImageFfi`] into the shared [`lingxi_core::host::CapturedImage`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub(super) fn captured_image_from_ffi(img: CapturedImageFfi) -> platform_api::CapturedImage {
-    platform_api::CapturedImage {
+pub(super) fn captured_image_from_ffi(img: CapturedImageFfi) -> lingxi_core::host::CapturedImage {
+    lingxi_core::host::CapturedImage {
         jpeg_bytes: img.jpeg_bytes,
         width: img.width,
         height: img.height,
     }
 }
 
-/// Fan a flat [`CameraFfiError`] back out onto the richer [`platform_api::CameraError`].
+/// Fan a flat [`CameraFfiError`] back out onto the richer [`lingxi_core::host::CameraError`].
 #[cfg(feature = "uniffi")]
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub(super) fn camera_error_from_ffi(e: CameraFfiError) -> platform_api::CameraError {
+pub(super) fn camera_error_from_ffi(e: CameraFfiError) -> lingxi_core::host::CameraError {
     match e {
-        CameraFfiError::PermissionDenied => platform_api::CameraError::PermissionDenied,
-        CameraFfiError::Cancelled => platform_api::CameraError::Cancelled,
-        CameraFfiError::DeviceUnavailable => platform_api::CameraError::DeviceUnavailable,
-        CameraFfiError::Other { message } => platform_api::CameraError::Other(message),
+        CameraFfiError::PermissionDenied => lingxi_core::host::CameraError::PermissionDenied,
+        CameraFfiError::Cancelled => lingxi_core::host::CameraError::Cancelled,
+        CameraFfiError::DeviceUnavailable => lingxi_core::host::CameraError::DeviceUnavailable,
+        CameraFfiError::Other { message } => lingxi_core::host::CameraError::Other(message),
     }
 }
 
@@ -861,8 +879,8 @@ pub(super) struct AndroidComputerUseBridge {
 #[cfg(feature = "uniffi")]
 pub(super) fn computer_use_error_from_ffi(
     error: AndroidComputerUseFfiError,
-) -> platform_api::AndroidAutomationError {
-    use platform_api::AndroidAutomationError as Target;
+) -> lingxi_core::host::AndroidAutomationError {
+    use lingxi_core::host::AndroidAutomationError as Target;
     match error {
         AndroidComputerUseFfiError::ServiceDisabled => Target::ServiceDisabled,
         AndroidComputerUseFfiError::SessionInactive => Target::SessionInactive,
@@ -888,27 +906,30 @@ pub(super) fn computer_use_error_from_ffi(
 #[cfg(feature = "uniffi")]
 pub(super) fn decode_computer_use_json<T: serde::de::DeserializeOwned>(
     value: String,
-) -> Result<T, platform_api::AndroidAutomationError> {
+) -> Result<T, lingxi_core::host::AndroidAutomationError> {
     serde_json::from_str(&value).map_err(|error| {
-        platform_api::AndroidAutomationError::Other(format!("invalid host JSON: {error}"))
+        lingxi_core::host::AndroidAutomationError::Other(format!("invalid host JSON: {error}"))
     })
 }
 
 #[cfg(feature = "uniffi")]
 pub(super) fn encode_computer_use_json<T: serde::Serialize>(
     value: &T,
-) -> Result<String, platform_api::AndroidAutomationError> {
+) -> Result<String, lingxi_core::host::AndroidAutomationError> {
     serde_json::to_string(value).map_err(|error| {
-        platform_api::AndroidAutomationError::Other(format!("cannot encode host JSON: {error}"))
+        lingxi_core::host::AndroidAutomationError::Other(format!(
+            "cannot encode host JSON: {error}"
+        ))
     })
 }
 
 #[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
-impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
+impl lingxi_core::host::AndroidUiAutomation for AndroidComputerUseBridge {
     async fn status(
         &self,
-    ) -> Result<platform_api::AndroidAutomationStatus, platform_api::AndroidAutomationError> {
+    ) -> Result<lingxi_core::host::AndroidAutomationStatus, lingxi_core::host::AndroidAutomationError>
+    {
         let value = self
             .inner
             .status_json()
@@ -919,8 +940,9 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn request_access(
         &self,
-        request: platform_api::AndroidAccessRequest,
-    ) -> Result<Vec<platform_api::AndroidAppInfo>, platform_api::AndroidAutomationError> {
+        request: lingxi_core::host::AndroidAccessRequest,
+    ) -> Result<Vec<lingxi_core::host::AndroidAppInfo>, lingxi_core::host::AndroidAutomationError>
+    {
         let request = encode_computer_use_json(&request)?;
         let value = self
             .inner
@@ -932,7 +954,8 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn list_granted_apps(
         &self,
-    ) -> Result<Vec<platform_api::AndroidAppInfo>, platform_api::AndroidAutomationError> {
+    ) -> Result<Vec<lingxi_core::host::AndroidAppInfo>, lingxi_core::host::AndroidAutomationError>
+    {
         let value = self
             .inner
             .list_granted_apps_json()
@@ -943,13 +966,14 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn screenshot(
         &self,
-    ) -> Result<platform_api::AndroidScreenshot, platform_api::AndroidAutomationError> {
+    ) -> Result<lingxi_core::host::AndroidScreenshot, lingxi_core::host::AndroidAutomationError>
+    {
         let value = self
             .inner
             .screenshot()
             .await
             .map_err(computer_use_error_from_ffi)?;
-        Ok(platform_api::AndroidScreenshot {
+        Ok(lingxi_core::host::AndroidScreenshot {
             width: value.width,
             height: value.height,
             png_bytes: value.png_bytes,
@@ -958,7 +982,8 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn ui_tree(
         &self,
-    ) -> Result<platform_api::AndroidUiSnapshot, platform_api::AndroidAutomationError> {
+    ) -> Result<lingxi_core::host::AndroidUiSnapshot, lingxi_core::host::AndroidAutomationError>
+    {
         let value = self
             .inner
             .ui_tree_json()
@@ -969,8 +994,9 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn find_nodes(
         &self,
-        query: platform_api::AndroidNodeQuery,
-    ) -> Result<Vec<platform_api::AndroidUiNode>, platform_api::AndroidAutomationError> {
+        query: lingxi_core::host::AndroidNodeQuery,
+    ) -> Result<Vec<lingxi_core::host::AndroidUiNode>, lingxi_core::host::AndroidAutomationError>
+    {
         let query = encode_computer_use_json(&query)?;
         let value = self
             .inner
@@ -983,7 +1009,7 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
     async fn inspect_node(
         &self,
         node_id: String,
-    ) -> Result<platform_api::AndroidUiNode, platform_api::AndroidAutomationError> {
+    ) -> Result<lingxi_core::host::AndroidUiNode, lingxi_core::host::AndroidAutomationError> {
         let value = self
             .inner
             .inspect_node_json(node_id)
@@ -994,8 +1020,9 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn perform(
         &self,
-        action: platform_api::AndroidAction,
-    ) -> Result<platform_api::AndroidActionResult, platform_api::AndroidAutomationError> {
+        action: lingxi_core::host::AndroidAction,
+    ) -> Result<lingxi_core::host::AndroidActionResult, lingxi_core::host::AndroidAutomationError>
+    {
         let action = encode_computer_use_json(&action)?;
         let value = self
             .inner
@@ -1007,9 +1034,10 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn wait_for(
         &self,
-        condition: platform_api::AndroidWaitCondition,
+        condition: lingxi_core::host::AndroidWaitCondition,
         timeout_ms: u64,
-    ) -> Result<platform_api::AndroidActionResult, platform_api::AndroidAutomationError> {
+    ) -> Result<lingxi_core::host::AndroidActionResult, lingxi_core::host::AndroidAutomationError>
+    {
         let condition = encode_computer_use_json(&condition)?;
         let value = self
             .inner
@@ -1021,8 +1049,9 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn listen(
         &self,
-        request: platform_api::AndroidAudioListenRequest,
-    ) -> Result<platform_api::AndroidAudioTranscript, platform_api::AndroidAutomationError> {
+        request: lingxi_core::host::AndroidAudioListenRequest,
+    ) -> Result<lingxi_core::host::AndroidAudioTranscript, lingxi_core::host::AndroidAutomationError>
+    {
         let request = encode_computer_use_json(&request)?;
         let value = self
             .inner
@@ -1034,8 +1063,9 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
 
     async fn speak(
         &self,
-        request: platform_api::AndroidAudioSpeakRequest,
-    ) -> Result<platform_api::AndroidAudioSpeakResult, platform_api::AndroidAutomationError> {
+        request: lingxi_core::host::AndroidAudioSpeakRequest,
+    ) -> Result<lingxi_core::host::AndroidAudioSpeakResult, lingxi_core::host::AndroidAutomationError>
+    {
         let request = encode_computer_use_json(&request)?;
         let value = self
             .inner
@@ -1045,14 +1075,14 @@ impl platform_api::AndroidUiAutomation for AndroidComputerUseBridge {
         decode_computer_use_json(value)
     }
 
-    async fn stop_audio(&self) -> Result<(), platform_api::AndroidAutomationError> {
+    async fn stop_audio(&self) -> Result<(), lingxi_core::host::AndroidAutomationError> {
         self.inner
             .stop_audio()
             .await
             .map_err(computer_use_error_from_ffi)
     }
 
-    async fn stop(&self) -> Result<(), platform_api::AndroidAutomationError> {
+    async fn stop(&self) -> Result<(), lingxi_core::host::AndroidAutomationError> {
         self.inner.stop().await.map_err(computer_use_error_from_ffi)
     }
 }
@@ -1114,12 +1144,11 @@ pub trait AndroidEventListener: Send + Sync {
     /// Deliver one session-owned workflow progress update.
     async fn on_workflow_progress(
         &self,
-        _origin_session_id: String,
-        _task_id: String,
-        _run_id: String,
-        _progress: client::protocol::listings::WorkflowProgressDto,
-    ) {
-    }
+        origin_session_id: String,
+        task_id: String,
+        run_id: String,
+        progress: client::protocol::listings::WorkflowProgressDto,
+    );
 }
 
 /// Flat cancellation error for the Android-local `AudioService` callback.

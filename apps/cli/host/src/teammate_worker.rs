@@ -24,13 +24,13 @@ pub async fn run(argv: &Argv, mode: permission::PermissionMode) -> i32 {
 mod unix {
     use super::*;
     use async_trait::async_trait;
-    use permission::gate::{
-        PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
-    };
-    use platform_api::team_spawn::TeamSpawnSeam;
-    use platform_api::teammate_worker::{
+    use lingxi_core::host::team_spawn::TeamSpawnSeam;
+    use lingxi_core::host::teammate_worker::{
         PaneMessageForwarder, PaneMessageResult, PaneTeammateManifest, ParentToWorker,
         WorkerToParent,
+    };
+    use permission::gate::{
+        PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
     };
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
@@ -50,14 +50,14 @@ mod unix {
     #[derive(Debug)]
     enum TaskCommand {
         Message(String),
-        PlanApproval(platform_api::teammate_plan::PlanApprovalResponse),
+        PlanApproval(lingxi_core::host::teammate_plan::PlanApprovalResponse),
     }
 
     async fn dispatch_task_command(
         seam: &dyn TeamSpawnSeam,
         task_id: &str,
         command: TaskCommand,
-    ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+    ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
         match command {
             TaskCommand::Message(text) => seam.send_message(task_id, text).await,
             TaskCommand::PlanApproval(response) => {
@@ -314,7 +314,7 @@ mod unix {
             return Err("Incomplete teammate launch identity".into());
         }
         if argv.agent_id.as_deref().is_some_and(|id| {
-            protocol::AgentId::parse_prefixed(id) != Some(manifest.agent_id)
+            lingxi_core::types::AgentId::parse_prefixed(id) != Some(manifest.agent_id)
                 && id != format!("{}@{}", manifest.name, manifest.team_name)
         }) || argv
             .agent_name
@@ -325,7 +325,8 @@ mod unix {
                 .as_deref()
                 .is_some_and(|name| name != manifest.team_name)
             || argv.parent_session_id.as_deref().is_some_and(|id| {
-                protocol::SessionId::parse_prefixed(id) != Some(manifest.parent_session_id)
+                lingxi_core::types::SessionId::parse_prefixed(id)
+                    != Some(manifest.parent_session_id)
             })
             || argv
                 .agent_color
@@ -700,21 +701,24 @@ mod unix {
         impl TeamSpawnSeam for PlanTransportSpy {
             async fn spawn_teammate(
                 &self,
-                _: protocol::AgentId,
+                _: lingxi_core::types::AgentId,
                 _: String,
                 _: String,
                 _: String,
-            ) -> Result<String, platform_api::team_spawn::TeamSpawnError> {
+            ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
                 unreachable!()
             }
-            async fn kill(&self, _: &str) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+            async fn kill(
+                &self,
+                _: &str,
+            ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
                 Ok(())
             }
             async fn send_message(
                 &self,
                 task_id: &str,
                 text: String,
-            ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+            ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
                 self.0
                     .lock()
                     .await
@@ -724,8 +728,8 @@ mod unix {
             async fn apply_plan_approval(
                 &self,
                 task_id: &str,
-                response: platform_api::teammate_plan::PlanApprovalResponse,
-            ) -> Result<(), platform_api::team_spawn::TeamSpawnError> {
+                response: lingxi_core::host::teammate_plan::PlanApprovalResponse,
+            ) -> Result<(), lingxi_core::host::team_spawn::TeamSpawnError> {
                 self.0
                     .lock()
                     .await
@@ -737,7 +741,7 @@ mod unix {
         #[tokio::test]
         async fn typed_plan_approval_queues_before_ready_and_uses_only_control_seam() {
             let frame = ParentToWorker::PlanApprovalResponse {
-                response: platform_api::teammate_plan::PlanApprovalResponse {
+                response: lingxi_core::host::teammate_plan::PlanApprovalResponse {
                     request_id: "plan-7".into(),
                     approved: true,
                     feedback: Some("approved".into()),
@@ -1068,10 +1072,10 @@ mod unix {
             let manifest = PaneTeammateManifest {
                 socket_path: "/tmp/socket".into(),
                 token: "private-token".into(),
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "buddy".into(),
                 team_name: "team".into(),
-                parent_session_id: protocol::SessionId::new(),
+                parent_session_id: lingxi_core::types::SessionId::new(),
                 request: Default::default(),
             };
             assert!(validate_identity(&argv, &manifest).is_err());
@@ -1084,11 +1088,11 @@ mod unix {
             let manifest = PaneTeammateManifest {
                 socket_path: "/tmp/socket".into(),
                 token: "token".into(),
-                agent_id: protocol::AgentId::new(),
+                agent_id: lingxi_core::types::AgentId::new(),
                 name: "worker".into(),
                 team_name: "session-12345678".into(),
-                parent_session_id: protocol::SessionId::new(),
-                request: platform_api::SubagentSpawnRequest {
+                parent_session_id: lingxi_core::types::SessionId::new(),
+                request: lingxi_core::host::SubagentSpawnRequest {
                     teammate_color: Some("blue".into()),
                     ..Default::default()
                 },

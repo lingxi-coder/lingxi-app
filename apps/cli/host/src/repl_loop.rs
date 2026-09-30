@@ -7,8 +7,8 @@ use crate::idle_notify::IdleNotifier;
 use crate::output::OutputSink;
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
+use lingxi_core::host::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use orchestrator::{OrchestratorError, TurnOutcome};
-use platform_api::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -210,9 +210,10 @@ where
 
     let (command, args) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     if command == "/tasks" {
-        if let (Some(parsed), Some(host)) =
-            (platform_api::human_task_message::parse(args), notifications)
-        {
+        if let (Some(parsed), Some(host)) = (
+            lingxi_core::host::human_task_message::parse(args),
+            notifications,
+        ) {
             let result = match parsed {
                 Ok((task_id, message)) => host
                     .send_human_task_message(task_id, message)
@@ -360,8 +361,8 @@ mod tests {
     use crate::idle_notify::IdleNotifier;
     use crate::output::PlainSink;
     use futures::future::BoxFuture;
+    use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
     use orchestrator::test_support::MockOrchestratorHandle;
-    use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{duplex, AsyncBufRead, AsyncWriteExt, BufReader};
     use tokio::sync::Mutex;

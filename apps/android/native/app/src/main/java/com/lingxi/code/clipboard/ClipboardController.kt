@@ -31,7 +31,7 @@ class ClipException(val failure: ClipFailure) : Exception(
 
 /**
  * Process-global bridge between the (Rust-driven)
- * `com.lingxi.code.bindings.AndroidClipboard` callback interface and the system
+ * `com.lingxi.code.bindings.android.AndroidClipboard` callback interface and the system
  * [ClipboardManager].
  *
  * Mirrors [com.lingxi.code.notify.NotificationController]: because the engine

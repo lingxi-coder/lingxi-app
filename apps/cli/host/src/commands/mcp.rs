@@ -21,9 +21,9 @@
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 use clap::{Args, Subcommand};
+use lingxi_core::host::CredentialStoragePolicy;
 use mcp::connection::ConfigScope;
 use mcp::oauth;
-use platform_api::CredentialStoragePolicy;
 use platform_posix::{self, PosixClock, PosixHttp};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ pub struct Cli {
     pub command: Option<Sub>,
 }
 
-pub use protocol::WritableScope;
+pub use lingxi_core::types::WritableScope;
 
 /// The `--scope` flag's own type, kept distinct from [`WritableScope`] purely
 /// so clap keeps generating its `[possible values: local, user, project]` help
@@ -521,7 +521,7 @@ impl McpProtocolOutput {
 
     async fn register_progress(
         &self,
-        tool_use_id: &protocol::ToolUseId,
+        tool_use_id: &lingxi_core::types::ToolUseId,
         token: Option<serde_json::Value>,
     ) {
         if let Some(token) = token {
@@ -532,7 +532,7 @@ impl McpProtocolOutput {
         }
     }
 
-    async fn unregister_progress(&self, tool_use_id: &protocol::ToolUseId) {
+    async fn unregister_progress(&self, tool_use_id: &lingxi_core::types::ToolUseId) {
         self.progress_tokens
             .lock()
             .await
@@ -541,12 +541,12 @@ impl McpProtocolOutput {
 }
 
 #[async_trait::async_trait]
-impl platform_api::OutputStream for McpProtocolOutput {
+impl lingxi_core::host::OutputStream for McpProtocolOutput {
     async fn emit_text(&self, _text: &str) {}
 
     async fn emit_tool_call(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _input: &serde_json::Value,
     ) {
@@ -554,14 +554,19 @@ impl platform_api::OutputStream for McpProtocolOutput {
 
     async fn emit_tool_result(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _model_text: &str,
         _result: &serde_json::Value,
     ) {
     }
 
-    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+    async fn emit_tool_heartbeat(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        elapsed_ms: u64,
+    ) {
         let token = self.progress_tokens.lock().await.get(id.as_str()).cloned();
         if let Some(token) = token {
             let frame = serde_json::json!({
@@ -577,7 +582,7 @@ impl platform_api::OutputStream for McpProtocolOutput {
         }
     }
 
-    async fn emit_end_turn(&self, _stop_reason: &str, _cost: &platform_api::CostSnapshot) {}
+    async fn emit_end_turn(&self, _stop_reason: &str, _cost: &lingxi_core::host::CostSnapshot) {}
 }
 
 struct McpServePermissionSink;
@@ -612,7 +617,7 @@ async fn run_serve(a: &ServeArgs) -> i32 {
         Arc::new(McpServePermissionSink);
     let runtime = match harness_runtime::desktop::build(
         cfg,
-        output.clone() as Arc<dyn platform_api::OutputStream>,
+        output.clone() as Arc<dyn lingxi_core::host::OutputStream>,
         permission_sink,
     )
     .await
@@ -855,7 +860,7 @@ async fn call_tool_response(
         return jsonrpc_error(request_id, -32602, "Tool arguments must be an object", None);
     }
 
-    let tool_use_id = protocol::ToolUseId::new();
+    let tool_use_id = lingxi_core::types::ToolUseId::new();
     output.register_progress(&tool_use_id, progress_token).await;
     let result = orchestrator
         .call_tool_from_host(
@@ -869,7 +874,7 @@ async fn call_tool_response(
 
     match result {
         Ok(None) => jsonrpc_error(request_id, -32602, &format!("Unknown tool: {name}"), None),
-        Ok(Some(protocol::ContentBlock::ToolResult {
+        Ok(Some(lingxi_core::types::ContentBlock::ToolResult {
             content,
             is_error,
             content_blocks,
@@ -1002,8 +1007,8 @@ async fn run_login(a: &LoginArgs, analytics_bus: Option<&Arc<telemetry::Analytic
             return RUNTIME_ERROR;
         }
     };
-    let clock: Arc<dyn platform_api::Clock> = Arc::new(PosixClock::new());
-    let http: Arc<dyn platform_api::HttpTransport> = Arc::new(PosixHttp::new());
+    let clock: Arc<dyn lingxi_core::host::Clock> = Arc::new(PosixClock::new());
+    let http: Arc<dyn lingxi_core::host::HttpTransport> = Arc::new(PosixHttp::new());
 
     let server_key = oauth::server_key(&cfg.name, &cfg.spec);
     let telemetry = oauth::McpOAuthTelemetryContext::for_server(&cfg.name, &cfg.spec);
@@ -1103,7 +1108,7 @@ async fn run_logout(a: &LogoutArgs, analytics_bus: Option<&Arc<telemetry::Analyt
             return RUNTIME_ERROR;
         }
     };
-    let http: Arc<dyn platform_api::HttpTransport> = Arc::new(PosixHttp::new());
+    let http: Arc<dyn lingxi_core::host::HttpTransport> = Arc::new(PosixHttp::new());
     let logout_cfg = find_loaded_server(&a.name);
     let telemetry = logout_cfg
         .as_ref()
@@ -1174,7 +1179,7 @@ async fn run_add_from_claude_desktop(
 
     let Ok(imported) = mcp::json_config::parse_mcp_json_string(
         &raw,
-        ConfigScope::Settings(protocol::SettingsScope::Project),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
     ) else {
         eprintln!("Could not parse Claude Desktop config.");
         return RUNTIME_ERROR;
@@ -1244,14 +1249,14 @@ fn find_loaded_server(name: &str) -> Option<mcp::connection::McpServerConfig> {
 /// Extract `(url, oauth_cfg)` when `cfg` is an OAuth-capable MCP remote transport.
 fn extract_oauth_spec(
     cfg: &mcp::connection::McpServerConfig,
-) -> Option<(&str, &platform_api::McpOAuthConfigDto)> {
+) -> Option<(&str, &lingxi_core::host::McpOAuthConfigDto)> {
     match &cfg.spec {
-        platform_api::McpTransportSpec::Sse {
+        lingxi_core::host::McpTransportSpec::Sse {
             url,
             oauth: Some(cfg),
             ..
         } => Some((url.as_str(), cfg)),
-        platform_api::McpTransportSpec::Http {
+        lingxi_core::host::McpTransportSpec::Http {
             url,
             oauth: Some(cfg),
             ..
@@ -1261,7 +1266,7 @@ fn extract_oauth_spec(
 }
 
 /// Build a CLI-local secure-storage backend used for MCP OAuth token persistence.
-async fn mcp_token_storage() -> Result<Arc<dyn platform_api::SecureStorage>, String> {
+async fn mcp_token_storage() -> Result<Arc<dyn lingxi_core::host::SecureStorage>, String> {
     let home = crate::run::lingxi_home_dir();
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
@@ -1275,7 +1280,7 @@ async fn credential_storage(
     user: String,
     home: PathBuf,
     credentials_path: PathBuf,
-) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+) -> Result<Arc<dyn lingxi_core::host::SecureStorage>, lingxi_core::host::SecureStorageError> {
     #[cfg(windows)]
     {
         platform_windows::secure_storage_for_policy(
@@ -1302,13 +1307,15 @@ async fn credential_storage(
 /// `write_server` (`command` / `args` / `env` or `type` + `url` + `headers`).
 fn cfg_to_entry_value(cfg: &mcp::connection::McpServerConfig) -> Option<serde_json::Value> {
     match &cfg.spec {
-        platform_api::McpTransportSpec::Stdio { command, args, env } => Some(serde_json::json!({
-            "type": "stdio",
-            "command": command,
-            "args": args,
-            "env": env,
-        })),
-        platform_api::McpTransportSpec::Sse { url, headers, .. } => {
+        lingxi_core::host::McpTransportSpec::Stdio { command, args, env } => {
+            Some(serde_json::json!({
+                "type": "stdio",
+                "command": command,
+                "args": args,
+                "env": env,
+            }))
+        }
+        lingxi_core::host::McpTransportSpec::Sse { url, headers, .. } => {
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), "sse".into());
             obj.insert("url".into(), serde_json::Value::String(url.clone()));
@@ -1325,7 +1332,7 @@ fn cfg_to_entry_value(cfg: &mcp::connection::McpServerConfig) -> Option<serde_js
             }
             Some(serde_json::Value::Object(obj))
         }
-        platform_api::McpTransportSpec::Http { url, headers, .. } => {
+        lingxi_core::host::McpTransportSpec::Http { url, headers, .. } => {
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), "http".into());
             obj.insert("url".into(), serde_json::Value::String(url.clone()));
@@ -2307,7 +2314,7 @@ async fn run_list(analytics_bus: Option<&Arc<telemetry::AnalyticsBus>>) -> i32 {
     println!("Checking MCP server health\u{2026}");
     println!();
 
-    let transport: std::sync::Arc<dyn platform_api::McpTransport> =
+    let transport: std::sync::Arc<dyn lingxi_core::host::McpTransport> =
         std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
     let registry = mcp::McpRegistry::new(transport);
 
@@ -2401,7 +2408,7 @@ async fn run_get(a: &GetArgs, analytics_bus: Option<&Arc<telemetry::AnalyticsBus
             println!("  Issue: {issue}");
         }
     } else {
-        let transport: std::sync::Arc<dyn platform_api::McpTransport> =
+        let transport: std::sync::Arc<dyn lingxi_core::host::McpTransport> =
             std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
         let registry = mcp::McpRegistry::new(transport);
         let (status, issue) = probe_server_health(&registry, cfg).await;
@@ -2411,7 +2418,7 @@ async fn run_get(a: &GetArgs, analytics_bus: Option<&Arc<telemetry::AnalyticsBus
         }
     }
     match &cfg.spec {
-        platform_api::McpTransportSpec::Stdio { command, args, env } => {
+        lingxi_core::host::McpTransportSpec::Stdio { command, args, env } => {
             println!("  Type: stdio");
             println!("  Command: {command}");
             println!("  Args: {}", args.join(" "));
@@ -2422,11 +2429,11 @@ async fn run_get(a: &GetArgs, analytics_bus: Option<&Arc<telemetry::AnalyticsBus
                 println!("    {k}={}", env[k]);
             }
         }
-        platform_api::McpTransportSpec::Sse { url, .. } => {
+        lingxi_core::host::McpTransportSpec::Sse { url, .. } => {
             println!("  Type: sse");
             println!("  URL: {url}");
         }
-        platform_api::McpTransportSpec::Http { url, .. } => {
+        lingxi_core::host::McpTransportSpec::Http { url, .. } => {
             println!("  Type: http");
             println!("  URL: {url}");
         }
@@ -2597,10 +2604,12 @@ fn diagnostic_row_survives(
     match w.scope {
         // A user-scope server is overridden by an APPROVED project server
         // (`gKy`) or a local one.
-        ConfigScope::Settings(protocol::SettingsScope::User) => {
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => {
             !approved_project.contains(name) && !local_names.contains(name)
         }
-        ConfigScope::Settings(protocol::SettingsScope::Project) => !local_names.contains(name),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => {
+            !local_names.contains(name)
+        }
         _ => true,
     }
 }
@@ -2660,9 +2669,9 @@ fn print_config_diagnostics(suppress_warnings: bool) {
 
     let mut printed_header = false;
     for scope in [
-        ConfigScope::Settings(protocol::SettingsScope::User),
-        ConfigScope::Settings(protocol::SettingsScope::Project),
-        ConfigScope::Settings(protocol::SettingsScope::Local),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
     ] {
         let rows: Vec<&McpConfigWarning> = warnings
             .iter()
@@ -2712,7 +2721,7 @@ fn print_config_diagnostics(suppress_warnings: bool) {
 /// [`mcp::json_config::load_mcp_servers`] and never require approval) must NOT be
 /// mislabelled pending nor have its details hidden.
 fn is_pending_project_server(cfg: &mcp::connection::McpServerConfig, pending: &[String]) -> bool {
-    cfg.scope == ConfigScope::Settings(protocol::SettingsScope::Project)
+    cfg.scope == ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         && pending.iter().any(|n| n == &cfg.name)
 }
 
@@ -2722,7 +2731,7 @@ fn is_pending_project_server(cfg: &mcp::connection::McpServerConfig, pending: &[
 /// takes precedence in the loaded view and never requires approval) must NOT
 /// be suppressed or labelled rejected.
 fn is_rejected_project_server(cfg: &mcp::connection::McpServerConfig, rejected: &[String]) -> bool {
-    cfg.scope == ConfigScope::Settings(protocol::SettingsScope::Project)
+    cfg.scope == ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
         && rejected.iter().any(|n| n == &cfg.name)
 }
 
@@ -2819,7 +2828,7 @@ fn project_mcp_server_entries_at(project_dir: &Path) -> Vec<(String, serde_json:
     let path = nearest_project_mcp_json(project_dir);
     let Ok(raw) = mcp::config_diagnostics::read_mcp_config_file(
         &path,
-        ConfigScope::Settings(protocol::SettingsScope::Project),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
     ) else {
         return Vec::new();
     };
@@ -2837,7 +2846,7 @@ fn project_mcp_server_entries_at(project_dir: &Path) -> Vec<(String, serde_json:
     };
     let Ok(valid_servers) = mcp::json_config::parse_mcp_json_string(
         &raw,
-        ConfigScope::Settings(protocol::SettingsScope::Project),
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
     ) else {
         return Vec::new();
     };
@@ -3013,18 +3022,18 @@ fn scope_contains_server(name: &str, scope: WritableScope) -> bool {
 
 /// One-line transport summary for `list` (e.g. `echo hello`,
 /// `https://x/mcp (HTTP)`).
-fn transport_summary(spec: &platform_api::McpTransportSpec) -> String {
+fn transport_summary(spec: &lingxi_core::host::McpTransportSpec) -> String {
     match spec {
-        platform_api::McpTransportSpec::Stdio { command, args, .. } => {
+        lingxi_core::host::McpTransportSpec::Stdio { command, args, .. } => {
             // Unconditional `{command} {args}`, matching the oracle — an
             // argless stdio server renders WITH a trailing space
             // (`mock_stdio_mcp  - ✘ …`). Special-casing the empty-args case to
             // trim it looks tidier and is a byte divergence.
             format!("{command} {}", args.join(" "))
         }
-        platform_api::McpTransportSpec::Sse { url, .. } => format!("{url} (SSE)"),
-        platform_api::McpTransportSpec::Http { url, .. } => format!("{url} (HTTP)"),
-        platform_api::McpTransportSpec::WebSocket { url, .. } => format!("{url} (WebSocket)"),
+        lingxi_core::host::McpTransportSpec::Sse { url, .. } => format!("{url} (SSE)"),
+        lingxi_core::host::McpTransportSpec::Http { url, .. } => format!("{url} (HTTP)"),
+        lingxi_core::host::McpTransportSpec::WebSocket { url, .. } => format!("{url} (WebSocket)"),
         other => other.kind().to_string(),
     }
 }
@@ -3032,13 +3041,13 @@ fn transport_summary(spec: &platform_api::McpTransportSpec) -> String {
 /// Human label for `get`'s `WritableScope:` line (matches claude's wording).
 fn scope_detail(scope: ConfigScope) -> &'static str {
     match scope {
-        ConfigScope::Settings(protocol::SettingsScope::Local) => {
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Local) => {
             "Local config (private to you in this project)"
         }
-        ConfigScope::Settings(protocol::SettingsScope::User) => {
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => {
             "User config (available in all your projects)"
         }
-        ConfigScope::Settings(protocol::SettingsScope::Project) => {
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => {
             "Project config (shared via .mcp.json)"
         }
         ConfigScope::Dynamic => "Dynamic",
@@ -3046,16 +3055,16 @@ fn scope_detail(scope: ConfigScope) -> &'static str {
         ConfigScope::Agent => "Agent config (from agent frontmatter)",
         ConfigScope::Enterprise => "Enterprise managed config",
         ConfigScope::ClaudeAi => "claude.ai connector",
-        ConfigScope::Settings(protocol::SettingsScope::Managed) => "Managed config",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed) => "Managed config",
     }
 }
 
 /// The `-s <scope>` flag label used in `get`'s "To remove …" hint.
 fn scope_flag_label(scope: ConfigScope) -> &'static str {
     match scope {
-        ConfigScope::Settings(protocol::SettingsScope::Local) => "local",
-        ConfigScope::Settings(protocol::SettingsScope::User) => "user",
-        ConfigScope::Settings(protocol::SettingsScope::Project) => "project",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Local) => "local",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => "user",
+        ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => "project",
         // Non-writable scopes have no remove flag; default to local for the hint.
         _ => "local",
     }
@@ -3548,7 +3557,7 @@ fn print_file_modified(scope: WritableScope, path: &std::path::Path) {
 
 #[cfg(test)]
 mod transport_summary_tests {
-    use platform_api::McpTransportSpec;
+    use lingxi_core::host::McpTransportSpec;
 
     #[test]
     fn argless_stdio_keeps_the_oracle_trailing_space() {
@@ -3958,7 +3967,7 @@ mod pending_approval_tests {
     fn stdio(name: &str, scope: ConfigScope) -> McpServerConfig {
         McpServerConfig {
             name: name.to_string(),
-            spec: platform_api::McpTransportSpec::Stdio {
+            spec: lingxi_core::host::McpTransportSpec::Stdio {
                 command: "srv".into(),
                 args: vec![],
                 env: HashMap::new(),
@@ -3993,7 +4002,7 @@ mod pending_approval_tests {
     fn unapproved_project_server_is_pending() {
         let cfg = stdio(
             "repo-srv",
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let pending = vec!["repo-srv".to_string()];
         assert!(is_pending_project_server(&cfg, &pending));
@@ -4005,7 +4014,7 @@ mod pending_approval_tests {
     fn approved_project_server_is_not_pending() {
         let cfg = stdio(
             "repo-srv",
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let pending: Vec<String> = vec![]; // approved ⇒ absent from pending
         assert!(!is_pending_project_server(&cfg, &pending));
@@ -4053,7 +4062,7 @@ mod pending_approval_tests {
         // And the loaded project server would now be flagged pending.
         let cfg = stdio(
             "repo-srv",
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
         assert!(is_pending_project_server(&cfg, &["repo-srv".to_string()]));
     }
@@ -4494,8 +4503,8 @@ mod pending_approval_tests {
     fn same_named_user_or_local_server_is_never_pending() {
         let pending = vec!["srv".to_string()];
         for scope in [
-            ConfigScope::Settings(protocol::SettingsScope::User),
-            ConfigScope::Settings(protocol::SettingsScope::Local),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
         ] {
             let cfg = stdio("srv", scope);
             assert!(
@@ -4527,9 +4536,9 @@ mod pending_approval_tests {
     fn unconnectable_status_splits_unconfigured_from_invalid_config() {
         const CONFIG_ERROR: &str = "'url' \"${VAR:-}\" expanded to an empty string. Set the referenced environment variable, or update the server's config and reconnect.";
 
-        let http = |url: &str| platform_api::McpTransportSpec::Http {
+        let http = |url: &str| lingxi_core::host::McpTransportSpec::Http {
             url: url.to_string(),
-            headers: platform_api::McpHeaders::default(),
+            headers: lingxi_core::host::McpHeaders::default(),
             headers_helper: None,
             oauth: None,
         };
@@ -4537,7 +4546,7 @@ mod pending_approval_tests {
         // `zar`: blank url, no configError.
         let mut blank = stdio(
             "blank",
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
         blank.spec = http("   ");
         assert_eq!(
@@ -4548,7 +4557,7 @@ mod pending_approval_tests {
         // configError: the failed branch WITH the issue text.
         let mut broken = stdio(
             "broken",
-            ConfigScope::Settings(protocol::SettingsScope::Project),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
         );
         broken.spec = http("${VAR:-}");
         broken.config_error = Some(CONFIG_ERROR.to_string());
@@ -4562,7 +4571,7 @@ mod pending_approval_tests {
         assert_eq!(
             unconnectable_status(&stdio(
                 "ok",
-                ConfigScope::Settings(protocol::SettingsScope::User)
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
             )),
             None
         );
@@ -4579,7 +4588,7 @@ mod pending_approval_tests {
             listed_servers(
                 vec![stdio(
                     "repo-srv",
-                    ConfigScope::Settings(protocol::SettingsScope::Project)
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
                 )],
                 &rejected
             )
@@ -4591,7 +4600,7 @@ mod pending_approval_tests {
             listed_servers(
                 vec![stdio(
                     "repo-srv",
-                    ConfigScope::Settings(protocol::SettingsScope::User)
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::User)
                 )],
                 &rejected
             )
@@ -4603,11 +4612,11 @@ mod pending_approval_tests {
             vec![
                 stdio(
                     "repo-srv",
-                    ConfigScope::Settings(protocol::SettingsScope::Project),
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 ),
                 stdio(
                     "other",
-                    ConfigScope::Settings(protocol::SettingsScope::Project),
+                    ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
                 ),
             ],
             &rejected,
@@ -4624,7 +4633,7 @@ mod pending_approval_tests {
         use mcp::config_diagnostics::{McpConfigSeverity, McpConfigWarning};
 
         let row = |severity, server: Option<&str>| McpConfigWarning {
-            scope: ConfigScope::Settings(protocol::SettingsScope::User),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
             severity,
             server_name: server.map(ToString::to_string),
             path: String::new(),
@@ -4659,7 +4668,7 @@ mod pending_approval_tests {
         use mcp::config_diagnostics::{McpConfigSeverity, McpConfigWarning};
 
         let warning = McpConfigWarning {
-            scope: ConfigScope::Settings(protocol::SettingsScope::Project),
+            scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Project),
             severity: McpConfigSeverity::Warning,
             server_name: Some("docs".into()),
             path: "mcpServers.docs".into(),
@@ -4714,13 +4723,13 @@ mod pending_approval_tests {
         assert!(is_rejected_project_server(
             &stdio(
                 "srv",
-                ConfigScope::Settings(protocol::SettingsScope::Project)
+                ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)
             ),
             &rejected
         ));
         for scope in [
-            ConfigScope::Settings(protocol::SettingsScope::User),
-            ConfigScope::Settings(protocol::SettingsScope::Local),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::Local),
         ] {
             assert!(
                 !is_rejected_project_server(&stdio("srv", scope), &rejected),
@@ -4737,14 +4746,14 @@ mod pending_approval_tests {
     async fn config_error_server_is_not_dialed() {
         let mut cfg = stdio(
             "broken",
-            ConfigScope::Settings(protocol::SettingsScope::User),
+            ConfigScope::Settings(lingxi_core::types::SettingsScope::User),
         );
         cfg.config_error = Some(
             "'url' \"${X}\" expanded to an empty string. Set the referenced \
              environment variable, or update the server's config and reconnect."
                 .to_string(),
         );
-        let transport: std::sync::Arc<dyn platform_api::McpTransport> =
+        let transport: std::sync::Arc<dyn lingxi_core::host::McpTransport> =
             std::sync::Arc::new(platform_posix::PosixMcpTransport::new());
         let registry = mcp::McpRegistry::new(transport);
         let err = registry.connect(cfg.clone()).await.unwrap_err();

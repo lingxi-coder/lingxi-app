@@ -1,7 +1,7 @@
 package com.lingxi.code.settings
 
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.conversation.ConversationSource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
@@ -41,7 +41,7 @@ class DesktopSettingsContractTest {
         val rules = commands.filterIsInstance<ClientCommand.UpdatePermissionRules>().single()
         assertEquals(listOf("Bash(ls)"),rules.add)
         assertEquals(listOf("Write"),rules.remove)
-        assertEquals(com.lingxi.code.bindings.WritableScopeDto.PROJECT,rules.destination)
+        assertEquals(com.lingxi.code.bindings.client.WritableScopeDto.PROJECT,rules.destination)
         assertEquals("plan",commands.filterIsInstance<ClientCommand.SetDefaultPermissionMode>().single().mode)
         assertEquals(listOf("/tmp/work"),commands.filterIsInstance<ClientCommand.UpdateWorkspaceDirectories>().single().add)
     }
@@ -81,11 +81,11 @@ class DesktopSettingsContractTest {
         assertEquals("project",command.command.scope)
         assertEquals("original",command.command.revision)
         val id = bridge.state.value.pending!!
-        bridge.accept(ClientEvent.ConfigurationOperation(com.lingxi.code.bindings.ConfigurationDomainDto.MCP,id,
-            com.lingxi.code.bindings.ConfigurationOperationStatusDto.STARTED,com.lingxi.code.bindings.ConfigurationEffectDto.NOT_APPLICABLE,null,null))
+        bridge.accept(ClientEvent.ConfigurationOperation(com.lingxi.code.bindings.client.ConfigurationDomainDto.MCP,id,
+            com.lingxi.code.bindings.client.ConfigurationOperationStatusDto.STARTED,com.lingxi.code.bindings.client.ConfigurationEffectDto.NOT_APPLICABLE,null,null))
         assertEquals(id,bridge.state.value.pending)
-        bridge.accept(ClientEvent.ConfigurationOperation(com.lingxi.code.bindings.ConfigurationDomainDto.MCP,id,
-            com.lingxi.code.bindings.ConfigurationOperationStatusDto.SUCCEEDED,com.lingxi.code.bindings.ConfigurationEffectDto.APPLIED,"Saved",null))
+        bridge.accept(ClientEvent.ConfigurationOperation(com.lingxi.code.bindings.client.ConfigurationDomainDto.MCP,id,
+            com.lingxi.code.bindings.client.ConfigurationOperationStatusDto.SUCCEEDED,com.lingxi.code.bindings.client.ConfigurationEffectDto.APPLIED,"Saved",null))
         assertNull(bridge.state.value.pending)
         assertTrue(bridge.state.value.notice!!.contains("SUCCEEDED"))
     }

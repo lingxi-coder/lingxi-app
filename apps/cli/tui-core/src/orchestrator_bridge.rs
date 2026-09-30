@@ -1,6 +1,6 @@
 //! Orchestrator → TUI event bridge. (M6-03)
 //!
-//! The `BridgeOutputStream` is an [`platform_api::OutputStream`] impl that
+//! The `BridgeOutputStream` is an [`lingxi_core::host::OutputStream`] impl that
 //! forwards every orchestrator callback as a [`TurnEvent`] on an mpsc
 //! channel. The TUI render loop drains the receiver and feeds events into
 //! `crate::streaming::apply_event`, which mutates `AppState` and pokes a
@@ -17,7 +17,7 @@
 //! 5. On `emit_end_turn` the bridge fires `TurnEvent::TurnEnded(_)`.
 
 use async_trait::async_trait;
-use platform_api::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
+use lingxi_core::host::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
@@ -28,7 +28,7 @@ use tokio::sync::mpsc::UnboundedSender;
 #[derive(Debug, Clone)]
 pub struct ToolHeartbeatUpdate {
     /// Stable tool-use identifier.
-    pub id: protocol::ToolUseId,
+    pub id: lingxi_core::types::ToolUseId,
     /// Tool name used by the activity renderer.
     pub tool: String,
     /// Latest elapsed wall time in milliseconds.
@@ -133,9 +133,9 @@ pub struct RunningAgentStatus {
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
     /// Bind the just-completed assistant response to its transcript identity.
-    MessageIdentity(protocol::MessageId),
+    MessageIdentity(lingxi_core::types::MessageId),
     /// Remove only the assistant response with this transcript identity.
-    MessageRetracted(protocol::MessageId),
+    MessageRetracted(lingxi_core::types::MessageId),
     /// Model selection confirmed by the live orchestrator.
     ModelChanged {
         /// Provider-local model identifier.
@@ -149,14 +149,14 @@ pub enum TurnEvent {
     TextDelta(String),
     /// A completed assistant thinking block (M5 live streaming). The
     /// orchestrator's `emit_thinking` fires once per COMPLETED block (not
-    /// per-delta — see `platform_api::OutputStream::emit_thinking`), so one event
+    /// per-delta — see `lingxi_core::host::OutputStream::emit_thinking`), so one event
     /// carries the whole reasoning text.
     ThinkingDelta(String),
     /// A tool invocation is about to dispatch.
     ToolUseStart {
         /// Stable id (the model-supplied `tool_use_id`) — correlates with
         /// the matching `ToolUseResult`.
-        id: protocol::ToolUseId,
+        id: lingxi_core::types::ToolUseId,
         /// Name of the tool being invoked.
         tool: String,
         /// JSON input passed to the tool.
@@ -167,7 +167,7 @@ pub enum TurnEvent {
     /// history.
     ToolHeartbeat {
         /// Stable id of the running tool call.
-        id: protocol::ToolUseId,
+        id: lingxi_core::types::ToolUseId,
         /// Tool name, retained so stateless clients can render the update.
         tool: String,
         /// Wall-clock age of the tool invocation in milliseconds.
@@ -196,7 +196,7 @@ pub enum TurnEvent {
     /// A tool result has returned.
     ToolUseResult {
         /// Correlator with the paired `ToolUseStart`.
-        id: protocol::ToolUseId,
+        id: lingxi_core::types::ToolUseId,
         /// Tool name (used to gate Bash → ANSI parser at render time).
         tool: String,
         /// JSON result payload.
@@ -215,7 +215,7 @@ pub enum TurnEvent {
     TurnStarted,
     /// A host-started turn (for example, a teammate message waking the leader)
     /// carries its cancellation token because no composer submit created one.
-    TurnStartedWithCancel(platform_api::CancellationToken),
+    TurnStartedWithCancel(lingxi_core::host::CancellationToken),
     /// Fired when the orchestrator returns. Carries the [`TurnOutcome`].
     TurnEnded(TurnOutcome),
     /// Updated session-cumulative cost, formatted as `$0.0000` (4-decimal
@@ -271,7 +271,7 @@ pub enum TurnEvent {
         summary: String,
     },
     /// Unified rate-limit header snapshot (llm-runtime future-work batch 3,
-    /// Task 9). Mirrors `platform_api::OutputEvent::RateLimit`'s nine fields —
+    /// Task 9). Mirrors `lingxi_core::host::OutputEvent::RateLimit`'s nine fields —
     /// see that variant's per-field docs for the
     /// `anthropic-ratelimit-unified-*` header each value comes from. The
     /// orchestrator emits on-change only; `apply_event` additionally dedupes
@@ -299,11 +299,11 @@ pub enum TurnEvent {
         /// a list; `None` when the header is absent or empty.
         upgrade_paths: Option<Vec<String>>,
         /// 2.1.206 `credits_required` derivation — see
-        /// `platform_api::OutputEvent::RateLimit::credits_required`.
+        /// `lingxi_core::host::OutputEvent::RateLimit::credits_required`.
         credits_required: bool,
     },
     /// Raw per-window utilization snapshot (llm-runtime future-work batch 5,
-    /// Task 4). Mirrors `platform_api::OutputEvent::RawUtilization`'s four fields —
+    /// Task 4). Mirrors `lingxi_core::host::OutputEvent::RawUtilization`'s four fields —
     /// tracked on every API response (unlike the warning-gated
     /// [`Self::RateLimit`]) and stored on `AppState.raw_utilization` for the
     /// statusline command input's `rate_limits` field (`StatusLine.tsx:50-65`).
@@ -434,11 +434,11 @@ impl BridgeOutputStream {
 
 #[async_trait]
 impl OutputStream for BridgeOutputStream {
-    async fn emit_assistant_message_identity(&self, message_id: &protocol::MessageId) {
+    async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
         let _ = self.tx.send(TurnEvent::MessageIdentity(*message_id));
     }
 
-    async fn emit_message_retracted(&self, message_id: &protocol::MessageId) {
+    async fn emit_message_retracted(&self, message_id: &lingxi_core::types::MessageId) {
         let _ = self.tx.send(TurnEvent::MessageRetracted(*message_id));
     }
 
@@ -475,9 +475,9 @@ impl OutputStream for BridgeOutputStream {
         });
     }
 
-    async fn emit_attachment(&self, attachment: platform_api::AttachmentKind) {
+    async fn emit_attachment(&self, attachment: lingxi_core::host::AttachmentKind) {
         let attachment = match attachment {
-            platform_api::AttachmentKind::NestedMemory { display_path } => {
+            lingxi_core::host::AttachmentKind::NestedMemory { display_path } => {
                 crate::message::Attachment::NestedMemory { display_path }
             }
             // Unmodelled kind: drop rather than guess a variant. Dropping draws
@@ -498,7 +498,7 @@ impl OutputStream for BridgeOutputStream {
 
     async fn emit_tool_call(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
     ) {
@@ -509,7 +509,12 @@ impl OutputStream for BridgeOutputStream {
         });
     }
 
-    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+    async fn emit_tool_heartbeat(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        elapsed_ms: u64,
+    ) {
         let update = ToolHeartbeatUpdate {
             id: id.clone(),
             tool: tool.to_string(),
@@ -553,7 +558,7 @@ impl OutputStream for BridgeOutputStream {
 
     async fn emit_tool_result(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         tool: &str,
         model_text: &str,
         result: &serde_json::Value,
@@ -662,7 +667,7 @@ impl OutputStream for BridgeOutputStream {
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "mirrors the trait method's eleven header-derived fields (see platform_api::OutputStream::emit_rate_limit)"
+        reason = "mirrors the trait method's eleven header-derived fields (see lingxi_core::host::OutputStream::emit_rate_limit)"
     )]
     async fn emit_rate_limit(
         &self,
@@ -717,7 +722,7 @@ mod tests {
     async fn assistant_identity_and_retraction_preserve_exact_id() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let stream = BridgeOutputStream::new(tx);
-        let id = protocol::MessageId::new();
+        let id = lingxi_core::types::MessageId::new();
         stream.emit_assistant_message_identity(&id).await;
         stream.emit_message_retracted(&id).await;
         assert!(
@@ -759,7 +764,7 @@ mod tests {
         // conversation…` progress UI never appears.
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        platform_api::OutputStream::emit_compaction_started(&bridge).await;
+        lingxi_core::host::OutputStream::emit_compaction_started(&bridge).await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::CompactPhase { phase } if phase == "preparing"));
     }
@@ -821,7 +826,7 @@ mod tests {
     async fn emit_tool_call_translates_to_tool_use_start() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         bridge
             .emit_tool_call(&id, "Read", &serde_json::json!({"file_path": "/tmp/x"}))
             .await;
@@ -868,7 +873,7 @@ mod tests {
     async fn emit_tool_heartbeat_translates_without_transcript_payload() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         bridge.emit_tool_heartbeat(&id, "Bash", 12_345).await;
         match rx.recv().await.unwrap() {
             TurnEvent::ToolHeartbeatBatch { heartbeats } => {
@@ -890,7 +895,7 @@ mod tests {
     async fn tool_heartbeats_coalesce_under_consumer_backpressure() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
 
         bridge.emit_tool_heartbeat(&id, "Bash", 1_000).await;
         bridge.emit_tool_heartbeat(&id, "Bash", 2_000).await;
@@ -909,7 +914,7 @@ mod tests {
     async fn emit_end_turn_endturn_reason_translates_to_endturn() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = platform_api::CostSnapshot::default();
+        let cost = lingxi_core::host::CostSnapshot::default();
         bridge.emit_end_turn("end_turn", &cost).await;
         // M6-06: emit_end_turn now precedes TurnEnded with a CostUpdated event.
         assert!(matches!(
@@ -930,7 +935,7 @@ mod tests {
     async fn emit_end_turn_max_tokens_translates_to_maxturns() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = platform_api::CostSnapshot::default();
+        let cost = lingxi_core::host::CostSnapshot::default();
         bridge.emit_end_turn("max_tokens", &cost).await;
         assert!(matches!(
             rx.recv().await.unwrap(),
@@ -950,9 +955,9 @@ mod tests {
     async fn emit_end_turn_formats_real_cost_4dp() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = platform_api::CostSnapshot {
+        let cost = lingxi_core::host::CostSnapshot {
             total_usd: 0.0234,
-            ..platform_api::CostSnapshot::default()
+            ..lingxi_core::host::CostSnapshot::default()
         };
         bridge.emit_end_turn("end_turn", &cost).await;
         match rx.recv().await.unwrap() {
@@ -1031,10 +1036,10 @@ mod tests {
         let bridge = BridgeOutputStream::new(tx);
         bridge
             .emit_context_pressure(
-                Some(platform_api::ContextPressureBanner {
+                Some(lingxi_core::host::ContextPressureBanner {
                     text: "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
                         .into(),
-                    level: platform_api::ContextPressureLevel::Error,
+                    level: lingxi_core::host::ContextPressureLevel::Error,
                 }),
                 0.92,
                 184_000,
@@ -1052,7 +1057,7 @@ mod tests {
                     b.text,
                     "Context low (8% remaining) \u{00b7} Run /compact to compact & continue"
                 );
-                assert_eq!(b.level, platform_api::ContextPressureLevel::Error);
+                assert_eq!(b.level, lingxi_core::host::ContextPressureLevel::Error);
                 assert!((used_fraction - 0.92).abs() < 1e-6);
                 assert_eq!(used_tokens, 184_000);
                 assert_eq!(context_window_tokens, 200_000);

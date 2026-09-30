@@ -1,7 +1,7 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.AskUserQuestionRequestDto
-import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.client.AskUserQuestionRequestDto
+import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.SessionRef

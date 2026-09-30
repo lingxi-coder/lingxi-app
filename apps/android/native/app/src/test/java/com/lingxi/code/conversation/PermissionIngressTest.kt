@@ -1,8 +1,8 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.AutoModePromptDto
-import com.lingxi.code.bindings.PermissionKindDto
-import com.lingxi.code.bindings.PermissionRequest
+import com.lingxi.code.bindings.client.AutoModePromptDto
+import com.lingxi.code.bindings.client.PermissionKindDto
+import com.lingxi.code.bindings.client.PermissionRequest
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Test

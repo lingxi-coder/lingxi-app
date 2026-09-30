@@ -1,7 +1,7 @@
 //! Host half of the supervised-shell ownership transaction.
 use crate::background_launch::{self, ShellHandoffAck};
-use platform_api::shell_handoff::ShellTaskHandoff;
-use platform_api::task_registry::TaskRegistryHandle;
+use lingxi_core::host::shell_handoff::ShellTaskHandoff;
+use lingxi_core::host::task_registry::TaskRegistryHandle;
 use std::path::Path;
 
 fn ack(ids: Vec<String>, error: Option<String>) -> ShellHandoffAck {
@@ -398,7 +398,7 @@ mod tests {
             "first storage error cannot terminate the destination owner"
         );
     }
-    use platform_api::task_registry::*;
+    use lingxi_core::host::task_registry::*;
     struct Registry {
         source: bool,
         fail_adopt: bool,
@@ -494,7 +494,7 @@ mod tests {
             cwd: None,
             caller: Some("turn".into()),
             output_offset: 12,
-            process: platform_api::process::ShellProcessHandoff {
+            process: lingxi_core::host::process::ShellProcessHandoff {
                 supervisor_directory_identity: None,
                 output_root_identity: None,
                 output_file_identity: None,

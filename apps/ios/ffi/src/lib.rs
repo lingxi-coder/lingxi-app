@@ -1,8 +1,8 @@
 //! `ios-framework` (M8-P12 → M10-F3) — the iOS `UniFFI` packager.
 //!
 //! This crate is the FFI boundary between the Rust engine and the iOS app. The
-//! Swift layer implements the unified [`platform_api::AudioService`] plus the
-//! [`platform_api::CameraControl`] / [`platform_api::SharingService`] callbacks
+//! Swift layer implements the unified [`lingxi_core::host::AudioService`] plus the
+//! [`lingxi_core::host::CameraControl`] / [`lingxi_core::host::SharingService`] callbacks
 //! (see the skeletons under `swift/`), hands them across as a [`PlatformImpls`] record, and Rust uses
 //! them to construct an `IosPlatform` and assemble the mobile engine — so Rust
 //! drives the device's native capabilities by calling *back* into Swift. That
@@ -255,7 +255,7 @@ mod mobile_linux_sdk;
 #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
 mod stub_capabilities {
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, ShareError, SharePayload,
         ShareResult, SharingService,
     };

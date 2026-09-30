@@ -19,7 +19,7 @@ private const val TAG = "CameraController"
 /**
  * Result of one native capture/pick, already encoded to JPEG + measured.
  *
- * Mirrors the `CapturedImageFfi` carrier the [com.lingxi.code.bindings.AndroidCamera]
+ * Mirrors the `CapturedImageFfi` carrier the [com.lingxi.code.bindings.android.AndroidCamera]
  * seam expects, but keeps the controller free of any bindings import so it can be
  * unit-tested / reused without the cdylib.
  */
@@ -46,7 +46,7 @@ class CameraException(val failure: CameraFailure) : Exception(
 )
 
 /**
- * Process-global bridge between the (Rust-driven) [com.lingxi.code.bindings.AndroidCamera]
+ * Process-global bridge between the (Rust-driven) [com.lingxi.code.bindings.android.AndroidCamera]
  * callback interface and the `ActivityResult` launchers, which can only be
  * registered against a live [androidx.activity.ComponentActivity].
  *

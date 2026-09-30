@@ -78,7 +78,11 @@ test('Fusion model menus stay bounded and support scrolling, keyboard, and upwar
     for (const key of ['searchName', 'searchId', 'searchProvider', 'empty']) assert.equal(result[key], true, key);
     assert.equal(result.escapeClosed, true);
     assert.equal(result.focusReturned, true);
-    assert.equal(result.opensUpward, true);
+    const placement = result.upwardPlacement;
+    assert.ok(placement.spaceBelow < placement.menuHeight, 'the analyst menu cannot fit below its trigger');
+    assert.ok(placement.menuHeight > 100, 'upward placement must keep a usable model list');
+    assert.ok(placement.menuTop >= 12, 'the upward menu stays inside the viewport');
+    assert.ok(placement.menuBottom <= placement.triggerTop, 'the analyst menu opens above its trigger');
 
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');

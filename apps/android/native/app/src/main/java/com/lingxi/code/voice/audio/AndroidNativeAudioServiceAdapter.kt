@@ -1,17 +1,17 @@
 package com.lingxi.code.voice.audio
 
 import android.content.Context
-import com.lingxi.code.bindings.AndroidAudioFfiException
-import com.lingxi.code.bindings.AndroidAudioService
-import com.lingxi.code.bindings.AudioCapabilitySnapshotDto
-import com.lingxi.code.bindings.AudioErrorKindDto
-import com.lingxi.code.bindings.AudioOperationDto
-import com.lingxi.code.bindings.AudioOperationKindDto
-import com.lingxi.code.bindings.AudioOperationReadinessDto
-import com.lingxi.code.bindings.AudioOperationRequestDto
-import com.lingxi.code.bindings.AudioOperationResultDto
-import com.lingxi.code.bindings.AudioOwnerDto
-import com.lingxi.code.bindings.AudioReadinessStateDto
+import com.lingxi.code.bindings.android.AndroidAudioFfiException
+import com.lingxi.code.bindings.android.AndroidAudioService
+import com.lingxi.code.bindings.client.AudioCapabilitySnapshotDto
+import com.lingxi.code.bindings.client.AudioErrorKindDto
+import com.lingxi.code.bindings.client.AudioOperationDto
+import com.lingxi.code.bindings.client.AudioOperationKindDto
+import com.lingxi.code.bindings.client.AudioOperationReadinessDto
+import com.lingxi.code.bindings.client.AudioOperationRequestDto
+import com.lingxi.code.bindings.client.AudioOperationResultDto
+import com.lingxi.code.bindings.client.AudioOwnerDto
+import com.lingxi.code.bindings.client.AudioReadinessStateDto
 import kotlinx.coroutines.CancellationException
 import java.util.UUID
 
@@ -46,7 +46,7 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
         ).let { AndroidAudioResultDtoMapper.toDto(it, maxPayloadBytes) }
     }
 
-    override suspend fun cancel(identity: com.lingxi.code.bindings.AudioOperationIdDto) {
+    override suspend fun cancel(identity: com.lingxi.code.bindings.client.AudioOperationIdDto) {
         val converted = identity.toIdentityOrNull()
             ?: throw AndroidAudioFfiException.NativeFailure("audio operation identity is invalid")
         try {
@@ -109,7 +109,7 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
 
     private fun failed(kind: AudioErrorKindDto, message: String) = AndroidAudioResultDtoMapper.failed(kind, message)
 
-    private fun com.lingxi.code.bindings.AudioOperationIdDto.toIdentityOrNull(): AudioOperationIdentity? {
+    private fun com.lingxi.code.bindings.client.AudioOperationIdDto.toIdentityOrNull(): AudioOperationIdentity? {
         if (generation > MAX_SAFE_INTEGER_ULONG || serviceEpoch > MAX_SAFE_INTEGER_ULONG) return null
         if (id.isBlank() || runCatching { UUID.fromString(id).version() }.getOrNull() != 4) return null
         return AudioOperationIdentity(id, generation.toLong(), serviceEpoch.toLong())

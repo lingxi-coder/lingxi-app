@@ -41,10 +41,11 @@ use crossterm::terminal::Clear as CtClear;
 use crossterm::terminal::ClearType as CtClearType;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
-use ratatui::backend::Backend;
 use ratatui::backend::ClearType;
+use ratatui::backend::{Backend, IntoCrossterm};
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Position;
 use ratatui::layout::Rect;
 use ratatui::layout::Size;
@@ -257,7 +258,7 @@ impl Frame<'_> {
 /// A double-buffered terminal whose viewport is an absolute on-screen rect.
 pub struct Terminal<B>
 where
-    B: Backend + Write,
+    B: Backend<Error = io::Error> + Write,
 {
     backend: B,
     buffers: [Buffer; 2],
@@ -274,7 +275,7 @@ where
 
 impl<B> Drop for Terminal<B>
 where
-    B: Backend + Write,
+    B: Backend<Error = io::Error> + Write,
 {
     fn drop(&mut self) {
         let _ = self.reset_cursor_style();
@@ -289,7 +290,7 @@ where
 
 impl<B> Terminal<B>
 where
-    B: Backend + Write,
+    B: Backend<Error = io::Error> + Write,
 {
     /// Build a terminal, probing the backend for its size + current cursor
     /// position (the initial viewport anchor).
@@ -755,7 +756,7 @@ where
         let buf = self.previous_buffer_mut();
         buf.reset();
         for cell in &mut buf.content {
-            cell.set_skip(true);
+            cell.set_diff_option(CellDiffOption::Skip);
         }
     }
 
@@ -859,12 +860,14 @@ fn write_history_line<W: Write>(
     queue!(
         writer,
         SetColors(Colors::new(
-            line.style
-                .fg
-                .map_or(crossterm::style::Color::Reset, Into::into),
-            line.style
-                .bg
-                .map_or(crossterm::style::Color::Reset, Into::into),
+            line.style.fg.map_or(
+                crossterm::style::Color::Reset,
+                IntoCrossterm::into_crossterm
+            ),
+            line.style.bg.map_or(
+                crossterm::style::Color::Reset,
+                IntoCrossterm::into_crossterm
+            ),
         ))
     )?;
     queue!(writer, CtClear(CtClearType::UntilNewLine))?;
@@ -907,7 +910,13 @@ where
             span.style.bg.unwrap_or(Color::Reset),
         );
         if next != (fg, bg) {
-            queue!(writer, SetColors(Colors::new(next.0.into(), next.1.into())))?;
+            queue!(
+                writer,
+                SetColors(Colors::new(
+                    next.0.into_crossterm(),
+                    next.1.into_crossterm()
+                ))
+            )?;
             (fg, bg) = next;
         }
         queue!(writer, Print(span.content.clone()))?;
@@ -963,7 +972,12 @@ fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
     let mut invalidated: usize = 0;
     let mut to_skip: usize = 0;
     for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
-        if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
+        if current.diff_option != CellDiffOption::Skip
+            && (current != previous
+                || invalidated > 0
+                || current.diff_option == CellDiffOption::AlwaysUpdate)
+            && to_skip == 0
+        {
             let (x, y) = a.pos_of(i);
             let row = i / a.area.width as usize;
             if x <= last_nonblank_columns[row] {
@@ -1010,7 +1024,10 @@ where
                 if cell.fg != fg || cell.bg != bg {
                     queue!(
                         writer,
-                        SetColors(Colors::new(cell.fg.into(), cell.bg.into()))
+                        SetColors(Colors::new(
+                            cell.fg.into_crossterm(),
+                            cell.bg.into_crossterm()
+                        ))
                     )?;
                     fg = cell.fg;
                     bg = cell.bg;
@@ -1020,7 +1037,7 @@ where
             DrawCommand::ClearToEnd { bg: clear_bg, .. } => {
                 queue!(writer, SetAttribute(crossterm::style::Attribute::Reset))?;
                 modifier = Modifier::empty();
-                queue!(writer, SetBackgroundColor(clear_bg.into()))?;
+                queue!(writer, SetBackgroundColor(clear_bg.into_crossterm()))?;
                 bg = clear_bg;
                 queue!(writer, CtClear(CtClearType::UntilNewLine))?;
             }
@@ -1150,51 +1167,58 @@ pub(crate) mod test_support {
     }
 
     impl Backend for TestWriteBackend {
+        type Error = io::Error;
         fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
         where
             I: Iterator<Item = (u16, u16, &'a Cell)>,
         {
-            self.inner.draw(content)
+            self.inner.draw(content).map_err(|never| match never {})
         }
 
         fn hide_cursor(&mut self) -> io::Result<()> {
-            self.inner.hide_cursor()
+            self.inner.hide_cursor().map_err(|never| match never {})
         }
 
         fn show_cursor(&mut self) -> io::Result<()> {
-            self.inner.show_cursor()
+            self.inner.show_cursor().map_err(|never| match never {})
         }
 
         fn get_cursor_position(&mut self) -> io::Result<Position> {
-            self.inner.get_cursor_position()
+            self.inner
+                .get_cursor_position()
+                .map_err(|never| match never {})
         }
 
         fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
-            self.inner.set_cursor_position(position)
+            self.inner
+                .set_cursor_position(position)
+                .map_err(|never| match never {})
         }
 
         fn clear(&mut self) -> io::Result<()> {
-            self.inner.clear()
+            self.inner.clear().map_err(|never| match never {})
         }
 
         fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
-            self.inner.clear_region(clear_type)
+            self.inner
+                .clear_region(clear_type)
+                .map_err(|never| match never {})
         }
 
         fn append_lines(&mut self, n: u16) -> io::Result<()> {
-            self.inner.append_lines(n)
+            self.inner.append_lines(n).map_err(|never| match never {})
         }
 
         fn size(&self) -> io::Result<Size> {
-            self.inner.size()
+            self.inner.size().map_err(|never| match never {})
         }
 
         fn window_size(&mut self) -> io::Result<WindowSize> {
-            self.inner.window_size()
+            self.inner.window_size().map_err(|never| match never {})
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            Backend::flush(&mut self.inner)
+            Backend::flush(&mut self.inner).map_err(|never| match never {})
         }
 
         fn scroll_region_up(
@@ -1202,7 +1226,9 @@ pub(crate) mod test_support {
             region: std::ops::Range<u16>,
             line_count: u16,
         ) -> io::Result<()> {
-            self.inner.scroll_region_up(region, line_count)
+            self.inner
+                .scroll_region_up(region, line_count)
+                .map_err(|never| match never {})
         }
 
         fn scroll_region_down(
@@ -1210,7 +1236,9 @@ pub(crate) mod test_support {
             region: std::ops::Range<u16>,
             line_count: u16,
         ) -> io::Result<()> {
-            self.inner.scroll_region_down(region, line_count)
+            self.inner
+                .scroll_region_down(region, line_count)
+                .map_err(|never| match never {})
         }
     }
 }
@@ -1467,7 +1495,10 @@ mod tests {
         term.set_bottom_viewport_height(2).unwrap();
         term.invalidate_viewport();
         assert!(
-            term.previous_buffer().content.iter().all(|c| c.skip),
+            term.previous_buffer()
+                .content
+                .iter()
+                .all(|c| c.diff_option == CellDiffOption::Skip),
             "invalidate must mark every previous cell skip"
         );
 
@@ -1512,7 +1543,10 @@ mod tests {
         term.set_bottom_viewport_height(2).unwrap(); // shrink to 2 (same top)
 
         assert!(
-            term.previous_buffer().content.iter().all(|c| c.skip),
+            term.previous_buffer()
+                .content
+                .iter()
+                .all(|c| c.diff_option == CellDiffOption::Skip),
             "a viewport shrink must invalidate the previous buffer so blank \
              columns repaint (footer left-edge artifact)"
         );
@@ -1559,7 +1593,10 @@ mod tests {
         assert_eq!(term.last_known_screen_size, Size::new(120, 40));
         assert_eq!(term.viewport_area, Rect::new(0, 36, 120, 4));
         assert!(
-            term.previous_buffer().content.iter().all(|c| c.skip),
+            term.previous_buffer()
+                .content
+                .iter()
+                .all(|c| c.diff_option == CellDiffOption::Skip),
             "resize must invalidate the previous buffer so blank cells erase \
              stale footer/composer rows"
         );

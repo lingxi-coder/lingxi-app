@@ -1,16 +1,12 @@
 //! The `/fusion setup` reducer: candidate rows, wizard state, and the key
 //! handling — all pure, so the flow is testable without a terminal.
 //!
-//! Fusion runs three different kinds of call and each is configured separately
-//! (see [`platform_api::FusionModelRole`]). The wizard walks them in order and
-//! only then offers to save, because a half-written configuration is worse than
-//! none: the engine reports every missing role at once, and an operator who
-//! saved two of three would see the same "not configured" error they started
-//! with.
+//! Configure the panel roster and analyst together. The parent conversation
+//! synthesizes the panel and analyst results with its current model.
 
 use crossterm::event::KeyCode;
-use platform_api::fusion_setup::FusionModelRoles;
-use platform_api::{FusionModelChoice, FusionModelRole};
+use lingxi_core::host::fusion_setup::FusionModelRoles;
+use lingxi_core::host::{FusionModelChoice, FusionModelRole};
 
 /// One model the wizard can offer, derived from the session's live catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +65,7 @@ pub struct FusionSetupSnapshot {
 /// NEXT `/fusion setup` opens on, exactly like the `/web` snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FusionSettingsSnapshot {
-    /// The three configured roles.
+    /// The panel and analyst roles.
     pub roles: FusionModelRoles,
     /// `fusion.enabled`.
     pub enabled: bool,
@@ -112,8 +108,6 @@ pub enum FusionSetupStep {
     Panels,
     /// Pick the analyst.
     Analyst,
-    /// Pick the synthesizer.
-    Synthesizer,
     /// Review and save.
     Confirm,
 }
@@ -125,41 +119,38 @@ impl FusionSetupStep {
         match self {
             Self::Panels => Some(FusionModelRole::Panels),
             Self::Analyst => Some(FusionModelRole::Analyst),
-            Self::Synthesizer => Some(FusionModelRole::Synthesizer),
             Self::Confirm => None,
         }
     }
 
-    /// One-based step number, for the `Step n/4` header.
+    /// One-based step number, for the `Step n/3` header.
     #[must_use]
     pub const fn number(self) -> usize {
         match self {
             Self::Panels => 1,
             Self::Analyst => 2,
-            Self::Synthesizer => 3,
-            Self::Confirm => 4,
+            Self::Confirm => 3,
         }
     }
 
     const fn next(self) -> Self {
         match self {
             Self::Panels => Self::Analyst,
-            Self::Analyst => Self::Synthesizer,
-            Self::Synthesizer | Self::Confirm => Self::Confirm,
+            Self::Analyst => Self::Confirm,
+            Self::Confirm => Self::Confirm,
         }
     }
 
     const fn previous(self) -> Self {
         match self {
             Self::Panels | Self::Analyst => Self::Panels,
-            Self::Synthesizer => Self::Analyst,
-            Self::Confirm => Self::Synthesizer,
+            Self::Confirm => Self::Analyst,
         }
     }
 }
 
 /// Total wizard steps, for the `Step n/N` header.
-pub const STEP_COUNT: usize = 4;
+pub const STEP_COUNT: usize = 3;
 
 /// What the wizard asks its owner to do after one key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +159,7 @@ pub enum FusionSetupOutcome {
     Stay,
     /// Save this configuration and close.
     Save {
-        /// The three chosen roles.
+        /// The chosen panel and analyst roles.
         roles: FusionModelRoles,
         /// Whether to also set `fusion.enabled` (agents + workflows).
         enable: bool,
@@ -192,8 +183,6 @@ pub struct FusionSetupState {
     pub panels: Vec<FusionModelChoice>,
     /// Analyst pick.
     pub analyst: Option<FusionModelChoice>,
-    /// Synthesizer pick.
-    pub synthesizer: Option<FusionModelChoice>,
     /// Whether to set `fusion.enabled` on save.
     pub enable: bool,
     /// A message explaining why the last key did not advance the wizard.
@@ -219,7 +208,6 @@ impl FusionSetupState {
                 .cloned()
         };
         let analyst = keep(&snapshot.roles.analyst);
-        let synthesizer = keep(&snapshot.roles.synthesizer);
         let enable = snapshot.enabled;
         let mut state = Self {
             snapshot,
@@ -228,7 +216,6 @@ impl FusionSetupState {
             selected: 0,
             panels,
             analyst,
-            synthesizer,
             enable,
             notice: None,
         };
@@ -279,7 +266,6 @@ impl FusionSetupState {
         match self.step {
             FusionSetupStep::Panels => self.panel_position(choice).is_some(),
             FusionSetupStep::Analyst => self.analyst.as_ref() == Some(choice),
-            FusionSetupStep::Synthesizer => self.synthesizer.as_ref() == Some(choice),
             FusionSetupStep::Confirm => false,
         }
     }
@@ -290,7 +276,6 @@ impl FusionSetupState {
         FusionModelRoles {
             panels: self.panels.clone(),
             analyst: self.analyst.clone(),
-            synthesizer: self.synthesizer.clone(),
         }
     }
 
@@ -307,10 +292,6 @@ impl FusionSetupState {
                 .analyst
                 .is_none()
                 .then(|| "Pick the analyst that scores the panel reports.".to_string()),
-            FusionSetupStep::Synthesizer => self
-                .synthesizer
-                .is_none()
-                .then(|| "Pick the synthesizer that writes the final answer.".to_string()),
             FusionSetupStep::Confirm => None,
         }
     }
@@ -368,7 +349,6 @@ impl FusionSetupState {
                 }
             }
             FusionSetupStep::Analyst => self.analyst = Some(candidate.choice),
-            FusionSetupStep::Synthesizer => self.synthesizer = Some(candidate.choice),
             FusionSetupStep::Confirm => {}
         }
     }
@@ -491,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn the_happy_path_saves_all_three_roles() {
+    fn the_happy_path_saves_panels_and_analyst() {
         let mut state = state();
         let outcome = press(
             &mut state,
@@ -502,8 +482,6 @@ mod tests {
                 KeyCode::Char(' '),
                 KeyCode::Enter,
                 // Analyst: the first judge-capable row.
-                KeyCode::Enter,
-                // Synthesizer.
                 KeyCode::Enter,
                 // Confirm.
                 KeyCode::Enter,
@@ -520,7 +498,6 @@ mod tests {
             ]
         );
         assert!(roles.analyst.is_some());
-        assert!(roles.synthesizer.is_some());
         assert!(roles.is_configured());
         assert!(!enable, "the switch defaults to what settings already said");
     }
@@ -567,9 +544,9 @@ mod tests {
             ],
             "the non-judge-capable route must not be offered"
         );
-        // …and it stays offerable as a panel or synthesizer, where the
+        // …and it stays offerable as a panel, where the
         // constraint does not apply.
-        state.step = FusionSetupStep::Synthesizer;
+        state.step = FusionSetupStep::Panels;
         assert_eq!(state.visible().len(), 3);
     }
 
@@ -639,7 +616,6 @@ mod tests {
                 FusionModelChoice::new("google", "gemini-3-pro"),
             ],
             analyst: Some(FusionModelChoice::new("anthropic", "claude-opus-5")),
-            synthesizer: Some(FusionModelChoice::new("openai", "gpt-5.6-sol")),
         };
         snapshot.enabled = true;
         let state = FusionSetupState::from_snapshot(snapshot);
@@ -666,7 +642,6 @@ mod tests {
                 FusionModelChoice::new("retired", "gone-2"),
             ],
             analyst: Some(FusionModelChoice::new("retired", "gone-2")),
-            synthesizer: None,
         };
         let state = FusionSetupState::from_snapshot(snapshot);
         assert_eq!(
@@ -720,7 +695,6 @@ mod tests {
         for step in [
             FusionSetupStep::Panels,
             FusionSetupStep::Analyst,
-            FusionSetupStep::Synthesizer,
             FusionSetupStep::Confirm,
         ] {
             let mut state = state();

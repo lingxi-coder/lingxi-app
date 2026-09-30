@@ -25,7 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ModelBillingModeDto
+import com.lingxi.code.bindings.client.ModelBillingModeDto
 import com.lingxi.code.model.CatalogModelDetails
 import kotlin.math.round
 

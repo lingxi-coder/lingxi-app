@@ -62,7 +62,7 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
     // `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, `platforms/posix` runner) forces the
     // permission mode to `default` — a hardened / scrubbed subprocess must not
     // inherit a requested bypass/plan/etc.
-    let env_scrub_active = platform_api::env::is_env_truthy(
+    let env_scrub_active = lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref(),
     );
     // MODE-FRONTMATTER-04: the selected main-thread agent's frontmatter
@@ -145,7 +145,7 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         .map(|p| {
             (
                 p,
-                permission::PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                permission::PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             )
         });
     let proj = incl_project
@@ -153,7 +153,9 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
         .map(|p| {
             (
                 p,
-                permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                permission::PermissionRuleSource::Settings(
+                    lingxi_core::types::SettingsScope::Project,
+                ),
             )
         });
     // User first, then project (ascending priority): project read last wins on
@@ -186,7 +188,9 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
             // guards). Only the user tier is loaded here; local/flag/policy are
             // not read at this surface (their omission is over-ask-safe).
             if source
-                != permission::PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+                != permission::PermissionRuleSource::Settings(
+                    lingxi_core::types::SettingsScope::Project,
+                )
                 && permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(
                     &raw,
                 )

@@ -29,8 +29,8 @@ use harness_runtime::mobile::{
 #[cfg(all(feature = "uniffi", target_os = "android"))]
 use harness_runtime::mobile::{MobileConfig, MobileSessionMode, SessionModeDto};
 #[cfg(all(feature = "uniffi", target_os = "android"))]
-use platform_api::Platform;
-use platform_api::{AudioService, CameraControl, SharingService};
+use lingxi_core::host::Platform;
+use lingxi_core::host::{AudioService, CameraControl, SharingService};
 use std::sync::Arc;
 
 /// The foreign (Kotlin) capability objects + config needed to build an
@@ -114,12 +114,12 @@ pub fn build_mobile_engine(
             ),
             cwd: std::path::PathBuf::from(&impls.app_files_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_files_root).join(branding::DOT_DIR),
-            host_environment: Some(platform_api::MobileHostEnvironment::new(
-                platform_api::MobileHostOs::Android,
+            host_environment: Some(lingxi_core::host::MobileHostEnvironment::new(
+                lingxi_core::host::MobileHostOs::Android,
                 None,
-                platform_api::MobileDeviceClass::Unknown,
-                platform_api::MobileExecutionTarget::Unknown,
-                platform_api::MobileLaunchMode::Unknown,
+                lingxi_core::host::MobileDeviceClass::Unknown,
+                lingxi_core::host::MobileExecutionTarget::Unknown,
+                lingxi_core::host::MobileLaunchMode::Unknown,
             )),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
@@ -263,18 +263,18 @@ pub fn build_android_engine(
         let audio = harness_runtime::mobile::from_native_audio_service(native_audio);
         let device_status = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn platform_api::DeviceStatusProvider>);
+            .map(|service| service.clone() as Arc<dyn lingxi_core::host::DeviceStatusProvider>);
         let haptics = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn platform_api::HapticService>);
+            .map(|service| service.clone() as Arc<dyn lingxi_core::host::HapticService>);
         let calendar = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn platform_api::CalendarProvider>);
+            .map(|service| service.clone() as Arc<dyn lingxi_core::host::CalendarProvider>);
         let contacts = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn platform_api::ContactsProvider>);
+            .map(|service| service.clone() as Arc<dyn lingxi_core::host::ContactsProvider>);
         let deep_link =
-            device_control.map(|service| service as Arc<dyn platform_api::DeepLinkOpener>);
+            device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
         // Git key paths remain anchored to the app-private files root.
         let app_files_root_str = app_files_root.clone();
         let cwd = android_project_cwd(&app_files_root, project_cwd.as_deref())?;
@@ -295,12 +295,12 @@ pub fn build_android_engine(
             vision_delegation_enabled,
             host_environment: Some(host_environment.map_or_else(
                 || {
-                    platform_api::MobileHostEnvironment::new(
-                        platform_api::MobileHostOs::Android,
+                    lingxi_core::host::MobileHostEnvironment::new(
+                        lingxi_core::host::MobileHostOs::Android,
                         None,
-                        platform_api::MobileDeviceClass::Unknown,
-                        platform_api::MobileExecutionTarget::Unknown,
-                        platform_api::MobileLaunchMode::Unknown,
+                        lingxi_core::host::MobileDeviceClass::Unknown,
+                        lingxi_core::host::MobileExecutionTarget::Unknown,
+                        lingxi_core::host::MobileLaunchMode::Unknown,
                     )
                 },
                 Into::into,
@@ -360,11 +360,11 @@ pub fn build_android_engine(
             )),
             secure_storage: secure_storage.map(|storage| {
                 Arc::new(AndroidSecureStorageBridge { inner: storage })
-                    as Arc<dyn platform_api::SecureStorage>
+                    as Arc<dyn lingxi_core::host::SecureStorage>
             }),
             android_ui_automation: computer_use.map(|host| {
                 Arc::new(AndroidComputerUseBridge { inner: host })
-                    as Arc<dyn platform_api::AndroidUiAutomation>
+                    as Arc<dyn lingxi_core::host::AndroidUiAutomation>
             }),
         });
         if let Some(c) = git {

@@ -35,7 +35,6 @@ migrations = { workspace = true }
 # F2-08: the full command-routing seam reaches the engine handles (in `traits`)
 # and the slash-command dispatcher (`command-api`). harness-runtime::desktop wires the
 # production runtime the router is built from (F2-05 binary path).
-platform-api = { workspace = true }
 command-api = { workspace = true, features = ["builtin-handlers"] }
 # S1: the production TurnDriver (`src/driver.rs`) drives a real
 # ConversationOrchestrator's cancelable streaming entry, so `orchestrator` is now
@@ -44,7 +43,6 @@ orchestrator = { workspace = true }
 # Desktop Beta session lifecycle: enumerate/replay the same JSONL store used by
 # the CLI/mobile hosts, then adopt the replayed protocol history in place.
 session = { workspace = true }
-protocol = { workspace = true }
 secret = { workspace = true }
 platform-posix = { workspace = true }
 platform-pty = { workspace = true }

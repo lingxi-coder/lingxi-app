@@ -52,13 +52,13 @@ use client::protocol::commands::ClientCommand;
 use client::protocol::computer_access::{AccessTierDto, ComputerAccessResponseDto};
 use client::protocol::events::ClientEvent;
 use futures_util::{SinkExt, StreamExt};
+use lingxi_core::types::ToolUseId;
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
     message_delta_stop, message_start, message_stop, text_delta, MockApiClient,
     MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
-use protocol::ToolUseId;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -119,7 +119,7 @@ fn build_connection() -> BridgeConnection {
     let batched = Arc::new(MockApiClient::new(Vec::new())); // unused on streaming path
 
     let connection = BridgeConnection::new();
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(AdapterOutputStream::new(connection.event_sink()));
 
     // The SAME channel shape `harness_runtime::desktop::build` wires onto

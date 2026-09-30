@@ -19,9 +19,9 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.lingxi.code.MainActivity
 import com.lingxi.code.R
-import com.lingxi.code.bindings.AndroidComputerUseFfiException
-import com.lingxi.code.bindings.AndroidComputerUseHost
-import com.lingxi.code.bindings.AndroidScreenshotFfi
+import com.lingxi.code.bindings.android.AndroidComputerUseFfiException
+import com.lingxi.code.bindings.android.AndroidComputerUseHost
+import com.lingxi.code.bindings.android.AndroidScreenshotFfi
 import com.lingxi.code.settings.AudioConfigurationRepository
 import com.lingxi.code.settings.settingsKey
 import com.lingxi.code.voice.audio.AudioOperationException

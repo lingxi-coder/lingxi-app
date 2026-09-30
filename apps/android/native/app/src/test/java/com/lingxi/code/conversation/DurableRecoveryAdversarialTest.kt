@@ -1,9 +1,9 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.TurnRecoverySnapshotDto
-import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.TurnRecoverySnapshotDto
+import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.SessionRef
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi

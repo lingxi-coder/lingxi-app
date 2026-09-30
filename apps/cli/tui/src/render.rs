@@ -10,7 +10,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::WidgetRef;
 use tui_core::render::osc8::hyperlink;
 use tui_core::render::{StyleColor, StyledLine, StyledSpan};
 use unicode_width::UnicodeWidthChar;
@@ -96,7 +95,7 @@ pub(crate) fn render_line_with_hyperlinks(line: &Line<'_>, area: Rect, buf: &mut
         .iter()
         .any(|span| span.content.contains("\x1b]8;;"))
     {
-        WidgetRef::render_ref(line, area, buf);
+        ratatui::widgets::Widget::render(line, area, buf);
         return;
     }
 

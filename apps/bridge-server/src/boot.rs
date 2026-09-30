@@ -37,7 +37,7 @@ use serde::Deserialize;
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
 use harness_runtime::desktop::{DesktopAudio, DesktopConfig, DesktopRuntime};
-use platform_api::{
+use lingxi_core::host::{
     CredentialStoragePolicy, OrchestratorHandle, OutputStream, SlashCommandDispatcher,
 };
 use platform_posix::PosixFileSystem;
@@ -122,7 +122,7 @@ impl BridgeArgs {
                     let value = it
                         .next()
                         .ok_or_else(|| "--session-id requires a UUID argument".to_string())?;
-                    let parsed = protocol::SessionId::parse_prefixed(value.as_ref())
+                    let parsed = lingxi_core::types::SessionId::parse_prefixed(value.as_ref())
                         .ok_or_else(|| "--session-id must be a valid UUID".to_string())?;
                     out.session_id = Some(parsed.as_uuid().to_string());
                 }
@@ -387,7 +387,7 @@ pub fn resolve_api_base() -> String {
 fn desktop_provider_catalog_listings(
     cfg: &DesktopConfig,
     region: llm_runtime::Region,
-) -> Vec<platform_api::ModelListing> {
+) -> Vec<lingxi_core::host::ModelListing> {
     let assembled = provider_config::assemble_for_region(
         provider_config::AssembleInputs {
             anthropic_api_base: cfg.api_base.clone(),
@@ -836,12 +836,12 @@ impl BoundServer {
 /// lifecycle explicit and guarantees graceful cleanup without changing the
 /// engine wire protocol.
 struct LiveSessionGuard {
-    dir: platform_api::live_sessions::LiveSessionDir,
+    dir: lingxi_core::host::live_sessions::LiveSessionDir,
     pid: u32,
     session_id: String,
     generation: u64,
     inbox_started: bool,
-    _writer_claim: Option<platform_api::live_sessions::SharedSessionWriterLease>,
+    _writer_claim: Option<lingxi_core::host::live_sessions::SharedSessionWriterLease>,
 }
 
 #[derive(Debug)]
@@ -899,7 +899,7 @@ impl Drop for LiveSessionGuard {
             return;
         }
         if self.inbox_started {
-            if let Err(error) = platform_api::uds_inbox::stop_process_inbox_checked() {
+            if let Err(error) = lingxi_core::host::uds_inbox::stop_process_inbox_checked() {
                 tracing::warn!(%error, "bridge inbox shutdown could not preserve accepted work");
             }
         }
@@ -907,7 +907,7 @@ impl Drop for LiveSessionGuard {
         // successfully hydrated destination.  Drop must unregister that
         // current record, not the construction-time A target, while old A
         // durable scopes continue to own their independent writer lease.
-        let current = platform_api::live_sessions::process_session_id()
+        let current = lingxi_core::host::live_sessions::process_session_id()
             .unwrap_or_else(|| self.session_id.clone());
         // `stop_process_inbox_checked` has just spilled accepted/held work into
         // `<session>.inbox`. Remove only this PID's matching presence metadata;
@@ -921,11 +921,11 @@ impl Drop for LiveSessionGuard {
 
 fn canonical_session_id(raw: Option<&str>) -> Result<String, String> {
     raw.map(|value| {
-        protocol::SessionId::parse_prefixed(value)
+        lingxi_core::types::SessionId::parse_prefixed(value)
             .map(|id| id.as_uuid().to_string())
             .ok_or_else(|| "bridge session id must be a valid UUID".to_string())
     })
-    .unwrap_or_else(|| Ok(protocol::SessionId::new().as_uuid().to_string()))
+    .unwrap_or_else(|| Ok(lingxi_core::types::SessionId::new().as_uuid().to_string()))
 }
 
 fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, String> {
@@ -933,7 +933,7 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
     cfg.session_id_override = Some(session_id.clone());
 
     let dir =
-        platform_api::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"));
+        lingxi_core::host::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"));
     let pid = std::process::id();
     // Only live records/PIDs participate in writer ownership. The persisted
     // `<session-id>.jsonl` transcript is intentionally ignored here because a
@@ -967,7 +967,7 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.trim().is_empty());
-    let claim = platform_api::live_sessions::install_process(
+    let claim = lingxi_core::host::live_sessions::install_process(
         dir.clone(),
         &session_id,
         display_name.as_deref(),
@@ -979,18 +979,18 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
     }
     if claim.is_none() {
         if let Some(name) = display_name.as_deref() {
-            platform_api::live_sessions::set_process_name(name);
+            lingxi_core::host::live_sessions::set_process_name(name);
         }
     }
 
     let permission_mode = cfg.permission_mode.wire_str().to_string();
-    platform_api::live_sessions::set_process_permission_mode(
+    lingxi_core::host::live_sessions::set_process_permission_mode(
         &permission_mode,
         cfg.allow_dangerously_skip_permissions,
     );
 
-    let socket = platform_api::uds_inbox::default_socket_path(pid);
-    let inbox_started = match platform_api::uds_inbox::start_process_inbox_for_session(
+    let socket = lingxi_core::host::uds_inbox::default_socket_path(pid);
+    let inbox_started = match lingxi_core::host::uds_inbox::start_process_inbox_for_session(
         socket,
         &session_id,
     ) {
@@ -999,10 +999,10 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
             dir.upsert_identity(
                 pid,
                 &session_id,
-                platform_api::live_sessions::process_name().as_deref(),
+                lingxi_core::host::live_sessions::process_name().as_deref(),
                 None,
                 Some(&path),
-                platform_api::live_sessions::process_permission_class().as_deref(),
+                lingxi_core::host::live_sessions::process_permission_class().as_deref(),
             )
             .map_err(|_| "bridge live-session identity is unavailable".to_string())?;
             true
@@ -1013,16 +1013,16 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
             dir.upsert_identity(
                 pid,
                 &session_id,
-                platform_api::live_sessions::process_name().as_deref(),
+                lingxi_core::host::live_sessions::process_name().as_deref(),
                 None,
                 None,
-                platform_api::live_sessions::process_permission_class().as_deref(),
+                lingxi_core::host::live_sessions::process_permission_class().as_deref(),
             )
             .map_err(|_| "bridge live-session identity is unavailable".to_string())?;
             false
         }
     };
-    platform_api::live_sessions::set_process_status("idle", None);
+    lingxi_core::host::live_sessions::set_process_status("idle", None);
     debug_assert_eq!(live_session.inbox_started, inbox_started);
     Ok(live_session)
 }
@@ -1039,7 +1039,8 @@ pub async fn list_sessions_json(cwd: &Path) -> Result<String, String> {
 }
 
 async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<String, String> {
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(PosixFileSystem::new(cwd.to_path_buf()));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> =
+        Arc::new(PosixFileSystem::new(cwd.to_path_buf()));
     let catalog = match session::jsonl::list_recent_sessions_with_diagnostics(
         lingxi_home,
         &cwd.to_string_lossy(),
@@ -1080,7 +1081,7 @@ async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<Strin
             if let Some(model) = row.resume_model.as_deref() {
                 object.insert(
                     "resume_model".to_string(),
-                    serde_json::Value::String(platform_api::qualified_model_ref(
+                    serde_json::Value::String(lingxi_core::host::qualified_model_ref(
                         model,
                         row.resume_model_profile.as_deref(),
                     )),
@@ -1236,7 +1237,7 @@ pub async fn assemble_with_credentials(
     }
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
-        platform_api::CredentialStoragePolicy::NativeOrMemory
+        lingxi_core::host::CredentialStoragePolicy::NativeOrMemory
     );
     let enable_automation_scheduler = cfg.enable_automation_scheduler;
     let mut live_session = initialize_live_session(&mut cfg)?;
@@ -1575,7 +1576,7 @@ pub async fn assemble_with_credentials(
             handle,
             runtime.auth.clone(),
             runtime.task_registry.clone()
-                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+                as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
             Some(dispatcher),
             Some(runtime.shared_command_registry.clone()),
         )
@@ -1641,7 +1642,7 @@ impl RegistrySlashDispatcherClone {
 
 #[async_trait::async_trait]
 impl SlashCommandDispatcher for RegistrySlashDispatcherClone {
-    async fn dispatch(&self, raw: &str) -> platform_api::SlashDispatchResult {
+    async fn dispatch(&self, raw: &str) -> lingxi_core::host::SlashDispatchResult {
         self.inner.dispatch(raw).await
     }
 }
@@ -1751,7 +1752,7 @@ pub fn publish_lockfile_recoverable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::live_sessions::LiveSessionDir;
+    use lingxi_core::host::live_sessions::LiveSessionDir;
 
     #[test]
     fn parse_defaults_when_no_args() {
@@ -2019,7 +2020,7 @@ mod tests {
         // `process_live_dir().drain_inbox(process_session_id())` — and that is
         // called by every turn, from another crate, holding no test lock. Seeded
         // before C, this file was deleted out from under the assertion below.
-        let mut owned_by_a = platform_api::live_sessions::outbound_peer_message(
+        let mut owned_by_a = lingxi_core::host::live_sessions::outbound_peer_message(
             "sender",
             "source-session",
             "owned by A",
@@ -2034,12 +2035,12 @@ mod tests {
         drop(guard_a);
 
         assert_eq!(
-            platform_api::live_sessions::process_session_id().as_deref(),
+            lingxi_core::host::live_sessions::process_session_id().as_deref(),
             Some(session_c),
             "a stale guard must not take the process session id from C"
         );
         assert!(
-            platform_api::uds_inbox::process_socket_path().is_some(),
+            lingxi_core::host::uds_inbox::process_socket_path().is_some(),
             "a stale guard must not stop C's inbox"
         );
         assert!(
@@ -2062,7 +2063,7 @@ mod tests {
 
         assert!(dir.list_live().unwrap().is_empty());
         assert!(
-            platform_api::uds_inbox::process_socket_path().is_none(),
+            lingxi_core::host::uds_inbox::process_socket_path().is_none(),
             "the live guard DOES stop the inbox — otherwise the stale-guard              assertion above would hold for a drop that never tears anything down"
         );
         assert_eq!(
@@ -2510,13 +2511,13 @@ pub(crate) mod fusion_refresh_test_support {
     }
 
     #[async_trait::async_trait]
-    impl platform_api::SecureStorage for StallingSecureStorage {
+    impl lingxi_core::host::SecureStorage for StallingSecureStorage {
         async fn store(
             &self,
             _service: &str,
             _account: &str,
-            _data: protocol::SecureStorageData,
-        ) -> Result<(), platform_api::SecureStorageError> {
+            _data: lingxi_core::types::SecureStorageData,
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             Ok(())
         }
 
@@ -2524,7 +2525,10 @@ pub(crate) mod fusion_refresh_test_support {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+        ) -> Result<
+            Option<lingxi_core::types::SecureStorageData>,
+            lingxi_core::host::SecureStorageError,
+        > {
             self.reads_started.fetch_add(1, Ordering::SeqCst);
             std::future::pending().await
         }
@@ -2533,14 +2537,14 @@ pub(crate) mod fusion_refresh_test_support {
             &self,
             _service: &str,
             _account: &str,
-        ) -> Result<(), platform_api::SecureStorageError> {
+        ) -> Result<(), lingxi_core::host::SecureStorageError> {
             Ok(())
         }
 
         async fn list(
             &self,
             _service: &str,
-        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
             Ok(Vec::new())
         }
 
@@ -2548,8 +2552,8 @@ pub(crate) mod fusion_refresh_test_support {
             true
         }
 
-        fn backend(&self) -> platform_api::SecureStorageBackend {
-            platform_api::SecureStorageBackend::MacOsKeychain
+        fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+            lingxi_core::host::SecureStorageBackend::MacOsKeychain
         }
     }
 

@@ -132,7 +132,7 @@ impl Renderable for Span<'_> {
 /// A single unwrapped styled line.
 impl Renderable for Line<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        WidgetRef::render_ref(self, area, buf);
+        ratatui::widgets::Widget::render(self, area, buf);
     }
     fn desired_height(&self, _width: u16) -> u16 {
         1

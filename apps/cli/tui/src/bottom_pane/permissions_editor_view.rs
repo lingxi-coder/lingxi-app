@@ -254,15 +254,15 @@ impl PermissionsSnapshot {
         for (dest, source) in [
             (
                 PermissionUpdateDestination::UserSettings,
-                PermissionRuleSource::Settings(protocol::SettingsScope::User),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             (
                 PermissionUpdateDestination::ProjectSettings,
-                PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
             ),
             (
                 PermissionUpdateDestination::LocalSettings,
-                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             ),
         ] {
             let Some(path) = paths.destination_path(dest) else {
@@ -292,7 +292,7 @@ impl PermissionsSnapshot {
     }
 
     /// Project the managed (policy) settings tier under `managed_dir` into rules
-    /// tagged [`PermissionRuleSource::Settings(protocol::SettingsScope::Managed)`] (rendered read-only).
+    /// tagged [`PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)`] (rendered read-only).
     /// Mirrors the engine settings watcher's managed tier: the base
     /// `managed-settings.json` first, then every `*.json` under
     /// `managed-settings.d/` in alphabetical order (dotfiles skipped). Split out
@@ -303,7 +303,7 @@ impl PermissionsSnapshot {
             if let Ok(raw) = std::fs::read_to_string(path) {
                 if let Ok(mut projected) = permission_rules_from_settings_json(
                     &raw,
-                    PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+                    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
                 ) {
                     rules.append(&mut projected);
                 }
@@ -336,7 +336,7 @@ impl PermissionsSnapshot {
             if let Ok(raw) = std::fs::read_to_string(path) {
                 snapshot.append_settings_json(
                     &raw,
-                    PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+                    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
                 );
             }
         }
@@ -420,13 +420,13 @@ impl PermTab {
 #[must_use]
 fn source_to_destination(source: PermissionRuleSource) -> Option<PermissionUpdateDestination> {
     match source {
-        PermissionRuleSource::Settings(protocol::SettingsScope::User) => {
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User) => {
             Some(PermissionUpdateDestination::UserSettings)
         }
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => {
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project) => {
             Some(PermissionUpdateDestination::ProjectSettings)
         }
-        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => {
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local) => {
             Some(PermissionUpdateDestination::LocalSettings)
         }
         _ => None,
@@ -438,11 +438,11 @@ fn source_to_destination(source: PermissionRuleSource) -> Option<PermissionUpdat
 #[must_use]
 fn source_label(source: PermissionRuleSource) -> &'static str {
     match source {
-        PermissionRuleSource::Settings(protocol::SettingsScope::User) => "user",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => "project",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => "local",
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User) => "user",
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project) => "project",
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local) => "local",
         PermissionRuleSource::FlagSettings => "flag",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Managed) => "managed",
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed) => "managed",
         PermissionRuleSource::CliArg => "cli",
         PermissionRuleSource::Command => "command",
         PermissionRuleSource::Session => "session",
@@ -457,10 +457,16 @@ fn source_label(source: PermissionRuleSource) -> &'static str {
 #[must_use]
 fn auto_source_label(source: PermissionRuleSource) -> &'static str {
     match source {
-        PermissionRuleSource::Settings(protocol::SettingsScope::User) => "user settings",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Project) => "project settings",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Local) => "local settings",
-        PermissionRuleSource::Settings(protocol::SettingsScope::Managed) => "managed policy",
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User) => "user settings",
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project) => {
+            "project settings"
+        }
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local) => {
+            "local settings"
+        }
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
+            "managed policy"
+        }
         _ => source_label(source),
     }
 }
@@ -1193,17 +1199,17 @@ mod tests {
                 rule(
                     "Read",
                     PermissionBehavior::Allow,
-                    PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
                 ),
                 rule(
                     "Edit(src/**)",
                     PermissionBehavior::Allow,
-                    PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+                    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
                 ),
                 rule(
                     "Bash(rm:*)",
                     PermissionBehavior::Deny,
-                    PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                    PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
                 ),
             ],
             auto_mode: AutoModeSnapshot::default(),
@@ -1369,7 +1375,7 @@ mod tests {
             rules: vec![rule(
                 "Bash(curl:*)",
                 PermissionBehavior::Allow,
-                PermissionRuleSource::Settings(protocol::SettingsScope::Managed),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
             )],
             auto_mode: AutoModeSnapshot::default(),
         });
@@ -1483,7 +1489,7 @@ mod tests {
                     rule(
                         &format!("Bash(cmd{i:02}:*)"),
                         PermissionBehavior::Allow,
-                        PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
                     )
                 })
                 .collect(),
@@ -1528,9 +1534,8 @@ mod tests {
         PermissionsSnapshot::append_managed_rules(&mut rules, &dir);
 
         // Every managed rule is tagged PolicySettings → rendered read-only.
-        assert!(rules
-            .iter()
-            .all(|r| r.source == PermissionRuleSource::Settings(protocol::SettingsScope::Managed)));
+        assert!(rules.iter().all(|r| r.source
+            == PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)));
         let strs: Vec<String> = rules.iter().map(|r| r.value.to_rule_string()).collect();
         assert!(strs.contains(&"Bash(curl:*)".to_string()), "{strs:?}");
         assert!(strs.contains(&"Read".to_string()), "{strs:?}");
@@ -1546,7 +1551,7 @@ mod tests {
         // A PolicySettings rule has no writable destination, so the editor's
         // read-only handling (no remove) stays active for it.
         assert!(source_to_destination(PermissionRuleSource::Settings(
-            protocol::SettingsScope::Managed
+            lingxi_core::types::SettingsScope::Managed
         ))
         .is_none());
 
@@ -1629,7 +1634,7 @@ mod tests {
                 },
                 "permissions": {"allow": ["Read"]}
             }"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         );
 
         assert!(!snapshot.builtin_enabled(AutoModeCategory::SoftAllow));
@@ -1680,13 +1685,13 @@ mod tests {
         let mut auto_mode = AutoModeSnapshot::default();
         auto_mode.append_settings_json(
             r#"{"autoMode":{"allow":["classifier sentence"]}}"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
         );
         let mut s = PermissionsEditorState::new(PermissionsSnapshot {
             rules: vec![rule(
                 "Read",
                 PermissionBehavior::Allow,
-                PermissionRuleSource::Settings(protocol::SettingsScope::Local),
+                PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
             )],
             auto_mode,
         });
@@ -1720,7 +1725,7 @@ mod tests {
         let mut auto_mode = AutoModeSnapshot::default();
         auto_mode.append_settings_json(
             r#"{"autoMode":{"allow":["$defaults","custom classifier rule"],"environment":["**Org**: internal"]}}"#,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project),
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
         let mut v = PermissionsEditorView::new(PermissionsSnapshot {
             rules: Vec::new(),
@@ -1748,7 +1753,7 @@ mod tests {
                 .auto_mode()
                 .entries_for_category(AutoModeCategory::SoftAllow)[0]
                 .source,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
         );
         assert!(text.contains("Environment"), "{text}");
         assert!(text.contains("Replaces the built-in default"), "{text}");
@@ -1793,7 +1798,7 @@ mod tests {
         assert_eq!(user[0].value, "user classifier");
         assert_eq!(
             user[0].source,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         );
         let local = snapshot
             .auto_mode
@@ -1802,7 +1807,7 @@ mod tests {
         assert_eq!(local[0].value, "local classifier");
         assert_eq!(
             local[0].source,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local)
         );
         assert!(snapshot
             .auto_mode

@@ -10,8 +10,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.flow.MutableSharedFlow

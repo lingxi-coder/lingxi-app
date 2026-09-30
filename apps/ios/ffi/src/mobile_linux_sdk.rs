@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 const LINGXI_DOT_DIR: &str = ".lingxi";
-const LOCAL_APP_BUILD_GUEST_ROOT: &str = platform_api::local_app_paths::LOCAL_APP_BUILD_ROOT;
+const LOCAL_APP_BUILD_GUEST_ROOT: &str = lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_ROOT;
 
 /// Immutable iSH runtime identity and path configuration supplied by the iOS
 /// framework bridge.
@@ -81,7 +81,8 @@ impl ProductIosRuntime {
             .iter()
             .filter(|mount| {
                 matches!(mount.purpose, MountPurpose::Shared)
-                    && mount.guest_path == platform_api::local_app_paths::LOCAL_APP_DEPENDENCY_STORE
+                    && mount.guest_path
+                        == lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE
             })
             .count();
         if build_count != 1 || store_count > 1 || request_mounts.len() != 1 + store_count {
@@ -391,7 +392,7 @@ fn validate_mount(
             )));
         }
     } else if matches!(mount.purpose, MountPurpose::Shared)
-        && mount.guest_path == platform_api::local_app_paths::LOCAL_APP_DEPENDENCY_STORE
+        && mount.guest_path == lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE
     {
         let expected_root = normalize_host_path(
             &config.app_sandbox_root.join("dependency-cache"),
@@ -461,7 +462,7 @@ fn parse_local_app_build_guest_path(path: &str) -> Result<(&str, &str), MobileLi
     if segments.next().is_some()
         || !is_valid_local_app_id(app_id)
         || !matches!(channel, "store" | "full")
-        || project != platform_api::local_app_paths::LOCAL_APP_BUILD_PROJECT_DIR
+        || project != lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_PROJECT_DIR
     {
         return Err(MobileLinuxError::InvalidRequest(format!(
             "local-app build guest_path must be {LOCAL_APP_BUILD_GUEST_ROOT}/<app-id>/<store|full>/project"

@@ -1,8 +1,8 @@
 package com.lingxi.code.settings
 
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.PermissionBehaviorDto
-import com.lingxi.code.bindings.WritableScopeDto
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.PermissionBehaviorDto
+import com.lingxi.code.bindings.client.WritableScopeDto
 import org.json.JSONObject
 
 /** Permissions is reserved by update_settings; edits must use the dedicated protocol. */

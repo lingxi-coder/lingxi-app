@@ -202,7 +202,7 @@ impl RetainedOutputLog {
         }
     }
 
-    fn append(&mut self, bytes: &[u8]) -> Result<(), platform_api::FsError> {
+    fn append(&mut self, bytes: &[u8]) -> Result<(), lingxi_core::host::FsError> {
         self.append_with_limits(
             bytes,
             crate::background_launch::OUTPUT_LOG_MAX_BYTES,
@@ -215,7 +215,7 @@ impl RetainedOutputLog {
         bytes: &[u8],
         max_bytes: u64,
         retain_bytes: u64,
-    ) -> Result<(), platform_api::FsError> {
+    ) -> Result<(), lingxi_core::host::FsError> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -225,30 +225,30 @@ impl RetainedOutputLog {
             .unwrap_or(usize::MAX)
             .min(max_bytes);
         if max_bytes == 0 {
-            return platform_api::rooted_fs::atomic_write(
+            return lingxi_core::host::rooted_fs::atomic_write(
                 &self.home,
                 &self.relative,
                 &[],
-                platform_api::rooted_fs::AtomicWriteOptions::default(),
+                lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
             );
         }
 
         let observed_len = match self.observed_len {
             Some(len) => len,
-            None => match platform_api::rooted_fs::read_tail_bytes(
+            None => match lingxi_core::host::rooted_fs::read_tail_bytes(
                 &self.home,
                 &self.relative,
                 u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX),
             ) {
                 Ok(existing) => u64::try_from(existing.len()).unwrap_or(u64::MAX),
-                Err(platform_api::FsError::NotFound(_)) => 0,
+                Err(lingxi_core::host::FsError::NotFound(_)) => 0,
                 Err(error) => return Err(error),
             },
         };
         let incoming_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if observed_len.saturating_add(incoming_len) <= u64::try_from(max_bytes).unwrap_or(u64::MAX)
         {
-            platform_api::rooted_fs::append_file_bytes(&self.home, &self.relative, bytes)?;
+            lingxi_core::host::rooted_fs::append_file_bytes(&self.home, &self.relative, bytes)?;
             self.observed_len = Some(observed_len.saturating_add(incoming_len));
             return Ok(());
         }
@@ -260,13 +260,13 @@ impl RetainedOutputLog {
             let mut prior = if prior_budget == 0 {
                 Vec::new()
             } else {
-                match platform_api::rooted_fs::read_tail_bytes(
+                match lingxi_core::host::rooted_fs::read_tail_bytes(
                     &self.home,
                     &self.relative,
                     u64::try_from(prior_budget).unwrap_or(u64::MAX),
                 ) {
                     Ok(prior) => prior,
-                    Err(platform_api::FsError::NotFound(_)) => Vec::new(),
+                    Err(lingxi_core::host::FsError::NotFound(_)) => Vec::new(),
                     Err(error) => return Err(error),
                 }
             };
@@ -276,11 +276,11 @@ impl RetainedOutputLog {
         if retained.len() > max_bytes {
             retained = retained.split_off(retained.len() - max_bytes);
         }
-        platform_api::rooted_fs::atomic_write(
+        lingxi_core::host::rooted_fs::atomic_write(
             &self.home,
             &self.relative,
             &retained,
-            platform_api::rooted_fs::AtomicWriteOptions::default(),
+            lingxi_core::host::rooted_fs::AtomicWriteOptions::default(),
         )?;
         self.observed_len = Some(u64::try_from(retained.len()).unwrap_or(u64::MAX));
         Ok(())
@@ -791,7 +791,8 @@ async fn load_exact_transcript(
 ) -> Result<Vec<session::jsonl::JsonlMessage>, String> {
     let canonical_path = validate_exact_transcript_path(config_home, launch)?;
     let cwd = nonempty_path(&launch.cwd)?;
-    let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
+    let fs: Arc<dyn lingxi_core::host::FileSystem> =
+        Arc::new(platform_posix::PosixFileSystem::new(cwd));
     let reader = session::jsonl::JsonlReader::new(canonical_path, fs);
     let loaded = reader.read_routed().await.map_err(|e| e.to_string())?;
     let (chain, _) = session::jsonl::build_conversation_chain(&loaded, &launch.session_id);

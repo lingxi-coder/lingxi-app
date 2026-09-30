@@ -102,7 +102,7 @@ async fn resume_usage_snapshot_crosses_idle_websocket_and_late_usage_stays_filte
         ));
 
         // Repairing resume must not let late main-turn usage through the normal sink.
-        platform_api::OutputStream::emit_usage(&live_output, 999999, 0, 0, 0).await;
+        lingxi_core::host::OutputStream::emit_usage(&live_output, 999999, 0, 0, 0).await;
         send_command(
             &mut ws,
             &ClientCommand::RefreshListings {

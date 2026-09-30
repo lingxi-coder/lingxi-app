@@ -89,13 +89,13 @@ fn tail_lines(bytes: &[u8], max_lines: usize) -> &[u8] {
 }
 
 fn read_output_log(home: &Path, short: &str) -> Result<Option<Vec<u8>>, String> {
-    match platform_api::rooted_fs::read_tail_bytes(
+    match lingxi_core::host::rooted_fs::read_tail_bytes(
         home,
         &output_log_relative(short),
         crate::background_launch::OUTPUT_LOG_MAX_BYTES,
     ) {
         Ok(bytes) => Ok(Some(tail_lines(&bytes, MAX_LOG_LINES).to_vec())),
-        Err(platform_api::FsError::NotFound(_)) => Ok(None),
+        Err(lingxi_core::host::FsError::NotFound(_)) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
 }

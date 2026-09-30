@@ -1,8 +1,8 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.ErrorKindDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.toUi
 import kotlinx.coroutines.flow.Flow

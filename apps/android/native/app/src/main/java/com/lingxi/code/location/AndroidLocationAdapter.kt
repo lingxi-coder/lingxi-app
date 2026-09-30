@@ -1,8 +1,8 @@
 package com.lingxi.code.location
 
-import com.lingxi.code.bindings.AndroidLocation
-import com.lingxi.code.bindings.LocationFfiException
-import com.lingxi.code.bindings.LocationFixFfi
+import com.lingxi.code.bindings.android.AndroidLocation
+import com.lingxi.code.bindings.android.LocationFfiException
+import com.lingxi.code.bindings.android.LocationFixFfi
 
 /** Maps Android's one-shot location surface onto the generated UniFFI callback. */
 class AndroidLocationAdapter(

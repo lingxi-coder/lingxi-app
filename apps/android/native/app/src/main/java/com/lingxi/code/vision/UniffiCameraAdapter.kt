@@ -1,8 +1,8 @@
 package com.lingxi.code.vision
 
-import com.lingxi.code.bindings.AndroidCamera
-import com.lingxi.code.bindings.CameraFfiException
-import com.lingxi.code.bindings.CapturedImageFfi
+import com.lingxi.code.bindings.android.AndroidCamera
+import com.lingxi.code.bindings.android.CameraFfiException
+import com.lingxi.code.bindings.android.CapturedImageFfi
 
 /**
  * Adapts the native [CameraController] to the generated UniFFI callback

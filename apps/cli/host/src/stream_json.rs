@@ -33,8 +33,8 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
+use lingxi_core::host::{CostSnapshot, OutputStream};
 use llm_runtime::model::context_window::{context_window_for_model, max_output_tokens_for_model};
-use platform_api::{CostSnapshot, OutputStream};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -481,7 +481,7 @@ pub struct StreamJsonStream {
     /// record just before the result frame is built (same post-construction
     /// `Mutex` pattern as `session_id`), because the run path owns the
     /// orchestrator and the builders only see `self`.
-    permission_denials: std::sync::OnceLock<Arc<Mutex<Vec<platform_api::PermissionDenial>>>>,
+    permission_denials: std::sync::OnceLock<Arc<Mutex<Vec<lingxi_core::host::PermissionDenial>>>>,
 }
 
 impl StreamJsonStream {
@@ -597,7 +597,11 @@ impl StreamJsonStream {
     /// Build the client-protocol heartbeat frame used by stream-json. Keeping
     /// this conversion in one pure helper prevents the CLI from inventing a
     /// second heartbeat schema.
-    fn build_tool_heartbeat_frame(id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) -> Value {
+    fn build_tool_heartbeat_frame(
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        elapsed_ms: u64,
+    ) -> Value {
         serde_json::to_value(client::protocol::events::ClientEvent::ToolHeartbeat {
             id: id.to_string(),
             tool: tool.to_string(),
@@ -746,7 +750,7 @@ impl StreamJsonStream {
     fn build_compact_boundary_frame(
         session_id: &str,
         boundary_uuid: &str,
-        metadata: &protocol::CompactBoundaryMetadata,
+        metadata: &lingxi_core::types::CompactBoundaryMetadata,
     ) -> Value {
         let source = serde_json::to_value(metadata).expect("compact metadata serializes");
         let mut compact = serde_json::Map::new();
@@ -801,7 +805,7 @@ impl StreamJsonStream {
         // Manual /compact returns through the local-command serializer;
         // automatic boundaries stream directly through the engine envelope.
         // Their insertion order differs in 2.1.261 (also verified live).
-        if metadata.trigger == protocol::CompactTrigger::Manual {
+        if metadata.trigger == lingxi_core::types::CompactTrigger::Manual {
             frame.insert("session_id".into(), json!(session_id));
         }
         frame.insert("uuid".into(), json!(boundary_uuid));
@@ -809,7 +813,7 @@ impl StreamJsonStream {
         if let Some(parent) = metadata.logical_parent_uuid.as_deref() {
             frame.insert("logical_parent_uuid".into(), json!(parent));
         }
-        if metadata.trigger != protocol::CompactTrigger::Manual {
+        if metadata.trigger != lingxi_core::types::CompactTrigger::Manual {
             frame.insert("session_id".into(), json!(session_id));
         }
         Value::Object(frame)
@@ -1096,7 +1100,10 @@ impl StreamJsonStream {
     /// The orchestrator's list is the authoritative record; the
     /// `permission_denied` system frames are documented by claude-code as
     /// advisory and incomplete, so they are NOT the source here.
-    pub fn share_permission_denials(&self, cell: Arc<Mutex<Vec<platform_api::PermissionDenial>>>) {
+    pub fn share_permission_denials(
+        &self,
+        cell: Arc<Mutex<Vec<lingxi_core::host::PermissionDenial>>>,
+    ) {
         let _ = self.permission_denials.set(cell);
     }
 
@@ -1507,7 +1514,7 @@ impl StreamJsonStream {
     /// forwarded child frame correlates to the subagent message that produced it.
     ///
     /// Fields CC additionally spreads that this seam genuinely CANNOT source
-    /// (the value threaded here is a serialized `protocol::ConversationMessage`
+    /// (the value threaded here is a serialized `lingxi_core::types::ConversationMessage`
     /// = `{role,id,content,stop_reason}`, and the progress event carries no more)
     /// are deliberately omitted rather than fabricated: `timestamp`, `error`,
     /// `request_id` (not on `ConversationMessage`), `subagent_type` /
@@ -1596,12 +1603,12 @@ impl OutputStream for StreamJsonStream {
     async fn emit_compact_boundary(
         &self,
         boundary_uuid: &str,
-        metadata: &protocol::CompactBoundaryMetadata,
+        metadata: &lingxi_core::types::CompactBoundaryMetadata,
     ) {
         if self.suppress_frames {
             return;
         }
-        if metadata.trigger == protocol::CompactTrigger::Manual {
+        if metadata.trigger == lingxi_core::types::CompactTrigger::Manual {
             self.emit_init().await;
         }
         let session_id = self.session_id.lock().await.clone();
@@ -1641,7 +1648,7 @@ impl OutputStream for StreamJsonStream {
 
     /// Emit a forwarded subagent assistant message (`--forward-subagent-text`).
     ///
-    /// `message` is the serialized subagent `protocol::ConversationMessage`
+    /// `message` is the serialized subagent `lingxi_core::types::ConversationMessage`
     /// (carried by `agent::SubagentEvent::Message`); `parent_tool_use_id` is the
     /// `Task`/`Agent` tool_use_id that spawned the child. Gated + shaped by
     /// [`Self::build_forwarded_subagent_frame`]; a no-op when the flag is off or
@@ -1695,7 +1702,7 @@ impl OutputStream for StreamJsonStream {
 
     async fn emit_tool_call(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         name: &str,
         input: &serde_json::Value,
     ) {
@@ -1712,7 +1719,7 @@ impl OutputStream for StreamJsonStream {
 
     async fn emit_tool_result(
         &self,
-        _id: &protocol::ToolUseId,
+        _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         model_text: &str,
         result: &serde_json::Value,
@@ -1728,7 +1735,7 @@ impl OutputStream for StreamJsonStream {
 
     async fn emit_tool_result_denied(
         &self,
-        id: &protocol::ToolUseId,
+        id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         model_text: &str,
         result: &serde_json::Value,
@@ -1749,7 +1756,12 @@ impl OutputStream for StreamJsonStream {
         self.enqueue(&frame);
     }
 
-    async fn emit_tool_heartbeat(&self, id: &protocol::ToolUseId, tool: &str, elapsed_ms: u64) {
+    async fn emit_tool_heartbeat(
+        &self,
+        id: &lingxi_core::types::ToolUseId,
+        tool: &str,
+        elapsed_ms: u64,
+    ) {
         if self.suppress_frames {
             return;
         }
@@ -2255,7 +2267,7 @@ pub fn build_init_params(
         slash_commands,
         terminal_slash_commands,
         api_key_source,
-        claude_code_version: platform_api::CLAUDE_CODE_VERSION.to_string(),
+        claude_code_version: lingxi_core::host::CLAUDE_CODE_VERSION.to_string(),
         output_style: output_style.to_string(),
         agents,
         skills,
@@ -2266,11 +2278,11 @@ pub fn build_init_params(
         // config-privacy check (`zKm()`) and a third-party-gateway check
         // (`o_()`); the former surface isn't ported and the latter is a LingXi
         // accepted divergence (multi-provider), so only the F$e() term is wired.
-        analytics_disabled: platform_api::traffic_mode::is_telemetry_disabled(),
+        analytics_disabled: lingxi_core::host::traffic_mode::is_telemetry_disabled(),
         // `productFeedbackDisabled` follows the essential-traffic privacy gate:
         // with non-essential traffic disabled, the product feedback surface is
         // unavailable and the init frame must advertise that fact.
-        product_feedback_disabled: platform_api::traffic_mode::is_essential_traffic_only(),
+        product_feedback_disabled: lingxi_core::host::traffic_mode::is_essential_traffic_only(),
         memory_paths,
         fast_mode_state: fast_mode_state.to_string(),
         fast_mode_disabled_reason: fast_mode_disabled_reason.map(str::to_string),
@@ -2333,8 +2345,8 @@ mod canonical_model_tests {
     /// legacy aggregate fallback) and sits alongside contextWindow/maxOutputTokens.
     #[test]
     fn usage_block_emits_canonical_model_on_both_branches() {
-        let mut per_model = platform_api::orchestrator::CostSnapshot::default();
-        per_model.by_model = vec![platform_api::orchestrator::ModelUsageRow {
+        let mut per_model = lingxi_core::host::orchestrator::CostSnapshot::default();
+        per_model.by_model = vec![lingxi_core::host::orchestrator::ModelUsageRow {
             model: "us.anthropic.claude-opus-4-7-v1:0".into(),
             provider: Some("bedrock".into()),
             total_nano_usd: 1_000_000_000,
@@ -2363,7 +2375,7 @@ mod canonical_model_tests {
 
         // Legacy aggregate fallback (no per-model rows): provider is unknown
         // there and must be OMITTED (`.optional()`), never null.
-        let mut agg = platform_api::orchestrator::CostSnapshot::default();
+        let mut agg = lingxi_core::host::orchestrator::CostSnapshot::default();
         agg.input_tokens = 5;
         let block2 =
             StreamJsonStream::build_model_usage_block(&agg, "claude-opus-4-7-20251101", &[]);
@@ -2442,7 +2454,7 @@ mod tests {
     // Fixed UUIDs make field order, omission, and Unicode escaping byte-testable.
     #[test]
     fn compact_boundary_matches_261_sdk_bytes() {
-        let metadata: protocol::CompactBoundaryMetadata = serde_json::from_value(json!({
+        let metadata: lingxi_core::types::CompactBoundaryMetadata = serde_json::from_value(json!({
             "trigger":"manual", "preTokens":42000, "postTokens":12000,
             "cumulativeDroppedTokens":31000, "durationMs":987, "userContext":"keep API details",
             "messagesSummarized":10, "precomputed":true, "preCompactDiscoveredTools":["Read"],
@@ -2462,7 +2474,7 @@ mod tests {
         let minimal = StreamJsonStream::build_compact_boundary_frame(
             "s",
             "b",
-            &protocol::CompactBoundaryMetadata::default(),
+            &lingxi_core::types::CompactBoundaryMetadata::default(),
         );
         assert_eq!(
             serialize_ndjson_line(&minimal),
@@ -2694,7 +2706,7 @@ mod tests {
             let stream =
                 StreamJsonStream::new_inner(Some(make_params("compact-session")), suppressed);
             let mut receiver = stream.drain_rx.lock().await.take().unwrap();
-            let metadata = protocol::CompactBoundaryMetadata::default();
+            let metadata = lingxi_core::types::CompactBoundaryMetadata::default();
             stream.emit_compaction_started().await;
             stream.emit_compaction_finished(None).await;
             stream
@@ -2946,7 +2958,7 @@ mod tests {
 
     #[test]
     fn tool_heartbeat_uses_client_protocol_wire_shape() {
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let frame = StreamJsonStream::build_tool_heartbeat_frame(&id, "Bash", 4_321);
         assert_eq!(frame["type"], "tool_heartbeat");
         assert_eq!(frame["id"], id.to_string());
@@ -2983,7 +2995,7 @@ mod tests {
             .await
             .take()
             .expect("drain receiver available");
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
 
         stream.emit_tool_heartbeat(&id, "Bash", 1_000).await;
         stream.emit_tool_heartbeat(&id, "Bash", 2_000).await;
@@ -3165,10 +3177,10 @@ mod tests {
         let stream = StreamJsonStream::new(params);
 
         // The orchestrator's cell, shared exactly as `lib.rs` wires it.
-        let cell: Arc<Mutex<Vec<platform_api::PermissionDenial>>> =
+        let cell: Arc<Mutex<Vec<lingxi_core::host::PermissionDenial>>> =
             Arc::new(Mutex::new(Vec::new()));
         stream.share_permission_denials(Arc::clone(&cell));
-        cell.lock().await.push(platform_api::PermissionDenial {
+        cell.lock().await.push(lingxi_core::host::PermissionDenial {
             tool_name: "Read".into(),
             tool_use_id: "toolu_denied_1".into(),
             tool_input: json!({"file_path": "/repo/secret/.env"}),
@@ -4166,7 +4178,7 @@ mod tests {
             input_tokens: 17,
             output_tokens: 5,
             total_usd: 0.000_002,
-            by_model: vec![platform_api::orchestrator::ModelUsageRow {
+            by_model: vec![lingxi_core::host::orchestrator::ModelUsageRow {
                 model: "claude-haiku-4-5".to_string(),
                 provider: Some("firstParty".to_string()),
                 total_nano_usd: 2_000,

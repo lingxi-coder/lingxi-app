@@ -14,11 +14,8 @@
 #        apps/android/native/app/src/main/java/  (package com.lingxi.code.bindings)
 #      using apps/android/ffi/uniffi.toml for the package name.
 #
-# Bindgen: we DO NOT use the stock `uniffi-bindgen` — its 0.28.3 `--library`
-# pipeline PANICS on our surface (cross-crate `ClientError` throw type recorded as
-# `Type::External`). We reuse the SAME offline bindgen bin the iOS script uses
-# (`ios-framework --features cli --bin uniffi-bindgen`), which re-tags that one
-# external throw type so 0.28.3 can render it; T2.4 taught it `--language kotlin`.
+# Swift and Kotlin share the pinned UniFFI 0.32 public generation pipeline.
+# Each Kotlin component has a configured package and native cross-component converters.
 #
 # Idempotent: regenerated dirs are cleaned first; safe to re-run. Prints output
 # paths on success. NO secrets baked in (the LLM API key is read at runtime).
@@ -219,7 +216,7 @@ INTROSPECT_LIB="${CARGO_TARGET_DIR}/aarch64-linux-android/${PROFILE_DIR}/${SONAM
 # The bindgen bin's `--library` metadata extractor expects to find a cdylib name
 # it can compute; build the bin first (cli feature), then run it.
 log "Building offline uniffi-bindgen bin (ios-framework --features cli)…"
-cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --features cli --bin uniffi-bindgen
+cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --features cli --bin uniffi-bindgen
 
 # Clean only the generated bindings package subtree (KOTLIN_OUT also holds any
 # hand-written app sources — never wipe the whole java/ root).
@@ -229,7 +226,7 @@ rm -rf "${GEN_PKG_DIR}"
 mkdir -p "${KOTLIN_OUT}"
 
 log "Generating Kotlin bindings → ${GEN_PKG_DIR} (package com.lingxi.code.bindings)…"
-cargo run --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --features cli \
+cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p ios-framework --features cli \
   --bin uniffi-bindgen -- \
   generate \
   --library "${INTROSPECT_LIB}" \

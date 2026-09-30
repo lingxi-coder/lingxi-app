@@ -304,7 +304,13 @@ if [[ "$preflight_only" == true ]]; then
 fi
 
 repo_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-remap_flags="--remap-path-prefix=${REPO_ROOT}=. --remap-path-prefix=${repo_cargo_home}=/cargo-home --remap-path-prefix=${HOME}/.rustup=/rustup"
+repo_cargo_target="${CARGO_TARGET_DIR:-${ENGINE_DIR}/target}"
+case "$repo_cargo_target" in
+  /*) ;;
+  *) repo_cargo_target="${ENGINE_DIR}/${repo_cargo_target}" ;;
+esac
+# Generated Rust sources live under target, which may be outside the checkout.
+remap_flags="--remap-path-prefix=${REPO_ROOT}=. --remap-path-prefix=${repo_cargo_home}=/cargo-home --remap-path-prefix=${HOME}/.rustup=/rustup --remap-path-prefix=${repo_cargo_target}=/cargo-target"
 export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }${remap_flags}"
 
 log 'building portable release bridge-server'

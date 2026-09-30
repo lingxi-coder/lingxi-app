@@ -1,5 +1,5 @@
 //! Durable interactive model picks. SDK overrides remain session-scoped.
-use platform_api::{HandleError, OrchestratorHandle};
+use lingxi_core::host::{HandleError, OrchestratorHandle};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 

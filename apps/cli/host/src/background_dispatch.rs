@@ -46,8 +46,8 @@ pub struct ForkLaunchContext {
     pub options: Option<BackgroundLaunchOptions>,
     pub transcript_path: Option<String>,
     /// Mid-turn UI boundary restored by the hidden background TUI.
-    pub handoff: Option<platform_api::BackgroundingSnapshot>,
-    pub shell_handoff: Vec<platform_api::shell_handoff::ShellTaskHandoff>,
+    pub handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
+    pub shell_handoff: Vec<lingxi_core::host::shell_handoff::ShellTaskHandoff>,
     /// Foreground-resolved, safety-checked permission mode. When present this
     /// replaces raw CLI/settings authority in the durable launch options.
     pub resolved_permission_mode: Option<permission::PermissionMode>,
@@ -243,7 +243,7 @@ pub async fn dispatch_background(
     if let Some(source_id) = resume_source {
         let target_id = if argv.fork_session {
             match argv.session_id.as_deref() {
-                Some(raw) => match protocol::SessionId::parse_prefixed(raw) {
+                Some(raw) => match lingxi_core::types::SessionId::parse_prefixed(raw) {
                     Some(id) => id.as_uuid(),
                     None => {
                         eprintln!("Error: Invalid session ID. Must be a valid UUID.");
@@ -332,7 +332,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
     // 1. Mint ids.
     let short = agents_registry::mint_short_id(config_home);
     let session_id = match argv.session_id.as_deref() {
-        Some(raw) => match protocol::SessionId::parse_prefixed(raw) {
+        Some(raw) => match lingxi_core::types::SessionId::parse_prefixed(raw) {
             Some(id) => id.as_uuid().to_string(),
             None => {
                 eprintln!("Error: Invalid session ID. Must be a valid UUID.");
@@ -1287,7 +1287,7 @@ mod tests {
                 system_prompt: Some("captured system".to_string()),
                 ..BackgroundLaunchOptions::default()
             }),
-            handoff: Some(platform_api::BackgroundingSnapshot::Idle {
+            handoff: Some(lingxi_core::host::BackgroundingSnapshot::Idle {
                 queued_commands: vec!["/compact".to_string()],
                 draft: "保留这段草稿".to_string(),
                 boundary_id: uuid::Uuid::nil(),

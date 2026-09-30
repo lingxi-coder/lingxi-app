@@ -17,7 +17,7 @@ fn parse(value: &str) -> Option<PermissionMode> {
 
 pub(crate) fn load(argv: &Argv) -> Option<PermissionMode> {
     if argv.restricted_enabled()
-        || platform_api::env::is_env_truthy(
+        || lingxi_core::host::env::is_env_truthy(
             std::env::var("LINGXI_SUBPROCESS_ENV_SCRUB").ok().as_deref(),
         )
         || !crate::init::setting_source_flags(argv.setting_sources.as_deref()).0

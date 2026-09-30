@@ -17,8 +17,8 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.lingxi.code.R
-import com.lingxi.code.bindings.CronFireStatusDto
-import com.lingxi.code.bindings.FiredCronJobDto
+import com.lingxi.code.bindings.runtime.CronFireStatusDto
+import com.lingxi.code.bindings.runtime.FiredCronJobDto
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException

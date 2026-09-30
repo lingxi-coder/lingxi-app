@@ -5,7 +5,7 @@
 //! are pure functions of this state.
 
 /// One background task as surfaced to the TUI. Mirrors the field shape of
-/// `platform_api::task_registry::TaskRecord` (the live task path) so the poller
+/// `lingxi_core::host::task_registry::TaskRecord` (the live task path) so the poller
 /// maps one-to-one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskRow {
@@ -115,7 +115,7 @@ pub struct WorkflowPhase {
 }
 
 /// One workflow run as surfaced to the `/workflows` picker. Mirrors
-/// `platform_api::task_registry::WorkflowRecord` (identity + timing) and is further
+/// `lingxi_core::host::task_registry::WorkflowRecord` (identity + timing) and is further
 /// enriched by [`crate::multiagent::parse_workflow_spool`] with the agent count
 /// and phase/agent tree parsed from the run's output spool. Elapsed is not
 /// stored — the picker derives it from `started_at_ms`/`ended_at_ms` against the

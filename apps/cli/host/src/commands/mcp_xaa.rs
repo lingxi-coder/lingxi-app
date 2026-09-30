@@ -18,7 +18,7 @@
 //! that does not exist would be a defect, not fidelity.
 
 use clap::{Args, Subcommand};
-use platform_api::CredentialStoragePolicy;
+use lingxi_core::host::CredentialStoragePolicy;
 use platform_posix::{PosixClock, PosixHttp};
 use std::sync::Arc;
 
@@ -93,7 +93,7 @@ pub struct LoginArgs {
 pub fn xaa_enabled() -> bool {
     ["LINGXI_ENABLE_XAA", "CLAUDE_CODE_ENABLE_XAA"]
         .iter()
-        .any(|k| platform_api::env::is_env_truthy(std::env::var(k).ok().as_deref()))
+        .any(|k| lingxi_core::host::env::is_env_truthy(std::env::var(k).ok().as_deref()))
 }
 
 /// Dispatch `mcp xaa`.
@@ -291,7 +291,7 @@ async fn run_setup(a: &SetupArgs) -> i32 {
                 Ok((storage, clock)) => {
                     mcp::xaa_idp::save_idp_client_secret(storage, clock, &a.issuer, secret).await
                 }
-                Err(e) => Err(platform_api::McpError::OAuth(e.clone())),
+                Err(e) => Err(lingxi_core::host::McpError::OAuth(e.clone())),
             };
             if let Err(e) = saved {
                 eprintln!(
@@ -329,7 +329,7 @@ async fn run_login(a: &LoginArgs) -> i32 {
                 println!(
                     "id_token cached for {} (expires {})",
                     cfg.issuer,
-                    protocol::iso8601::iso8601_utc(expires_at)
+                    lingxi_core::types::iso8601::iso8601_utc(expires_at)
                 );
                 SUCCESS
             }
@@ -541,8 +541,8 @@ fn write_xaa_settings(value: Option<serde_json::Value>) -> Result<(), String> {
 
 async fn storage_and_clock() -> Result<
     (
-        Arc<dyn platform_api::SecureStorage>,
-        Arc<dyn platform_api::Clock>,
+        Arc<dyn lingxi_core::host::SecureStorage>,
+        Arc<dyn lingxi_core::host::Clock>,
     ),
     String,
 > {
@@ -553,7 +553,7 @@ async fn storage_and_clock() -> Result<
     let storage = credential_storage(user, home.clone(), home.join(".credentials.json"))
         .await
         .map_err(|e| e.to_string())?;
-    let clock: Arc<dyn platform_api::Clock> = Arc::new(PosixClock::new());
+    let clock: Arc<dyn lingxi_core::host::Clock> = Arc::new(PosixClock::new());
     Ok((storage, clock))
 }
 
@@ -561,7 +561,7 @@ async fn credential_storage(
     user: String,
     home: std::path::PathBuf,
     credentials_path: std::path::PathBuf,
-) -> Result<Arc<dyn platform_api::SecureStorage>, platform_api::SecureStorageError> {
+) -> Result<Arc<dyn lingxi_core::host::SecureStorage>, lingxi_core::host::SecureStorageError> {
     #[cfg(windows)]
     {
         platform_windows::secure_storage_for_policy(
@@ -584,8 +584,8 @@ async fn credential_storage(
     }
 }
 
-fn http_transport() -> Result<Arc<dyn platform_api::HttpTransport>, String> {
-    Ok(Arc::new(PosixHttp::new()) as Arc<dyn platform_api::HttpTransport>)
+fn http_transport() -> Result<Arc<dyn lingxi_core::host::HttpTransport>, String> {
+    Ok(Arc::new(PosixHttp::new()) as Arc<dyn lingxi_core::host::HttpTransport>)
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ use client::protocol::commands::ClientCommand;
 use client::protocol::events::ClientEvent;
 use futures_util::{SinkExt, StreamExt};
 use harness_runtime::desktop::DesktopConfig;
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioOperation, AudioOperationContext, AudioOperationId,
     AudioOperationSuccess, AudioOwner, AudioService,
 };

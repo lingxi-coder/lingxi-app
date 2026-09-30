@@ -390,7 +390,7 @@ private suspend fun stopLinuxRuntimeTask(
         LinuxRuntimeBridge.killProcess(
             context = context,
             mode = mode,
-            handle = com.lingxi.code.bindings.MobileLinuxProcessHandleFfi(taskId),
+            handle = com.lingxi.code.bindings.android.MobileLinuxProcessHandleFfi(taskId),
         )
         store.completeLinuxRuntimeAction(
             action,

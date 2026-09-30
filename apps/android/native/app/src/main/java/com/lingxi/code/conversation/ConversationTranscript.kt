@@ -1,10 +1,10 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ImageRefDto
-import com.lingxi.code.bindings.MessageBlockDto
-import com.lingxi.code.bindings.MessageDto
-import com.lingxi.code.bindings.MessageImageDto
+import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.MessageBlockDto
+import com.lingxi.code.bindings.client.MessageDto
+import com.lingxi.code.bindings.client.MessageImageDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.toUi
@@ -138,7 +138,7 @@ private class ToolBlockRef(val build: MessageBuild, val blockIndex: Int)
 private class MessageBuild(
     wireRole: String,
     val images: List<ImageRefDto> = emptyList(),
-    val loopWakeup: com.lingxi.code.bindings.LoopWakeupDto? = null,
+    val loopWakeup: com.lingxi.code.bindings.client.LoopWakeupDto? = null,
 ) {
     val role: Role = if (wireRole.equals("user", ignoreCase = true)) Role.User else Role.Ai
     val textParts = mutableListOf<String>().apply { loopWakeup?.let { add(it.message) } }

@@ -56,7 +56,7 @@ pub struct StatusLineData {
     /// Cumulative output tokens across model calls.
     pub total_output_tokens: u64,
     /// Most recent successful model response usage.
-    pub current_usage: Option<platform_api::CurrentUsageSnapshot>,
+    pub current_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
     /// Context-window used fraction (0-1), from `TurnEvent::ContextPressure`.
     pub context_pct: f32,
     /// Raw context token estimate behind the fraction
@@ -266,7 +266,7 @@ mod tests {
         )
         .unwrap()
         .with_execution_policy(
-            StatusLineSource::Known(protocol::Scope::Project),
+            StatusLineSource::Known(lingxi_core::types::Scope::Project),
             StatusLineExecutionPolicy {
                 workspace_trusted: false,
                 disable_all_hooks: false,
@@ -281,7 +281,7 @@ mod tests {
         )
         .unwrap()
         .with_execution_policy(
-            StatusLineSource::Known(protocol::Scope::User),
+            StatusLineSource::Known(lingxi_core::types::Scope::User),
             StatusLineExecutionPolicy {
                 workspace_trusted: true,
                 disable_all_hooks: false,

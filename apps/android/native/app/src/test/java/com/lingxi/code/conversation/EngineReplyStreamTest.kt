@@ -1,9 +1,9 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.CostDto
-import com.lingxi.code.bindings.ErrorKindDto
-import com.lingxi.code.bindings.TurnOutcomeDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.CostDto
+import com.lingxi.code.bindings.client.ErrorKindDto
+import com.lingxi.code.bindings.client.TurnOutcomeDto
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.take
@@ -180,9 +180,9 @@ class EngineReplyStreamTest {
     @Test
     fun messageCompleteDoesNotTerminateBeforeTurnEnded() = runTest {
         val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
-        val message = com.lingxi.code.bindings.MessageDto(
+        val message = com.lingxi.code.bindings.client.MessageDto(
             role = "assistant",
-            blocks = listOf(com.lingxi.code.bindings.MessageBlockDto.Text("first")),
+            blocks = listOf(com.lingxi.code.bindings.client.MessageBlockDto.Text("first")),
             images = emptyList(),
         )
         val stream = mapReplyStream(

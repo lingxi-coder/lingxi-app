@@ -30,7 +30,6 @@
     "outputstyles",
     "permission",
     "platform-android",
-    "platform-api",
     "platform-common",
     "platform-ios",
     "platform-macos-computer-control",
@@ -38,7 +37,6 @@
     "platform-posix-minimal",
     "platform-windows",
     "plugin",
-    "protocol",
     "provider-config",
     "sandbox",
     "sandbox-runtime",
@@ -77,6 +75,7 @@
     "git2",
     "libgit2-sys",
     "libssh2-sys",
-    "mbedtls-sys"
+    "mbedtls-sys",
+    "syntect"
   ]
 }

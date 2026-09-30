@@ -28,8 +28,8 @@ use harness_runtime::mobile::{
     PermissionRequestSink, SessionModeDto,
 };
 #[cfg(all(feature = "uniffi", target_os = "ios"))]
-use platform_api::Platform;
-use platform_api::{AudioService, CameraControl, SharingService};
+use lingxi_core::host::Platform;
+use lingxi_core::host::{AudioService, CameraControl, SharingService};
 use std::sync::Arc;
 
 /// The foreign (Swift) capability objects + config the engine needs to build an
@@ -44,7 +44,7 @@ pub struct PlatformImpls {
     pub share: Arc<dyn SharingService>,
     /// Swift Keychain-backed `SecureStorage` impl, if provided. When `None` the
     /// composition root falls back to the non-persisting development stub.
-    pub secure_storage: Option<Arc<dyn platform_api::SecureStorage>>,
+    pub secure_storage: Option<Arc<dyn lingxi_core::host::SecureStorage>>,
     /// The app's writable sandbox container root.
     pub app_sandbox_root: String,
     /// Optional mobile-linux runtime configuration.
@@ -80,12 +80,12 @@ pub fn build_mobile_engine(
             ),
             cwd: std::path::PathBuf::from(&impls.app_sandbox_root),
             lingxi_home: std::path::PathBuf::from(&impls.app_sandbox_root).join(branding::DOT_DIR),
-            host_environment: Some(platform_api::MobileHostEnvironment::new(
-                platform_api::MobileHostOs::Ios,
+            host_environment: Some(lingxi_core::host::MobileHostEnvironment::new(
+                lingxi_core::host::MobileHostOs::Ios,
                 None,
-                platform_api::MobileDeviceClass::Unknown,
-                platform_api::MobileExecutionTarget::Unknown,
-                platform_api::MobileLaunchMode::Unknown,
+                lingxi_core::host::MobileDeviceClass::Unknown,
+                lingxi_core::host::MobileExecutionTarget::Unknown,
+                lingxi_core::host::MobileLaunchMode::Unknown,
             )),
             // P0.2: production injects the real LINGXI.md hierarchy provider so the
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
@@ -215,18 +215,18 @@ pub fn build_ios_engine_with_config(
         let audio = harness_runtime::mobile::from_native_audio_service(native_audio);
         let device_status = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn platform_api::DeviceStatusProvider>);
+            .map(|service| service.clone() as Arc<dyn lingxi_core::host::DeviceStatusProvider>);
         let haptics = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn platform_api::HapticService>);
+            .map(|service| service.clone() as Arc<dyn lingxi_core::host::HapticService>);
         let calendar = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn platform_api::CalendarProvider>);
+            .map(|service| service.clone() as Arc<dyn lingxi_core::host::CalendarProvider>);
         let contacts = device_control
             .clone()
-            .map(|service| service.clone() as Arc<dyn platform_api::ContactsProvider>);
+            .map(|service| service.clone() as Arc<dyn lingxi_core::host::ContactsProvider>);
         let deep_link =
-            device_control.map(|service| service as Arc<dyn platform_api::DeepLinkOpener>);
+            device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
         // The app generator uses the bundled runtime independently of the
@@ -264,10 +264,11 @@ pub fn build_ios_engine_with_config(
             contacts,
             secure_storage: secure_storage.map(|s| {
                 Arc::new(IosSecureStorageBridge { inner: s })
-                    as Arc<dyn platform_api::SecureStorage>
+                    as Arc<dyn lingxi_core::host::SecureStorage>
             }),
             location: location.map(|l| {
-                Arc::new(IosLocationBridge { inner: l }) as Arc<dyn platform_api::LocationProvider>
+                Arc::new(IosLocationBridge { inner: l })
+                    as Arc<dyn lingxi_core::host::LocationProvider>
             }),
             mobile_linux: ios_mobile_linux_runtime(local_apps_mobile_linux.as_ref()),
             workspace_host_path: Some(workspace_host_path),

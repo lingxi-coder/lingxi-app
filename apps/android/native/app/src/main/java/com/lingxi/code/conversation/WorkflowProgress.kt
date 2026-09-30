@@ -1,7 +1,7 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.TaskStatusDto
-import com.lingxi.code.bindings.WorkflowProgressDto
+import com.lingxi.code.bindings.client.TaskStatusDto
+import com.lingxi.code.bindings.client.WorkflowProgressDto
 
 /** One structured, session-owned workflow update delivered outside ClientEvent. */
 data class WorkflowProgressUpdate(

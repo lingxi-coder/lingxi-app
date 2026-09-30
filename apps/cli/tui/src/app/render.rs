@@ -24,7 +24,7 @@ impl<'cb> RataApp<'cb> {
     /// backend's async `pump_terminal_sequence` writing to stdout). The
     /// sequences are allowlisted OSC/BEL escapes that never move the cursor,
     /// so writing them between frames cannot corrupt the viewport diff.
-    pub(super) fn write_terminal_sequences<B: Backend + Write>(
+    pub(super) fn write_terminal_sequences<B: Backend<Error = std::io::Error> + Write>(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
@@ -42,7 +42,7 @@ impl<'cb> RataApp<'cb> {
     }
     /// Commit finalized transcript cells into the terminal's native
     /// scrollback (see [`crate::chat_widget::ChatWidget::flush_scrollback`]).
-    pub(super) fn flush_scrollback<B: Backend + Write>(
+    pub(super) fn flush_scrollback<B: Backend<Error = std::io::Error> + Write>(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
@@ -50,7 +50,7 @@ impl<'cb> RataApp<'cb> {
     }
     /// Draw one frame through the widget's render contract
     /// ([`crate::chat_widget::ChatWidget::render_frame`] is the frame adapter).
-    pub(super) fn draw<B: Backend + Write>(
+    pub(super) fn draw<B: Backend<Error = std::io::Error> + Write>(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
@@ -65,7 +65,7 @@ impl<'cb> RataApp<'cb> {
     /// inside a synchronized-update bracket so the terminal applies the frame
     /// atomically (codex `Tui::draw`). The bracket must close even when a
     /// step fails — a dangling `?2026h` freezes the terminal.
-    pub(super) fn render_tick<B: Backend + Write>(
+    pub(super) fn render_tick<B: Backend<Error = std::io::Error> + Write>(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {

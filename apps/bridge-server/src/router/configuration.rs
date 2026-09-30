@@ -424,7 +424,7 @@ impl EngineCommandRouter {
             .map(|settings| settings.paths.project_dir.clone())
             .ok_or_else(|| "no skill settings context wired".to_string())?;
         let outcome = reloader
-            .reload(platform_api::RepoRootReloadRequest {
+            .reload(lingxi_core::host::RepoRootReloadRequest {
                 root,
                 reload_skills: true,
                 reload_plugins: false,
@@ -568,13 +568,13 @@ impl EngineCommandRouter {
                     ("plugin", false, Some("由插件注入；请在 Plugins 设置中管理"))
                 }
                 Some(config) => match config.scope {
-                    mcp::ConfigScope::Settings(protocol::SettingsScope::User) => {
+                    mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::User) => {
                         ("user", true, None)
                     }
-                    mcp::ConfigScope::Settings(protocol::SettingsScope::Local) => {
+                    mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Local) => {
                         ("local", true, None)
                     }
-                    mcp::ConfigScope::Settings(protocol::SettingsScope::Project) => {
+                    mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Project) => {
                         ("project", true, None)
                     }
                     mcp::ConfigScope::Dynamic => ("dynamic", false, Some("由当前会话动态注入")),
@@ -582,7 +582,7 @@ impl EngineCommandRouter {
                     mcp::ConfigScope::ClaudeAi => {
                         ("claude_ai", false, Some("由 Claude.ai 连接提供"))
                     }
-                    mcp::ConfigScope::Settings(protocol::SettingsScope::Managed) => {
+                    mcp::ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed) => {
                         ("managed", false, Some("由管理员策略管理"))
                     }
                     mcp::ConfigScope::Agent => ("agent", false, Some("由 Agent frontmatter 注入")),
@@ -592,9 +592,9 @@ impl EngineCommandRouter {
             runtime_servers.push(serde_json::json!({
                 "name": server.name,
                 "status": match server.status {
-                    platform_api::McpStatus::Connected => serde_json::json!("connected"),
-                    platform_api::McpStatus::Disconnected => serde_json::json!("disconnected"),
-                    platform_api::McpStatus::Error(reason) => serde_json::json!({ "type": "error", "reason": reason }),
+                    lingxi_core::host::McpStatus::Connected => serde_json::json!("connected"),
+                    lingxi_core::host::McpStatus::Disconnected => serde_json::json!("disconnected"),
+                    lingxi_core::host::McpStatus::Error(reason) => serde_json::json!({ "type": "error", "reason": reason }),
                 },
                 "transport": server.transport,
                 "source": source,

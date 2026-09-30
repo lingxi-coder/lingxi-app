@@ -1,8 +1,8 @@
 //! `android-aar` (M8-P12 → M10-F3) — the Android `UniFFI` packager.
 //!
 //! The FFI boundary between the Rust engine and the Android app. The Kotlin
-//! layer implements the unified [`platform_api::AudioService`] plus the
-//! [`platform_api::CameraControl`] / [`platform_api::SharingService`] callbacks
+//! layer implements the unified [`lingxi_core::host::AudioService`] plus the
+//! [`lingxi_core::host::CameraControl`] / [`lingxi_core::host::SharingService`] callbacks
 //! (skeletons under `kotlin/`), hands them across as a [`PlatformImpls`] record, and Rust uses them to build
 //! an `AndroidPlatform` and assemble the mobile engine — Rust calls *back* into
 //! Kotlin for native capabilities.
@@ -226,11 +226,11 @@ pub use probes::android_git_probe_authed;
 // Mirrors the AndroidStt/AndroidTts/AndroidCamera pattern: the Kotlin layer
 // implements a crate-local async `AndroidShare` callback interface (the system
 // `Intent.ACTION_SEND` share sheet) and hands it across the FFI seam. The
-// engine consumes the SHARED `platform_api::SharingService` seam, so
+// engine consumes the SHARED `lingxi_core::host::SharingService` seam, so
 // `AndroidShareBridge` adapts the crate-local interface to its `traits`
-// counterpart. The shared `platform_api::SharePayload` is destructured into the three
+// counterpart. The shared `lingxi_core::host::SharePayload` is destructured into the three
 // flat `text` / `url` / `image_bytes` args to keep the FFI flat; the bridge
-// maps the FFI result/error back onto `platform_api::ShareResult` / `platform_api::ShareError`.
+// maps the FFI result/error back onto `lingxi_core::host::ShareResult` / `lingxi_core::host::ShareError`.
 
 // ---------------------------------------------------------------------------
 // Location — foreign (Kotlin) callback interface + its engine bridge.
@@ -243,11 +243,11 @@ pub use probes::android_git_probe_authed;
 // Mirrors the AndroidShare pattern: the Kotlin layer implements a crate-local
 // async `AndroidNotification` callback interface (the system
 // `NotificationManager`) and hands it across the FFI seam. The engine consumes
-// the SHARED `platform_api::NotificationService` seam, so `AndroidNotificationBridge`
+// the SHARED `lingxi_core::host::NotificationService` seam, so `AndroidNotificationBridge`
 // adapts the crate-local interface to its `traits` counterpart. The shared
-// `platform_api::NotificationRequest` is destructured into the flat `title` / `body`
+// `lingxi_core::host::NotificationRequest` is destructured into the flat `title` / `body`
 // / `tag` args to keep the FFI flat; the bridge maps the FFI error back onto
-// `platform_api::NotificationError`. This is ENGINE-DRIVEN by `tool-notification`
+// `lingxi_core::host::NotificationError`. This is ENGINE-DRIVEN by `tool-notification`
 // (the model posts a notification) — no user-facing UI affordance.
 
 // ---------------------------------------------------------------------------
@@ -257,9 +257,9 @@ pub use probes::android_git_probe_authed;
 // Mirrors the AndroidNotification pattern: the Kotlin layer implements a
 // crate-local async `AndroidClipboard` callback interface (the system
 // `ClipboardManager`) and hands it across the FFI seam. The engine consumes
-// the SHARED `platform_api::Clipboard` seam, so `AndroidClipboardBridge` adapts the
+// the SHARED `lingxi_core::host::Clipboard` seam, so `AndroidClipboardBridge` adapts the
 // crate-local interface to its `traits` counterpart; the bridge maps the FFI
-// error back onto `platform_api::ClipboardError`. This is ENGINE-DRIVEN by
+// error back onto `lingxi_core::host::ClipboardError`. This is ENGINE-DRIVEN by
 // `tool-clipboard` (the model reads/writes the pasteboard) — no user-facing UI
 // affordance. NOTE Android 10+ restricts clipboard READS to the focused app /
 // default IME — when a read is not permitted the Kotlin side returns `None`
@@ -275,10 +275,10 @@ pub use probes::android_git_probe_authed;
 //
 // The Kotlin app implements a crate-local async `AndroidSecureStorage` callback
 // interface backed by the Android Keystore / EncryptedSharedPreferences. The
-// engine's `protocol::SecureStorageData` is serde-encoded by the bridge into an
+// engine's `lingxi_core::types::SecureStorageData` is serde-encoded by the bridge into an
 // OPAQUE `blob: Vec<u8>` keyed by (service, account); the native side stores /
 // returns the blob verbatim (encrypted at rest by the Keystore). The bridge
-// adapts it to the shared `platform_api::SecureStorage` seam and reports
+// adapts it to the shared `lingxi_core::host::SecureStorage` seam and reports
 // is_encrypted()=true / backend=AndroidKeystore so OAuth /login can persist.
 //
 // The bridge struct/impl + its error-fan-out are gated to `target_os =
@@ -295,10 +295,10 @@ pub use probes::android_git_probe_authed;
 // The Kotlin layer implements
 // a crate-local async `AndroidCamera` callback interface (CameraX capture +
 // system photo picker) and hands it across the FFI seam. The engine consumes
-// the SHARED `platform_api::CameraControl` seam, so `AndroidCameraBridge` adapts the
+// the SHARED `lingxi_core::host::CameraControl` seam, so `AndroidCameraBridge` adapts the
 // crate-local interface to its `traits` counterpart. Camera position crosses
 // the seam as a plain `front: bool` (true = front/selfie, false = rear) to keep
-// the FFI flat; the bridge maps it to `platform_api::CameraPosition`.
+// the FFI flat; the bridge maps it to `lingxi_core::host::CameraPosition`.
 
 // ---------------------------------------------------------------------------
 
@@ -321,7 +321,7 @@ pub use probes::android_git_probe_authed;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod stub_capabilities {
     use async_trait::async_trait;
-    use platform_api::{
+    use lingxi_core::host::{
         CameraControl, CameraError, CapturePhotoOpts, CapturedImage, ShareError, SharePayload,
         ShareResult, SharingService,
     };

@@ -138,10 +138,10 @@ pub struct AndroidHostEnvironmentFfi {
 }
 
 impl From<AndroidHostEnvironmentFfi>
-    for platform_api::mobile_runtime_environment::MobileHostEnvironment
+    for lingxi_core::host::mobile_runtime_environment::MobileHostEnvironment
 {
     fn from(value: AndroidHostEnvironmentFfi) -> Self {
-        use platform_api::mobile_runtime_environment::{
+        use lingxi_core::host::mobile_runtime_environment::{
             MobileDeviceClass, MobileExecutionTarget, MobileHostEnvironment, MobileHostOs,
             MobileLaunchMode,
         };

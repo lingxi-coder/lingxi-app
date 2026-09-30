@@ -1,6 +1,6 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.bindings.client.TaskStatusDto
 
 /** Rebuilding the source invalidates live work and connection-scoped user requests. */
 internal fun ChatState.blocksEngineReconnect(hasPendingPermission: Boolean): Boolean =

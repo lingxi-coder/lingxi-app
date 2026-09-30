@@ -4,7 +4,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.lingxi.code.bindings.AutoModePromptDto
+import com.lingxi.code.bindings.client.AutoModePromptDto
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.theme.LingXiTheme
 import org.junit.Rule

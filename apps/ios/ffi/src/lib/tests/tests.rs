@@ -100,7 +100,7 @@ use async_trait::async_trait;
 use client::protocol::events::ClientEvent;
 use client::protocol::permission::PermissionRequest as PermissionRequestDto;
 use harness_runtime::mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
-use platform_api::{
+use lingxi_core::host::{
     CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
     SharingService, WorktreeManager,
 };
@@ -172,6 +172,14 @@ struct FakeListener {
 impl ClientEventListener for FakeListener {
     async fn on_event(&self, event: ClientEvent) {
         self.received.lock().await.push(event);
+    }
+    async fn on_workflow_progress(
+        &self,
+        _origin_session_id: String,
+        _task_id: String,
+        _run_id: String,
+        _progress: client::protocol::listings::WorkflowProgressDto,
+    ) {
     }
 }
 
@@ -610,13 +618,19 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
     assert!(!cfg.vision_delegation_enabled);
     assert_eq!(cfg.physical_memory_bytes, 7 * 1024_u64.pow(3));
     let host = cfg.host_environment.as_ref().expect("mobile host fallback");
-    assert_eq!(host.host_os, platform_api::MobileHostOs::Ios);
-    assert_eq!(host.device_class, platform_api::MobileDeviceClass::Unknown);
+    assert_eq!(host.host_os, lingxi_core::host::MobileHostOs::Ios);
+    assert_eq!(
+        host.device_class,
+        lingxi_core::host::MobileDeviceClass::Unknown
+    );
     assert_eq!(
         host.execution_target,
-        platform_api::MobileExecutionTarget::Unknown
+        lingxi_core::host::MobileExecutionTarget::Unknown
     );
-    assert_eq!(host.launch_mode, platform_api::MobileLaunchMode::Unknown);
+    assert_eq!(
+        host.launch_mode,
+        lingxi_core::host::MobileLaunchMode::Unknown
+    );
     assert_eq!(
         cfg.lingxi_home,
         temp.path().join(branding::DOT_DIR),
@@ -705,19 +719,19 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
     .expect("launch config");
 
     let environment = cfg.host_environment.expect("host environment");
-    assert_eq!(environment.host_os, platform_api::MobileHostOs::Ios);
+    assert_eq!(environment.host_os, lingxi_core::host::MobileHostOs::Ios);
     assert_eq!(environment.host_os_version.as_deref(), Some("19.0"));
     assert_eq!(
         environment.device_class,
-        platform_api::MobileDeviceClass::Tablet
+        lingxi_core::host::MobileDeviceClass::Tablet
     );
     assert_eq!(
         environment.execution_target,
-        platform_api::MobileExecutionTarget::Simulator
+        lingxi_core::host::MobileExecutionTarget::Simulator
     );
     assert_eq!(
         environment.launch_mode,
-        platform_api::MobileLaunchMode::ScheduledHeadless
+        lingxi_core::host::MobileLaunchMode::ScheduledHeadless
     );
 }
 

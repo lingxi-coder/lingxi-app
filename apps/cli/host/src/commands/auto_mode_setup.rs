@@ -1111,7 +1111,7 @@ mod tests {
         let allow_rule = |spec: &str| PermissionRule {
             value: PermissionRuleValue::from_rule_string(spec),
             behavior: PermissionBehavior::Allow,
-            source: PermissionRuleSource::Settings(protocol::SettingsScope::User),
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
         };
         let seed = [allow_rule("Bash(rm:*)"), allow_rule("Read")];
         replace_permission_rules(

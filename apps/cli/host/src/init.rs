@@ -27,8 +27,8 @@ use async_trait::async_trait;
 use client::protocol::permission::PermissionRequest as PermissionRequestDto;
 use command_api::RegistrySlashDispatcher;
 use harness_runtime::desktop::{build, DesktopConfig};
+use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream};
 use orchestrator::ConversationOrchestrator;
-use platform_api::{AuthHandle, OrchestratorHandle, OutputStream};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -46,13 +46,13 @@ pub struct Runtime {
     /// Dynamic loop timer seam retained for the mounted terminal host.
     pub wakeup_scheduler_cell: harness_runtime::desktop::loop_tools::WakeupSchedulerCell,
     /// Host runtime used to arm cancellable loop timers.
-    pub runtime_spawner: Arc<dyn platform_api::RuntimeSpawner>,
+    pub runtime_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner>,
     /// Durable session coordinator retained across CLI runtime projection and
     /// remounts. Every host has one; the no-transcript mode gets a disposable
     /// ledger under a temporary home rather than no ledger.
     pub session_state: Arc<harness_runtime::desktop::session_state::SessionStateCoordinator>,
     /// Common Fusion terminal recorder retained by the projected runtime.
-    pub fusion_recorder: Arc<dyn platform_api::FusionRunRecorder>,
+    pub fusion_recorder: Arc<dyn lingxi_core::host::FusionRunRecorder>,
     /// Per-session recorder factory used to drain mounted outboxes during CLI
     /// shutdown or an in-process session remount.
     pub fusion_recorder_factory:
@@ -93,7 +93,7 @@ pub struct Runtime {
     /// refined by the background profile+roles fetch). The TUI mount threads a
     /// clone into `tui::session::Runtime::with_subscription` so the rate-limit
     /// composer reads the live snapshot.
-    pub subscription: platform_api::subscription::SharedSubscription,
+    pub subscription: lingxi_core::host::subscription::SharedSubscription,
     /// (`/sandbox`) Shared bash-sandbox toggle cell, projected straight from
     /// [`harness_runtime::desktop::DesktopRuntime::sandbox_toggle`] (the SAME
     /// `Arc<AtomicBool>` the bash tool reads). The TUI mount threads a clone
@@ -141,7 +141,7 @@ pub struct Runtime {
     pub model_providers: std::collections::BTreeMap<String, (String, String)>,
     /// Provenance of the model selected by the desktop composition root for
     /// the initial/default `/model` row.
-    pub model_provenance: platform_api::ModelProvenance,
+    pub model_provenance: lingxi_core::host::ModelProvenance,
     /// (Plan 3c C1) Shared engine credential store, projected straight from
     /// [`harness_runtime::desktop::DesktopRuntime::credentials`]. The TUI mount threads a
     /// clone into `tui::session::Runtime::with_provider_key_store` so the
@@ -149,7 +149,7 @@ pub struct Runtime {
     /// provider key via `CredentialManager::set_provider_key`.
     pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
     /// Shared HTTP transport for TUI-owned `/web` test-search requests.
-    pub http: std::sync::Arc<dyn platform_api::HttpTransport>,
+    pub http: std::sync::Arc<dyn lingxi_core::host::HttpTransport>,
     /// Shared analytics bus projected from the desktop runtime.
     pub analytics_bus: std::sync::Arc<telemetry::AnalyticsBus>,
     /// Structured-output capture slot, projected from
@@ -196,7 +196,7 @@ pub struct Runtime {
     pub mcp_registry: std::sync::Arc<mcp::McpRegistry>,
     /// Provider-neutral local IDE lifecycle handle projected from the desktop
     /// composition root. It owns lockfile discovery and local auth state.
-    pub ide_handle: std::sync::Arc<dyn platform_api::IdeHandle>,
+    pub ide_handle: std::sync::Arc<dyn lingxi_core::host::IdeHandle>,
     /// The ENFORCING permission gate (`harness_runtime::desktop::DesktopRuntime::
     /// enforcing_permission_gate`), threaded to the TUI so Shift+Tab drives live
     /// permission-mode cycling via `set_permission_mode`.
@@ -446,7 +446,7 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
         // CLI-provided servers carry Dynamic scope, matching the oracle's
         // `--mcp-config` handler, which stamps `{...ws, scope:"dynamic"}` on
         // every entry: they are never `.mcp.json` project-approval-gated
-        // (`mcp::server_gate` only gates `ConfigScope::Settings(protocol::SettingsScope::Project)`). Precedence
+        // (`mcp::server_gate` only gates `ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)`). Precedence
         // over discovered servers is enforced by the name-merge in
         // `harness_runtime::desktop::build`, not the scope.
         match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Dynamic) {
@@ -761,9 +761,13 @@ pub(crate) fn resolve_desktop_config_at(
     // subagent inheriting `CLAUDE_CODE_SAFE_MODE`).
     let gates = harness_runtime::desktop::CustomizationGates {
         safe_mode: argv.safe_mode
-            || platform_api::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref()),
+            || lingxi_core::host::env::is_env_truthy(
+                std::env::var("LINGXI_SAFE_MODE").ok().as_deref(),
+            ),
         bare: argv.bare
-            || platform_api::env::is_env_truthy(std::env::var("LINGXI_SIMPLE").ok().as_deref()),
+            || lingxi_core::host::env::is_env_truthy(
+                std::env::var("LINGXI_SIMPLE").ok().as_deref(),
+            ),
     };
 
     // `--strict-mcp-config` (claude-code main.tsx:1586): "Only use MCP servers
@@ -879,7 +883,7 @@ pub(crate) fn resolve_desktop_config_at(
         // Real CLI session: the machine's keychain and env ARE legitimate
         // credential sources here.
         isolated_credential_storage: false,
-        credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
+        credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativePreferred,
         injected_plugin_secrets: std::collections::BTreeMap::new(),
         api_base: resolve_api_base(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
@@ -1337,16 +1341,15 @@ pub async fn build_runtime_from_config(
         let session_id = cfg
             .session_id_override
             .as_deref()
-            .and_then(protocol::SessionId::parse_prefixed)
+            .and_then(lingxi_core::types::SessionId::parse_prefixed)
             .unwrap_or_default();
         cfg.session_id_override = Some(session_id.as_uuid().to_string());
-        let lease =
-            platform_api::live_sessions::LiveSessionDir::at_live(cfg.lingxi_home.join("sessions"))
-                .claim_session_id(&session_id.to_string(), std::process::id())
-                .map_err(|error| {
-                    InitError::Orchestrator(format!("session writer claim failed: {error}"))
-                })?
-                .into_shared();
+        let lease = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
+            cfg.lingxi_home.join("sessions"),
+        )
+        .claim_session_id(&session_id.to_string(), std::process::id())
+        .map_err(|error| InitError::Orchestrator(format!("session writer claim failed: {error}")))?
+        .into_shared();
         cfg.session_writer_lease = Some(lease);
     }
     let permission_sink: Arc<dyn client::adapter::PermissionRequestSink> =
@@ -1699,7 +1702,7 @@ mod tests {
     /// unapproved `--mcp-config` server in a fresh project (no
     /// `enabledMcpjsonServers` record at all) must connect on the first
     /// launch, not sit `ProjectPendingApproval`. Before the fix this parsed at
-    /// `ConfigScope::Settings(protocol::SettingsScope::Project)` and `McpPolicyContext::decide` blocked it.
+    /// `ConfigScope::Settings(lingxi_core::types::SettingsScope::Project)` and `McpPolicyContext::decide` blocked it.
     #[test]
     fn parse_cli_mcp_servers_are_never_project_approval_gated() {
         let raw = r#"{"mcpServers":{"docs":{"command":"docs-server"}}}"#.to_string();
@@ -1752,7 +1755,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             stack.storage.backend(),
-            platform_api::SecureStorageBackend::PlainText
+            lingxi_core::host::SecureStorageBackend::PlainText
         );
         assert!(!stack
             .storage

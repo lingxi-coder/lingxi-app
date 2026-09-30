@@ -17,7 +17,7 @@ use client::protocol::listings::SlashCommandDto;
 use command_api::builtin_support::names::core_description;
 use command_api::builtin_support::names::is_palette_hidden;
 use command_api::registry::CommandRegistry;
-use platform_api::task_registry::TaskListFilter;
+use lingxi_core::host::task_registry::TaskListFilter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SlashAuthoritySnapshot {
@@ -73,7 +73,7 @@ impl EngineCommandRouter {
         let snapshot = self.handle.get_status_snapshot().await;
         SlashAuthoritySnapshot {
             session_id: self.handle.current_session_id().await.to_string(),
-            model: platform_api::qualified_model_ref(
+            model: lingxi_core::host::qualified_model_ref(
                 &snapshot.model,
                 snapshot.model_profile.as_deref(),
             ),
@@ -139,18 +139,18 @@ impl EngineCommandRouter {
                     providers: provider_catalog,
                 })
                 .await;
-                let curated = platform_api::curated_model_listings(
+                let curated = lingxi_core::host::curated_model_listings(
                     &listings,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
-                let models = platform_api::curated_model_refs(
+                let models = lingxi_core::host::curated_model_refs(
                     &listings,
                     &available,
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );
-                let current = platform_api::qualified_model_ref(
+                let current = lingxi_core::host::qualified_model_ref(
                     &snapshot.model,
                     snapshot.model_profile.as_deref(),
                 );

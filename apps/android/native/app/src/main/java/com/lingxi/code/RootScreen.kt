@@ -109,13 +109,13 @@ import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.model.ManagedLocalAppMcpSource
 import com.lingxi.code.model.ManagedLocalAppToolSchema
 import com.lingxi.code.model.LocalAppPluginStatus
-import com.lingxi.code.bindings.AppEventDto
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.LocalAppPluginInventoryDto
-import com.lingxi.code.bindings.ManagedLocalAppMcpServerDto
-import com.lingxi.code.bindings.PluginActivationStateDto
-import com.lingxi.code.bindings.PluginCommandDto
+import com.lingxi.code.bindings.client.AppEventDto
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.LocalAppPluginInventoryDto
+import com.lingxi.code.bindings.client.ManagedLocalAppMcpServerDto
+import com.lingxi.code.bindings.client.PluginActivationStateDto
+import com.lingxi.code.bindings.client.PluginCommandDto
 import com.lingxi.code.theme.LingXiTheme
 import android.Manifest
 import android.content.Context
@@ -848,17 +848,17 @@ fun RootScreen(
         val pluginId = settingsState.localAppPlugin.pluginId
         runCatching {
             currentEngineSource.submitClientCommand(
-                com.lingxi.code.bindings.ClientCommand.PluginCommand(
+                com.lingxi.code.bindings.client.ClientCommand.PluginCommand(
                     PluginCommandDto.GetStatus(pluginId = pluginId),
                 ),
             )
             currentEngineSource.submitClientCommand(
-                com.lingxi.code.bindings.ClientCommand.PluginCommand(
+                com.lingxi.code.bindings.client.ClientCommand.PluginCommand(
                     PluginCommandDto.GetInventory(pluginId = pluginId),
                 ),
             )
             currentEngineSource.submitClientCommand(
-                com.lingxi.code.bindings.ClientCommand.PluginCommand(
+                com.lingxi.code.bindings.client.ClientCommand.PluginCommand(
                     PluginCommandDto.GetManagedMcpInventory,
                 ),
             )

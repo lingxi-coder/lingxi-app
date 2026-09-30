@@ -32,7 +32,7 @@ pub enum RenderedMessage {
     /// Per-id expanded state lives in `AppState.expanded`.
     AssistantToolUse {
         /// Correlator (model-supplied `tool_use_id`).
-        id: protocol::ToolUseId,
+        id: lingxi_core::types::ToolUseId,
         /// Tool name (e.g. `"Read"`, `"Bash"`).
         tool: String,
         /// JSON input the tool was invoked with.
@@ -44,7 +44,7 @@ pub enum RenderedMessage {
     /// line plus a `(+N lines)` suffix.
     UserToolResult {
         /// Correlator matching the paired `AssistantToolUse.id`.
-        id: protocol::ToolUseId,
+        id: lingxi_core::types::ToolUseId,
         /// Tool name (used to gate Bash → ANSI parser).
         tool: String,
         /// JSON result payload.
@@ -272,7 +272,7 @@ pub enum RenderedMessage {
         /// Shared tool name for the group.
         tool: String,
         /// First child's id — the per-group expanded-map key.
-        group_id: protocol::ToolUseId,
+        group_id: lingxi_core::types::ToolUseId,
         /// `(input, result)` pairs in group order.
         entries: Vec<(serde_json::Value, serde_json::Value)>,
     },
@@ -288,7 +288,7 @@ pub enum RenderedMessage {
         /// `true` while the group is still streaming (present-tense verbs).
         is_active: bool,
         /// Expanded-map key (first child's id).
-        group_id: protocol::ToolUseId,
+        group_id: lingxi_core::types::ToolUseId,
         /// Per-entry display lines, shown when expanded.
         entries: Vec<String>,
         /// Number of REPL invocations folded (present-tense `REPL'ing`).
@@ -495,7 +495,7 @@ pub struct CurrentTodo {
 }
 
 impl RenderedMessage {
-    pub fn tool_id(&self) -> Option<&protocol::ToolUseId> {
+    pub fn tool_id(&self) -> Option<&lingxi_core::types::ToolUseId> {
         match self {
             RenderedMessage::AssistantToolUse { id, .. }
             | RenderedMessage::UserToolResult { id, .. } => Some(id),
@@ -554,7 +554,7 @@ mod rendered_message_tests {
 
     #[test]
     fn native_scrollback_safe_keeps_expandable_tool_messages_live() {
-        let id = protocol::ToolUseId::new();
+        let id = lingxi_core::types::ToolUseId::new();
         let tool_use = RenderedMessage::AssistantToolUse {
             id: id.clone(),
             tool: "Read".to_string(),

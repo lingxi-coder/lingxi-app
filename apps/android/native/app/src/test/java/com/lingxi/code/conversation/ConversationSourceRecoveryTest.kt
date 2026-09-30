@@ -1,10 +1,10 @@
 package com.lingxi.code.conversation
 
 import android.content.SharedPreferences
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.TurnRecoverySnapshotDto
-import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.TurnRecoverySnapshotDto
+import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.SessionMode
 import com.lingxi.code.settings.LinuxRuntimeMode
 import kotlinx.coroutines.flow.MutableStateFlow

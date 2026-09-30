@@ -1,15 +1,15 @@
 use super::*;
 use harness_runtime::desktop::session_agents::DesktopSessionAgentObserver;
-use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
+use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
 
-fn observer(session_id: protocol::SessionId) -> Arc<DesktopSessionAgentObserver> {
+fn observer(session_id: lingxi_core::types::SessionId) -> Arc<DesktopSessionAgentObserver> {
     Arc::new(DesktopSessionAgentObserver::new(
         CapturingSink::arc(),
         session_id.as_uuid().to_string(),
     ))
 }
 
-fn allocation(agent_id: protocol::AgentId) -> SubagentObservation {
+fn allocation(agent_id: lingxi_core::types::AgentId) -> SubagentObservation {
     SubagentObservation::Allocated {
         agent_id,
         agent_type: "reviewer".into(),
@@ -82,7 +82,7 @@ async fn session_agent_allocation_without_transcript_is_visible_and_session_fenc
     let root = tempfile::tempdir().unwrap();
     let handle = Arc::new(MockOrchestratorHandle::new());
     let session_id = handle.current_session_id().await;
-    let id = protocol::AgentId::new();
+    let id = lingxi_core::types::AgentId::new();
     let live = observer(session_id);
     live.on_allocated(&allocation(id));
     let router = router_with_store(handle.clone(), root.path()).with_session_agent_observer(live);
@@ -90,7 +90,7 @@ async fn session_agent_allocation_without_transcript_is_visible_and_session_fenc
         .await
         .iter()
         .any(|agent| agent.agent_id == id.to_string() && agent.status == "running"));
-    let foreign = observer(protocol::SessionId::new());
+    let foreign = observer(lingxi_core::types::SessionId::new());
     foreign.on_allocated(&allocation(id));
     let router = router_with_store(handle, root.path()).with_session_agent_observer(foreign);
     assert_eq!(roster(&router).await.len(), 1);
@@ -209,7 +209,10 @@ async fn session_agent_idle_and_resume_observations_win_over_lagging_task_snapsh
     );
     live.on_event(SubagentObservation::Message {
         agent_id: id,
-        message: protocol::ConversationMessage::user(protocol::MessageId::new(), "continue".into()),
+        message: lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "continue".into(),
+        ),
     })
     .await;
     let tasks = Arc::new(MockTaskRegistry {
@@ -252,8 +255,8 @@ async fn a_parked_row_reports_the_wire_word_rather_than_the_footer_group_word() 
         format!(
             "{}\n",
             serde_json::json!({
-                "message": protocol::ConversationMessage::user(
-                    protocol::MessageId::new(),
+                "message": lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
                     "inspect the runtime".to_string(),
                 ),
                 "status": "running",

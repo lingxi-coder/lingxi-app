@@ -1,9 +1,9 @@
 package com.lingxi.code.localapps
 
-import com.lingxi.code.bindings.AppBridgeOperationDto
-import com.lingxi.code.bindings.AppUiActionKindDto
-import com.lingxi.code.bindings.AppUiRequestDto
-import com.lingxi.code.bindings.AppUiTargetDto
+import com.lingxi.code.bindings.client.AppBridgeOperationDto
+import com.lingxi.code.bindings.client.AppUiActionKindDto
+import com.lingxi.code.bindings.client.AppUiRequestDto
+import com.lingxi.code.bindings.client.AppUiTargetDto
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

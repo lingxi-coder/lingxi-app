@@ -1,8 +1,8 @@
 package com.lingxi.code.share
 
-import com.lingxi.code.bindings.AndroidShare
-import com.lingxi.code.bindings.ShareFfiException
-import com.lingxi.code.bindings.ShareResultFfi
+import com.lingxi.code.bindings.android.AndroidShare
+import com.lingxi.code.bindings.android.ShareFfiException
+import com.lingxi.code.bindings.android.ShareResultFfi
 
 /**
  * Adapts the native [ShareController] to the generated UniFFI callback interface

@@ -10,14 +10,13 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+core = { workspace = true }
 tool-api = { workspace = true }
 client = { workspace = true, features = ["presentation"] }
 memory = { workspace = true }
 permission = { workspace = true }
 tool-shell = { workspace = true }
 telemetry = { workspace = true }
-platform-api = { workspace = true }
-protocol = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }

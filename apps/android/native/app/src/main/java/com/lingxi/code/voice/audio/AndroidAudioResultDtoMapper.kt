@@ -1,9 +1,9 @@
 package com.lingxi.code.voice.audio
 
-import com.lingxi.code.bindings.AudioErrorDto
-import com.lingxi.code.bindings.AudioErrorKindDto
-import com.lingxi.code.bindings.AudioOperationResultDto
-import com.lingxi.code.bindings.AudioStatusDto
+import com.lingxi.code.bindings.client.AudioErrorDto
+import com.lingxi.code.bindings.client.AudioErrorKindDto
+import com.lingxi.code.bindings.client.AudioOperationResultDto
+import com.lingxi.code.bindings.client.AudioStatusDto
 import java.util.Base64
 
 /** Pure result projection shared by the generated callback and JVM contract tests. */

@@ -239,11 +239,11 @@ impl NotificationWatcher {
         for (path, source) in [
             (
                 user_settings,
-                hooks::definition::HookSource::Settings(protocol::SettingsScope::User),
+                hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::User),
             ),
             (
                 project_settings,
-                hooks::definition::HookSource::Settings(protocol::SettingsScope::Project),
+                hooks::definition::HookSource::Settings(lingxi_core::types::SettingsScope::Project),
             ),
         ] {
             if let Ok(raw) = std::fs::read_to_string(&path) {
@@ -264,14 +264,15 @@ impl NotificationWatcher {
                 hooks::HookExecutorImpl::new(
                     Arc::new(tokio::sync::RwLock::new(registry)),
                     Arc::new(platform_posix::PosixHttp::new())
-                        as Arc<dyn platform_api::HttpTransport>,
+                        as Arc<dyn lingxi_core::host::HttpTransport>,
                     Arc::new(platform_posix::PosixRuntime::new())
-                        as Arc<dyn platform_api::RuntimeSpawner>,
+                        as Arc<dyn lingxi_core::host::RuntimeSpawner>,
                 )
                 .with_process_runner(
                     Arc::new(platform_posix::PosixProcess::new())
-                        as Arc<dyn platform_api::ProcessRunner>,
-                    Arc::new(platform_posix::PosixSandbox::new()) as Arc<dyn platform_api::Sandbox>,
+                        as Arc<dyn lingxi_core::host::ProcessRunner>,
+                    Arc::new(platform_posix::PosixSandbox::new())
+                        as Arc<dyn lingxi_core::host::Sandbox>,
                 ),
             )
         });

@@ -1,6 +1,6 @@
 package com.lingxi.code.settings
 
-import com.lingxi.code.bindings.AndroidSecureStorage
+import com.lingxi.code.bindings.android.AndroidSecureStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray

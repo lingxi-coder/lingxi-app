@@ -4,8 +4,8 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import com.lingxi.code.bindings.AndroidSecureStorage
-import com.lingxi.code.bindings.SecureStorageFfiException
+import com.lingxi.code.bindings.android.AndroidSecureStorage
+import com.lingxi.code.bindings.android.SecureStorageFfiException
 import java.io.File
 import java.security.KeyStore
 import javax.crypto.Cipher

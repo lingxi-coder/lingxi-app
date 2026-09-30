@@ -44,7 +44,7 @@ const LAST_TOTAL_CACHE_READ_INPUT_TOKENS: &str = "lastTotalCacheReadInputTokens"
 /// The `lastModelUsage` value for one model — claude-code writes
 /// `{inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens,
 /// costUSD}` per model id.
-fn model_usage_entry(row: &platform_api::orchestrator::ModelUsageRow) -> serde_json::Value {
+fn model_usage_entry(row: &lingxi_core::host::orchestrator::ModelUsageRow) -> serde_json::Value {
     serde_json::json!({
         "inputTokens": row.input_tokens,
         "outputTokens": row.output_tokens,
@@ -62,7 +62,7 @@ pub fn save_session_cost(
     config_path: &Path,
     cwd: &Path,
     session_id: &str,
-    cost: &platform_api::orchestrator::CostSnapshot,
+    cost: &lingxi_core::host::orchestrator::CostSnapshot,
 ) {
     let key = migrations::global_config::project_path_for_config(cwd);
     let session_id = session_id.to_string();
@@ -118,15 +118,15 @@ mod tests {
 
     /// A snapshot carrying one model row, so the persisted shape is exercised
     /// rather than the empty-default path.
-    fn snapshot(total_usd: f64) -> platform_api::orchestrator::CostSnapshot {
-        platform_api::orchestrator::CostSnapshot {
+    fn snapshot(total_usd: f64) -> lingxi_core::host::orchestrator::CostSnapshot {
+        lingxi_core::host::orchestrator::CostSnapshot {
             total_usd,
             input_tokens: 100,
             output_tokens: 40,
             cache_read_tokens: 25,
             cache_creation_tokens: 10,
             api_duration: std::time::Duration::from_millis(1234),
-            by_model: vec![platform_api::orchestrator::ModelUsageRow {
+            by_model: vec![lingxi_core::host::orchestrator::ModelUsageRow {
                 model: "claude-opus-5".to_string(),
                 provider: None,
                 total_nano_usd: 17_500_000,

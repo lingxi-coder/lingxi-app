@@ -1,6 +1,6 @@
 package com.lingxi.code.location
 
-import com.lingxi.code.bindings.LocationFfiException
+import com.lingxi.code.bindings.android.LocationFfiException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

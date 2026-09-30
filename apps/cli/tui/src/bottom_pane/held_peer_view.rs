@@ -20,8 +20,8 @@ pub struct HeldPeerView {
 impl HeldPeerView {
     /// Build the dialog for one held inbox item.
     #[must_use]
-    pub fn new(held: platform_api::uds_inbox::HeldPeer) -> Self {
-        let cause = platform_api::live_sessions::hold_cause_text(&held.hold_cause);
+    pub fn new(held: lingxi_core::host::uds_inbox::HeldPeer) -> Self {
+        let cause = lingxi_core::host::live_sessions::hold_cause_text(&held.hold_cause);
         let from = if held.from.is_empty() {
             "an unidentified session".to_string()
         } else {
@@ -62,16 +62,16 @@ impl BottomPaneView for HeldPeerView {
         match self.dialog.on_key(key.code) {
             DialogOutcome::Pending => ViewOutcome::Pending,
             DialogOutcome::Selected(0) => {
-                let _ = platform_api::uds_inbox::resolve_held(&self.id, true);
+                let _ = lingxi_core::host::uds_inbox::resolve_held(&self.id, true);
                 ViewOutcome::RewakePeer
             }
             DialogOutcome::Selected(_) => {
-                let _ = platform_api::uds_inbox::resolve_held(&self.id, false);
+                let _ = lingxi_core::host::uds_inbox::resolve_held(&self.id, false);
                 ViewOutcome::Cancelled
             }
             // Esc dismisses without denying; unannounce so it can reappear.
             DialogOutcome::Cancelled => {
-                platform_api::uds_inbox::unannounce_held(&self.id);
+                lingxi_core::host::uds_inbox::unannounce_held(&self.id);
                 ViewOutcome::Cancelled
             }
         }
@@ -92,7 +92,7 @@ mod tests {
     }
 
     fn view() -> HeldPeerView {
-        HeldPeerView::new(platform_api::uds_inbox::HeldPeer {
+        HeldPeerView::new(lingxi_core::host::uds_inbox::HeldPeer {
             id: "m1".into(),
             from: "alpha".into(),
             preview: "hello".into(),

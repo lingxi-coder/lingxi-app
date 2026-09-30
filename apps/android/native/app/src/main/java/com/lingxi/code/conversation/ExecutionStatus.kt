@@ -1,8 +1,8 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.SessionAgentSummaryDto
-import com.lingxi.code.bindings.TaskRowDto
-import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.bindings.client.SessionAgentSummaryDto
+import com.lingxi.code.bindings.client.TaskRowDto
+import com.lingxi.code.bindings.client.TaskStatusDto
 
 data class BackgroundTaskUi(
     val taskId: String,

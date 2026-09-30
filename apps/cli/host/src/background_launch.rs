@@ -9,7 +9,7 @@
 use crate::agents_registry;
 use crate::argv::Argv;
 use crate::daemon_roster::{self, Dispatch, Launch};
-use platform_api::rooted_fs::{self, AtomicWriteOptions};
+use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind};
@@ -296,9 +296,9 @@ pub struct BackgroundLaunchSpec {
     /// Live TUI boundary state for a mid-turn foreground→background handoff.
     /// Older launch specs omit it and resume with an empty composer/queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<platform_api::BackgroundingSnapshot>,
+    pub handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub shell_handoff: Vec<platform_api::shell_handoff::ShellTaskHandoff>,
+    pub shell_handoff: Vec<lingxi_core::host::shell_handoff::ShellTaskHandoff>,
     pub options: BackgroundLaunchOptions,
     /// Allowlisted environment inherited by the PTY child. `launch.json` is
     /// owner-only because this map may contain provider credentials.
@@ -855,15 +855,15 @@ fn background_relative_path(short: &str, file: &str) -> PathBuf {
     PathBuf::from("jobs").join(short).join(file)
 }
 
-fn rooted_error_to_io(error: platform_api::FsError) -> std::io::Error {
+fn rooted_error_to_io(error: lingxi_core::host::FsError) -> std::io::Error {
     let kind = match error {
-        platform_api::FsError::NotFound(_) => ErrorKind::NotFound,
-        platform_api::FsError::PermissionDenied(_) => ErrorKind::PermissionDenied,
-        platform_api::FsError::AlreadyExists(_) => ErrorKind::AlreadyExists,
-        platform_api::FsError::OutsideWorkspace(_)
-        | platform_api::FsError::BinaryFile(_)
-        | platform_api::FsError::TooLarge { .. } => ErrorKind::InvalidData,
-        platform_api::FsError::Io(_) => ErrorKind::Other,
+        lingxi_core::host::FsError::NotFound(_) => ErrorKind::NotFound,
+        lingxi_core::host::FsError::PermissionDenied(_) => ErrorKind::PermissionDenied,
+        lingxi_core::host::FsError::AlreadyExists(_) => ErrorKind::AlreadyExists,
+        lingxi_core::host::FsError::OutsideWorkspace(_)
+        | lingxi_core::host::FsError::BinaryFile(_)
+        | lingxi_core::host::FsError::TooLarge { .. } => ErrorKind::InvalidData,
+        lingxi_core::host::FsError::Io(_) => ErrorKind::Other,
     };
     Error::new(kind, error)
 }
@@ -987,7 +987,7 @@ mod tests {
     fn launch_spec_round_trips_atomically_and_tui_argv_is_promptless() {
         let home = tmpdir();
         let mut spec = sample("abcd1234", BackgroundLaunchKind::Fresh);
-        spec.handoff = Some(platform_api::BackgroundingSnapshot::Idle {
+        spec.handoff = Some(lingxi_core::host::BackgroundingSnapshot::Idle {
             queued_commands: vec!["/compact keep tests".into()],
             draft: "draft 🦀".into(),
             boundary_id: uuid::Uuid::new_v4(),

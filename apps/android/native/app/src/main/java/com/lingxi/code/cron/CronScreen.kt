@@ -219,7 +219,7 @@ fun CronScreen(
                         editingTaskId = null; metadata = automation.copied().json; dirty = true
                     }) { Text("Copy to project…") }
                     CronChoice("Model", automation.model, modelState?.available.orEmpty().map { it to (modelState?.details?.get(it)?.displayName ?: it) }) { model ->
-                        change(automation.change("model", model).withReasoning(com.lingxi.code.bindings.ReasoningSelectionDto.Automatic))
+                        change(automation.change("model", model).withReasoning(com.lingxi.code.bindings.client.ReasoningSelectionDto.Automatic))
                     }
                     val reasoningOptions = modelState?.details?.get(automation.model)?.reasoningOptions.orEmpty().filter { it.persistable }
                     val choices = listOf("{\"type\":\"automatic\"}" to "Automatic") + reasoningOptions.map { reasoningJson(it.selection).toString() to it.label }

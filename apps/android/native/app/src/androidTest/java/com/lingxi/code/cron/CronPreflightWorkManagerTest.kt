@@ -16,9 +16,9 @@ import androidx.work.impl.WorkManagerImpl
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.testing.WorkManagerTestInitHelper
-import com.lingxi.code.bindings.CronFireStatusDto
-import com.lingxi.code.bindings.CronTaskDto
-import com.lingxi.code.bindings.FiredCronJobDto
+import com.lingxi.code.bindings.runtime.CronFireStatusDto
+import com.lingxi.code.bindings.runtime.CronTaskDto
+import com.lingxi.code.bindings.runtime.FiredCronJobDto
 import java.io.File
 import java.io.IOException
 import java.util.UUID

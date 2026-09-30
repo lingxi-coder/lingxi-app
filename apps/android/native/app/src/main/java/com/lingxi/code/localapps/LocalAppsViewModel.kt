@@ -5,39 +5,39 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.BuildConfig
 import com.lingxi.code.R
-import com.lingxi.code.bindings.AppAuthorizationDecisionDto
-import com.lingxi.code.bindings.AppBridgeOperationDto
-import com.lingxi.code.bindings.AppBridgeRequestDto
-import com.lingxi.code.bindings.AppCapabilityKindDto
-import com.lingxi.code.bindings.AppCreateModeDto
-import com.lingxi.code.bindings.AppCreateOriginDto
-import com.lingxi.code.bindings.AppDataFieldDto
-import com.lingxi.code.bindings.AppDataFieldTypeDto
-import com.lingxi.code.bindings.AppDependencyChangeConfirmationRequestDto
-import com.lingxi.code.bindings.AppDependencyChangeKindDto
-import com.lingxi.code.bindings.AppDetailsDto
-import com.lingxi.code.bindings.AppEventDto
-import com.lingxi.code.bindings.AppRecordDto
-import com.lingxi.code.bindings.AppRuntimeDetailsDto
-import com.lingxi.code.bindings.AppRuntimeModeDto
-import com.lingxi.code.bindings.AppRuntimeProfileStatusDto
-import com.lingxi.code.bindings.AppRuntimeStateDto
-import com.lingxi.code.bindings.AppSessionKindDto
-import com.lingxi.code.bindings.AppSessionRowDto
-import com.lingxi.code.bindings.AppUiActionKindDto
-import com.lingxi.code.bindings.AppUiRequestDto
-import com.lingxi.code.bindings.AppWorkflowStateDto
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.LocalAppGateStatusDto
-import com.lingxi.code.bindings.LocalAppMcpProposalApprovalRequestDto
-import com.lingxi.code.bindings.LocalAppMcpToolDiffDto
-import com.lingxi.code.bindings.LocalAppMcpToolFieldDto
-import com.lingxi.code.bindings.LocalAppMcpToolSurfaceDto
-import com.lingxi.code.bindings.LocalAppPluginErrorCodeDto
-import com.lingxi.code.bindings.LocalAppVerificationStatusDto
-import com.lingxi.code.bindings.LocalAppVerificationSummaryDto
-import com.lingxi.code.bindings.PluginCommandDto
+import com.lingxi.code.bindings.client.AppAuthorizationDecisionDto
+import com.lingxi.code.bindings.client.AppBridgeOperationDto
+import com.lingxi.code.bindings.client.AppBridgeRequestDto
+import com.lingxi.code.bindings.client.AppCapabilityKindDto
+import com.lingxi.code.bindings.client.AppCreateModeDto
+import com.lingxi.code.bindings.client.AppCreateOriginDto
+import com.lingxi.code.bindings.client.AppDataFieldDto
+import com.lingxi.code.bindings.client.AppDataFieldTypeDto
+import com.lingxi.code.bindings.client.AppDependencyChangeConfirmationRequestDto
+import com.lingxi.code.bindings.client.AppDependencyChangeKindDto
+import com.lingxi.code.bindings.client.AppDetailsDto
+import com.lingxi.code.bindings.client.AppEventDto
+import com.lingxi.code.bindings.client.AppRecordDto
+import com.lingxi.code.bindings.client.AppRuntimeDetailsDto
+import com.lingxi.code.bindings.client.AppRuntimeModeDto
+import com.lingxi.code.bindings.client.AppRuntimeProfileStatusDto
+import com.lingxi.code.bindings.client.AppRuntimeStateDto
+import com.lingxi.code.bindings.client.AppSessionKindDto
+import com.lingxi.code.bindings.client.AppSessionRowDto
+import com.lingxi.code.bindings.client.AppUiActionKindDto
+import com.lingxi.code.bindings.client.AppUiRequestDto
+import com.lingxi.code.bindings.client.AppWorkflowStateDto
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.LocalAppGateStatusDto
+import com.lingxi.code.bindings.client.LocalAppMcpProposalApprovalRequestDto
+import com.lingxi.code.bindings.client.LocalAppMcpToolDiffDto
+import com.lingxi.code.bindings.client.LocalAppMcpToolFieldDto
+import com.lingxi.code.bindings.client.LocalAppMcpToolSurfaceDto
+import com.lingxi.code.bindings.client.LocalAppPluginErrorCodeDto
+import com.lingxi.code.bindings.client.LocalAppVerificationStatusDto
+import com.lingxi.code.bindings.client.LocalAppVerificationSummaryDto
+import com.lingxi.code.bindings.client.PluginCommandDto
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
 import com.lingxi.code.localapps.widget.NoopLocalAppWidgetSnapshotSync
@@ -1760,7 +1760,7 @@ class LocalAppsViewModel(
         }
     }
 
-    private fun reduceManagedMcpInventory(servers: List<com.lingxi.code.bindings.ManagedLocalAppMcpServerDto>) {
+    private fun reduceManagedMcpInventory(servers: List<com.lingxi.code.bindings.client.ManagedLocalAppMcpServerDto>) {
         val byAppId = servers.associateBy { it.appId }
         _uiState.update { state ->
             state.copy(
@@ -1771,7 +1771,7 @@ class LocalAppsViewModel(
         }
     }
 
-    private fun reduceDetails(details: com.lingxi.code.bindings.AppDetailsDto) {
+    private fun reduceDetails(details: com.lingxi.code.bindings.client.AppDetailsDto) {
         val prior = _uiState.value.apps.firstOrNull { it.id == details.app.id }
         val runtimeProfileStatus = details.runtimeProfileStatus?.toUiRuntimeProfileStatus()
         val app = details.app.toUiApp(
@@ -2284,7 +2284,7 @@ private fun LocalAppVerificationSummaryDto.toUiVerificationSummary(): LocalAppVe
         code = code,
     )
 
-private fun com.lingxi.code.bindings.ManagedLocalAppMcpServerDto.toUiManagedMcpServer(): LocalAppManagedMcpServer {
+private fun com.lingxi.code.bindings.client.ManagedLocalAppMcpServerDto.toUiManagedMcpServer(): LocalAppManagedMcpServer {
     val reflectedEnabled = reflectBoolean("getEnabled")
     val reflectedStatus = reflectStatus("getStatus")
     val reflectedRevision = reflectULong("getSettingsRevision")
@@ -2564,7 +2564,7 @@ internal fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction?
     }
 }
 
-private fun com.lingxi.code.bindings.AppUiTargetDto.toUiTarget(): LocalAppUiTarget? {
+private fun com.lingxi.code.bindings.client.AppUiTargetDto.toUiTarget(): LocalAppUiTarget? {
     val elementId = elementId?.trim().takeUnless { it.isNullOrEmpty() }
     val role = role?.trim().takeUnless { it.isNullOrEmpty() }
     val name = name?.trim().takeUnless { it.isNullOrEmpty() }

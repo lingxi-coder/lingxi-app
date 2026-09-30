@@ -63,11 +63,12 @@ test('parseSettingsSnapshot is null-safe: no event means no snapshot and no erro
   assert.deepEqual(parseSettingsSnapshot(undefined), { snapshot: null, error: null });
 });
 
-test('parseSettingsSnapshot contains settings data without runtime activation state', () => {
+test('parseSettingsSnapshot leaves active settings unknown when active_json is absent', () => {
   const { snapshot, error } = parseSettingsSnapshot(rawSnapshot());
   assert.equal(error, null);
   assert.deepEqual(snapshot, {
     effective: { model: 'opus' },
+    active: undefined,
     provenance: { model: 'user' },
     files: [],
     locked: [],
@@ -101,12 +102,14 @@ test('parseSettingsSnapshot decodes layers_json into a per-layer map when presen
   });
 });
 
-test('parseSettingsSnapshot ignores engine active_json state', () => {
-  const { snapshot } = parseSettingsSnapshot(rawSnapshot({
-    effective_json: JSON.stringify({ model: 'opus', theme: 'dark' }),
-    active_json: JSON.stringify({ model: 'sonnet', theme: 'light' }),
+test('parseSettingsSnapshot preserves engine active settings separately from effective settings', () => {
+  const { snapshot, error } = parseSettingsSnapshot(rawSnapshot({
+    effective_json: JSON.stringify({ model: 'opus', providerRegion: 'china_mainland' }),
+    active_json: JSON.stringify({ model: 'sonnet', providerRegion: 'international' }),
   }));
-  assert.equal('active' in snapshot!, false);
+  assert.equal(error, null);
+  assert.deepEqual(snapshot?.effective, { model: 'opus', providerRegion: 'china_mainland' });
+  assert.deepEqual(snapshot?.active, { model: 'sonnet', providerRegion: 'international' });
 });
 
 test('parseSettingsSnapshot decodes the optional fields when present', () => {
@@ -120,6 +123,7 @@ test('parseSettingsSnapshot decodes the optional fields when present', () => {
   assert.equal(error, null);
   assert.deepEqual(snapshot, {
     effective: { model: 'opus' },
+    active: { model: 'sonnet' },
     provenance: { model: 'user' },
     files: [{ layer: 'user', path: '/x', exists: true, parsed: true }],
     locked: ['model'],
@@ -148,6 +152,12 @@ test('parseSettingsSnapshot surfaces malformed JSON as an error, not a throw', (
 
 test('parseSettingsSnapshot surfaces a malformed optional field as an error too', () => {
   const { snapshot, error } = parseSettingsSnapshot(rawSnapshot({ files_json: '[not json' }));
+  assert.equal(snapshot, null);
+  assert.ok(error);
+});
+
+test('parseSettingsSnapshot reports malformed active_json instead of losing activation state', () => {
+  const { snapshot, error } = parseSettingsSnapshot(rawSnapshot({ active_json: '{not json' }));
   assert.equal(snapshot, null);
   assert.ok(error);
 });

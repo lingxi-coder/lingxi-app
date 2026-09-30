@@ -37,8 +37,10 @@ use lifecycle::{
     finish_print_branch, run_print_owned, run_print_owned_with_cleanup,
     stop_background_agents_at_budget, stop_print_tasks, wind_down_print_tasks, PrintAuxTaskGroup,
 };
+use lingxi_core::host::{
+    McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
+};
 use permission;
-use platform_api::{McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 pub(crate) use resume::{
     daemon_runtime_dir, drive_background_tui_switch_loop, drive_tui_switch_loop,
     inherited_resume_effort, lingxi_home_dir, load_resume_picker_rows,
@@ -125,7 +127,7 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
         .split_once(char::is_whitespace)
         .unwrap_or((&prompt, ""));
     if command == "/tasks" {
-        if let Some(parsed) = platform_api::human_task_message::parse(args) {
+        if let Some(parsed) = lingxi_core::host::human_task_message::parse(args) {
             let result = match parsed {
                 Ok((task_id, message)) if runtime.orchestrator.workspace_trusted().await => runtime
                     .task_registry
@@ -892,7 +894,7 @@ async fn run_stream_json_input_loop_inner(
     // requests recovers each of them, matching claude-code (whose
     // `hasHandledOrphanedPermission` boolean is a per-command QueryEngine field,
     // not a cross-command cap).
-    let mut handled_orphans: std::collections::HashSet<protocol::ToolUseId> =
+    let mut handled_orphans: std::collections::HashSet<lingxi_core::types::ToolUseId> =
         std::collections::HashSet::new();
     // Disable the orphan `select!` branch once its channel closes (all senders
     // dropped) so a perpetually-ready `recv() → None` can't busy-spin the loop.
@@ -958,8 +960,8 @@ async fn run_stream_json_input_loop_inner(
                     for content in [input, result] {
                         runtime
                             .orchestrator
-                            .append_external_history_message(protocol::ConversationMessage::user(
-                                protocol::MessageId::new(),
+                            .append_external_history_message(lingxi_core::types::ConversationMessage::user(
+                                lingxi_core::types::MessageId::new(),
                                 content.clone(),
                             ))
                             .await;
@@ -989,7 +991,7 @@ async fn run_stream_json_input_loop_inner(
         let external_message_id = turn
             .uuid
             .as_deref()
-            .and_then(protocol::MessageId::parse_prefixed);
+            .and_then(lingxi_core::types::MessageId::parse_prefixed);
 
         if let Some(uuid) = turn.uuid.as_deref() {
             if runtime

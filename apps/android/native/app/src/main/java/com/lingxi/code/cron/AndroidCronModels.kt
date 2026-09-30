@@ -2,7 +2,7 @@ package com.lingxi.code.cron
 
 import android.content.Context
 import com.lingxi.code.R
-import com.lingxi.code.bindings.CronTaskDto
+import com.lingxi.code.bindings.runtime.CronTaskDto
 
 const val GLOBAL_CRON_SCOPE_ID = "global"
 
@@ -109,7 +109,7 @@ internal data class ScopedCronOccurrence(
 )
 
 internal data class CronTaskExecutionBatch(
-    val firedJobs: List<com.lingxi.code.bindings.FiredCronJobDto>,
+    val firedJobs: List<com.lingxi.code.bindings.runtime.FiredCronJobDto>,
 )
 
 internal fun shouldNotifyCronRun(policy: String, status: CronRunStatus): Boolean =

@@ -25,7 +25,7 @@ mod tests {
         assert!(!opt_in(&["--allowedTools", "Read", "Bash(git *)"]));
 
         // Each of the five bare names trips either list.
-        for name in platform_api::session_flags::TODO_TOOL_NAMES {
+        for name in lingxi_core::host::session_flags::TODO_TOOL_NAMES {
             assert!(opt_in(&["--tools", name]), "--tools {name}");
             assert!(opt_in(&["--allowedTools", name]), "--allowedTools {name}");
         }

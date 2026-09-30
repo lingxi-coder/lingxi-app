@@ -3,9 +3,9 @@ package com.lingxi.code
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.MobileEngineHandle
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.voice.buildVoiceEngine
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking

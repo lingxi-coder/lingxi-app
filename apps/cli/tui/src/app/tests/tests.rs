@@ -205,7 +205,9 @@ fn streaming_deltas_grow_reply_and_turn_ended_clears_token() {
     app.apply_turn_event(TurnEvent::TextDelta("Hel".to_string()));
     app.apply_turn_event(TurnEvent::TextDelta("lo".to_string()));
     assert_eq!(cell::<AssistantTextCell>(&app, 1).body(), "Hello");
-    app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+    app.apply_turn_event(TurnEvent::TurnEnded(
+        lingxi_core::host::TurnOutcome::EndTurn,
+    ));
     assert!(!app.chat_widget.turn_running());
 }
 
@@ -231,7 +233,9 @@ fn ctrl_c_keeps_turn_owned_until_terminal_then_needs_two_presses_to_quit() {
         ChatOutcome::Continue
     ));
     assert!(!app.chat_widget.bottom_pane().ctrl_c_armed());
-    app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
+    app.apply_turn_event(TurnEvent::TurnEnded(
+        lingxi_core::host::TurnOutcome::Cancelled,
+    ));
     assert!(!app.chat_widget.turn_running());
     // First idle Ctrl-C only arms the exit; it does not quit.
     assert!(matches!(
@@ -493,7 +497,9 @@ fn esc_interrupts_running_turn_then_quits_when_idle() {
         app.on_key(press(KeyCode::Esc)),
         ChatOutcome::Continue
     ));
-    app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
+    app.apply_turn_event(TurnEvent::TurnEnded(
+        lingxi_core::host::TurnOutcome::Cancelled,
+    ));
     // Idle only after the terminal event: Esc now arms, then fires the
     // idle rewind chord on the second press.
     assert!(matches!(
@@ -535,7 +541,9 @@ fn esc_routes_to_active_view_before_the_interrupt_policy() {
     ));
     assert!(token.is_cancelled());
     assert!(app.chat_widget.turn_running());
-    app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
+    app.apply_turn_event(TurnEvent::TurnEnded(
+        lingxi_core::host::TurnOutcome::Cancelled,
+    ));
     // And once the terminal boundary makes it idle, Esc arms the rewind
     // chord, then the second press routes through `/rewind`.
     assert!(matches!(
@@ -805,7 +813,7 @@ fn app_with_models() -> RataApp<'static> {
                 request_model: "claude-opus-4-8".into(),
                 profile: Some("anthropic".into()),
                 provider_label: "Anthropic".into(),
-                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                 is_current: true,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -817,7 +825,7 @@ fn app_with_models() -> RataApp<'static> {
                 request_model: "claude-sonnet-5".into(),
                 profile: Some("anthropic".into()),
                 provider_label: "Anthropic".into(),
-                provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                 is_current: false,
                 supports_reasoning: true,
                 supports_multimodal: false,
@@ -1132,7 +1140,9 @@ fn flush_scrollback_holds_streaming_tail_until_turn_ends() {
         1,
         "still streaming: tail stays held back"
     );
-    app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+    app.apply_turn_event(TurnEvent::TurnEnded(
+        lingxi_core::host::TurnOutcome::EndTurn,
+    ));
     app.flush_scrollback(&mut terminal).unwrap();
     assert_eq!(
         app.chat_widget.transcript().committed_to_terminal(),
@@ -1265,7 +1275,9 @@ fn full_turn_then_idle_emits_no_degenerate_scroll_region() {
         app.apply_turn_event(TurnEvent::TextDelta(
             "Hello! How can I help you today?".to_string(),
         ));
-        app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        app.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         app.render_tick(&mut terminal).unwrap();
         app.flush_scrollback(&mut terminal).unwrap();
         app.render_tick(&mut terminal).unwrap();
@@ -1943,7 +1955,9 @@ fn native_scrollback_insertions_stay_above_the_pane_across_viewport_height_chang
     raw.borrow_mut().clear();
     app.apply_turn_event(TurnEvent::TurnStarted);
     app.apply_turn_event(TurnEvent::TextDelta("post-shrink reply".to_string()));
-    app.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+    app.apply_turn_event(TurnEvent::TurnEnded(
+        lingxi_core::host::TurnOutcome::EndTurn,
+    ));
     app.flush_scrollback(&mut terminal).unwrap();
     let out = String::from_utf8_lossy(&raw.borrow()).into_owned();
     assert!(out.contains("post-shrink reply"), "reply flushed");

@@ -277,40 +277,40 @@ pub(super) fn ios_mobile_config_from_launch_config(
         vision_delegation_enabled: config.vision_delegation_enabled,
         host_environment: Some(config.host_environment.as_ref().map_or_else(
             || {
-                platform_api::MobileHostEnvironment::new(
-                    platform_api::MobileHostOs::Ios,
+                lingxi_core::host::MobileHostEnvironment::new(
+                    lingxi_core::host::MobileHostOs::Ios,
                     None,
-                    platform_api::MobileDeviceClass::Unknown,
-                    platform_api::MobileExecutionTarget::Unknown,
-                    platform_api::MobileLaunchMode::Unknown,
+                    lingxi_core::host::MobileDeviceClass::Unknown,
+                    lingxi_core::host::MobileExecutionTarget::Unknown,
+                    lingxi_core::host::MobileLaunchMode::Unknown,
                 )
             },
             |environment| {
-                platform_api::MobileHostEnvironment::new(
-                    platform_api::MobileHostOs::Ios,
+                lingxi_core::host::MobileHostEnvironment::new(
+                    lingxi_core::host::MobileHostOs::Ios,
                     Some(environment.os_version.clone()),
                     match environment.device_class {
-                        IosDeviceClassFfi::Phone => platform_api::MobileDeviceClass::Phone,
-                        IosDeviceClassFfi::Tablet => platform_api::MobileDeviceClass::Tablet,
-                        IosDeviceClassFfi::Unknown => platform_api::MobileDeviceClass::Unknown,
+                        IosDeviceClassFfi::Phone => lingxi_core::host::MobileDeviceClass::Phone,
+                        IosDeviceClassFfi::Tablet => lingxi_core::host::MobileDeviceClass::Tablet,
+                        IosDeviceClassFfi::Unknown => lingxi_core::host::MobileDeviceClass::Unknown,
                     },
                     match environment.execution_target {
                         IosExecutionTargetFfi::PhysicalDevice => {
-                            platform_api::MobileExecutionTarget::PhysicalDevice
+                            lingxi_core::host::MobileExecutionTarget::PhysicalDevice
                         }
                         IosExecutionTargetFfi::Simulator => {
-                            platform_api::MobileExecutionTarget::Simulator
+                            lingxi_core::host::MobileExecutionTarget::Simulator
                         }
                         IosExecutionTargetFfi::Unknown => {
-                            platform_api::MobileExecutionTarget::Unknown
+                            lingxi_core::host::MobileExecutionTarget::Unknown
                         }
                     },
                     match environment.launch_mode {
                         IosLaunchModeFfi::Interactive => {
-                            platform_api::MobileLaunchMode::Interactive
+                            lingxi_core::host::MobileLaunchMode::Interactive
                         }
                         IosLaunchModeFfi::ScheduledHeadless => {
-                            platform_api::MobileLaunchMode::ScheduledHeadless
+                            lingxi_core::host::MobileLaunchMode::ScheduledHeadless
                         }
                     },
                 )

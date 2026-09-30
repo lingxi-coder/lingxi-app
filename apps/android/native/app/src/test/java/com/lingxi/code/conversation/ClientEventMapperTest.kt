@@ -1,23 +1,23 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.CodeSegmentDto
-import com.lingxi.code.bindings.CostDto
-import com.lingxi.code.bindings.DiffLineKindDto
-import com.lingxi.code.bindings.DiffRowDto
-import com.lingxi.code.bindings.ErrorKindDto
-import com.lingxi.code.bindings.HeadlineKindDto
-import com.lingxi.code.bindings.MessageBlockDto
-import com.lingxi.code.bindings.MessageDto
-import com.lingxi.code.bindings.PlanTaskDto
-import com.lingxi.code.bindings.PlanTaskStateDto
-import com.lingxi.code.bindings.SessionModeDto
-import com.lingxi.code.bindings.StructuredDiffDto
-import com.lingxi.code.bindings.SyntaxClassDto
-import com.lingxi.code.bindings.ToolHeaderDto
-import com.lingxi.code.bindings.ToolResultDisplayDto
-import com.lingxi.code.bindings.ToolVerbDto
-import com.lingxi.code.bindings.TurnOutcomeDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.CodeSegmentDto
+import com.lingxi.code.bindings.client.CostDto
+import com.lingxi.code.bindings.client.DiffLineKindDto
+import com.lingxi.code.bindings.client.DiffRowDto
+import com.lingxi.code.bindings.client.ErrorKindDto
+import com.lingxi.code.bindings.client.HeadlineKindDto
+import com.lingxi.code.bindings.client.MessageBlockDto
+import com.lingxi.code.bindings.client.MessageDto
+import com.lingxi.code.bindings.client.PlanTaskDto
+import com.lingxi.code.bindings.client.PlanTaskStateDto
+import com.lingxi.code.bindings.client.SessionModeDto
+import com.lingxi.code.bindings.client.StructuredDiffDto
+import com.lingxi.code.bindings.client.SyntaxClassDto
+import com.lingxi.code.bindings.client.ToolHeaderDto
+import com.lingxi.code.bindings.client.ToolResultDisplayDto
+import com.lingxi.code.bindings.client.ToolVerbDto
+import com.lingxi.code.bindings.client.TurnOutcomeDto
 import com.lingxi.code.model.Role
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -49,9 +49,9 @@ class ClientEventMapperTest {
 
     @Test fun restoredLoopWakeupsKeepMetadataAndFoldQuietMessages() {
         val messages = transcriptFromDtos(listOf(
-            MessageDto(role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.LoopWakeupDto("first", null, 0u, 0uL)),
+            MessageDto(role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.client.LoopWakeupDto("first", null, 0u, 0uL)),
             MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("quiet"))),
-            MessageDto(role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.LoopWakeupDto("second", "healthy", 1u, 1uL)),
+            MessageDto(role = "system", blocks = emptyList(), loopWakeup = com.lingxi.code.bindings.client.LoopWakeupDto("second", "healthy", 1u, 1uL)),
         ))
         assertEquals(listOf("first", "quiet", "second", "healthy"), messages.map { it.text })
         assertEquals(messages.take(2).map { it.id }.toSet(), messages[2].loopFoldedItemIds)

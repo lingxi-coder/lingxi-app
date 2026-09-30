@@ -3,7 +3,7 @@ package com.lingxi.code
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.lingxi.code.bindings.androidGitProbeAuthed
+import com.lingxi.code.bindings.android.androidGitProbeAuthed
 import org.json.JSONObject
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

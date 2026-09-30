@@ -10,7 +10,7 @@
 //! starts empty.
 //!
 //! This module is the Rust analog of that seed step. It maps the persisted
-//! [`protocol::ConversationMessage`] history (loaded by
+//! [`lingxi_core::types::ConversationMessage`] history (loaded by
 //! `session::SessionStorage::load` / `session::jsonl::load_session`) into the
 //! TUI's [`RenderedMessage`] scrollback, reusing the SAME per-kind mapping the
 //! live event path uses ([`crate::streaming::apply_event`]):
@@ -37,7 +37,7 @@
 //! [`RenderedMessage::CompactBoundary`]. The hidden summary is never rendered as
 //! an ordinary user row.
 
-use protocol::{ContentBlock, ConversationMessage, ToolUseId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, ToolUseId};
 use std::collections::HashMap;
 use tui_core::message::RenderedMessage;
 
@@ -369,7 +369,7 @@ fn push_assistant_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ImageSource, MessageId};
+    use lingxi_core::types::{ImageSource, MessageId};
 
     fn user_text(text: &str) -> ConversationMessage {
         ConversationMessage::User {
@@ -640,8 +640,8 @@ mod tests {
 
     #[test]
     fn typed_compact_history_replays_one_boundary_and_hides_summary_user_row() {
-        let metadata = protocol::CompactBoundaryMetadata {
-            trigger: protocol::CompactTrigger::Manual,
+        let metadata = lingxi_core::types::CompactBoundaryMetadata {
+            trigger: lingxi_core::types::CompactTrigger::Manual,
             messages_summarized: Some(8),
             ..Default::default()
         };

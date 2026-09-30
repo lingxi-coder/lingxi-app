@@ -135,8 +135,12 @@ pub struct AppCallbacks<'cb> {
     ///
     /// ⛔ This must NOT unwind the app — see [`ChatOutcome::Summarize`].
     pub on_summarize: Box<
-        dyn FnMut(uuid::Uuid, platform_api::SummarizeDirection, Option<String>, CancellationToken)
-            + 'cb,
+        dyn FnMut(
+                uuid::Uuid,
+                lingxi_core::host::SummarizeDirection,
+                Option<String>,
+                CancellationToken,
+            ) + 'cb,
     >,
     /// Executed on [`ChatOutcome::RenameSession`]: the caller appends the
     /// `custom-title` line via `OrchestratorHandle::rename_session` off the
@@ -626,13 +630,13 @@ impl<'cb> RataApp<'cb> {
 pub fn run_app(
     messages: Vec<RenderedMessage>,
     initial_prompt: Option<String>,
-    background_handoff: Option<platform_api::BackgroundingSnapshot>,
+    background_handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     session: SessionInfo,
     events_rx: UnboundedReceiver<TurnEvent>,
     permission_rx: Receiver<PermissionExchange>,
     ask_user_question_rx: Receiver<AskUserQuestionExchange>,
     computer_access_rx: Receiver<ComputerAccessExchange>,
-    subscription: Option<platform_api::subscription::SharedSubscription>,
+    subscription: Option<lingxi_core::host::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
     web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
     fusion_settings: Option<
@@ -646,13 +650,13 @@ pub fn run_app(
     connect_auth_methods: std::collections::BTreeMap<String, String>,
     connect_availability: std::collections::BTreeMap<String, bool>,
     shell_expansion: Option<std::sync::Arc<dyn command_api::ShellExpansionProvider>>,
-    orchestrator: Option<std::sync::Arc<dyn platform_api::OrchestratorHandle>>,
+    orchestrator: Option<std::sync::Arc<dyn lingxi_core::host::OrchestratorHandle>>,
     // Live session-cwd reader used by native scrollback attachment links.
     // `None` keeps hermetic/unit callers on the startup `SessionInfo` cwd.
     hyperlink_cwd_provider: Option<std::sync::Arc<dyn Fn() -> std::path::PathBuf + Send + Sync>>,
     sandbox_toggle: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     command_registry: Option<std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
-    task_registry: Option<std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+    task_registry: Option<std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
     // Persistent prompt-history store (`~/.lingxi/history.jsonl`, cc 2.1.218):
     // seeds the composer recall + persists submissions. `None` = session-local
     // recall only (tests, `CLAUDE_CODE_SKIP_PROMPT_HISTORY`).
@@ -681,7 +685,7 @@ pub fn run_app(
     on_compact: impl FnMut(String, CancellationToken),
     on_summarize: impl FnMut(
         uuid::Uuid,
-        platform_api::SummarizeDirection,
+        lingxi_core::host::SummarizeDirection,
         Option<String>,
         CancellationToken,
     ),
@@ -836,7 +840,7 @@ pub fn run_app(
     // ←-on-empty gesture; it is ANDed with the agent-view enablement gate,
     // because a disabled agent view fails `kGt`'s `Zan(C2t({fleetEnabled:
     // $H(), …}))` check and installs no handler at all.
-    let agent_view_enabled = platform_api::agent_view::is_enabled();
+    let agent_view_enabled = lingxi_core::host::agent_view::is_enabled();
     app.chat_widget.set_left_arrow_opens_agents(
         tui_core::theme_persist::load_left_arrow_opens_agents().unwrap_or(true)
             && agent_view_enabled,

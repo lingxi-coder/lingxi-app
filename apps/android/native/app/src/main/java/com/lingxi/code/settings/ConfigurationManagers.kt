@@ -204,7 +204,7 @@ internal fun PluginManager(bridge: SettingsEngineBridge, layer: String, onReconn
         OutlinedTextField(marketplace, { marketplace = it }, label = { Text(settingsLabel("Marketplace source")) }, modifier = Modifier.fillMaxWidth())
         TextButton(enabled = writable && marketplace.isNotBlank(), onClick = { preview(JSONObject().put("action","marketplace_add").put("source",marketplace.trim())) }) { Text(settingsLabel("Preview adding marketplace")) }
         val result = state.operation
-        if (proposal != null && result != null && result.operationId == previewId && result.status == com.lingxi.code.bindings.ConfigurationOperationStatusDto.SUCCEEDED) {
+        if (proposal != null && result != null && result.operationId == previewId && result.status == com.lingxi.code.bindings.client.ConfigurationOperationStatusDto.SUCCEEDED) {
             Text(result.message ?: "Review operation")
             result.detailsJson?.let { SelectionContainer { Text(prettyJson(it)) } }
             Button(enabled = writable && revision != null, onClick = {

@@ -166,7 +166,7 @@ pub enum ChatOutcome {
     /// `TurnEvent::BashOutput`.
     RunBash(String),
     /// `/compact` asked for a forced compaction pass. The caller drives
-    /// [`platform_api::OrchestratorHandle::force_compact`] — a real multi-second LLM
+    /// [`lingxi_core::host::OrchestratorHandle::force_compact`] — a real multi-second LLM
     /// summarization round-trip — asynchronously on the LIVE engine runtime
     /// (correct reactor; never on the render thread's throwaway `block_on`,
     /// which would freeze input, drive the reqwest/websocket sockets on the
@@ -223,7 +223,7 @@ pub enum ChatOutcome {
         /// The split point.
         message: uuid::Uuid,
         /// Which side is summarized.
-        direction: platform_api::SummarizeDirection,
+        direction: lingxi_core::host::SummarizeDirection,
         /// The user's "add context (optional)" text, trimmed; `None` when empty.
         context: Option<String>,
     },
@@ -452,14 +452,14 @@ pub struct ChatWidget {
     /// Stable id of the tool currently driving the spinner. Heartbeats for an
     /// older/completed invocation are ignored so delayed channel delivery cannot
     /// resurrect stale activity after its result has arrived.
-    active_tool_id: Option<protocol::ToolUseId>,
+    active_tool_id: Option<lingxi_core::types::ToolUseId>,
     /// Latest orchestrator-reported wall-clock age for [`Self::active_tool_id`].
     /// This is live UI state only and is never appended to the transcript.
     active_tool_elapsed_ms: Option<u64>,
     /// All tool calls that have started and not produced a paired result.
     /// Unlike `active_tool_id` (the spinner's newest call), this preserves the
     /// complete in-flight set required by the background handoff classifier.
-    active_tool_kinds: Vec<(protocol::ToolUseId, String)>,
+    active_tool_kinds: Vec<(lingxi_core::types::ToolUseId, String)>,
     /// Assistant text received in the current turn. This sidecar survives an
     /// abort-then-fork boundary without changing the normal transcript wire.
     partial_assistant_text: String,
@@ -520,7 +520,7 @@ pub struct ChatWidget {
     /// copy; absent/unfilled degrades to the unknown-subscription default
     /// (TS-conservative), exactly like the old backend's
     /// `AppState::subscription_snapshot`.
-    subscription: Option<platform_api::subscription::SharedSubscription>,
+    subscription: Option<lingxi_core::host::subscription::SharedSubscription>,
     /// Composition-root-shared custom-statusline slot (`None` unless the
     /// embedder wires one via [`Self::set_status_line`]). The widget writes the
     /// live pump inputs (cost / rate-limit utilization) + marks it dirty on
@@ -538,15 +538,15 @@ pub struct ChatWidget {
     /// [`TurnEvent::ToolUseResult`] to recover the Edit/Write diff fields
     /// (`old_string`/`new_string`/`file_path`) for the result cell — the same
     /// correlation the resume path does with its `tool_inputs` side-table.
-    tool_inputs: std::collections::HashMap<protocol::ToolUseId, serde_json::Value>,
+    tool_inputs: std::collections::HashMap<lingxi_core::types::ToolUseId, serde_json::Value>,
     /// The open client-side read/search fold (design doc §4). Lives in the
     /// transcript's active slot while streaming; committed once on a breaker.
     collapse_group: Option<tui_core::collapse::CollapseGroup>,
     /// The first folded tool-use id — the committed variant's `group_id`.
-    collapse_group_id: Option<protocol::ToolUseId>,
+    collapse_group_id: Option<lingxi_core::types::ToolUseId>,
     /// Tool-use ids currently absorbed by the open fold — a collapsible result
     /// for one of these is absorbed (does not break the group).
-    collapse_ids: std::collections::HashSet<protocol::ToolUseId>,
+    collapse_ids: std::collections::HashSet<lingxi_core::types::ToolUseId>,
     /// Live terminal surface used by the collapse classifier. Fullscreen folds
     /// extra Bash/MCP/memory categories; inline preserves native scrollback.
     collapse_fullscreen: bool,
@@ -621,7 +621,7 @@ pub struct ChatWidget {
     /// [`ChatOutcome::Compact`] instead.
     /// `None` (every test widget) makes each of those a graceful
     /// "unavailable" system line rather than a panic.
-    orchestrator: Option<std::sync::Arc<dyn platform_api::OrchestratorHandle>>,
+    orchestrator: Option<std::sync::Arc<dyn lingxi_core::host::OrchestratorHandle>>,
     /// Composition-root-shared sandbox-enabled cell (also held by the bash
     /// tool's `BuiltinToolContext::sandbox_enabled_override`). `/sandbox` flips
     /// it for the live session so the next bash command sandboxes (or not)
@@ -653,7 +653,7 @@ pub struct ChatWidget {
     /// to seed the `/tasks` picker; the picker's stop action goes off-loop via
     /// [`ChatOutcome::TaskAction`]. `None` (every test widget) makes `/tasks` a
     /// graceful "unavailable" line.
-    task_registry: Option<std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+    task_registry: Option<std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
     /// Composition-root-supplied live agents snapshot provider for the fleet
     /// pane. `None` degrades to an empty agents pane.
     agents_snapshot_provider:
@@ -817,7 +817,7 @@ impl ChatWidget {
     /// as graceful no-ops.
     pub fn set_orchestrator(
         &mut self,
-        handle: std::sync::Arc<dyn platform_api::OrchestratorHandle>,
+        handle: std::sync::Arc<dyn lingxi_core::host::OrchestratorHandle>,
     ) {
         self.goal_handler = Some(command_api::builtins::goal::GoalHandler::new(
             handle.clone(),
@@ -1068,7 +1068,7 @@ impl ChatWidget {
             && key.kind == crossterm::event::KeyEventKind::Press
             && key.modifiers == crossterm::event::KeyModifiers::CONTROL
             && matches!(key.code, crossterm::event::KeyCode::Char('b' | 'B'))
-            && !platform_api::env::background_tasks_disabled()
+            && !lingxi_core::host::env::background_tasks_disabled()
             && self.background_all_tasks()
         {
             return ChatOutcome::Continue;
@@ -1171,7 +1171,7 @@ impl ChatWidget {
         {
             return;
         }
-        if let Some(held) = platform_api::uds_inbox::next_unannounced_held() {
+        if let Some(held) = lingxi_core::host::uds_inbox::next_unannounced_held() {
             self.bottom_pane.show_held_peer(held);
         }
     }
@@ -1225,7 +1225,7 @@ impl ChatWidget {
                 group_id: self
                     .collapse_group_id
                     .clone()
-                    .unwrap_or_else(protocol::ToolUseId::new),
+                    .unwrap_or_else(lingxi_core::types::ToolUseId::new),
                 latest_hint: group.latest_hint().map(str::to_string),
                 entries: group.entries().to_vec(),
                 mem_read: 0,
@@ -1247,7 +1247,7 @@ impl ChatWidget {
         let group_id = self
             .collapse_group_id
             .take()
-            .unwrap_or_else(protocol::ToolUseId::new);
+            .unwrap_or_else(lingxi_core::types::ToolUseId::new);
         self.collapse_ids.clear();
         self.transcript.discard_active();
         self.transcript
@@ -1546,7 +1546,7 @@ impl ChatWidget {
                     });
             }
             TurnEvent::TurnEnded(outcome) => {
-                let was_cancelled = matches!(outcome, platform_api::TurnOutcome::Cancelled)
+                let was_cancelled = matches!(outcome, lingxi_core::host::TurnOutcome::Cancelled)
                     || self
                         .current_turn
                         .as_ref()
@@ -2089,7 +2089,9 @@ impl ChatWidget {
     /// and the seed/background fetch has filled it. A poisoned lock degrades
     /// to `None` (conservative copy, never a panic in the event-fold path) —
     /// the documented `SharedSubscription` reader stance.
-    fn subscription_snapshot(&self) -> Option<platform_api::subscription::SubscriptionSnapshot> {
+    fn subscription_snapshot(
+        &self,
+    ) -> Option<lingxi_core::host::subscription::SubscriptionSnapshot> {
         self.subscription
             .as_ref()
             .and_then(|s| s.read().ok())
@@ -2099,7 +2101,7 @@ impl ChatWidget {
     /// Wire the composition root's shared subscription slot so the rate-limit
     /// composer reads the live snapshot at compose time (the old backend's
     /// `Runtime::with_subscription`).
-    pub fn set_subscription(&mut self, slot: platform_api::subscription::SharedSubscription) {
+    pub fn set_subscription(&mut self, slot: lingxi_core::host::subscription::SharedSubscription) {
         self.subscription = Some(slot);
     }
 
@@ -2185,7 +2187,7 @@ impl ChatWidget {
     /// (tests) keeps `/tasks` a graceful "unavailable" no-op.
     pub fn set_task_registry(
         &mut self,
-        handle: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        handle: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     ) {
         self.task_registry = Some(handle);
     }
@@ -2291,14 +2293,14 @@ impl ChatWidget {
                 // managed policy. Clear the old row's administrator provenance
                 // as the active selection moves, so the suffix cannot linger.
                 m.provenance = if m.is_current {
-                    platform_api::ModelProvenance::UserOrEnv
+                    lingxi_core::host::ModelProvenance::UserOrEnv
                 } else {
-                    platform_api::ModelProvenance::ProviderCatalogTier
+                    lingxi_core::host::ModelProvenance::ProviderCatalogTier
                 };
             }
         }
         if selection_changed {
-            self.session.model_provenance = platform_api::ModelProvenance::UserOrEnv;
+            self.session.model_provenance = lingxi_core::host::ModelProvenance::UserOrEnv;
         }
     }
 
@@ -2702,14 +2704,14 @@ impl ChatWidget {
     ///
     /// # Errors
     /// Propagates the first terminal IO error from the history insertion.
-    pub fn flush_scrollback<B: Backend + Write>(
+    pub fn flush_scrollback<B: Backend<Error = std::io::Error> + Write>(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
     ) -> io::Result<()> {
         self.flush_scrollback_with_hyperlinks(terminal, crate::terminal::hyperlinks_supported())
     }
 
-    fn flush_scrollback_with_hyperlinks<B: Backend + Write>(
+    fn flush_scrollback_with_hyperlinks<B: Backend<Error = std::io::Error> + Write>(
         &mut self,
         terminal: &mut crate::terminal::Terminal<B>,
         hyperlinks_enabled: bool,
@@ -2891,13 +2893,13 @@ impl ChatWidget {
         let (message, is_error) = runtime.block_on(async {
             // Live configured servers, excluding the `ide` pseudo-server
             // (claude's `clients.filter(b => b.name !== "ide")`).
-            let states: Vec<(String, platform_api::McpActionState)> = handle
+            let states: Vec<(String, lingxi_core::host::McpActionState)> = handle
                 .mcp_server_states()
                 .await
                 .into_iter()
                 .filter(|(name, _)| name != "ide")
                 .collect();
-            let l: Vec<(String, platform_api::McpActionState)> = if is_all {
+            let l: Vec<(String, lingxi_core::host::McpActionState)> = if is_all {
                 states.clone()
             } else {
                 states
@@ -2940,12 +2942,12 @@ impl ChatWidget {
     /// branch: single-target block pre-check, `all` failed/needs-auth subset,
     /// live reconnect of that subset, then a re-query for the outcome message.
     async fn mcp_do_reconnect(
-        handle: &dyn platform_api::OrchestratorHandle,
+        handle: &dyn lingxi_core::host::OrchestratorHandle,
         target: &str,
         is_all: bool,
-        l: &[(String, platform_api::McpActionState)],
+        l: &[(String, lingxi_core::host::McpActionState)],
     ) -> (String, bool) {
-        use platform_api::McpActionState::{Failed, NeedsAuth};
+        use lingxi_core::host::McpActionState::{Failed, NeedsAuth};
         if !is_all {
             if let Some(msg) = mcp_reconnect_block_msg(l[0].1, target) {
                 return (msg, false);
@@ -2964,7 +2966,7 @@ impl ChatWidget {
         if w.is_empty() {
             let disabled = l
                 .iter()
-                .filter(|(_, s)| matches!(s, platform_api::McpActionState::Disabled))
+                .filter(|(_, s)| matches!(s, lingxi_core::host::McpActionState::Disabled))
                 .count();
             return (mcp_reconnect_nothing_msg(disabled), false);
         }
@@ -2972,14 +2974,14 @@ impl ChatWidget {
             let _ = handle.reconnect_mcp_servers(Some(name)).await;
         }
         // Re-query the live state to read each server's post-reconnect `type`.
-        let post: std::collections::HashMap<String, platform_api::McpActionState> =
+        let post: std::collections::HashMap<String, lingxi_core::host::McpActionState> =
             handle.mcp_server_states().await.into_iter().collect();
         if !is_all {
             mcp_reconnect_single_msg(post.get(target).copied(), target)
         } else {
             let connected = w
                 .iter()
-                .filter(|n| post.get(*n) == Some(&platform_api::McpActionState::Connected))
+                .filter(|n| post.get(*n) == Some(&lingxi_core::host::McpActionState::Connected))
                 .count();
             (mcp_reconnect_all_msg(connected, w.len()), false)
         }
@@ -2991,17 +2993,17 @@ impl ChatWidget {
     /// claude's byte-exact "already enabled/disabled" message; a real change
     /// reports the existing state without reconnecting.
     async fn mcp_do_enable_disable(
-        handle: &dyn platform_api::OrchestratorHandle,
+        handle: &dyn lingxi_core::host::OrchestratorHandle,
         target: &str,
         is_all: bool,
         enable: bool,
-        l: &[(String, platform_api::McpActionState)],
+        l: &[(String, lingxi_core::host::McpActionState)],
     ) -> (String, bool) {
         // Approval pre-check (claude's `needs-approval` guard). Inert: no
         // LingXi connection state maps to `NeedsApproval`.
         if !is_all
             && l.iter()
-                .any(|(_, s)| matches!(s, platform_api::McpActionState::NeedsApproval))
+                .any(|(_, s)| matches!(s, lingxi_core::host::McpActionState::NeedsApproval))
         {
             return (
                 format!(
@@ -3148,9 +3150,9 @@ impl ChatWidget {
 
     fn workflow_size_guideline_state(
         &self,
-    ) -> Result<platform_api::session_flags::WorkflowSizeGuidelineSnapshot, String> {
+    ) -> Result<lingxi_core::host::session_flags::WorkflowSizeGuidelineSnapshot, String> {
         let Some(handle) = self.orchestrator.clone() else {
-            return Ok(platform_api::session_flags::workflow_size_guideline_snapshot());
+            return Ok(lingxi_core::host::session_flags::workflow_size_guideline_snapshot());
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3178,10 +3180,10 @@ impl ChatWidget {
 
     fn set_workflow_size_guideline_state(&self, value: &str) -> Result<(), String> {
         let Some(handle) = self.orchestrator.clone() else {
-            if platform_api::session_flags::workflow_size_guideline_is_managed() {
+            if lingxi_core::host::session_flags::workflow_size_guideline_is_managed() {
                 return Err("workflowSizeGuideline is managed by enterprise policy".to_string());
             }
-            let _ = platform_api::session_flags::set_workflow_size_guideline(value, false);
+            let _ = lingxi_core::host::session_flags::set_workflow_size_guideline(value, false);
             return Ok(());
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3230,7 +3232,7 @@ impl ChatWidget {
                 // Agents-view rows (2.1.220): shown only while agent view is
                 // enabled, mirroring the oracle's `...$H()?[row]:[]` /
                 // `...H7e()?[row]:[]` spreads.
-                platform_api::agent_view::is_enabled(),
+                lingxi_core::host::agent_view::is_enabled(),
                 self.bottom_pane.left_arrow_opens_agents(),
                 tui_core::theme_persist::load_default_to_agents_view().unwrap_or(false),
                 &self.session.doctor.lingxi_home,
@@ -3359,7 +3361,7 @@ impl ChatWidget {
             // for). With agent view disabled the ids simply do not exist, so the
             // key must fall through to `icy`'s unknown-key answer.
             "leftArrowOpensAgents"
-                if platform_api::agent_view::is_enabled()
+                if lingxi_core::host::agent_view::is_enabled()
                     && !telemetry::flag_bool("tengu_maple_sundial", false) =>
             {
                 let want = parse_bool("leftArrowOpensAgents")?;
@@ -3368,7 +3370,7 @@ impl ChatWidget {
                 Ok(format!("Set leftArrowOpensAgents to {want}."))
             }
             "defaultToAgentsView"
-                if platform_api::agent_view::is_enabled()
+                if lingxi_core::host::agent_view::is_enabled()
                     && !telemetry::flag_bool("tengu_maple_sundial", false) =>
             {
                 let want = parse_bool("defaultToAgentsView")?;
@@ -3376,25 +3378,26 @@ impl ChatWidget {
                 Ok(format!("Set defaultToAgentsView to {want}."))
             }
             "dialogExpiry" => {
-                if !platform_api::live_sessions::DIALOG_EXPIRY_OPTIONS.contains(&value) {
+                if !lingxi_core::host::live_sessions::DIALOG_EXPIRY_OPTIONS.contains(&value) {
                     return Err(format!(
                         "dialogExpiry takes one of: {}",
-                        platform_api::live_sessions::DIALOG_EXPIRY_OPTIONS.join(", ")
+                        lingxi_core::host::live_sessions::DIALOG_EXPIRY_OPTIONS.join(", ")
                     ));
                 }
                 tui_core::theme_persist::save_dialog_expiry(value);
                 Ok(format!("Set dialogExpiry to {value}."))
             }
             "crossSessionInbound" => {
-                if !platform_api::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.contains(&value) {
+                if !lingxi_core::host::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.contains(&value)
+                {
                     return Err(format!(
                         "crossSessionInbound takes one of: {}",
-                        platform_api::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.join(", ")
+                        lingxi_core::host::live_sessions::CROSS_SESSION_INBOUND_OPTIONS.join(", ")
                     ));
                 }
                 tui_core::theme_persist::save_cross_session_inbound(value);
                 if value == "accept" {
-                    let n = platform_api::uds_inbox::release_all_held();
+                    let n = lingxi_core::host::uds_inbox::release_all_held();
                     if n > 0 {
                         return Ok(format!(
                             "Set crossSessionInbound to {value}. Released {n} held cross-session message(s) to Claude's queue (policy-accepts)."
@@ -3660,7 +3663,7 @@ impl ChatWidget {
                 roles: settings.roles,
                 enabled: settings.enabled,
                 max_panel: if settings.max_panel == 0 {
-                    platform_api::FUSION_MAX_PANEL
+                    lingxi_core::host::FUSION_MAX_PANEL
                 } else {
                     settings.max_panel
                 },
@@ -3688,7 +3691,7 @@ impl ChatWidget {
     /// stays inside the dialog; only a missing handle renders an error line.
     /// Stopping a task goes off-loop via [`ChatOutcome::TaskAction`].
     pub(crate) fn cmd_tasks(&mut self, args: &str) -> ChatOutcome {
-        if let Some(parsed) = platform_api::human_task_message::parse(args) {
+        if let Some(parsed) = lingxi_core::host::human_task_message::parse(args) {
             return match parsed {
                 Ok((task_id, message)) => ChatOutcome::TaskAction(TaskAction::Message {
                     task_id: task_id.into(),
@@ -3744,7 +3747,7 @@ impl ChatWidget {
             .build()
             .map_err(|err| format!("/tasks failed: {err}"))?;
         Ok(runtime
-            .block_on(registry.list(platform_api::task_registry::TaskListFilter::default()))
+            .block_on(registry.list(lingxi_core::host::task_registry::TaskListFilter::default()))
             .unwrap_or_default()
             .into_iter()
             .map(tui_core::multiagent::task_row_from_record)
@@ -3771,7 +3774,7 @@ impl ChatWidget {
         ChatOutcome::Continue
     }
 
-    fn backgrounding_snapshot(&self) -> platform_api::BackgroundingSnapshot {
+    fn backgrounding_snapshot(&self) -> lingxi_core::host::BackgroundingSnapshot {
         let queued_commands = self
             .queued_compact
             .as_ref()
@@ -3786,7 +3789,7 @@ impl ChatWidget {
             .collect();
         let draft = self.bottom_pane.composer().text().to_string();
         if self.current_turn.is_none() {
-            return platform_api::BackgroundingSnapshot::Idle {
+            return lingxi_core::host::BackgroundingSnapshot::Idle {
                 queued_commands,
                 draft,
                 boundary_id: self.background_boundary_id,
@@ -3802,7 +3805,7 @@ impl ChatWidget {
             .filter(|kind| is_agent_tool(kind))
             .count();
         if in_flight_kinds.is_empty() {
-            platform_api::BackgroundingSnapshot::Streaming {
+            lingxi_core::host::BackgroundingSnapshot::Streaming {
                 queued_commands,
                 draft,
                 in_flight_kinds,
@@ -3811,7 +3814,7 @@ impl ChatWidget {
                 restartable_count,
             }
         } else {
-            platform_api::BackgroundingSnapshot::BetweenTools {
+            lingxi_core::host::BackgroundingSnapshot::BetweenTools {
                 queued_commands,
                 draft,
                 in_flight_kinds,
@@ -3825,7 +3828,10 @@ impl ChatWidget {
     /// Restore the composer and queued command state captured in a durable
     /// background handoff. The current producer only queues `/compact`; keep
     /// the serialized vector so future queue kinds remain forward-compatible.
-    pub fn restore_background_handoff(&mut self, snapshot: &platform_api::BackgroundingSnapshot) {
+    pub fn restore_background_handoff(
+        &mut self,
+        snapshot: &lingxi_core::host::BackgroundingSnapshot,
+    ) {
         self.bottom_pane.restore_composer_text(snapshot.draft());
         let queued = snapshot.queued_commands().to_vec();
         if self.queued_compact.is_none() {
@@ -3842,7 +3848,7 @@ impl ChatWidget {
 
     fn perform_backgrounding(
         &mut self,
-        snapshot: platform_api::BackgroundingSnapshot,
+        snapshot: lingxi_core::host::BackgroundingSnapshot,
         abort_foreground: bool,
     ) -> ChatOutcome {
         let Some(handle) = self.orchestrator.clone() else {
@@ -3891,21 +3897,21 @@ impl ChatWidget {
         let elapsed_ms = self.pending_backgrounding.as_ref().map_or(0, |pending| {
             u64::try_from(pending.requested_at.elapsed().as_millis()).unwrap_or(u64::MAX)
         });
-        match platform_api::classify_backgrounding(&snapshot, elapsed_ms) {
-            platform_api::BackgroundingDecision::IdleFork => {
+        match lingxi_core::host::classify_backgrounding(&snapshot, elapsed_ms) {
+            lingxi_core::host::BackgroundingDecision::IdleFork => {
                 self.perform_backgrounding(snapshot, false)
             }
-            platform_api::BackgroundingDecision::DeferThenFork { .. } => {
+            lingxi_core::host::BackgroundingDecision::DeferThenFork { .. } => {
                 if self.pending_backgrounding.is_some() {
                     // A confirmed second ← is the oracle's “skip ahead” path.
-                    match platform_api::classify_backgrounding(
+                    match lingxi_core::host::classify_backgrounding(
                         &snapshot,
-                        platform_api::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
+                        lingxi_core::host::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
                     ) {
-                        platform_api::BackgroundingDecision::AbortThenFork => {
+                        lingxi_core::host::BackgroundingDecision::AbortThenFork => {
                             self.perform_backgrounding(snapshot, true)
                         }
-                        platform_api::BackgroundingDecision::Refuse { reason } => {
+                        lingxi_core::host::BackgroundingDecision::Refuse { reason } => {
                             self.pending_backgrounding = None;
                             self.show_system_text(reason, true)
                         }
@@ -3918,10 +3924,10 @@ impl ChatWidget {
                     self.show_system_text("Backgrounding after the current tool finishes…", false)
                 }
             }
-            platform_api::BackgroundingDecision::AbortThenFork => {
+            lingxi_core::host::BackgroundingDecision::AbortThenFork => {
                 self.perform_backgrounding(snapshot, true)
             }
-            platform_api::BackgroundingDecision::Refuse { reason } => {
+            lingxi_core::host::BackgroundingDecision::Refuse { reason } => {
                 self.pending_backgrounding = None;
                 self.show_system_text(reason, true)
             }
@@ -3936,18 +3942,18 @@ impl ChatWidget {
         let elapsed_ms =
             u64::try_from(pending.requested_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let snapshot = self.backgrounding_snapshot();
-        match platform_api::classify_backgrounding(&snapshot, elapsed_ms) {
-            platform_api::BackgroundingDecision::IdleFork => {
+        match lingxi_core::host::classify_backgrounding(&snapshot, elapsed_ms) {
+            lingxi_core::host::BackgroundingDecision::IdleFork => {
                 let _ = self.perform_backgrounding(snapshot, false);
             }
-            platform_api::BackgroundingDecision::AbortThenFork => {
+            lingxi_core::host::BackgroundingDecision::AbortThenFork => {
                 let _ = self.perform_backgrounding(snapshot, true);
             }
-            platform_api::BackgroundingDecision::Refuse { reason } => {
+            lingxi_core::host::BackgroundingDecision::Refuse { reason } => {
                 self.pending_backgrounding = None;
                 let _ = self.show_system_text(reason, true);
             }
-            platform_api::BackgroundingDecision::DeferThenFork { .. } => {}
+            lingxi_core::host::BackgroundingDecision::DeferThenFork { .. } => {}
         }
     }
 
@@ -3959,7 +3965,7 @@ impl ChatWidget {
 
     /// `/workflows`: seed the interactive "Dynamic workflows" picker with all
     /// `local_workflow` runs (running AND completed), reading the richer
-    /// [`platform_api::task_registry::TaskRegistryHandle::list_workflows`] projection
+    /// [`lingxi_core::host::task_registry::TaskRegistryHandle::list_workflows`] projection
     /// and enriching each row with the agent-count + phase/agent tree parsed
     /// from its output spool. Subsequent lifecycle changes arrive through
     /// pushed `MultiAgentEvent`s. Opens the dialog even when empty (its own
@@ -4835,7 +4841,9 @@ impl ChatWidget {
                     .build()
                     .ok()?;
                 runtime
-                    .block_on(registry.list(platform_api::task_registry::TaskListFilter::default()))
+                    .block_on(
+                        registry.list(lingxi_core::host::task_registry::TaskListFilter::default()),
+                    )
                     .ok()
             })
             .unwrap_or_default()
@@ -4922,7 +4930,7 @@ impl ChatWidget {
 
     /// `/compact`: run a forced compaction pass. Returns
     /// [`ChatOutcome::Compact`] so the CLI drives
-    /// [`platform_api::OrchestratorHandle::force_compact`] — a real multi-second LLM
+    /// [`lingxi_core::host::OrchestratorHandle::force_compact`] — a real multi-second LLM
     /// round-trip — on the LIVE runtime handle, reporting the summary via
     /// `TurnEvent::SystemNotice`. It must NOT go through `run_core_command`'s
     /// throwaway `block_on`: that would freeze the render/input thread for the
@@ -5129,8 +5137,8 @@ impl ChatWidget {
     }
 
     pub(crate) fn live_agents_snapshot() -> crate::bottom_pane::view::AgentsSnapshot {
-        let self_session_id = platform_api::live_sessions::process_session_id();
-        let mut rows = platform_api::live_sessions::process_live_dir()
+        let self_session_id = lingxi_core::host::live_sessions::process_session_id();
+        let mut rows = lingxi_core::host::live_sessions::process_live_dir()
             .list_live()
             .unwrap_or_default()
             .into_iter()
@@ -5426,14 +5434,14 @@ impl ChatWidget {
                     if turn_was_cancelled {
                         return ChatOutcome::Continue;
                     }
-                    if !platform_api::env::background_tasks_disabled() {
+                    if !lingxi_core::host::env::background_tasks_disabled() {
                         if let Some(registry) = &self.task_registry {
                             if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                                 .enable_all()
                                 .build()
                             {
                                 runtime.block_on(registry.background_all_tasks_with_reason(
-                                    platform_api::task_registry::TaskBackgroundReason::TurnAbort,
+                                    lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort,
                                 ));
                             }
                         }
@@ -5781,7 +5789,7 @@ fn line_count(lines: &[ratatui::text::Line<'static>]) -> u16 {
 /// Maps `TurnEvent::RateLimit`'s fields onto the composer's own
 /// [`crate::rate_limit_messages::RateLimitInfo`] shape — the two share the
 /// same field set (the `TurnEvent` variant is the bridge-crate twin of
-/// `platform_api::OutputEvent::RateLimit`), so this is a straight field-for-field
+/// `lingxi_core::host::OutputEvent::RateLimit`), so this is a straight field-for-field
 /// carry, including the 206 `upgrade_paths` / `credits_required` overage
 /// fields threaded alongside the original nine.
 #[allow(
@@ -5873,7 +5881,7 @@ fn is_agent_tool(tool: &str) -> bool {
 }
 
 fn agent_status_from_tool_start(
-    id: &protocol::ToolUseId,
+    id: &lingxi_core::types::ToolUseId,
     input: &serde_json::Value,
 ) -> RunningAgentStatus {
     RunningAgentStatus {
@@ -5958,8 +5966,11 @@ fn mcp_not_configured_msg(is_all: bool, target: &str) -> String {
 /// Single-target `reconnect` pre-check (claude's `R3s(b)` blocking states):
 /// disabled / pending / needs-approval short-circuit before any reconnect.
 /// `None` means the state is reconnectable (connected / failed / needs-auth).
-fn mcp_reconnect_block_msg(state: platform_api::McpActionState, target: &str) -> Option<String> {
-    use platform_api::McpActionState::{Disabled, NeedsApproval, Pending};
+fn mcp_reconnect_block_msg(
+    state: lingxi_core::host::McpActionState,
+    target: &str,
+) -> Option<String> {
+    use lingxi_core::host::McpActionState::{Disabled, NeedsApproval, Pending};
     match state {
         Disabled => Some(format!(
             "\"{target}\" is disabled. Run `/mcp enable {target}` to bring it back."
@@ -5989,10 +6000,10 @@ fn mcp_reconnect_nothing_msg(disabled_count: usize) -> String {
 /// (claude's `k` = `x[0].value.client.type`, or `void 0` when the attempt
 /// hard-failed). Returns `(message, is_error)`.
 fn mcp_reconnect_single_msg(
-    k: Option<platform_api::McpActionState>,
+    k: Option<lingxi_core::host::McpActionState>,
     target: &str,
 ) -> (String, bool) {
-    use platform_api::McpActionState::{Connected, NeedsAuth};
+    use lingxi_core::host::McpActionState::{Connected, NeedsAuth};
     match k {
         Some(Connected) => (format!("Reconnected \"{target}\"."), false),
         Some(other) => {
@@ -6058,9 +6069,9 @@ fn mcp_toggle_success_message(
     enable: bool,
     is_all: bool,
     target: &str,
-    out: &[platform_api::McpToggleOutcome],
+    out: &[lingxi_core::host::McpToggleOutcome],
 ) -> String {
-    use platform_api::McpActionState;
+    use lingxi_core::host::McpActionState;
     let verb = if enable { "Enabled" } else { "Disabled" };
     // claude `m` = settled (fulfilled) count.
     let settled = out.iter().filter(|o| o.state.is_some()).count();
@@ -6206,13 +6217,13 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl platform_api::task_registry::TaskRegistryHandle for BackgroundStubRegistry {
+    impl lingxi_core::host::task_registry::TaskRegistryHandle for BackgroundStubRegistry {
         async fn create(
             &self,
-            _i: platform_api::task_registry::TaskCreateInput,
+            _i: lingxi_core::host::task_registry::TaskCreateInput,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -6220,20 +6231,20 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            Option<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Option<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
         async fn list(
             &self,
-            _f: platform_api::task_registry::TaskListFilter,
+            _f: lingxi_core::host::task_registry::TaskListFilter,
         ) -> Result<
-            Vec<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Vec<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             Ok(if self.backgroundable {
-                vec![platform_api::task_registry::TaskRecord {
+                vec![lingxi_core::host::task_registry::TaskRecord {
                     task_id: "b1".into(),
                     task_type: "local_bash".into(),
                     status: "running".into(),
@@ -6247,10 +6258,10 @@ mod tests {
         async fn update(
             &self,
             _id: &str,
-            _p: platform_api::task_registry::TaskUpdatePatch,
+            _p: lingxi_core::host::task_registry::TaskUpdatePatch,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -6259,8 +6270,8 @@ mod tests {
             _id: &str,
             _s: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -6268,8 +6279,8 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -6278,8 +6289,8 @@ mod tests {
             _id: &str,
             _offset: Option<u64>,
         ) -> Result<
-            platform_api::task_registry::TaskOutputChunk,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskOutputChunk,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -6320,7 +6331,9 @@ mod tests {
         view.apply_turn_event(TurnEvent::TextDelta(
             "/tasks message a123 resume stopped work".into(),
         ));
-        view.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        view.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         assert!(view.bottom_pane.composer().text().is_empty());
         assert!(matches!(
             view.handle_key(press(KeyCode::Enter)),
@@ -6552,7 +6565,7 @@ mod tests {
 
     #[test]
     fn mcp_reconnect_block_messages_are_byte_exact() {
-        use platform_api::McpActionState::*;
+        use lingxi_core::host::McpActionState::*;
         assert_eq!(
             mcp_reconnect_block_msg(Disabled, "sentry").unwrap(),
             "\"sentry\" is disabled. Run `/mcp enable sentry` to bring it back."
@@ -6585,7 +6598,7 @@ mod tests {
 
     #[test]
     fn mcp_reconnect_single_messages_are_byte_exact() {
-        use platform_api::McpActionState::*;
+        use lingxi_core::host::McpActionState::*;
         assert_eq!(
             mcp_reconnect_single_msg(Some(Connected), "sentry"),
             ("Reconnected \"sentry\".".to_string(), false)
@@ -6650,7 +6663,7 @@ mod tests {
             "Usage: /mcp [reconnect|enable|disable [<server>|all]]. With no server name, applies to all."
         );
         // pGd state labels.
-        use platform_api::McpActionState::*;
+        use lingxi_core::host::McpActionState::*;
         assert_eq!(Connected.label(), "connected");
         assert_eq!(Pending.label(), "connecting");
         assert_eq!(Disabled.label(), "disabled");
@@ -6661,9 +6674,9 @@ mod tests {
 
     fn toggle(
         name: &str,
-        state: Option<platform_api::McpActionState>,
-    ) -> platform_api::McpToggleOutcome {
-        platform_api::McpToggleOutcome {
+        state: Option<lingxi_core::host::McpActionState>,
+    ) -> lingxi_core::host::McpToggleOutcome {
+        lingxi_core::host::McpToggleOutcome {
             name: name.to_string(),
             state,
         }
@@ -6671,7 +6684,7 @@ mod tests {
 
     #[test]
     fn mcp_toggle_success_message_single_forms_are_byte_exact() {
-        use platform_api::McpActionState::{Connected, Disabled, Failed, NeedsAuth, Pending};
+        use lingxi_core::host::McpActionState::{Connected, Disabled, Failed, NeedsAuth, Pending};
 
         // ── single enable ──
         // Connected → plain quoted name.
@@ -6738,7 +6751,7 @@ mod tests {
 
     #[test]
     fn mcp_toggle_success_message_aggregate_forms_are_byte_exact() {
-        use platform_api::McpActionState::{Connected, Disabled, Failed};
+        use lingxi_core::host::McpActionState::{Connected, Disabled, Failed};
 
         // enable-all, every server connected.
         assert_eq!(
@@ -6941,12 +6954,12 @@ mod tests {
     /// or a value the key's type rejects.
     #[test]
     fn cmd_config_shorthand_sets_and_reports_errors() {
-        let prior_workflow = platform_api::session_flags::workflow_size_guideline();
+        let prior_workflow = lingxi_core::host::session_flags::workflow_size_guideline();
         let prior_workflow_managed =
-            platform_api::session_flags::workflow_size_guideline_is_managed();
+            lingxi_core::host::session_flags::workflow_size_guideline_is_managed();
         let prior_workflow_default =
-            platform_api::session_flags::workflow_size_guideline_is_default();
-        let _ = platform_api::session_flags::set_workflow_size_guideline("medium", false);
+            lingxi_core::host::session_flags::workflow_size_guideline_is_default();
+        let _ = lingxi_core::host::session_flags::set_workflow_size_guideline("medium", false);
 
         // vim=true applies live and confirms.
         let mut w = widget();
@@ -7003,7 +7016,7 @@ mod tests {
         );
         assert!(sys.is_error());
 
-        let _ = platform_api::session_flags::set_workflow_size_guideline_with_source(
+        let _ = lingxi_core::host::session_flags::set_workflow_size_guideline_with_source(
             prior_workflow,
             prior_workflow_managed,
             prior_workflow_default,
@@ -7081,9 +7094,9 @@ mod tests {
             .build()
             .expect("runtime");
         assert_eq!(
-            runtime.block_on(platform_api::OrchestratorHandle::workflow_size_guideline(
-                mock.as_ref()
-            )),
+            runtime.block_on(
+                lingxi_core::host::OrchestratorHandle::workflow_size_guideline(mock.as_ref())
+            ),
             "large"
         );
     }
@@ -7103,14 +7116,16 @@ mod tests {
             .build()
             .expect("runtime");
         assert_eq!(
-            runtime.block_on(platform_api::OrchestratorHandle::workflow_size_guideline(
-                mock.as_ref()
-            )),
+            runtime.block_on(
+                lingxi_core::host::OrchestratorHandle::workflow_size_guideline(mock.as_ref())
+            ),
             "small"
         );
         assert!(
             !runtime.block_on(
-                platform_api::OrchestratorHandle::workflow_size_guideline_is_default(mock.as_ref())
+                lingxi_core::host::OrchestratorHandle::workflow_size_guideline_is_default(
+                    mock.as_ref()
+                )
             ),
             "live /config changes are explicit, not built-in defaults"
         );
@@ -7146,7 +7161,7 @@ mod tests {
         let _env = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let var = platform_api::agent_view::DISABLE_AGENT_VIEW_ENV;
+        let var = lingxi_core::host::agent_view::DISABLE_AGENT_VIEW_ENV;
         std::env::remove_var(var);
 
         // Enabled (the default): the arms match, so a bad bool reports the
@@ -7465,12 +7480,12 @@ mod tests {
                 timestamp: 0,
             });
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("bash"),
+            id: lingxi_core::types::ToolUseId::from("bash"),
             tool: "Bash".into(),
             input: serde_json::json!({ "command": "cargo test" }),
         });
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("bash"),
+            id: lingxi_core::types::ToolUseId::from("bash"),
             tool: "Bash".into(),
             result: serde_json::json!({ "stdout": "ok" }),
         });
@@ -7666,7 +7681,9 @@ mod tests {
         assert!(output.contains("line"), "{output:?}");
 
         let before_end = widget.focus_projection.lines.clone();
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         let after_end = widget.focus_projection.lines.clone();
         assert_eq!(
             after_end, before_end,
@@ -7723,7 +7740,7 @@ mod tests {
 
         assert!(matches!(
             widget.backgrounding_snapshot(),
-            platform_api::BackgroundingSnapshot::Streaming {
+            lingxi_core::host::BackgroundingSnapshot::Streaming {
                 ref partial_text,
                 ref in_flight_kinds,
                 ..
@@ -7807,7 +7824,7 @@ mod tests {
     #[test]
     fn background_handoff_restores_draft_and_queued_compact() {
         let mut widget = widget();
-        let snapshot = platform_api::BackgroundingSnapshot::Streaming {
+        let snapshot = lingxi_core::host::BackgroundingSnapshot::Streaming {
             queued_commands: vec!["/compact focus on tests".into()],
             draft: "继续检查 Unicode 🦀".into(),
             in_flight_kinds: Vec::new(),
@@ -7834,7 +7851,7 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::TextDelta("before tool".into()));
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::new(),
+            id: lingxi_core::types::ToolUseId::new(),
             tool: "Agent".into(),
             input: serde_json::json!({"description":"child"}),
         });
@@ -7847,7 +7864,7 @@ mod tests {
         assert!(!token.is_cancelled(), "first confirm waits for the tool");
         assert!(matches!(
             widget.backgrounding_snapshot(),
-            platform_api::BackgroundingSnapshot::BetweenTools {
+            lingxi_core::host::BackgroundingSnapshot::BetweenTools {
                 ref partial_text,
                 restartable_count: 1,
                 ..
@@ -7870,7 +7887,7 @@ mod tests {
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::new(),
+            id: lingxi_core::types::ToolUseId::new(),
             tool: "Bash".into(),
             input: serde_json::json!({"command":"sleep 20"}),
         });
@@ -7878,7 +7895,7 @@ mod tests {
         widget.pending_backgrounding = Some(PendingBackgrounding {
             requested_at: Instant::now()
                 - std::time::Duration::from_millis(
-                    platform_api::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
+                    lingxi_core::host::backgrounding::DEFAULT_BACKGROUND_DEFER_MS,
                 ),
         });
         widget.pump_backgrounding();
@@ -8118,15 +8135,15 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("powerup settings dir");
         std::env::set_var(branding::CONFIG_DIR_ENV, config_dir.path());
 
-        let prior_brief = platform_api::session_flags::brief_mode_enabled();
-        platform_api::session_flags::set_brief_mode_enabled(false);
+        let prior_brief = lingxi_core::host::session_flags::brief_mode_enabled();
+        lingxi_core::host::session_flags::set_brief_mode_enabled(false);
 
         let mut brief_widget = widget();
         assert!(matches!(
             brief_widget.handle_slash("/brief"),
             Some(ChatOutcome::Continue)
         ));
-        assert!(platform_api::session_flags::brief_mode_enabled());
+        assert!(lingxi_core::host::session_flags::brief_mode_enabled());
         let brief = cell::<crate::history_cell::system::SystemTextCell>(&brief_widget, 0);
         assert_eq!(brief.body(), "Brief-only mode enabled");
         assert!(
@@ -8147,7 +8164,7 @@ mod tests {
             "/powerup must not start a model turn"
         );
 
-        platform_api::session_flags::set_brief_mode_enabled(prior_brief);
+        lingxi_core::host::session_flags::set_brief_mode_enabled(prior_brief);
         match prior_config_dir {
             Some(value) => std::env::set_var(branding::CONFIG_DIR_ENV, value),
             None => std::env::remove_var(branding::CONFIG_DIR_ENV),
@@ -8488,7 +8505,9 @@ mod tests {
                 ChatOutcome::Continue
             ));
         }
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         assert_eq!(widget.bottom_pane().composer().text(), "draft");
 
         let Some((args, token)) = widget.take_ready_compact() else {
@@ -8662,7 +8681,9 @@ mod tests {
         w2.apply_turn_event(TurnEvent::TurnStarted);
         w2.apply_turn_event(TurnEvent::CompactStarted);
         assert!(w2.pane_status().compact_percent.is_some());
-        w2.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        w2.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         assert!(
             w2.pane_status().compact_percent.is_none(),
             "turn boundary is the failed-auto-compact backstop"
@@ -8677,7 +8698,9 @@ mod tests {
         assert!(matches!(widget.cmd_compact(""), ChatOutcome::Compact(_, _)));
         widget.apply_turn_event(TurnEvent::CompactStarted);
         assert!(widget.pane_status().compact_percent.is_some());
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         assert!(
             widget.pane_status().compact_percent.is_some(),
             "manual compaction bar is cleared by CompactEnded, not TurnEnded"
@@ -8975,22 +8998,18 @@ mod tests {
         configured: bool,
     ) -> std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>> {
         let roles = if configured {
-            platform_api::fusion_setup::FusionModelRoles {
+            lingxi_core::host::fusion_setup::FusionModelRoles {
                 panels: vec![
-                    platform_api::FusionModelChoice::new("anthropic", "claude-opus-5"),
-                    platform_api::FusionModelChoice::new("openai", "gpt-5.6-sol"),
+                    lingxi_core::host::FusionModelChoice::new("anthropic", "claude-opus-5"),
+                    lingxi_core::host::FusionModelChoice::new("openai", "gpt-5.6-sol"),
                 ],
-                analyst: Some(platform_api::FusionModelChoice::new(
+                analyst: Some(lingxi_core::host::FusionModelChoice::new(
                     "openai",
                     "gpt-5.6-sol",
                 )),
-                synthesizer: Some(platform_api::FusionModelChoice::new(
-                    "anthropic",
-                    "claude-opus-5",
-                )),
             }
         } else {
-            platform_api::fusion_setup::FusionModelRoles::default()
+            lingxi_core::host::fusion_setup::FusionModelRoles::default()
         };
         std::sync::Arc::new(std::sync::Mutex::new(
             crate::fusion::setup::FusionSettingsSnapshot {
@@ -9319,7 +9338,7 @@ mod tests {
                         request_model: "claude-opus-4-8".into(),
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
-                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                        provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                         is_current: true,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -9331,7 +9350,7 @@ mod tests {
                         request_model: "claude-sonnet-5".into(),
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
-                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                        provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -9372,16 +9391,18 @@ mod tests {
         // (`echo` bash — not a read/search command) so it renders its own
         // ●/⎿ cells rather than folding into a CollapsedReadSearch group.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "Bash".to_string(),
             input: serde_json::json!({ "command": "echo hi" }),
         });
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "Bash".to_string(),
             result: serde_json::json!("hi"),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         // Exactly: user "run it" · ● Bash · ⎿ result — NO empty assistant cell.
         assert_eq!(widget.transcript.committed_cells().len(), 3);
         assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Bash");
@@ -9410,17 +9431,19 @@ mod tests {
             ("t2", "Grep", serde_json::json!({ "pattern": "foo" })),
         ] {
             widget.apply_turn_event(TurnEvent::ToolUseStart {
-                id: protocol::ToolUseId::from(id),
+                id: lingxi_core::types::ToolUseId::from(id),
                 tool: tool.to_string(),
                 input,
             });
             widget.apply_turn_event(TurnEvent::ToolUseResult {
-                id: protocol::ToolUseId::from(id),
+                id: lingxi_core::types::ToolUseId::from(id),
                 tool: tool.to_string(),
                 result: serde_json::json!("ok"),
             });
         }
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         // user "look" + ONE folded cell — no per-tool ●/⎿ cells.
         assert_eq!(widget.transcript.committed_cells().len(), 2);
         assert!(cells(&widget)[1]
@@ -9441,7 +9464,7 @@ mod tests {
         submit_command(&mut widget, "run");
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("meta"),
+            id: lingxi_core::types::ToolUseId::from("meta"),
             tool: "ToolSearch".to_string(),
             input: serde_json::json!({"query": "github"}),
         });
@@ -9475,16 +9498,18 @@ mod tests {
         assert!(verbose.contains("ToolSearch"), "{verbose}");
 
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("bash"),
+            id: lingxi_core::types::ToolUseId::from("bash"),
             tool: "Bash".to_string(),
             input: serde_json::json!({"command": "echo hi"}),
         });
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("bash"),
+            id: lingxi_core::types::ToolUseId::from("bash"),
             tool: "Bash".to_string(),
             result: serde_json::json!("hi"),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
 
         assert_eq!(widget.transcript.committed_cells().len(), 2);
         assert!(cells(&widget)[1]
@@ -9513,16 +9538,18 @@ mod tests {
         submit_command(&mut widget, "run");
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("meta"),
+            id: lingxi_core::types::ToolUseId::from("meta"),
             tool: "ToolSearch".to_string(),
             input: serde_json::json!({"query": "github"}),
         });
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("meta"),
+            id: lingxi_core::types::ToolUseId::from("meta"),
             tool: "ToolSearch".to_string(),
             result: serde_json::json!("ok"),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
 
         assert_eq!(widget.transcript.committed_cells().len(), 2);
         let cell = cells(&widget)[1]
@@ -9561,21 +9588,23 @@ mod tests {
         submit_command(&mut widget, "run");
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("search"),
+            id: lingxi_core::types::ToolUseId::from("search"),
             tool: "mcp__filesystem__read_file".to_string(),
             input: serde_json::json!({"path": "README.md"}),
         });
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("search"),
+            id: lingxi_core::types::ToolUseId::from("search"),
             tool: "mcp__filesystem__read_file".to_string(),
             result: serde_json::json!("ok"),
         });
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("mutate"),
+            id: lingxi_core::types::ToolUseId::from("mutate"),
             tool: "mcp__github__create_issue".to_string(),
             input: serde_json::json!({"title": "bug"}),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
 
         let committed = cells(&widget);
         assert!(committed.iter().any(|cell| {
@@ -9607,12 +9636,12 @@ mod tests {
         submit_command(&mut widget, "mixed");
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("read"),
+            id: lingxi_core::types::ToolUseId::from("read"),
             tool: "Read".to_string(),
             input: serde_json::json!({ "file_path": "/a" }),
         });
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("read"),
+            id: lingxi_core::types::ToolUseId::from("read"),
             tool: "Read".to_string(),
             result: serde_json::json!("ok"),
         });
@@ -9620,16 +9649,18 @@ mod tests {
         widget.set_collapse_fullscreen(true);
 
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("bash"),
+            id: lingxi_core::types::ToolUseId::from("bash"),
             tool: "Bash".to_string(),
             input: serde_json::json!({"command": "echo hi"}),
         });
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("bash"),
+            id: lingxi_core::types::ToolUseId::from("bash"),
             tool: "Bash".to_string(),
             result: serde_json::json!("hi"),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
 
         assert_eq!(widget.transcript.committed_cells().len(), 3);
         let first = cells(&widget)[1]
@@ -9719,12 +9750,14 @@ mod tests {
         submit_command(&mut widget, "go");
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "Write".to_string(),
             input: serde_json::json!({ "content": "big payload" }),
         });
         assert_eq!(widget.tool_inputs.len(), 1);
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         assert!(
             widget.tool_inputs.is_empty(),
             "un-paired tool input cleared on TurnEnded"
@@ -9767,7 +9800,7 @@ mod tests {
         // text above the tool call, then renders the tool-use cell; the paired
         // ToolUseResult renders the result cell and clears the activity.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "Bash".to_string(),
             input: serde_json::json!({}),
         });
@@ -9780,14 +9813,16 @@ mod tests {
             "Bash"
         );
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "Bash".to_string(),
             result: serde_json::json!({}),
         });
         assert!(widget.activity.is_none());
 
         // TurnEnded finalizes the reply and clears every per-turn field.
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         assert!(!widget.turn_running());
         assert!(widget.turn_started_at.is_none());
         assert!(widget.transcript.active_cell().is_none(), "cell flushed");
@@ -9816,7 +9851,9 @@ mod tests {
         assert_eq!(widget.transcript().committed_to_terminal(), 1);
 
         // TurnEnded finalizes: the reply commits as a whole, the tail empties.
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         widget.flush_scrollback(&mut terminal).unwrap();
         assert_eq!(widget.transcript().committed_to_terminal(), 2);
         assert!(widget.transcript().visible_live_tail(80, &theme).is_empty());
@@ -10010,7 +10047,7 @@ mod tests {
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "Read".to_string(),
             input: serde_json::json!({}),
         });
@@ -10023,13 +10060,15 @@ mod tests {
         assert!(widget.turn_started_at.is_some());
 
         widget.apply_turn_event(TurnEvent::ToolHeartbeat {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "Read".to_string(),
             elapsed_ms: 17_000,
         });
         assert_eq!(widget.active_tool_elapsed_ms, Some(17_000));
 
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::Cancelled));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::Cancelled,
+        ));
         assert!(!widget.turn_running());
         assert!(widget.activity.is_none());
         assert!(widget.turn_started_at.is_none());
@@ -10237,7 +10276,7 @@ mod tests {
         let mut widget = widget();
 
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("unowned"),
+            id: lingxi_core::types::ToolUseId::from("unowned"),
             tool: "WebSearch".to_string(),
             input: serde_json::json!({"query": "unowned"}),
         });
@@ -10257,16 +10296,18 @@ mod tests {
         assert!(cells(&widget).is_empty());
 
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         let before = cells(&widget).len();
 
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("late"),
+            id: lingxi_core::types::ToolUseId::from("late"),
             tool: "WebSearch".to_string(),
             input: serde_json::json!({"query": "late"}),
         });
         widget.apply_turn_event(TurnEvent::ToolHeartbeat {
-            id: protocol::ToolUseId::from("late"),
+            id: lingxi_core::types::ToolUseId::from("late"),
             tool: "WebSearch".to_string(),
             elapsed_ms: 99_000,
         });
@@ -10297,7 +10338,9 @@ mod tests {
     fn permission_ask_opens_after_turn_events_end_without_a_cancel() {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         assert!(!widget.accepts_turn_events, "precondition: turn ended");
         assert!(widget.current_turn.is_none(), "precondition: turn cleared");
 
@@ -10320,7 +10363,9 @@ mod tests {
     fn ask_user_question_and_computer_access_also_open_after_turn_events_end() {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
 
         let (ask, _ask_rx) = ask_exchange();
         widget.open_ask_user_question(ask);
@@ -10716,7 +10761,7 @@ mod tests {
                         request_model: "claude-opus-4-8".into(),
                         profile: Some("anthropic".into()),
                         provider_label: "Anthropic".into(),
-                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                        provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                         is_current: true,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -10728,7 +10773,7 @@ mod tests {
                         request_model: "openrouter/auto".into(),
                         profile: Some("openrouter".into()),
                         provider_label: "OpenRouter".into(),
-                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                        provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -10740,7 +10785,7 @@ mod tests {
                         request_model: "openai/gpt-4o".into(),
                         profile: Some("openrouter".into()),
                         provider_label: "OpenRouter".into(),
-                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                        provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -10799,9 +10844,9 @@ mod tests {
         // model. Switch Opus→Sonnet, then the reopened picker marks Sonnet.
         let mut widget = widget_with_models(); // Opus (current) + Sonnet, anthropic connected
         widget.session.model_provenance =
-            platform_api::ModelProvenance::ManagedAdministratorDefault;
+            lingxi_core::host::ModelProvenance::ManagedAdministratorDefault;
         widget.session.models[0].provenance =
-            platform_api::ModelProvenance::ManagedAdministratorDefault;
+            lingxi_core::host::ModelProvenance::ManagedAdministratorDefault;
         assert_eq!(
             widget
                 .session
@@ -10861,7 +10906,7 @@ mod tests {
         );
         assert_eq!(
             widget.session.model_provenance,
-            platform_api::ModelProvenance::UserOrEnv,
+            lingxi_core::host::ModelProvenance::UserOrEnv,
             "a picker switch changes the live model ownership"
         );
         assert!(
@@ -10889,7 +10934,7 @@ mod tests {
                         request_model: "gpt-5.5".into(),
                         profile: Some("openai".into()),
                         provider_label: "OpenAI".into(),
-                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                        provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -10901,7 +10946,7 @@ mod tests {
                         request_model: "gpt-5.5".into(),
                         profile: Some("github-copilot".into()),
                         provider_label: "GitHub Copilot".into(),
-                        provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+                        provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
                         is_current: false,
                         supports_reasoning: true,
                         supports_multimodal: false,
@@ -11591,7 +11636,7 @@ mod tests {
         );
         // ToolUseStart swaps the verb for the activity label.
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "Edit".to_string(),
             input: serde_json::json!({}),
         });
@@ -11602,7 +11647,7 @@ mod tests {
     fn tool_heartbeat_updates_live_elapsed_without_transcript_growth() {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        let id = protocol::ToolUseId::from("heartbeat-tool");
+        let id = lingxi_core::types::ToolUseId::from("heartbeat-tool");
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: id.clone(),
             tool: "Bash".to_string(),
@@ -11643,7 +11688,7 @@ mod tests {
         submit_command(&mut widget, "go");
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("t1"),
+            id: lingxi_core::types::ToolUseId::from("t1"),
             tool: "TodoWrite".to_string(),
             input: serde_json::json!({
                 "todos": [
@@ -11668,7 +11713,7 @@ mod tests {
         // A later, unrelated tool call does not override the active todo's
         // verb (claude-code's `currentTodo` outranks generic tool activity).
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("t2"),
+            id: lingxi_core::types::ToolUseId::from("t2"),
             tool: "Bash".to_string(),
             input: serde_json::json!({}),
         });
@@ -11676,16 +11721,18 @@ mod tests {
         // The active task is session plan state, so it remains visible across
         // turn boundaries until a later authoritative TodoWrite completes it.
         widget.apply_turn_event(TurnEvent::ToolUseResult {
-            id: protocol::ToolUseId::from("t2"),
+            id: lingxi_core::types::ToolUseId::from("t2"),
             tool: "Bash".to_string(),
             result: serde_json::json!({}),
         });
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         widget.apply_turn_event(TurnEvent::TurnStarted);
         assert!(widget.spinner_text().contains("Compiling the project…"));
 
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("t3"),
+            id: lingxi_core::types::ToolUseId::from("t3"),
             tool: "TodoWrite".to_string(),
             input: serde_json::json!({
                 "todos": [
@@ -11741,7 +11788,7 @@ mod tests {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::ToolUseStart {
-            id: protocol::ToolUseId::from("todo-plan"),
+            id: lingxi_core::types::ToolUseId::from("todo-plan"),
             tool: "TodoWrite".into(),
             input: serde_json::json!({
                 "todos": [
@@ -11757,7 +11804,9 @@ mod tests {
         assert_eq!(tasks[1].state, PlanTaskState::InProgress);
         assert_eq!(tasks[2].state, PlanTaskState::Pending);
 
-        widget.apply_turn_event(TurnEvent::TurnEnded(platform_api::TurnOutcome::EndTurn));
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
         assert_eq!(
             widget.bottom_pane().planned_tasks().len(),
             3,
@@ -11771,7 +11820,7 @@ mod tests {
 
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        let create = protocol::ToolUseId::from("task-create");
+        let create = lingxi_core::types::ToolUseId::from("task-create");
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: create.clone(),
             tool: "TaskCreate".into(),
@@ -11794,7 +11843,7 @@ mod tests {
             PlanTaskState::Pending
         );
 
-        let update = protocol::ToolUseId::from("task-update");
+        let update = lingxi_core::types::ToolUseId::from("task-update");
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: update.clone(),
             tool: "TaskUpdate".into(),
@@ -11822,7 +11871,7 @@ mod tests {
     fn agent_status_combines_foreground_and_background_lifecycles() {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
-        let foreground = protocol::ToolUseId::from("agent-tool");
+        let foreground = lingxi_core::types::ToolUseId::from("agent-tool");
         widget.apply_turn_event(TurnEvent::ToolUseStart {
             id: foreground.clone(),
             tool: "Agent".into(),
@@ -12104,9 +12153,9 @@ mod tests {
         let width = 80;
         let idle_height = widget.desired_height(width);
         widget.apply_turn_event(TurnEvent::ContextPressure {
-            banner: Some(platform_api::ContextPressureBanner {
+            banner: Some(lingxi_core::host::ContextPressureBanner {
                 text: "Context low (12% remaining)".to_string(),
-                level: platform_api::ContextPressureLevel::Warning,
+                level: lingxi_core::host::ContextPressureLevel::Warning,
             }),
             used_fraction: 0.88,
             used_tokens: 0,
@@ -12114,7 +12163,7 @@ mod tests {
         });
         assert_eq!(
             widget.bottom_pane().context_pressure().map(|b| b.level),
-            Some(platform_api::ContextPressureLevel::Warning)
+            Some(lingxi_core::host::ContextPressureLevel::Warning)
         );
         // The banner adds exactly one pane row. Idle has no leading status
         // row now, so the banner renders FIRST, above the composer.
@@ -12351,10 +12400,10 @@ mod tests {
         widget.apply_turn_event(TurnEvent::TurnStarted);
         // A live composition-root slot, filled AFTER wiring (the background
         // fetch landing) — the composer reads it at compose time.
-        let slot: platform_api::subscription::SharedSubscription =
+        let slot: lingxi_core::host::subscription::SharedSubscription =
             std::sync::Arc::new(std::sync::RwLock::new(None));
         widget.set_subscription(std::sync::Arc::clone(&slot));
-        *slot.write().unwrap() = Some(platform_api::subscription::SubscriptionSnapshot {
+        *slot.write().unwrap() = Some(lingxi_core::host::subscription::SubscriptionSnapshot {
             is_subscriber: true,
             subscription_type: Some("pro".to_string()),
             billing_type: Some("stripe_subscription".to_string()),

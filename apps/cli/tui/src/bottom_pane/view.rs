@@ -164,7 +164,7 @@ pub enum ViewOutcome {
         /// The target user-message uuid — the split point.
         message: uuid::Uuid,
         /// Which side is summarized.
-        direction: platform_api::SummarizeDirection,
+        direction: lingxi_core::host::SummarizeDirection,
         /// The free text typed into the picker row, trimmed. `None` when it was
         /// submitted empty — claude-code's `allowEmptySubmitToCancel` means an
         /// empty submit SELECTS the option (`si = text.trim() || undefined`),
@@ -204,10 +204,10 @@ pub enum RewindScope {
 impl RewindScope {
     /// The summarize direction this scope carries, or `None` for a restore.
     #[must_use]
-    pub fn summarize_direction(self) -> Option<platform_api::SummarizeDirection> {
+    pub fn summarize_direction(self) -> Option<lingxi_core::host::SummarizeDirection> {
         match self {
-            Self::SummarizeFrom => Some(platform_api::SummarizeDirection::From),
-            Self::SummarizeUpTo => Some(platform_api::SummarizeDirection::UpTo),
+            Self::SummarizeFrom => Some(lingxi_core::host::SummarizeDirection::From),
+            Self::SummarizeUpTo => Some(lingxi_core::host::SummarizeDirection::UpTo),
             Self::CodeAndConversation | Self::CodeOnly | Self::ConversationOnly => None,
         }
     }
@@ -270,7 +270,7 @@ pub enum PermissionAction {
 
 /// An app-level `/tasks` effect a view can request via
 /// [`ViewOutcome::RunTaskAction`]. The owner aborts the task OFF-LOOP via
-/// [`platform_api::task_registry::TaskRegistryHandle::kill`] on the live runtime and
+/// [`lingxi_core::host::task_registry::TaskRegistryHandle::kill`] on the live runtime and
 /// reports the result back through `TurnEvent::SystemNotice`. The 9-char task
 /// id is not secret, so the derived `Debug` is fine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,7 +314,7 @@ pub enum FusionSetupAction {
     /// Write the three model roles, and `fusion.enabled` alongside them.
     Save {
         /// Panels (in order), analyst and synthesizer.
-        roles: platform_api::fusion_setup::FusionModelRoles,
+        roles: lingxi_core::host::fusion_setup::FusionModelRoles,
         /// Whether to also enable the Fusion agent and workflow `fusion()`.
         enable: bool,
     },

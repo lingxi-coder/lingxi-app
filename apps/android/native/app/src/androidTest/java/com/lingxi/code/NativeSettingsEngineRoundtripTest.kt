@@ -2,7 +2,9 @@ package com.lingxi.code
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.lingxi.code.bindings.*
+import com.lingxi.code.bindings.client.*
+import com.lingxi.code.bindings.runtime.*
+import com.lingxi.code.bindings.android.*
 import com.lingxi.code.clipboard.AndroidClipboardAdapter
 import com.lingxi.code.location.AndroidLocationAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter

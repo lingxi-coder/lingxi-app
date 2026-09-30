@@ -7,11 +7,11 @@ use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreCont
 use client::adapter::ClientEventSink;
 use client::protocol::commands::ClientCommand;
 use client::protocol::events::ClientEvent;
-use platform_api::task_registry::{
+use lingxi_core::host::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
-use platform_api::{
+use lingxi_core::host::{
     AuthError, AuthHandle, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo,
     LoginInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
 };
@@ -30,14 +30,14 @@ impl ClientEventSink for Sink {
 }
 
 struct SwitchHandle {
-    current: Mutex<protocol::SessionId>,
-    next: Mutex<protocol::SessionId>,
+    current: Mutex<lingxi_core::types::SessionId>,
+    next: Mutex<lingxi_core::types::SessionId>,
     fail: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
 impl OrchestratorHandle for SwitchHandle {
-    async fn current_session_id(&self) -> protocol::SessionId {
+    async fn current_session_id(&self) -> lingxi_core::types::SessionId {
         *self.current.lock().await
     }
 
@@ -85,7 +85,7 @@ impl OrchestratorHandle for SwitchHandle {
         Vec::new()
     }
 
-    async fn list_agents(&self) -> Vec<platform_api::AgentInfo> {
+    async fn list_agents(&self) -> Vec<lingxi_core::host::AgentInfo> {
         Vec::new()
     }
 
@@ -111,11 +111,11 @@ impl OrchestratorHandle for SwitchHandle {
 
     async fn resume_session(
         &self,
-        session_id: protocol::SessionId,
-        _history: Vec<protocol::ConversationMessage>,
+        session_id: lingxi_core::types::SessionId,
+        _history: Vec<lingxi_core::types::ConversationMessage>,
         _last_jsonl_uuid: Option<String>,
-        _active_goal: Option<platform_api::ActiveGoalSnapshot>,
-        _runtime: platform_api::ResumeRuntimeSnapshot,
+        _active_goal: Option<lingxi_core::host::ActiveGoalSnapshot>,
+        _runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(HandleError::ActionFailed(
@@ -188,22 +188,27 @@ impl TaskRegistryHandle for Tasks {
 #[tokio::test]
 async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_intact() {
     let root = tempfile::tempdir().unwrap();
-    let sessions = platform_api::live_sessions::LiveSessionDir::at(root.path().join("sessions"));
+    let sessions =
+        lingxi_core::host::live_sessions::LiveSessionDir::at(root.path().join("sessions"));
     let session_a =
-        protocol::SessionId::parse_prefixed("11111111-2222-4333-8444-555555555555").unwrap();
+        lingxi_core::types::SessionId::parse_prefixed("11111111-2222-4333-8444-555555555555")
+            .unwrap();
     let session_b =
-        protocol::SessionId::parse_prefixed("22222222-3333-4444-8555-666666666666").unwrap();
+        lingxi_core::types::SessionId::parse_prefixed("22222222-3333-4444-8555-666666666666")
+            .unwrap();
     let session_c =
-        protocol::SessionId::parse_prefixed("33333333-4444-4555-8666-777777777777").unwrap();
+        lingxi_core::types::SessionId::parse_prefixed("33333333-4444-4555-8666-777777777777")
+            .unwrap();
     let session_a_text = session_a.as_uuid().to_string();
     let session_b_text = session_b.as_uuid().to_string();
     let session_c_text = session_c.as_uuid().to_string();
-    platform_api::live_sessions::set_process_dir(sessions.clone());
-    platform_api::live_sessions::set_process_session_id(&session_a_text);
-    platform_api::live_sessions::set_process_name("bridge-test");
+    lingxi_core::host::live_sessions::set_process_dir(sessions.clone());
+    lingxi_core::host::live_sessions::set_process_session_id(&session_a_text);
+    lingxi_core::host::live_sessions::set_process_name("bridge-test");
     let socket = root.path().join("bridge.sock");
     let socket_text = socket.to_string_lossy().into_owned();
-    platform_api::uds_inbox::start_process_inbox_for_session(&socket, &session_a_text).unwrap();
+    lingxi_core::host::uds_inbox::start_process_inbox_for_session(&socket, &session_a_text)
+        .unwrap();
     sessions
         .upsert_identity(
             std::process::id(),
@@ -214,10 +219,14 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
             None,
         )
         .unwrap();
-    let mut old_generation =
-        platform_api::live_sessions::outbound_peer_message("sender", "source", "owned by A", None);
+    let mut old_generation = lingxi_core::host::live_sessions::outbound_peer_message(
+        "sender",
+        "source",
+        "owned by A",
+        None,
+    );
     old_generation.msg_id = Some("old-generation".into());
-    platform_api::uds_inbox::enqueue_accepted(old_generation);
+    lingxi_core::host::uds_inbox::enqueue_accepted(old_generation);
 
     let handle = Arc::new(SwitchHandle {
         current: Mutex::new(session_a),
@@ -238,7 +247,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         .iter()
         .any(|event| matches!(event, ClientEvent::SessionEnded)));
     assert_eq!(
-        platform_api::live_sessions::process_session_id().as_deref(),
+        lingxi_core::host::live_sessions::process_session_id().as_deref(),
         Some(session_b_text.as_str())
     );
     let live = sessions.find_by_pid(std::process::id()).expect("live B");
@@ -263,7 +272,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
     ));
     assert_eq!(*handle.current.lock().await, session_b);
     assert_eq!(
-        platform_api::live_sessions::process_session_id().as_deref(),
+        lingxi_core::host::live_sessions::process_session_id().as_deref(),
         Some(session_b_text.as_str())
     );
     assert_eq!(
@@ -321,7 +330,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         .any(|event| matches!(event, ClientEvent::SessionResumed { .. })));
     assert_eq!(*handle.current.lock().await, session_c);
     assert_eq!(
-        platform_api::live_sessions::process_session_id().as_deref(),
+        lingxi_core::host::live_sessions::process_session_id().as_deref(),
         Some(session_c_text.as_str())
     );
     assert_eq!(
@@ -334,7 +343,7 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         .expect_err("a stale A-to-B callback must not replace live C");
     assert!(stale.contains("stale session activation"), "{stale}");
     assert_eq!(
-        platform_api::live_sessions::process_session_id().as_deref(),
+        lingxi_core::host::live_sessions::process_session_id().as_deref(),
         Some(session_c_text.as_str())
     );
     assert_eq!(
@@ -342,5 +351,5 @@ async fn clear_updates_real_process_presence_and_failure_leaves_new_identity_int
         session_c_text
     );
 
-    platform_api::uds_inbox::stop_process_inbox_checked().unwrap();
+    lingxi_core::host::uds_inbox::stop_process_inbox_checked().unwrap();
 }

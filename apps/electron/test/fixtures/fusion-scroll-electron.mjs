@@ -53,7 +53,7 @@ async function main() {
     await search('does-not-exist');
     result.empty = await run(`!document.querySelector('[role=listbox]').textContent.includes('Model 00')`);
     await search('');
-    await key('ArrowDown');
+    await key('Down');
     await key('End');
     await key('Enter');
     await wait('!document.querySelector("[role=listbox]")');
@@ -63,11 +63,20 @@ async function main() {
     await key('Escape');
     result.escapeClosed = await run('!document.querySelector("[role=listbox]") && Boolean(document.querySelector("[data-nav-page=fusion]"))');
     result.focusReturned = await run(`document.activeElement === ${trigger}`);
-    await run(`(() => { const button = document.querySelector('button[aria-label="选择 synthesizer…"]'); button.scrollIntoView({block:'end'}); })()`);
+    const analyst = `document.querySelector('button[aria-label="选择 analyst…"]')`;
+    await run(`${analyst}.scrollIntoView({block:'center', behavior:'instant'})`);
+    const analystBottom = await run(`${analyst}.getBoundingClientRect().bottom`);
+    window.setContentSize(1100, Math.ceil(analystBottom + 40));
+    await run(`${analyst}.scrollIntoView({block:'end', behavior:'instant'})`);
     await delay(100);
-    await run(`document.querySelector('button[aria-label="选择 synthesizer…"]').click()`);
+    await run(`document.querySelector('button[aria-label="选择 analyst…"]').click()`);
     await wait('Boolean(document.querySelector("[role=listbox]"))');
-    result.opensUpward = await run(`document.querySelector('[role=listbox]').closest('[role=dialog]').getBoundingClientRect().bottom <= document.querySelector('button[aria-label="选择 synthesizer…"]').getBoundingClientRect().top`);
+    result.upwardPlacement = await run(`(() => {
+      const trigger = ${analyst}.getBoundingClientRect();
+      const menu = document.querySelector('[role=listbox]').closest('[role=dialog]').getBoundingClientRect();
+      return { spaceBelow: innerHeight - trigger.bottom, triggerTop: trigger.top,
+        menuTop: menu.top, menuBottom: menu.bottom, menuHeight: menu.height };
+    })()`);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally { window.destroy(); app.quit(); }
 }

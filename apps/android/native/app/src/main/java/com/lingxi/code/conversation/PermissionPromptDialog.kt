@@ -40,8 +40,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
-import com.lingxi.code.bindings.AutoModePromptDto
-import com.lingxi.code.bindings.PermissionResponseDto
+import com.lingxi.code.bindings.client.AutoModePromptDto
+import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.components.UiTags
 
 /**

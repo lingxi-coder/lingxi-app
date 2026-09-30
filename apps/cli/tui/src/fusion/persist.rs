@@ -4,7 +4,7 @@
 //! Mirrors [`crate::web::persist`] — the async orchestration (and the result
 //! notice) lives in the CLI composition root, which calls these.
 
-use platform_api::fusion_setup::FusionModelRoles;
+use lingxi_core::host::fusion_setup::FusionModelRoles;
 
 /// `~/.lingxi/settings.json` — the same file `/web`, `/config` and the startup
 /// settings load read and write.
@@ -35,7 +35,7 @@ pub fn save_fusion_settings_to(
         .unwrap_or_else(|| serde_json::json!({}));
     roles.write_settings_json(&mut value);
     if let Some(enable) = enable {
-        platform_api::fusion_setup::write_enabled_settings_json(&mut value, enable);
+        lingxi_core::host::fusion_setup::write_enabled_settings_json(&mut value, enable);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -55,14 +55,14 @@ pub fn load_fusion_settings_from(path: &std::path::Path) -> (FusionModelRoles, b
         .unwrap_or_else(|| serde_json::json!({}));
     (
         FusionModelRoles::from_settings_json(&value),
-        platform_api::fusion_setup::enabled_from_settings_json(&value),
+        lingxi_core::host::fusion_setup::enabled_from_settings_json(&value),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use platform_api::FusionModelChoice;
+    use lingxi_core::host::FusionModelChoice;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -84,7 +84,6 @@ mod tests {
                 FusionModelChoice::new("openai", "gpt-5.6-sol"),
             ],
             analyst: Some(FusionModelChoice::new("openai", "gpt-5.6-terra")),
-            synthesizer: Some(FusionModelChoice::new("anthropic", "claude-sonnet-5")),
         }
     }
 

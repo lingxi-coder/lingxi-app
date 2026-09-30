@@ -1,10 +1,10 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.R
-import com.lingxi.code.bindings.AutoModePromptDto
-import com.lingxi.code.bindings.PermissionKindDto
-import com.lingxi.code.bindings.PermissionRequest
-import com.lingxi.code.bindings.WorkerInfoDto
+import com.lingxi.code.bindings.client.AutoModePromptDto
+import com.lingxi.code.bindings.client.PermissionKindDto
+import com.lingxi.code.bindings.client.PermissionRequest
+import com.lingxi.code.bindings.client.WorkerInfoDto
 
 /**
  * SHIP-BLOCKER #3 — the Android permission-prompt surface.

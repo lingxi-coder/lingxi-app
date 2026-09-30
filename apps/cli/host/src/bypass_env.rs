@@ -12,9 +12,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use lingxi_core::host::HttpTransport;
+use lingxi_core::types::transport::{HttpMethod, HttpRequest};
 use permission::bypass_guard::BypassEnv;
-use platform_api::HttpTransport;
-use protocol::transport::{HttpMethod, HttpRequest};
 
 /// Production environment probe for the bypass safety guard.
 pub struct RealBypassEnv {

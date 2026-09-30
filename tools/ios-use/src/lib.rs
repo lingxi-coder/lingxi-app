@@ -7,10 +7,10 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
+use lingxi_core::host::computer_control::ComputerError;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use platform_api::computer_control::ComputerError;
 use serde_json::{json, Value};
 
 use tool_api::context::ToolUseContext;

@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn tool_use_renders_a_parameterized_header() {
         let m = RenderedMessage::AssistantToolUse {
-            id: protocol::ToolUseId::new(),
+            id: lingxi_core::types::ToolUseId::new(),
             tool: "Read".to_string(),
             input: serde_json::json!({"file_path": "src/lib.rs"}),
         };
@@ -348,7 +348,7 @@ mod tests {
 
         // Tool use: verbose pretty-prints the JSON over multiple lines.
         let tool = RenderedMessage::AssistantToolUse {
-            id: protocol::ToolUseId::new(),
+            id: lingxi_core::types::ToolUseId::new(),
             tool: "Read".to_string(),
             input: serde_json::json!({"file_path": "src/lib.rs", "limit": 10}),
         };
@@ -357,7 +357,7 @@ mod tests {
         // Grouped tool use: collapsed is header-only; verbose lists children.
         let group = RenderedMessage::GroupedToolUse {
             tool: "Read".to_string(),
-            group_id: protocol::ToolUseId::new(),
+            group_id: lingxi_core::types::ToolUseId::new(),
             entries: vec![
                 (serde_json::json!({"f": "a"}), serde_json::json!("ok")),
                 (serde_json::json!({"f": "b"}), serde_json::json!("ok")),
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn tool_result_prefers_string_content() {
         let m = RenderedMessage::UserToolResult {
-            id: protocol::ToolUseId::new(),
+            id: lingxi_core::types::ToolUseId::new(),
             tool: "Read".to_string(),
             result: serde_json::json!({"content": "hello world"}),
             old_string: None,
@@ -587,7 +587,7 @@ mod tests {
             (
                 "AssistantToolUse",
                 RenderedMessage::AssistantToolUse {
-                    id: protocol::ToolUseId::new(),
+                    id: lingxi_core::types::ToolUseId::new(),
                     tool: "Read".to_string(),
                     input: serde_json::json!({"file_path": "src/lib.rs"}),
                 },
@@ -598,7 +598,7 @@ mod tests {
             (
                 "UserToolResult",
                 RenderedMessage::UserToolResult {
-                    id: protocol::ToolUseId::new(),
+                    id: lingxi_core::types::ToolUseId::new(),
                     tool: "Read".to_string(),
                     result: serde_json::json!({"content": "hello world"}),
                     old_string: None,
@@ -637,7 +637,7 @@ mod tests {
                 "GroupedToolUse",
                 RenderedMessage::GroupedToolUse {
                     tool: "Read".to_string(),
-                    group_id: protocol::ToolUseId::new(),
+                    group_id: lingxi_core::types::ToolUseId::new(),
                     entries: vec![
                         (serde_json::json!({"f": "a"}), serde_json::json!("ok")),
                         (serde_json::json!({"f": "b"}), serde_json::json!("ok")),
@@ -657,7 +657,7 @@ mod tests {
                     mcp_server_names: Vec::new(),
                     bash_count: 0,
                     is_active: false,
-                    group_id: protocol::ToolUseId::new(),
+                    group_id: lingxi_core::types::ToolUseId::new(),
                     latest_hint: None,
                     entries: vec!["Read a.rs".to_string(), "Grep foo".to_string()],
                     mem_read: 0,

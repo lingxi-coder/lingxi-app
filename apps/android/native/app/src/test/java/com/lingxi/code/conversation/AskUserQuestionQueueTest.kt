@@ -2,13 +2,13 @@ package com.lingxi.code.conversation
 
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.SheetValue
-import com.lingxi.code.bindings.AskOptionDto
-import com.lingxi.code.bindings.AskQuestionDto
-import com.lingxi.code.bindings.AskUserQuestionRequestDto
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.TaskRowDto
-import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.bindings.client.AskOptionDto
+import com.lingxi.code.bindings.client.AskQuestionDto
+import com.lingxi.code.bindings.client.AskUserQuestionRequestDto
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.TaskRowDto
+import com.lingxi.code.bindings.client.TaskStatusDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import kotlinx.coroutines.Dispatchers

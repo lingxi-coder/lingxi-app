@@ -1,12 +1,12 @@
 package com.lingxi.code.terminal
 
 import android.content.Context
-import com.lingxi.code.bindings.MobileLinuxEventFfi
-import com.lingxi.code.bindings.MobileLinuxEventKindFfi
-import com.lingxi.code.bindings.MobileLinuxMountSpecFfi
-import com.lingxi.code.bindings.MobileLinuxPtyOpenRequestFfi
-import com.lingxi.code.bindings.MobileLinuxPtySessionHandleFfi
-import com.lingxi.code.bindings.MobileLinuxPtySizeFfi
+import com.lingxi.code.bindings.android.MobileLinuxEventFfi
+import com.lingxi.code.bindings.android.MobileLinuxEventKindFfi
+import com.lingxi.code.bindings.android.MobileLinuxMountSpecFfi
+import com.lingxi.code.bindings.android.MobileLinuxPtyOpenRequestFfi
+import com.lingxi.code.bindings.android.MobileLinuxPtySessionHandleFfi
+import com.lingxi.code.bindings.android.MobileLinuxPtySizeFfi
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
 import kotlinx.coroutines.CancellationException

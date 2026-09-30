@@ -1,12 +1,12 @@
 package com.lingxi.code.settings
 
 import com.lingxi.code.R
-import com.lingxi.code.bindings.MobileLinuxCapabilityFfi
-import com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi
-import com.lingxi.code.bindings.MobileLinuxTaskStateFfi
-import com.lingxi.code.bindings.MobileLinuxRootfsStateFfi
-import com.lingxi.code.bindings.MobileLinuxRuntimeModeFfi
-import com.lingxi.code.bindings.MobileLinuxStatusFfi
+import com.lingxi.code.bindings.android.MobileLinuxCapabilityFfi
+import com.lingxi.code.bindings.android.MobileLinuxTaskSnapshotFfi
+import com.lingxi.code.bindings.android.MobileLinuxTaskStateFfi
+import com.lingxi.code.bindings.android.MobileLinuxRootfsStateFfi
+import com.lingxi.code.bindings.android.MobileLinuxRuntimeModeFfi
+import com.lingxi.code.bindings.android.MobileLinuxStatusFfi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

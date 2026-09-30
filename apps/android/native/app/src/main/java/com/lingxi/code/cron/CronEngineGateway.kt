@@ -2,10 +2,10 @@ package com.lingxi.code.cron
 
 import android.content.Context
 import com.lingxi.code.R
-import com.lingxi.code.bindings.CronTaskDto
-import com.lingxi.code.bindings.MobileCronStoreHandle
-import com.lingxi.code.bindings.MobileEngineHandle
-import com.lingxi.code.bindings.buildAndroidCronStore
+import com.lingxi.code.bindings.runtime.CronTaskDto
+import com.lingxi.code.bindings.runtime.MobileCronStoreHandle
+import com.lingxi.code.bindings.runtime.MobileEngineHandle
+import com.lingxi.code.bindings.android.buildAndroidCronStore
 
 /**
  * Narrow seam around generated UniFFI bindings. Storage/reconciliation never

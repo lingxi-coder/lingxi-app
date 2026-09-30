@@ -169,7 +169,7 @@ class AndroidCronRepository private constructor(
         }
     }
 
-    internal fun recoverNativeTerminal(record: CronRunRecord, task: com.lingxi.code.bindings.CronTaskDto): Boolean {
+    internal fun recoverNativeTerminal(record: CronRunRecord, task: com.lingxi.code.bindings.runtime.CronTaskDto): Boolean {
         val automation = CronAutomation.from(task)
         val terminal = automation.terminalFor(record) ?: return false
         historyStore.attachExecution(record.runId, terminal.sessionId, terminal.model)
@@ -210,7 +210,7 @@ class AndroidCronRepository private constructor(
         prompt: String,
         recurring: Boolean,
         automation: CronAutomation = defaultAutomation(),
-    ): com.lingxi.code.bindings.CronTaskDto = mutateAndReconcile(
+    ): com.lingxi.code.bindings.runtime.CronTaskDto = mutateAndReconcile(
         reason = "create",
         scopeId = scopeId,
     ) { scope ->
@@ -224,7 +224,7 @@ class AndroidCronRepository private constructor(
         prompt: String,
         recurring: Boolean,
         automation: CronAutomation,
-    ): com.lingxi.code.bindings.CronTaskDto = mutateAndReconcile(
+    ): com.lingxi.code.bindings.runtime.CronTaskDto = mutateAndReconcile(
         reason = "update",
         scopeId = scopeId,
     ) { scope ->

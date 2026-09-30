@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use client::protocol::events::ClientEvent;
 use client::protocol::permission::PermissionRequest as PermissionRequestDto;
 use harness_runtime::mobile::{ClientEventListener, MobileConfig, PermissionRequestSink};
-use platform_api::{
+use lingxi_core::host::{
     CameraControl, Clock, FileSystem, HttpTransport, LocationProvider, Platform, ProcessRunner,
     Sandbox, SharingService, WorktreeManager,
 };
@@ -57,7 +57,7 @@ async fn android_location_bridge_maps_fix_and_stable_errors() {
     .expect_err("permission failure");
     assert!(matches!(
         permission,
-        platform_api::LocationError::PermissionDenied
+        lingxi_core::host::LocationError::PermissionDenied
     ));
 
     let unavailable = super::AndroidLocationBridge {
@@ -70,7 +70,7 @@ async fn android_location_bridge_maps_fix_and_stable_errors() {
     .expect_err("unavailable failure");
     assert!(matches!(
         unavailable,
-        platform_api::LocationError::Unavailable
+        lingxi_core::host::LocationError::Unavailable
     ));
 
     let timeout = super::AndroidLocationBridge {
@@ -81,7 +81,7 @@ async fn android_location_bridge_maps_fix_and_stable_errors() {
     .current_location()
     .await
     .expect_err("timeout failure");
-    assert!(matches!(timeout, platform_api::LocationError::Timeout));
+    assert!(matches!(timeout, lingxi_core::host::LocationError::Timeout));
 
     let other = super::AndroidLocationBridge {
         inner: Box::new(FakeAndroidLocation {
@@ -93,13 +93,13 @@ async fn android_location_bridge_maps_fix_and_stable_errors() {
     .expect_err("other failure");
     assert!(matches!(
         other,
-        platform_api::LocationError::Other(message) if message == "native failure"
+        lingxi_core::host::LocationError::Other(message) if message == "native failure"
     ));
 }
 
 #[test]
 fn android_host_environment_maps_to_shared_stable_facts() {
-    let environment: platform_api::mobile_runtime_environment::MobileHostEnvironment =
+    let environment: lingxi_core::host::mobile_runtime_environment::MobileHostEnvironment =
         super::AndroidHostEnvironmentFfi {
             host_os_version: Some("16 (API 36)".to_string()),
             device_class: super::AndroidDeviceClassFfi::Tablet,
@@ -110,20 +110,20 @@ fn android_host_environment_maps_to_shared_stable_facts() {
 
     assert_eq!(
         environment.host_os,
-        platform_api::mobile_runtime_environment::MobileHostOs::Android
+        lingxi_core::host::mobile_runtime_environment::MobileHostOs::Android
     );
     assert_eq!(environment.host_os_version.as_deref(), Some("16 (API 36)"));
     assert_eq!(
         environment.device_class,
-        platform_api::mobile_runtime_environment::MobileDeviceClass::Tablet
+        lingxi_core::host::mobile_runtime_environment::MobileDeviceClass::Tablet
     );
     assert_eq!(
         environment.execution_target,
-        platform_api::mobile_runtime_environment::MobileExecutionTarget::Emulator
+        lingxi_core::host::mobile_runtime_environment::MobileExecutionTarget::Emulator
     );
     assert_eq!(
         environment.launch_mode,
-        platform_api::mobile_runtime_environment::MobileLaunchMode::ScheduledHeadless
+        lingxi_core::host::mobile_runtime_environment::MobileLaunchMode::ScheduledHeadless
     );
 }
 
@@ -193,6 +193,14 @@ struct FakeListener {
 impl ClientEventListener for FakeListener {
     async fn on_event(&self, event: ClientEvent) {
         self.received.lock().await.push(event);
+    }
+    async fn on_workflow_progress(
+        &self,
+        _origin_session_id: String,
+        _task_id: String,
+        _run_id: String,
+        _progress: client::protocol::listings::WorkflowProgressDto,
+    ) {
     }
 }
 

@@ -1,9 +1,9 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.McpServerDto
-import com.lingxi.code.bindings.McpStatusDto
-import com.lingxi.code.bindings.MessageDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.McpServerDto
+import com.lingxi.code.bindings.client.McpStatusDto
+import com.lingxi.code.bindings.client.MessageDto
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DefaultSessionCatalogStrings
 import com.lingxi.code.model.EngineModelState

@@ -1,8 +1,8 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.TaskStatusDto
-import com.lingxi.code.bindings.WorkflowProgressDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.TaskStatusDto
+import com.lingxi.code.bindings.client.WorkflowProgressDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue

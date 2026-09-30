@@ -725,14 +725,14 @@ mod tests {
     fn factory_maps_tool_variants_to_concrete_cells() {
         assert!(maps_to::<tool::ToolUseCell>(
             RenderedMessage::AssistantToolUse {
-                id: protocol::ToolUseId::new(),
+                id: lingxi_core::types::ToolUseId::new(),
                 tool: "Read".into(),
                 input: serde_json::json!({}),
             }
         ));
         assert!(maps_to::<tool::ToolResultCell>(
             RenderedMessage::UserToolResult {
-                id: protocol::ToolUseId::new(),
+                id: lingxi_core::types::ToolUseId::new(),
                 tool: "Read".into(),
                 result: serde_json::json!("ok"),
                 old_string: None,
@@ -756,7 +756,7 @@ mod tests {
         assert!(maps_to::<tool::GroupedToolUseCell>(
             RenderedMessage::GroupedToolUse {
                 tool: "Read".into(),
-                group_id: protocol::ToolUseId::new(),
+                group_id: lingxi_core::types::ToolUseId::new(),
                 entries: Vec::new(),
             }
         ));
@@ -770,7 +770,7 @@ mod tests {
                 mcp_server_names: Vec::new(),
                 bash_count: 0,
                 is_active: false,
-                group_id: protocol::ToolUseId::new(),
+                group_id: lingxi_core::types::ToolUseId::new(),
                 latest_hint: None,
                 entries: Vec::new(),
                 mem_read: 0,

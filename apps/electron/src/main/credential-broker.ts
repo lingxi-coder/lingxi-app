@@ -261,7 +261,6 @@ export function resolveFusionCredentialProviderIds(settings: unknown, explicit =
   const choices = [
     ...(Array.isArray(fusion.panelModels) ? fusion.panelModels : []),
     fusion.analystModel,
-    fusion.synthesizerModel,
   ];
   return [...new Set(choices.flatMap((choice) => {
     if (!isRecord(choice) || typeof choice.profile !== 'string' || typeof choice.model !== 'string') return [];

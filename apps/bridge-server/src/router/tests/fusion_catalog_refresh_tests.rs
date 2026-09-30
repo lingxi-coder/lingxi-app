@@ -2,11 +2,11 @@ use super::{CommandRouter, EngineCommandRouter};
 use client::adapter::ClientEventSink;
 use client::protocol::commands::{ClientCommand, ProviderCredentialSecretDto};
 use client::protocol::events::ClientEvent;
-use platform_api::task_registry::{
+use lingxi_core::host::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
-use platform_api::{AuthError, AuthHandle, LoginInfo};
+use lingxi_core::host::{AuthError, AuthHandle, LoginInfo};
 use platform_posix::{PlainTextSecureStorage, PosixClock, PosixHttp};
 use std::sync::Arc;
 
@@ -199,7 +199,7 @@ async fn route_cron(
 
 #[tokio::test]
 async fn cron_host_trust_allows_persisted_crud_and_untrusted_mutations_are_rejected() {
-    use platform_api::OrchestratorHandle;
+    use lingxi_core::host::OrchestratorHandle;
 
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("project");
@@ -210,7 +210,7 @@ async fn cron_host_trust_allows_persisted_crud_and_untrusted_mutations_are_rejec
             cwd: cwd.clone(),
             lingxi_home: home.clone(),
             isolated_credential_storage: true,
-            credential_storage_policy: platform_api::CredentialStoragePolicy::PlainTextFixture,
+            credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::PlainTextFixture,
             host_workspace_trusted: Some(true),
             restricted: true,
             strict_mcp_config: true,
@@ -311,7 +311,7 @@ async fn router_with_credentials(
 ) -> EngineCommandRouter {
     EngineCommandRouter::new(
         Arc::new(orchestrator::test_support::MockOrchestratorHandle::new())
-            as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+            as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry::default()) as Arc<dyn TaskRegistryHandle>,
         None,

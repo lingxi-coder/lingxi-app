@@ -23,7 +23,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.unit.dp
 import androidx.test.platform.app.InstrumentationRegistry
-import com.lingxi.code.bindings.buildAndroidCronStore
+import com.lingxi.code.bindings.android.buildAndroidCronStore
 import kotlinx.coroutines.runBlocking
 import org.junit.Rule
 import org.junit.Test

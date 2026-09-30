@@ -1,5 +1,5 @@
 //! `CliBgSessionForker` — the CLI composition root's concrete
-//! [`platform_api::bg_session_forker::BgSessionForker`] (2.1.212 `/fork` `vAd`).
+//! [`lingxi_core::host::bg_session_forker::BgSessionForker`] (2.1.212 `/fork` `vAd`).
 //!
 //! Copies the live conversation into a NEW background session and keeps the
 //! interactive session running:
@@ -20,8 +20,8 @@
 //! depends on `apps/cli`.
 
 use async_trait::async_trait;
-use platform_api::bg_session_forker::{BgForkError, BgSessionForker};
-use platform_api::FileSystem;
+use lingxi_core::host::bg_session_forker::{BgForkError, BgSessionForker};
+use lingxi_core::host::FileSystem;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -29,7 +29,7 @@ use std::sync::{Arc, RwLock};
 /// dirs. Constructed in `init::resolve_desktop_config` and set on
 /// `DesktopConfig.bg_session_forker`.
 pub struct CliBgSessionForker {
-    task_registry: RwLock<Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>>,
+    task_registry: RwLock<Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>>,
     /// `<config-home>` (`~/.lingxi`) — anchors `projects/<cwd>/<uuid>.jsonl` and
     /// the `jobs/<short>/state.json` writes.
     config_home: PathBuf,
@@ -72,11 +72,11 @@ impl CliBgSessionForker {
 
     async fn fork_with_handoff(
         &self,
-        history: &[protocol::ConversationMessage],
+        history: &[lingxi_core::types::ConversationMessage],
         system_prompt: Option<Arc<str>>,
         prompt: &str,
         model: &str,
-        handoff: Option<&platform_api::BackgroundingSnapshot>,
+        handoff: Option<&lingxi_core::host::BackgroundingSnapshot>,
     ) -> Result<String, BgForkError> {
         // Resolve the LIVE cwd at fork time (a Bash `cd` may have moved it since
         // boot) so the snapshot path and the recorded job cwd agree.
@@ -179,7 +179,7 @@ impl CliBgSessionForker {
 impl BgSessionForker for CliBgSessionForker {
     fn set_task_registry(
         &self,
-        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     ) {
         *self
             .task_registry
@@ -189,7 +189,7 @@ impl BgSessionForker for CliBgSessionForker {
 
     async fn fork_to_background(
         &self,
-        history: &[protocol::ConversationMessage],
+        history: &[lingxi_core::types::ConversationMessage],
         system_prompt: Option<Arc<str>>,
         prompt: &str,
         model: &str,
@@ -200,11 +200,11 @@ impl BgSessionForker for CliBgSessionForker {
 
     async fn background_conversation(
         &self,
-        history: &[protocol::ConversationMessage],
+        history: &[lingxi_core::types::ConversationMessage],
         system_prompt: Option<Arc<str>>,
         prompt: &str,
         model: &str,
-        snapshot: &platform_api::BackgroundingSnapshot,
+        snapshot: &lingxi_core::host::BackgroundingSnapshot,
     ) -> Result<String, BgForkError> {
         self.fork_with_handoff(history, system_prompt, prompt, model, Some(snapshot))
             .await

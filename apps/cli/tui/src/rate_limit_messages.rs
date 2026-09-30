@@ -46,9 +46,9 @@
 //! `None` for non-subscribers (TSX :26 `if (!shouldShowUpsell) return null`,
 //! with `shouldShowUpsell = isClaudeAISubscriber()` at :78).
 
+use lingxi_core::host::env::is_env_truthy;
+use lingxi_core::host::subscription::SubscriptionSnapshot;
 use llm_runtime::model::rate_limit::format_reset_time;
-use platform_api::env::is_env_truthy;
-use platform_api::subscription::SubscriptionSnapshot;
 
 /// Locked upsell strings. Mirrors claude-code 2.1.206 `getUpsellMessage`
 /// (binary `Gid` @221157422: `function

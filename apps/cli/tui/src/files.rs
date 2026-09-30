@@ -71,12 +71,12 @@ pub fn file_completions(fragment: &str) -> Vec<CompletionItem> {
 }
 
 fn session_completions(prefix: &str) -> Vec<CompletionItem> {
-    let Some(dir) = platform_api::live_sessions::process_dir() else {
+    let Some(dir) = lingxi_core::host::live_sessions::process_dir() else {
         return Vec::new();
     };
     dir.complete_names(
         prefix,
-        platform_api::live_sessions::process_session_id().as_deref(),
+        lingxi_core::host::live_sessions::process_session_id().as_deref(),
     )
     .into_iter()
     .map(|name| CompletionItem {

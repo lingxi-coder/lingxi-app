@@ -15,8 +15,8 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.CalendarContract
 import android.provider.ContactsContract
-import com.lingxi.code.bindings.AndroidDeviceControl
-import com.lingxi.code.bindings.DeviceControlFfiException
+import com.lingxi.code.bindings.android.AndroidDeviceControl
+import com.lingxi.code.bindings.android.DeviceControlFfiException
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import org.json.JSONArray

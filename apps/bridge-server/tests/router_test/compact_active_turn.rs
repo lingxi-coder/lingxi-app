@@ -3,7 +3,7 @@ use super::*;
 use bridge_server::server::TurnDriver;
 use client::protocol::commands::ImageRefDto;
 use client::protocol::permission::PermissionResponseDto;
-use platform_api::{PermissionDecision, PermissionGate};
+use lingxi_core::host::{PermissionDecision, PermissionGate};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;

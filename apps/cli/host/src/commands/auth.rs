@@ -18,11 +18,10 @@
 use clap::{Args, Subcommand};
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
+use lingxi_core::host::AuthHandle;
 use lingxi_core::settings::enterprise::{ForceLoginMethod, ForceLoginOrgPin, OrgMembershipCheck};
-use llm_runtime::oauth::anthropic::client::ClaudeAiOAuthClient;
-use llm_runtime::oauth::anthropic::config::ClaudeAiOAuthConfig;
-use llm_runtime::oauth::anthropic::handle::{CodeFlowIo, OAuthHandle, OAuthLoginOptions, UrlSink};
-use platform_api::AuthHandle;
+use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
+use llm_runtime::auth::anthropic::handle::{CodeFlowIo, OAuthHandle, OAuthLoginOptions, UrlSink};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -390,7 +389,7 @@ fn print_status_json(
         has_stored_api_key,
         oauth_email,
         oauth_org,
-        platform_api::traffic_mode::is_telemetry_disabled(),
+        lingxi_core::host::traffic_mode::is_telemetry_disabled(),
         projects_directory,
     );
     // Two-space pretty print, matching claude's `jsonStringify(_, null, 2)`.
@@ -522,14 +521,18 @@ async fn build_credential_manager() -> Result<Arc<secret::CredentialManager>, an
 
 pub(crate) async fn build_oauth_handle(use_console: bool) -> Result<OAuthHandle, anyhow::Error> {
     let credentials = build_credential_manager().await?;
-    let http: Arc<dyn platform_api::HttpTransport> = Arc::new(platform_posix::PosixHttp::new());
+    let http: Arc<dyn lingxi_llm_client::Transport> = Arc::new(http_client::provider_transport()?);
     let config = if use_console {
         ClaudeAiOAuthConfig::console_with_port(0)
     } else {
         ClaudeAiOAuthConfig::default_with_port(0)
     };
-    let client = Arc::new(ClaudeAiOAuthClient::new(config, http, credentials));
-    Ok(OAuthHandle::new(client))
+    Ok(OAuthHandle::new(
+        config,
+        http,
+        credentials,
+        Arc::new(platform_posix::PosixClock),
+    ))
 }
 
 pub(crate) async fn effective_force_login_method() -> Option<ForceLoginMethod> {

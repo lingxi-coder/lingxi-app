@@ -387,13 +387,13 @@ class MainActivity : ComponentActivity() {
                                 val source = activeConversationSource
                                     ?: error("engine is not connected")
                                 source.submitClientCommand(
-                                    com.lingxi.code.bindings.ClientCommand.SetTypescriptLspMode(mode),
+                                    com.lingxi.code.bindings.client.ClientCommand.SetTypescriptLspMode(mode),
                                 )
                             },
                             onSetLocalAppPluginEnabled = { pluginId, enabled ->
                                 activeConversationSource?.submitClientCommand(
-                                    com.lingxi.code.bindings.ClientCommand.PluginCommand(
-                                        com.lingxi.code.bindings.PluginCommandDto.SetEnabled(
+                                    com.lingxi.code.bindings.client.ClientCommand.PluginCommand(
+                                        com.lingxi.code.bindings.client.PluginCommandDto.SetEnabled(
                                             pluginId = pluginId,
                                             enabled = enabled,
                                         ),

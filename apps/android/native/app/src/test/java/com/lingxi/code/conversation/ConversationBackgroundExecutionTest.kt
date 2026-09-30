@@ -1,6 +1,6 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

@@ -48,8 +48,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
-import com.lingxi.code.bindings.AskQuestionDto
-import com.lingxi.code.bindings.AskUserQuestionRequestDto
+import com.lingxi.code.bindings.client.AskQuestionDto
+import com.lingxi.code.bindings.client.AskUserQuestionRequestDto
 
 /** Toggle [label] in a question's selection list. */
 internal fun toggleAskSelection(

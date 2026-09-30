@@ -1150,7 +1150,7 @@ impl BottomPaneView for WorkflowSaveView {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use platform_api::task_registry::WorkflowRecord;
+    use lingxi_core::host::task_registry::WorkflowRecord;
     use tui_core::multiagent::{WorkflowAgentRow, WorkflowPhase, WorkflowProgressEvent};
 
     fn press(code: KeyCode) -> KeyEvent {

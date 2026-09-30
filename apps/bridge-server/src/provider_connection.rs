@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use client::protocol::commands::ProviderCredentialSecretDto;
 use client::protocol::events::ClientEvent;
-use platform_api::{HttpError, HttpTransport};
-use protocol::{HttpMethod, HttpRequest, HttpResponse};
+use lingxi_core::host::{HttpError, HttpTransport};
+use lingxi_core::types::{HttpMethod, HttpRequest, HttpResponse};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 

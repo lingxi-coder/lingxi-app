@@ -33,7 +33,7 @@ class NotifyException(val failure: NotifyFailure) : Exception(
 
 /**
  * Process-global bridge between the (Rust-driven)
- * `com.lingxi.code.bindings.AndroidNotification` callback interface and the
+ * `com.lingxi.code.bindings.android.AndroidNotification` callback interface and the
  * system [NotificationManager].
  *
  * The engine has no [Context] handle, so the host installs the application

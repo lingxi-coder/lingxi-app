@@ -10,10 +10,10 @@ use crate::output_adapter::SinkAdapter;
 use crate::repl_loop::{step_with_notifications, StepOutcome, TaskNotificationWake};
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
+use lingxi_core::host::task_registry::TaskRegistryHandle;
+use lingxi_core::host::{OrchestratorHandle, OutputStream};
+use lingxi_core::types::SessionId;
 use orchestrator::{OrchestratorError, TurnOutcome};
-use platform_api::task_registry::TaskRegistryHandle;
-use platform_api::{OrchestratorHandle, OutputStream};
-use protocol::SessionId;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
@@ -156,7 +156,7 @@ async fn confirm_repl_exit<R: AsyncBufRead + Send + Unpin + ?Sized>(
             match reply.trim() {
                 "1" => {}
                 "2" if handoff => {
-                    let snapshot = platform_api::BackgroundingSnapshot::Idle {
+                    let snapshot = lingxi_core::host::BackgroundingSnapshot::Idle {
                         queued_commands: Vec::new(),
                         draft: String::new(),
                         boundary_id: uuid::Uuid::new_v4(),
@@ -853,7 +853,7 @@ mod tests {
         assert!(!parse_trust_input("maybe\n"));
         assert!(!parse_trust_input("yy\n"));
     }
-    use platform_api::task_registry::*;
+    use lingxi_core::host::task_registry::*;
     struct FixedRoster {
         tasks: Vec<TaskRecord>,
         killed: std::sync::Mutex<Vec<String>>,

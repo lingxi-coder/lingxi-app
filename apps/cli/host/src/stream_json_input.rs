@@ -38,7 +38,9 @@
 #![forbid(unsafe_code)]
 
 use crate::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
-use protocol::{CompactBoundaryMetadata, ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use lingxi_core::types::{
+    CompactBoundaryMetadata, ContentBlock, ConversationMessage, MessageId, ToolUseId,
+};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 #[cfg(test)]
@@ -1111,7 +1113,7 @@ mod tests {
                 replay_frame: None,
             }) if content == "Conversation compacted"
                 && subtype == "compact_boundary"
-                && metadata.trigger == protocol::CompactTrigger::Manual
+                && metadata.trigger == lingxi_core::types::CompactTrigger::Manual
                 && metadata.pre_tokens == 42
         ));
 

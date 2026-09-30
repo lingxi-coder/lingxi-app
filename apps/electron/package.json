@@ -11,7 +11,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "test": "node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test test/*.test.ts test/*.test.mjs",
+    "test": "node --import ../../packages/bridge-client/node_modules/tsx/dist/loader.mjs --test --test-concurrency=1 test/*.test.ts test/*.test.mjs",
     "package:mac": "node scripts/package-mac.mjs",
     "package:mac:flare": "bash scripts/package-macos-flare.sh",
     "package:desktop": "node scripts/package-desktop.mjs",

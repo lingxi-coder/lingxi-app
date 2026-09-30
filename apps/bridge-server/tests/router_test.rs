@@ -46,17 +46,17 @@ use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::listings::SessionModeDto;
 use client::protocol::permission::PermissionRequest;
 use futures_util::{SinkExt, StreamExt};
-use orchestrator::test_support::MockOrchestratorHandle;
-use platform_api::auth::{AuthError, AuthHandle, LoginInfo};
-use platform_api::orchestrator::{
+use lingxi_core::host::auth::{AuthError, AuthHandle, LoginInfo};
+use lingxi_core::host::orchestrator::{
     AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
     McpStatus, MemoryEditorOutcome, SkillInfo, StatusSnapshot,
 };
-use platform_api::task_registry::{
+use lingxi_core::host::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
-use platform_api::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::host::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use orchestrator::test_support::MockOrchestratorHandle;
 use platform_posix::{PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
@@ -85,18 +85,19 @@ struct CapturingSink {
 
 #[derive(Default)]
 struct SelectiveFailureStorage {
-    values:
-        std::sync::Mutex<std::collections::HashMap<(String, String), protocol::SecureStorageData>>,
+    values: std::sync::Mutex<
+        std::collections::HashMap<(String, String), lingxi_core::types::SecureStorageData>,
+    >,
 }
 
 #[async_trait]
-impl platform_api::SecureStorage for SelectiveFailureStorage {
+impl lingxi_core::host::SecureStorage for SelectiveFailureStorage {
     async fn store(
         &self,
         service: &str,
         account: &str,
-        data: protocol::SecureStorageData,
-    ) -> Result<(), platform_api::SecureStorageError> {
+        data: lingxi_core::types::SecureStorageData,
+    ) -> Result<(), lingxi_core::host::SecureStorageError> {
         self.values
             .lock()
             .unwrap()
@@ -108,9 +109,10 @@ impl platform_api::SecureStorage for SelectiveFailureStorage {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<Option<protocol::SecureStorageData>, platform_api::SecureStorageError> {
+    ) -> Result<Option<lingxi_core::types::SecureStorageData>, lingxi_core::host::SecureStorageError>
+    {
         if account == "provider-key-openrouter" {
-            return Err(platform_api::SecureStorageError::PermissionDenied(
+            return Err(lingxi_core::host::SecureStorageError::PermissionDenied(
                 "test keychain denial".to_string(),
             ));
         }
@@ -126,7 +128,7 @@ impl platform_api::SecureStorage for SelectiveFailureStorage {
         &self,
         service: &str,
         account: &str,
-    ) -> Result<(), platform_api::SecureStorageError> {
+    ) -> Result<(), lingxi_core::host::SecureStorageError> {
         self.values
             .lock()
             .unwrap()
@@ -134,7 +136,10 @@ impl platform_api::SecureStorage for SelectiveFailureStorage {
         Ok(())
     }
 
-    async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+    async fn list(
+        &self,
+        service: &str,
+    ) -> Result<Vec<String>, lingxi_core::host::SecureStorageError> {
         Ok(self
             .values
             .lock()
@@ -149,8 +154,8 @@ impl platform_api::SecureStorage for SelectiveFailureStorage {
         true
     }
 
-    fn backend(&self) -> platform_api::SecureStorageBackend {
-        platform_api::SecureStorageBackend::MacOsKeychain
+    fn backend(&self) -> lingxi_core::host::SecureStorageBackend {
+        lingxi_core::host::SecureStorageBackend::MacOsKeychain
     }
 }
 
@@ -202,14 +207,14 @@ struct MockTaskRegistry {
 
 /// Minimal handle that records the history adopted by `ResumeSession`.
 struct ResumingHandle {
-    session_id: protocol::SessionId,
+    session_id: lingxi_core::types::SessionId,
     resumed: Mutex<
         Option<(
-            protocol::SessionId,
-            Vec<protocol::ConversationMessage>,
+            lingxi_core::types::SessionId,
+            Vec<lingxi_core::types::ConversationMessage>,
             Option<String>,
-            Option<platform_api::ActiveGoalSnapshot>,
-            platform_api::ResumeRuntimeSnapshot,
+            Option<lingxi_core::host::ActiveGoalSnapshot>,
+            lingxi_core::host::ResumeRuntimeSnapshot,
         )>,
     >,
     resume_context: Mutex<Option<(Option<String>, bool)>>,
@@ -224,7 +229,7 @@ struct ResumingHandle {
 impl ResumingHandle {
     fn new() -> Self {
         Self {
-            session_id: protocol::SessionId::new(),
+            session_id: lingxi_core::types::SessionId::new(),
             resumed: Mutex::new(None),
             resume_context: Mutex::new(None),
             permission_mode: Mutex::new(Some("default".to_string())),
@@ -270,8 +275,8 @@ impl ResumingHandle {
 }
 
 #[async_trait]
-impl platform_api::OrchestratorHandle for ResumingHandle {
-    async fn current_session_id(&self) -> protocol::SessionId {
+impl lingxi_core::host::OrchestratorHandle for ResumingHandle {
+    async fn current_session_id(&self) -> lingxi_core::types::SessionId {
         self.session_id
     }
     async fn clear_session(&self) -> Result<(), HandleError> {
@@ -358,11 +363,11 @@ impl platform_api::OrchestratorHandle for ResumingHandle {
     }
     async fn resume_session(
         &self,
-        session_id: protocol::SessionId,
-        history: Vec<protocol::ConversationMessage>,
+        session_id: lingxi_core::types::SessionId,
+        history: Vec<lingxi_core::types::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
-        active_goal: Option<platform_api::ActiveGoalSnapshot>,
-        runtime: platform_api::ResumeRuntimeSnapshot,
+        active_goal: Option<lingxi_core::host::ActiveGoalSnapshot>,
+        runtime: lingxi_core::host::ResumeRuntimeSnapshot,
     ) -> Result<(), HandleError> {
         self.operation_log
             .lock()
@@ -481,7 +486,7 @@ fn router_with(
     tasks: Arc<MockTaskRegistry>,
 ) -> EngineCommandRouter {
     EngineCommandRouter::new(
-        handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+        handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         tasks as Arc<dyn TaskRegistryHandle>,
         None,
@@ -527,7 +532,7 @@ fn router_with_store_and_tasks(
 ) -> EngineCommandRouter {
     let cwd = root.to_string_lossy().into_owned();
     EngineCommandRouter::new(
-        handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+        handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         tasks,
         None,
@@ -1014,7 +1019,7 @@ async fn set_model_routes() {
 #[tokio::test]
 async fn set_reasoning_selection_persists_the_desktop_default() {
     use client::protocol::controls::ReasoningSelectionDto;
-    use platform_api::{ConversationControls, PermissionControlState, ReasoningSelection};
+    use lingxi_core::host::{ConversationControls, PermissionControlState, ReasoningSelection};
 
     let root = tempfile::tempdir().expect("tempdir");
     let handle = Arc::new(MockOrchestratorHandle::new());
@@ -1027,7 +1032,7 @@ async fn set_reasoning_selection_persists_the_desktop_default() {
         },
         requested_reasoning_selection: ReasoningSelection::Automatic,
         effective_reasoning_selection: ReasoningSelection::Automatic,
-        reasoning_spec: platform_api::ReasoningControlSpec {
+        reasoning_spec: lingxi_core::host::ReasoningControlSpec {
             available: vec![
                 ReasoningSelection::Automatic,
                 ReasoningSelection::Level { id: "high".into() },
@@ -1087,7 +1092,7 @@ async fn set_fast_mode_routes_and_acknowledges_authoritative_state() {
 #[tokio::test]
 async fn set_model_keeps_provider_in_acknowledgement() {
     let handle = Arc::new(MockOrchestratorHandle::new());
-    handle.set_model_listings(vec![platform_api::ModelListing {
+    handle.set_model_listings(vec![lingxi_core::host::ModelListing {
         display_model: "GPT-5.5".into(),
         request_model: "gpt-5.5".into(),
         provider_id: "github-copilot".into(),
@@ -1152,7 +1157,7 @@ async fn set_permission_mode_routes_and_acknowledges_authoritative_mode() {
 #[tokio::test]
 async fn control_commands_synchronize_snapshots_while_a_turn_is_active() {
     use client::protocol::controls::ReasoningSelectionDto;
-    use platform_api::{ConversationControls, PermissionControlState, ReasoningSelection};
+    use lingxi_core::host::{ConversationControls, PermissionControlState, ReasoningSelection};
 
     let cases = [
         (
@@ -1197,7 +1202,7 @@ async fn control_commands_synchronize_snapshots_while_a_turn_is_active() {
             permission: PermissionControlState {
                 requested: "default".into(),
                 effective: "default".into(),
-                modes: vec![platform_api::PermissionModeAvailability {
+                modes: vec![lingxi_core::host::PermissionModeAvailability {
                     mode: "acceptEdits".into(),
                     available: true,
                     disabled_reason: None,
@@ -1205,7 +1210,7 @@ async fn control_commands_synchronize_snapshots_while_a_turn_is_active() {
             },
             requested_reasoning_selection: ReasoningSelection::Automatic,
             effective_reasoning_selection: ReasoningSelection::Automatic,
-            reasoning_spec: platform_api::ReasoningControlSpec {
+            reasoning_spec: lingxi_core::host::ReasoningControlSpec {
                 available: vec![ReasoningSelection::Automatic, ReasoningSelection::Enabled],
                 modifiable: true,
                 disabled_reason: None,
@@ -1336,14 +1341,14 @@ async fn list_models_curates_and_preserves_provider_identity() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     handle.set_available_models(vec!["gpt-5.6-sol".into(), "gpt-4o".into()]);
     handle.set_model_listings(vec![
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: "GPT-5.6 Sol".into(),
             request_model: "gpt-5.6-sol".into(),
             provider_id: "openai".into(),
             provider_label: "OpenAI".into(),
             description: None,
             metadata: Default::default(),
-            capabilities: platform_api::ModelCapabilities {
+            capabilities: lingxi_core::host::ModelCapabilities {
                 tools: true,
                 ..Default::default()
             },
@@ -1352,14 +1357,14 @@ async fn list_models_curates_and_preserves_provider_identity() {
             fusion_analyst_capable: false,
             connection: Default::default(),
         },
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: "GPT-4o".into(),
             request_model: "gpt-4o".into(),
             provider_id: "openai".into(),
             provider_label: "OpenAI".into(),
             description: None,
             metadata: Default::default(),
-            capabilities: platform_api::ModelCapabilities {
+            capabilities: lingxi_core::host::ModelCapabilities {
                 tools: true,
                 ..Default::default()
             },
@@ -1368,14 +1373,14 @@ async fn list_models_curates_and_preserves_provider_identity() {
             fusion_analyst_capable: false,
             connection: Default::default(),
         },
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: "GPT-5.6 Sol".into(),
             request_model: "gpt-5.6-sol".into(),
             provider_id: "github-copilot".into(),
             provider_label: "GitHub Copilot".into(),
             description: None,
             metadata: Default::default(),
-            capabilities: platform_api::ModelCapabilities {
+            capabilities: lingxi_core::host::ModelCapabilities {
                 tools: true,
                 ..Default::default()
             },
@@ -1433,14 +1438,14 @@ async fn list_models_curates_and_preserves_provider_identity() {
 async fn list_models_uses_full_provider_catalog_when_provided() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     handle.set_available_models(vec!["deepseek-flash".into()]);
-    handle.set_model_listings(vec![platform_api::ModelListing {
+    handle.set_model_listings(vec![lingxi_core::host::ModelListing {
         display_model: "DeepSeek V4 Flash".into(),
         request_model: "deepseek-flash".into(),
         provider_id: "deepseek".into(),
         provider_label: "DeepSeek".into(),
         description: None,
         metadata: Default::default(),
-        capabilities: platform_api::ModelCapabilities {
+        capabilities: lingxi_core::host::ModelCapabilities {
             tools: true,
             ..Default::default()
         },
@@ -1455,21 +1460,21 @@ async fn list_models_uses_full_provider_catalog_when_provided() {
         ..StatusSnapshot::default()
     });
     let router = EngineCommandRouter::new(
-        handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+        handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
         None,
     )
     .with_provider_model_catalog_listings(vec![
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: "Claude Sonnet 5".into(),
             request_model: "claude-sonnet-5".into(),
             provider_id: "anthropic".into(),
             provider_label: "Anthropic".into(),
             description: None,
             metadata: Default::default(),
-            capabilities: platform_api::ModelCapabilities {
+            capabilities: lingxi_core::host::ModelCapabilities {
                 tools: true,
                 ..Default::default()
             },
@@ -1478,14 +1483,14 @@ async fn list_models_uses_full_provider_catalog_when_provided() {
             fusion_analyst_capable: false,
             connection: Default::default(),
         },
-        platform_api::ModelListing {
+        lingxi_core::host::ModelListing {
             display_model: "Internal 7B".into(),
             request_model: "internal-7b".into(),
             provider_id: "my-proxy".into(),
             provider_label: "My Proxy".into(),
             description: None,
             metadata: Default::default(),
-            capabilities: platform_api::ModelCapabilities {
+            capabilities: lingxi_core::host::ModelCapabilities {
                 tools: true,
                 ..Default::default()
             },
@@ -1598,7 +1603,7 @@ async fn slash_command_routes_to_registry() {
 
     let handle = Arc::new(MockOrchestratorHandle::new());
     let router = EngineCommandRouter::new(
-        handle as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+        handle as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
@@ -1639,7 +1644,7 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
     reg.register_command(SlashCommand {
         name: "deploy".to_string(),
         description: "ship it".to_string(),
-        source: CommandSource::Settings(protocol::SettingsScope::Project),
+        source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         kind: SlashCommandKind::Markdown {
             file_path: std::path::PathBuf::from("/tmp/deploy.md"),
             frontmatter: CommandFrontmatter {
@@ -1654,7 +1659,7 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
     let dispatcher = Arc::new(RegistrySlashDispatcher::new(shared.clone()));
     let router = EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new())
-            as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+            as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
@@ -1766,7 +1771,7 @@ impl SlashCommandDispatcher for MutatingDispatcher {
             self.registry.write().await.register_command(SlashCommand {
                 name: "newcmd".to_string(),
                 description: "added during dispatch".to_string(),
-                source: CommandSource::Settings(protocol::SettingsScope::User),
+                source: CommandSource::Settings(lingxi_core::types::SettingsScope::User),
                 kind: SlashCommandKind::Markdown {
                     file_path: std::path::PathBuf::from("/tmp/newcmd.md"),
                     frontmatter: CommandFrontmatter {
@@ -1845,7 +1850,7 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
     let shared = Arc::new(RwLock::new(reg));
     let router = EngineCommandRouter::new(
         Arc::new(MockOrchestratorHandle::new())
-            as Arc<dyn platform_api::orchestrator::OrchestratorHandle>,
+            as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(Arc::new(MutatingDispatcher {
@@ -2204,7 +2209,7 @@ async fn list_sessions_preserves_readable_rows_when_one_transcript_is_corrupt() 
 #[tokio::test]
 async fn new_session_clears_applies_model_and_emits_started() {
     let handle = Arc::new(MockOrchestratorHandle::new());
-    let expected_id = platform_api::OrchestratorHandle::current_session_id(&*handle)
+    let expected_id = lingxi_core::host::OrchestratorHandle::current_session_id(&*handle)
         .await
         .to_string();
     let router = router_with(handle.clone(), Arc::new(MockTaskRegistry { rows: vec![] }));
@@ -2279,9 +2284,9 @@ async fn new_and_resume_are_rejected_mid_turn_and_bad_resume_is_honest() {
 
 fn seed_session_agent_transcript(
     root: &std::path::Path,
-    session_id: protocol::SessionId,
+    session_id: lingxi_core::types::SessionId,
     nested: bool,
-) -> (protocol::AgentId, std::path::PathBuf) {
+) -> (lingxi_core::types::AgentId, std::path::PathBuf) {
     let cwd = root.to_string_lossy().into_owned();
     let base = orchestrator::transcript_paths::subagents_dir(
         &root.join(".lingxi"),
@@ -2294,9 +2299,9 @@ fn seed_session_agent_transcript(
         base
     };
     std::fs::create_dir_all(&dir).unwrap();
-    let agent_id = protocol::AgentId::new();
-    let message = protocol::ConversationMessage::user(
-        protocol::MessageId::new(),
+    let agent_id = lingxi_core::types::AgentId::new();
+    let message = lingxi_core::types::ConversationMessage::user(
+        lingxi_core::types::MessageId::new(),
         "inspect the runtime".to_string(),
     );
     let path = dir.join(format!("agent-{agent_id}.jsonl"));
@@ -2410,7 +2415,7 @@ async fn session_agent_transcript_route_reports_absent_and_corrupt_files() {
     let handle = Arc::new(MockOrchestratorHandle::new());
     let session_id = handle.current_session_id().await;
     let router = router_with_store(handle, root.path());
-    let missing_id = protocol::AgentId::new();
+    let missing_id = lingxi_core::types::AgentId::new();
     let missing_sink = CapturingSink::arc();
     router
         .route(
@@ -2448,7 +2453,7 @@ async fn session_agent_transcript_route_reports_absent_and_corrupt_files() {
 async fn live_session_agent_without_a_first_transcript_write_retries_quietly() {
     let root = tempfile::tempdir().unwrap();
     let handle = Arc::new(MockOrchestratorHandle::new());
-    let agent_id = protocol::AgentId::new();
+    let agent_id = lingxi_core::types::AgentId::new();
     let tasks = Arc::new(MockTaskRegistry {
         rows: vec![TaskRecord {
             task_id: "a-liveagent".into(),
@@ -2516,7 +2521,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     let handle = Arc::new(ResumingHandle::new());
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
+        handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -2549,7 +2554,7 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     assert_eq!(adopted.1.len(), 3);
     assert!(matches!(
         &adopted.1[0],
-        protocol::ConversationMessage::System {
+        lingxi_core::types::ConversationMessage::System {
             subtype: Some(subtype),
             compact_metadata: Some(metadata),
             ..
@@ -2625,7 +2630,7 @@ async fn resume_session_sets_plan_state_before_replay() {
     handle.set_current_permission_mode("acceptEdits").await;
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
+        handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -2684,7 +2689,7 @@ async fn resume_session_rolls_back_plan_preset_when_plan_mode_enable_fails() {
     handle.set_plan_mode_error("plan latch failed").await;
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
+        handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -2737,7 +2742,7 @@ async fn resume_session_does_not_adopt_when_plan_permission_preset_fails() {
     handle.set_permission_mode_error("plan gate failed").await;
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
+        handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -2787,7 +2792,7 @@ async fn resume_session_rolls_back_plan_state_when_replay_fails() {
     handle.set_resume_error("resume replay failed").await;
     let cwd = root.path().to_string_lossy().into_owned();
     let router = EngineCommandRouter::new(
-        handle.clone() as Arc<dyn platform_api::OrchestratorHandle>,
+        handle.clone() as Arc<dyn lingxi_core::host::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         None,
@@ -3011,10 +3016,10 @@ async fn force_compact_completion_routes_over_ws_without_an_active_turn() {
 
     // The production orchestrator emits to this owned sink. Idle compaction
     // phases must still reach the wire while no conversation turn is active.
-    platform_api::OutputStream::emit_compaction_started(&output).await;
-    platform_api::OutputStream::emit_compaction_phase(&output, "summarizing").await;
-    platform_api::OutputStream::emit_compaction_phase(&output, "restoring").await;
-    platform_api::OutputStream::emit_compaction_finished(&output, None).await;
+    lingxi_core::host::OutputStream::emit_compaction_started(&output).await;
+    lingxi_core::host::OutputStream::emit_compaction_phase(&output, "summarizing").await;
+    lingxi_core::host::OutputStream::emit_compaction_phase(&output, "restoring").await;
+    lingxi_core::host::OutputStream::emit_compaction_finished(&output, None).await;
     for phase in ["preparing", "summarizing", "restoring", "complete"] {
         match next_frame(&mut ws).await {
             Frame::Event(ClientEvent::CompactionStatus {

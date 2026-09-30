@@ -28,6 +28,16 @@ done
 SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 SDK_OUTPUT="${IOS_DIR}/build/mobile-linux-sdk"
 CACHE="${IOS_DIR}/build/mobile-linux-cache"
+# Clang/Swift PCH files embed their module-cache path. A moved checkout cannot
+# reuse that cache; native sources and packaged outputs remain independently pinned.
+MODULE_CACHE="${CACHE}/swift-modules"
+LOCATION_STAMP="${MODULE_CACHE}/.build-location"
+if [[ -d "${MODULE_CACHE}" ]] && [[ ! -f "${LOCATION_STAMP}" || "$(cat "${LOCATION_STAMP}")" != "${MODULE_CACHE}" ]]; then
+  rm -rf "${MODULE_CACHE}"
+fi
+mkdir -p "${MODULE_CACHE}"
+printf '%s\n' "${MODULE_CACHE}" > "${LOCATION_STAMP}"
+
 STAGE_ROOT="${IOS_DIR}/build/linux-runtime/openminis"
 FRAMEWORKS="${LINGXI_FRAMEWORKS_DIR:-${IOS_DIR}/Frameworks}"
 FRAMEWORK=MobileLinuxNativeSupport.xcframework

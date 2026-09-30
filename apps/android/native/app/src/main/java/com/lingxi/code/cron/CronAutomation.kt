@@ -1,7 +1,7 @@
 package com.lingxi.code.cron
 
-import com.lingxi.code.bindings.CronTaskDto
-import com.lingxi.code.bindings.ReasoningSelectionDto
+import com.lingxi.code.bindings.runtime.CronTaskDto
+import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import org.json.JSONObject
 
 /** Versioned engine metadata. Preserve unknown fields when editing known settings. */

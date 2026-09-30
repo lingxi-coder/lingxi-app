@@ -323,7 +323,7 @@ impl StdioControlPlane {
                     scheduled_fire_id: None,
                     uuid: Uuid::new_v4().to_string(),
                     content: msgqueue::QueuedCommandContent::OrphanedPermission {
-                        tool_use_id: protocol::ToolUseId::from(tuid),
+                        tool_use_id: lingxi_core::types::ToolUseId::from(tuid),
                         permission_decision_json,
                         reason: format!(
                             "orphaned control_response (no pending request) request_id={request_id}"
@@ -628,7 +628,7 @@ impl StdioControlPermissionGate {
                                 updated_input,
                                 permission_updates: Vec::new(),
                                 decision_classification: Some(
-                                    platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                                    lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
                                 ),
                             }
                         }
@@ -650,10 +650,10 @@ impl StdioControlPermissionGate {
                         permission_updates.clear();
                         if matches!(
                             decision_classification,
-                            Some(platform_api::permission_gate::ToolDecisionClassification::UserPermanent)
+                            Some(lingxi_core::host::permission_gate::ToolDecisionClassification::UserPermanent)
                         ) {
                             *decision_classification = Some(
-                                platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                                lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
                             );
                         }
                     }
@@ -755,13 +755,13 @@ impl StdioControlPermissionGate {
                             .and_then(Value::as_str)
                             .and_then(|value| match value {
                                 "user_temporary" => Some(
-                                    platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                                    lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
                                 ),
                                 "user_permanent" => Some(
-                                    platform_api::permission_gate::ToolDecisionClassification::UserPermanent,
+                                    lingxi_core::host::permission_gate::ToolDecisionClassification::UserPermanent,
                                 ),
                                 "user_reject" => Some(
-                                    platform_api::permission_gate::ToolDecisionClassification::UserReject,
+                                    lingxi_core::host::permission_gate::ToolDecisionClassification::UserReject,
                                 ),
                                 _ => None,
                             });
@@ -1018,13 +1018,13 @@ fn parse_destination(s: &str) -> Option<PermissionUpdateDestination> {
 fn source_for_destination(dest: PermissionUpdateDestination) -> PermissionRuleSource {
     match dest {
         PermissionUpdateDestination::UserSettings => {
-            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         }
         PermissionUpdateDestination::ProjectSettings => {
-            PermissionRuleSource::Settings(protocol::SettingsScope::Project)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
         }
         PermissionUpdateDestination::LocalSettings => {
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local)
         }
         PermissionUpdateDestination::CliArg => PermissionRuleSource::CliArg,
         PermissionUpdateDestination::Session => PermissionRuleSource::Session,
@@ -1782,7 +1782,9 @@ mod tests {
         let gate = StdioControlPermissionGate::new(plane.clone());
         let input = json!({"command": "echo hi"});
         let ctx = PermissionCheckContext {
-            auto_mode_prompt: Some(platform_api::permission_gate::AutoModePrompt::WorkflowBash),
+            auto_mode_prompt: Some(
+                lingxi_core::host::permission_gate::AutoModePrompt::WorkflowBash,
+            ),
             ..PermissionCheckContext::default()
         };
         let check =
@@ -1948,7 +1950,7 @@ mod tests {
         );
         assert_eq!(
             updates[0].rule.source,
-            PermissionRuleSource::Settings(protocol::SettingsScope::Local)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local)
         );
         // Tool-wide rule keeps ruleContent None.
         assert_eq!(updates[1].rule.value.tool_name, "Read");
@@ -1974,7 +1976,7 @@ mod tests {
         assert_eq!(updates[0].rule.behavior, PermissionBehavior::Deny);
         assert_eq!(
             updates[0].rule.source,
-            PermissionRuleSource::Settings(protocol::SettingsScope::User)
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User)
         );
     }
 
@@ -2107,7 +2109,7 @@ mod tests {
             check.await.unwrap(),
             PermissionOutcome::Allow {
                 decision_classification: Some(
-                    platform_api::permission_gate::ToolDecisionClassification::UserPermanent
+                    lingxi_core::host::permission_gate::ToolDecisionClassification::UserPermanent
                 ),
                 ..
             }

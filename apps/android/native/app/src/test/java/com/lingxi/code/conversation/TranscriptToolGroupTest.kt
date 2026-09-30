@@ -33,12 +33,12 @@ class TranscriptToolGroupTest {
     }
 
     @Test fun historicalReasoningDoesNotDivideWireToolGroups() {
-        val message = messageDtoToMessage(com.lingxi.code.bindings.MessageDto(
+        val message = messageDtoToMessage(com.lingxi.code.bindings.client.MessageDto(
             role = "assistant", blocks = listOf(
-                com.lingxi.code.bindings.MessageBlockDto.ToolUse("a", "Read", "{}", null),
-                com.lingxi.code.bindings.MessageBlockDto.Thinking("private reasoning", null),
-                com.lingxi.code.bindings.MessageBlockDto.RedactedThinking("opaque"),
-                com.lingxi.code.bindings.MessageBlockDto.ToolUse("b", "Read", "{}", null),
+                com.lingxi.code.bindings.client.MessageBlockDto.ToolUse("a", "Read", "{}", null),
+                com.lingxi.code.bindings.client.MessageBlockDto.Thinking("private reasoning", null),
+                com.lingxi.code.bindings.client.MessageBlockDto.RedactedThinking("opaque"),
+                com.lingxi.code.bindings.client.MessageBlockDto.ToolUse("b", "Read", "{}", null),
             )))
         val group = transcriptBlocks(message.blocks).single() as TranscriptBlock.Tools
         assertEquals(listOf("a", "b"), group.calls.map { it.id })

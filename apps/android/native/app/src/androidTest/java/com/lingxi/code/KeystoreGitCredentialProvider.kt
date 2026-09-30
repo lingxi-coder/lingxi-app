@@ -2,7 +2,7 @@ package com.lingxi.code
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import com.lingxi.code.bindings.AndroidGitCredentialProvider
+import com.lingxi.code.bindings.android.AndroidGitCredentialProvider
 import java.security.KeyStore
 import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Cipher

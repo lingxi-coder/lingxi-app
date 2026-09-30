@@ -47,18 +47,16 @@ test('roles read out of one layer, and a malformed entry reads as absent', () =>
       'not-an-object',
     ],
     analystModel: { profile: 'openai', model: 'gpt-5.6-terra' },
-    synthesizerModel: { profile: 'openai' },
   });
   assert.deepEqual(roles.panels.map(routeOf), ['anthropic/claude-opus-5']);
   assert.deepEqual(roles.analyst, { profile: 'openai', model: 'gpt-5.6-terra' });
-  assert.equal(roles.synthesizer, null, 'a half-written role is not a configured role');
+  assert.equal(Object.hasOwn(roles, 'synthesizer'), false);
 });
 
 test('a one-model roster reports as missing, not as a small roster', () => {
   const roles = rolesFromFusionObject({
     panelModels: [{ profile: 'anthropic', model: 'claude-opus-5' }],
     analystModel: { profile: 'openai', model: 'gpt-5.6-terra' },
-    synthesizerModel: { profile: 'openai', model: 'gpt-5.6-terra' },
   });
   assert.deepEqual(missingRoles(roles), ['panel 模型']);
 });
@@ -66,7 +64,7 @@ test('a one-model roster reports as missing, not as a small roster', () => {
 test('an empty fusion object reports every role missing, in engine order', () => {
   assert.deepEqual(
     missingRoles(rolesFromFusionObject({})),
-    ['panel 模型', 'analyst 模型', 'synthesizer 模型'],
+    ['panel 模型', 'analyst 模型'],
   );
 });
 

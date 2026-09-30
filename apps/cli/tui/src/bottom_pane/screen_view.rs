@@ -27,7 +27,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 use tui_core::theme::ThemeName;
 
-use platform_api::CostSnapshot;
+use lingxi_core::host::CostSnapshot;
 
 use crate::bottom_pane::view::{BottomPaneView, ViewOutcome};
 use crate::renderable::Renderable;
@@ -306,7 +306,7 @@ impl ScreenView {
 
     /// Oracle `gl()`: Loops is a Usage *section*, hidden when there are no
     /// rows — never a third tab.
-    fn loops_section_lines(rows: &[platform_api::LoopUsageRow]) -> Vec<Line<'static>> {
+    fn loops_section_lines(rows: &[lingxi_core::host::LoopUsageRow]) -> Vec<Line<'static>> {
         const MAX_ROWS: usize = 10;
         let mut lines = vec![header("Loops")];
         lines.push(row("every / runs / tokens / last", ""));
@@ -334,9 +334,9 @@ impl ScreenView {
     /// counts and percentages.
     ///
     /// Category cells and the legend are projected from the same
-    /// [`platform_api::ContextUsageSnapshot`] the headless `/context` command uses.
+    /// [`lingxi_core::host::ContextUsageSnapshot`] the headless `/context` command uses.
     #[must_use]
-    pub fn context(model: &str, usage: &platform_api::ContextUsageSnapshot) -> Self {
+    pub fn context(model: &str, usage: &lingxi_core::host::ContextUsageSnapshot) -> Self {
         const GRID_COLS: usize = 20;
         const GRID_ROWS: usize = 5;
         const CELLS: usize = GRID_COLS * GRID_ROWS;
@@ -347,12 +347,12 @@ impl ScreenView {
         let fallback;
         let breakdown = if usage.breakdown.is_empty() {
             fallback = vec![
-                platform_api::ContextUsageCategory::new(
-                    platform_api::ContextUsageCategoryKind::Messages,
+                lingxi_core::host::ContextUsageCategory::new(
+                    lingxi_core::host::ContextUsageCategoryKind::Messages,
                     used,
                 ),
-                platform_api::ContextUsageCategory::new(
-                    platform_api::ContextUsageCategoryKind::FreeSpace,
+                lingxi_core::host::ContextUsageCategory::new(
+                    lingxi_core::host::ContextUsageCategoryKind::FreeSpace,
                     max.saturating_sub(used),
                 ),
             ];
@@ -377,7 +377,7 @@ impl ScreenView {
             for c in 0..GRID_COLS {
                 let idx = r * GRID_COLS + c;
                 let kind = category_for_cell(breakdown, idx, CELLS, max);
-                let glyph = if kind == platform_api::ContextUsageCategoryKind::FreeSpace {
+                let glyph = if kind == lingxi_core::host::ContextUsageCategoryKind::FreeSpace {
                     "□ "
                 } else {
                     "■ "
@@ -389,7 +389,7 @@ impl ScreenView {
         lines.push(Line::from(""));
         for row in breakdown {
             let row_pct = context_percentage(row.tokens, max);
-            let glyph = if row.kind == platform_api::ContextUsageCategoryKind::FreeSpace {
+            let glyph = if row.kind == lingxi_core::host::ContextUsageCategoryKind::FreeSpace {
                 "□ "
             } else {
                 "■ "
@@ -647,12 +647,12 @@ fn context_percentage(tokens: u64, max: u64) -> u64 {
 }
 
 fn category_for_cell(
-    breakdown: &[platform_api::ContextUsageCategory],
+    breakdown: &[lingxi_core::host::ContextUsageCategory],
     cell: usize,
     cells: usize,
     max: u64,
-) -> platform_api::ContextUsageCategoryKind {
-    use platform_api::ContextUsageCategoryKind as Kind;
+) -> lingxi_core::host::ContextUsageCategoryKind {
+    use lingxi_core::host::ContextUsageCategoryKind as Kind;
     if max == 0 || cells == 0 {
         return Kind::FreeSpace;
     }
@@ -669,8 +669,8 @@ fn category_for_cell(
     Kind::FreeSpace
 }
 
-fn context_category_label(kind: platform_api::ContextUsageCategoryKind) -> &'static str {
-    use platform_api::ContextUsageCategoryKind as Kind;
+fn context_category_label(kind: lingxi_core::host::ContextUsageCategoryKind) -> &'static str {
+    use lingxi_core::host::ContextUsageCategoryKind as Kind;
     match kind {
         Kind::SystemPrompt => "System prompt",
         Kind::SystemTools => "System tools",
@@ -683,8 +683,8 @@ fn context_category_label(kind: platform_api::ContextUsageCategoryKind) -> &'sta
     }
 }
 
-fn context_category_style(kind: platform_api::ContextUsageCategoryKind) -> Style {
-    use platform_api::ContextUsageCategoryKind as Kind;
+fn context_category_style(kind: lingxi_core::host::ContextUsageCategoryKind) -> Style {
+    use lingxi_core::host::ContextUsageCategoryKind as Kind;
     use ratatui::style::Color;
     match kind {
         Kind::SystemPrompt => Style::default().fg(Color::Magenta),
@@ -1004,7 +1004,7 @@ mod tests {
             request_model: "claude-opus".into(),
             profile: None,
             provider_label: "Anthropic".into(),
-            provenance: platform_api::ModelProvenance::ProviderCatalogTier,
+            provenance: lingxi_core::host::ModelProvenance::ProviderCatalogTier,
             is_current: true,
             supports_reasoning: true,
             supports_multimodal: false,
@@ -1111,10 +1111,10 @@ mod tests {
 
     #[test]
     fn context_screen_uses_shared_category_snapshot() {
-        use platform_api::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
+        use lingxi_core::host::{ContextUsageCategory, ContextUsageCategoryKind as Kind};
         let view = ScreenView::context(
             "claude-opus-5",
-            &platform_api::ContextUsageSnapshot {
+            &lingxi_core::host::ContextUsageSnapshot {
                 live_context_tokens: 100_000,
                 max_context_tokens: 1_000_000,
                 breakdown: vec![
@@ -1139,7 +1139,7 @@ mod tests {
     fn context_screen_warns_when_usage_exceeds_the_window() {
         let view = ScreenView::context(
             "claude-opus-5",
-            &platform_api::ContextUsageSnapshot {
+            &lingxi_core::host::ContextUsageSnapshot {
                 live_context_tokens: 1_012_345,
                 max_context_tokens: 1_000_000,
                 ..Default::default()
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[test]
     fn usage_stats_tab_renders_byte_exact_cost_block() {
-        use platform_api::orchestrator::ModelUsageRow;
+        use lingxi_core::host::orchestrator::ModelUsageRow;
         let snap = CostSnapshot {
             total_usd: 0.1234,
             api_duration: std::time::Duration::from_millis(5_000),
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn usage_tab_shows_loops_section_when_present() {
         let snap = CostSnapshot {
-            loops: vec![platform_api::LoopUsageRow {
+            loops: vec![lingxi_core::host::LoopUsageRow {
                 prompt: "check deploy".into(),
                 every: "5m".into(),
                 runs: 3,

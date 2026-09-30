@@ -1,6 +1,6 @@
 package com.lingxi.code.cron
 
-import com.lingxi.code.bindings.ReasoningSelectionDto
+import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import org.json.JSONObject
 import com.lingxi.code.model.persistenceKey
 import org.junit.Assert.assertEquals

@@ -1,6 +1,6 @@
 package com.lingxi.code.computeruse
 
-import com.lingxi.code.bindings.AndroidComputerUseFfiException
+import com.lingxi.code.bindings.android.AndroidComputerUseFfiException
 import com.lingxi.code.voice.audio.AudioOperationException
 import com.lingxi.code.voice.audio.DeviceAudioErrorKind
 import org.junit.Assert.assertTrue

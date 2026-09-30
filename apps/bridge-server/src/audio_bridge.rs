@@ -19,13 +19,13 @@ use client::protocol::audio::{
     MAX_AUDIO_PAYLOAD_BYTES, MAX_AUDIO_SAMPLE_RATE_HZ,
 };
 use client::protocol::events::ClientEvent;
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioInitiator, AudioOperation,
     AudioOperationContext, AudioOperationId, AudioOperationKind, AudioOperationReadiness,
     AudioOperationSuccess, AudioOwner, AudioReadinessState, AudioRecordingHandle, AudioService,
     AudioStatus,
 };
-use platform_api::{SttTranscript, TtsAudio, VoiceRecording};
+use lingxi_core::host::{SttTranscript, TtsAudio, VoiceRecording};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, Mutex};
 

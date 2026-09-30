@@ -2,7 +2,7 @@ package com.lingxi.code.computeruse
 
 import android.content.Context
 import android.content.Intent
-import com.lingxi.code.bindings.AndroidComputerUseHost
+import com.lingxi.code.bindings.android.AndroidComputerUseHost
 import kotlinx.coroutines.flow.StateFlow
 
 enum class ComputerUseTier {

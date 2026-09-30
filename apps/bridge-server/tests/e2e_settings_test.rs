@@ -41,7 +41,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// `boot::assemble` → `initialize_live_session` writes to PROCESS-GLOBAL
 /// statics (`PROCESS_DIR` / `PROCESS_SESSION` / `PROCESS_NAME` in
-/// `platform_api::live_sessions`) shared by every test in this binary. Rust's
+/// `lingxi_core::host::live_sessions`) shared by every test in this binary. Rust's
 /// default harness runs a file's `#[tokio::test]` fns CONCURRENTLY, so
 /// without this these five tests race each other on that global state — this
 /// file's own version of the guard `boot.rs`'s `LOOP_KA_TEST_SERIAL` documents
@@ -132,7 +132,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         // in the developer's real login keychain would make this test
         // machine-dependent.
         isolated_credential_storage: true,
-        credential_storage_policy: platform_api::CredentialStoragePolicy::NativePreferred,
+        credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativePreferred,
         recent_models: Vec::new(),
         fallback_model: None,
         custom_betas: Vec::new(),

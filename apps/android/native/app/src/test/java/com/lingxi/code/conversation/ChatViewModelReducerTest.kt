@@ -1,23 +1,23 @@
 package com.lingxi.code.conversation
 
 import androidx.lifecycle.SavedStateHandle
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.CostDto
-import com.lingxi.code.bindings.HeadlineKindDto
-import com.lingxi.code.bindings.ImageRefDto
-import com.lingxi.code.bindings.MessageBlockDto
-import com.lingxi.code.bindings.MessageDto
-import com.lingxi.code.bindings.PlanTaskDto
-import com.lingxi.code.bindings.PlanTaskStateDto
-import com.lingxi.code.bindings.TaskStatusDto
-import com.lingxi.code.bindings.TaskRowDto
-import com.lingxi.code.bindings.ToolHeaderDto
-import com.lingxi.code.bindings.ToolResultDisplayDto
-import com.lingxi.code.bindings.ToolVerbDto
-import com.lingxi.code.bindings.TurnOutcomeDto
-import com.lingxi.code.bindings.TurnRecoverySnapshotDto
-import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.CostDto
+import com.lingxi.code.bindings.client.HeadlineKindDto
+import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.MessageBlockDto
+import com.lingxi.code.bindings.client.MessageDto
+import com.lingxi.code.bindings.client.PlanTaskDto
+import com.lingxi.code.bindings.client.PlanTaskStateDto
+import com.lingxi.code.bindings.client.TaskStatusDto
+import com.lingxi.code.bindings.client.TaskRowDto
+import com.lingxi.code.bindings.client.ToolHeaderDto
+import com.lingxi.code.bindings.client.ToolResultDisplayDto
+import com.lingxi.code.bindings.client.ToolVerbDto
+import com.lingxi.code.bindings.client.TurnOutcomeDto
+import com.lingxi.code.bindings.client.TurnRecoverySnapshotDto
+import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
@@ -404,7 +404,7 @@ class ChatViewModelReducerTest {
         runCurrent()
 
         vm.reduceClientEvent(ClientEvent.Error(
-            kind = com.lingxi.code.bindings.ErrorKindDto.INTERNAL,
+            kind = com.lingxi.code.bindings.client.ErrorKindDto.INTERNAL,
             message = "force_compact failed: handle action failed: rate limited",
         ))
 

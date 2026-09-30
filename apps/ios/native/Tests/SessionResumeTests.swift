@@ -1702,14 +1702,14 @@ visionDelegationEnabled: true)
     private final class TestMobileEngineHandle: MobileEngineHandle {
         private let submitHandler: (ClientCommand) async throws -> Void
 
-        required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        required init(unsafeFromHandle handle: UInt64) {
             submitHandler = { _ in }
-            super.init(unsafeFromRawPointer: pointer)
+            super.init(unsafeFromHandle: handle)
         }
 
         init(submitHandler: @escaping (ClientCommand) async throws -> Void) {
             self.submitHandler = submitHandler
-            super.init(noPointer: .init())
+            super.init(noHandle: .init())
         }
 
         override func submit(command: ClientCommand) async throws {

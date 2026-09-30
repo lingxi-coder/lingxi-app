@@ -50,7 +50,7 @@ pub struct PermissionExchange {
     /// not render an Auto row; clients must not infer this from the request.
     pub auto_mode_prompt: Option<AutoModePrompt>,
     /// (Finding 22) Mirrors
-    /// `platform_api::permission_gate::PermissionCheckContext::background_owned`:
+    /// `lingxi_core::host::permission_gate::PermissionCheckContext::background_owned`:
     /// `true` only for a dispatch issued through an invoker the composition
     /// root built exclusively for a background task with no owning
     /// interactive turn (as of writing, only the `/fusion` background task).

@@ -1,6 +1,12 @@
-# M8-P12: UniFFI bindgen config — consumed in M9 once the `uniffi` crate dep is
-# added (omitted in M8 for the `--offline` build gate). M9 runs
-# `uniffi-bindgen generate … --language kotlin` with this config.
-[bindings.kotlin]
-package_name = "com.lingxi.code.bindings"
+# Global configuration for the pinned UniFFI 0.32 native pipeline.
+[defaults.bindings.kotlin]
 generate_immutable_records = true
+
+[crates.client.bindings.kotlin]
+package_name = "com.lingxi.code.bindings.client"
+
+[crates.harness_runtime.bindings.kotlin]
+package_name = "com.lingxi.code.bindings.runtime"
+
+[crates.android_aar.bindings.kotlin]
+package_name = "com.lingxi.code.bindings.android"

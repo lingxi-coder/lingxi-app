@@ -36,7 +36,7 @@ use crate::renderable::Renderable;
 pub struct TasksView {
     /// Current visible registry projection, grouped in oracle dialog order.
     rows: Vec<TaskRow>,
-    registry: Option<Arc<dyn platform_api::task_registry::TaskRegistryHandle>>,
+    registry: Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
     parked_agents: HashSet<String>,
     monitors: HashSet<String>,
     last_refresh: Option<Instant>,
@@ -84,7 +84,7 @@ impl TasksView {
     #[must_use]
     pub fn with_registry(
         mut self,
-        registry: Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     ) -> Self {
         self.registry = Some(registry);
         self.refresh(Instant::now());
@@ -108,8 +108,8 @@ impl TasksView {
         else {
             return;
         };
-        let Ok(mut records) =
-            runtime.block_on(registry.list(platform_api::task_registry::TaskListFilter::default()))
+        let Ok(mut records) = runtime
+            .block_on(registry.list(lingxi_core::host::task_registry::TaskListFilter::default()))
         else {
             return;
         };
@@ -800,15 +800,15 @@ mod tests {
         ));
     }
 
-    struct LiveRegistry(std::sync::Mutex<Vec<platform_api::task_registry::TaskRecord>>);
+    struct LiveRegistry(std::sync::Mutex<Vec<lingxi_core::host::task_registry::TaskRecord>>);
     #[async_trait::async_trait]
-    impl platform_api::task_registry::TaskRegistryHandle for LiveRegistry {
+    impl lingxi_core::host::task_registry::TaskRegistryHandle for LiveRegistry {
         async fn create(
             &self,
-            _i: platform_api::task_registry::TaskCreateInput,
+            _i: lingxi_core::host::task_registry::TaskCreateInput,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -816,27 +816,27 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            Option<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Option<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
         async fn list(
             &self,
-            _f: platform_api::task_registry::TaskListFilter,
+            _f: lingxi_core::host::task_registry::TaskListFilter,
         ) -> Result<
-            Vec<platform_api::task_registry::TaskRecord>,
-            platform_api::task_registry::TaskRegistryError,
+            Vec<lingxi_core::host::task_registry::TaskRecord>,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             Ok(self.0.lock().unwrap().clone())
         }
         async fn update(
             &self,
             _id: &str,
-            _p: platform_api::task_registry::TaskUpdatePatch,
+            _p: lingxi_core::host::task_registry::TaskUpdatePatch,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -845,8 +845,8 @@ mod tests {
             _id: &str,
             _s: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -854,8 +854,8 @@ mod tests {
             &self,
             _id: &str,
         ) -> Result<
-            platform_api::task_registry::TaskRecord,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskRecord,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -864,8 +864,8 @@ mod tests {
             _id: &str,
             _o: Option<u64>,
         ) -> Result<
-            platform_api::task_registry::TaskOutputChunk,
-            platform_api::task_registry::TaskRegistryError,
+            lingxi_core::host::task_registry::TaskOutputChunk,
+            lingxi_core::host::task_registry::TaskRegistryError,
         > {
             unreachable!()
         }
@@ -946,20 +946,20 @@ mod tests {
     fn mounted_dialog_refreshes_registry_and_preserves_selected_identity() {
         let registry = Arc::new(LiveRegistry(std::sync::Mutex::new(vec![])));
         let mut view = TasksView::new(vec![], Theme::dark()).with_registry(registry.clone());
-        let mut record = platform_api::task_registry::TaskRecord {
+        let mut record = lingxi_core::host::task_registry::TaskRecord {
             task_id: "agent1".into(),
             task_type: "local_agent".into(),
             status: "running".into(),
             description: "working".into(),
             ..Default::default()
         };
-        let finished = platform_api::task_registry::TaskRecord {
+        let finished = lingxi_core::host::task_registry::TaskRecord {
             task_id: "shell-done".into(),
             task_type: "local_bash".into(),
             status: "completed".into(),
             ..Default::default()
         };
-        let foreground = platform_api::task_registry::TaskRecord {
+        let foreground = lingxi_core::host::task_registry::TaskRecord {
             task_id: "shell-fg".into(),
             task_type: "local_bash".into(),
             status: "running".into(),

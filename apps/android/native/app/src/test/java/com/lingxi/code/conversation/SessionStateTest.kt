@@ -1,11 +1,11 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.ErrorKindDto
-import com.lingxi.code.bindings.MessageBlockDto
-import com.lingxi.code.bindings.MessageDto
-import com.lingxi.code.bindings.SessionModeDto
-import com.lingxi.code.bindings.SessionRowDto
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ErrorKindDto
+import com.lingxi.code.bindings.client.MessageBlockDto
+import com.lingxi.code.bindings.client.MessageDto
+import com.lingxi.code.bindings.client.SessionModeDto
+import com.lingxi.code.bindings.client.SessionRowDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Message

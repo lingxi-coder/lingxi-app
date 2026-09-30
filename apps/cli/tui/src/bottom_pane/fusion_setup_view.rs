@@ -56,7 +56,6 @@ impl FusionSetupView {
         let label = match step {
             FusionSetupStep::Panels => "Panel models",
             FusionSetupStep::Analyst => "Analyst model",
-            FusionSetupStep::Synthesizer => "Synthesizer model",
             FusionSetupStep::Confirm => "Review",
         };
         format!(
@@ -141,13 +140,9 @@ impl FusionSetupView {
                 .as_ref()
                 .map_or_else(|| "—".to_string(), ToString::to_string)
         )));
-        lines.push(Line::from(format!(
-            "Synthesizer {}",
-            self.state
-                .synthesizer
-                .as_ref()
-                .map_or_else(|| "—".to_string(), ToString::to_string)
-        )));
+        lines.push(Line::from(
+            "Final synthesis uses the parent conversation model.",
+        ));
         lines.push(Line::from(""));
         lines.push(Line::from(format!(
             "[{}] Also enable Fusion for agents and workflows (fusion.enabled)",
@@ -155,7 +150,7 @@ impl FusionSetupView {
         )));
         lines.push(Line::from(Span::styled(
             "/fusion works either way; this switch only adds the Fusion agent and \
-             workflow fusion().",
+             parent-session synthesis.",
             Style::default().add_modifier(Modifier::DIM),
         )));
         lines
@@ -166,7 +161,7 @@ impl FusionSetupView {
             FusionSetupStep::Panels => {
                 "type to filter · Space pick/unpick · Enter next · Esc cancel".to_string()
             }
-            FusionSetupStep::Analyst | FusionSetupStep::Synthesizer => {
+            FusionSetupStep::Analyst => {
                 "type to filter · Enter pick & next · ← back · Esc cancel".to_string()
             }
             FusionSetupStep::Confirm => "Enter save · e toggle · ← back · Esc cancel".to_string(),
@@ -251,7 +246,7 @@ mod tests {
     use super::*;
     use crate::fusion::setup::FusionCandidate;
     use crossterm::event::{KeyCode, KeyModifiers};
-    use platform_api::FusionModelChoice;
+    use lingxi_core::host::FusionModelChoice;
     use ratatui::layout::Rect;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -302,7 +297,6 @@ mod tests {
             KeyCode::Char(' '),
             KeyCode::Down,
             KeyCode::Char(' '),
-            KeyCode::Enter,
             KeyCode::Enter,
             KeyCode::Enter,
         ] {
@@ -376,14 +370,13 @@ mod tests {
             KeyCode::Char(' '),
             KeyCode::Enter,
             KeyCode::Enter,
-            KeyCode::Enter,
         ] {
             view.handle_key(key(code));
         }
         let text = render_text(&view);
         assert!(text.contains("Panels"), "{text}");
         assert!(text.contains("Analyst"), "{text}");
-        assert!(text.contains("Synthesizer"), "{text}");
+        assert!(text.contains("parent conversation model"), "{text}");
         assert!(text.contains("[ ] Also enable"), "{text}");
         view.handle_key(key(KeyCode::Char('e')));
         assert!(render_text(&view).contains("[x] Also enable"));

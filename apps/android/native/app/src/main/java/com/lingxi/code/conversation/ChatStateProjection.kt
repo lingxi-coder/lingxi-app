@@ -1,7 +1,7 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.R
-import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.bindings.client.TaskStatusDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import kotlinx.coroutines.flow.map

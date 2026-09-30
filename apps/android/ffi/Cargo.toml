@@ -47,11 +47,10 @@ uniffi = [
 ]
 
 [dependencies]
+core = { workspace = true }
 mobile-linux-api.workspace = true
 harness-runtime = { workspace = true, default-features = false, features = ["mobile"] }
 skill-api = { workspace = true }
-platform-api = { workspace = true }
-protocol = { workspace = true }
 branding.workspace = true
 thiserror.workspace = true
 serde.workspace = true

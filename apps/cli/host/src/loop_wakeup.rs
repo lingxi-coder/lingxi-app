@@ -1,12 +1,12 @@
 //! Dynamic /loop delivery for the local terminal host.
 use harness_runtime::desktop::loop_tools;
+use lingxi_core::host::OrchestratorHandle;
 use loop_tools::WakeupScheduler;
-use platform_api::OrchestratorHandle;
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct CliLoopHost {
-    session_id: Arc<std::sync::Mutex<Option<protocol::SessionId>>>,
+    session_id: Arc<std::sync::Mutex<Option<lingxi_core::types::SessionId>>>,
     pub state: Arc<loop_tools::LoopRuntime>,
     pub scheduler: Arc<dyn WakeupScheduler>,
     session_cron: Option<Arc<loop_tools::SessionCronScheduler>>,
@@ -173,7 +173,7 @@ impl CliLoopHost {
     }
 }
 struct CliDelivery {
-    session_id: Arc<std::sync::Mutex<Option<protocol::SessionId>>>,
+    session_id: Arc<std::sync::Mutex<Option<lingxi_core::types::SessionId>>>,
     queue: Arc<msgqueue::MessageQueueManager>,
     orch: Weak<orchestrator::ConversationOrchestrator>,
     tx: tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,

@@ -1,6 +1,6 @@
 use crate::exit_codes;
 use crate::output::OutputSink;
-use platform_api::FusionPublicationStatus;
+use lingxi_core::host::FusionPublicationStatus;
 
 /// Extract a `local_fusion` task id from `/fusion`'s `Handled` display text
 /// (`"{task_id}  {preset}  {scope}"`, `harness-runtime/src/desktop/

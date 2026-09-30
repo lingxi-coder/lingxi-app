@@ -1,6 +1,8 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.*
+import com.lingxi.code.bindings.client.*
+import com.lingxi.code.bindings.runtime.*
+import com.lingxi.code.bindings.android.*
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test

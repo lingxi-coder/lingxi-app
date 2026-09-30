@@ -1,7 +1,7 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.AskUserQuestionRequestDto
-import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.bindings.client.AskUserQuestionRequestDto
+import com.lingxi.code.bindings.client.TaskStatusDto
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.SessionRef
 import org.junit.Assert.assertFalse

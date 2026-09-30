@@ -1,6 +1,6 @@
 package com.lingxi.code.conversation
 
-import com.lingxi.code.bindings.PermissionRequest
+import com.lingxi.code.bindings.client.PermissionRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow

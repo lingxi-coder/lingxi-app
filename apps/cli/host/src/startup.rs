@@ -62,7 +62,7 @@ pub(super) async fn run_config_startup(command: Option<&crate::commands::Command
         if let Err(error) = migrations::global_config::ensure_first_start_metadata(
             &global_config_path,
             &first_start_time,
-            platform_api::CLAUDE_CODE_VERSION,
+            lingxi_core::host::CLAUDE_CODE_VERSION,
         ) {
             tracing::warn!(%error, "first-start metadata write failed");
         }

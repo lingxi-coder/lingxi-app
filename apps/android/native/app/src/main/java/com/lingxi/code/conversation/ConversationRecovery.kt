@@ -6,11 +6,11 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import com.lingxi.code.R
-import com.lingxi.code.bindings.ClientCommand
-import com.lingxi.code.bindings.ClientEvent
-import com.lingxi.code.bindings.ImageRefDto
-import com.lingxi.code.bindings.PermissionResponseDto
-import com.lingxi.code.bindings.TurnRecoveryStateDto
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ImageRefDto
+import com.lingxi.code.bindings.client.PermissionResponseDto
+import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.MCPServer

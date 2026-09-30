@@ -43,13 +43,13 @@ use client::protocol::commands::ClientCommand;
 use client::protocol::events::ClientEvent;
 use client::protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
 use futures_util::{SinkExt, StreamExt};
+use lingxi_core::types::ToolUseId;
 use orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
     message_delta_stop, message_start, message_stop, text_delta, MockApiClient,
     MockStreamingApiClient, StaticMemoryProvider,
 };
 use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
-use protocol::ToolUseId;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -162,7 +162,7 @@ fn build_connection() -> BridgeConnection {
     // sink; we wire them into the orchestrator so the SAME outbound channel feeds
     // streamed events AND permission requests.
     let connection = BridgeConnection::new();
-    let output: Arc<dyn platform_api::OutputStream> =
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(AdapterOutputStream::new(connection.event_sink()));
     let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
 

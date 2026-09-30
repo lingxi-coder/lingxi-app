@@ -159,9 +159,16 @@ pub fn roster_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("roster.json")
 }
 
-pub fn lock_roster(runtime_dir: &Path) -> std::io::Result<platform_api::rooted_fs::RootedFileLock> {
-    platform_api::rooted_fs::lock_exclusive(runtime_dir, Path::new(ROSTER_LOCK_FILE), 0o700, 0o600)
-        .map_err(|error| std::io::Error::other(error.to_string()))
+pub fn lock_roster(
+    runtime_dir: &Path,
+) -> std::io::Result<lingxi_core::host::rooted_fs::RootedFileLock> {
+    lingxi_core::host::rooted_fs::lock_exclusive(
+        runtime_dir,
+        Path::new(ROSTER_LOCK_FILE),
+        0o700,
+        0o600,
+    )
+    .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 pub fn with_roster_lock<T>(

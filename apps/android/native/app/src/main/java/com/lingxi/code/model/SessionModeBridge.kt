@@ -1,6 +1,6 @@
 package com.lingxi.code.model
 
-import com.lingxi.code.bindings.SessionModeDto
+import com.lingxi.code.bindings.client.SessionModeDto
 
 fun SessionMode.toDto(): SessionModeDto = when (this) {
     SessionMode.Chat -> SessionModeDto.CHAT

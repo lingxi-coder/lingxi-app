@@ -1,8 +1,8 @@
 use super::suggestions::StreamFileSuggestionIndex;
 use crate::init::Runtime;
 use crate::stream_json_input::ControlPlaneWriter;
+use lingxi_core::host::{McpStatus, OrchestratorHandle};
 use permission;
-use platform_api::{McpStatus, OrchestratorHandle};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -262,7 +262,7 @@ pub(super) async fn dispatch_control_request(
                 Target::Invalid => {
                     writer.reply_error(request_id, "background_tasks: tool_use_id must be a string")
                 }
-                _ if platform_api::env::background_tasks_disabled() => {
+                _ if lingxi_core::host::env::background_tasks_disabled() => {
                     writer.reply_error(request_id, "Background tasks are disabled in this session.")
                 }
                 Target::One(id) => {
@@ -277,7 +277,9 @@ pub(super) async fn dispatch_control_request(
         }
         "register_repo_root" => {
             let request_value = frame.get("request").cloned().unwrap_or_else(|| json!({}));
-            match serde_json::from_value::<platform_api::RegisterRepoRootRequest>(request_value) {
+            match serde_json::from_value::<lingxi_core::host::RegisterRepoRootRequest>(
+                request_value,
+            ) {
                 Ok(request) if !request.path.trim().is_empty() => {
                     match orchestrator.register_repo_root(request).await {
                         Ok(outcome) => match serde_json::to_value(outcome) {
@@ -645,7 +647,7 @@ pub(super) fn pure_control_response(subtype: &str, frame: &serde_json::Value) ->
     match subtype {
         // §2.2 #8: `{version, buildTime}`.
         "get_binary_version" => PureControlReply::Success(Some(json!({
-            "version": platform_api::CLAUDE_CODE_VERSION,
+            "version": lingxi_core::host::CLAUDE_CODE_VERSION,
             "buildTime": ""
         }))),
         // §2.2 #45: telemetry-only; ack with `{}`.
@@ -752,13 +754,13 @@ pub(super) fn orphan_decision_from_payload(
                 .and_then(serde_json::Value::as_str)
                 .and_then(|value| match value {
                     "user_temporary" => Some(
-                        platform_api::permission_gate::ToolDecisionClassification::UserTemporary,
+                        lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
                     ),
                     "user_permanent" => Some(
-                        platform_api::permission_gate::ToolDecisionClassification::UserPermanent,
+                        lingxi_core::host::permission_gate::ToolDecisionClassification::UserPermanent,
                     ),
                     "user_reject" => {
-                        Some(platform_api::permission_gate::ToolDecisionClassification::UserReject)
+                        Some(lingxi_core::host::permission_gate::ToolDecisionClassification::UserReject)
                     }
                     _ => None,
                 });
@@ -798,7 +800,7 @@ pub(super) fn orphan_decision_from_payload(
 pub(super) async fn recover_orphaned_permission(
     runtime: &Runtime,
     cmd: msgqueue::QueuedCommand,
-    handled_orphans: &mut std::collections::HashSet<protocol::ToolUseId>,
+    handled_orphans: &mut std::collections::HashSet<lingxi_core::types::ToolUseId>,
 ) {
     let msgqueue::QueuedCommandContent::OrphanedPermission {
         tool_use_id,
@@ -914,7 +916,7 @@ pub(super) const MANAGED_CLOUD_PROVIDER_ENV: [&str; 6] = [
 pub(super) fn env_api_provider_is_first_party() -> bool {
     !MANAGED_CLOUD_PROVIDER_ENV
         .iter()
-        .any(|key| platform_api::env::is_env_truthy(std::env::var(key).ok().as_deref()))
+        .any(|key| lingxi_core::host::env::is_env_truthy(std::env::var(key).ok().as_deref()))
 }
 
 /// `xn()==="firstParty"` for this session: the env-derived provider
@@ -924,7 +926,7 @@ pub(super) fn env_api_provider_is_first_party() -> bool {
 /// `not_first_party`.
 pub(super) fn session_model_is_first_party(
     env_first_party: bool,
-    listings: &[platform_api::orchestrator::ModelListing],
+    listings: &[lingxi_core::host::orchestrator::ModelListing],
     model: &str,
 ) -> bool {
     if !env_first_party {
@@ -960,9 +962,9 @@ pub(super) fn resolve_fast_mode_state(
     fast_mode_disabled_reason: Option<&str>,
     sdk_fast_mode_opt_in: bool,
 ) -> &'static str {
-    let model_supports_fast_mode = platform_api::model_capabilities::has_capability(
+    let model_supports_fast_mode = lingxi_core::host::model_capabilities::has_capability(
         model,
-        platform_api::model_capabilities::ModelCapability::FastMode,
+        lingxi_core::host::model_capabilities::ModelCapability::FastMode,
     );
     if fast_mode_disabled_reason.is_none() && sdk_fast_mode_opt_in && model_supports_fast_mode {
         "on"
@@ -1019,7 +1021,7 @@ pub(super) fn model_capabilities(
         return model_capabilities("claude-sonnet-5");
     }
     let capabilities =
-        platform_api::model_capabilities::initialization_capabilities_for(request_model);
+        lingxi_core::host::model_capabilities::initialization_capabilities_for(request_model);
     (
         capabilities.supports_effort,
         capabilities.supported_effort_levels.to_vec(),

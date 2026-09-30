@@ -1,7 +1,7 @@
 package com.lingxi.code.notify
 
-import com.lingxi.code.bindings.AndroidNotification
-import com.lingxi.code.bindings.NotificationFfiException
+import com.lingxi.code.bindings.android.AndroidNotification
+import com.lingxi.code.bindings.android.NotificationFfiException
 
 /**
  * Adapts the native [NotificationController] to the generated UniFFI callback

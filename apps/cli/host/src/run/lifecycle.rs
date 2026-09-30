@@ -3,7 +3,7 @@ use crate::control_plane::StdioControlPlane;
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
-use platform_api::OrchestratorHandle;
+use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 
 /// Claude Code 2.1.217 print-loop budget cleanup (`Wam` + `rcr`). After every
@@ -15,7 +15,7 @@ use std::sync::Arc;
 pub(super) async fn stop_background_agents_at_budget(
     max_budget_usd: Option<f64>,
     orchestrator: &dyn OrchestratorHandle,
-    task_registry: &dyn platform_api::task_registry::TaskRegistryHandle,
+    task_registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle,
 ) -> usize {
     let Some(max_budget_usd) = max_budget_usd else {
         return 0;
@@ -51,9 +51,9 @@ pub(super) async fn wind_down_print_tasks(
         if max_budget_usd.is_some_and(|limit| budget_reached(limit, cost.total_nano_usd)) {
             break;
         }
-        let records = platform_api::task_registry::TaskRegistryHandle::list(
+        let records = lingxi_core::host::task_registry::TaskRegistryHandle::list(
             runtime.task_registry.as_ref(),
-            platform_api::task_registry::TaskListFilter::default(),
+            lingxi_core::host::task_registry::TaskListFilter::default(),
         )
         .await
         .unwrap_or_default();
@@ -102,10 +102,10 @@ pub(super) async fn wind_down_print_tasks(
 }
 
 pub(super) fn print_task_keeps_session_alive(
-    task: &platform_api::task_registry::TaskRecord,
+    task: &lingxi_core::host::task_registry::TaskRecord,
 ) -> bool {
-    platform_api::task_activity::is_active_delegated_task(task)
-        || (platform_api::task_activity::is_live_shell_task(task)
+    lingxi_core::host::task_activity::is_active_delegated_task(task)
+        || (lingxi_core::host::task_activity::is_live_shell_task(task)
             && task.kind.as_deref() != Some("monitor"))
 }
 
@@ -118,9 +118,9 @@ pub(super) async fn stop_print_tasks(runtime: &Runtime) {
 }
 
 pub(super) async fn stop_print_tasks_matching(runtime: &Runtime, subscriptions_only: bool) {
-    if let Ok(records) = platform_api::task_registry::TaskRegistryHandle::list(
+    if let Ok(records) = lingxi_core::host::task_registry::TaskRegistryHandle::list(
         runtime.task_registry.as_ref(),
-        platform_api::task_registry::TaskListFilter::default(),
+        lingxi_core::host::task_registry::TaskListFilter::default(),
     )
     .await
     {

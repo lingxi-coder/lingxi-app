@@ -211,7 +211,7 @@ fn connect_display_meta(profile_name: &str) -> DisplayMeta {
 /// Re-exported so this module reads the same way it did; the parser itself is
 /// shared with the desktop provider header via `platform_api`, so the two
 /// cannot drift into labelling one profile differently.
-use platform_api::split_connection_profile;
+use lingxi_core::host::split_connection_profile;
 
 /// "brand-new-provider" → "Brand New Provider" (split on '-'/'_').
 fn title_case(id: &str) -> String {

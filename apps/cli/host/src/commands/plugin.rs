@@ -3274,18 +3274,19 @@ fn validate_lsp_object(
         return;
     };
     for (name, config) in map {
-        let parsed = match serde_json::from_value::<platform_api::LspServerConfig>(config.clone()) {
-            Ok(config) => config,
-            Err(error) => {
-                push_issue(
-                    errors,
-                    prefix,
-                    &format!("{field}.{name}"),
-                    &format!("Invalid LSP server configuration: {error}"),
-                );
-                continue;
-            }
-        };
+        let parsed =
+            match serde_json::from_value::<lingxi_core::host::LspServerConfig>(config.clone()) {
+                Ok(config) => config,
+                Err(error) => {
+                    push_issue(
+                        errors,
+                        prefix,
+                        &format!("{field}.{name}"),
+                        &format!("Invalid LSP server configuration: {error}"),
+                    );
+                    continue;
+                }
+            };
         if parsed.command.trim().is_empty() {
             push_issue(
                 errors,

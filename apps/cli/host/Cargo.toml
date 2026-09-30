@@ -14,6 +14,8 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
+lingxi-llm-client.workspace = true
+http-client.workspace = true
 configuration-admin = { workspace = true }
 # Single source of truth for the product namespace (config dir/file names, env
 # var names, memory filenames, plugin manifest dir). The CLI routes its runtime
@@ -41,8 +43,6 @@ secret = { workspace = true }
 # engine-tier crates. Legal: the dep rule (§0.3) only forbids
 # client-protocol/client-adapter → apps/*, not apps/* → client-protocol/client-adapter.
 client = { workspace = true, features = ["adapter"] }
-protocol = { workspace = true }
-platform-api = { workspace = true }
 command-api = { workspace = true, features = ["builtin-handlers"] }
 orchestrator = { workspace = true }
 core = { workspace = true }

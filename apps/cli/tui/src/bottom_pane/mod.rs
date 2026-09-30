@@ -200,7 +200,7 @@ pub enum BottomPaneOutcome {
         /// The split point.
         message: uuid::Uuid,
         /// Which side is summarized.
-        direction: platform_api::SummarizeDirection,
+        direction: lingxi_core::host::SummarizeDirection,
         /// The user's "add context (optional)" text, trimmed; `None` when empty.
         context: Option<String>,
     },
@@ -348,7 +348,7 @@ pub struct BottomPane {
     /// Owner-fed context-pressure banner (`TurnEvent::ContextPressure` — the
     /// claude-code `<TokenWarning>` line). Rendered as its own row between the
     /// status row and the composer; `None` renders nothing.
-    context_pressure: Option<platform_api::ContextPressureBanner>,
+    context_pressure: Option<lingxi_core::host::ContextPressureBanner>,
     /// Theme for status-row styling.
     theme: Theme,
     /// Session accent color (`/color`): tints the composer's `›` gutter
@@ -893,7 +893,7 @@ impl BottomPane {
     }
 
     /// Open the held-peer-message dialog (2.1.232 inbound hold).
-    pub fn show_held_peer(&mut self, held: platform_api::uds_inbox::HeldPeer) {
+    pub fn show_held_peer(&mut self, held: lingxi_core::host::uds_inbox::HeldPeer) {
         self.view_stack
             .push(Box::new(held_peer_view::HeldPeerView::new(held)));
     }
@@ -944,7 +944,7 @@ impl BottomPane {
     pub fn show_live_tasks(
         &mut self,
         rows: Vec<tui_core::multiagent::TaskRow>,
-        registry: std::sync::Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
+        registry: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     ) {
         self.view_stack.push(Box::new(
             tasks_view::TasksView::new(rows, self.theme).with_registry(registry),
@@ -1046,7 +1046,10 @@ impl BottomPane {
 
     /// Set or clear the owner-fed context-pressure banner
     /// (`TurnEvent::ContextPressure`); `None` removes the banner row.
-    pub fn set_context_pressure(&mut self, banner: Option<platform_api::ContextPressureBanner>) {
+    pub fn set_context_pressure(
+        &mut self,
+        banner: Option<lingxi_core::host::ContextPressureBanner>,
+    ) {
         self.context_pressure = banner;
     }
 
@@ -1106,7 +1109,7 @@ impl BottomPane {
 
     /// The context-pressure banner currently shown, if any (tests/owner).
     #[must_use]
-    pub fn context_pressure(&self) -> Option<&platform_api::ContextPressureBanner> {
+    pub fn context_pressure(&self) -> Option<&lingxi_core::host::ContextPressureBanner> {
         self.context_pressure.as_ref()
     }
 
@@ -2040,11 +2043,14 @@ impl BottomPane {
     /// byte-exact orchestrator-computed text, colored by severity (`Dim` →
     /// theme dim, `Warning`/`Error` → the matching theme colors). Only called
     /// when a banner is set (its zone is zero-height otherwise).
-    fn context_pressure_line(&self, banner: &platform_api::ContextPressureBanner) -> Line<'static> {
+    fn context_pressure_line(
+        &self,
+        banner: &lingxi_core::host::ContextPressureBanner,
+    ) -> Line<'static> {
         let color = match banner.level {
-            platform_api::ContextPressureLevel::Dim => self.theme.dim,
-            platform_api::ContextPressureLevel::Warning => self.theme.warning,
-            platform_api::ContextPressureLevel::Error => self.theme.error,
+            lingxi_core::host::ContextPressureLevel::Dim => self.theme.dim,
+            lingxi_core::host::ContextPressureLevel::Warning => self.theme.warning,
+            lingxi_core::host::ContextPressureLevel::Error => self.theme.error,
         };
         Line::from(Span::styled(
             banner.text.clone(),
@@ -4041,9 +4047,9 @@ mod tests {
     fn context_pressure_banner_takes_one_row_between_status_and_composer() {
         let mut pane = pane();
         let without = pane.desired_height(80);
-        pane.set_context_pressure(Some(platform_api::ContextPressureBanner {
+        pane.set_context_pressure(Some(lingxi_core::host::ContextPressureBanner {
             text: "Context left until auto-compact: 8%".to_string(),
-            level: platform_api::ContextPressureLevel::Dim,
+            level: lingxi_core::host::ContextPressureLevel::Dim,
         }));
         assert_eq!(pane.desired_height(80), without + 1, "banner adds one row");
         let area = Rect::new(0, 0, 80, pane.desired_height(80));

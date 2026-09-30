@@ -17,7 +17,7 @@
 //! - [`router::CommandRouter`] — the engine-routing seam for the FULL command
 //!   surface (model, listings, slash, tasks, session control) the connection
 //!   delegates non-turn/non-permission commands to (F2-08).
-//! - [`audio_bridge::AudioBridge`] — the desktop `platform_api::AudioService`
+//! - [`audio_bridge::AudioBridge`] — the desktop `lingxi_core::host::AudioService`
 //!   proxy: each device operation becomes one identity-scoped
 //!   [`client::protocol::events::ClientEvent::AudioRequest`] awaiting the client's
 //!   `AudioResponse` (the microphone/speaker live in Electron, not in the engine).

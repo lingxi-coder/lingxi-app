@@ -31,6 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"                       # apps/ios/native
 REPO_ROOT="$(cd "${IOS_DIR}/../../.." && pwd)"                     # worktree root
 CARGO_DIR="${REPO_ROOT}"                           # Rust workspace
+cd "${CARGO_DIR}"
 # Honour an inherited CARGO_TARGET_DIR: cargo reads it from the environment, so
 # hard-coding the shared dir here would make the script look for outputs
 # somewhere cargo never wrote them. A private dir also keeps a long iOS release
@@ -96,6 +97,7 @@ done
 # The SDK native-support framework contains no Rust core. LingXiCodeFFI below
 # remains the only Rust/UniFFI implementation in the application.
 LINUX_RUNTIME_BUILD="${SCRIPT_DIR}/build-linux-runtime.sh"
+if [[ "${LINGXI_FFI_BINDINGS_ONLY:-0}" != "1" ]]; then
 if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
   "${LINUX_RUNTIME_BUILD}" --simulator-only
 elif [[ "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
@@ -109,6 +111,7 @@ elif [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
   "${LINUX_RUNTIME_BUILD}" --local-app-runtime
 else
   "${LINUX_RUNTIME_BUILD}"
+fi
 fi
 SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 
@@ -144,10 +147,10 @@ fi
 # the default and always regenerates.
 if [[ "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" == "1" ]]; then
   for required in \
-    "${GEN_DIR}/client_protocol.swift" \
-    "${GEN_DIR}/client_protocolFFI.h" \
+    "${GEN_DIR}/client.swift" \
+    "${GEN_DIR}/clientFFI.h" \
     "${GEN_DIR}/harness_runtime.swift" \
-    "${GEN_DIR}/ios_framework.swift"; do
+    "${GEN_DIR}/LingxiCodeBindings.swift"; do
     [[ -f "${required}" ]] || {
       echo "ERROR: generated-binding reuse requested but file is missing: ${required}" >&2
       exit 1
@@ -156,7 +159,7 @@ if [[ "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" == "1" ]]; then
   log "Reusing validated Swift bindings in ${GEN_DIR} …"
 else
   log "Building host cdylib for bindgen introspection…"
-  cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi
+  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi
 
   HOST_DYLIB_PATH="${CARGO_TARGET_DIR}/debug/${HOST_DYLIB}"
   [[ -f "${HOST_DYLIB_PATH}" ]] || { echo "ERROR: host dylib not produced: ${HOST_DYLIB_PATH}" >&2; exit 1; }
@@ -164,19 +167,8 @@ else
   log "Generating Swift bindings into ${GEN_DIR} …"
   rm -rf "${GEN_DIR}"
   mkdir -p "${GEN_DIR}"
-# The `ios-framework` `uniffi-bindgen` bin is NOT the stock
-# `uniffi::uniffi_bindgen_main()`. Stock UniFFI 0.28.3 `--library` mode PANICS on
-# our surface (`interface/mod.rs:1126` — "unknown throw type") because the shared
-# host's async export `MobileEngineHandle::submit() -> Result<(), client_protocol
-# ::ClientError>` throws an error type that lives in a DIFFERENT crate, which
-# 0.28.3 records as `Type::External` and cannot render in the throws position.
-#
-# Our bin reimplements the Swift `generate --library` path over UniFFI's public
-# library APIs and re-tags that one external error throw type so 0.28.3 can emit
-# it (see the bin's module docs). It ships no `uniffi.toml`, so it uses an empty
-# config supplier and NEVER runs `cargo metadata` — no `--metadata-no-deps` flag,
-# no CWD-must-be-the-workspace requirement, no edition-2024 manifest-parse hazard.
-cargo run --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features cli \
+# Generate through the pinned UniFFI 0.32 public pipeline.
+cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features cli \
   --bin uniffi-bindgen -- \
   generate \
   --library "${HOST_DYLIB_PATH}" \
@@ -228,11 +220,11 @@ shopt -u nullglob
 # 1b. Single-Swift-module dedup pass
 # ---------------------------------------------------------------------------
 # UniFFI 0.28 `--library` mode emits ONE self-contained `.swift` per namespace
-# (client_protocol / client_adapter / harness_runtime / ios_framework). The iOS
+# (client / client / harness_runtime / ios_framework). The iOS
 # app compiles all four into ONE Swift module — which UniFFI itself REQUIRES for
 # cross-namespace (external) type access: a throwing method in `harness_runtime`
 # (`MobileEngineHandle.submit`) references `FfiConverterTypeClientError` /
-# `FfiConverterTypeClientCommand` that are DEFINED in `client_protocol` with no
+# `FfiConverterTypeClientCommand` that are DEFINED in `client` with no
 # explicit Swift import (UniFFI docs, types/remote_ext_types.md: "all generated
 # .swift files must be compiled together in a single module").
 #
@@ -243,7 +235,7 @@ shopt -u nullglob
 # module. That compiles for every namespace in isolation, but breaks the ONE
 # cross-file reference that matters: `harness_runtime.swift` calling
 # `FfiConverterTypeClientError.lift` — a `public` converter type whose `lift`
-# witness comes from `client_protocol.swift`'s `private protocol
+# witness comes from `client.swift`'s `private protocol
 # FfiConverterRustBuffer`, so it is "inaccessible due to 'private' protection"
 # from another file. (Swift error: harness_runtime.swift … 'lift' is inaccessible.)
 #
@@ -259,12 +251,12 @@ shopt -u nullglob
 # below-marker per-namespace helper (`uniffiEnsureInitialized`, the async
 # future callbacks, the checksum `initializationResult`) stays file-local.
 #
-# Canonical file = client_protocol.swift: it defines the cross-referenced
-# `ClientCommand` / `ClientError`, so its namespace's `ffi_client_protocol_
+# Canonical file = client.swift: it defines the cross-referenced
+# `ClientCommand` / `ClientError`, so its namespace's `ffi_client_
 # rustbuffer_*` symbols (used by the shared `RustBuffer` extension) are the ones
 # the deduped scaffolding calls — all present in the linked staticlib.
 log "Deduplicating shared Swift scaffolding into a single module…"
-CANON="client_protocol"
+CANON="client"
 MARKER="// Public interface members begin here."
 
 # Sanity: every generated file must carry the marker (else the bindgen output
@@ -288,7 +280,7 @@ for sw in "${GEN_DIR}"/*.swift; do
     # marker onward are emitted verbatim.
     awk -v marker="${MARKER}" '
       index($0, marker) == 1 { seen_marker = 1 }
-      !seen_marker && /^(private|fileprivate) (func|protocol|struct|enum|class|extension|let|var|typealias) / {
+      !seen_marker && /^(private|fileprivate) (final )?(func|protocol|struct|enum|class|extension|let|var|typealias) / {
         sub(/^(private|fileprivate) /, "")
       }
       { print }
@@ -316,7 +308,7 @@ done
 # `extension Task: UniffiForeignFutureTask {}` conformance — ONCE PER NAMESPACE
 # that exports an async callback interface. With >1 such namespace in the single
 # Swift module (M10-P3a added `IosEventListener` in `ios_framework` alongside the
-# pre-existing `ClientEventListener` in `client_adapter`), those two
+# pre-existing `ClientEventListener` in `client`), those two
 # non-`private` declarations COLLIDE: "invalid redeclaration of
 # 'UniffiForeignFutureTask'" / "ambiguous for type lookup". They sit BELOW the
 # `// Public interface members begin here.` marker, so the §1b pass (which only
@@ -326,14 +318,14 @@ done
 # `Task` conformance in exactly ONE keeper file and delete BOTH lines from every
 # other file. The two declarations are identical across namespaces and
 # module-internal, so module-internal references resolve to the single kept copy.
-# Prefer client_adapter.swift as the keeper when it contains the exact shared
+# Prefer client.swift as the keeper when it contains the exact shared
 # declaration; otherwise keep the first file that actually emits it. The
 # per-namespace `private UNIFFI_FOREIGN_FUTURE_HANDLE_MAP`, the `private`
 # `uniffiTraitInterfaceCallAsync*` helpers, and the namespaced
 # `uniffiForeignFutureHandleCount<Ns>()` are file-local / uniquely named and are
 # left untouched.
 log "Deduplicating async-foreign-future task protocol into a single module copy…"
-# Newer UniFFI output may namespace the client_adapter copy
+# Newer UniFFI output may namespace the client copy
 # (`ClientAdapterUniffiForeignFutureTask`) while leaving the ios_framework copy
 # unnamespaced. Only files containing the exact shared declaration participate
 # in this pass; if there is a single copy, keep it where bindgen emitted it.
@@ -347,7 +339,7 @@ done
 if [[ ${#FUTURE_PROTOCOL_FILES[@]} -gt 1 ]]; then
   FUTURE_KEEPER="${FUTURE_PROTOCOL_FILES[0]}"
   for sw in "${FUTURE_PROTOCOL_FILES[@]}"; do
-    if [[ "$(basename "${sw}" .swift)" == "client_adapter" ]]; then
+    if [[ "$(basename "${sw}" .swift)" == "client" ]]; then
       FUTURE_KEEPER="${sw}"
       break
     fi
@@ -376,7 +368,7 @@ fi
 # ---------------------------------------------------------------------------
 # UniFFI registers a `callback_interface`'s foreign vtable inside its namespace's
 # `private` lazy `initializationResult`, which is forced ONLY by that namespace's
-# `uniffiEnsureInitialized()` — called from async FFI calls or the SYNCHRONOUS
+# `uniffiEnsureIosFrameworkInitialized()` — called from async FFI calls or the SYNCHRONOUS
 # `makeRustCall`/`rustCallWithError` paths' callers, but NOT by the generated
 # `buildIosEngine` itself (it is a bare `rustCallWithError` that lowers the
 # listener WITHOUT first forcing `ios_framework`'s init). The engine then streams
@@ -387,13 +379,13 @@ fi
 # function, never built a handle, so this latent gap went unobserved.)
 #
 # Fix (deterministic, no bindgen/engine-semantics change): make `buildIosEngine`
-# call `ios_framework`'s `uniffiEnsureInitialized()` as its FIRST statement, so
+# call `ios_framework`'s `uniffiEnsureIosFrameworkInitialized()` as its FIRST statement, so
 # the `uniffiCallbackInitIosEventListener()` inside the lazy init runs before the
 # foreign listener is lowered and handed to the engine. The function/types are
 # unchanged; this only forces the same one-time init UniFFI already runs for
 # async entrypoints. Idempotent: skipped if the call is already present.
 log "Forcing IosEventListener callback-vtable init in engine constructors…"
-IOSF="${GEN_DIR}/ios_framework.swift"
+IOSF="${GEN_DIR}/LingxiCodeBindings.swift"
 [[ -f "${IOSF}" ]] || { echo "ERROR: ${IOSF} missing after bindgen" >&2; exit 1; }
 for constructor in buildIosEngine buildIosEngineWithConfig; do
   if ! grep -qF "func ${constructor}(" "${IOSF}"; then
@@ -406,13 +398,13 @@ for constructor in buildIosEngine buildIosEngineWithConfig; do
     awk -v signature="public func ${constructor}(" -v marker="${marker}" '
       index($0, signature) == 1 {
         print
-        print "    uniffiEnsureInitialized() // " marker " register IosEventListener vtable before lowering"
+        print "    uniffiEnsureIosFrameworkInitialized() // " marker " register IosEventListener vtable before lowering"
         next
       }
       { print }
     ' "${IOSF}" > "${tmp}"
     grep -qF "${marker}" "${tmp}" || {
-      echo "ERROR: failed to inject uniffiEnsureInitialized() into ${constructor}" >&2
+      echo "ERROR: failed to inject uniffiEnsureIosFrameworkInitialized() into ${constructor}" >&2
       exit 1
     }
     mv "${tmp}" "${IOSF}"
@@ -422,6 +414,11 @@ done
 SWIFT_COUNT="$(find "${GEN_DIR}" -maxdepth 1 -type f -name '*.swift' -print | wc -l | tr -d ' ')"
 [[ "${SWIFT_COUNT}" -gt 0 ]] || { echo "ERROR: no Swift bindings generated in ${GEN_DIR}" >&2; exit 1; }
 log "Swift bindings: ${SWIFT_COUNT} .swift file(s) + headers + module.modulemap (single-module deduped)"
+
+if [[ "${LINGXI_FFI_BINDINGS_ONLY:-0}" == "1" ]]; then
+  log "Bindings-only generation completed; target archives are not rebuilt."
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Per-arch staticlib builds
@@ -435,12 +432,12 @@ for t in "${BUILD_TARGETS[@]}"; do
     # headers to bindgen without changing Rust's target or the resulting slice.
     simulator_bindgen_args="--target=arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator -isysroot ${SIMULATOR_SDK}"
     BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} ${simulator_bindgen_args}" \
-      cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
+      cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
         --target "${t}" --"${PROFILE}"
   elif [[ "${t}" == "x86_64-apple-ios" ]]; then
     simulator_bindgen_args="--target=x86_64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator -isysroot ${SIMULATOR_SDK}"
     BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:-} ${simulator_bindgen_args}" \
-      cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
+      cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
         --target "${t}" --"${PROFILE}"
   else
     # The package also declares a cdylib for host-side UniFFI introspection.
@@ -448,7 +445,7 @@ for t in "${BUILD_TARGETS[@]}"; do
     # the final Xcode app link, so permit those symbols to remain unresolved;
     # the staticlib packaged below is unaffected and Xcode resolves them.
     RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-undefined,dynamic_lookup" \
-      cargo build --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
+      cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi \
         --target "${t}" --"${PROFILE}"
   fi
   arch_lib="${CARGO_TARGET_DIR}/${t}/${PROFILE_DIR}/${STATICLIB}"

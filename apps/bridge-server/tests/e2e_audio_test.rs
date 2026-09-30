@@ -38,7 +38,7 @@ use client::protocol::audio::{
 use client::protocol::commands::ClientCommand;
 use client::protocol::events::ClientEvent;
 use futures_util::{SinkExt, StreamExt};
-use platform_api::audio::{
+use lingxi_core::host::audio::{
     AudioOperation, AudioOperationContext, AudioOperationId, AudioOperationSuccess, AudioOwner,
     AudioRecordingHandle, AudioService,
 };
@@ -287,7 +287,7 @@ async fn disconnect_mid_audio_request_fails_the_parked_call() {
         .expect_err("a dropped connection cannot answer");
     assert_eq!(
         error.kind,
-        platform_api::audio::AudioErrorKind::NativeFailure
+        lingxi_core::host::audio::AudioErrorKind::NativeFailure
     );
     assert_eq!(
         responder.pending_count().await,
@@ -315,7 +315,10 @@ async fn an_audio_request_with_no_client_connected_fails_immediately() {
         )
         .await
         .expect_err("there is no client to record anything");
-    assert_eq!(error.kind, platform_api::audio::AudioErrorKind::Unavailable);
+    assert_eq!(
+        error.kind,
+        lingxi_core::host::audio::AudioErrorKind::Unavailable
+    );
 }
 
 #[tokio::test]
@@ -349,7 +352,7 @@ async fn capability_updates_replace_the_live_snapshot_and_notify_the_client() {
     assert_eq!(current.support_revision, 2);
     assert_eq!(
         current.supported_operations,
-        vec![platform_api::audio::AudioOperationKind::Record]
+        vec![lingxi_core::host::audio::AudioOperationKind::Record]
     );
 
     endpoint.shutdown().await;

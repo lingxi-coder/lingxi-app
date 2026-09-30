@@ -581,7 +581,7 @@ body {
   grid-template-columns: 22px minmax(0, 1fr) auto;
   min-height: 58px;
   column-gap: 10px;
-  padding: 10px 12px;
+  padding: 10px 12px 10px 0;
   border: 0;
   border-radius: 14px;
   background:

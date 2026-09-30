@@ -19,11 +19,11 @@ impl crate::router::CommandRouter for AdmissionRouter {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Some(crate::router::SlashDispatchOutcome {
             result: if self.run_as_turn {
-                platform_api::SlashDispatchResult::RunAsTurn {
+                lingxi_core::host::SlashDispatchResult::RunAsTurn {
                     prompt: "custom compact prompt".into(),
                 }
             } else {
-                platform_api::SlashDispatchResult::Handled {
+                lingxi_core::host::SlashDispatchResult::Handled {
                     display: "idle compact".into(),
                 }
             },

@@ -3,7 +3,7 @@ use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
 use client::protocol::events::ErrorKindDto;
 use client::protocol::listings::SessionAgentSummaryDto;
-use platform_api::task_registry::TaskListFilter;
+use lingxi_core::host::task_registry::TaskListFilter;
 
 pub(super) fn session_agent_activity(
     messages: &[client::protocol::message::MessageDto],
@@ -105,7 +105,7 @@ pub(super) async fn read_session_agent_summary(
         let root = root.to_path_buf();
         let row = if let Some(relative) = relative {
             tokio::task::spawn_blocking(move || {
-                platform_api::rooted_fs::read_to_string_limited(
+                lingxi_core::host::rooted_fs::read_to_string_limited(
                     &root,
                     &relative,
                     session::agent_rows::ROW_MAX_BYTES,
@@ -447,7 +447,7 @@ impl EngineCommandRouter {
                 }
             }
         } else {
-            let Some(parsed) = protocol::AgentId::parse_prefixed(&agent_id) else {
+            let Some(parsed) = lingxi_core::types::AgentId::parse_prefixed(&agent_id) else {
                 sink.emit(ClientEvent::Error {
                     kind: ErrorKindDto::Protocol,
                     message: format!("malformed session agent id: {agent_id:?}"),

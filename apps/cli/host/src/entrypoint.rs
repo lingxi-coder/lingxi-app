@@ -161,7 +161,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // runtime/auth work. Safe mode deliberately ignores the flag without
     // parsing it; bare mode still validates it.
     let safe_mode = parsed.safe_mode
-        || platform_api::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref());
+        || lingxi_core::host::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref());
     if !safe_mode {
         if let Some(raw) = parsed.agents.as_deref() {
             if let Err(error) = agent::parse_agents_from_flag_json_checked(raw) {
@@ -197,7 +197,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // existing LINGXI.md kill-switch (`orchestrator::prompt::memory_block`),
     // so subagents/children inherit the disable too.
     if parsed.safe_mode
-        || platform_api::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref())
+        || lingxi_core::host::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref())
     {
         std::env::set_var("LINGXI_SAFE_MODE", "1");
         std::env::set_var("LINGXI_DISABLE_LINGXI_MDS", "1");
@@ -206,21 +206,21 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // (M-01, cc2.1.215) `--brief` selects Brief-only mode for this process.
     // Keep the value in shared live-session state so `/brief` can toggle it
     // later without relying on a stale process-environment snapshot.
-    platform_api::session_flags::set_brief_mode_enabled(parsed.brief);
+    lingxi_core::host::session_flags::set_brief_mode_enabled(parsed.brief);
 
     // claude-code `ZDn(ERe.some(ue))` (2.1.263) — naming any of the five
     // todo/task tools in `--tools`/`--allowedTools` opts the session past the
     // `OO()` model gate. Launch-time immutable, so publish it once here beside
     // the other argv-derived session flags.
-    platform_api::session_flags::set_todo_tools_opt_in(parsed.todo_tools_opt_in());
+    lingxi_core::host::session_flags::set_todo_tools_opt_in(parsed.todo_tools_opt_in());
 
     // (CLI-2) `--system-prompt-snapshot <on|off>` feeds oracle `lje(e)`'s
     // `e.systemPromptSnapshot`. Launch-time immutable like the flags above, and
     // published BEFORE any conversation is built, since the gate is read on the
     // very first request (that is the request whose prompt gets recorded).
-    platform_api::session_flags::set_system_prompt_snapshot(parsed.system_prompt_snapshot);
+    lingxi_core::host::session_flags::set_system_prompt_snapshot(parsed.system_prompt_snapshot);
     // 2.1.270 `oVn`: streaming input or an SDK URL makes print non-single-shot.
-    platform_api::session_flags::set_single_shot_print_session(
+    lingxi_core::host::session_flags::set_single_shot_print_session(
         (parsed.print
             || parsed
                 .prompt
@@ -466,11 +466,11 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                     | Some(crate::commands::plugin::Sub::Update(_))
             ) {
                 let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
-                    Arc::new(output::JsonSink::new(protocol::SessionId::new()))
+                    Arc::new(output::JsonSink::new(lingxi_core::types::SessionId::new()))
                 } else {
                     Arc::new(output::PlainSink::new())
                 };
-                let adapter: Arc<dyn platform_api::OutputStream> =
+                let adapter: Arc<dyn lingxi_core::host::OutputStream> =
                     Arc::new(output_adapter::SinkAdapter::new(sink));
                 let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
                     Ok(r) => r,
@@ -520,7 +520,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
         // (b) UUID validation (a bare UUID; `parse_prefixed` also tolerates the
         //     `sess:`-prefixed display form).
-        if protocol::SessionId::parse_prefixed(sid).is_none() {
+        if lingxi_core::types::SessionId::parse_prefixed(sid).is_none() {
             eprintln!("Error: Invalid session ID. Must be a valid UUID.");
             return exit_codes::ARGV_ERROR;
         }
@@ -528,7 +528,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         //     transcript path, even from another project under the same config
         //     home. Reject before runtime construction so no append/write path
         //     is opened against the occupied JSONL.
-        if let Some(parsed_id) = protocol::SessionId::parse_prefixed(sid) {
+        if let Some(parsed_id) = lingxi_core::types::SessionId::parse_prefixed(sid) {
             match session_id_exists_in_store(&run::lingxi_home_dir(), parsed_id.as_uuid()).await {
                 Ok(true) => {
                     eprintln!("Error: Session ID {sid} is already in use.");
@@ -669,7 +669,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // after the `&mut parsed` startup-resource pass.
     if parsed.print && parsed.rewind_files.is_some() {
         let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
-            Arc::new(output::JsonSink::new(protocol::SessionId::new()))
+            Arc::new(output::JsonSink::new(lingxi_core::types::SessionId::new()))
         } else {
             Arc::new(output::PlainSink::new())
         };
@@ -689,7 +689,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             return exit_codes::ARGV_ERROR;
         }
         let stream = Arc::new(stream_json::StreamJsonStream::new_placeholder());
-        platform_api::OutputStream::set_thinking_display(
+        lingxi_core::host::OutputStream::set_thinking_display(
             stream.as_ref(),
             parsed.thinking_display.as_deref(),
         );
@@ -704,7 +704,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         stream.set_forward_subagent_text(
             parsed.forward_subagent_text_effective() && parsed.print && parsed.is_stream_json(),
         );
-        let adapter: Arc<dyn platform_api::OutputStream> = stream.clone();
+        let adapter: Arc<dyn lingxi_core::host::OutputStream> = stream.clone();
 
         // P5 Phase 2: for the bidirectional `--input-format stream-json` path,
         // build the shared control plane BEFORE `build_runtime` (its outbound
@@ -824,7 +824,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         .map_or(false, |p| !p.trim_start().starts_with('/'));
     if parsed.is_json_output() && (is_non_slash_print || parsed.print) {
         let stream = Arc::new(stream_json::StreamJsonStream::new_json_mode_placeholder());
-        let adapter: Arc<dyn platform_api::OutputStream> = stream.clone();
+        let adapter: Arc<dyn lingxi_core::host::OutputStream> = stream.clone();
         let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
             Ok(r) => r,
             Err(e) => {
@@ -911,7 +911,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
     let make_sink = || -> Arc<dyn output::OutputSink> {
         if parsed.is_json_output() {
-            Arc::new(output::JsonSink::new(protocol::SessionId::new()))
+            Arc::new(output::JsonSink::new(lingxi_core::types::SessionId::new()))
         } else {
             Arc::new(output::PlainSink::new())
         }
@@ -929,7 +929,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             resumed_argv.effort = Some(effort);
         }
         let sink = make_sink();
-        let adapter: Arc<dyn platform_api::OutputStream> =
+        let adapter: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
         let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
             Ok(r) => r,
@@ -951,7 +951,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             resumed_argv.effort = Some(effort);
         }
         let sink = make_sink();
-        let adapter: Arc<dyn platform_api::OutputStream> =
+        let adapter: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
         let runtime = match init::build_runtime(&resumed_argv, adapter, permission_mode).await {
             Ok(r) => r,
@@ -979,7 +979,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
         mode::Mode::Print(_) => {
             let sink = make_sink();
-            let adapter: Arc<dyn platform_api::OutputStream> =
+            let adapter: Arc<dyn lingxi_core::host::OutputStream> =
                 Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
             let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
                 Ok(r) => r,

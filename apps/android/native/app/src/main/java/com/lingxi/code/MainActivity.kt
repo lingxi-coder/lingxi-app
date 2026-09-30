@@ -16,6 +16,7 @@ import com.lingxi.code.share.ShareController
 import com.lingxi.code.notify.NotificationController
 import com.lingxi.code.clipboard.ClipboardController
 import com.lingxi.code.device.AndroidDeviceControlController
+import com.lingxi.code.device.DeviceReadPermissionController
 import com.lingxi.code.location.LocationController
 import com.lingxi.code.offload.NativeOffloadRuntime
 import androidx.compose.animation.AnimatedVisibility
@@ -36,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingxi.code.cron.CronAlarmScheduler
 import com.lingxi.code.onboarding.SetupWizardOverlay
@@ -67,6 +69,7 @@ import kotlinx.coroutines.launch
  * in [RootScreen] and let the Appearance page mutate the same store.
  */
 class MainActivity : ComponentActivity() {
+    private lateinit var deviceReadPermissions: DeviceReadPermissionController
     private val pendingCronRunId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     private val pendingTerminalArgs =
         kotlinx.coroutines.flow.MutableStateFlow<TerminalRouteArgs?>(null)
@@ -136,6 +139,17 @@ class MainActivity : ComponentActivity() {
         val locationPermLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
         ) { grants -> LocationController.onLocationPermission(grants) }
+        val deviceReadPermLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission(),
+        ) { granted -> deviceReadPermissions.onPermissionResult(granted) }
+        deviceReadPermissions = DeviceReadPermissionController(
+            isGranted = { permission ->
+                ContextCompat.checkSelfPermission(applicationContext, permission) ==
+                    PackageManager.PERMISSION_GRANTED
+            },
+            isForeground = { lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) },
+            requestPermission = { permission -> deviceReadPermLauncher.launch(permission) },
+        )
         CameraController.attach(
             CameraController.makeLaunchers(
                 context = applicationContext,
@@ -160,7 +174,7 @@ class MainActivity : ComponentActivity() {
         // (engine-driven through tool-clipboard; no UI affordance). No manifest
         // permission is required for clipboard access.
         ClipboardController.attach(applicationContext)
-        AndroidDeviceControlController.attach(applicationContext)
+        AndroidDeviceControlController.attach(applicationContext, deviceReadPermissions)
         // Device-location: the engine capability gate runs first; this controller
         // then owns Android's fine/coarse runtime permission and one-shot fix.
         LocationController.attach(
@@ -503,7 +517,7 @@ class MainActivity : ComponentActivity() {
         ShareController.detach()
         NotificationController.detach()
         ClipboardController.detach()
-        AndroidDeviceControlController.detach()
+        AndroidDeviceControlController.detach(deviceReadPermissions)
         LocationController.detach()
         NativeOffloadRuntime.detach()
         super.onDestroy()

@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -17,24 +16,27 @@ import android.provider.CalendarContract
 import android.provider.ContactsContract
 import com.lingxi.code.bindings.android.AndroidDeviceControl
 import com.lingxi.code.bindings.android.DeviceControlFfiException
-import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import org.json.JSONArray
 
 /** Process-global Android implementation of Local App device controls. */
 object AndroidDeviceControlController {
-    @Volatile private var context: Context? = null
+    private class Host(val context: Context, val permissions: DeviceReadPermissionController)
 
-    fun attach(context: Context) {
-        this.context = context.applicationContext
+    @Volatile private var host: Host? = null
+
+    internal fun attach(context: Context, permissions: DeviceReadPermissionController) {
+        host?.permissions?.detach()
+        host = Host(context.applicationContext, permissions)
     }
 
-    fun detach() {
-        context = null
+    internal fun detach(permissions: DeviceReadPermissionController) {
+        permissions.detach()
+        if (host?.permissions === permissions) host = null
     }
 
     fun statusJson(): String {
-        val ctx = context ?: throw DeviceControlFfiException.Unavailable()
+        val ctx = host?.context ?: throw DeviceControlFfiException.Unavailable()
         val battery = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
@@ -66,7 +68,7 @@ object AndroidDeviceControlController {
     }
 
     fun triggerHaptic(style: String) {
-        val ctx = context ?: throw DeviceControlFfiException.Unavailable()
+        val ctx = host?.context ?: throw DeviceControlFfiException.Unavailable()
         val vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             ?: throw DeviceControlFfiException.Unavailable()
         val (duration, amplitude) = when (style) {
@@ -87,7 +89,7 @@ object AndroidDeviceControlController {
     }
 
     fun openDeepLink(url: String) {
-        val ctx = context ?: throw DeviceControlFfiException.Unavailable()
+        val ctx = host?.context ?: throw DeviceControlFfiException.Unavailable()
         try {
             ctx.startActivity(
                 Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
@@ -97,12 +99,11 @@ object AndroidDeviceControlController {
         }
     }
 
-    fun calendarJson(requestJson: String): String {
-        val ctx = context ?: throw DeviceControlFfiException.Unavailable()
-        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
-            throw DeviceControlFfiException.Rejected("calendar permission denied")
-        }
+    suspend fun calendarJson(requestJson: String): String {
+        val current = host ?: throw DeviceControlFfiException.Unavailable()
         val request = parseCalendarQuery(requestJson)
+        current.permissions.ensurePermission(Manifest.permission.READ_CALENDAR, "calendar")
+        val ctx = current.context
         val startMs = request.startMs
         val endMs = request.endMs
         val limit = request.limit
@@ -151,14 +152,13 @@ object AndroidDeviceControlController {
         }
     }
 
-    fun contactsJson(requestJson: String): String {
-        val ctx = context ?: throw DeviceControlFfiException.Unavailable()
-        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
-            throw DeviceControlFfiException.Rejected("contacts permission denied")
-        }
+    suspend fun contactsJson(requestJson: String): String {
+        val current = host ?: throw DeviceControlFfiException.Unavailable()
         val request = JSONObject(requestJson)
         val query = request.getString("query").trim()
         val limit = request.optInt("limit", 20).coerceIn(1, 50)
+        current.permissions.ensurePermission(Manifest.permission.READ_CONTACTS, "contacts")
+        val ctx = current.context
         return try {
             val result = JSONArray()
             val projection = arrayOf(ContactsContract.Contacts._ID, ContactsContract.Contacts.DISPLAY_NAME)

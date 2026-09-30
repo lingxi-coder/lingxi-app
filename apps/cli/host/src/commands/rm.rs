@@ -755,8 +755,9 @@ mod worktree_delete {
 mod worktree_delete {
     use super::ManagedWorktreeBinding;
     use platform_pty::{
-        delete_windows_path_by_handle, enumerate_directory_by_handle, open_directory_entry_by_handle,
-        open_windows_reparse_guarded, windows_file_identity, WindowsFileIdentity,
+        delete_windows_path_by_handle, enumerate_directory_by_handle,
+        open_directory_entry_by_handle, open_windows_reparse_guarded, windows_file_identity,
+        WindowsFileIdentity,
     };
     use std::path::{Path, PathBuf};
 

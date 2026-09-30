@@ -4906,8 +4906,8 @@ final class LocalAppsStoreTests: XCTestCase {
                 body.contains("switchScope("),
                 "\(declaration) must still be the site that requests the switch")
             let close = try XCTUnwrap(
-                body.range(of: "navigation.closePresentedRoute()"),
-                "\(declaration) must still dismiss the cover on the success path")
+                body.range(of: "localAppConversationSheet = LocalAppConversationPresentation("),
+                "\(declaration) must present the accepted destination on the success path")
 
             let refusal = try XCTUnwrap(
                 body.range(of: "guard switchScope("),
@@ -5271,8 +5271,11 @@ final class LocalAppsStoreTests: XCTestCase {
         }
         let binding = String(rootSource[bindingStart.lowerBound ..< bindingEnd.lowerBound])
         XCTAssertTrue(
-            binding.contains("switchScope(to: .localApp(appID), mode: mode ?? activeMode, resumeSessionID: sessionID)"),
+            binding.contains("openAppSession(appID: appID, sessionID: sessionID, mode: mode ?? activeMode)"),
             "the binding must fold the drawer's mode into the SAME switchScope call, not switchMode then switchScope")
+        let opening = try declarationSource("private func openAppSession(", in: rootSource)
+        XCTAssertTrue(opening.contains("guard switchScope(to: .localApp(appID), mode: mode, resumeSessionID: sessionID)"))
+        XCTAssertFalse(binding.contains("switchMode("))
     }
 
     /// `pendingInitKickoff` used to have NO expiry at all: if none of

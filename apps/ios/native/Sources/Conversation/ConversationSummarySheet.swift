@@ -3,9 +3,10 @@ import UIKit
 
 /// The native iOS counterpart to Desktop's Runtime Center. Each case is a
 /// real projection of data already published by ConversationModel; ChatView
-/// only adds populated cases to its menu.
+/// exposes these categories in its menu.
 enum ConversationSummaryCategory: String, Identifiable {
     case changes
+    case tools
     case agents
     case resources
     case plan
@@ -14,6 +15,7 @@ enum ConversationSummaryCategory: String, Identifiable {
 
     var title: String {
         switch self {
+        case .tools: return "Tools"
         case .changes: return "Changes"
         case .agents: return "Agents & background tasks"
         case .resources: return "Resources"
@@ -23,6 +25,7 @@ enum ConversationSummaryCategory: String, Identifiable {
 
     var systemImage: String {
         switch self {
+        case .tools: return "wrench.and.screwdriver"
         case .changes: return "arrow.triangle.2.circlepath"
         case .agents: return "person.2"
         case .resources: return "shippingbox"
@@ -123,6 +126,8 @@ struct ConversationSummarySheet: View {
     @ViewBuilder
     private var categoryContent: some View {
         switch category {
+        case .tools:
+            toolsContent
         case .changes:
             changesContent
         case .agents:
@@ -131,6 +136,31 @@ struct ConversationSummarySheet: View {
             resourcesContent
         case .plan:
             planContent
+        }
+    }
+
+    private var toolsContent: some View {
+        let groups = ConversationRenderLayout.timelineGroups(convo.items).filter(\.isToolGroup)
+        let hasLiveOwner = convo.streaming || convo.hasUnresolvedTurnRecovery
+        let liveToolIDs = Set(convo.items.flatMap { item -> [String] in
+            guard case let .run(run) = item,
+                  (run.status == .running && hasLiveOwner) || run.activeWorkers > 0 else { return [] }
+            return run.tools.filter { $0.status == .running }.map(\.id)
+        })
+        return VStack(alignment: .leading, spacing: 12) {
+            if groups.isEmpty {
+                emptyRow("No tool calls in this session.", systemImage: "wrench.and.screwdriver")
+            } else {
+                ConversationTimelineView(
+                    groups: groups,
+                    liveToolIDs: liveToolIDs,
+                    hasLiveOwner: hasLiveOwner,
+                    messageDetails: [:],
+                    expandedToolCalls: convo.expandedToolCalls,
+                    onToggleToolCall: { convo.toggleTranscriptDisclosure($0) },
+                    showThinking: false
+                )
+            }
         }
     }
 

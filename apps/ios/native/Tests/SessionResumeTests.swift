@@ -721,7 +721,7 @@ visionDelegationEnabled: true)
             XCTAssertEqual(source.model.selectedAgentID, ConversationModel.mainAgentID)
         }
 
-        func testLiveAgentMessageMergesWithTranscriptReplyAndMarksAgentWorking() {
+        func testLiveAgentMessageMergesWithTranscriptReplyAndPreservesReportedStatus() {
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
@@ -746,6 +746,11 @@ visionDelegationEnabled: true)
                 message: live
             ))
             XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["live tail"])
+            XCTAssertEqual(source.model.selectedAgentSummary?.status, "idle", "transcript delivery must preserve authoritative lifecycle state")
+            source.applyForTesting(.sessionAgentUpdated(sessionId: "session-a", agent: SessionAgentSummaryDto(
+                agentId: "agent:child-1", name: "worker", agentType: "general", model: nil,
+                modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: 1
+            )))
             XCTAssertEqual(source.model.selectedAgentSummary?.status, "working")
 
             source.applyForTesting(.sessionAgentTranscript(

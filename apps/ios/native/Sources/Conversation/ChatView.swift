@@ -372,7 +372,7 @@ struct ChatView: View {
     }
 
     private var summaryCategories: [ConversationSummaryCategory] {
-        [.changes, .agents, .resources, .plan]
+        [.changes, .tools, .agents, .resources, .plan]
     }
 
     /// Only engine resolution removes a request; an incidental presentation

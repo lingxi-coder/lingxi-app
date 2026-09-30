@@ -1401,7 +1401,7 @@ import SwiftUI
             XCTAssertNotNil(existingModal.presentedViewController)
             XCTAssertEqual(
                 existingModal.presentedViewController?.modalPresentationStyle,
-                .overFullScreen
+                .pageSheet
             )
         }
 

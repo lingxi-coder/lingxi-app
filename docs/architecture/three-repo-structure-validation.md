@@ -148,5 +148,158 @@ locked product dependencies lack safe-to-deploy source review. The earlier warni
 fallback is removed. This source-review failure remains open.
 
 Earlier native/package checks and hashes above retain their original dependency
-revision. Final-pin Android/iOS/native support builds and GitHub CI are still being
-completed. Existing macOS app shutdown and physical-device approval remain pending.
+revision. The final 0e8e54d/13ffbec graph now passes 2759 Rust tests, zero failures,
+four existing ignored tests, and all six product gates. Android native support and
+four JNI libraries are rebuilt, generated Kotlin is refreshed, both APKs pass exact
+native/rootfs/provenance byte checks. All 348 generated FFI functions resolve in
+each of the four final JNI libraries. Direct 998/Play 985 unit tests pass with
+zero failures/errors/skips. Both rootfs archives are verified against immutable SDK
+release evidence (70 licensed packages each; 6093/6094 entries).
+
+Final iOS SDK native support and toolchain rootfs, three Rust framework architectures,
+arm64 simulator/device application compilation and three native FFI roundtrips pass.
+Device compilation is unsigned; no physical-device execution is claimed. The owned
+simulator and its data are removed; all six pre-existing simulators remain.
+
+Final Flare-signed macOS ZIP/static verification passes with SHA-256
+`e392210ced00a7bff1b22c7ed05ee46722c1627be9ceceb140bf0afdd1c983df`.
+Smoke remains blocked by the existing app instance and pending shutdown approval.
+
+Desktop CI tests dependency packages through their canonical owning workspace
+manifest: Cargo cannot run foreign-package dev-dependency tests from the Host
+workspace. Python 3.11 is explicit for native client jobs, and mobile policy installs
+ripgrep; absent scanning tools fail closed. Both source resolvers explicitly read
+UTF-8 files and decode Cargo metadata as UTF-8 on Windows. Android SDK setup
+installs `platform-tools` explicitly, avoiding the unavailable legacy `tools`
+package. The iOS runner provisions Meson, Ninja, LLVM and the separate lld ELF
+linker required by iSH's ARM64 Linux VDSO. Host fakefsify additionally requires
+Homebrew libarchive with its explicit pkg-config search path. Linux desktop CI
+runs the actual Electron interaction suite under Xvfb instead of skipping it.
+
+CI uses Node 24 and setup-node v7. Node 20.20.2 reproducibly spins in internal
+assertion-source parsing for an expected negative audio-capability contract
+assertion. A CPU profile identifies `assert`/`findColumn`/Acorn, with no pending
+Cargo/Python subprocess. The same unchanged 64 contract tests pass under Node 24
+with no skips, and the remote node-clients job passes. The full local Node 24
+Electron suite passes 1284 tests, zero failures, two existing skips after a fixture
+waits for sortable initialization rendering before sending its destination move;
+all drag/drop ordering, touch, cancellation, click and menu assertions remain.
+Five repetitions of that real interaction pass.
+
+`fetch-sdk-rootfs.py` downloads the immutable RC2 release archives as a transport
+source and verifies bytes against the selected Cargo SDK's committed release
+manifest, not the release tag alone. Fresh downloads pass both complete evidence
+checks. Same-size corruption cannot replace prior staging; cached verified bytes
+need no network, and output cannot overlap SDK source. Those three rejection/
+immutability regressions run in required CI. Android stages both distributions
+before APK verification. iOS accepts the same digest-verified ARM64 toolchain
+archive, builds complete native support, converts it through fakefsify, and retains
+all source, profile and packaged-rootfs checks; the actual local flow passes.
+The final GitHub matrix is still running.
+Physical-device approval and genuine cargo-vet source review remain pending.
+
+Final Android APK SHA-256:
+
+| Variant | SHA-256 |
+| --- | --- |
+| Direct | `22d76dfa067f9ef698b17ce174ac1c35252e37c11089f94aff39fdad428b9b66` |
+| Play | `172f75c9a4948df88f1f0614176bdfa4b478802255574309714dc8c57d657681` |
+
+
+### Authenticated sidecar process teardown
+
+Windows Node `kill(SIGINT/SIGTERM)` forces termination and cannot exercise Rust's
+cleanup. The bridge host now observes the existing authenticated RequestExit state
+and runs its normal endpoint stop and ordered session drain. No new wire command
+or public runtime handle is exposed. Electron sends that command only to owned
+children or owned adopted processes, keeps the channel alive until exit, and
+retains bounded forced termination for an unresponsive owned process. Externally
+reused peers are only disconnected.
+
+All 208 bridge-server tests, strict bridge Clippy, 101 host tests, Node typecheck
+and all six product gates pass. Three host regressions cover managed child exit,
+owned adopted exit and refusal to terminate an unowned peer. A real locally built
+bridge process accepts authenticated RequestExit, exits zero, and removes its
+discovery record without any process signal. Windows packaged-sidecar smoke uses
+the same authenticated command and requires zero exit plus actual file cleanup;
+Unix signal coverage remains. The rebuilt 20b23c6d macOS application passes the full Flare signing and static
+package gate; its ZIP SHA-256 is
+`04c148acf6bcdf626ce47462e24d9593315396d3ee5bf126b8a0f43bf731fb9f`.
+The existing process 69988 still blocks the required packaged-app smoke and its
+shutdown approval remains pending. Native Windows and final mobile CI are still
+running. The final product Rust/lint/source jobs all pass; only cargo-vet source
+review remains red in the main CI.
+
+
+### Prepared iPhone artifact
+
+The current FullDebug device application now builds with automatic signing for
+Flare team AZ4AX7J833 and the existing DF422E132604B63835F35605A0080A66AFF67CC4
+Apple Development identity. Deep/strict codesign verification passes for
+`com.lingxi.code.full`; its executable SHA-256 is
+`875be17110600ba95411fb4d3ffaa00074cf35718e0a517c88e6c7e893f68eb0`.
+The paired iPhone 11 is reachable, but installation and launch authorization is
+still pending. Android has no attached device. No physical execution is claimed.
+
+
+### Native Windows closure and deterministic CI follow-up
+
+Product commit `d078e65d8` pins Harness production code to
+`2cb4bb4bbef1c6ee61f52e522be88b26a7afeb1c` and the SDK to
+`5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9`. The lockfile retains the same registry
+package versions and resolves one canonical identity per runtime. All six product
+source/structure gates and Windows GNU CLI/bridge all-target compilation pass.
+Router fixtures now use the corresponding native filesystem and credential store
+on both Windows and Unix.
+
+Windows deletion opens an enumerated entry relative to its retained directory
+handle, rejects reparse points and identity replacement, then marks that handle
+for deletion. Six native Windows regressions pass, including renamed-parent,
+replaced-entry, traversal, access-right and directory cases. SDK CI run
+`36725789556` passes all 15 jobs. Later SDK commits only stabilize the PowerShell
+test startup handshake; production consumers remain pinned to the production fix.
+
+Harness `2610eb06a40a031a96cc69751c5d31743d1645dd` isolates test pause notifications
+by MCP connection generation. Its 650 MCP tests and 20 repeated concurrent lag
+regressions pass locally. CI `36734348152` passes all 26 code, lint, test and native
+platform jobs; the sole failure remains cargo-vet's missing source audits. These
+test-only changes do not require another downstream production pin.
+
+Product test commit `9a93ca76f` verifies 1,287 Electron tests with zero failures and
+two existing skips in an isolated copy of production HEAD plus the test fixes.
+Both Android instrumentation APKs compile with the current native audio adapter
+(104 Gradle tasks); this is build evidence, not emulator or physical execution.
+Product CI at `d078e65d8` passes the full Rust unit job and all structure gates.
+Its lint job found only Windows import formatting, corrected in the follow-up;
+cargo-vet remains blocked on source audits. Local native routing regressions pass
+73 integration tests, one session-presence test and 13 router unit tests. Desktop
+and mobile jobs are still running. Earlier signed macOS/mobile
+artifact hashes above document their original source pins and must not be treated
+as rebuilt artifacts for this new dependency closure.
+
+
+### iOS Runtime Center and native regression closure
+
+Runtime Center now exposes a Tools sheet backed by the existing tool result
+renderer and session-owned disclosure state. The main transcript retains its
+current message layout. Live tool ownership follows the same authoritative
+session/run rules as the transcript; cancelled and completed rows preserve their
+reported status. UI coverage opens the sheet, checks native icons and cancellation,
+and expands an actual Read result.
+
+The local signed simulator run executes all 831 Swift tests with zero failures
+and one existing skip in the shared checkout. The full 34-case UI run passes 30,
+with two existing skips and two outdated test-fixture failures. After correcting
+accordion auto-advance and adding the missing OAuth mock catalog entry, all four
+focused UI regressions pass, including the two failed cases, model selection and
+actual tool-result expansion. The real-engine startup responsiveness test passes
+without changing its eight-second launch or two-second interaction limits.
+
+Other updated contracts cover native page-sheet permission presentation, accepted
+local-app navigation, authoritative agent lifecycle, stable settings entry IDs,
+and system password-save prompts. Real system-default TTS produces nonempty PCM;
+its integration test allows a bounded cold start without substituting audio.
+Simulator tests use normal ad-hoc signing so Keychain is exercised successfully.
+These Swift checks use the existing FFI ABI; CI still needs to finish rebuilding
+the complete new Rust dependency closure for the final packaged applications.
+Physical-device and cargo-vet acceptance remain outstanding as documented above.

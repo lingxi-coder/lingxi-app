@@ -83,6 +83,7 @@ struct DesktopGeneralPage: View {
                 SettingsRow(label: String(localized: "settings_notifications"), onTap: { host.push(.notifications) })
                 SettingsRow(label: String(localized: "settings_keyboard_input"), onTap: { host.push(.input) })
                 SettingsRow(label: String(localized: "settings_app_integration"), isLast: true, onTap: { host.push(.appIntegration) })
+                    .accessibilityIdentifier("settings.appIntegration")
             }
             SettingsSection(label: String(localized: "settings_parity_mobile_capabilities")) {
                 SettingsRow(label: String(localized: "settings_web_search"), onTap: { host.push(.providerList(.init(.search))) })

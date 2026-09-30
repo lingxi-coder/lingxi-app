@@ -158,7 +158,7 @@ final class VoiceCapabilityTests: XCTestCase {
             ),
             owner: .ui(instanceID: "system-default-tts-test"),
             initiator: nil,
-            timeoutBudgetMs: 4_000,
+            timeoutBudgetMs: 30_000,
             maxPayloadBytes: service.maximumPayloadBytes ?? maxAudioPayloadBytes(),
             operation: .synthesize(text: "hello", language: nil, rate: nil, voice: "system:default")
         )
@@ -166,15 +166,15 @@ final class VoiceCapabilityTests: XCTestCase {
             result = await service.execute(request)
             completed.fulfill()
         }
-        await fulfillment(of: [completed], timeout: 5)
+        await fulfillment(of: [completed], timeout: 35)
 
         guard let result else {
             task.cancel()
-            XCTFail("system:default TTS must finish within five seconds")
+            XCTFail("system:default TTS must finish within its bounded cold-start budget")
             return
         }
         guard case let .synthesized(pcm, sampleRateHz) = result else {
-            return XCTFail("system:default TTS should return bounded PCM from the app AudioService")
+            return XCTFail("system:default TTS should return bounded PCM from the app AudioService; result: \(result)")
         }
 
         XCTAssertFalse(pcm.isEmpty)

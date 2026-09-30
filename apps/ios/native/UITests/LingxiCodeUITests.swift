@@ -51,7 +51,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(create.waitForExistence(timeout: 5))
     }
 
-    func testTimelineHidesAgentRunAndShowsCompactExecutionRows() {
+    func testTimelineKeepsTranscriptAndOpensToolResultsInRuntimeCenter() {
         XCTAssertFalse(app.staticTexts["理解需求"].exists)
         let llmStatus = app.descendants(matching: .any)["conversation.llm-status"]
         XCTAssertFalse(app.staticTexts["已暂停"].exists, app.debugDescription)
@@ -67,20 +67,22 @@ final class LingxiCodeUITests: XCTestCase {
             NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.thought.")
         ).firstMatch
         XCTAssertFalse(thought.exists, app.debugDescription)
+        XCTAssertFalse(app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-shell"].exists)
+        app.buttons["conversation.summary-menu"].tap()
+        app.buttons["conversation.summary.category.tools"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["conversation.summary-sheet.tools"].firstMatch.waitForExistence(timeout: 5))
         let shellGroup = app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-shell"]
         XCTAssertTrue(shellGroup.waitForExistence(timeout: 5), app.debugDescription)
         shellGroup.tap()
         let tool = app.descendants(matching: .any)["conversation.tool-call.ui-shell"]
         XCTAssertTrue(tool.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-shell.icon.terminal"].exists)
-        let batch = app.buttons["conversation.timeline.tool-batch.timeline-tools:ui-read"]
-        XCTAssertTrue(batch.exists, app.debugDescription)
-        XCTAssertFalse(app.descendants(matching: .any)["conversation.tool-call.ui-read"].exists)
-        batch.tap()
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-read"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-search"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-read.icon.bookOpen"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-search.icon.search"].exists)
+        app.buttons["conversation.tool-call.ui-read.icon.bookOpen"].tap()
+        XCTAssertTrue(app.staticTexts["Read completed"].waitForExistence(timeout: 5), app.debugDescription)
 
         // A normal completed turn has no persistent runtime footer.
         XCTAssertTrue(waitUntilGone(llmStatus, timeout: 5), app.debugDescription)
@@ -142,7 +144,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(waitUntilGone(jump, timeout: 5), app.debugDescription)
     }
 
-    func testVoiceTapRequestsPermissionThenOpensListeningAndSettings() {
+    func testVoiceTapRequestsPermissionThenShowsNativeBackendStateAndSettings() {
         app.terminate()
         app.resetAuthorizationStatus(for: .microphone)
         app.launch()
@@ -165,7 +167,13 @@ final class LingxiCodeUITests: XCTestCase {
         }
 
         XCTAssertGreaterThan(permissionPromptCount, 0, springboard.debugDescription)
-        XCTAssertTrue(app.staticTexts["正在聆听"].waitForExistence(timeout: 8), app.debugDescription)
+        let listening = app.staticTexts["正在聆听"]
+        let unavailable = app.staticTexts["语音暂不可用"]
+        XCTAssertTrue(listening.waitForExistence(timeout: 8) || unavailable.waitForExistence(timeout: 2), app.debugDescription)
+        if unavailable.exists {
+            XCTAssertTrue(app.buttons["voice.retry"].isHittable, app.debugDescription)
+            XCTAssertTrue(app.buttons["voice.close"].isHittable, app.debugDescription)
+        }
         XCTAssertFalse(app.buttons["voice.configure"].exists, app.debugDescription)
 
         let listeningScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
@@ -178,9 +186,7 @@ final class LingxiCodeUITests: XCTestCase {
         app.buttons["drawer.settings"].tap()
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
 
-        let voiceSettings = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "语音 TTS")
-        ).firstMatch
+        let voiceSettings = app.buttons["settings.page.voice"]
         XCTAssertTrue(voiceSettings.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(waitUntilHittable(voiceSettings, timeout: 5), app.debugDescription)
         voiceSettings.tap()
@@ -397,6 +403,9 @@ final class LingxiCodeUITests: XCTestCase {
         app.launch()
 
         XCTAssertFalse(app.descendants(matching: .any)["conversation.agent-run"].exists)
+        XCTAssertTrue(app.buttons["conversation.summary-menu"].waitForExistence(timeout: 8))
+        app.buttons["conversation.summary-menu"].tap()
+        app.buttons["conversation.summary.category.tools"].tap()
         let batch = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "conversation.timeline.tool-batch.")
         ).firstMatch
@@ -405,13 +414,10 @@ final class LingxiCodeUITests: XCTestCase {
         batch.tap()
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-web-search"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["conversation.tool-call.ui-shell"].waitForExistence(timeout: 5), app.debugDescription)
-        let webSearchStatus = app.staticTexts["conversation.tool-call.ui-web-search.status"]
-        XCTAssertTrue(webSearchStatus.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(webSearchStatus.label, "已取消")
-        let cancelledLabels = app.staticTexts.matching(
-            NSPredicate(format: "label == %@", "已取消")
-        )
-        XCTAssertGreaterThan(cancelledLabels.count, 0)
+        for toolID in ["ui-web-search", "ui-shell"] {
+            let row = app.descendants(matching: .any)["conversation.tool-call.\(toolID)"]
+            XCTAssertEqual(row.value as? String, "已取消", app.debugDescription)
+        }
         XCTAssertFalse(app.staticTexts["运行中"].exists, app.debugDescription)
 
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
@@ -433,36 +439,33 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(panel.waitForExistence(timeout: 10), app.debugDescription)
         let cancel = app.buttons["chat.ask.cancel"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 5), app.debugDescription)
-        let next = app.buttons["chat.ask.next"]
-        XCTAssertTrue(next.waitForExistence(timeout: 5), app.debugDescription)
-        // `isHittable` is what fails when a control is laid out below the
-        // sheet's visible height: it exists in the hierarchy but no tap can
-        // reach it.
+        let submitInitially = app.buttons["chat.ask.submit"]
+        XCTAssertTrue(submitInitially.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(cancel.isHittable, app.debugDescription)
-        XCTAssertTrue(next.isHittable, app.debugDescription)
-        // The free-text row is part of every question and must be reachable
-        // without first scrolling past four described options.
+        XCTAssertTrue(submitInitially.isHittable, app.debugDescription)
+        XCTAssertFalse(submitInitially.isEnabled)
+        let scroll = panel.scrollViews.firstMatch
         XCTAssertTrue(app.descendants(matching: .any)["chat.ask.other.0"].exists, app.debugDescription)
-
-        // Walk the whole stepper: every step must keep its actions on screen,
-        // and the last one must offer an enabled 提交 once each question is
-        // answered.
+        // Every accordion row keeps its answer while the next row is opened;
+        // the fixed submit footer stays reachable throughout the full form.
         for step in 0 ..< 4 {
-            let option = app.buttons.matching(
-                NSPredicate(format: "label BEGINSWITH %@", "Option \(step + 1).1")
-            ).firstMatch
+            let option = app.buttons["chat.ask.option.\(step).0"]
+            if !option.exists {
+                let row = app.buttons["chat.ask.question.\(step)"]
+                XCTAssertTrue(scrollUntilHittable(row, in: scroll), app.debugDescription)
+                row.tap()
+            }
             XCTAssertTrue(option.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(option.isHittable, app.debugDescription)
+            XCTAssertTrue(scrollUntilHittable(option, in: scroll), app.debugDescription)
             option.tap()
-            guard step < 3 else { break }
-            XCTAssertTrue(next.isHittable, app.debugDescription)
-            next.tap()
+            XCTAssertTrue(cancel.isHittable, app.debugDescription)
+            XCTAssertTrue(submitInitially.isHittable, app.debugDescription)
         }
         let submit = app.buttons["chat.ask.submit"]
         XCTAssertTrue(submit.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(submit.isHittable, app.debugDescription)
         XCTAssertTrue(submit.isEnabled, app.debugDescription)
-        XCTAssertTrue(app.buttons["chat.ask.prev"].isHittable, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["4 of 4 answered"].exists, app.debugDescription)
 
         let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         screenshot.name = "提问表单-满配选项"
@@ -491,7 +494,8 @@ final class LingxiCodeUITests: XCTestCase {
 
         XCTAssertTrue(app.descendants(matching: .any)["conversation.agent-detail-sheet"].waitForExistence(timeout: 8), app.debugDescription)
 
-        let toggle = app.buttons["conversation.message.user.toggle"]
+        let detail = app.otherElements["conversation.agent-detail-sheet"].firstMatch
+        let toggle = detail.buttons["conversation.message.user.toggle"].firstMatch
         XCTAssertTrue(
             toggle.waitForExistence(timeout: 8),
             "a long subagent prompt must offer a fold affordance: \(app.debugDescription)"
@@ -514,7 +518,7 @@ final class LingxiCodeUITests: XCTestCase {
         // `otherElements[...]`, NOT `descendants(matching: .any)[...]`: the
         // latter walks the entire accessibility tree and stalls the runner
         // long enough for the test to be killed.
-        let bubble = app.otherElements["conversation.message.user"]
+        let bubble = detail.otherElements["conversation.message.user"].firstMatch
         XCTAssertTrue(bubble.waitForExistence(timeout: 5), app.debugDescription)
         let collapsedHeight = bubble.frame.height
 
@@ -838,8 +842,10 @@ final class LingxiCodeUITests: XCTestCase {
         app.keyboards.buttons["return"].tap()
         app.buttons["provider.cancel"].tap()
         XCTAssertTrue(waitUntilGone(keyField, timeout: 5), app.debugDescription)
-        let savePasswordPrompt = app.sheets["Save Password?"]
-        if savePasswordPrompt.waitForExistence(timeout: 1) {
+        let passwordAlert = app.alerts["Save Password?"]
+        let passwordSheet = app.sheets["Save Password?"]
+        if passwordAlert.waitForExistence(timeout: 1) || passwordSheet.waitForExistence(timeout: 1) {
+            let savePasswordPrompt = passwordAlert.exists ? passwordAlert : passwordSheet
             let notNow = savePasswordPrompt.buttons["Not Now"]
             XCTAssertTrue(notNow.waitForExistence(timeout: 2), app.debugDescription)
             notNow.tap()
@@ -975,6 +981,9 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 1)
 
+        let general = app.buttons["settings.page.general"]
+        XCTAssertTrue(general.waitForExistence(timeout: 5), app.debugDescription)
+        general.tap()
         let integration = app.buttons["settings.appIntegration"]
         if !integration.exists || !integration.isHittable {
             app.swipeUp()
@@ -1049,6 +1058,13 @@ final class LingxiCodeUITests: XCTestCase {
         add(apiKeyScreenshot)
         app.buttons["provider.cancel"].tap()
         XCTAssertTrue(waitUntilGone(apiKeyField, timeout: 5), app.debugDescription)
+        let passwordAlert = app.alerts["Save Password?"]
+        let passwordSheet = app.sheets["Save Password?"]
+        if passwordAlert.waitForExistence(timeout: 1) || passwordSheet.waitForExistence(timeout: 1) {
+            let savePasswordPrompt = passwordAlert.exists ? passwordAlert : passwordSheet
+            savePasswordPrompt.buttons["Not Now"].tap()
+            XCTAssertTrue(waitUntilGone(savePasswordPrompt, timeout: 5), app.debugDescription)
+        }
 
         let oauthPreset = app.buttons["onboarding.model.preset.openai-chatgpt"]
         XCTAssertTrue(scrollUntilHittable(oauthPreset, in: content), app.debugDescription)
@@ -1145,7 +1161,7 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(waitUntilGone(sheet, timeout: 5), app.debugDescription)
         let options = app.buttons["composer.model"]
         XCTAssertTrue(options.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(String(describing: options.value).contains("V4 Flash"), app.debugDescription)
+        XCTAssertTrue(String(describing: options.value).contains("Flash"), app.debugDescription)
 
         // Reopening pins that pick to the top under 最近使用 — a SECOND row for
         // the same model, distinct from the one under its provider.

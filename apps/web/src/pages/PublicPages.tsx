@@ -3,11 +3,10 @@ import { CodeTabs } from '../components/CodeTabs';
 import {
   IconArrowRight,
   IconCheck,
-  IconDesktop,
   IconDocs,
   IconDownload,
+  IconDesktop,
   IconPhone,
-  IconSpark,
   IconTerminal,
 } from '../components/Icons';
 import { RouteLink } from '../components/RouteLink';
@@ -15,138 +14,82 @@ import { releaseArtifacts, subscriptionPlans } from '../data/mockData';
 import { Locale, Region, formatCurrency, pickLocaleText } from '../utils/locale';
 import { formatReleaseBadge, getReleaseStatusMeta, pickRecommendedArtifact } from '../utils/release';
 
-const apiTabs = [
+const homeSdks = [
   {
-    id: 'curl',
-    label: 'curl',
-    code: `curl https://api.lingxi.dev/v1/responses \\
-  -H "Authorization: Bearer $LINGXI_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model":"lingxi-code","input":"Review this diff"}'`,
+    name: 'Harness Runtime',
+    Icon: IconDesktop,
+    package: 'harness-runtime',
+    href: '/docs/harness' as const,
+    en: 'The foundation for agents. Sessions, tools, permissions, and memory.',
+    zh: '构建代理的基础。会话、工具、权限与记忆，一处接入。',
   },
   {
-    id: 'typescript',
-    label: 'TypeScript',
-    code: `const response = await fetch("https://api.lingxi.dev/v1/responses", {
-  method: "POST",
-  headers: {
-    Authorization: \`Bearer \${process.env.LINGXI_API_KEY}\`,
-    "Content-Type": "application/json"
+    name: 'LLM Client',
+    Icon: IconTerminal,
+    package: 'llm-client',
+    href: '/docs/llm-client' as const,
+    en: 'Connect your models with a unified Rust client and streaming API.',
+    zh: '以统一的 Rust 客户端与流式 API，连接你的模型。',
   },
-  body: JSON.stringify({ model: "lingxi-code", input: "Review this diff" })
-});`,
+  {
+    name: 'Mobile Linux',
+    Icon: IconPhone,
+    package: 'mobile-linux-runtime',
+    href: '/docs/mobile-linux' as const,
+    en: 'Bring a Linux environment into your iOS and Android applications.',
+    zh: '将 Linux 运行环境带入你的 iOS 与 Android 应用。',
   },
 ];
 
-export function HomePage({ locale, region }: { locale: Locale; region: Region }) {
+export function HomePage({ locale }: { locale: Locale; region: Region }) {
   const t = (en: string, zh: string) => pickLocaleText(locale, { en, zh });
-  const capabilities: Array<[
-    typeof IconDesktop,
-    string,
-    string,
-  ]> = [
-    [IconDesktop, t('See the whole change', '看清完整变更'), t('Desktop holds the workspace, diff, and long-running task state.', '桌面端承载工作区、Diff 与长时任务状态。')],
-    [IconPhone, t('Approve with context', '带着上下文审批'), t('Phone approvals show the command, scope, and affected files.', '手机审批同时展示命令、范围与受影响文件。')],
-    [IconTerminal, t('Recover precisely', '精确恢复现场'), t('CLI resumes the same task instead of opening a disconnected session.', 'CLI 接续同一个任务，而不是开启割裂的新会话。')],
-  ];
   return (
     <>
-      <section className="hero section-wrap">
-        <div className="hero-copy reveal">
-          <div className="section-kicker"><IconSpark width={16} height={16} /> {t('Cross-device AI development', '跨设备 AI 开发')}</div>
-          <h1>{t('Keep building, wherever you are.', '让代码，在任何设备上继续。')}</h1>
-          <p>{t(
-            'Start a task on desktop, approve it from your phone, and recover the exact context in the CLI. LingXi keeps the work moving without hiding what changed.',
-            '在桌面发起任务，用手机审批，再回到 CLI 原样接续上下文。LingXi 让工作持续推进，同时让每一次变更清晰可见。',
-          )}</p>
-          <div className="hero-actions">
-            <RouteLink href="/login" className="button primary">{t('Start free', '免费开始')} <IconArrowRight width={17} height={17} /></RouteLink>
-            <RouteLink href="/download" className="button secondary">{t('Download LingXi', '下载 LingXi')}</RouteLink>
-          </div>
-          <div className="hero-proof">
-            <span><IconCheck width={15} height={15} /> {t('No card required', '无需信用卡')}</span>
-            <span><IconCheck width={15} height={15} /> {t('Individual accounts', '个人账号')}</span>
-          </div>
+      <section className="landing-hero" aria-labelledby="landing-title">
+        <RouteLink href="/docs" className="landing-announcement">
+          <span className="landing-announcement-dot" aria-hidden="true" />
+          {t('The LingXi SDKs. Built for developers.', '面向开发者的灵犀 SDK')}
+          <IconArrowRight width={14} height={14} />
+        </RouteLink>
+        <h1 id="landing-title"><span>{t('Bring your ideas ', '让想法，')}</span><span className="landing-title-accent">{t('to life.', '成为现实。')}</span></h1>
+        <p className="landing-description">
+          {t(
+            'An AI development workspace across desktop, mobile, and CLI. Build with the same tools in your own product.',
+            '在桌面、手机与 CLI 上，与 AI 一起开发。也将这份能力，融入你的产品。',
+          )}
+        </p>
+        <div className="landing-actions">
+          <RouteLink href="/download" className="landing-entry landing-entry-primary">
+            <IconDownload width={22} height={22} />
+            <span><strong>{t('Get LingXi', '获取 LingXi')}</strong><small>{t('Desktop · Mobile · CLI', '桌面 · 移动端 · CLI')}</small></span>
+            <IconArrowRight width={17} height={17} />
+          </RouteLink>
+          <RouteLink href="/docs" className="landing-entry">
+            <IconDocs width={22} height={22} />
+            <span><strong>{t('Developer docs', '开发者文档')}</strong><small>{t('Explore the SDKs & APIs', '探索 SDK 与 API')}</small></span>
+            <IconArrowRight width={17} height={17} />
+          </RouteLink>
         </div>
-        <ContinuityScene locale={locale} />
+        <div className="landing-platforms"><span>{t('Wherever you build', '在你创造的每一处')}</span><span>macOS · Windows · Linux · iOS · Android</span></div>
       </section>
 
-      <section className="section-wrap product-statement">
-        <span className="eyebrow">01 / Continuity</span>
-        <h2>{t('One task. Three surfaces. No handoff tax.', '一个任务，三个终端，没有交接损耗。')}</h2>
-        <div className="capability-grid">
-          {capabilities.map(([Icon, title, body]) => (
-            <article className="capability-card" key={String(title)}>
-              <Icon width={22} height={22} />
-              <h3>{title}</h3><p>{body}</p>
-            </article>
+      <section className="landing-sdks" aria-labelledby="landing-sdk-title">
+        <div className="landing-sdk-heading">
+          <div><span className="landing-eyebrow">Build with LingXi</span><h2 id="landing-sdk-title">{t('Make it your own.', '从你的想法开始。')}</h2></div>
+          <RouteLink href="/docs" className="landing-text-link">{t('All documentation', '全部文档')} <IconArrowRight width={16} height={16} /></RouteLink>
+        </div>
+        <div className="landing-sdk-grid">
+          {homeSdks.map((sdk, index) => (
+            <RouteLink href={sdk.href} className="landing-sdk" key={sdk.package}>
+              <div className="landing-sdk-top"><span className="landing-sdk-icon"><sdk.Icon width={23} height={23} /></span><span className="landing-sdk-number">0{index + 1}</span><IconArrowRight width={18} height={18} /></div>
+              <h3>{sdk.name}</h3>
+              <p>{locale === 'zh' ? sdk.zh : sdk.en}</p>
+              <span className="landing-package">{sdk.package}</span>
+            </RouteLink>
           ))}
         </div>
       </section>
-
-      <section className="api-section section-wrap">
-        <div className="api-copy">
-          <span className="eyebrow">02 / API</span>
-          <h2>{t('The same capability, shaped for your product.', '同一套能力，也可以进入你的产品。')}</h2>
-          <p>{t('Use a first-party LingXi key, track every request, and keep API usage separate from your personal subscription.', '使用 LingXi 第一方密钥追踪每次请求，并让 API 用量与个人订阅保持独立。')}</p>
-          <RouteLink href="/docs" className="text-link">{t('Read the quick start', '查看快速开始')} <IconArrowRight width={16} height={16} /></RouteLink>
-        </div>
-        <CodeTabs tabs={apiTabs} />
-      </section>
-
-      <section className="section-wrap split-heading">
-        <div><span className="eyebrow">03 / Surfaces</span><h2>{t('Meet LingXi where you work.', '在你工作的地方遇见 LingXi。')}</h2></div>
-        <RouteLink href="/download" className="button secondary">{t('View release status', '查看发布状态')}</RouteLink>
-      </section>
-      <section className="section-wrap surface-row">
-        {['Android', 'iOS', 'Desktop', 'CLI'].map((name, index) => (
-          <article key={name} className="surface-card">
-            <span>0{index + 1}</span><h3>{name}</h3>
-            <p>{index === 3 ? t('Developer preview available', '开发者预览可用') : t('Beta or coming soon', '测试中或即将推出')}</p>
-          </article>
-        ))}
-      </section>
-
-      <section className="pricing-preview section-wrap">
-        <div>
-          <span className="eyebrow">04 / Pricing</span>
-          <h2>{t('Subscribe for the assistant. Pay only for the API you use.', '助手按订阅，API 按实际用量。')}</h2>
-          <p>{t('Two products, two clear ledgers. No surprise deductions from your personal plan.', '两类产品，两套清晰账目，不从个人套餐中混扣 API 费用。')}</p>
-        </div>
-        <div className="price-callout">
-          <span>{t('Sample Pro price', 'Pro 样例价')}</span>
-          <strong>{formatCurrency(19, region)}<small>/mo</small></strong>
-          <RouteLink href="/pricing" className="text-link">{t('Compare plans', '比较套餐')} <IconArrowRight width={16} height={16} /></RouteLink>
-        </div>
-      </section>
-
-      <section className="docs-cta section-wrap">
-        <IconDocs width={28} height={28} />
-        <div><span className="eyebrow">Quick start</span><h2>{t('From API key to first response in minutes.', '几分钟内，从 API Key 到第一次响应。')}</h2></div>
-        <RouteLink href="/docs" className="button primary">{t('Open docs', '打开文档')}</RouteLink>
-      </section>
     </>
-  );
-}
-
-function ContinuityScene({ locale }: { locale: Locale }) {
-  const t = (en: string, zh: string) => pickLocaleText(locale, { en, zh });
-  return (
-    <div className="continuity-scene reveal delay-1" aria-label={t('Cross-device task continuity illustration', '跨设备任务连续性示意图')}>
-      <div className="flow-line" aria-hidden="true"><i /><i /><i /></div>
-      <div className="device desktop-device">
-        <div className="device-bar"><span /><span /><span /><b>LingXi / storefront</b></div>
-        <div className="device-body">
-          <div className="mini-sidebar"><i /><i /><i /><i /></div>
-          <div className="mini-work"><span className="mini-label">TASK 08</span><h4>{t('Repair checkout race', '修复结账竞态')}</h4><p>3 files changed · tests running</p><div className="diff-lines"><i /><i /><i /><i /></div></div>
-        </div>
-      </div>
-      <div className="device phone-device">
-        <div className="phone-notch" /><span className="mini-label">APPROVAL</span><h4>{t('Run migration?', '运行迁移？')}</h4><p>staging · 3 tables</p><button type="button">{t('Approve', '批准')}</button>
-      </div>
-      <div className="device terminal-device"><div className="terminal-head">lingxi — zsh</div><code><em>$</em> lingxi resume task_08<br /><span>✓ context restored</span><br />tests: 42 passed</code></div>
-      <div className="scene-note"><IconSpark width={15} height={15} /> {t('Context stays attached', '上下文始终相连')}</div>
-    </div>
   );
 }
 

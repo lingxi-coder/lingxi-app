@@ -11,3 +11,16 @@ apps/android/ffi/src/host.rs:LINGXI_GIT_SHA_SHORT  # Existing branding::ENV_PREF
 
 scripts/tests/test_android_jni_promotion.py:LINGXI_ANDROID_JNILIBS_DIR  # Existing build-jni.sh output-override environment API; the fixture must clear this exact name to exercise default publication paths.
 scripts/tests/test_android_jni_promotion.py:LINGXI_KOTLIN_OUT  # Existing build-jni.sh binding-output environment API; clearing the actual override keeps the regression independent of the developer shell.
+
+apps/web/src/data/docs/bridge.ts:~/.lingxi/bridge  # Bridge SDK default persisted lockfile discovery directory; documentation must name the actual client/server contract.
+apps/web/src/data/docs/bridge.ts:X-LingXi-Ide-Authorization  # Bridge SDK/server wire authentication header; a renamed documentation header would fail the real handshake.
+apps/web/src/data/docs/mobile.ts:io.github.lingxi-coder:mobile-linux-runtime  # Published Mobile Linux Maven artifact coordinate; embedding applications must depend on this exact external package identity.
+apps/web/src/data/docs/mobile.ts:io.github.lingxi-coder.mobile-linux  # Published Mobile Linux Gradle plugin ID; the integration snippet must preserve its actual resolver identity.
+
+apps/web/public/api-index.json:~/.lingxi/bridge  # Generated Bridge SDK contract summary of the persisted discovery namespace; preserve the upstream source verbatim.
+apps/web/public/api-index.json:LINGXI.md  # Generated SDK API summary naming the existing persisted memory-file contract; renaming the catalog would misdescribe the API.
+apps/web/public/api-index.json:LINGXI_SESSION_KIND  # Generated Harness SDK summary naming its current environment ABI for background-session deferral.
+apps/web/public/api-index.json:LINGXI_ENABLE_TODO_TOOLS  # Generated Harness SDK public constant value; consumers must set the actual environment key.
+apps/web/public/api-index.json:.lingxi-plugin/plugin.json  # Generated Harness SDK plugin-loader manifest namespace; extracted packages require this exact on-disk contract.
+apps/web/public/api-index.json:.lingxi-plugin/marketplace.json  # Generated Harness SDK marketplace manifest namespace; catalog parsing uses this exact persisted filename.
+apps/web/public/api-index.json:LINGXI_ENABLE_TOOL_SEARCH  # Generated Harness SDK summary of the supported tool-search environment ABI; keep the upstream public contract exact.

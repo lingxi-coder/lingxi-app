@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "docs:sync": "python3 scripts/generate-api-index.py",
+    "docs:check": "python3 scripts/generate-api-index.py --check",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "test": "node --import tsx --test test/*.test.ts"
   },

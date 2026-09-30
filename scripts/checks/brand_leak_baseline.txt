@@ -114,8 +114,6 @@ G1	packages/bridge-client/src/client.ts	X-LingXi-Ide-Authorization
 G1	packages/bridge-client/src/client.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	packages/bridge-client/src/lockfile.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	packages/bridge-client/test/snapshots.test.ts	\.lingxi(?![A-Za-z0-9_.\-])
-G1	apps/web/src/pages/DocsPage.tsx	LINGXI_
-G1	apps/web/src/pages/PublicPages.tsx	LINGXI_
 G1	apps/android/ffi/kotlin/build.gradle.kts	\.lingxi
 G1	apps/android/ffi/src/lib/tests/tests.rs	LINGXI
 G1	apps/android/ffi/src/lib/tests/tests.rs	\.lingxi

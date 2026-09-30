@@ -1,4 +1,5 @@
 import { startTransition, useEffect, useMemo, useState } from 'react';
+import { docPages } from '../data/docs';
 
 export const appRoutes = [
   '/',
@@ -12,7 +13,7 @@ export const appRoutes = [
   '/docs',
 ] as const;
 
-export type AppRoute = (typeof appRoutes)[number];
+export type AppRoute = (typeof appRoutes)[number] | `/docs/${string}`;
 
 export function normalizePath(path: string): string {
   const [pathname = '/'] = path.split(/[?#]/u);
@@ -27,6 +28,9 @@ export function normalizePath(path: string): string {
 export function resolveRoute(path: string): AppRoute {
   const normalized = normalizePath(path);
   if ((appRoutes as readonly string[]).includes(normalized)) {
+    return normalized as AppRoute;
+  }
+  if (docPages.some((page) => normalized === `/docs/${page.id}`)) {
     return normalized as AppRoute;
   }
   return '/';

@@ -23,8 +23,24 @@ export function App() {
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    if (!route.startsWith('/docs')) {
+      document.title = locale === 'zh' ? '灵犀 LingXi — 让想法，成为现实。' : 'LingXi — Bring your ideas to life.';
+      const description = document.querySelector<HTMLMetaElement>('meta[name="description"]');
+      if (description) description.content = locale === 'zh'
+        ? '灵犀 LingXi：跨平台 AI 开发助手。探索 Harness Runtime、LLM Client 与 Mobile Linux SDK 和开发者文档。'
+        : 'LingXi is a cross-platform AI development assistant. Explore the Harness Runtime, LLM Client, and Mobile Linux SDKs and developer documentation.';
+    }
   }, [locale, route, theme]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      let target: HTMLElement | null = null;
+      try { target = document.getElementById(decodeURIComponent(window.location.hash.slice(1))); } catch { /* Invalid fragments use the page top. */ }
+      if (target) target.scrollIntoView({ behavior: 'instant' });
+      else window.scrollTo({ top: 0, behavior: 'instant' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [route]);
 
   const common = {
     locale,
@@ -33,9 +49,10 @@ export function App() {
     onRegionChange: setRegion,
   };
 
-  if (route === '/docs') {
+  if (route === '/docs' || route.startsWith('/docs/')) {
     return (
       <DocsPage
+        pageId={route === '/docs' ? 'overview' : route.slice('/docs/'.length)}
         {...common}
         theme={theme}
         onThemeToggle={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}

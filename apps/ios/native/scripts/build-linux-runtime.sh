@@ -22,7 +22,7 @@ while [[ $# -gt 0 ]]; do
     --apk-dir) APK_DIR="${2:?missing APK directory}"; shift 2 ;;
     --alpine-version) ALPINE_VERSION="${2:?missing Alpine version}"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 [--debug|--release] [--simulator-only] [--local-app-runtime] [--apk-dir DIR] [--clean]"
+      echo "usage: $0 [--debug|--release] [--simulator-only] [--local-app-runtime] [--rootfs-archive FILE] [--apk-dir DIR] [--clean]"
       exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac

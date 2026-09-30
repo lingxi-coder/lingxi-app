@@ -14,6 +14,7 @@ jobs:
         run: |
           python3 scripts/tests/test_runtime_source.py
           python3 scripts/tests/test_mobile_linux_source.py
+          python3 scripts/tests/test_fetch_sdk_rootfs.py
           python3 scripts/tests/test_workspace_layout.py
       - name: Validate both pinned runtime sources
         run: python3 scripts/checks/check-runtime-dependency.py

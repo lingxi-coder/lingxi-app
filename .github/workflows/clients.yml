@@ -5,12 +5,6 @@
 # and node client surfaces and run the instrumented / simulator engine
 # round-trip tests against a freshly built on-device engine.
 #
-# CAVEAT (no remote yet): at authoring time this repo has NO git remote, so
-# GitHub Actions cannot actually RUN this workflow. It is a validated workflow
-# DEFINITION (actionlint-clean + YAML-parseable); it begins executing only once
-# the repo is pushed to GitHub. The triggers below mirror ci.yml so that, once
-# pushed, these client gates fire on every pull_request and on push to main.
-#
 # All engine round-trip tests are KEYLESS: with no ANTHROPIC_API_KEY the engine
 # is expected to terminate in an Error / TurnEnded event, which is exactly what
 # the round-trip tests assert. No secret is required by any job here.

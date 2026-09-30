@@ -60,6 +60,27 @@ forbidden-feature gates in every locked runtime profile. Enabled releases still
 require authorization, real rootfs archive/evidence, approved licenses and APK
 validation.
 
+The structural Android/iOS store gates load identities through
+`scripts/lib/local_app_branding.py`, rooted at the gate's own Host checkout,
+independently of the scanned `--repo-root`. Android's reviewed package and
+constant paths use `namespace`/`applicationId` from
+`apps/android/native/app/build.gradle.kts`; they must agree. iOS task IDs use
+only the main application target's `settings.base.PRODUCT_BUNDLE_IDENTIFIER`
+in `apps/ios/native/project.yml`. The helper reads the existing literal,
+indented XcodeGen/Gradle definitions and fails on missing, ambiguous or
+unsupported forms. Manifest/plist values and flavor, widget or test bundle IDs
+do not define the expected identity. Reviewed task suffixes, service classes,
+subtypes, declaration scope and registration/expiration/completion/audio
+cleanup checks remain enforced.
+
+The accessibility service name uses `branding::PRODUCT_NAME`; runtime profile
+policy paths use `branding::DOT_DIR`, read from the branding package located by
+the canonical locked Cargo resolver. Smoke tests obtain the enabled env key
+from the Host authorization script and the APK env key from the Host smoke
+script. Fixtures copy the canonical native configs and invoke the real Host
+gates against their separate mutable source trees, including coordinated
+config/manifest/plist/source identity attacks.
+
 Source checkout directories are read-only inputs. The SDK receives local rootfs
 archives; host build/download or bundling policy controls how those files arrive.
 

@@ -17,6 +17,14 @@ import xml.etree.ElementTree as ET
 HOST = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(HOST / "scripts/lib"))
 from runtime_source import resolve_runtime
+from local_app_branding import (android_package, authorization_enabled_env,
+                                branding_constant, ios_bundle_id, local_app_apk_env)
+
+ANDROID_PACKAGE = android_package()
+ANDROID_PACKAGE_PATH = Path(*ANDROID_PACKAGE.split("."))
+IOS_BUNDLE_ID = ios_bundle_id()
+ENABLED_ENV = authorization_enabled_env()
+APK_ENV = local_app_apk_env()
 
 
 class SmokeRoutingTests(unittest.TestCase):
@@ -28,10 +36,10 @@ class SmokeRoutingTests(unittest.TestCase):
         self.runtime = self.root / "harness"
         self.sdk = self.root / "sdk"
         self.log = self.root / "calls"
-        self.env = {**os.environ, "LINGXI_MOBILE_LINUX_ENABLED": "0",
+        self.env = {**os.environ, ENABLED_ENV: "0",
                     "POLICY_TEST_LOG": str(self.log), "POLICY_TEST_FAIL": "",
                     "PYTHONDONTWRITEBYTECODE": "1"}
-        for name in ("MOBILE_LINUX_EVIDENCE_DIR", "LINGXI_LOCAL_APP_APK_DIR"):
+        for name in ("MOBILE_LINUX_EVIDENCE_DIR", APK_ENV):
             self.env.pop(name, None)
         self.write(self.host / "scripts/local-apps/smoke.sh",
                    (HOST / "scripts/local-apps/smoke.sh").read_text())
@@ -97,23 +105,23 @@ sys.exit(1 if os.environ['POLICY_TEST_FAIL'] == {name!r} else 0)
         self.assertFalse(any(call.startswith("supply-chain") for call in calls))
 
     def test_enabled_requires_evidence(self):
-        self.env["LINGXI_MOBILE_LINUX_ENABLED"] = "1"
+        self.env[ENABLED_ENV] = "1"
         result, calls = self.run_smoke()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("enabled release requires external evidence", result.stderr)
         self.assertFalse(any(call.startswith("sdk-contracts") for call in calls))
 
     def test_enabled_requires_apks_after_rootfs_and_licenses(self):
-        self.env.update(LINGXI_MOBILE_LINUX_ENABLED="1", MOBILE_LINUX_EVIDENCE_DIR=str(self.root / "evidence"))
+        self.env.update({ENABLED_ENV: "1", "MOBILE_LINUX_EVIDENCE_DIR": str(self.root / "evidence")})
         result, calls = self.run_smoke()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("LINGXI_LOCAL_APP_APK_DIR is required", result.stderr)
+        self.assertIn(f"{APK_ENV} is required", result.stderr)
         self.assertEqual([call.split()[0] for call in calls[-2:]], ["check-rootfs-manifest", "check-sbom-and-licenses"])
         self.assertFalse(any(call.startswith("supply-chain") for call in calls))
 
     def test_enabled_preserves_release_validation_and_rejections(self):
-        self.env.update(LINGXI_MOBILE_LINUX_ENABLED="1", MOBILE_LINUX_EVIDENCE_DIR=str(self.root / "evidence"),
-                        LINGXI_LOCAL_APP_APK_DIR=str(self.root / "apks"))
+        self.env.update({ENABLED_ENV: "1", "MOBILE_LINUX_EVIDENCE_DIR": str(self.root / "evidence"),
+                         APK_ENV: str(self.root / "apks")})
         result, calls = self.run_smoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"--release --apk-dir {self.root / 'apks'}", calls[-1])
@@ -131,6 +139,7 @@ class LockedProfilePolicyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.resolved = resolve_runtime()
         cls.runtime = Path(cls.resolved["root"])
+        cls.dot_dir = branding_constant("DOT_DIR", cls.resolved)
         spec = importlib.util.spec_from_file_location(
             "locked_local_app_policy", cls.runtime / "scripts/local-apps/verify-local-app-supply-chain.py")
         cls.verify = importlib.util.module_from_spec(spec)
@@ -150,7 +159,7 @@ class LockedProfilePolicyTests(unittest.TestCase):
                 template = Path(temporary) / "template"
                 shutil.copytree(self.runtime / f"crates/local-apps/templates/runtime-profiles/{family}/r4", template)
                 self.verify.validate_runtime_profile_source_policy(family, template)
-                policy_path = template / ".lingxi/source-policy.json"
+                policy_path = template / self.dot_dir / "source-policy.json"
                 policy = json.loads(policy_path.read_text())
                 mutations = {
                     "writable roots": {**policy, "agent_writable_roots": policy["agent_writable_roots"] + ["."]},
@@ -192,8 +201,15 @@ class MobileStorePolicyFixture(unittest.TestCase):
             (self.host / path).mkdir(parents=True, exist_ok=True)
         for path in ("crates/platforms/android", "crates/platforms/ios"):
             (self.runtime / path).mkdir(parents=True)
-        for name in ("check-store-compliance.sh", "check-android-special-use.py", "check-ios-background-policy.py"):
-            self.write(f"scripts/local-apps/{name}", (HOST / f"scripts/local-apps/{name}").read_text())
+        self.write("scripts/local-apps/check-store-compliance.sh",
+                   (HOST / "scripts/local-apps/check-store-compliance.sh").read_text())
+        # Run the real Host gates: their trusted identity source must remain
+        # independent of the mutable --repo-root supplied by this fixture.
+        for name in ("check-android-special-use.py", "check-ios-background-policy.py"):
+            self.write(f"scripts/local-apps/{name}",
+                       f"import runpy\nrunpy.run_path({str(HOST / 'scripts/local-apps' / name)!r}, run_name='__main__')\n")
+        for path in ("apps/android/native/app/build.gradle.kts", "apps/ios/native/project.yml"):
+            self.write(path, (HOST / path).read_text())
         self.write("scripts/lib/runtime_source.py", f"print({str(self.runtime)!r})\n")
         for path in (self.MAIN, self.DIRECT):
             self.write(path, (HOST / path).read_text())
@@ -206,8 +222,8 @@ class MobileStorePolicyFixture(unittest.TestCase):
         # The source check limits constant provenance; runtime semantics were
         # reviewed in the real implementation, not simulated by this fixture.
         for path in (
-            "main/java/com/lingxi/code/conversation/ConversationBackgroundExecution.kt",
-            "direct/java/com/lingxi/code/computeruse/ComputerUseSessionService.kt",
+            Path("main/java") / ANDROID_PACKAGE_PATH / "conversation/ConversationBackgroundExecution.kt",
+            Path("direct/java") / ANDROID_PACKAGE_PATH / "computeruse/ComputerUseSessionService.kt",
         ):
             self.write(f"apps/android/native/app/src/{path}", "val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE\n")
 
@@ -244,8 +260,16 @@ class AndroidSpecialUsePolicyTests(MobileStorePolicyFixture):
                 self.assertIn(f"{mode} store-compliance scan passed", result.stdout)
 
     def test_formatting_and_namespace_prefix_do_not_change_policy(self):
-        self.mutate_main(lambda root: None)  # ElementTree emits ns0 attributes.
-        self.assertEqual(self.run_policy().returncode, 0)
+        for qualified in (False, True):
+            with self.subTest(qualified=qualified):
+                self.write(self.MAIN, (HOST / self.MAIN).read_text())
+                def mutate(root):
+                    if qualified:
+                        root.set("package", ANDROID_PACKAGE)
+                        root.find("application/service").set(
+                            self.ANDROID + "name", ANDROID_PACKAGE + ".conversation.ConversationTurnService")
+                self.mutate_main(mutate)  # ElementTree emits ns0 attributes.
+                self.assertEqual(self.run_policy().returncode, 0)
 
     def test_exported_missing_export_or_wrong_lifecycle_rejected(self):
         original = (HOST / self.MAIN).read_text()
@@ -320,9 +344,21 @@ class AndroidSpecialUsePolicyTests(MobileStorePolicyFixture):
                         root.set("package", "com.deceptive")
                 self.mutate_main(mutate)
                 self.assert_rejected()
+        # Changing the fixture's Gradle config along with its manifest cannot
+        # authorize a new package, qualified service or constant location.
+        unreviewed = "com.deceptive"
+        config = "apps/android/native/app/build.gradle.kts"
+        self.write(config, (HOST / config).read_text().replace(ANDROID_PACKAGE, unreviewed))
+        self.write(self.MAIN, original.replace(ANDROID_PACKAGE, unreviewed))
+        self.mutate_main(lambda root: root.set("package", unreviewed))
+        self.assert_rejected(reason="unreviewed service package")
+        self.write(self.MAIN, original)
+        self.mutate_main(lambda root: root.find("application/service").set(
+            self.ANDROID + "name", unreviewed + ".conversation.ConversationTurnService"))
+        self.assert_rejected()
 
     def test_overlay_cannot_export_or_replace_conversation(self):
-        for name in (".conversation.ConversationTurnService", "com.lingxi.code.conversation.ConversationTurnService"):
+        for name in (".conversation.ConversationTurnService", ANDROID_PACKAGE + ".conversation.ConversationTurnService"):
             with self.subTest(name=name):
                 self.write("apps/android/native/app/src/play/AndroidManifest.xml", f'''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 <application><service android:name="{name}" android:exported="true" /></application></manifest>''')
@@ -340,7 +376,7 @@ class AndroidSpecialUsePolicyTests(MobileStorePolicyFixture):
 
     def test_unknown_source_references_rejected_even_in_reviewed_file(self):
         paths = ("apps/android/native/app/src/main/java/Unknown.kt",
-                 "apps/android/native/app/src/main/java/com/lingxi/code/conversation/ConversationBackgroundExecution.kt",
+                 Path("apps/android/native/app/src/main/java") / ANDROID_PACKAGE_PATH / "conversation/ConversationBackgroundExecution.kt",
                  "apps/android/ffi/unknown.rs")
         for path in paths:
             with self.subTest(path=path):
@@ -362,7 +398,8 @@ class AndroidSpecialUsePolicyTests(MobileStorePolicyFixture):
         original = (HOST / self.DIRECT).read_text()
         for old, new in (("BIND_ACCESSIBILITY_SERVICE", "BIND_OTHER_SERVICE"),
                          ("mediaProjection|microphone|specialUse", "specialUse"),
-                         ("User-started Android Computer Use control session", "Background work")):
+                         ("User-started Android Computer Use control session", "Background work"),
+                         (branding_constant("PRODUCT_NAME") + "AccessibilityService", "OtherAccessibilityService")):
             with self.subTest(old=old):
                 self.write(self.DIRECT, original.replace(old, new))
                 self.assert_rejected("direct")
@@ -446,8 +483,8 @@ let endpoint = "silence detected"
             ("UIBackgroundModes", ["processing", "location"]), ("UIBackgroundModes", ["processing", "processing"]),
             ("UIBackgroundModes", "processing"), ("UIBackgroundModes", [True]), ("UIBackgroundModes", []),
             ("BGTaskSchedulerPermittedIdentifiers", []), ("BGTaskSchedulerPermittedIdentifiers", ["*"]),
-            ("BGTaskSchedulerPermittedIdentifiers", ["com.lingxi.code.unknown"]),
-            ("BGTaskSchedulerPermittedIdentifiers", "com.lingxi.code.cron.reconcile"),
+            ("BGTaskSchedulerPermittedIdentifiers", [IOS_BUNDLE_ID + ".unknown"]),
+            ("BGTaskSchedulerPermittedIdentifiers", IOS_BUNDLE_ID + ".cron.reconcile"),
         ):
             with self.subTest(field=field, values=values):
                 (self.host / self.INFO).write_bytes(original)
@@ -456,11 +493,26 @@ let endpoint = "silence detected"
         (self.host / self.INFO).write_bytes(original)
         self.mutate_info(lambda info: info["BGTaskSchedulerPermittedIdentifiers"].append(info["BGTaskSchedulerPermittedIdentifiers"][0]))
         self.assert_rejected(reason="duplicate BGTaskSchedulerPermittedIdentifiers")
+        # A coordinated change to fixture config, plist and every source owner
+        # must still be rejected against the trusted Host's base bundle ID.
+        unreviewed = "com.deceptive"
+        config = "apps/ios/native/project.yml"
+        self.write(config, (HOST / config).read_text().replace(IOS_BUNDLE_ID, unreviewed))
+        (self.host / self.INFO).write_bytes(original)
+        self.mutate_info(lambda info: info.update(BGTaskSchedulerPermittedIdentifiers=[
+            value.replace(IOS_BUNDLE_ID, unreviewed) for value in info["BGTaskSchedulerPermittedIdentifiers"]]))
+        for path in (self.host / "apps/ios/native/Sources").rglob("*.swift"):
+            path.write_text(path.read_text().replace(IOS_BUNDLE_ID, unreviewed))
+        self.assert_rejected(reason="unreviewed processing modes / permitted identifiers")
+        # Restore only the plist to prove the source anchors independently
+        # enforce the exact reviewed IDs (including escaped regex dots).
+        (self.host / self.INFO).write_bytes(original)
+        self.assert_rejected(reason="missing reviewed processing identifier")
 
     def test_missing_unregistered_or_commented_task_source_rejected(self):
         path = self.host / "apps/ios/native/Sources/Cron/CronModels.swift"
         original = path.read_text()
-        path.write_text(original.replace("com.lingxi.code.cron.reconcile", "com.lingxi.code.cron.unknown"))
+        path.write_text(original.replace(IOS_BUNDLE_ID + ".cron.reconcile", IOS_BUNDLE_ID + ".cron.unknown"))
         self.assert_rejected(reason="missing reviewed processing identifier")
         path.write_text("/* " + original + " */")
         self.assert_rejected(reason="missing reviewed processing identifier")

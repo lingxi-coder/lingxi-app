@@ -19,6 +19,9 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from local_app_branding import android_package, branding_constant
+
 ANDROID = "{http://schemas.android.com/apk/res/android}"
 TOOLS = "{http://schemas.android.com/tools}"
 PERMISSION = "android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
@@ -37,7 +40,7 @@ def reject(path, message):
 
 def service_name(name):
     # Fully qualified spelling must not bypass overlay/duplicate checks.
-    prefix = "com.lingxi.code"
+    prefix = android_package()
     return name[len(prefix):] if name.startswith(prefix + ".") else name
 
 
@@ -84,7 +87,7 @@ def validate_manifest(path, repo_root, mode):
     if seen != set(expected) or len(permissions) != (1 if expected else 0):
         reject(path, "missing reviewed specialUse service or permission pair")
     if expected:
-        if tree.get("package") not in (None, "com.lingxi.code"):
+        if tree.get("package") not in (None, android_package()):
             reject(path, "unreviewed service package")
         base = [node for node in tree.findall("uses-permission")
                 if node.attrib == {ANDROID + "name": "android.permission.FOREGROUND_SERVICE"}]
@@ -97,8 +100,9 @@ def validate_manifest(path, repo_root, mode):
         if node.tag in ("manifest", "application") and any(key.startswith(TOOLS) for key in node.attrib):
             reject(path, "manifest merger directive requires policy review")
     if mode == "direct" and relative == DIRECT:
+        accessibility = ".computeruse." + branding_constant("PRODUCT_NAME") + "AccessibilityService"
         bindings = [node for node in tree.findall("application/service")
-                    if service_name(node.get(ANDROID + "name", "")) == ".computeruse.LingXiAccessibilityService"]
+                    if service_name(node.get(ANDROID + "name", "")) == accessibility]
         if len(bindings) != 1 or bindings[0].get(ANDROID + "permission") != "android.permission.BIND_ACCESSIBILITY_SERVICE":
             reject(path, "Direct manifest is missing AccessibilityService binding")
 
@@ -118,9 +122,12 @@ def validate_sources(repo_root, mode, scan_paths):
         raise ValueError("missing reviewed Android manifest")
     for path in sorted(manifests):
         validate_manifest(path, repo_root, mode)
-    constant_paths = {repo_root / "apps/android/native/app/src/main/java/com/lingxi/code/conversation/ConversationBackgroundExecution.kt"}
+    package_path = Path(*android_package().split("."))
+    constant_paths = {repo_root / "apps/android/native/app/src/main/java" / package_path
+                      / "conversation/ConversationBackgroundExecution.kt"}
     if mode == "direct":
-        constant_paths.add(repo_root / "apps/android/native/app/src/direct/java/com/lingxi/code/computeruse/ComputerUseSessionService.kt")
+        constant_paths.add(repo_root / "apps/android/native/app/src/direct/java" / package_path
+                           / "computeruse/ComputerUseSessionService.kt")
     candidates = subprocess.run(command + ["-l", "-e", TOKEN.pattern] + list(map(str, scan_paths)),
                                 capture_output=True)
     if candidates.returncode not in (0, 1):

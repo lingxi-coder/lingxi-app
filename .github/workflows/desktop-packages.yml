@@ -89,23 +89,32 @@ jobs:
         working-directory: .
         run: |
           cargo check --locked -p bridge-server
-          cargo test --locked -p client
+          runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
+          cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p client
           cargo build --locked --release -p bridge-server --bin bridge-server
 
       - name: Test POSIX secure storage
         if: matrix.platform != 'win32'
         working-directory: .
-        run: cargo test --locked -p platform-posix secure_storage --lib
+        run: |
+          runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
+          cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p platform-posix secure_storage --lib
 
       - name: Test Windows Credential Manager storage
         if: matrix.platform == 'win32'
         working-directory: .
-        run: cargo test --locked -p platform-windows --lib
+        shell: bash
+        run: |
+          runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
+          cargo test --locked --manifest-path "${runtime_root}/Cargo.toml" -p platform-windows --lib
 
       - name: Test public Windows file handle operations
         if: matrix.platform == 'win32'
         working-directory: .
-        run: cargo test --locked -p platform-pty --test windows_file_exports
+        shell: bash
+        run: |
+          sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
+          cargo test --locked --manifest-path "${sdk_root}/Cargo.toml" -p platform-pty --test windows_file_exports
 
       - name: Build and test shared SDK
         working-directory: packages/bridge-client

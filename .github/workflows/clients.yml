@@ -293,7 +293,7 @@ jobs:
 
       # xcodegen materializes apps/ios/native/project.yml into an .xcodeproj.
       - name: Install Xcode project and native build tools
-        run: brew install xcodegen meson ninja
+        run: brew install xcodegen meson ninja llvm lld
 
       - name: Build native support and verified release rootfs
         run: |

@@ -293,7 +293,9 @@ jobs:
 
       # xcodegen materializes apps/ios/native/project.yml into an .xcodeproj.
       - name: Install Xcode project and native build tools
-        run: brew install xcodegen meson ninja llvm lld
+        run: |
+          brew install xcodegen meson ninja llvm lld libarchive
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Build native support and verified release rootfs
         run: |

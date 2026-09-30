@@ -8,10 +8,11 @@ const root = join(import.meta.dirname, '../../..');
 
 function hits(needle: string): string[] {
   try {
-    return execFileSync('rg', ['-l', '-F', '--', needle, 'apps/electron/src'],
+    return execFileSync('rg', ['--path-separator', '/', '-l', '-F', '--', needle, 'apps/electron/src'],
       { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean).sort();
-  } catch {
-    return [];   // git grep 无命中时退出码为 1
+  } catch (error) {
+    if ((error as { status?: number }).status !== 1) throw error;
+    return []; // rg returns 1 only when the search has no matches.
   }
 }
 
@@ -109,10 +110,11 @@ function declarationSites(name: string): string[] {
   try {
     return execFileSync(
       'rg',
-      ['-l', '-U', '-e', `^export (interface|type) ${name}[ <={]`, '--', 'apps/electron/src'],
+      ['--path-separator', '/', '-l', '-U', '-e', `^export (interface|type) ${name}[ <={]`, '--', 'apps/electron/src'],
       { cwd: root, encoding: 'utf8' },
     ).trim().split('\n').filter(Boolean).sort();
-  } catch {
+  } catch (error) {
+    if ((error as { status?: number }).status !== 1) throw error;
     return [];
   }
 }

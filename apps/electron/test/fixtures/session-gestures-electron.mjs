@@ -1,3 +1,4 @@
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 import assert from 'node:assert/strict';
 import { app, BrowserWindow } from 'electron';
 
@@ -7,9 +8,10 @@ app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: true, width: 1000, height: 800, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ show: true, width: 1000, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = script => window.webContents.executeJavaScript(script);
     const wait = async expression => {
       const deadline = Date.now() + 6000;
@@ -87,7 +89,6 @@ async function main() {
     // moves only after the renderer completes that phase. Advance rendered
     // frames before sending the destination move instead of racing activation.
     await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-    await input('mouseMove', alpha, { button: 'left', modifiers: ['leftButtonDown'] });
     const alphaHit = await run(`(() => {
       const element = document.elementFromPoint(${alpha.x}, ${alpha.y});
       const row = element?.closest('.sidebar-tree-row');
@@ -95,6 +96,7 @@ async function main() {
       return { tag: element?.tagName, className: typeof element?.className === 'string' ? element.className : '', sessionId: button?.dataset.sessionId, projectPath: button?.dataset.sessionProjectPath };
     })()`);
     assert.equal(alphaHit.sessionId, 'alpha', `drag pointer did not resolve to alpha: ${JSON.stringify(alphaHit)}`);
+    await input('mouseMove', alpha, { button: 'left', modifiers: ['leftButtonDown'] });
     await wait(`Array.from(document.querySelectorAll('.sidebar-tree-row')).some(row => row.dataset.dragTarget === 'true')`);
     const dropIndicators = await run(`Array.from(document.querySelectorAll('.sidebar-tree-row[data-drag-target="true"] [data-session-id]')).map(button => button.dataset.sessionId)`);
     assert.deepEqual(dropIndicators, ['gamma'], 'the sortable placeholder marks the dragged item at its preview position');

@@ -222,7 +222,7 @@ test('credential broker replaces a same-version installed bundle when its signed
   );
 });
 
-test('nested signing discovery includes Mach-O binaries and excludes ordinary resources', () => {
+test('nested signing discovery includes Mach-O binaries and excludes ordinary resources', { skip: process.platform !== 'darwin' && 'requires native macOS binaries and plutil' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'lingxi-macho-test-'));
   try {
     const binary = join(root, 'helper');
@@ -281,7 +281,7 @@ test('audio helper identifiers follow the desktop packaging channel split', () =
   assert.throws(() => audioHelperIdentifiers('staging'), /unsupported audio helper channel/);
 });
 
-test('audio helper resource layout and plist declare the expected macOS voice permissions', () => {
+test('audio helper resource layout and plist declare the expected macOS voice permissions', { skip: process.platform !== 'darwin' && 'requires native macOS binaries and plutil' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'lingxi-audio-helper-test-'));
   try {
     const contents = join(root, 'LingXiAudioHelper.app', 'Contents');
@@ -435,7 +435,7 @@ test('package scanning permits the public source prefix embedded by the official
   }
 });
 
-test('the rewritten outer app Info.plist declares real native voice usage', () => {
+test('the rewritten outer app Info.plist declares real native voice usage', { skip: process.platform !== 'darwin' && 'requires native macOS binaries and plutil' }, () => {
   // This does not read back a constant the implementation just wrote: it
   // runs the REAL `rewriteInfoPlist` export against a REAL plist file
   // through the REAL `plutil` binary (the same tool `package-mac.mjs` shells

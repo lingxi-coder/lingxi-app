@@ -1,3 +1,4 @@
+import { configureFixtureWindow, settleFixtureAnimations } from './electron-test-environment.mjs';
 import { app, BrowserWindow } from 'electron';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -22,6 +23,7 @@ async function main() {
   const checks = [];
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const wc = window.webContents;
     const js = (expression) => wc.executeJavaScript(expression);
     const click = async (selector) => { await js(`document.querySelector(${JSON.stringify(selector)}).click()`); await delay(40); };
@@ -51,14 +53,12 @@ async function main() {
     assert.equal(await js(`getComputedStyle(document.querySelector('.runtime-inspector')).opacity`), '1');
     await click('[aria-label="Hide right panel"]');
     await waitFor(wc, `!document.querySelector('.runtime-inspector')`);
-    wc.debugger.attach('1.3');
     await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     await click('[aria-label="Toggle right panel"]');
     assert.equal(await js(`document.querySelector('.runtime-inspector').getAnimations({subtree:true}).length`), 0);
     await click('[aria-label="Hide right panel"]');
     assert.equal(await js(`document.querySelector('.runtime-inspector')`), null);
-    await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
-    wc.debugger.detach();
+    await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
 
 
     assert.equal(await js(`Boolean(document.querySelector('.desktop-topbar [aria-label="More chat actions"], .desktop-topbar .git-topbar'))`), false);
@@ -84,6 +84,7 @@ async function main() {
     checks.push('context browsing focus and guarded compaction in summary');
 
     await waitFor(wc, `Boolean(document.querySelector('#runtime-center-overview'))`);
+    await settleFixtureAnimations(wc, '#runtime-center-overview');
     const overview = await js(`(() => { const panel = document.querySelector('#runtime-center-overview'); const row = panel.parentElement; return { width: panel.getBoundingClientRect().width, height: panel.getBoundingClientRect().height, rowHeight: row.getBoundingClientRect().height, scrollHeight: panel.scrollHeight, clientHeight: panel.clientHeight, radius: getComputedStyle(panel).borderRadius, sections: [...panel.querySelectorAll('h2')].map(el=>el.textContent), fourthResource: panel.textContent.includes('acceptance.md') }; })()`);
     assert.equal(overview.width, 300);
     assert.equal(overview.radius, '20px');

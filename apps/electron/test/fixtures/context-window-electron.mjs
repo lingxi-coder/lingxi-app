@@ -1,3 +1,4 @@
+import { configureFixtureWindow, waitForFixture } from './electron-test-environment.mjs';
 import assert from 'node:assert/strict';
 import { app, BrowserWindow } from 'electron';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -9,7 +10,7 @@ app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 
 async function main() {
   await app.whenReady();
-  const win = new BrowserWindow({ show: false, width: 700, height: 450, webPreferences: { sandbox: true } });
+  const win = new BrowserWindow({ show: false, width: 700, height: 450, webPreferences: { sandbox: true, backgroundThrottling: false } });
   const evaluate = code => win.webContents.executeJavaScript(code);
   const settle = () => new Promise(resolve => setTimeout(resolve, 50));
   const act = async code => { await evaluate(code); await settle(); };
@@ -20,8 +21,9 @@ async function main() {
     const point = inside ? await evaluate(`(() => {
       const rect = document.querySelector('.context-window-trigger').getBoundingClientRect();
       return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
-    })()`) : { x: 10, y: 10 };
+    })()`) : await evaluate(`(() => { const rect = document.querySelector('#other').getBoundingClientRect(); return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) }; })()`);
     win.webContents.sendInputEvent({ type: 'mouseMove', ...point });
+    await waitForFixture(win.webContents, `document.querySelector('.context-window-trigger').matches(':hover') === ${inside}`);
     await settle();
   };
   const expectOpen = async (expected, message) => {
@@ -36,6 +38,7 @@ async function main() {
 
   try {
     await win.loadURL(url);
+    await configureFixtureWindow(win);
     win.webContents.focus();
     for (let n = 0; n < 100 && !await evaluate(`Boolean(document.querySelector('.context-window-trigger'))`); n++) await settle();
     await hover(false);

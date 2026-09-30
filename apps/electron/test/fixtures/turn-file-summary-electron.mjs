@@ -1,3 +1,4 @@
+import { configureFixtureWindow, settleFixtureAnimations } from './electron-test-environment.mjs';
 import { app, BrowserWindow } from 'electron';
 import { writeFile } from 'node:fs/promises';
 const url = process.argv.find(arg => arg.startsWith('http://'));
@@ -17,11 +18,12 @@ async function main() {
       }
     };
     await win.loadURL(url);
+    await configureFixtureWindow(win);
     await waitFor('Boolean(document.querySelector(".turn-file-review"))');
     const result = await run(`({ files: document.querySelectorAll('.turn-file-summary li').length, initiallyClosed: !document.querySelector('#runtime-inspector'), inlineDiffs: document.querySelectorAll('main .turn-file-diffs').length })`);
     await run(`document.querySelector('.turn-file-review').click()`);
     await waitFor(`document.querySelector('#runtime-inspector-panel')?.textContent.includes('Historical stylesheet change')`);
-    await waitFor(`document.querySelector('#runtime-inspector').getAnimations().length === 0`);
+    await settleFixtureAnimations(win.webContents, '#runtime-inspector');
     result.allFilesVisible = await run(`['Historical component change', 'Historical stylesheet change'].every(text => document.querySelector('#runtime-inspector-panel').textContent.includes(text))`);
     result.rightPanel = await run(`document.querySelector('#runtime-inspector').getBoundingClientRect().left >= document.querySelector('main').getBoundingClientRect().right - 1`);
     await writeFile('/tmp/lingxi-turn-files-light.png', (await win.webContents.capturePage()).toPNG());
@@ -43,7 +45,7 @@ async function main() {
     await waitFor('Boolean(document.querySelector(".turn-file-review"))');
     await run(`document.querySelector('.turn-file-review').click()`);
     await waitFor(`document.querySelector('#runtime-inspector-panel')?.textContent.includes('Historical stylesheet change')`);
-    await waitFor(`document.querySelector('#runtime-inspector').getAnimations().length === 0`);
+    await settleFixtureAnimations(win.webContents, '#runtime-inspector');
     result.darkNarrowVisible = await run(`document.querySelector('#runtime-inspector').getBoundingClientRect().right <= innerWidth + 1 && document.querySelector('#runtime-inspector').getBoundingClientRect().left >= -1`);
     result.darkHeadingMatchesTheme = await run(`getComputedStyle(document.querySelector('.turn-file-diffs h3')).color === getComputedStyle(document.querySelector('.turn-file-summary-heading strong')).color`);
     result.narrowOverflow = await run(`document.documentElement.scrollWidth > innerWidth`);

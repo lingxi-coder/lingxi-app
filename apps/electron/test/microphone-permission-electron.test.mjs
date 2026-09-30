@@ -59,7 +59,7 @@ function transpileForElectron(outputRoot, relativePaths) {
  * answer for a denial while the page permission stays granted, so a probe
  * that reads the page permission is caught on ANY machine.
  */
-test('the voice page reads the real OS microphone grant, not the page permission this app grants itself', async () => {
+test('the voice page reads the real OS microphone grant, not the page permission this app grants itself', { skip: process.platform === 'linux' && 'Electron exposes native media access status on macOS and Windows' }, async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-microphone-vite-'));
   const transpiledRoot = mkdtempSync(join(tmpdir(), 'lingxi-microphone-main-'));
   transpileForElectron(transpiledRoot, ['src/shared/microphoneAccess.ts', 'src/main/microphoneAccess.ts']);

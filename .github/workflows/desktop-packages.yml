@@ -125,9 +125,17 @@ jobs:
           npm run build
           npm test
 
-      - name: Install Linux GUI test display
+      - name: Install macOS test search tool
+        if: matrix.platform == 'darwin'
+        run: brew install ripgrep
+
+      - name: Install Windows test search tool
+        if: matrix.platform == 'win32'
+        run: choco install ripgrep --no-progress -y
+
+      - name: Install Linux test search tool and GUI display
         if: matrix.platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb ripgrep
 
       - name: Typecheck, test, and build Desktop
         shell: bash

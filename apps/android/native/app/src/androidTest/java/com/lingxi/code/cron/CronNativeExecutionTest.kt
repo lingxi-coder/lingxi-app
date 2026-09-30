@@ -10,7 +10,7 @@ import com.lingxi.code.location.AndroidLocationAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
 import com.lingxi.code.share.AndroidShareAdapter
 import com.lingxi.code.vision.AndroidCameraAdapter
-import com.lingxi.code.voice.recorder.AndroidVoiceAdapter
+import com.lingxi.code.voice.audio.AndroidNativeAudioServiceAdapter
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -61,9 +61,7 @@ class CronNativeExecutionTest {
                         }
                         override suspend fun onWorkflowProgress(originSessionId: String, taskId: String, runId: String, progress: WorkflowProgressDto) {}
                     },
-                    stt = object : AndroidStt { override suspend fun transcribe(language: String?): String = error("No speech in scheduled fixture") },
-                    tts = object : AndroidTts { override suspend fun synthesize(text: String, voice: String?): TtsAudioFfi = error("No speech in scheduled fixture") },
-                    camera = AndroidCameraAdapter(), share = AndroidShareAdapter(), voice = AndroidVoiceAdapter(),
+                    camera = AndroidCameraAdapter(), share = AndroidShareAdapter(), audio = AndroidNativeAudioServiceAdapter(context),
                     location = AndroidLocationAdapter(), notifications = AndroidNotificationAdapter(), clipboard = AndroidClipboardAdapter(),
                     permissions = object : AndroidPermissionSink { override suspend fun onRequest(request: PermissionRequest) { error("Scheduled fixture must not request permission") } },
                     computerUse = null, shell = null, git = null, gitCredentialProvider = null, secureStorage = null, deviceControl = null)

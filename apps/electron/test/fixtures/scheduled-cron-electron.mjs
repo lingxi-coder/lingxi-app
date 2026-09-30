@@ -1,3 +1,4 @@
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 import { app, BrowserWindow } from 'electron';
 import { writeFileSync } from 'node:fs';
 const url = process.argv.find((argument) => argument.startsWith('http://'));
@@ -6,9 +7,10 @@ app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1440, height: 1000, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ show: false, width: 1440, height: 1000, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = (script) => window.webContents.executeJavaScript(script);
     const wait = async (expression) => {
       const deadline = Date.now() + 6000;
@@ -51,6 +53,7 @@ async function main() {
     await capturePicker('time-light');
     await click('Done');
     await wait('!document.querySelector("dialog[open]")');
+    await wait('document.activeElement?.getAttribute("aria-label") === "At"');
     picker.doneFocus = await run('document.activeElement?.getAttribute("aria-label")');
     picker.timeDescription = await run('document.getElementById(document.activeElement.getAttribute("aria-describedby"))?.textContent');
     await clickLabel('At');
@@ -58,6 +61,7 @@ async function main() {
     window.webContents.sendInputEvent({type: 'keyDown', keyCode: 'Escape'});
     window.webContents.sendInputEvent({type: 'keyUp', keyCode: 'Escape'});
     await wait('!document.querySelector("dialog[open]")');
+    await wait('document.activeElement?.getAttribute("aria-label") === "At"');
     picker.escapeFocus = await run('document.activeElement?.getAttribute("aria-label")');
     await run(`(() => { const input = [...document.querySelectorAll('label')].find(item => item.firstChild?.textContent === 'Expires').querySelector('select'); input.value = 'date'; input.dispatchEvent(new Event('change', {bubbles:true})); })()`);
     await delay(30);

@@ -1,3 +1,4 @@
+import { configureFixtureWindow } from './electron-test-environment.mjs';
 import { app, BrowserWindow } from 'electron';
 import { writeFileSync } from 'node:fs';
 const url = process.argv.find(argument => argument.startsWith('http://'));
@@ -6,9 +7,10 @@ app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1000, height: 800, webPreferences: { sandbox: true } });
+  const window = new BrowserWindow({ show: false, width: 1000, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = script => window.webContents.executeJavaScript(script);
     const wait = async expression => {
       const deadline = Date.now() + 6000;
@@ -28,7 +30,6 @@ async function main() {
       errorCount: document.querySelectorAll('[aria-label="Session error"]').length,
     })`);
     writeFileSync('/tmp/sidebar-progress.png', (await window.webContents.capturePage()).toPNG());
-    window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     result.reducedMotion = await run(`[...document.querySelectorAll('.sidebar-session-progress > span')].every(span => getComputedStyle(span).animationName === 'none')`);
     await run(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('Show more')).click()`);

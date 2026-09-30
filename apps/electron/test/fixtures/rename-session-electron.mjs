@@ -1,3 +1,4 @@
+import { configureFixtureWindow, settleFixtureAnimations } from './electron-test-environment.mjs';
 import assert from 'node:assert/strict';
 import { app, BrowserWindow } from 'electron';
 import { writeFileSync } from 'node:fs';
@@ -7,13 +8,14 @@ app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
   await app.whenReady();
-  const win = new BrowserWindow({ show: false, width: 900, height: 550, webPreferences: { sandbox: true } });
+  const win = new BrowserWindow({ show: false, width: 900, height: 550, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await win.loadURL(url);
+    await configureFixtureWindow(win);
     const run = code => win.webContents.executeJavaScript(code);
     for (let n = 0; n < 100 && !await run(`Boolean(document.querySelector('input'))`); n++) await delay(20);
     assert.equal(await run(`document.activeElement.tagName`), 'INPUT');
-    await delay(350); // Measure after the dialog's entrance transform settles.
+    await settleFixtureAnimations(win.webContents, '[role=dialog]');
     const gap = await run(`document.querySelector('.desktop-dialog-actions').getBoundingClientRect().top - document.querySelector('input').getBoundingClientRect().bottom`);
     assert.ok(gap >= 20, `input/action spacing: ${gap}px`);
     if (process.env.LINGXI_RENAME_SCREENSHOT) writeFileSync(process.env.LINGXI_RENAME_SCREENSHOT, (await win.webContents.capturePage()).toPNG());

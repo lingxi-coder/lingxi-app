@@ -1,3 +1,4 @@
+import { configureFixtureWindow, waitForFixture } from './electron-test-environment.mjs';
 import { app, BrowserWindow } from 'electron';
 import { mkdir, writeFile } from 'node:fs/promises';
 const url = process.argv.find((argument) => argument.startsWith('http://'));
@@ -9,6 +10,7 @@ async function main() {
   const window = new BrowserWindow({ show: false, width: 1000, height: 800, webPreferences: { sandbox: true, backgroundThrottling: false } });
   try {
     await window.loadURL(url);
+    await configureFixtureWindow(window);
     const run = (script) => window.webContents.executeJavaScript(script);
     const settle = () => delay(100);
     const deadline = Date.now() + 6000;
@@ -52,10 +54,10 @@ async function main() {
     }
     // Local child layout changes do not update Stage props (e.g. late markdown/media).
     await run(`document.querySelector('.transcript-thinking').style.height = '150px'`);
-    await settle();
+    await waitForFixture(window.webContents, `${metrics}.gap <= 1`);
     result.resizeGap = (await run(metrics)).gap;
     await run(`document.querySelector('.transcript-thinking').style.height = '20px'`);
-    await settle();
+    await waitForFixture(window.webContents, `${metrics}.gap <= 1`);
     result.shrinkGap = (await run(metrics)).gap;
     result.finalAncestorScroll = (await run(metrics)).ancestor;
     await run(`(() => { const style = document.createElement('style'); style.textContent = '* { animation: none !important; transition: none !important; }'; document.head.append(style); })()`);

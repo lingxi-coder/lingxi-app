@@ -83,6 +83,8 @@ test('sidebar running progress stays right aligned and vertically centered', asy
     }
     assert.equal(result.pendingCount, 1);
     assert.equal(result.errorCount, 1);
+    assert.equal(result.searchFilters, true);
+    assert.equal(result.collapsed, true);
     assert.equal(result.reducedMotion, true);
     assert.equal(result.opening, true);
     assert.equal(result.settled, true);

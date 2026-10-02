@@ -30,6 +30,22 @@ async function main() {
       errorCount: document.querySelectorAll('[aria-label="Session error"]').length,
     })`);
     writeFileSync('/tmp/sidebar-progress.png', (await window.webContents.capturePage()).toPNG());
+    await run(`document.querySelector('button[aria-label="Search chats"]').click()`);
+    await wait(`Boolean(document.querySelector('input[aria-label="Search chats and projects"]'))`);
+    await run(`(() => {
+      const input = document.querySelector('input[aria-label="Search chats and projects"]');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'long');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await wait(`!document.querySelector('button[title="Short"]') && Boolean(document.querySelector('button[title="A very long running session title that must truncate before its progress bar"]'))`);
+    result.searchFilters = true;
+    await run(`document.querySelector('button[aria-label="Close search"]').click()`);
+    await wait(`Boolean(document.querySelector('button[title="Short"]'))`);
+    await run(`document.querySelector('button[aria-label="Hide sidebar"]').click()`);
+    await wait(`document.querySelector('#desktop-session-sidebar').getBoundingClientRect().width <= 2`);
+    result.collapsed = await run(`document.querySelector('#desktop-session-sidebar').hasAttribute('inert')`);
+    await run(`document.querySelector('button[aria-label="Show sidebar"]').click()`);
+    await wait(`document.querySelector('#desktop-session-sidebar').getBoundingClientRect().width > 200`);
     await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     result.reducedMotion = await run(`[...document.querySelectorAll('.sidebar-session-progress > span')].every(span => getComputedStyle(span).animationName === 'none')`);
     await run(`[...document.querySelectorAll('button')].find(button => button.textContent.includes('Show more')).click()`);

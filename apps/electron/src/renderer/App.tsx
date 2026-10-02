@@ -100,8 +100,9 @@ export function App() {
       <div
         className="desktop-shell"
         data-screen-label="LingXi Code Desktop Beta"
-        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.windowBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent } as CSSProperties}
+        style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.appBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.appBg, '--nav-panel-border': palette.border } as CSSProperties}
       >
+        <div className="drag-region desktop-window-drag-strip" aria-hidden="true" />
         <SettingsBackground active={settingsRoute !== null}>
           <BetaSidebar
             bridge={bridge}

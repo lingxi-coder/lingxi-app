@@ -41,47 +41,119 @@ body {
 .desktop-shell {
   isolation: isolate;
 }
-.desktop-main {
-  box-shadow: inset 1px 0 color-mix(in oklab, currentColor 2.5%, transparent);
-}
-.desktop-sidebar {
-  z-index: 2;
-  background: color-mix(in srgb, var(--sidebar-material) 94%, transparent);
-  backdrop-filter: blur(24px) saturate(1.15);
-}
-.desktop-sidebar-brand {
-  font-family: var(--font-sans-default);
-  user-select: none;
-}
-/* The sidebar's own paddingTop covers the title bar strip, so with
-   `hiddenInset` nothing at the top of the left panel was draggable. Like
-   `.settings-window-drag-region`, it starts at 88px so the traffic lights
-   keep their clicks. */
-.desktop-sidebar-drag-strip {
+.desktop-window-drag-strip {
   position: absolute;
+  z-index: 4;
   top: 0;
   right: 0;
-  left: 88px;
+  left: 116px;
   height: 38px;
 }
-.desktop-brand-mark {
-  width: 26px;
-  height: 26px;
-  display: inline-grid;
+.desktop-main {
+  overflow: hidden;
+  border-top: 1px solid var(--nav-panel-border);
+  border-radius: 16px 0 0 0;
+}
+.desktop-navigation {
+  z-index: 2;
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex: 0 0 auto;
+  background: var(--rail-material);
+}
+.desktop-nav-rail {
+  width: 52px;
+  padding: 46px 6px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 52px;
+}
+.desktop-rail-button {
+  width: 40px;
+  height: 40px;
+  display: grid;
   place-items: center;
   flex: 0 0 auto;
+  border: 0;
+  border-radius: 13px;
+  background: transparent;
+  color: var(--text3);
+  cursor: pointer;
+  transition: background-color 130ms ease, color 130ms ease;
+}
+.desktop-rail-button:hover,
+.desktop-rail-button:focus-visible,
+.desktop-rail-button[data-active='true'] {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: var(--text);
+}
+.desktop-rail-toggle {
+  position: absolute;
+  top: 2px;
+  left: 78px;
+  width: 32px;
+  height: 32px;
+}
+.desktop-rail-divider {
+  width: 26px;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--nav-panel-border);
+}
+.desktop-sidebar {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 16px 0 0 0;
+  background: var(--sidebar-material);
+  transition: width 170ms cubic-bezier(.2, 0, 0, 1), border-color 170ms ease;
+}
+.desktop-sidebar[data-resizing='true'] { transition: none; }
+.desktop-navigation[data-collapsed='true'] .desktop-sidebar {
+  width: 0 !important;
+  border-color: transparent !important;
+  visibility: hidden;
+  pointer-events: none;
+}
+.sidebar-header-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+.sidebar-header-icon:hover,
+.sidebar-header-icon:focus-visible { background: color-mix(in srgb, currentColor 8%, transparent); }
+.sidebar-search {
+  margin: 3px 13px 8px;
+  padding: 0 7px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--nav-panel-border);
   border-radius: 9px;
+  color: var(--text3);
+  background: color-mix(in srgb, var(--sidebar-material) 80%, var(--rail-material));
 }
-.desktop-brand-label {
-  margin-left: 1px;
-  padding: 2px 5px;
-  border: 1px solid;
-  border-radius: 5px;
-  font-size: 8px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: .12em;
+.sidebar-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 12px; }
+.sidebar-search button { display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.sidebar-section-heading { padding: 0 8px 6px; font-size: 12px; font-weight: 500; }
+.sidebar-section-heading button { display: flex; align-items: center; gap: 5px; padding: 4px 0; border: 0; background: transparent; font: inherit; cursor: pointer; }
+.sidebar-session-metadata { display: none; }
+.desktop-sidebar-list { scrollbar-gutter: stable; }
+.desktop-workspace { padding-top: 38px; background: var(--rail-material); }
+@media (prefers-reduced-motion: reduce) {
+  .desktop-sidebar, .desktop-rail-button { transition: none; }
 }
+.desktop-sidebar-brand { font-family: var(--font-sans-default); user-select: none; }
 .desktop-sidebar-footer {
   background: transparent;
 }

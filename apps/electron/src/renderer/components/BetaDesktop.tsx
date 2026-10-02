@@ -107,8 +107,8 @@ import { PERMISSION_MODE_OPTIONS } from '../model/permissionModes';
 import type { RunItem } from '../model/runItem';
 import type { SidebarPreferences } from '../../shared/settings';
 
-export const SIDEBAR_DEFAULT_WIDTH = 260;
-export const SIDEBAR_MIN_WIDTH = 200;
+export const SIDEBAR_DEFAULT_WIDTH = 308;
+export const SIDEBAR_MIN_WIDTH = 240;
 export const SIDEBAR_MAX_WIDTH = 480;
 const SIDEBAR_KEYBOARD_STEP = 16;
 const PROJECT_ACTIONS_HIDE_DELAY = 700;
@@ -326,16 +326,18 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
         data-session-id={session.uuid}
         aria-current={active ? 'page' : undefined}
         title={pinnedSection ? `${title}\n${projectPath}` : title}
+        aria-label={`${title}, ${sessionMetadata}`}
         data-session-project-path={projectPath}
         style={{
-          width: '100%', minHeight: 43, display: 'grid', gap: 1,
-          padding: pinnedSection ? '6px 64px 6px 10px' : '6px 64px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
+          width: '100%', minHeight: 34, display: 'flex', alignItems: 'center', gap: pinnedSection ? 5 : 10,
+          padding: pinnedSection ? '5px 64px 5px 10px' : '5px 64px 5px 30px', borderRadius: 9, border: 0, textAlign: 'left',
           touchAction: 'none', userSelect: 'none',
           background: active ? t.surfaceActive : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
-          fontSize: 13, fontWeight: active ? 600 : 500,
+          fontSize: 13, fontWeight: active ? 600 : 400,
         }}
       >
+        {pinnedSection && <Icon name="chat" size={15} stroke={1.7} />}
         <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
           {opening
@@ -345,7 +347,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
             : attention?.label === 'Running' ? <SidebarSessionProgress label="Running" />
             : attention && (pinnedSection || attention.label !== 'Session error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
         </span>
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
+        <span className="sidebar-session-metadata" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
           {sessionMetadata}
         </span>
       </button>
@@ -409,6 +411,15 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
     () => new Set(selectedProject ? [selectedProject] : []),
   );
   const [showAllSessions, setShowAllSessions] = useState<Record<string, boolean>>({});
+  const [pinnedExpanded, setPinnedExpanded] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const projectsHeadingRef = useRef<HTMLElement>(null);
+  const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
+  const matchesSearch = (value: string) => !normalizedSearch || value.toLocaleLowerCase().includes(normalizedSearch);
+  useEffect(() => { asideRef.current?.toggleAttribute('inert', sidebarCollapsed); }, [sidebarCollapsed]);
   const activeCatalogRows = visibleSession ? bridge.bootstrap?.projectCatalogs?.[visibleSession.projectPath]?.sessions : undefined;
   const activeRowIndex = activeCatalogRows?.findIndex((row) => row.uuid === visibleSession?.sessionId) ?? -1;
   const revealedSessionKey = !scheduled && visibleSession && activeRowIndex >= 0
@@ -552,11 +563,11 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
   }, [selectedProject]);
 
   useEffect(() => {
-    const catalogsToLoad = sidebarOrganization === 'list' ? projects : expandedProjects;
+    const catalogsToLoad = sidebarOrganization === 'list' || normalizedSearch ? projects : expandedProjects;
     for (const projectPath of catalogsToLoad) {
       if (!bridge.bootstrap?.projectCatalogs?.[projectPath]) void bridge.listProjectSessions(projectPath).catch(() => undefined);
     }
-  }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, expandedProjects, projects, sidebarOrganization]);
+  }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, expandedProjects, normalizedSearch, projects, sidebarOrganization]);
 
   useEffect(() => {
     if (scheduledWorkspace && !generalCatalog) void bridge.listProjectSessions(scheduledWorkspace).catch(() => undefined);
@@ -631,6 +642,13 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
     }
     return sidebarSessionTimestamp(right.session) - sidebarSessionTimestamp(left.session);
   }), [bridge.bootstrap?.projectCatalogs, chatSort, projects, sortedSessions, visibleSession]);
+  const searchedProjectSessions = normalizedSearch
+    ? allProjectSessions.filter(({ projectPath, session }) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || 'Untitled session'))
+    : allProjectSessions;
+  const visibleProjects = normalizedSearch
+    ? projects.filter((path) => matchesSearch(basename(path)) ||
+      bridge.bootstrap?.projectCatalogs?.[path]?.sessions.some((session) => matchesSearch(session.title || 'Untitled session')))
+    : projects;
   const projectSessionIndices = useMemo(() => {
     const nextIndexByProject = new Map<string, number>();
     const indexBySession = new Map<string, number>();
@@ -710,35 +728,49 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
 
   return (
     <>
+    <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} style={{ '--rail-material': t.appBg, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
+      <nav className="desktop-nav-rail no-drag" aria-label="Main navigation">
+        <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
+        <button type="button" className="desktop-rail-button" data-active={!scheduled || undefined} aria-label="Home" title="Home" onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
+        <button type="button" className="desktop-rail-button" aria-label="Projects" title="Projects" onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label="Scheduled tasks" title="Scheduled tasks" onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button" aria-label="Activity" title="Activity" onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }}><Icon name="goal" size={21} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button" aria-label="Settings" title="Settings" onClick={onOpenSettings}><Icon name="more" size={21} stroke={1.8} /></button>
+        <span className="desktop-rail-divider" aria-hidden="true" />
+        <button type="button" className="desktop-rail-button" aria-label="Review changes" title="Review changes" onClick={() => { onOpenChat?.(); bridge.openRuntimeItem({ kind: 'section', id: 'review' }); }}><Icon name="branch" size={21} stroke={1.7} /></button>
+      </nav>
     <aside
+      id="desktop-session-sidebar"
       className="desktop-sidebar"
       ref={asideRef}
+      aria-hidden={sidebarCollapsed || undefined}
       data-resizing={resizingSidebar || undefined}
-      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: `0.5px solid ${t.border}`, paddingTop: 38, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
+      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', border: `0.5px solid ${t.border}`, borderBottom: 0, marginTop: 38, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
     >
-      <div className="drag-region desktop-sidebar-drag-strip" aria-hidden="true" />
-      <div className="drag-region desktop-sidebar-brand" style={{ minHeight: 48, padding: '7px 14px 6px', display: 'flex', alignItems: 'center', gap: 9 }}>
-        <span className="desktop-brand-mark" style={{ color: t.accent, background: t.accentBg, boxShadow: `0 0 0 1px ${t.accentBorder}` }} aria-hidden="true"><Icon name="spark" size={13} stroke={1.7} /></span>
-        <strong style={{ color: t.text, fontSize: 16, fontWeight: 600, letterSpacing: '-.02em' }}>LingXi</strong>
-        <span className="desktop-brand-label" style={{ color: t.text4, borderColor: t.border }}>CODE</span>
+      <div className="desktop-sidebar-brand" style={{ minHeight: 48, padding: '5px 16px 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1 }}>LingXi</strong>
+        <button type="button" className="sidebar-header-icon" aria-label="Activity" title="Activity" onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }} style={{ color: t.text3 }}><Icon name="bell" size={18} stroke={1.65} /></button>
+        <button type="button" className="sidebar-header-icon" aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><Icon name="search" size={18} stroke={1.65} /></button>
       </div>
 
-      <div style={{ padding: '2px 9px 10px' }}>
+      {searchOpen && <div className="sidebar-search"><Icon name="search" size={15} stroke={1.7} /><input ref={searchInputRef} type="search" aria-label="Search chats and projects" placeholder="Search chats and projects" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label="Close search" onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
+
+      <div style={{ padding: '0 8px 8px' }}>
         <button
           className="sidebar-primary-action"
           type="button"
           disabled={bridge.sessionLoading || editingProject !== null}
           onClick={() => { onOpenChat?.(); selectedProject ? editProject(selectedProject) : invoke(bridge.addProject); }}
           style={{
-            width: '100%', minHeight: 42, display: 'flex', alignItems: 'center', gap: 11,
-            padding: '8px 11px', borderRadius: 11, border: 0, background: 'transparent',
+            width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
+            padding: '6px 5px', borderRadius: 10, border: 0, background: 'transparent',
             color: t.text, cursor: bridge.sessionLoading || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.sessionLoading || editingProject !== null ? .5 : 1,
-            textAlign: 'left', fontSize: 13.5, fontWeight: 500,
+            textAlign: 'left', fontSize: 14, fontWeight: 500,
           }}
         >
           {editingProject
             ? <span className="beta-spinner" role="status" aria-label="Opening project draft" />
-            : <Icon name="compose" size={20} color={t.text2} stroke={1.8} />}
+            : <Icon name="compose" size={18} color={t.text2} stroke={1.8} />}
           <span>{editingProject ? 'Opening draft…' : 'New chat'}</span>
         </button>
         <button
@@ -746,11 +778,11 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
           className="sidebar-primary-action"
           aria-current={scheduled ? 'page' : undefined}
           onClick={onOpenScheduled}
-          style={{ width: '100%', minHeight: 42, marginTop: 4, display: 'flex', alignItems: 'center', gap: 11,
-            padding: '8px 11px', borderRadius: 11, border: 0, background: scheduled ? t.surfaceActive : 'transparent',
-            color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 13.5, fontWeight: 500 }}
+          style={{ width: '100%', minHeight: 36, marginTop: 0, display: 'flex', alignItems: 'center', gap: 9,
+            padding: '6px 5px', borderRadius: 10, border: 0, background: scheduled ? t.surfaceActive : 'transparent',
+            color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}
         >
-          <Icon name="clock" size={20} stroke={1.8} />
+          <Icon name="clock" size={18} stroke={1.8} />
           <span>Scheduled</span>
         </button>
       </div>
@@ -761,11 +793,14 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
         sensors={(defaults) => defaults.map((sensor) => sensor === PointerSensor ? SESSION_POINTER_SENSOR : sensor)}
         onDragEnd={handleSessionDragEnd}
       >
-      <nav className="no-drag" aria-label="Projects and sessions" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 8px 12px' }}>
+      <nav className="no-drag desktop-sidebar-list" aria-label="Projects and sessions" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 12px' }}>
         {pinnedSessions.length > 0 ? (
-          <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 16 }}>
-            <h2 id="pinned-sessions-heading" style={{ padding: '7px 8px 6px', color: t.text4, fontSize: 12.5, fontWeight: 600, letterSpacing: '.01em' }}>Pinned</h2>
-            {pinnedSessions.map((pinned) => {
+          <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 24 }}>
+            <h2 id="pinned-sessions-heading" className="sidebar-section-heading"><button type="button" aria-expanded={pinnedExpanded} onClick={() => setPinnedExpanded((value) => !value)} style={{ color: t.text4 }}>Pinned <Icon name="chevron" size={13} stroke={1.7} style={{ transform: pinnedExpanded ? 'none' : 'rotate(-90deg)' }} /></button></h2>
+            {pinnedExpanded && pinnedSessions.filter((pinned) => {
+              const current = bridge.bootstrap?.projectCatalogs?.[pinned.projectPath]?.sessions.find((session) => session.uuid === pinned.sessionId);
+              return matchesSearch(current?.title || pinned.title || 'Untitled session') || matchesSearch(basename(pinned.projectPath));
+            }).map((pinned) => {
               const pinnedCatalog = bridge.bootstrap?.projectCatalogs?.[pinned.projectPath];
               const current = pinnedCatalog?.sessions.find((session) => session.uuid === pinned.sessionId);
               const title = current?.title || pinned.title || 'Untitled session';
@@ -792,7 +827,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
 
         {scheduledWorkspace && generalCatalog && generalCatalog.sessions.length > 0 && <section aria-labelledby="general-chats-heading">
           <h2 id="general-chats-heading" style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>Chats</h2>
-          {(showAllSessions[scheduledWorkspace] ? generalCatalog.sessions : generalCatalog.sessions.slice(0, 5)).map((session) => {
+          {(normalizedSearch ? generalCatalog.sessions.filter((session) => matchesSearch(session.title || 'Untitled session')) : showAllSessions[scheduledWorkspace] ? generalCatalog.sessions : generalCatalog.sessions.slice(0, 5)).map((session) => {
             const pinned = pinnedKeys.has(`${scheduledWorkspace}\0${session.uuid}`);
             return <SessionRow key={session.uuid} projectPath={scheduledWorkspace} session={session}
               active={!scheduled && visibleSession?.projectPath === scheduledWorkspace && visibleSession?.sessionId === session.uuid}
@@ -803,12 +838,13 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
               onRename={() => prepareRename(scheduledWorkspace, session.uuid, session.title || 'Untitled chat')}
               onPin={() => invoke(() => bridge.setSessionPinned(pinInput(scheduledWorkspace, session.uuid, session.title || 'Untitled session'), !pinned))} />;
           })}
-          {generalCatalog.sessions.length > 5 && <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [scheduledWorkspace]: !current[scheduledWorkspace] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
+          {!normalizedSearch && generalCatalog.sessions.length > 5 && <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [scheduledWorkspace]: !current[scheduledWorkspace] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
             {showAllSessions[scheduledWorkspace] ? 'Show less' : `Show more (${generalCatalog.sessions.length - 5})`}
           </button>}
         </section>}
 
         <section
+          ref={projectsHeadingRef}
           className="projects-sidebar-section"
           aria-labelledby="projects-heading"
           tabIndex={0}
@@ -824,7 +860,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
           }}
         >
           <div className="projects-sidebar-heading" style={{ minHeight: 35, padding: '3px 4px 5px 8px', display: 'flex', alignItems: 'center' }}>
-            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 600, letterSpacing: '.01em' }}>Projects</h2>
+            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 500, letterSpacing: '.01em' }}>Projects</h2>
             <div className="projects-sidebar-actions">
               <button
                 ref={projectsMenuTriggerRef}
@@ -898,9 +934,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
             </div>
           ) : sidebarOrganization === 'list' ? (
             <div className="projects-one-list" aria-label="All project chats">
-              {allProjectSessions.length === 0 ? (
-                <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>Loading project chats…</div>
-              ) : allProjectSessions.map(({ projectPath, session }) => {
+              {searchedProjectSessions.length === 0 ? (
+                <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>{normalizedSearch ? 'No matching chats.' : 'Loading project chats…'}</div>
+              ) : searchedProjectSessions.map(({ projectPath, session }) => {
                 const pinned = pinnedKeys.has(`${projectPath}\0${session.uuid}`);
                 const opening = openingSessionKey === `${projectPath}\0${session.uuid}`;
               return <SessionRow key={`${projectPath}\0${session.uuid}`} projectPath={projectPath} session={session}
@@ -914,12 +950,16 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                 sortableIndex={projectSessionIndices.get(`${projectPath}\0${session.uuid}`) ?? 0} />;
               })}
             </div>
-          ) : projects.map((projectPath) => {
+          ) : visibleProjects.length === 0 ? (
+            <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>No matching projects or chats.</div>
+          ) : visibleProjects.map((projectPath) => {
             const active = projectPath === selectedProject;
-            const open = expandedProjects.has(projectPath);
+            const open = Boolean(normalizedSearch) || expandedProjects.has(projectPath);
             const catalog = bridge.bootstrap?.projectCatalogs?.[projectPath];
             const allSessions = sortedSessions(projectPath, catalog?.sessions ?? []);
-            const visibleSessions = showAllSessions[projectPath] ? allSessions : allSessions.slice(0, 5);
+            const visibleSessions = normalizedSearch
+              ? allSessions.filter((session) => matchesSearch(basename(projectPath)) || matchesSearch(session.title || 'Untitled session'))
+              : showAllSessions[projectPath] ? allSessions : allSessions.slice(0, 5);
             const projectHasActiveWork = (bridge.bootstrap?.runtimes ?? []).some((runtime) => {
               if (runtime.projectPath !== projectPath) return false;
               const status = bridge.sessionRuntimeStatus(runtime.sessionId);
@@ -1017,7 +1057,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
                         />
                       );
                     })}
-                    {allSessions.length > 5 ? (
+                    {!normalizedSearch && allSessions.length > 5 ? (
                       <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [projectPath]: !current[projectPath] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
                         {showAllSessions[projectPath] ? 'Show less' : `Show more (${allSessions.length - 5})`}
                       </button>
@@ -1095,6 +1135,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
         style={{ color: t.accent }}
       />
     </aside>
+    </div>
     {archiveTarget && <ArchiveChatDialog title={archiveTarget.title} jobs={archiveJobs} loading={archiveLoading} busy={archiving} error={archiveError} onClose={closeArchive} onConfirm={() => void confirmArchive()} onRetry={() => void prepareArchive(archiveTarget.projectPath, archiveTarget.sessionId, archiveTarget.title)} />}
     {renameTarget && <RenameSessionDialog title={renameTarget.title} busy={renamingSession} error={renameError} onClose={() => { if (!renamingSession) setRenameTarget(null); }} onConfirm={(title) => void confirmRename(title)} />}
     </>

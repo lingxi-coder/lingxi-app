@@ -50,7 +50,7 @@ uniffi = [
     "dep:tokio",
     "dep:orchestrator",
     "dep:serde_json",
-    "dep:local-apps",
+    "dep:local-app-contracts",
     "harness-runtime/uniffi",
 ]
 # Native bindgen uses the same exact UniFFI release as runtime scaffolding.
@@ -86,10 +86,10 @@ client = { workspace = true, optional = true }
 mobile-linux-ios = { workspace = true, optional = true }
 platform-posix-minimal = { workspace = true, optional = true }
 orchestrator = { workspace = true, optional = true }
-# The engine's own app-id rule (`ids::is_valid_app_id`) — the boot-time cwd
+# The app-id rule (`ids::is_valid_app_id`, owned by the Local App contracts) — the boot-time cwd
 # validator accepts `apps/<id>/workspace` scopes with the SAME derivation the
-# local-apps service mints ids with, never a twin regex.
-local-apps = { workspace = true, optional = true }
+# Local App service mints ids with, never a twin regex.
+local-app-contracts = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 # Optional native binding generator dependencies.

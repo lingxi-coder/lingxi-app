@@ -235,7 +235,7 @@ pub(super) fn ios_project_cwd(
     // engine's own minting rule instead of a twin regex.
     let is_local_app_workspace = components.len() == 3
         && components[0] == "apps"
-        && local_apps::ids::is_valid_app_id(components[1])
+        && local_app_contracts::ids::is_valid_app_id(components[1])
         && components[2] == "workspace";
     let is_scheduled_workspace = components == ["scheduled", "workspace"];
     let valid = (is_managed_project || is_local_app_workspace || is_scheduled_workspace)

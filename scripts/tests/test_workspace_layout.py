@@ -43,7 +43,11 @@ class WorkspaceLayoutTests(unittest.TestCase):
                                 if relative.startswith("packages/"):
                                     self.assertFalse(target.is_relative_to(ROOT / "apps"))
         # Folder consolidation must not turn independent SDKs into path/submodule dependencies.
-        self.assertNotIn("patch", workspace)
+        # The one patch allowed is the libgit2 redirect: the Local App repository asks crates.io for git2 and
+        # root patches do not propagate, so this workspace answers it with the runtime checkout it already pins.
+        runtime = workspace["workspace"]["dependencies"]["harness-runtime"]
+        self.assertEqual(workspace.get("patch"),
+                         {"crates-io": {"git2": {"git": runtime["git"], "rev": runtime["rev"]}}})
         sdk_dependencies = [value for value in workspace["workspace"]["dependencies"].values()
                             if isinstance(value, dict) and "git" in value]
         self.assertTrue(sdk_dependencies)

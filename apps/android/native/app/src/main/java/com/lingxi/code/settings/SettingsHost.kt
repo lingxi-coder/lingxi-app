@@ -77,7 +77,6 @@ fun SettingsHost(
     onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
     onPermissionModeChanged: suspend (String) -> Unit = {},
     onTypescriptLspModeChanged: suspend (String) -> Unit = {},
-    onSetLocalAppPluginEnabled: suspend (String, Boolean) -> Unit = { _, _ -> },
     // 把当前会话切到另一个项目。设置页自己做不了：项目层/本地层写到哪个目录由引擎
     // 进程的 cwd 决定，换 cwd 就要重建会话源，那套状态机住在 RootScreen 里。
     // null 表示本宿主不提供切换能力，此时层选择器下不画切换入口。
@@ -328,11 +327,6 @@ fun SettingsHost(
                     SkillsPage(
                         state = state,
                         store = resolvedStore,
-                        onSetLocalAppPluginEnabled = { pluginId, enabled ->
-                            resolvedStore.viewModelScope.launch {
-                                onSetLocalAppPluginEnabled(pluginId, enabled)
-                            }
-                        },
                         onDetail = { id -> navController.navigate(SettingsRoutes.skillDetail(id)) },
                     )
                 }

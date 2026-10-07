@@ -51,13 +51,9 @@ internal fun WorkspaceGroupsSection(
     onToggleWorkspacePinned: (String) -> Unit = {},
     onSelectGlobalSession: (SessionRow) -> Unit,
     onSelectProjectSession: (String, SessionRef) -> Unit,
-    onSelectLocalAppSession: (String, SessionRef) -> Unit,
     onNewGlobalSession: () -> Unit,
     onNewProjectSession: (String) -> Unit,
-    onNewLocalAppSession: (String) -> Unit,
     onContinueSession: (ConversationScope, SessionRow, SessionMode) -> Unit = { _, _, _ -> },
-    onOpenLocalAppLibrary: (String) -> Unit = {},
-    onOpenLocalAppDetails: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     if (groups.isEmpty()) {
@@ -93,15 +89,11 @@ internal fun WorkspaceGroupsSection(
                 onTogglePinned = { onToggleWorkspacePinned(group.stableKey) },
                 onSelectGlobalSession = onSelectGlobalSession,
                 onSelectProjectSession = onSelectProjectSession,
-                onSelectLocalAppSession = onSelectLocalAppSession,
                 onNewGlobalSession = onNewGlobalSession,
                 onNewProjectSession = onNewProjectSession,
-                onNewLocalAppSession = onNewLocalAppSession,
                 onContinueSession = { row ->
                     onContinueSession(group.scope, row, mode.forkTargetMode())
                 },
-                onOpenLocalAppLibrary = onOpenLocalAppLibrary,
-                onOpenLocalAppDetails = onOpenLocalAppDetails,
             )
         }
     }
@@ -119,13 +111,9 @@ private fun WorkspaceGroupCard(
     onTogglePinned: () -> Unit,
     onSelectGlobalSession: (SessionRow) -> Unit,
     onSelectProjectSession: (String, SessionRef) -> Unit,
-    onSelectLocalAppSession: (String, SessionRef) -> Unit,
     onNewGlobalSession: () -> Unit,
     onNewProjectSession: (String) -> Unit,
-    onNewLocalAppSession: (String) -> Unit,
     onContinueSession: (SessionRow) -> Unit,
-    onOpenLocalAppLibrary: (String) -> Unit,
-    onOpenLocalAppDetails: (String) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val selected = group.stableKey == activeWs
@@ -148,7 +136,6 @@ private fun WorkspaceGroupCard(
                 name = when (group.kind) {
                     WorkspaceGroupKind.Global -> LXIconName.Message
                     WorkspaceGroupKind.Project -> LXIconName.Folder
-                    WorkspaceGroupKind.LocalApp -> LXIconName.Workflow
                 },
                 size = 14.dp,
                 color = if (selected) t.accent else t.text3,
@@ -172,14 +159,6 @@ private fun WorkspaceGroupCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-            }
-            if (group.kind == WorkspaceGroupKind.LocalApp) {
-                Text(
-                    text = stringResource(R.string.drawer_workspace_badge_local_app),
-                    color = t.accent,
-                    fontSize = 10.5f.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
             }
             WorkspaceActionChip(
                 tag = UiTags.drawerWorkspacePin(group.stableKey),
@@ -217,7 +196,8 @@ private fun WorkspaceGroupCard(
                         when (val scope = group.scope) {
                             ConversationScope.Global, ConversationScope.Scheduled -> onNewGlobalSession()
                             is ConversationScope.Project -> onNewProjectSession(scope.projectId)
-                            is ConversationScope.LocalApp -> onNewLocalAppSession(scope.appId)
+                            // Local App workspaces are not listed in the drawer.
+                            is ConversationScope.LocalApp -> Unit
                         }
                     },
             )
@@ -232,8 +212,7 @@ private fun WorkspaceGroupCard(
                             ConversationScope.Global, ConversationScope.Scheduled -> onSelectGlobalSession(row)
                             is ConversationScope.Project ->
                                 onSelectProjectSession(scope.projectId, SessionRef(row.uuid, row.title))
-                            is ConversationScope.LocalApp ->
-                                onSelectLocalAppSession(scope.appId, SessionRef(row.uuid, row.title))
+                            is ConversationScope.LocalApp -> Unit
                         }
                     },
                     onContinue = { onContinueSession(row) },
@@ -249,19 +228,13 @@ private fun WorkspaceGroupCard(
                         when (val scope = group.scope) {
                             ConversationScope.Global, ConversationScope.Scheduled -> onNewGlobalSession()
                             is ConversationScope.Project -> onNewProjectSession(scope.projectId)
-                            is ConversationScope.LocalApp -> onNewLocalAppSession(scope.appId)
+                            // Local App workspaces are not listed in the drawer.
+                            is ConversationScope.LocalApp -> Unit
                         }
                     },
             )
         }
 
-        if (group.scope is ConversationScope.LocalApp) {
-            LocalAppWorkspaceShortcuts(
-                appId = group.scope.appId,
-                onOpenLocalAppLibrary = onOpenLocalAppLibrary,
-                onOpenLocalAppDetails = onOpenLocalAppDetails,
-            )
-        }
     }
 }
 
@@ -292,32 +265,6 @@ private fun WorkspaceActionChip(
 }
 
 @Composable
-private fun LocalAppWorkspaceShortcuts(
-    appId: String,
-    onOpenLocalAppLibrary: (String) -> Unit,
-    onOpenLocalAppDetails: (String) -> Unit,
-) {
-    val t = LingXiTheme.palette
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        modifier = Modifier.padding(top = 6.dp),
-    ) {
-        Text(
-            text = stringResource(R.string.drawer_open_apps_library),
-            color = t.accent,
-            fontSize = 11.5f.sp,
-            modifier = Modifier.clickable { onOpenLocalAppLibrary(appId) },
-        )
-        Text(
-            text = stringResource(R.string.session_details_button),
-            color = t.accent,
-            fontSize = 11.5f.sp,
-            modifier = Modifier.clickable { onOpenLocalAppDetails(appId) },
-        )
-    }
-}
-
-@Composable
 private fun WorkspaceSessionRow(
     row: SessionRow,
     active: Boolean,
@@ -336,16 +283,7 @@ private fun WorkspaceSessionRow(
     ) {
         Column {
             Text(
-                // The pinned create-interview session carries no other marker
-                // in this compact row (unlike the Local Apps screen's own
-                // session list, which has room for a separate AssistChip via
-                // `LocalAppSessionCard`), so it gets the same badge copy
-                // suffixed onto the title instead.
-                text = if (row.isInit) {
-                    "${row.title} · ${stringResource(R.string.local_apps_session_init_badge)}"
-                } else {
-                    row.title
-                },
+                text = row.title,
                 color = if (active) t.text else t.text2,
                 fontSize = 13.5f.sp,
                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,

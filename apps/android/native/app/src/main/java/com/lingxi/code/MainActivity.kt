@@ -55,8 +55,6 @@ import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.theme.LocaleWrapper
 import com.lingxi.code.theme.ThemeMode
-import com.lingxi.code.localapps.widget.LocalAppLaunchRequest
-import com.lingxi.code.localapps.widget.LocalAppWidgetDeepLink
 import kotlinx.coroutines.launch
 
 /**
@@ -79,9 +77,6 @@ class MainActivity : ComponentActivity() {
         kotlinx.coroutines.flow.MutableStateFlow<TerminalRouteArgs?>(null)
     private val pendingConversationLaunch =
         kotlinx.coroutines.flow.MutableStateFlow<ConversationLaunchRequest?>(null)
-    private val pendingLocalAppLaunch =
-        kotlinx.coroutines.flow.MutableStateFlow<LocalAppLaunchRequest?>(null)
-    private val pendingOpenLocalApps = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     // Apply the persisted in-app language to the base context before the
     // activity (and its resources) are created, so the whole surface renders
@@ -90,34 +85,12 @@ class MainActivity : ComponentActivity() {
         super.attachBaseContext(LocaleWrapper.wrap(newBase))
     }
 
-    @Suppress("DEPRECATION")
-    override fun onTrimMemory(level: Int) {
-        super.onTrimMemory(level)
-        if (
-            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
-            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
-            level == android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE
-        ) {
-            com.lingxi.code.localapps.LocalAppsMemoryPressure.notifyPressure()
-        }
-    }
-
-    override fun onLowMemory() {
-        super.onLowMemory()
-        com.lingxi.code.localapps.LocalAppsMemoryPressure.notifyPressure()
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         pendingCronRunId.value = intent.getStringExtra(
             com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
         )
         pendingTerminalArgs.value = intent.terminalRouteArgs()
         pendingConversationLaunch.value = ConversationNotificationRoute.parse(intent)
-        pendingLocalAppLaunch.value = LocalAppWidgetDeepLink.parse(intent)
-        pendingOpenLocalApps.value = intent.getBooleanExtra(
-            LocalAppWidgetDeepLink.EXTRA_OPEN_LOCAL_APPS,
-            false,
-        )
         // Register the camera/picker launchers before the Activity is STARTED and
         // hand them to the process-global CameraController, which the UniFFI
         // AndroidCamera adapter drives across the FFI seam (the device-vision
@@ -235,8 +208,6 @@ class MainActivity : ComponentActivity() {
             val requestedCronRunId by pendingCronRunId.collectAsState()
             val requestedTerminalArgs by pendingTerminalArgs.collectAsState()
             val requestedConversationLaunch by pendingConversationLaunch.collectAsState()
-            val requestedLocalAppLaunch by pendingLocalAppLaunch.collectAsState()
-            val requestedOpenLocalApps by pendingOpenLocalApps.collectAsState()
             val scope = rememberCoroutineScope()
             val prefs by store.prefs.collectAsState(initial = AppearancePrefs())
             val darkTheme = when (prefs.themeMode) {
@@ -287,12 +258,6 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(requestedConversationLaunch) {
                 if (requestedConversationLaunch != null) {
-                    settingsOpen = false
-                    terminalOpen = false
-                }
-            }
-            LaunchedEffect(requestedLocalAppLaunch, requestedOpenLocalApps) {
-                if (requestedLocalAppLaunch != null || requestedOpenLocalApps) {
                     settingsOpen = false
                     terminalOpen = false
                 }
@@ -361,10 +326,6 @@ class MainActivity : ComponentActivity() {
                         onConversationBusyChanged = { activeConversationBusy = it },
                         requestedConversationLaunch = requestedConversationLaunch,
                         onConversationLaunchHandled = { pendingConversationLaunch.value = null },
-                        requestedLocalAppLaunch = requestedLocalAppLaunch,
-                        onLocalAppLaunchHandled = { pendingLocalAppLaunch.value = null },
-                        openLocalAppsRequest = requestedOpenLocalApps,
-                        onOpenLocalAppsHandled = { pendingOpenLocalApps.value = false },
                     )
                     AnimatedVisibility(
                         visible = settingsOpen,
@@ -410,16 +371,6 @@ class MainActivity : ComponentActivity() {
                                     ?: error("engine is not connected")
                                 source.submitClientCommand(
                                     com.lingxi.code.bindings.client.ClientCommand.SetTypescriptLspMode(mode),
-                                )
-                            },
-                            onSetLocalAppPluginEnabled = { pluginId, enabled ->
-                                activeConversationSource?.submitClientCommand(
-                                    com.lingxi.code.bindings.client.ClientCommand.PluginCommand(
-                                        com.lingxi.code.bindings.client.PluginCommandDto.SetEnabled(
-                                            pluginId = pluginId,
-                                            enabled = enabled,
-                                        ),
-                                    ),
                                 )
                             },
                             initialRoute = settingsInitialRoute,
@@ -539,11 +490,6 @@ class MainActivity : ComponentActivity() {
         )
         pendingTerminalArgs.value = intent.terminalRouteArgs()
         pendingConversationLaunch.value = ConversationNotificationRoute.parse(intent)
-        pendingLocalAppLaunch.value = LocalAppWidgetDeepLink.parse(intent)
-        pendingOpenLocalApps.value = intent.getBooleanExtra(
-            LocalAppWidgetDeepLink.EXTRA_OPEN_LOCAL_APPS,
-            false,
-        )
     }
 }
 

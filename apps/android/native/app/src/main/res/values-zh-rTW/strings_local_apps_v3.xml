@@ -1,15 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Traditional Chinese for values/strings_local_apps_v3.xml (see that file's header). -->
 <resources>
-    <string name="local_apps_webview_upgrade_required">目前的 Android System WebView 不支援安全的本地應用 Bridge，請先更新 System WebView。</string>
-    <string name="local_apps_webview_untrusted_origin">本地應用只能從受信任的回送位址開啟。</string>
-    <string name="local_apps_webview_storage_cleanup_waiting">正在安全清除此應用位址的舊瀏覽資料…</string>
-    <string name="local_apps_webview_storage_cleanup_failed">無法安全準備應用瀏覽資料，應用未載入。</string>
-    <string name="local_apps_error_web_storage_cleanup_queue">無法安全記錄應用瀏覽資料清除工作，應用尚未刪除。</string>
-    <string name="local_apps_workflow_draft">草稿</string>
-    <string name="local_apps_session_load_more">載入更多</string>
-    <string name="local_apps_sessions_loading">正在載入會話…</string>
-    <string name="local_apps_session_meta">%1$s · %2$d 則訊息</string>
     <string name="chat_question_card_title">助手想確認幾個問題</string>
     <string name="chat_question_progress">第 %1$d/%2$d 題</string>
     <string name="chat_question_answered_progress">已回答 %1$d/%2$d</string>
@@ -25,6 +16,4 @@
     <string name="chat_task_status_failed">背景任務 %1$s 已失敗</string>
     <string name="chat_task_status_failed_reason">背景任務 %1$s 已失敗：%2$s</string>
     <string name="chat_task_status_cancelled">背景任務 %1$s 已取消</string>
-    <string name="drawer_app_scope_label">應用 · %1$s</string>
-    <string name="drawer_app_sessions_empty">這個應用還沒有會話。</string>
 </resources>

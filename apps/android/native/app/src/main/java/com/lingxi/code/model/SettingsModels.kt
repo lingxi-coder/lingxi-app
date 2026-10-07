@@ -117,40 +117,6 @@ data class Skill(
     val builtin: Boolean,
 )
 
-data class LocalAppPluginStatus(
-    val pluginId: String,
-    val displayName: String,
-    val version: String,
-    val bundleDigest: String,
-    val enabled: Boolean,
-    val skillsCount: Int,
-    val agentsCount: Int,
-    val workflowsCount: Int,
-    val templatesCount: Int,
-    val validationError: String? = null,
-)
-
-data class ManagedLocalAppToolSchema(
-    val name: String,
-    val permissionSummary: String,
-)
-
-data class ManagedLocalAppMcpSource(
-    val stableServerName: String,
-    val appName: String,
-    val appId: String,
-    val buildDigestSummary: String,
-    val catalogDigestSummary: String,
-    val toolCount: Int,
-    val authoringRevision: String,
-    val uiVerification: String,
-    val mcpVerification: String,
-    val schemaSummary: String,
-    val annotationSummary: String,
-    val permissionCeiling: String,
-    val toolSchemas: List<ManagedLocalAppToolSchema> = emptyList(),
-)
-
 data class MCPServer(
     val id: String,
     val name: String,
@@ -160,7 +126,6 @@ data class MCPServer(
     val enabled: Boolean,
     val transport: String,
     val auth: String? = null,
-    val managedLocalApp: ManagedLocalAppMcpSource? = null,
 )
 
 data class DreamConfig(
@@ -514,18 +479,6 @@ object SettingsMock {
             enabled = true,
             builtin = true,
         ),
-    )
-
-    fun localAppPlugin() = LocalAppPluginStatus(
-        pluginId = "lingxi-local-app",
-        displayName = "LingXi Local App",
-        version = "1.0.0",
-        bundleDigest = "builtin",
-        enabled = true,
-        skillsCount = 27,
-        agentsCount = 7,
-        workflowsCount = 3,
-        templatesCount = 5,
     )
 
     fun mcpServers(resolve: (id: Int, fallback: String) -> String = { _, fallback -> fallback }): List<MCPServer> = listOf(

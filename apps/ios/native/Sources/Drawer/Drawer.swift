@@ -6,14 +6,13 @@ typealias WorkspaceSessionMode = SessionMode
 enum DrawerSection: String, CaseIterable, Hashable, Sendable {
     case chat
     case code
-    case apps
     case cron
 
     var sessionMode: WorkspaceSessionMode? {
         switch self {
         case .chat: .chat
         case .code: .code
-        case .apps, .cron: nil
+        case .cron: nil
         }
     }
 }
@@ -21,7 +20,6 @@ enum DrawerSection: String, CaseIterable, Hashable, Sendable {
 enum WorkspaceGroupKind: String, Hashable, Sendable {
     case global
     case project
-    case localApp
 }
 
 struct WorkspaceSessionRow: Identifiable, Equatable, Sendable {
@@ -31,7 +29,6 @@ struct WorkspaceSessionRow: Identifiable, Equatable, Sendable {
     let modifiedAt: Date?
     let relativeTime: String
     let messageCount: Int
-    let isInit: Bool
 }
 
 struct WorkspaceCronRow: Identifiable, Equatable, Sendable {
@@ -115,8 +112,6 @@ enum WorkspaceGroupBuilder {
         liveSessions: [EngineSession],
         globalSessions: [ProjectSessionSummary],
         projects: [ProjectSnapshot],
-        localApps: [LocalAppSummary],
-        localAppSessionPages: [String: LocalAppSessionPage],
         pinnedAt: [String: Date] = [:]
     ) -> [WorkspaceGroup] {
         let globalSeed = WorkspaceGroupSeed(
@@ -138,20 +133,10 @@ enum WorkspaceGroupBuilder {
                 sessions: mergedSessionRows(live: activeScope == scope ? liveSessions : [], cached: project.sessions)
             )
         }
-        let appSeeds = localApps.map { app in
-            WorkspaceGroupSeed(
-                scope: .localApp(app.id),
-                kind: .localApp,
-                title: app.displayName,
-                subtitle: app.draftStatusLine ?? app.workflow.label,
-                updatedAt: app.updatedAt,
-                sessions: (localAppSessionPages[app.id]?.rows ?? []).map(localAppRow)
-            )
-        }
         return seededConversationGroups(
             section: section,
             query: query,
-            groups: [globalSeed] + projectSeeds + appSeeds,
+            groups: [globalSeed] + projectSeeds,
             pinnedAt: pinnedAt
         )
     }
@@ -207,8 +192,7 @@ enum WorkspaceGroupBuilder {
             mode: session.mode,
             modifiedAt: session.modifiedAt,
             relativeTime: session.relativeTime,
-            messageCount: session.messageCount,
-            isInit: false
+            messageCount: session.messageCount
         )
     }
 
@@ -219,20 +203,7 @@ enum WorkspaceGroupBuilder {
             mode: session.mode,
             modifiedAt: session.modifiedAt,
             relativeTime: session.relativeTime,
-            messageCount: session.messageCount,
-            isInit: false
-        )
-    }
-
-    private static func localAppRow(_ session: LocalAppSessionRow) -> WorkspaceSessionRow {
-        WorkspaceSessionRow(
-            id: session.uuid,
-            title: session.title,
-            mode: session.mode,
-            modifiedAt: session.modifiedAt,
-            relativeTime: session.relativeTime,
-            messageCount: session.messageCount,
-            isInit: session.isInit
+            messageCount: session.messageCount
         )
     }
 
@@ -336,7 +307,6 @@ struct Drawer: View {
     @Environment(\.theme) private var t
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Bindable var projectStore: ProjectStore
-    @Bindable var localAppsStore: LocalAppsStore
     let activeScope: ConversationScope
     @Binding var activeSession: String
 
@@ -347,20 +317,11 @@ struct Drawer: View {
     let collapsedWorkspaceKeys: Set<String>
     let openSettings: () -> Void
     let openTerminal: () -> Void
-    let openApps: (String?) -> Void
     let openCron: (String?, String?) -> Void
     let closeSidebar: () -> Void
-    let createApp: () -> Void
     let onSelectProject: (String?) -> Void
     let onSelectSession: (String?, String) -> Void
     let onNewChat: (String?) -> Void
-    /// The mode of the SECTION the tapped row lives in — `nil` only when that
-    /// section has no fixed mode. Carried atomically with the tap rather than
-    /// fired separately through `onModeChanged` beforehand: two independent
-    /// scope switches raced the in-flight `projectSwitching` guard, so a tap
-    /// that both entered an app scope AND changed mode was silently refused.
-    let onSelectAppSession: (String, String, WorkspaceSessionMode?) -> Void
-    let onNewAppChat: (String) -> Void
     let onModeChanged: ((WorkspaceSessionMode) -> Void)?
     let onToggleWorkspacePinned: (String) -> Void
     let onSetWorkspaceCollapsed: (Bool, String) -> Void
@@ -368,7 +329,6 @@ struct Drawer: View {
 
     @ObservedObject private var convo: ConversationModel
     @Binding private var section: DrawerSection
-    @Binding private var showsAppLibrary: Bool
     @State private var query = ""
     @State private var createProjectName = ""
     @State private var showCreateAlert = false
@@ -380,63 +340,47 @@ struct Drawer: View {
 
     init(
         projectStore: ProjectStore,
-        localAppsStore: LocalAppsStore,
         activeScope: ConversationScope = .global,
         activeSession: Binding<String>,
         source: any ConversationSource,
         cronState: CronRepositoryState = .init(),
         activeMode: WorkspaceSessionMode = .code,
         section: Binding<DrawerSection>,
-        showsAppLibrary: Binding<Bool>,
         workspacePinnedAt: [String: Date] = [:],
         collapsedWorkspaceKeys: Set<String> = [],
         openSettings: @escaping () -> Void,
         openTerminal: @escaping () -> Void,
-        openApps: @escaping (String?) -> Void,
         openCron: @escaping (String?, String?) -> Void = { _, _ in },
         closeSidebar: @escaping () -> Void,
-        createApp: @escaping () -> Void,
         onSelectProject: @escaping (String?) -> Void,
         onSelectSession: @escaping (String?, String) -> Void,
         onNewChat: @escaping (String?) -> Void,
-        onSelectAppSession: @escaping (String, String, WorkspaceSessionMode?) -> Void = { _, _, _ in },
-        onNewAppChat: @escaping (String) -> Void = { _ in },
         onModeChanged: ((WorkspaceSessionMode) -> Void)? = nil,
         onToggleWorkspacePinned: @escaping (String) -> Void = { _ in },
         onSetWorkspaceCollapsed: @escaping (Bool, String) -> Void = { _, _ in },
         onContinueInMode: @escaping (ConversationScope, String, WorkspaceSessionMode, WorkspaceSessionMode) -> Void = { _, _, _, _ in }
     ) {
         self.projectStore = projectStore
-        self.localAppsStore = localAppsStore
         self.activeScope = activeScope
         _activeSession = activeSession
         self.source = source
         self.cronState = cronState
         self.activeMode = activeMode
         _section = section
-        _showsAppLibrary = showsAppLibrary
         self.workspacePinnedAt = workspacePinnedAt
         self.collapsedWorkspaceKeys = collapsedWorkspaceKeys
         self.openSettings = openSettings
         self.openTerminal = openTerminal
-        self.openApps = openApps
         self.openCron = openCron
         self.closeSidebar = closeSidebar
-        self.createApp = createApp
         self.onSelectProject = onSelectProject
         self.onSelectSession = onSelectSession
         self.onNewChat = onNewChat
-        self.onSelectAppSession = onSelectAppSession
-        self.onNewAppChat = onNewAppChat
         self.onModeChanged = onModeChanged
         self.onToggleWorkspacePinned = onToggleWorkspacePinned
         self.onSetWorkspaceCollapsed = onSetWorkspaceCollapsed
         self.onContinueInMode = onContinueInMode
         convo = source.model
-    }
-
-    private var activeApp: LocalAppSummary? {
-        activeScope.appID.flatMap { localAppsStore.app(id: $0) }
     }
 
     private var currentWorkspaceGuestPath: String {
@@ -451,8 +395,6 @@ struct Drawer: View {
             liveSessions: convo.engineSessions,
             globalSessions: globalSessionsIncludingScheduled,
             projects: projectStore.projects,
-            localApps: localAppsStore.apps,
-            localAppSessionPages: localAppsStore.sessionPages,
             pinnedAt: workspacePinnedAt
         )
     }
@@ -483,21 +425,11 @@ struct Drawer: View {
         .background { t.sidebarBg.ignoresSafeArea() }
         .onAppear {
             source.listSessions()
-            Task {
-                await localAppsStore.refresh()
-                if let appID = activeScope.appID {
-                    await localAppsStore.listSessions(appID: appID)
-                }
-            }
         }
         .onChange(of: activeMode) { _, mode in
             if section.sessionMode != nil {
                 section = mode == .chat ? .chat : .code
             }
-        }
-        .onChange(of: activeScope.appID) { _, appID in
-            guard let appID else { return }
-            Task { await localAppsStore.listSessions(appID: appID) }
         }
         .navigationTitle(String(localized: "app_name"))
         .navigationBarTitleDisplayMode(.inline)
@@ -532,9 +464,7 @@ struct Drawer: View {
     private var header: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(activeScope.isLocalApp
-                    ? (activeApp?.displayName ?? activeScope.appID ?? "")
-                    : (projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session")))
+                Text(projectStore.activeProject?.record.name ?? String(localized: "drawer_global_session"))
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                     .foregroundStyle(t.text)
                     .lineLimit(1)
@@ -594,7 +524,6 @@ struct Drawer: View {
         HStack(spacing: 4) {
             tab(.chat, .message, String(localized: "drawer_tab_chat"), count: count(for: .chat))
             tab(.code, .terminal, String(localized: "drawer_tab_code"), count: count(for: .code))
-            tab(.apps, .workflow, String(localized: "local_apps_title"), count: count(for: .apps))
             tab(.cron, .clock, String(localized: "drawer_tab_crons"), count: cronGroups.count)
         }
         .padding(.horizontal, 14)
@@ -626,7 +555,6 @@ struct Drawer: View {
     }
 
     private func count(for section: DrawerSection) -> Int {
-        if section == .apps { return localAppsStore.apps.count }
         return WorkspaceGroupBuilder.conversationGroups(
             section: section,
             query: query,
@@ -634,8 +562,6 @@ struct Drawer: View {
             liveSessions: convo.engineSessions,
             globalSessions: globalSessionsIncludingScheduled,
             projects: projectStore.projects,
-            localApps: localAppsStore.apps,
-            localAppSessionPages: localAppsStore.sessionPages,
             pinnedAt: workspacePinnedAt
         ).count
     }
@@ -643,9 +569,7 @@ struct Drawer: View {
     private var bodyContent: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 10) {
-                if section == .apps {
-                    appsContent
-                } else if section != .cron {
+                if section != .cron {
                     projectActions
                     ForEach(conversationGroups) { group in
                         conversationGroupCard(group)
@@ -655,7 +579,7 @@ struct Drawer: View {
                         cronGroupCard(group)
                     }
                 }
-                if section != .apps, visibleGroupCount == 0 {
+                if visibleGroupCount == 0 {
                     emptyState
                 }
             }
@@ -667,166 +591,12 @@ struct Drawer: View {
     }
 
     private var visibleGroupCount: Int {
-        if section == .apps { return localAppsStore.apps.count }
         return section == .cron ? cronGroups.count : conversationGroups.count
     }
 
     private var projectActions: some View {
         HStack(spacing: 8) {
             projectCreationMenu
-        }
-    }
-
-    @ViewBuilder
-    private var appsContent: some View {
-        if !showsAppLibrary,
-           let appID = activeScope.appID,
-           let app = localAppsStore.app(id: appID) {
-            activeAppSessions(app)
-        } else {
-            appLibrary
-        }
-    }
-
-    private var appLibrary: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button(action: createApp) {
-                Label(String(localized: "local_apps_create"), systemImage: "plus")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityIdentifier("drawer.apps.create")
-
-            if filteredApps.isEmpty {
-                ContentUnavailableView(
-                    "local_apps_empty",
-                    systemImage: localAppIconSystemName,
-                    description: Text("local_apps_empty_hint")
-                )
-                .padding(.vertical, 32)
-            } else {
-                ForEach(filteredApps) { app in
-                    Button {
-                        showsAppLibrary = false
-                        openApps(app.id)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: localAppIconSystemName)
-                                .font(.title3)
-                                .foregroundStyle(t.accent)
-                                .frame(width: 40, height: 40)
-                                .background(t.accent.opacity(0.14), in: .rect(cornerRadius: 11))
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(app.displayName)
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(t.text)
-                                    .lineLimit(1)
-                                Text(app.draftStatusLine ?? app.workflow.label)
-                                    .font(.caption)
-                                    .foregroundStyle(t.text4)
-                                    .lineLimit(1)
-                            }
-                            Spacer(minLength: 8)
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(t.text4)
-                        }
-                        .padding(10)
-                        .background(t.surface, in: .rect(cornerRadius: 14))
-                        .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("drawer.apps.row.\(app.id)")
-                }
-            }
-        }
-    }
-
-    private func activeAppSessions(_ app: LocalAppSummary) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button { showsAppLibrary = true } label: {
-                Label("drawer_apps_library", systemImage: "chevron.left")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(t.accent)
-            .accessibilityIdentifier("drawer.apps.all")
-
-            HStack(spacing: 10) {
-                Image(systemName: localAppIconSystemName)
-                    .foregroundStyle(t.accent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(app.displayName)
-                        .font(.headline)
-                        .foregroundStyle(t.text)
-                        .lineLimit(1)
-                    Text("local_apps_section_sessions")
-                        .font(.caption)
-                        .foregroundStyle(t.text4)
-                }
-                Spacer()
-                Button {
-                    onNewAppChat(app.id)
-                } label: {
-                    Label("local_apps_session_new", systemImage: "square.and.pencil")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("drawer.apps.session.new.\(app.id)")
-            }
-            .padding(10)
-            .background(t.surface, in: .rect(cornerRadius: 14))
-
-            let rows = localAppsStore.sessionPages[app.id]?.rows ?? []
-            if rows.isEmpty {
-                ContentUnavailableView(
-                    "local_apps_sessions_empty",
-                    systemImage: "bubble.left.and.bubble.right"
-                )
-                .padding(.vertical, 28)
-            } else {
-                ForEach(rows) { row in
-                    Button {
-                        onSelectAppSession(app.id, row.uuid, row.mode)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(row.title)
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(t.text)
-                                .lineLimit(1)
-                            Text("drawer_session_subtitle \(row.relativeTime) \(row.messageCount)")
-                                .font(.caption)
-                                .foregroundStyle(t.text4)
-                                .lineLimit(1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(t.surface, in: .rect(cornerRadius: 12))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("drawer.apps.session.\(app.id).\(row.uuid)")
-                }
-            }
-
-            if localAppsStore.sessionPages[app.id]?.nextOffset != nil {
-                Button("local_apps_sessions_load_more") {
-                    Task { await localAppsStore.loadMoreSessions(appID: app.id) }
-                }
-                .frame(maxWidth: .infinity)
-            }
-        }
-        .task { await localAppsStore.listSessions(appID: app.id) }
-    }
-
-    private var filteredApps: [LocalAppSummary] {
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !needle.isEmpty else { return localAppsStore.apps }
-        return localAppsStore.apps.filter {
-            $0.displayName.localizedStandardContains(needle)
-                || ($0.displayBrief?.localizedStandardContains(needle) ?? false)
         }
     }
 
@@ -877,15 +647,9 @@ struct Drawer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("drawer.workspace.collapse.\(group.key)")
-                if let appID = group.scope.appID {
-                    Button(String(localized: "drawer_workspace_details")) { openApps(appID) }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                } else {
-                    Button(String(localized: "common_open")) { selectWorkspace(group.scope) }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                }
+                Button(String(localized: "common_open")) { selectWorkspace(group.scope) }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
                 Button {
                     startNewConversation(in: group.scope)
                 } label: {
@@ -974,7 +738,7 @@ struct Drawer: View {
 
     private func sessionRow(_ row: WorkspaceSessionRow, scope: ConversationScope) -> some View {
         let active = scope == activeScope && row.id == activeSession
-        let title = row.isInit ? "\(row.title) · \(String(localized: "local_apps_session_init_badge"))" : row.title
+        let title = row.title
         let targetMode: WorkspaceSessionMode = row.mode == .chat ? .code : .chat
         return Button {
             selectSession(row.id, in: scope)
@@ -1009,10 +773,6 @@ struct Drawer: View {
                 Text("◎")
             case .project:
                 LXIcon(name: .folder, size: 15, color: t.text3, stroke: 1.8)
-            case .localApp:
-                Image(systemName: localAppIconSystemName)
-                    .font(.system(size: 13))
-                    .foregroundStyle(t.accent)
             }
         }
         .frame(width: 18, height: 18)
@@ -1095,8 +855,9 @@ struct Drawer: View {
             onSelectProject(nil)
         case let .project(id):
             onSelectProject(id)
-        case let .localApp(id):
-            openApps(id)
+        case .localApp:
+            // Local App workspaces are not listed by this client.
+            break
         }
     }
 
@@ -1108,14 +869,8 @@ struct Drawer: View {
         case let .project(id):
             if let mode = section.sessionMode { onModeChanged?(mode) }
             onSelectSession(id, sessionID)
-        case let .localApp(id):
-            // NOT `onModeChanged?` + `onSelectAppSession` as two separate
-            // calls: the mode change is itself a `switchScope` that sets
-            // `projectSwitching = true` synchronously, so the session-select
-            // call right after it was refused whenever this tap also changed
-            // mode. Carried as ONE parameter so the caller can fold both into
-            // a single `switchScope`.
-            onSelectAppSession(id, sessionID, section.sessionMode)
+        case .localApp:
+            break
         }
     }
 
@@ -1128,8 +883,8 @@ struct Drawer: View {
             onNewChat(nil)
         case let .project(id):
             onNewChat(id)
-        case let .localApp(id):
-            onNewAppChat(id)
+        case .localApp:
+            break
         }
     }
 

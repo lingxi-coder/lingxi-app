@@ -80,22 +80,6 @@ final class AppIntegrationTests: XCTestCase {
         )
     }
 
-    func testLocalAppDeepLinkParsesValidatedUnifiedRoute() {
-        let url = URL(
-            string: "lingxi://open_local_app?appId=tracker-1&destination=preview&autostart=1&source=widget"
-        )!
-
-        XCTAssertEqual(
-            LingxiDeepLink.action(from: url),
-            .openLocalApp(
-                appID: "tracker-1",
-                destination: "preview",
-                autostart: true,
-                source: "widget"
-            )
-        )
-    }
-
     func testDeviceControlCalendarQueryDecodesHostSnakeCase() throws {
         let query = try DeviceControlWireJSON.decodeCalendarQuery(
             #"{"start_ms":1000,"end_ms":2000,"limit":8}"#

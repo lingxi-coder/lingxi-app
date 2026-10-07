@@ -19,7 +19,6 @@
     "http-client",
     "jsonrpc",
     "llm-runtime",
-    "local-apps",
     "lsp",
     "mcp",
     "memory",

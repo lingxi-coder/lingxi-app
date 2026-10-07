@@ -12,6 +12,7 @@ import tomllib
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 PACKAGE_LIST = (Path(__file__).resolve().parent / "harness-runtime-packages.json")
+CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 
 
 def inspect_metadata(metadata, dependency, package_list, *, anchor="harness-runtime", layout="crates/runtime/Cargo.toml"):
@@ -21,7 +22,8 @@ def inspect_metadata(metadata, dependency, package_list, *, anchor="harness-runt
     if dependency.get("git") != repository or not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError(f"{anchor} must use its canonical Git URL and a full commit SHA")
     expected_source = f"git+{repository}?rev={revision}#{revision}"
-    owned = set(package_list["packages"] + package_list["vendored_packages"])
+    vendored = set(package_list["vendored_packages"])
+    owned = set(package_list["packages"]) | vendored
     packages = {}
     for package in metadata["packages"]:
         name = package["name"]
@@ -55,7 +57,15 @@ def inspect_metadata(metadata, dependency, package_list, *, anchor="harness-runt
                     Path(edge["path"]).resolve().relative_to(root)
                 except ValueError as error:
                     raise ValueError(f"{package['name']} retains a local dependency on {edge['name']}") from error
-            elif edge.get("source") not in (expected_source, expected_source.rsplit("#", 1)[0]):
+            elif edge.get("source") in (expected_source, expected_source.rsplit("#", 1)[0]):
+                continue
+            elif edge["name"] in vendored and edge.get("source") == CRATES_IO:
+                # A dependency on a vendored crate may be spelled as a crates.io request (another repository's
+                # package cannot name this checkout's path); the workspace's `[patch.crates-io]` answers it. The
+                # identity check above is what proves the answer: a second, unpatched copy of the crate would be
+                # a package with a different source and fail there.
+                continue
+            else:
                 raise ValueError(f"{package['name']} declares another source for {edge['name']}")
     return {
         "root": str(root),

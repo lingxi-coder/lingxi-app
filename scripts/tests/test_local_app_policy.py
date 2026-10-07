@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 HOST = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(HOST / "scripts/lib"))
 from runtime_source import resolve_runtime
+from local_app_source import resolve_local_app
 from local_app_branding import (android_package, authorization_enabled_env,
                                 branding_constant, ios_bundle_id, local_app_apk_env)
 
@@ -139,6 +140,7 @@ class LockedProfilePolicyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.resolved = resolve_runtime()
         cls.runtime = Path(cls.resolved["root"])
+        cls.local_app = Path(resolve_local_app()["root"])
         cls.dot_dir = branding_constant("DOT_DIR", cls.resolved)
         spec = importlib.util.spec_from_file_location(
             "locked_local_app_policy", cls.runtime / "scripts/local-apps/verify-local-app-supply-chain.py")
@@ -157,7 +159,7 @@ class LockedProfilePolicyTests(unittest.TestCase):
         for family in ("react-dom", "canvas-2d", "three-3d", "phaser-2d", "babylon-3d"):
             with self.subTest(family=family), tempfile.TemporaryDirectory() as temporary:
                 template = Path(temporary) / "template"
-                shutil.copytree(self.runtime / f"crates/local-apps/templates/runtime-profiles/{family}/r4", template)
+                shutil.copytree(self.local_app / f"crates/local-apps/templates/runtime-profiles/{family}/r4", template)
                 self.verify.validate_runtime_profile_source_policy(family, template)
                 policy_path = template / self.dot_dir / "source-policy.json"
                 policy = json.loads(policy_path.read_text())

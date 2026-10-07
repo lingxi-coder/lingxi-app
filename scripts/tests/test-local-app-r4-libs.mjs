@@ -5,8 +5,8 @@ import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 
-const runtimeRoot = execFileSync('python3', [fileURLToPath(new URL('../lib/runtime_source.py', import.meta.url)), '--root'], { encoding: 'utf8' }).trim();
-const root = `${runtimeRoot}/crates/plugins/lingxi-local-app/assets/templates/`;
+const localAppRoot = execFileSync('python3', [fileURLToPath(new URL('../lib/local_app_source.py', import.meta.url)), '--root'], { encoding: 'utf8' }).trim();
+const root = `${localAppRoot}/crates/plugins/lingxi-local-app/assets/templates/`;
 const revision = 'r4';
 const families = ['react-dom', 'canvas-2d', 'three-3d', 'phaser-2d', 'babylon-3d'];
 

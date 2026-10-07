@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/lingxi-coder/local-app",
+  "packages": [
+    "device-api",
+    "local-app-contracts",
+    "local-app-plugin",
+    "local-app-service",
+    "local-apps",
+    "mcp-wire",
+    "rooted-fs"
+  ],
+  "vendored_packages": []
+}

@@ -89,6 +89,31 @@ class RuntimeSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another source"):
             self.inspect()
 
+    def test_accepts_a_patched_crates_io_request_for_a_vendored_crate(self):
+        # `local-apps` lives in another repository and cannot name this checkout's git2 by path.
+        self.inventory["vendored_packages"] = ["git2"]
+        self.metadata["packages"].append({"name": "git2", "source": self.source,
+            "manifest_path": "/tmp/locked-harness/third_party/git2-rs/git2/Cargo.toml", "dependencies": []})
+        self.metadata["packages"].append({"name": "local-apps", "dependencies": [
+            {"name": "git2", "source": "registry+https://github.com/rust-lang/crates.io-index"},
+        ]})
+        self.assertEqual(self.inspect()["revision"], self.revision)
+
+    def test_rejects_a_crates_io_request_for_a_crate_that_is_not_vendored(self):
+        self.metadata["packages"].append({"name": "local-apps", "dependencies": [
+            {"name": "core", "source": "registry+https://github.com/rust-lang/crates.io-index"},
+        ]})
+        with self.assertRaisesRegex(ValueError, "another source"):
+            self.inspect()
+
+    def test_an_unpatched_copy_of_a_vendored_crate_is_still_a_different_identity(self):
+        self.inventory["vendored_packages"] = ["git2"]
+        self.metadata["packages"].append({"name": "git2",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "manifest_path": "/tmp/registry/git2/Cargo.toml", "dependencies": []})
+        with self.assertRaisesRegex(ValueError, "different source"):
+            self.inspect()
+
     def test_rejects_host_path_into_the_cargo_checkout(self):
         self.metadata["packages"].append({"name": "ios-framework", "dependencies": [
             {"name": "core", "path": "/tmp/locked-harness/crates/core"},

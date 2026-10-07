@@ -35,7 +35,7 @@ uniffi = [
     "dep:platform-posix-minimal",
     "dep:tokio",
     "dep:orchestrator",
-    "dep:local-app-contracts",
+    "dep:local-app-builder-contracts",
     "dep:tool-api",
     # P4-T11: the on-device `android_git_probe` export builds a
     # `BuiltinToolContext` via tool-api's test-support stubs (the git ops use
@@ -70,7 +70,7 @@ orchestrator = { workspace = true, optional = true }
 # The app-id rule (`ids::is_valid_app_id`, owned by the Local App contracts) — the boot-time cwd
 # validator accepts `apps/<id>/workspace` scopes with the SAME derivation the
 # Local App service mints ids with, never a twin regex (mirrors ios-framework).
-local-app-contracts = { workspace = true, optional = true }
+local-app-builder-contracts = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 # P3-T5: the `AndroidShellToolCtx` carrier type assigned onto `MobileConfig`
 # (the Shell-tool registration gate result). Optional + pulled under `uniffi` so

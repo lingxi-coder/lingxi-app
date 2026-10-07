@@ -1,10 +1,10 @@
 {
-  "repository": "https://github.com/lingxi-coder/local-app",
+  "repository": "https://github.com/lingxi-coder/local-app-builder",
   "packages": [
     "device-api",
-    "local-app-contracts",
-    "local-app-plugin",
-    "local-app-service",
+    "local-app-builder-contracts",
+    "local-app-builder-plugin",
+    "local-app-builder-service",
     "local-apps",
     "mcp-wire",
     "rooted-fs"

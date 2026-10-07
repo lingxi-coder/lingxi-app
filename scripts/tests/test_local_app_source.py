@@ -13,11 +13,11 @@ from local_app_source import inspect_local_app_metadata
 class LocalAppSourceTests(unittest.TestCase):
     def setUp(self):
         self.revision = "d" * 40
-        self.repository = "https://github.com/lingxi-coder/local-app"
+        self.repository = "https://github.com/lingxi-coder/local-app-builder"
         self.dependency = {"git": self.repository, "rev": self.revision}
         self.source = f"git+{self.repository}?rev={self.revision}#{self.revision}"
         self.inventory = {"repository": self.repository,
-                          "packages": ["local-app-contracts", "local-app-service", "local-apps"],
+                          "packages": ["local-app-builder-contracts", "local-app-builder-service", "local-apps"],
                           "vendored_packages": []}
         self.metadata = {"packages": [
             {"name": name, "source": self.source,
@@ -52,7 +52,7 @@ class LocalAppSourceTests(unittest.TestCase):
 
     def test_rejects_the_runtime_repository_declaring_another_revision(self):
         self.metadata["packages"].append({"name": "harness-runtime", "dependencies": [
-            {"name": "local-app-service",
+            {"name": "local-app-builder-service",
              "source": f"git+{self.repository}?rev={'e' * 40}"},
         ]})
         with self.assertRaisesRegex(ValueError, "another source"):
@@ -60,7 +60,7 @@ class LocalAppSourceTests(unittest.TestCase):
 
     def test_accepts_the_runtime_repository_declaring_the_same_revision(self):
         self.metadata["packages"].append({"name": "harness-runtime", "dependencies": [
-            {"name": "local-app-service", "source": f"git+{self.repository}?rev={self.revision}"},
+            {"name": "local-app-builder-service", "source": f"git+{self.repository}?rev={self.revision}"},
         ]})
         self.assertEqual(self.inspect()["revision"], self.revision)
 

@@ -18,14 +18,14 @@ PACKAGE_LIST = (Path(__file__).resolve().parent / "local-app-packages.json")
 def inspect_local_app_metadata(metadata, dependency, package_list):
     return inspect_metadata(
         metadata, dependency, package_list,
-        anchor="local-app-contracts", layout="crates/local-app-contracts/Cargo.toml",
+        anchor="local-app-builder-contracts", layout="crates/local-app-builder-contracts/Cargo.toml",
     )
 
 
 def resolve_local_app(workspace=WORKSPACE):
     workspace = Path(workspace).resolve()
     manifest = tomllib.loads((workspace / "Cargo.toml").read_text(encoding="utf-8"))
-    dependency = manifest["workspace"]["dependencies"]["local-app-contracts"]
+    dependency = manifest["workspace"]["dependencies"]["local-app-builder-contracts"]
     result = subprocess.run(
         ["cargo", "metadata", "--locked", "--format-version=1", "--all-features",
          "--manifest-path", str(workspace / "Cargo.toml")],

@@ -195,7 +195,11 @@ pub fn process_line(
 
     // Parse JSON.
     let mut frame: Value = serde_json::from_str(line).map_err(|e| {
-        eprintln!("Error parsing streaming input line: invalid JSON at line {} column {}", e.line(), e.column());
+        eprintln!(
+            "Error parsing streaming input line: invalid JSON at line {} column {}",
+            e.line(),
+            e.column()
+        );
         InputError::MalformedJson
     })?;
 
@@ -465,6 +469,7 @@ fn parse_assistant_content(content: Option<&Value>) -> Vec<ContentBlock> {
     if let Some(text) = content.as_str() {
         return vec![ContentBlock::Text {
             text: text.to_string(),
+            citations: None,
         }];
     }
     let Some(blocks) = content.as_array() else {
@@ -476,6 +481,7 @@ fn parse_assistant_content(content: Option<&Value>) -> Vec<ContentBlock> {
         .filter_map(|block| match block.get("type").and_then(Value::as_str)? {
             "text" => Some(ContentBlock::Text {
                 text: block.get("text")?.as_str()?.to_string(),
+                citations: None,
             }),
             "thinking" => Some(ContentBlock::Thinking {
                 thinking: block.get("thinking")?.as_str()?.to_string(),
@@ -713,11 +719,16 @@ impl StdinReaderControl {
         self.stop.cancel();
         // Join the finite parsing/publication section, never the OS read or
         // bounded channel send. No lifecycle/replay frame can land after this.
-        let _publication = self.publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _publication = self
+            .publication
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 }
 impl Drop for StdinReaderControl {
-    fn drop(&mut self) { self.stop(); }
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 pub struct StdinChannels {
@@ -766,7 +777,10 @@ pub fn spawn_stdin_router(
 ) -> StdinChannels {
     spawn_stdin_router_from_reader(
         std::io::BufReader::new(std::io::stdin()),
-        replay_user_messages, session_id, out_tx, lifecycle,
+        replay_user_messages,
+        session_id,
+        out_tx,
+        lifecycle,
     )
 }
 
@@ -787,97 +801,126 @@ pub(crate) fn spawn_stdin_router_from_reader<R: BufRead + Send + 'static>(
     let reader_status = status_tx.clone();
     let stop = tokio_util::sync::CancellationToken::new();
     let publication = Arc::new(std::sync::Mutex::new(()));
-    let reader_control = StdinReaderControl { stop: stop.clone(), publication: publication.clone() };
-    let spawned = std::thread::Builder::new().name("lingxi-stdin".into()).spawn(move || {
-        let mut seen_uuids: HashSet<String> = HashSet::new();
-        let mut outcome = StdinReaderStatus::Eof;
+    let reader_control = StdinReaderControl {
+        stop: stop.clone(),
+        publication: publication.clone(),
+    };
+    let spawned = std::thread::Builder::new()
+        .name("lingxi-stdin".into())
+        .spawn(move || {
+            let mut seen_uuids: HashSet<String> = HashSet::new();
+            let mut outcome = StdinReaderStatus::Eof;
 
-        for line_result in reader.lines() {
-            if stop.is_cancelled() { outcome = StdinReaderStatus::Stopped; break; }
-            let line = match line_result {
-                Ok(l) => l,
-                Err(_) => {
-                    eprintln!("Error reading streaming input");
-                    outcome = StdinReaderStatus::Failed(InputError::ReadFailed);
+            for line_result in reader.lines() {
+                if stop.is_cancelled() {
+                    outcome = StdinReaderStatus::Stopped;
                     break;
                 }
-            };
-            let line = line.trim_end_matches('\r').to_string();
-            if line.trim().is_empty() {
-                continue;
-            }
+                let line = match line_result {
+                    Ok(l) => l,
+                    Err(_) => {
+                        eprintln!("Error reading streaming input");
+                        outcome = StdinReaderStatus::Failed(InputError::ReadFailed);
+                        break;
+                    }
+                };
+                let line = line.trim_end_matches('\r').to_string();
+                if line.trim().is_empty() {
+                    continue;
+                }
 
-            let action = {
-                let _publication = publication.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if stop.is_cancelled() { outcome = StdinReaderStatus::Stopped; break; }
-                let action = process_line(&line, &mut seen_uuids);
-                match &action {
+                let action = {
+                    let _publication = publication
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if stop.is_cancelled() {
+                        outcome = StdinReaderStatus::Stopped;
+                        break;
+                    }
+                    let action = process_line(&line, &mut seen_uuids);
+                    match &action {
+                        Ok(FrameAction::UserTurn(turn)) => {
+                            if let Some(uuid) = turn.uuid.as_deref() {
+                                lifecycle.command_queued(uuid);
+                            }
+                        }
+                        Ok(FrameAction::DuplicateUser {
+                            uuid,
+                            content,
+                            timestamp,
+                        }) if replay_user_messages => {
+                            emit_replay_ack_queued(
+                                &out_tx,
+                                uuid,
+                                content,
+                                timestamp.as_deref(),
+                                &session_id,
+                            );
+                        }
+                        _ => {}
+                    }
+                    action
+                };
+                match action {
                     Ok(FrameAction::UserTurn(turn)) => {
-                        if let Some(uuid) = turn.uuid.as_deref() { lifecycle.command_queued(uuid); }
+                        // Backpressure stays outside the publication fence, so a
+                        // closed consumer always unblocks this reader on shutdown.
+                        if input_tx.blocking_send(StreamInput::User(turn)).is_err() {
+                            // Receiver dropped — turn driver has stopped; exit.
+                            break;
+                        }
                     }
-                    Ok(FrameAction::DuplicateUser { uuid, content, timestamp }) if replay_user_messages => {
-                        emit_replay_ack_queued(&out_tx, uuid, content, timestamp.as_deref(), &session_id);
+                    Ok(FrameAction::History(history)) => {
+                        if input_tx
+                            .blocking_send(StreamInput::History(history))
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
-                    _ => {}
-                }
-                action
-            };
-            match action {
-                Ok(FrameAction::UserTurn(turn)) => {
-                    // Backpressure stays outside the publication fence, so a
-                    // closed consumer always unblocks this reader on shutdown.
-                    if input_tx.blocking_send(StreamInput::User(turn)).is_err() {
-                        // Receiver dropped — turn driver has stopped; exit.
+                    Ok(FrameAction::BashCommand(command)) => {
+                        if input_tx.blocking_send(StreamInput::Bash(command)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(FrameAction::DuplicateUser { .. }) => {}
+                    Ok(FrameAction::ControlRequest(frame)) => {
+                        if control_req_tx
+                            .blocking_send(StdinControlFrame::Request(frame))
+                            .is_err()
+                        {
+                            // Control dispatcher stopped; keep reading (don't break —
+                            // still need to drain stdin for user turns).
+                        }
+                    }
+                    Ok(FrameAction::ControlCancel(request_id)) => {
+                        if control_req_tx
+                            .blocking_send(StdinControlFrame::Cancel(request_id))
+                            .is_err()
+                        {
+                            // Control dispatcher stopped; keep reading.
+                        }
+                    }
+                    Ok(FrameAction::ControlResponse(frame)) => {
+                        if control_resp_tx.blocking_send(frame).is_err() {
+                            // Pending resolver stopped; keep reading.
+                        }
+                    }
+                    Ok(FrameAction::Consumed) => {}
+                    Err(error) => {
+                        outcome = StdinReaderStatus::Failed(error);
                         break;
                     }
-                }
-                Ok(FrameAction::History(history)) => {
-                    if input_tx
-                        .blocking_send(StreamInput::History(history))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Ok(FrameAction::BashCommand(command)) => {
-                    if input_tx.blocking_send(StreamInput::Bash(command)).is_err() {
-                        break;
-                    }
-                }
-                Ok(FrameAction::DuplicateUser { .. }) => {}
-                Ok(FrameAction::ControlRequest(frame)) => {
-                    if control_req_tx
-                        .blocking_send(StdinControlFrame::Request(frame))
-                        .is_err()
-                    {
-                        // Control dispatcher stopped; keep reading (don't break —
-                        // still need to drain stdin for user turns).
-                    }
-                }
-                Ok(FrameAction::ControlCancel(request_id)) => {
-                    if control_req_tx
-                        .blocking_send(StdinControlFrame::Cancel(request_id))
-                        .is_err()
-                    {
-                        // Control dispatcher stopped; keep reading.
-                    }
-                }
-                Ok(FrameAction::ControlResponse(frame)) => {
-                    if control_resp_tx.blocking_send(frame).is_err() {
-                        // Pending resolver stopped; keep reading.
-                    }
-                }
-                Ok(FrameAction::Consumed) => {}
-                Err(error) => {
-                    outcome = StdinReaderStatus::Failed(error);
-                    break;
                 }
             }
-        }
-        // Publish the result before dropping data senders: EOF and fatal input
-        // must remain distinguishable when the last buffered input is consumed.
-        reader_status.send_replace(if stop.is_cancelled() { StdinReaderStatus::Stopped } else { outcome });
-    });
+            // Publish the result before dropping data senders: EOF and fatal input
+            // must remain distinguishable when the last buffered input is consumed.
+            reader_status.send_replace(if stop.is_cancelled() {
+                StdinReaderStatus::Stopped
+            } else {
+                outcome
+            });
+        });
     if spawned.is_err() {
         status_tx.send_replace(StdinReaderStatus::Failed(InputError::ReadFailed));
     }
@@ -1108,10 +1151,7 @@ mod tests {
     fn user_frame_bad_role_error_string() {
         // Verify the exact error message format.
         let err = InputError::BadRole("assistant".to_string());
-        assert_eq!(
-            err.to_string(),
-            "Error: Expected message role 'user'"
-        );
+        assert_eq!(err.to_string(), "Error: Expected message role 'user'");
     }
 
     #[test]

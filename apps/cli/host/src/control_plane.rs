@@ -176,7 +176,9 @@ impl StdioControlPlane {
     /// loop before each turn.
     pub async fn set_active_turn(&self, token: CancellationToken) {
         let mut active = self.active_turn_cancel.lock().await;
-        if self.stopped.is_cancelled() { token.cancel(); }
+        if self.stopped.is_cancelled() {
+            token.cancel();
+        }
         *active = Some(token);
     }
 
@@ -265,7 +267,9 @@ impl StdioControlPlane {
         {
             let mut pending = self.pending.lock().await;
             if self.input_closed.is_cancelled() {
-                let _ = tx.send(Err("Tool permission stream closed before response received".into()));
+                let _ = tx.send(Err(
+                    "Tool permission stream closed before response received".into(),
+                ));
                 return (request_id, rx);
             }
             pending.insert(
@@ -277,7 +281,9 @@ impl StdioControlPlane {
             );
             // Queue under the admission lock so input closure cannot reject
             // this waiter and then publish its permission prompt afterward.
-            let _ = self.outbound_tx.send(OutboundMsg::Line(serialize_ndjson_line(&frame)));
+            let _ = self
+                .outbound_tx
+                .send(OutboundMsg::Line(serialize_ndjson_line(&frame)));
         }
         (request_id, rx)
     }
@@ -303,7 +309,9 @@ impl StdioControlPlane {
     /// so the join key is the inner `response.request_id` and the payload is the
     /// inner `response.response` (the load-bearing double nesting).
     pub async fn resolve_response(&self, frame: &Value) {
-        if self.stopped.is_cancelled() { return; }
+        if self.stopped.is_cancelled() {
+            return;
+        }
         let Some(response) = frame.get("response") else {
             return;
         };
@@ -771,7 +779,7 @@ impl StdioControlPermissionGate {
                         let updated_input = if map.is_empty() {
                             None
                         } else {
-                            Some(Value::Object(map.clone()))
+                            Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(Value::Object(map.clone())))
                         };
                         // §2b / `applyPermissionUpdates` + `persistPermissionUpdates`:
                         // an allow may also carry an `updatedPermissions` array of
@@ -826,7 +834,7 @@ impl StdioControlPermissionGate {
                     .get("updatedInput")
                     .and_then(Value::as_object)
                     .filter(|map| !map.is_empty())
-                    .map(|map| Value::Object(map.clone()));
+                    .map(|map| lingxi_core::types::utf16_json::Utf16JsonProjection::plain(Value::Object(map.clone())));
                 PermissionOutcome::AllowAuto { updated_input }
             }
             Some("deny") => {
@@ -1750,7 +1758,7 @@ mod tests {
             .await;
         match check.await.unwrap() {
             PermissionOutcome::Allow { updated_input, .. } => {
-                assert_eq!(updated_input, Some(json!({"command": "ls -la"})));
+                assert_eq!(updated_input, Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({"command": "ls -la"}))));
             }
             other => panic!("expected Allow with updated_input, got {other:?}"),
         }
@@ -1993,10 +2001,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_persistent_rules_normalizes_legacy_tool_name() {
+    fn parse_persistent_rules_preserves_current_agent_tool_name() {
         let raw = json!({
             "type": "addRules",
-            "rules": [{ "toolName": "Task", "ruleContent": "general-purpose" }],
+            "rules": [{ "toolName": "Agent", "ruleContent": "general-purpose" }],
             "behavior": "deny",
             "destination": "userSettings",
         });
@@ -2006,7 +2014,6 @@ mod tests {
             panic!("expected addRules");
         };
         assert_eq!(updates.len(), 1);
-        // "Task" is the legacy alias for "Agent".
         assert_eq!(updates[0].rule.value.tool_name, "Agent");
         assert_eq!(updates[0].rule.behavior, PermissionBehavior::Deny);
         assert_eq!(
@@ -2316,13 +2323,20 @@ mod close_scope_tests {
     async fn closure_rejects_existing_and_future_permission_waiters() {
         let (out, mut frames) = tokio::sync::mpsc::unbounded_channel();
         let plane = StdioControlPlane::new(Arc::new(out));
-        let (_, first) = plane.send_request(json!({"subtype":"can_use_tool"}), None).await;
+        let (_, first) = plane
+            .send_request(json!({"subtype":"can_use_tool"}), None)
+            .await;
         assert!(frames.recv().await.is_some());
         plane.close_input("closed fixture").await;
         assert!(first.await.unwrap().is_err());
-        let (_, later) = plane.send_request(json!({"subtype":"can_use_tool"}), None).await;
+        let (_, later) = plane
+            .send_request(json!({"subtype":"can_use_tool"}), None)
+            .await;
         assert!(later.await.unwrap().is_err());
-        assert!(frames.try_recv().is_err(), "no prompt may be queued after closure");
+        assert!(
+            frames.try_recv().is_err(),
+            "no prompt may be queued after closure"
+        );
     }
     #[tokio::test]
     async fn shutdown_cancels_an_owner_without_releasing_its_cwd_lease() {
@@ -2335,7 +2349,8 @@ mod close_scope_tests {
         assert!(token.is_cancelled());
         assert!(plane.is_busy().await);
         assert!(plane.try_lock_operation().is_none());
-        plane.clear_active_turn().await; drop(lease);
+        plane.clear_active_turn().await;
+        drop(lease);
         assert!(!plane.is_busy().await);
         assert!(plane.try_lock_operation().is_some());
     }

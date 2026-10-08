@@ -122,7 +122,13 @@ impl CliLoopHost {
                     .then(|| command.uuid.clone()),
                 text: prompt.to_string(),
                 is_meta: true,
+                mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
+                    serde_json::json!({"kind":"auto-continuation"})
+                } else {
+                    serde_json::json!({"kind":"scheduled-trigger"})
+                }),
                 message_id: None,
+                transcript_row_token: None,
                 queue_priority: Some("later".into()),
                 scheduled_task_id: command.scheduled_task_id.clone(),
                 scheduled_fire_id: command.scheduled_fire_id.clone(),

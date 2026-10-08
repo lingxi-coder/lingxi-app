@@ -133,6 +133,7 @@ impl BottomPaneView for FocusView {
             OwnerViewUpdate::Focus(projection) => self.projection = projection,
             OwnerViewUpdate::Agents(_) => {}
             OwnerViewUpdate::RunningAgents(agents) => self.projection.running_agents = agents,
+            OwnerViewUpdate::Commands(_) => {}
         }
     }
 

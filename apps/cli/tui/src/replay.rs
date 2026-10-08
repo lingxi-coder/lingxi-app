@@ -102,6 +102,22 @@ pub fn rebuild_messages(history: &[ConversationMessage]) -> Vec<RenderedMessage>
 /// any non-user/assistant entry types are skipped (reconstructed at runtime).
 #[must_use]
 pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<RenderedMessage> {
+    rebuild_from_jsonl_impl(messages, false)
+}
+
+/// Seed fullscreen selection with the persisted transcript UUID of ordinary
+/// user and assistant text rows. Tool rows use their tool-use ID instead.
+#[must_use]
+pub fn rebuild_from_jsonl_with_request_ids(
+    messages: &[session::jsonl::JsonlMessage],
+) -> Vec<RenderedMessage> {
+    rebuild_from_jsonl_impl(messages, true)
+}
+
+fn rebuild_from_jsonl_impl(
+    messages: &[session::jsonl::JsonlMessage],
+    with_request_ids: bool,
+) -> Vec<RenderedMessage> {
     let mut acc = ReplayAcc::default();
     for m in messages {
         // The full routed transcript also contains subagent/sidechain rows.
@@ -111,6 +127,7 @@ pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<Rend
             continue;
         }
         let blocks = decode_content_blocks(&m.message);
+        let first_row = acc.out.len();
         match m.message_type.as_str() {
             "user" => {
                 let compact_summary = m
@@ -146,6 +163,19 @@ pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<Rend
             // ordinary system / attachment / summary / sidechain — not replayed.
             _ => {}
         }
+        if with_request_ids && !m.uuid.is_empty() {
+            for row in &mut acc.out[first_row..] {
+                if matches!(
+                    row,
+                    RenderedMessage::UserText { .. } | RenderedMessage::AssistantText { .. }
+                ) {
+                    *row = RenderedMessage::IdentifiedTranscriptRow {
+                        message: Box::new(row.clone()),
+                        request_id: m.uuid.clone(),
+                    };
+                }
+            }
+        }
     }
     acc.out
 }
@@ -162,6 +192,7 @@ fn decode_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
     if let Some(s) = content.as_str() {
         return vec![ContentBlock::Text {
             text: s.to_string(),
+            citations: None,
         }];
     }
     if content.is_array() {
@@ -201,7 +232,7 @@ impl ReplayAcc {
         let summary = content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -250,7 +281,7 @@ fn push_user_block(
     out: &mut Vec<RenderedMessage>,
 ) {
     match block {
-        ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
             out.push(RenderedMessage::UserText {
                 body: text.clone(),
                 timestamp: 0,
@@ -322,7 +353,7 @@ fn push_assistant_block(
     out: &mut Vec<RenderedMessage>,
 ) {
     match block {
-        ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
             out.push(RenderedMessage::AssistantText {
                 body: text.clone(),
                 timestamp: 0,
@@ -374,7 +405,10 @@ mod tests {
     fn user_text(text: &str) -> ConversationMessage {
         ConversationMessage::User {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
@@ -384,7 +418,10 @@ mod tests {
     fn assistant_text(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             stop_reason: None,
         }
     }
@@ -432,7 +469,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: "edited".into(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 }],
@@ -483,7 +520,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: id,
                 content: "stdout".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -578,6 +615,7 @@ mod tests {
                 subtype: None,
                 compact_metadata: None,
                 refusal_fallback: None,
+                model_fallback: None,
             },
             ConversationMessage::User {
                 id: MessageId::new(),
@@ -619,6 +657,27 @@ mod tests {
         assert!(matches!(
             &out[0],
             RenderedMessage::UserText { body, .. } if body == "hi from jsonl"
+        ));
+    }
+
+    #[test]
+    fn jsonl_selection_uses_top_level_uuid_only_for_prose_rows() {
+        let user = jsonl("user", &serde_json::json!("hello"));
+        let user_uuid = user.uuid.clone();
+        let assistant = jsonl("assistant", &serde_json::json!("answer"));
+        let assistant_uuid = assistant.uuid.clone();
+        let out = rebuild_from_jsonl_with_request_ids(&[user, assistant]);
+        assert!(matches!(
+            &out[0],
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &user_uuid
+                    && matches!(message.as_ref(), RenderedMessage::UserText { body, .. } if body == "hello")
+        ));
+        assert!(matches!(
+            &out[1],
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &assistant_uuid
+                    && matches!(message.as_ref(), RenderedMessage::AssistantText { body, .. } if body == "answer")
         ));
     }
 
@@ -742,6 +801,21 @@ mod tests {
                 ]),
             ),
         ];
+        let identified = rebuild_from_jsonl_with_request_ids(&msgs);
+        assert!(matches!(
+            &identified[0],
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &msgs[0].uuid
+                    && matches!(message.as_ref(), RenderedMessage::AssistantText { .. })
+        ));
+        assert!(matches!(
+            &identified[1],
+            RenderedMessage::AssistantToolUse { .. }
+        ));
+        assert!(matches!(
+            &identified[2],
+            RenderedMessage::UserToolResult { .. }
+        ));
         let out = rebuild_from_jsonl(&msgs);
         assert_eq!(out.len(), 3);
         assert!(
@@ -785,6 +859,7 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "let me read it".into(),
+                    citations: None,
                 },
                 ContentBlock::ToolUse {
                     id,

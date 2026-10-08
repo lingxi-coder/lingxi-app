@@ -127,6 +127,10 @@ pub struct RegistrySlashRow {
     pub menu_description: Option<String>,
     /// Alternate names WITH the leading `/`.
     pub aliases: Vec<String>,
+    pub hidden: bool,
+    pub replaces_builtin: bool,
+    pub argument_hint: Option<String>,
+    pub argument_names: Vec<String>,
 }
 
 /// A popup candidate: either a static builtin or a registry-backed command.
@@ -208,7 +212,10 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
 /// - the matched alias is shown in parens only when the user typed it
 ///   (`findMatchedAlias`), e.g. `/quit` → `/exit (quit)`.
 #[must_use]
-pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<CompletionItem> {
+pub fn command_items_merged<'a>(
+    prefix: &str,
+    registry: &'a [RegistrySlashRow],
+) -> Vec<CompletionItem> {
     if !prefix.starts_with('/') {
         return Vec::new();
     }
@@ -219,6 +226,17 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
         return Vec::new();
     }
     let query = rest.to_lowercase();
+    let replaces_builtin = |name: &str| {
+        registry
+            .iter()
+            .any(|row| row.replaces_builtin && row.name == name)
+    };
+    let registry_is_available = |row: &&RegistrySlashRow| {
+        row.replaces_builtin
+            || !crate::command::BUILTIN
+                .iter()
+                .any(|builtin| builtin.name == row.name)
+    };
 
     // Registry rows whose name a builtin already owns are dropped (the builtin
     // table is authoritative). Inlined at both use sites below — a shared
@@ -229,12 +247,20 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
     // `'static` builtins coerce down (covariance); order is irrelevant — the
     // result is sorted by name below.
     if query.is_empty() {
-        let mut commands: Vec<Cand> = registry
+        let mut commands: Vec<Cand<'a>> = registry
             .iter()
-            .filter(|r| !crate::command::BUILTIN.iter().any(|b| b.name == r.name))
+            .filter(registry_is_available)
+            .filter(|row| !row.hidden)
             .map(|r| Cand::Registry(r))
-            .chain(crate::command::advertised().map(|c| Cand::Builtin(c)))
             .collect();
+        commands.extend(
+            crate::command::advertised()
+                .filter(|command| !replaces_builtin(command.name))
+                .map(|command| {
+                    let command: &'a crate::command::SlashCommand = command;
+                    Cand::Builtin(command)
+                }),
+        );
         commands.sort_by(|a, b| a.name().cmp(b.name()));
         return commands
             .into_iter()
@@ -248,30 +274,53 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
     // `hiddenExact`: an unadvertised builtin typed out in full surfaces — unless
     // a visible command shares the name. Only builtins carry a hidden flag;
     // registry rows are always visible.
-    let hidden_exact = crate::command::BUILTIN
+    let hidden_exact = registry
         .iter()
-        .filter(|c| !c.advertised || crate::command::is_runtime_hidden(c.name))
-        .find(|c| bare(c.name) == query);
+        .filter(registry_is_available)
+        .filter(|row| row.hidden)
+        .find(|row| bare(&row.name) == query)
+        .map(Cand::Registry)
+        .or_else(|| {
+            crate::command::BUILTIN
+                .iter()
+                .filter(|command| !replaces_builtin(command.name))
+                .filter(|command| {
+                    !command.advertised || crate::command::is_runtime_hidden(command.name)
+                })
+                .find(|command| bare(command.name) == query)
+                .map(|command| {
+                    let command: &'a crate::command::SlashCommand = command;
+                    Cand::Builtin(command)
+                })
+        });
 
     // Candidates: commands the reference's Fuse index would match — name/alias
     // substring, name-part prefix, or description word prefix.
-    let mut candidates: Vec<Cand> = registry
+    let mut candidates: Vec<Cand<'a>> = registry
         .iter()
-        .filter(|r| !crate::command::BUILTIN.iter().any(|b| b.name == r.name))
+        .filter(registry_is_available)
+        .filter(|row| !row.hidden)
         .map(|r| Cand::Registry(r))
-        .chain(crate::command::advertised().map(|c| Cand::Builtin(c)))
-        .filter(|c| {
-            bare(c.name()).contains(&query)
-                || c.aliases().iter().any(|a| bare(a).contains(&query))
-                || bare(c.name())
-                    .split(['-', '_', ':'])
-                    .any(|part| part.starts_with(&query))
-                || c.describe().to_lowercase().split_whitespace().any(|word| {
-                    word.trim_matches(|ch: char| !ch.is_alphanumeric())
-                        .starts_with(&query)
-                })
-        })
         .collect();
+    candidates.extend(
+        crate::command::advertised()
+            .filter(|command| !replaces_builtin(command.name))
+            .map(|command| {
+                let command: &'a crate::command::SlashCommand = command;
+                Cand::Builtin(command)
+            }),
+    );
+    candidates.retain(|c| {
+        bare(c.name()).contains(&query)
+            || c.aliases().iter().any(|a| bare(a).contains(&query))
+            || bare(c.name())
+                .split(['-', '_', ':'])
+                .any(|part| part.starts_with(&query))
+            || c.describe().to_lowercase().split_whitespace().any(|word| {
+                word.trim_matches(|ch: char| !ch.is_alphanumeric())
+                    .starts_with(&query)
+            })
+    });
 
     // Rank tiers (the reference comparator, minus the Fuse-score tail).
     let tier = |c: &Cand| -> (u8, usize) {
@@ -310,8 +359,8 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
         })
         .collect();
     if let Some(hidden) = hidden_exact {
-        if !items.iter().any(|i| i.insert == hidden.name) {
-            items.insert(0, item(hidden.name, hidden.describe(), None));
+        if !items.iter().any(|i| i.insert == hidden.name()) {
+            items.insert(0, item(hidden.name(), hidden.display_desc(), None));
         }
     }
     items
@@ -482,6 +531,10 @@ mod tests {
                 description: (*d).to_string(),
                 menu_description: None,
                 aliases: Vec::new(),
+                hidden: false,
+                replaces_builtin: false,
+                argument_hint: None,
+                argument_names: Vec::new(),
             })
             .collect()
     }
@@ -531,6 +584,10 @@ mod tests {
             description: "Review the changed code for reuse and altitude cleanups".into(),
             menu_description: Some("Clean up the changed code".into()),
             aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
         }];
         // Bare "/": the row shows the compact menu label, not the full description.
         let all = command_items_merged("/", &reg);
@@ -559,6 +616,22 @@ mod tests {
         let help: Vec<_> = all.iter().filter(|i| i.insert == "/help").collect();
         assert_eq!(help.len(), 1);
         assert_ne!(help[0].desc, "SHOULD NOT WIN");
+    }
+
+    #[test]
+    fn mod_description_replaces_builtin_and_keeps_hidden_exact_match() {
+        let mut rows = rows(&[("/help", "Mod help"), ("/secret", "Secret command")]);
+        rows[0].replaces_builtin = true;
+        rows[1].hidden = true;
+        let all = command_items_merged("/", &rows);
+        assert_eq!(
+            all.iter().find(|item| item.insert == "/help").unwrap().desc,
+            "Mod help"
+        );
+        assert!(!all.iter().any(|item| item.insert == "/secret"));
+        assert!(command_items_merged("/secret", &rows)
+            .iter()
+            .any(|item| item.insert == "/secret"));
     }
 
     #[test]

@@ -29,7 +29,7 @@ use tui_core::theme::ThemeName;
 
 use lingxi_core::host::CostSnapshot;
 
-use crate::bottom_pane::view::{BottomPaneView, ViewOutcome};
+use crate::bottom_pane::view::{BottomPaneView, OwnerViewUpdate, ViewOutcome};
 use crate::renderable::Renderable;
 use crate::session::{DoctorInfo, InfoRow, ModelRow};
 
@@ -67,6 +67,7 @@ pub struct ScreenView {
     tabs: Vec<(String, Vec<Line<'static>>)>,
     /// Index into [`Self::tabs`] of the active tab (`0` when untabbed).
     active_tab: usize,
+    is_help: bool,
 }
 
 impl ScreenView {
@@ -87,6 +88,7 @@ impl ScreenView {
             viewport_height: Cell::new(1),
             tabs: Vec::new(),
             active_tab: 0,
+            is_help: false,
         }
     }
 
@@ -112,6 +114,7 @@ impl ScreenView {
             viewport_height: Cell::new(1),
             tabs,
             active_tab,
+            is_help: false,
         };
         view.rebuild_tab_lines();
         view
@@ -150,11 +153,25 @@ impl ScreenView {
     /// The `/help` screen (shortcuts + slash commands).
     #[must_use]
     pub fn help() -> Self {
-        Self::new(
+        let mut view = Self::new(
             concat!("LingXi v", env!("CARGO_PKG_VERSION")),
             help_lines(),
             "esc to close · ↑/↓ scroll",
-        )
+        );
+        view.is_help = true;
+        view
+    }
+
+    /// The live command list after Mod descriptions have been projected.
+    #[must_use]
+    pub fn help_with_commands(commands: &[super::completion_view::RegistrySlashRow]) -> Self {
+        let mut view = Self::new(
+            concat!("LingXi v", env!("CARGO_PKG_VERSION")),
+            help_lines_with_commands(commands),
+            "esc to close · ↑/↓ scroll",
+        );
+        view.is_help = true;
+        view
     }
 
     /// The `/btw` side-question exchange. Keeping the last exchange in a
@@ -531,6 +548,16 @@ impl Renderable for ScreenView {
 }
 
 impl BottomPaneView for ScreenView {
+    fn refresh_from_owner(&mut self, update: OwnerViewUpdate) {
+        if let OwnerViewUpdate::Commands(commands) = update {
+            if self.is_help {
+                self.lines = help_lines_with_commands(&commands);
+                self.scroll = self
+                    .scroll
+                    .min(u16::try_from(self.lines.len().saturating_sub(1)).unwrap_or(u16::MAX));
+            }
+        }
+    }
     /// Route a key: scroll keys move the window, `Esc`/bare `q` close.
     fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
         let max = u16::try_from(self.lines.len().saturating_sub(1)).unwrap_or(u16::MAX);
@@ -923,6 +950,12 @@ fn settings_lines(
 /// listing DERIVED from the single [`crate::command::BUILTIN`] registry (plan
 /// Phase 8) — advertised entries only, in registry order.
 pub(crate) fn help_lines() -> Vec<Line<'static>> {
+    help_lines_with_commands(&[])
+}
+
+fn help_lines_with_commands(
+    commands: &[super::completion_view::RegistrySlashRow],
+) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::with_capacity(SHORTCUTS.len() + 24);
     out.push(Line::from(
         "Claude understands your codebase, makes edits with your permission, \
@@ -935,8 +968,29 @@ pub(crate) fn help_lines() -> Vec<Line<'static>> {
     }
     out.push(Line::from(""));
     out.push(header("Slash commands"));
-    for command in crate::command::advertised() {
-        out.push(row(command.name, command.description));
+    for command in crate::command::BUILTIN {
+        match commands
+            .iter()
+            .find(|candidate| candidate.replaces_builtin && candidate.name == command.name)
+        {
+            Some(described) if !described.hidden => {
+                out.push(row(command.name, &described.description));
+            }
+            Some(_) => {}
+            None if command.advertised && !crate::command::is_runtime_hidden(command.name) => {
+                out.push(row(command.name, command.description));
+            }
+            None => {}
+        }
+    }
+    for command in commands.iter().filter(|command| {
+        !command.hidden
+            && !command.replaces_builtin
+            && !crate::command::BUILTIN
+                .iter()
+                .any(|builtin| builtin.name == command.name)
+    }) {
+        out.push(row(&command.name, &command.description));
     }
     // [PARITY] 2.1.206's help dialog (`rCo` header + `LBs` command tabs) ends
     // at the command list — it renders NO "For more help" docs footer, so the
@@ -1435,5 +1489,49 @@ mod tests {
         // `/powerup` is now a live registry command and is covered by the
         // advertised-command sweep above.
         assert!(!text.contains("For more help"));
+    }
+
+    #[test]
+    fn help_uses_described_catalog_and_omits_hidden_commands() {
+        let commands = vec![
+            super::super::completion_view::RegistrySlashRow {
+                name: "/help".into(),
+                description: "Modded help".into(),
+                menu_description: None,
+                aliases: Vec::new(),
+                hidden: false,
+                replaces_builtin: true,
+                argument_hint: None,
+                argument_names: Vec::new(),
+            },
+            super::super::completion_view::RegistrySlashRow {
+                name: "/secret".into(),
+                description: "Secret command".into(),
+                menu_description: None,
+                aliases: Vec::new(),
+                hidden: true,
+                replaces_builtin: false,
+                argument_hint: None,
+                argument_names: Vec::new(),
+            },
+        ];
+        let text = help_lines_with_commands(&commands)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("Modded help"));
+        assert!(!text.contains("Secret command"));
+        let mut open_help = ScreenView::help();
+        open_help.refresh_from_owner(OwnerViewUpdate::Commands(commands));
+        let refreshed = open_help
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(refreshed.contains("Modded help"));
     }
 }

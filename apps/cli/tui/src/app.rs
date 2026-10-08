@@ -83,11 +83,14 @@ pub enum AppExit {
 pub struct AppCallbacks<'cb> {
     /// Executed on [`ChatOutcome::Submit`]: the caller drives a turn for the
     /// prompt, honoring the paired [`CancellationToken`] (the widget cancels
-    /// it on Ctrl-C/Esc).
-    pub on_submit: Box<dyn FnMut(String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
+    /// it on Ctrl-C/Esc). The second `String` is the visible row's opaque
+    /// correlation token.
+    pub on_submit: Box<dyn FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
     /// Executed for a prompt entered while a turn is already active. The host
-    /// queues it at the canonical `Next` priority.
-    pub on_queue_prompt: Box<dyn FnMut(String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
+    /// queues it at the canonical `Next` priority; the second `String` is the
+    /// visible row's opaque correlation token.
+    pub on_queue_prompt:
+        Box<dyn FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
     /// Executed on [`ChatOutcome::SwitchModel`] with the picked
     /// `(request_model, profile)` pair.
     pub on_switch_model: Box<dyn FnMut(String, Option<String>) + 'cb>,
@@ -120,6 +123,8 @@ pub struct AppCallbacks<'cb> {
     /// reporting the component tallies via a [`TurnEvent::SystemNotice`]. No-op
     /// (informational notice) when plugins are disabled for the session.
     pub on_reload_plugins: Box<dyn FnMut() + 'cb>,
+    /// Recompute the visible command catalog after `/reload-skills`.
+    pub on_refresh_command_catalog: Box<dyn FnMut() + 'cb>,
     /// Executed on [`ChatOutcome::RunBash`]: the caller runs the `!`-prefixed
     /// command through the sandboxed bash runner (no LLM turn) and folds its
     /// output back via [`TurnEvent::BashOutput`].
@@ -224,6 +229,34 @@ pub struct RataApp<'cb> {
     copy_tx: std::sync::mpsc::Sender<Result<crate::copy::ClipboardTransport, String>>,
     copy_rx: std::sync::mpsc::Receiver<Result<crate::copy::ClipboardTransport, String>>,
     copy_error_shown: bool,
+    /// Off-thread `ui.render` results for the live terminal AbovePrompt site.
+    mod_ui_render_tx: std::sync::mpsc::Sender<(
+        u64,
+        u64,
+        serde_json::Value,
+        Result<serde_json::Value, String>,
+    )>,
+    mod_ui_render_rx: std::sync::mpsc::Receiver<(
+        u64,
+        u64,
+        serde_json::Value,
+        Result<serde_json::Value, String>,
+    )>,
+    /// Lightweight session-local invalidate generation polled off-thread
+    /// while the input loop waits for its next redraw.
+    mod_ui_generation_tx: std::sync::mpsc::Sender<u64>,
+    mod_ui_generation_rx: std::sync::mpsc::Receiver<u64>,
+    mod_ui_generation_poll_in_flight: bool,
+    mod_ui_generation_tracker: crate::mod_ui_render::RenderGenerationTracker,
+    mod_ui_orchestrator: Option<std::sync::Arc<dyn lingxi_core::host::OrchestratorHandle>>,
+    mod_ui_render_input: Option<serde_json::Value>,
+    mod_ui_render_pending: Option<serde_json::Value>,
+    mod_ui_render_in_flight: bool,
+    /// Button action identities extracted from the latest accepted render.
+    mod_ui_button_actions: Vec<crate::mod_ui_render::AbovePromptButtonAction>,
+    /// Reject results from requests started before a cache reset, including
+    /// `/clear` where viewport props and the ModHost generation stay equal.
+    mod_ui_render_revision: u64,
     /// Alternate-screen renderer state (`/tui`).
     fullscreen: bool,
     copy_on_select: bool,
@@ -251,6 +284,8 @@ impl<'cb> RataApp<'cb> {
     ) -> Self {
         let (paste_tx, paste_rx) = std::sync::mpsc::channel();
         let (copy_tx, copy_rx) = std::sync::mpsc::channel();
+        let (mod_ui_render_tx, mod_ui_render_rx) = std::sync::mpsc::channel();
+        let (mod_ui_generation_tx, mod_ui_generation_rx) = std::sync::mpsc::channel();
         Self {
             chat_widget: ChatWidget::new(messages, session),
             events_rx,
@@ -262,12 +297,174 @@ impl<'cb> RataApp<'cb> {
             copy_tx,
             copy_rx,
             copy_error_shown: false,
+            mod_ui_render_tx,
+            mod_ui_render_rx,
+            mod_ui_generation_tx,
+            mod_ui_generation_rx,
+            mod_ui_generation_poll_in_flight: false,
+            mod_ui_generation_tracker: crate::mod_ui_render::RenderGenerationTracker::default(),
+            mod_ui_orchestrator: None,
+            mod_ui_render_input: None,
+            mod_ui_render_pending: None,
+            mod_ui_render_in_flight: false,
+            mod_ui_button_actions: Vec::new(),
+            mod_ui_render_revision: 0,
             fullscreen: false,
             copy_on_select: true,
             selection: crate::selection::SelectionState::default(),
             callbacks,
             redraw_interval: Duration::from_millis(50),
         }
+    }
+
+    fn set_orchestrator(
+        &mut self,
+        handle: std::sync::Arc<dyn lingxi_core::host::OrchestratorHandle>,
+    ) {
+        self.chat_widget.set_orchestrator(handle.clone());
+        self.mod_ui_orchestrator = Some(handle);
+    }
+
+    pub(super) fn request_mod_ui_render(&mut self, columns: u16, rows: u16) {
+        let max_rows = self
+            .chat_widget
+            .mod_ui_row_budget(columns, rows, self.fullscreen);
+        let input = crate::mod_ui_render::above_prompt_event(
+            columns,
+            rows,
+            self.fullscreen,
+            self.chat_widget.mod_ui_is_working(),
+            max_rows,
+        );
+        if self.mod_ui_render_input.as_ref() == Some(&input) {
+            return;
+        }
+        self.mod_ui_render_input = Some(input.clone());
+        if self.mod_ui_render_in_flight {
+            self.mod_ui_render_pending = Some(input);
+            return;
+        }
+        self.start_mod_ui_render(input);
+    }
+
+    fn start_mod_ui_render(&mut self, input: serde_json::Value) {
+        let Some(orchestrator) = self.mod_ui_orchestrator.clone() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        self.mod_ui_render_revision = self.mod_ui_render_revision.saturating_add(1);
+        self.mod_ui_button_actions.clear();
+        self.chat_widget.clear_mod_ui_render_tree();
+        self.mod_ui_render_in_flight = true;
+        let tx = self.mod_ui_render_tx.clone();
+        let request = input.clone();
+        let generation = self.mod_ui_generation_tracker.generation().unwrap_or(0);
+        let revision = self.mod_ui_render_revision;
+        runtime.spawn(async move {
+            // Revoke the currently displayed actions before dispatching this
+            // render. Keeping both calls in one task preserves their order, so
+            // an old press cannot win a race while a redraw is pending.
+            let result = crate::mod_ui_render::clear_then_render(
+                || orchestrator.mod_ui_clear_press_actions(revision),
+                || orchestrator.mod_ui_render(input, revision),
+            )
+            .await
+            .map_err(|error| error.to_string());
+            let _ = tx.send((generation, revision, request, result));
+        });
+    }
+
+    fn poll_mod_ui_render_generation(&mut self) {
+        if self.mod_ui_generation_poll_in_flight {
+            return;
+        }
+        let Some(orchestrator) = self.mod_ui_orchestrator.clone() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        self.mod_ui_generation_poll_in_flight = true;
+        let tx = self.mod_ui_generation_tx.clone();
+        runtime.spawn(async move {
+            let generation = orchestrator.mod_ui_render_generation().await;
+            let _ = tx.send(generation);
+        });
+    }
+
+    fn drain_mod_ui_render_generation(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(generation) = self.mod_ui_generation_rx.try_recv() {
+            self.mod_ui_generation_poll_in_flight = false;
+            if self.mod_ui_generation_tracker.observe(generation) {
+                self.reset_mod_ui_render_cache();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn reset_mod_ui_render_cache(&mut self) {
+        self.mod_ui_render_revision = self.mod_ui_render_revision.saturating_add(1);
+        self.mod_ui_render_input = None;
+        self.mod_ui_render_pending = None;
+        self.mod_ui_button_actions.clear();
+        self.chat_widget.clear_mod_ui_render_tree();
+        let Some(orchestrator) = self.mod_ui_orchestrator.clone() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let revision = self.mod_ui_render_revision;
+        runtime.spawn(async move {
+            let _ = orchestrator.mod_ui_clear_press_actions(revision).await;
+        });
+    }
+
+    fn drain_mod_ui_render_results(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok((generation, revision, request, result)) = self.mod_ui_render_rx.try_recv() {
+            self.mod_ui_render_in_flight = false;
+            if self.mod_ui_generation_tracker.generation().unwrap_or(0) == generation
+                && self.mod_ui_render_revision == revision
+                && self.mod_ui_render_input.as_ref() == Some(&request)
+            {
+                if let Ok(tree) = result {
+                    let max_rows = request["props"]["maxRows"].as_u64().unwrap_or(0) as u16;
+                    self.chat_widget.set_mod_ui_render_tree(&tree, max_rows);
+                    self.mod_ui_button_actions =
+                        crate::mod_ui_render::tree_buttons(&tree, revision).unwrap_or_default();
+                    changed = true;
+                }
+            }
+            if let Some(pending) = self.mod_ui_render_pending.take() {
+                if (pending != request
+                    || revision != self.mod_ui_render_revision
+                    || generation != self.mod_ui_generation_tracker.generation().unwrap_or(0))
+                    && self.mod_ui_render_input.as_ref() == Some(&pending)
+                {
+                    self.start_mod_ui_render(pending);
+                }
+            }
+        }
+        changed
+    }
+
+    fn press_mod_ui_button(&self, action: crate::mod_ui_render::AbovePromptButtonAction) {
+        let Some(orchestrator) = self.mod_ui_orchestrator.clone() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            let _ = orchestrator
+                .mod_ui_press(action.press_event(), action.site_revision)
+                .await;
+        });
     }
 
     /// Run the event loop until the user quits. Per-tick order (locked by the
@@ -302,6 +499,9 @@ impl<'cb> RataApp<'cb> {
         let mut need_draw = true;
         loop {
             let mut dirty = false;
+            dirty |= self.drain_mod_ui_render_results();
+            dirty |= self.drain_mod_ui_render_generation();
+            self.poll_mod_ui_render_generation();
             while let Ok(event) = self.events_rx.try_recv() {
                 self.apply_turn_event(event);
                 dirty = true;
@@ -412,6 +612,7 @@ impl<'cb> RataApp<'cb> {
                         self.fullscreen = enabled;
                         self.chat_widget.set_collapse_fullscreen(enabled);
                         self.selection.clear();
+                        self.chat_widget.set_mod_ui_selection(None);
                         // Entering clears the alternate screen; leaving must
                         // rebuild native scrollback from structured cells.
                         self.chat_widget.reset_terminal_commit();
@@ -462,14 +663,14 @@ impl<'cb> RataApp<'cb> {
                             CancellationToken::new(),
                         );
                     }
-                    ChatOutcome::Submit(prompt, images, token) => {
+                    ChatOutcome::Submit(prompt, row_token, images, token) => {
                         // The queued images ride inside the Submit payload
                         // (they become `ContentBlock::Image` on the user
                         // message).
-                        (self.callbacks.on_submit)(prompt, images, token);
+                        (self.callbacks.on_submit)(prompt, row_token, images, token);
                     }
-                    ChatOutcome::QueuePrompt(prompt, images, owner) => {
-                        (self.callbacks.on_queue_prompt)(prompt, images, owner);
+                    ChatOutcome::QueuePrompt(prompt, row_token, images, owner) => {
+                        (self.callbacks.on_queue_prompt)(prompt, row_token, images, owner);
                     }
                     ChatOutcome::PasteImage => {
                         // Clipboard image read + PNG encode can take hundreds
@@ -522,6 +723,9 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::ReloadPlugins => {
                         (self.callbacks.on_reload_plugins)();
                     }
+                    ChatOutcome::RefreshCommandCatalog => {
+                        (self.callbacks.on_refresh_command_catalog)();
+                    }
                     // A `!`-prefixed bash-mode command: run it off the model
                     // path; the output returns via `TurnEvent::BashOutput`.
                     ChatOutcome::RunBash(command) => {
@@ -559,6 +763,8 @@ impl<'cb> RataApp<'cb> {
                         (self.callbacks.on_set_permission_mode)(mode);
                     }
                     ChatOutcome::ClearSession(title) => {
+                        self.selection.clear();
+                        self.chat_widget.set_mod_ui_selection(None);
                         (self.callbacks.on_clear_session)(title);
                     }
                     // `/sandbox`: the live toggle already flipped in the widget;
@@ -677,8 +883,8 @@ pub fn run_app(
         std::sync::Arc<dyn Fn() -> crate::bottom_pane::view::AgentsSnapshot + Send + Sync>,
     >,
     loop_interrupt: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
-    on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
-    on_queue_prompt: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
+    on_submit: impl FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken),
+    on_queue_prompt: impl FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
     on_fusion_setup_action: impl FnMut(FusionSetupAction),
@@ -686,6 +892,7 @@ pub fn run_app(
     on_permission_action: impl FnMut(PermissionAction),
     on_plugin_action: impl FnMut(PluginAction),
     on_reload_plugins: impl FnMut(),
+    on_refresh_command_catalog: impl FnMut(),
     on_bash: impl FnMut(String),
     on_compact: impl FnMut(String, CancellationToken),
     on_summarize: impl FnMut(
@@ -748,6 +955,7 @@ pub fn run_app(
             on_permission_action: Box::new(on_permission_action),
             on_plugin_action: Box::new(on_plugin_action),
             on_reload_plugins: Box::new(on_reload_plugins),
+            on_refresh_command_catalog: Box::new(on_refresh_command_catalog),
             on_bash: Box::new(on_bash),
             on_compact: Box::new(on_compact),
             on_summarize: Box::new(on_summarize),
@@ -818,7 +1026,7 @@ pub fn run_app(
     // `/effort`, `/goal`, `/compact`) and the shared command registry (drives
     // `/reload-skills`). `None` (tests) keeps those commands graceful no-ops.
     if let Some(handle) = orchestrator {
-        app.chat_widget.set_orchestrator(handle);
+        app.set_orchestrator(handle);
     }
     // Seed the below-composer permission-mode indicator from the resolved boot
     // mode (so `--dangerously-skip-permissions` shows `⏵⏵ bypass permissions on`).
@@ -874,11 +1082,14 @@ pub fn run_app(
         app.chat_widget.restore_background_handoff(snapshot);
     }
     if let Some(prompt) = initial_prompt.filter(|value| !value.trim().is_empty()) {
-        if let ChatOutcome::Submit(prompt, images, token) = app.chat_widget.submit_prompt(prompt) {
-            (app.callbacks.on_submit)(prompt, images, token);
+        if let ChatOutcome::Submit(prompt, row_token, images, token) =
+            app.chat_widget.submit_prompt(prompt)
+        {
+            (app.callbacks.on_submit)(prompt, row_token, images, token);
         }
     }
     let result = app.run_with_session(&mut terminal, &mut session_guard);
+    app.chat_widget.set_mod_ui_selection(None);
     app.chat_widget.cancel_active_turn();
     result
 }

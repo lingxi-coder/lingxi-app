@@ -21,9 +21,8 @@ use crate::stream_json_input::{
 };
 use command_api::format_description_with_source;
 use control::{
-    dispatch_control_request, env_api_provider_is_first_party, flag_settings_fast_mode_opt_in,
-    model_capabilities, recover_orphaned_permission, resolve_fast_mode_disabled_reason,
-    resolve_fast_mode_state, session_model_is_first_party,
+    dispatch_control_request, flag_settings_fast_mode_opt_in, model_capabilities,
+    recover_orphaned_permission, resolve_fast_mode_disabled_reason, resolve_fast_mode_state,
 };
 #[cfg(test)]
 use fusion::await_local_fusion_result_bounded;
@@ -176,7 +175,11 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     // Non-slash branch — drive the orchestrator turn loop. Without a real
     // ANTHROPIC_API_KEY this returns 401; we surface the error verbatim.
     sink.turn_start().await;
-    let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+    let turn_result = orchestrator::mod_prompt_origin::with_origin(
+        serde_json::json!({"kind":"sdk"}),
+        runtime.orchestrator.run_turn(&prompt),
+    )
+    .await;
     let turn_result = match turn_result {
         Ok(outcome) => wind_down_print_tasks(
             runtime,
@@ -306,13 +309,17 @@ async fn run_stream_json_print_inner(
     }
 
     // Collect the real session_id and model from the orchestrator after build.
-    let (session_id_str, model_str) = {
+    let (session_id_str, model_str, model_profile) = {
         let session_handle = runtime.orchestrator.session();
         let session = session_handle.lock().await;
-        (session.session_id.to_string(), session.model.clone())
+        (
+            session.session_id.to_string(),
+            session.model.clone(),
+            session.model_profile.clone(),
+        )
     };
 
-    // Collect tool names (Agent → Task SDK rename handled inside build_init_params).
+    // Advertise the current registry tool names.
     let tool_names = runtime.orchestrator.tool_names();
 
     // ── P2b: real init-frame population ─────────────────────────────────────
@@ -378,13 +385,17 @@ async fn run_stream_json_print_inner(
     // the Agent SDK, so without the `--settings` `fastMode:true` opt-in this
     // resolves `sdk_opt_in_required` (live 2.1.220 init/result capture).
     let sdk_fast_mode_opt_in = flag_settings_fast_mode_opt_in(argv.settings.as_deref());
-    let fast_mode_disabled_reason = {
-        let listings = runtime.orchestrator.list_model_listings().await;
-        resolve_fast_mode_disabled_reason(
-            session_model_is_first_party(env_api_provider_is_first_party(), &listings, &model_str),
-            sdk_fast_mode_opt_in,
-        )
-    };
+    let fast_mode_disabled_reason = resolve_fast_mode_disabled_reason(
+        runtime
+            .orchestrator
+            .model_is_first_party_route(&model_str, model_profile.as_deref()),
+        sdk_fast_mode_opt_in,
+    );
+    let credential_source = runtime
+        .orchestrator
+        .model_credential_source(&model_str, model_profile.as_deref())
+        .await
+        .unwrap_or(llm_runtime::CredentialSource::Unknown);
     // `cK(mt,ce.fastMode)` — the state rides the SAME inputs as the reason, so
     // an opted-in first-party fast-mode model reports `on` instead of the
     // self-contradicting `off`-with-no-reason pair.
@@ -397,6 +408,7 @@ async fn run_stream_json_print_inner(
         tool_names,
         mcp_servers,
         &model_str,
+        &credential_source,
         permission_mode_str(permission_mode),
         slash_commands,
         agents,
@@ -438,7 +450,11 @@ async fn run_stream_json_print_inner(
 
     // ③ Run the turn — streaming callbacks (emit_text / emit_tool_call /
     //    emit_message_start / emit_message_boundary) fire on the stream.
-    let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+    let turn_result = orchestrator::mod_prompt_origin::with_origin(
+        serde_json::json!({"kind":"sdk"}),
+        runtime.orchestrator.run_turn(&prompt),
+    )
+    .await;
     let turn_result = match turn_result {
         Ok(outcome) => wind_down_print_tasks(
             runtime,
@@ -562,10 +578,14 @@ async fn run_stream_json_input_loop_inner(
     stdin_channels: Option<StdinChannels>,
 ) -> i32 {
     // Collect the real session_id and model from the orchestrator after build.
-    let (session_id_str, model_str) = {
+    let (session_id_str, model_str, model_profile) = {
         let session_handle = runtime.orchestrator.session();
         let session = session_handle.lock().await;
-        (session.session_id.to_string(), session.model.clone())
+        (
+            session.session_id.to_string(),
+            session.model.clone(),
+            session.model_profile.clone(),
+        )
     };
 
     // Collect tool names, MCP servers, slash commands, agents, etc. — same as
@@ -621,13 +641,17 @@ async fn run_stream_json_input_loop_inner(
     // threaded into system/init, the `initialize` control_response, and every
     // result frame (all live-verified 2.1.220 emission sites).
     let sdk_fast_mode_opt_in = flag_settings_fast_mode_opt_in(argv.settings.as_deref());
-    let fast_mode_disabled_reason = {
-        let listings = runtime.orchestrator.list_model_listings().await;
-        resolve_fast_mode_disabled_reason(
-            session_model_is_first_party(env_api_provider_is_first_party(), &listings, &model_str),
-            sdk_fast_mode_opt_in,
-        )
-    };
+    let fast_mode_disabled_reason = resolve_fast_mode_disabled_reason(
+        runtime
+            .orchestrator
+            .model_is_first_party_route(&model_str, model_profile.as_deref()),
+        sdk_fast_mode_opt_in,
+    );
+    let credential_source = runtime
+        .orchestrator
+        .model_credential_source(&model_str, model_profile.as_deref())
+        .await
+        .unwrap_or(llm_runtime::CredentialSource::Unknown);
     // `cK(mt,ce.fastMode)` — same inputs as the reason (see
     // `resolve_fast_mode_state`), so the two never contradict each other.
     let fast_mode_state =
@@ -638,6 +662,7 @@ async fn run_stream_json_input_loop_inner(
         tool_names,
         mcp_servers,
         &model_str,
+        &credential_source,
         permission_mode_str(permission_mode),
         slash_commands,
         agents,
@@ -686,12 +711,14 @@ async fn run_stream_json_input_loop_inner(
         mut control_resp_rx,
         status: reader_status,
         reader,
-    } = stdin_channels.unwrap_or_else(|| spawn_stdin_router(
-        argv.replay_user_messages,
-        session_id_str.clone(),
-        stream.outbound_tx(),
-        queue_lifecycle.clone(),
-    ));
+    } = stdin_channels.unwrap_or_else(|| {
+        spawn_stdin_router(
+            argv.replay_user_messages,
+            session_id_str.clone(),
+            stream.outbound_tx(),
+            queue_lifecycle.clone(),
+        )
+    });
 
     // ORPHANED PERMISSION recovery channel. A late `control_response` whose
     // `can_use_tool` request was lost (process restart with `--resume`, or a
@@ -735,7 +762,9 @@ async fn run_stream_json_input_loop_inner(
                 StdinReaderStatus::Reading => {}
                 StdinReaderStatus::Eof | StdinReaderStatus::Stopped => return,
             }
-            if fatal_status.changed().await.is_err() { return; }
+            if fatal_status.changed().await.is_err() {
+                return;
+            }
         }
     }));
 
@@ -896,7 +925,9 @@ async fn run_stream_json_input_loop_inner(
                         &ctrl_file_suggestions,
                     )
                     .await;
-                    if subtype == "end_session" { break; }
+                    if subtype == "end_session" {
+                        break;
+                    }
                 }
             }
         }
@@ -1147,15 +1178,18 @@ async fn run_stream_json_input_loop_inner(
         // Probe handle: after the turn, `is_cancelled()` distinguishes an
         // interrupt-aborted turn from a completed one (binary `mCo(reason)`).
         let cancel_probe = cancel.clone();
-        let turn_result = runtime
-            .orchestrator
-            .run_turn_streaming_with_cancel_image_sources_and_message_id(
-                &prompt,
-                Vec::new(),
-                cancel,
-                external_message_id,
-            )
-            .await;
+        let turn_result = orchestrator::mod_prompt_origin::with_origin(
+            serde_json::json!({"kind":"sdk"}),
+            runtime
+                .orchestrator
+                .run_turn_streaming_with_cancel_image_sources_and_message_id(
+                    &prompt,
+                    Vec::new(),
+                    cancel,
+                    external_message_id,
+                ),
+        )
+        .await;
         // The control plane's token is also its busy flag. Release it only
         // after the orchestrator future has naturally completed so Block tools
         // remain protected, but always release it before accepting between-turn
@@ -1429,7 +1463,11 @@ async fn run_structured_output(
             *s = None;
         }
         sink.turn_start().await;
-        let turn_result = runtime.orchestrator.run_turn(&turn_prompt).await;
+        let turn_result = orchestrator::mod_prompt_origin::with_origin(
+            serde_json::json!({"kind":"sdk"}),
+            runtime.orchestrator.run_turn(&turn_prompt),
+        )
+        .await;
         stop_background_agents_at_budget(
             max_budget_usd,
             runtime.orchestrator.as_ref(),
@@ -1481,7 +1519,12 @@ async fn run_slash_command_with_budget(
     max_budget_usd: Option<f64>,
     sink: &dyn OutputSink,
 ) -> i32 {
-    match runtime.dispatcher.dispatch(input).await {
+    let context = command_api::ModCommandRunContext {
+        origin: serde_json::json!({"kind":"sdk"}),
+        is_fullscreen: false,
+        columns: 80,
+    };
+    match command_api::with_mod_command_context(context, runtime.dispatcher.dispatch(input)).await {
         SlashDispatchResult::Handled { display } => {
             sink.command_output("", &display).await;
             // G002: `/fusion` spawns a background `local_fusion` task and
@@ -1510,7 +1553,11 @@ async fn run_slash_command_with_budget(
         // + executes.
         SlashDispatchResult::RunAsTurn { prompt } => {
             sink.turn_start().await;
-            let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+            let turn_result = orchestrator::mod_prompt_origin::with_origin(
+                serde_json::json!({"kind":"sdk"}),
+                runtime.orchestrator.run_turn(&prompt),
+            )
+            .await;
             stop_background_agents_at_budget(
                 max_budget_usd,
                 runtime.orchestrator.as_ref(),

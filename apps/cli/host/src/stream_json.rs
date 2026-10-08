@@ -1700,6 +1700,52 @@ impl OutputStream for StreamJsonStream {
         }));
     }
 
+    async fn emit_mod_log(&self, plugin: &str, text: &str) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue(&json!({
+            "type": "system",
+            "subtype": "ui_log",
+            "plugin": plugin,
+            "text": text,
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "session_id": session_id,
+        }));
+    }
+
+    async fn emit_mod_toast(&self, plugin: &str, text: &str, timeout_ms: u64) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue(&json!({
+            "type": "system",
+            "subtype": "ui_toast",
+            "plugin": plugin,
+            "text": text,
+            "timeout_ms": timeout_ms,
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "session_id": session_id,
+        }));
+    }
+
+    async fn emit_mod_status(&self, plugin: &str, text: Option<&str>) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue(&json!({
+            "type": "system",
+            "subtype": "ui_status",
+            "plugin": plugin,
+            "text": text,
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "session_id": session_id,
+        }));
+    }
+
     async fn emit_tool_call(
         &self,
         id: &lingxi_core::types::ToolUseId,
@@ -2207,6 +2253,7 @@ pub fn build_init_params(
     tool_names: Vec<String>,
     mcp_servers: Vec<(String, String)>, // (name, status_str)
     model: &str,
+    credential_source: &llm_runtime::CredentialSource,
     permission_mode: &str,
     slash_commands: Vec<String>,
     agents: Vec<String>,
@@ -2234,14 +2281,9 @@ pub fn build_init_params(
 
     let memory_paths: Option<Value> = memory_auto_path.map(|p| json!({"auto": p}));
 
-    // Apply the `Agent` → `Task` SDK-compat rename (sdkCompatToolName).
-    let tools: Vec<String> = tool_names
-        .into_iter()
-        .map(|n| if n == "Agent" { "Task".to_string() } else { n })
-        .collect();
+    let tools = tool_names;
 
-    // apiKeySource: check ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN presence.
-    let api_key_source = detect_api_key_source();
+    let api_key_source = credential_source_label(credential_source);
 
     // SLASH-15: derive the `terminalOriented:!0` subset from the SAME advertised
     // list the frame emits, mirroring the oracle's single-source filter over
@@ -2293,15 +2335,17 @@ pub fn build_init_params(
     }
 }
 
-/// Determine the API key source label (mirrors claude-code's
-/// `getAnthropicApiKeyWithSource().source`).
-fn detect_api_key_source() -> String {
-    if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.is_empty()) {
-        "ANTHROPIC_API_KEY".to_string()
-    } else if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty()) {
-        "/login managed key".to_string()
-    } else {
-        "none".to_string()
+/// Render only metadata supplied by the selected route's credential resolver.
+fn credential_source_label(source: &llm_runtime::CredentialSource) -> String {
+    use llm_runtime::CredentialSource;
+    match source {
+        CredentialSource::Environment { variable } => variable.clone(),
+        CredentialSource::Stored => "stored".into(),
+        CredentialSource::Configured => "configured".into(),
+        CredentialSource::ApiKeyHelper => "apiKeyHelper".into(),
+        CredentialSource::OAuth => "oauth".into(),
+        CredentialSource::None => "none".into(),
+        CredentialSource::Unknown => "unknown".into(),
     }
 }
 
@@ -2658,6 +2702,7 @@ mod tests {
             vec![],
             vec![],
             "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
             "default",
             vec![],
             vec![],
@@ -2668,6 +2713,52 @@ mod tests {
             "off",
             None,
         )
+    }
+
+    #[test]
+    fn init_frame_uses_only_selected_route_credential_source() {
+        use llm_runtime::CredentialSource;
+        let cases = [
+            (
+                CredentialSource::Environment {
+                    variable: "GEMINI_API_KEY".into(),
+                },
+                "GEMINI_API_KEY",
+            ),
+            (
+                CredentialSource::Environment {
+                    variable: "CUSTOM_PROFILE_KEY".into(),
+                },
+                "CUSTOM_PROFILE_KEY",
+            ),
+            (CredentialSource::Stored, "stored"),
+            (CredentialSource::Configured, "configured"),
+            (CredentialSource::OAuth, "oauth"),
+            (CredentialSource::ApiKeyHelper, "apiKeyHelper"),
+            (CredentialSource::Unknown, "unknown"),
+            (CredentialSource::None, "none"),
+        ];
+        for (source, expected) in cases {
+            let params = build_init_params(
+                "source-test",
+                vec![],
+                vec![],
+                "gemini-model",
+                &source,
+                "default",
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                "default",
+                None,
+                "off",
+                None,
+            );
+            let frame = build_init_frame("source-test", "source-init", &params);
+            assert_eq!(frame["apiKeySource"], expected);
+            assert_eq!(frame["model"], "gemini-model");
+        }
     }
 
     #[tokio::test]
@@ -2737,6 +2828,7 @@ mod tests {
             vec!["Bash".to_string(), "Read".to_string(), "Agent".to_string()],
             vec![("codegraph".to_string(), "connected".to_string())],
             "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
             "bypassPermissions",
             vec!["graphify".to_string()],
             vec!["claude".to_string()],
@@ -2752,17 +2844,13 @@ mod tests {
             None,
         );
         let stream = Arc::new(StreamJsonStream::new(params));
-        // Just verify it doesn't panic and the Agent→Task rename works.
         let params_guard = stream.init_params.lock().await;
-        let tools = &params_guard.as_ref().unwrap().tools;
-        assert!(
-            tools.contains(&"Task".to_string()),
-            "Agent should be renamed to Task"
+        let frame = build_init_frame(
+            "test-session-id",
+            "test-init-id",
+            params_guard.as_ref().unwrap(),
         );
-        assert!(
-            !tools.contains(&"Agent".to_string()),
-            "Agent should not remain in tools list"
-        );
+        assert_eq!(frame["tools"], json!(["Bash", "Read", "Agent"]));
     }
 
     /// `analytics_disabled` reflects the traffic-mode privacy gate (CC
@@ -3049,6 +3137,79 @@ mod tests {
         assert_eq!(frame["message"], "transcript persistence failed");
         assert_eq!(frame["is_error"], true);
         assert_eq!(frame["session_id"], "sess-notice");
+    }
+
+    #[tokio::test]
+    async fn mod_log_matches_claude_stream_json_system_frame() {
+        let stream = StreamJsonStream::new(make_params("sess-mod"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream.emit_mod_log("review", "Found a mismatch").await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().expect("ui_log frame") else {
+            panic!("expected a Line frame");
+        };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "ui_log");
+        assert_eq!(frame["plugin"], "review");
+        assert_eq!(frame["text"], "Found a mismatch");
+        assert_eq!(frame["session_id"], "sess-mod");
+        let uuid = frame["uuid"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(uuid).is_ok());
+        assert_eq!(frame.as_object().unwrap().len(), 6);
+        assert_eq!(
+            line,
+            format!("{{\"type\":\"system\",\"subtype\":\"ui_log\",\"plugin\":\"review\",\"text\":\"Found a mismatch\",\"uuid\":\"{uuid}\",\"session_id\":\"sess-mod\"}}\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_toast_matches_claude_stream_json_system_frame() {
+        let stream = StreamJsonStream::new(make_params("sess-mod"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream.emit_mod_toast("review", "Done", 4000).await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().expect("ui_toast frame") else {
+            panic!("expected a Line frame");
+        };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "ui_toast");
+        assert_eq!(frame["plugin"], "review");
+        assert_eq!(frame["text"], "Done");
+        assert_eq!(frame["timeout_ms"], 4000);
+        assert_eq!(frame["session_id"], "sess-mod");
+        let uuid = frame["uuid"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(uuid).is_ok());
+        assert_eq!(frame.as_object().unwrap().len(), 7);
+        assert_eq!(
+            line,
+            format!("{{\"type\":\"system\",\"subtype\":\"ui_toast\",\"plugin\":\"review\",\"text\":\"Done\",\"timeout_ms\":4000,\"uuid\":\"{uuid}\",\"session_id\":\"sess-mod\"}}\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_status_uses_null_to_clear_claude_stream_json_frame() {
+        let stream = StreamJsonStream::new(make_params("sess-mod"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream.emit_mod_status("review", None).await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().expect("ui_status frame") else {
+            panic!("expected a Line frame");
+        };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "ui_status");
+        assert_eq!(frame["plugin"], "review");
+        assert!(frame["text"].is_null());
+        assert_eq!(frame["session_id"], "sess-mod");
+        let uuid = frame["uuid"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(uuid).is_ok());
+        assert_eq!(frame.as_object().unwrap().len(), 6);
+        assert_eq!(
+            line,
+            format!("{{\"type\":\"system\",\"subtype\":\"ui_status\",\"plugin\":\"review\",\"text\":null,\"uuid\":\"{uuid}\",\"session_id\":\"sess-mod\"}}\n")
+        );
     }
 
     #[tokio::test]
@@ -3643,6 +3804,7 @@ mod tests {
             vec!["Bash".to_string()],
             vec![],
             "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
             "default",
             vec![],
             vec![],
@@ -3695,6 +3857,7 @@ mod tests {
             vec!["Bash".to_string()],
             vec![],
             "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
             "default",
             vec![],
             vec![],
@@ -3759,6 +3922,7 @@ mod tests {
             vec![],
             vec![],
             "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
             "default",
             vec![
                 "color".to_string(),
@@ -3812,6 +3976,7 @@ mod tests {
             vec![],
             vec![],
             "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
             "default",
             vec!["context".to_string(), "usage".to_string()],
             vec![],
@@ -3845,6 +4010,7 @@ mod tests {
             vec![],
             vec![],
             "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
             "default",
             vec![],
             vec![],
@@ -4271,6 +4437,7 @@ mod tests {
             vec!["Bash".to_string(), "Read".to_string()],
             vec![("codegraph".to_string(), "connected".to_string())],
             "claude-opus-4-8",
+            &llm_runtime::CredentialSource::Unknown,
             "bypassPermissions",
             vec!["graphify".to_string()],
             vec!["claude".to_string()],

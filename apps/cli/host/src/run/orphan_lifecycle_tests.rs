@@ -293,7 +293,7 @@ async fn replay_case(block: bool) {
     let history = &session.lock().await.history;
     assert!(history.iter().any(|message| match message {
         lingxi_core::types::ConversationMessage::User { content, .. } => content.iter().any(|block_result| matches!(block_result,
-            lingxi_core::types::ContentBlock::ToolResult { tool_use_id, is_error, .. } if tool_use_id == &id && *is_error == !block)),
+            lingxi_core::types::ContentBlock::ToolResult { tool_use_id, is_error, .. } if tool_use_id == &id && *is_error == Some(!block))),
         _ => false,
     }), "exact recovered result persisted before owner release");
     tasks.abort_and_join().await;

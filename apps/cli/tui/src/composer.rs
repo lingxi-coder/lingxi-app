@@ -861,6 +861,8 @@ impl Composer {
 /// [`crate::terminal::Frame`].
 pub struct ComposerView<'a> {
     composer: &'a Composer,
+    /// Hint displayed after an exact slash command followed by one space.
+    argument_hint: Option<&'a str>,
     /// Session accent tint (`/color`): there is no border to tint since the
     /// borderless-composer rework (Task 3) — it now tints the `›` prompt.
     accent: Option<ratatui::style::Color>,
@@ -875,6 +877,7 @@ impl<'a> ComposerView<'a> {
     pub fn new(composer: &'a Composer) -> Self {
         Self {
             composer,
+            argument_hint: None,
             accent: None,
             attached_images: &[],
         }
@@ -885,6 +888,14 @@ impl<'a> ComposerView<'a> {
     #[must_use]
     pub fn with_accent(mut self, accent: Option<ratatui::style::Color>) -> Self {
         self.accent = accent;
+        self
+    }
+
+    /// Draw the command's argument hint as dim, non-editable text at the end
+    /// of the current input line.
+    #[must_use]
+    pub fn with_argument_hint(mut self, hint: Option<&'a str>) -> Self {
+        self.argument_hint = hint;
         self
     }
 
@@ -994,6 +1005,26 @@ impl Renderable for ComposerView<'_> {
                 usize::from(inner.width),
                 style,
             );
+        }
+        if let Some(hint) = self.argument_hint {
+            let display_col = self.composer.display_col_in(&rows[cursor_row]);
+            if self.composer.cursor == self.composer.chars.len()
+                && display_col < usize::from(inner.width)
+            {
+                let x = inner.x + u16::try_from(display_col).unwrap_or(0);
+                let y = inner.y + u16::try_from(cursor_row - first_row).unwrap_or(0);
+                let remaining = inner.x.saturating_add(inner.width).saturating_sub(x);
+                buf.set_span(
+                    x,
+                    y,
+                    &Span::styled(
+                        hint,
+                        ratatui::style::Style::default()
+                            .add_modifier(ratatui::style::Modifier::DIM),
+                    ),
+                    remaining,
+                );
+            }
         }
     }
 
@@ -1370,6 +1401,17 @@ mod tests {
         assert!(!row(0).contains('┌') && !row(2).contains('└'));
         // Row 1: gutter prompt + text at column 2.
         assert!(row(1).starts_with("› hi"), "row1: {:?}", row(1));
+    }
+
+    #[test]
+    fn view_renders_argument_hint_after_command_space() {
+        let composer = typed("/model ");
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&composer)
+            .with_argument_hint(Some("<choice>"))
+            .render(area, &mut buf);
+        assert!(buffer_row(&buf, 1).contains("/model <choice>"));
     }
 
     #[test]

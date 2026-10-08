@@ -1693,6 +1693,7 @@ fn deliver_idle_notifications(path: &Path, record: &LiveSessionRecord, exited: b
             msg_id: None,
             from_addr: None,
             from_mode: None,
+            mod_screened: false,
         };
         let _ = dir.send_inbox(&sub.from_session_id, &msg);
     }

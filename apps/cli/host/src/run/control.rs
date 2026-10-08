@@ -743,7 +743,7 @@ pub(super) fn orphan_decision_from_payload(
             // applies it "when it has keys"); otherwise fall back to the original.
             let updated_input = match payload.get("updatedInput") {
                 Some(serde_json::Value::Object(m)) if !m.is_empty() => {
-                    Some(serde_json::Value::Object(m.clone()))
+                    Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::Value::Object(m.clone())))
                 }
                 _ => None,
             };
@@ -884,64 +884,13 @@ pub(super) fn resolve_fast_mode_disabled_reason(
     if !first_party {
         return Some("not_first_party");
     }
-    if std::env::var("CLAUDE_CODE_DISABLE_FAST_MODE").is_ok_and(|v| !v.is_empty()) {
+    if std::env::var(branding::DISABLE_FAST_MODE_ENV).is_ok_and(|v| !v.is_empty()) {
         return Some("disabled_by_env");
     }
     if !sdk_fast_mode_opt_in {
         return Some("sdk_opt_in_required");
     }
     None
-}
-
-/// `xn()==="firstParty"` — the ENV-derived API provider (binary @227682549):
-///
-/// ```js
-/// function xn(){if(C_())return"gateway";
-///   return Z.CLAUDE_CODE_USE_BEDROCK?"bedrock":Z.CLAUDE_CODE_USE_FOUNDRY?"foundry":
-///     Z.CLAUDE_CODE_USE_ANTHROPIC_AWS?"anthropicAws":
-///     Z.CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD?"anthropicGoogleCloud":
-///     Z.CLAUDE_CODE_USE_MANTLE?"mantle":Z.CLAUDE_CODE_USE_VERTEX?"vertex":"firstParty"}
-/// ```
-///
-/// The model id plays NO part: a Claude model under `CLAUDE_CODE_USE_VERTEX=1`
-/// is `vertex`, hence `not_first_party` (live-captured on 2.1.220). `C_()` is
-/// the gateway-auth cell, which has no port surface. Value test is the shared
-/// `isEnvTruthy` allowlist, as everywhere else the port reads these vars.
-pub(super) const MANAGED_CLOUD_PROVIDER_ENV: [&str; 6] = [
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_FOUNDRY",
-    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-    "CLAUDE_CODE_USE_MANTLE",
-    "CLAUDE_CODE_USE_VERTEX",
-];
-
-/// `xn()==="firstParty"` — see [`MANAGED_CLOUD_PROVIDER_ENV`].
-pub(super) fn env_api_provider_is_first_party() -> bool {
-    !MANAGED_CLOUD_PROVIDER_ENV
-        .iter()
-        .any(|key| lingxi_core::host::env::is_env_truthy(std::env::var(key).ok().as_deref()))
-}
-
-/// `xn()==="firstParty"` for this session: the env-derived provider
-/// (`env_first_party`, from [`env_api_provider_is_first_party`]) AND — LingXi
-/// multi-provider divergence, which the oracle has no analogue for — a model
-/// actually served by the Anthropic profile. Either half falsy maps to
-/// `not_first_party`.
-pub(super) fn session_model_is_first_party(
-    env_first_party: bool,
-    listings: &[lingxi_core::host::orchestrator::ModelListing],
-    model: &str,
-) -> bool {
-    if !env_first_party {
-        return false;
-    }
-    if let Some(listing) = listings.iter().find(|l| l.request_model == model) {
-        return listing.provider_id == "anthropic";
-    }
-    // Not in the live catalog (offline/test builds): bare `claude-*` ids and
-    // the `default` pseudo-model route to the first-party Anthropic profile.
-    model == "default" || model.to_lowercase().starts_with("claude-")
 }
 
 /// Port of `cK(model, fastModeOptIn)` (binary @227895153) — the

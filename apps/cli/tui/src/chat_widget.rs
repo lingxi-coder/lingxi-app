@@ -109,12 +109,14 @@ pub enum ChatOutcome {
     /// honoring the paired [`CancellationToken`] (the widget cancels it on
     /// Ctrl-C). Carries the image files queued for this turn (pasted paths,
     /// clipboard images, `/image`) so every Submit consumer receives them
-    /// atomically with the prompt.
-    Submit(String, Vec<std::path::PathBuf>, CancellationToken),
+    /// atomically with the prompt. The second `String` is an opaque row token
+    /// used to connect the visible row to its eventual persisted JSONL UUID.
+    Submit(String, String, Vec<std::path::PathBuf>, CancellationToken),
     /// A prompt submitted while the current turn is active. The embedding host
     /// places it in Rust's canonical `Next` queue instead of starting another
-    /// turn or replacing the current cancellation owner.
-    QueuePrompt(String, Vec<std::path::PathBuf>, CancellationToken),
+    /// turn or replacing the current cancellation owner. The second `String`
+    /// is an opaque row token used for persisted transcript identity.
+    QueuePrompt(String, String, Vec<std::path::PathBuf>, CancellationToken),
     /// Ctrl+V/Alt+V: read an IMAGE from the system clipboard. The read + PNG
     /// encode can take hundreds of ms, so the caller runs it OFF the render
     /// thread and feeds the result back via
@@ -160,6 +162,9 @@ pub enum ChatOutcome {
     /// agents, MCP, LSP), reporting the component tallies via
     /// `TurnEvent::SystemNotice` — mirroring claude-code's `refreshActivePlugins`.
     ReloadPlugins,
+    /// `/reload-skills` changed the live command registry; recompute the Mod
+    /// description projection off the render thread.
+    RefreshCommandCatalog,
     /// The user submitted a `!`-prefixed bash-mode command. The caller runs it
     /// through the sandboxed [`tool_api::bash_runner::BashRunner`] (no LLM
     /// turn) and folds the captured output back through
@@ -327,6 +332,13 @@ fn is_live_turn_event(event: &TurnEvent) -> bool {
         TurnEvent::TextDelta(_)
             | TurnEvent::MessageIdentity(_)
             | TurnEvent::MessageRetracted(_)
+            | TurnEvent::TranscriptRowIdentity { .. }
+            | TurnEvent::AssistantTranscriptRowUuids { .. }
+            | TurnEvent::ServerFallbackQueryModelChange { .. }
+            | TurnEvent::AssistantBlockStart { .. }
+            | TurnEvent::AssistantBlockIdentity { .. }
+            | TurnEvent::ServerFallbackTombstone { .. }
+            | TurnEvent::RefusalContinuation { .. }
             | TurnEvent::ThinkingDelta(_)
             | TurnEvent::ToolUseStart { .. }
             | TurnEvent::ToolHeartbeat { .. }
@@ -355,6 +367,15 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         TurnEvent::TextDelta(delta) => FocusRefreshKind::AppendText(delta.clone()),
         TurnEvent::Attachment { .. }
         | TurnEvent::SystemNotice { .. }
+        | TurnEvent::UiLog { .. }
+        | TurnEvent::UiToast { .. }
+        | TurnEvent::UiStatus { .. }
+        | TurnEvent::TranscriptRowIdentity { .. }
+        | TurnEvent::AssistantTranscriptRowUuids { .. }
+        | TurnEvent::AssistantBlockStart { .. }
+        | TurnEvent::AssistantBlockIdentity { .. }
+        | TurnEvent::ServerFallbackTombstone { .. }
+        | TurnEvent::RefusalContinuation { .. }
         | TurnEvent::BashOutput { .. }
         | TurnEvent::CompactionCompleted { .. }
         | TurnEvent::MessageIdentity(_)
@@ -364,7 +385,8 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::TurnStartedWithCancel(_)
         | TurnEvent::ThinkingDelta(_)
         | TurnEvent::ToolUseStart { .. }
-        | TurnEvent::ToolUseResult { .. } => FocusRefreshKind::ResetAssistantTail,
+        | TurnEvent::ToolUseResult { .. }
+        | TurnEvent::ServerFallbackQueryModelChange { .. } => FocusRefreshKind::ResetAssistantTail,
         TurnEvent::RateLimit { .. } | TurnEvent::SubagentActivity { .. } => FocusRefreshKind::None,
         TurnEvent::PermissionRequest { .. }
         | TurnEvent::ModelChanged { .. }
@@ -468,6 +490,17 @@ pub struct ChatWidget {
     /// Assistant text received in the current turn. This sidecar survives an
     /// abort-then-fork boundary without changing the normal transcript wire.
     partial_assistant_text: String,
+    /// Per-query served model reported by an admitted server fallback. Kept
+    /// separate from the user-selected session model because stream sinks do
+    /// not carry enough scope to safely mutate the global model picker.
+    server_fallback_model: Option<String>,
+    /// Current provider content block awaiting its durable assistant-row UUID.
+    active_assistant_block_key: Option<u64>,
+    assistant_block_uuids: std::collections::HashMap<u64, String>,
+    pending_server_fallback_tombstones: std::collections::HashSet<String>,
+    /// Retained refusal text is reintroduced only when the next visible block
+    /// opens, so following deltas concatenate with the exact native join.
+    pending_refusal_continuation: Option<(String, bool)>,
     /// Correlates a live turn with the snapshot persisted by backgrounding.
     background_boundary_id: uuid::Uuid,
     /// Set while ← waits for an active tool to finish.
@@ -718,6 +751,11 @@ impl ChatWidget {
             active_tool_elapsed_ms: None,
             active_tool_kinds: Vec::new(),
             partial_assistant_text: String::new(),
+            server_fallback_model: None,
+            active_assistant_block_key: None,
+            assistant_block_uuids: std::collections::HashMap::new(),
+            pending_server_fallback_tombstones: std::collections::HashSet::new(),
+            pending_refusal_continuation: None,
             background_boundary_id: uuid::Uuid::new_v4(),
             pending_backgrounding: None,
             response_chars: 0,
@@ -831,6 +869,102 @@ impl ChatWidget {
         self.orchestrator = Some(handle);
     }
 
+    pub(crate) fn set_mod_ui_selection(
+        &self,
+        selection: Option<lingxi_core::host::ModUiSelection>,
+    ) {
+        if let Some(handle) = self.orchestrator.as_ref() {
+            handle.set_mod_ui_selection(selection);
+        }
+    }
+
+    /// Replace the currently rendered terminal `AbovePrompt` Mod tree.
+    pub(crate) fn set_mod_ui_render_tree(&mut self, tree: &serde_json::Value, max_rows: u16) {
+        let lines = crate::mod_ui_render::tree_lines(tree, max_rows).unwrap_or_default();
+        self.bottom_pane.set_mod_render_lines(lines, max_rows);
+    }
+
+    pub(crate) fn clear_mod_ui_render_tree(&mut self) {
+        self.bottom_pane.clear_mod_render_lines();
+    }
+
+    /// A live AbovePrompt control may take an otherwise unused prompt key only
+    /// when no composer draft, completion popup, or modal view owns it.
+    pub(crate) fn mod_ui_button_press_allowed(&self) -> bool {
+        self.bottom_pane.composer_is_empty()
+            && !self.bottom_pane.completion_is_open()
+            && !self.bottom_pane.has_active_view()
+    }
+
+    /// Remaining AbovePrompt rows inside the viewport after the live tail and
+    /// all other bottom-pane content have settled.
+    pub(crate) fn mod_ui_row_budget(
+        &self,
+        width: u16,
+        terminal_rows: u16,
+        is_fullscreen: bool,
+    ) -> u16 {
+        let viewport_rows = if is_fullscreen {
+            terminal_rows
+        } else {
+            terminal_rows.min(20)
+        };
+        let running = self.pane_status().running;
+        let above_pane = self
+            .live_tail_height(width)
+            .saturating_add(self.status_line_height());
+        self.bottom_pane.mod_ui_row_budget_for(
+            width,
+            running,
+            viewport_rows.saturating_sub(above_pane),
+        )
+    }
+
+    /// The `AbovePrompt` render-site fact exposed to Mods.
+    pub(crate) fn mod_ui_is_working(&self) -> bool {
+        self.current_turn.is_some()
+    }
+
+    /// Attribute a selection to one rendered transcript entry, if possible.
+    pub(crate) fn fullscreen_selection_request_id(
+        &self,
+        first_row: u16,
+        last_row: u16,
+        area: Rect,
+    ) -> Option<String> {
+        if self.brief_transcript {
+            return None;
+        }
+        let status_height = u16::try_from(self.status_line_lines().len())
+            .unwrap_or(u16::MAX)
+            .min(area.height);
+        let pane_height = self
+            .bottom_pane
+            .desired_height(area.width)
+            .min(area.height.saturating_sub(status_height));
+        let history_height = area.height.saturating_sub(status_height + pane_height);
+        if first_row < area.y || last_row >= area.y.saturating_add(history_height) {
+            return None;
+        }
+        let live_cwd = self
+            .hyperlink_cwd_provider
+            .as_ref()
+            .map(|provider| provider());
+        let snapshot_cwd = (!self.session.doctor.cwd.is_empty())
+            .then(|| std::path::Path::new(self.session.doctor.cwd.as_str()));
+        self.transcript
+            .request_id_for_fullscreen_rows(
+                usize::from(first_row - area.y),
+                usize::from(last_row - area.y),
+                usize::from(history_height),
+                area.width,
+                &self.theme,
+                crate::terminal::hyperlinks_supported(),
+                live_cwd.as_deref().or(snapshot_cwd),
+            )
+            .map(str::to_owned)
+    }
+
     /// Seed the below-composer permission-mode indicator from the resolved boot
     /// mode (claude-code `initialPermissionModeFromCLI`), and whether bypass is
     /// an available Shift+Tab cycle target (`--dangerously-skip-permissions` /
@@ -902,6 +1036,10 @@ impl ChatWidget {
                 .set_registry_commands(registry_slash_rows(&reg));
         }
         self.command_registry = Some(registry);
+    }
+
+    pub(crate) fn command_completion_is_open(&self) -> bool {
+        self.bottom_pane.completion_is_open() && self.bottom_pane.composer().text().starts_with('/')
     }
 
     /// Wire the persistent prompt-history store (`~/.lingxi/history.jsonl`,
@@ -1267,24 +1405,40 @@ impl ChatWidget {
             .take()
             .unwrap_or_else(lingxi_core::types::ToolUseId::new);
         self.collapse_ids.clear();
-        self.transcript.discard_active();
         self.transcript
-            .push_message(RenderedMessage::CollapsedReadSearch {
-                search_count: group.search_count(),
-                read_count: group.read_count(),
-                list_count: group.list_count(),
-                repl_count: group.repl_count(),
-                mcp_call_count: group.mcp_call_count(),
-                mcp_server_names: group.mcp_server_names(),
-                bash_count: group.bash_count(),
-                is_active: false,
-                group_id,
-                latest_hint: None,
-                entries: group.entries().to_vec(),
-                mem_read: 0,
-                mem_search: 0,
-                mem_write: group.memory_write_count(),
-            });
+            .set_active(crate::history_cell::cell_for_message(
+                RenderedMessage::CollapsedReadSearch {
+                    search_count: group.search_count(),
+                    read_count: group.read_count(),
+                    list_count: group.list_count(),
+                    repl_count: group.repl_count(),
+                    mcp_call_count: group.mcp_call_count(),
+                    mcp_server_names: group.mcp_server_names(),
+                    bash_count: group.bash_count(),
+                    is_active: false,
+                    group_id,
+                    latest_hint: None,
+                    entries: group.entries().to_vec(),
+                    mem_read: 0,
+                    mem_search: 0,
+                    mem_write: group.memory_write_count(),
+                },
+            ));
+        self.transcript.flush_active();
+    }
+
+    /// Drop the in-flight aggregate when a fallback tombstone removed its
+    /// active transcript cell. Tool rows retain independent UUIDs, so the
+    /// group disappears only after every member row was reported superseded.
+    fn clear_removed_collapse_group(&mut self) {
+        if self.collapse_group.is_none() || self.transcript.active_cell().is_some() {
+            return;
+        }
+        self.collapse_group = None;
+        self.collapse_group_id = None;
+        for id in self.collapse_ids.drain() {
+            self.tool_inputs.remove(&id);
+        }
     }
 
     fn flush_or_discard_active(&mut self) {
@@ -1366,6 +1520,11 @@ impl ChatWidget {
                 self.turn_started_at = None;
                 self.activity = None;
                 self.partial_assistant_text.clear();
+                self.server_fallback_model = None;
+                self.active_assistant_block_key = None;
+                self.assistant_block_uuids.clear();
+                self.pending_server_fallback_tombstones.clear();
+                self.pending_refusal_continuation = None;
                 self.active_tool_id = None;
                 self.active_tool_kinds.clear();
                 self.background_boundary_id = uuid::Uuid::new_v4();
@@ -1405,6 +1564,11 @@ impl ChatWidget {
                 self.accepts_turn_events = true;
                 self.has_seen_turn = true;
                 self.finalize_collapse_group();
+                self.server_fallback_model = None;
+                self.active_assistant_block_key = None;
+                self.assistant_block_uuids.clear();
+                self.pending_server_fallback_tombstones.clear();
+                self.pending_refusal_continuation = None;
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
                 self.active_tool_id = None;
@@ -1429,9 +1593,113 @@ impl ChatWidget {
                 self.transcript
                     .set_active(Box::new(AssistantTextCell::new(String::new())));
             }
+            TurnEvent::ServerFallbackQueryModelChange { to_model } => {
+                // This is a per-query observation, not a `/model` selection.
+                // The current output sink carries no main/child scope, so keep
+                // it local instead of mutating the global model snapshot.
+                self.server_fallback_model = Some(to_model);
+            }
+            TurnEvent::AssistantBlockStart { block_key } => {
+                let continuation = self.pending_refusal_continuation.take();
+                if let Some(previous_key) = self.active_assistant_block_key.take() {
+                    self.assistant_block_uuids.remove(&previous_key);
+                }
+                if continuation.is_some() {
+                    self.finalize_collapse_group();
+                    self.flush_or_discard_active();
+                } else if self.collapse_group.is_none() {
+                    self.flush_or_discard_active();
+                }
+
+                // Tool blocks can follow one another inside a collapsed run;
+                // retain that active group until its next visible text/tool
+                // event decides whether it continues. Otherwise open a row
+                // placeholder for this block's incoming text.
+                if self.collapse_group.is_none() {
+                    let seed = continuation
+                        .as_ref()
+                        .filter(|(_, display)| *display)
+                        .map(|(text, _)| text.clone())
+                        .unwrap_or_default();
+                    if !seed.is_empty() {
+                        self.partial_assistant_text.push_str(&seed);
+                    }
+                    self.transcript
+                        .set_active(Box::new(AssistantTextCell::new(seed)));
+                }
+                self.active_assistant_block_key = Some(block_key);
+                if let Some(uuid) = self.assistant_block_uuids.get(&block_key).cloned() {
+                    if self.collapse_group.is_some() {
+                        self.transcript.identify_active_row_uuid(uuid);
+                    } else {
+                        self.transcript.identify_active_row(uuid);
+                    }
+                }
+            }
+            TurnEvent::AssistantBlockIdentity {
+                block_key,
+                message_uuid,
+            } => {
+                self.assistant_block_uuids
+                    .insert(block_key, message_uuid.clone());
+                if self.active_assistant_block_key == Some(block_key) {
+                    if self.collapse_group.is_some() {
+                        self.transcript.identify_active_row_uuid(message_uuid);
+                    } else {
+                        self.transcript.identify_active_row(message_uuid);
+                    }
+                }
+            }
+            TurnEvent::ServerFallbackTombstone {
+                message,
+                display_only: _,
+            } => {
+                // A tombstone edits only this TUI's displayed transcript. The
+                // history writer owns persistence and has already received
+                // the matching removal request.
+                let uuid = message.uuid.as_uuid().to_string();
+                self.pending_server_fallback_tombstones.insert(uuid.clone());
+                let tombstoned = self
+                    .pending_server_fallback_tombstones
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.transcript.remove_transcript_rows(&tombstoned);
+                self.clear_removed_collapse_group();
+                self.assistant_block_uuids
+                    .retain(|_, candidate| candidate != &uuid);
+                self.partial_assistant_text = self.transcript.current_turn_assistant_text();
+            }
+            TurnEvent::RefusalContinuation {
+                phase: lingxi_core::host::RefusalContinuationPhase::Begin,
+                salvage_text,
+                join: lingxi_core::host::RefusalContinuationJoin::Exact,
+                replaces_uuids,
+                display_salvage_text,
+            } => {
+                self.finalize_collapse_group();
+                let replaced = replaces_uuids
+                    .into_iter()
+                    .map(|uuid| uuid.as_uuid().to_string())
+                    .collect::<Vec<_>>();
+                self.pending_server_fallback_tombstones.extend(replaced);
+                let tombstoned = self
+                    .pending_server_fallback_tombstones
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.transcript.remove_transcript_rows(&tombstoned);
+                self.clear_removed_collapse_group();
+                self.partial_assistant_text = self.transcript.current_turn_assistant_text();
+                self.pending_refusal_continuation = Some((salvage_text, display_salvage_text));
+                self.active_assistant_block_key = None;
+            }
             TurnEvent::MessageIdentity(id) => {
                 self.flush_or_discard_active();
                 self.transcript.identify_assistant_response(id);
+                if let Some(block_key) = self.active_assistant_block_key.take() {
+                    self.assistant_block_uuids.remove(&block_key);
+                }
             }
             TurnEvent::MessageRetracted(id) => {
                 self.transcript.retract_assistant_response(id);
@@ -1499,6 +1767,10 @@ impl ChatWidget {
                 }
             }
             TurnEvent::ToolUseStart { id, tool, input } => {
+                let block_uuid = self
+                    .active_assistant_block_key
+                    .take()
+                    .and_then(|key| self.assistant_block_uuids.remove(&key));
                 self.activity = Some(activity_label(&tool));
                 self.active_tool_id = Some(id.clone());
                 self.active_tool_elapsed_ms = Some(0);
@@ -1547,6 +1819,9 @@ impl ChatWidget {
                     if let Some(group) = self.collapse_group.as_mut() {
                         group.absorb_start(&tool, &input);
                     }
+                    if let Some(uuid) = block_uuid {
+                        self.transcript.identify_active_row_uuid(uuid);
+                    }
                     self.collapse_ids.insert(id.clone());
                     self.tool_inputs.insert(id.clone(), input.clone());
                     self.render_active_collapse();
@@ -1559,6 +1834,9 @@ impl ChatWidget {
                 self.tool_inputs.insert(id.clone(), input.clone());
                 self.transcript
                     .push_message(RenderedMessage::AssistantToolUse { id, tool, input });
+                if let Some(uuid) = block_uuid {
+                    self.transcript.identify_latest_committed_row(uuid);
+                }
             }
             TurnEvent::ToolHeartbeat {
                 id,
@@ -1650,6 +1928,10 @@ impl ChatWidget {
                 self.active_tool_elapsed_ms = None;
                 self.active_tool_kinds.clear();
                 self.partial_assistant_text.clear();
+                self.active_assistant_block_key = None;
+                self.assistant_block_uuids.clear();
+                self.pending_server_fallback_tombstones.clear();
+                self.pending_refusal_continuation = None;
                 self.foreground_agents.clear();
                 self.sync_running_agents();
                 self.bottom_pane.clear_running_hooks();
@@ -1929,6 +2211,30 @@ impl ChatWidget {
                     is_error,
                 });
             }
+            TurnEvent::UiLog { plugin, text } => {
+                self.transcript.push_message(RenderedMessage::SystemText {
+                    body: format!("{plugin}: {text}"),
+                    timestamp: 0,
+                    is_error: false,
+                });
+            }
+            TurnEvent::UiToast {
+                plugin: _,
+                text,
+                timeout_ms,
+            } => {
+                self.bottom_pane.set_mod_toast(text, timeout_ms);
+            }
+            TurnEvent::UiStatus { plugin, text } => {
+                self.bottom_pane.set_mod_status(plugin, text);
+            }
+            TurnEvent::TranscriptRowIdentity { row_token, uuid } => {
+                self.transcript.identify_user_row(&row_token, uuid);
+            }
+            TurnEvent::AssistantTranscriptRowUuids { message_id, uuids } => {
+                self.transcript
+                    .identify_assistant_text_rows(message_id, &uuids);
+            }
             TurnEvent::CommandCatalogRefreshed { commands } => {
                 self.bottom_pane.set_registry_commands(
                     commands
@@ -1939,6 +2245,10 @@ impl ChatWidget {
                                 description: command.description,
                                 menu_description: command.menu_description,
                                 aliases: command.aliases,
+                                hidden: command.hidden,
+                                replaces_builtin: command.replaces_builtin,
+                                argument_hint: command.argument_hint,
+                                argument_names: command.argument_names,
                             },
                         )
                         .collect(),
@@ -2862,8 +3172,9 @@ impl ChatWidget {
 
     /// `/help`: open the shortcuts + slash-commands screen.
     pub(crate) fn cmd_help(&mut self, _args: &str) -> ChatOutcome {
-        self.bottom_pane.show_view(Box::new(ScreenView::help()));
-        ChatOutcome::Continue
+        let view = ScreenView::help_with_commands(self.bottom_pane.registry_commands());
+        self.bottom_pane.show_view(Box::new(view));
+        ChatOutcome::RefreshCommandCatalog
     }
 
     /// Toggle the full-screen renderer.  The app owns terminal-mode changes so
@@ -4083,24 +4394,35 @@ impl ChatWidget {
         let records = runtime
             .block_on(registry.list_workflows())
             .unwrap_or_default();
-        let live_effort = self
+        let ultracode_enabled = self
             .orchestrator
             .as_ref()
-            .and_then(|handle| runtime.block_on(handle.current_effort()));
+            .is_some_and(|handle| runtime.block_on(handle.ultracode_enabled()));
+        let model_supported = self.orchestrator.as_ref().is_some_and(|handle| {
+            match runtime.block_on(handle.effort_command_snapshot()) {
+                Ok(Some(snapshot)) => snapshot.capabilities.xhigh,
+                Ok(None) => runtime
+                    .block_on(handle.conversation_controls())
+                    .is_some_and(|controls| {
+                        controls.reasoning_spec.available.iter().any(|selection| {
+                            matches!(
+                                selection,
+                                lingxi_core::host::ReasoningSelection::Level { id }
+                                    if id == "xhigh"
+                            )
+                        })
+                    }),
+                Err(_) => false,
+            }
+        });
         let workflows_enabled = self
             .orchestrator
             .as_ref()
             .is_some_and(|handle| runtime.block_on(handle.dynamic_workflows_enabled()));
-        let current_model = self
-            .session
-            .models
-            .iter()
-            .find(|model| model.is_current)
-            .map_or("", |model| model.request_model.as_str());
         let warning_config = crate::bottom_pane::workflows_view::WorkflowWarningConfig {
             ultracode_active: UltracodeGate {
-                model: current_model,
-                effort: live_effort.as_deref(),
+                enabled: ultracode_enabled,
+                model_supported,
                 workflows_enabled,
             }
             .active(),
@@ -4282,6 +4604,7 @@ impl ChatWidget {
         self.foreground_agents.clear();
         self.background_agents.clear();
         self.bottom_pane.set_planned_tasks(Vec::new());
+        self.bottom_pane.clear_mod_ui();
         self.bottom_pane.set_running_agents(Vec::new());
         // The queued-image cells just vanished from the screen; keeping the
         // paths would silently attach them to a later unrelated message.
@@ -4423,15 +4746,17 @@ impl ChatWidget {
         } else {
             format!("/{name} {args}")
         };
+        let row_token = uuid::Uuid::new_v4().to_string();
         self.transcript.push_message(RenderedMessage::UserText {
             body: invocation,
             timestamp: 0,
         });
+        self.transcript.track_latest_user_row(row_token.clone());
         self.sync_focus_projection();
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
         self.accepts_turn_events = true;
-        ChatOutcome::Submit(content, self.take_pending_images(), token)
+        ChatOutcome::Submit(content, row_token, self.take_pending_images(), token)
     }
 
     /// Render read-only command output into the transcript as a `system`
@@ -4926,7 +5251,11 @@ impl ChatWidget {
                     .set_registry_commands(registry_slash_rows(&guard));
             }
         }
-        outcome
+        if matches!(outcome, ChatOutcome::Continue) {
+            ChatOutcome::RefreshCommandCatalog
+        } else {
+            outcome
+        }
     }
 
     /// `/stop`: stop the session. Shows "Session stopped." then returns
@@ -5707,10 +6036,12 @@ impl ChatWidget {
         if self.session_clear_pending {
             return ChatOutcome::Continue;
         }
+        let row_token = uuid::Uuid::new_v4().to_string();
         self.transcript.push_message(RenderedMessage::UserText {
             body: text.clone(),
             timestamp: 0,
         });
+        self.transcript.track_latest_user_row(row_token.clone());
         self.sync_focus_projection();
         self.pending_slash_dispatches
             .retain(PendingSlashDispatch::is_pending);
@@ -5726,12 +6057,12 @@ impl ChatWidget {
             self.queued_prompt_owners
                 .retain(|owner| !owner.is_cancelled());
             self.queued_prompt_owners.push(owner.clone());
-            return ChatOutcome::QueuePrompt(text, self.take_pending_images(), owner);
+            return ChatOutcome::QueuePrompt(text, row_token, self.take_pending_images(), owner);
         }
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
         self.accepts_turn_events = true;
-        ChatOutcome::Submit(text, self.take_pending_images(), token)
+        ChatOutcome::Submit(text, row_token, self.take_pending_images(), token)
     }
 
     /// Execute a command effect a view requested via
@@ -5892,7 +6223,11 @@ impl ChatWidget {
         );
         let receiving = self.response_chars > 0 || self.activity.is_some();
         let paren = crate::spinner_status::status_paren(elapsed_ms, self.response_chars, receiving);
-        format!("{frame} {verb}… {paren}")
+        let served_model = self
+            .server_fallback_model
+            .as_deref()
+            .map_or_else(String::new, |model| format!(" · {model}"));
+        format!("{frame} {verb}… {paren}{served_model}")
     }
 }
 
@@ -5961,13 +6296,14 @@ fn registry_slash_rows(
     reg.list_all()
         .into_iter()
         .filter(|c| {
-            matches!(
-                c.kind,
-                SlashCommandKind::Markdown { .. }
-                    | SlashCommandKind::Plugin { .. }
-                    | SlashCommandKind::Bundled { .. }
-                    | SlashCommandKind::Mcp { .. }
-            )
+            reg.mod_owner_of(&c.name).is_some()
+                || matches!(
+                    c.kind,
+                    SlashCommandKind::Markdown { .. }
+                        | SlashCommandKind::Plugin { .. }
+                        | SlashCommandKind::Bundled { .. }
+                        | SlashCommandKind::Mcp { .. }
+                )
         })
         .filter(|c| c.user_invocable != Some(false))
         .map(|c| crate::bottom_pane::completion_view::RegistrySlashRow {
@@ -5975,6 +6311,10 @@ fn registry_slash_rows(
             description: c.description.clone(),
             menu_description: c.menu_description.clone(),
             aliases: c.aliases.iter().map(|a| with_slash(a)).collect(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: c.argument_hint.clone(),
+            argument_names: c.argument_names.clone(),
         })
         .collect()
 }
@@ -5992,7 +6332,7 @@ fn is_plan_tool(tool: &str) -> bool {
 
 /// Whether a tool invokes a foreground/background subagent.
 fn is_agent_tool(tool: &str) -> bool {
-    matches!(tool, "Agent" | "Task")
+    tool == "Agent"
 }
 
 fn agent_status_from_tool_start(
@@ -6564,6 +6904,46 @@ mod tests {
         ChatWidget::new(Vec::new(), SessionInfo::default())
     }
 
+    #[test]
+    fn fullscreen_selection_attributes_only_history_rows() {
+        let mut widget = widget();
+        let id = lingxi_core::types::ToolUseId::from("toolu_selection");
+        widget
+            .transcript
+            .push_message(RenderedMessage::AssistantToolUse {
+                id: id.clone(),
+                tool: "Read".into(),
+                input: serde_json::json!({"file_path":"/tmp/example"}),
+            });
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            widget.fullscreen_selection_request_id(0, 0, area),
+            Some(id.as_str().to_owned())
+        );
+        assert_eq!(widget.fullscreen_selection_request_id(0, 23, area), None);
+        widget.brief_transcript = true;
+        assert_eq!(widget.fullscreen_selection_request_id(0, 0, area), None);
+    }
+
+    #[test]
+    fn live_user_selection_uses_uuid_from_persistence_event() {
+        let mut widget = widget();
+        let ChatOutcome::Submit(_, row_token, _, _) = widget.submit_prompt("live prompt".into())
+        else {
+            panic!("expected submit");
+        };
+        let persisted_uuid = "83f67a72-a806-49b7-9a18-e57307177a86";
+        widget.apply_turn_event(TurnEvent::TranscriptRowIdentity {
+            row_token,
+            uuid: persisted_uuid.into(),
+        });
+
+        assert_eq!(
+            widget.fullscreen_selection_request_id(0, 0, Rect::new(0, 0, 80, 24)),
+            Some(persisted_uuid.into())
+        );
+    }
+
     fn widget_with_agents_snapshot(
         snapshot: std::sync::Arc<std::sync::Mutex<crate::bottom_pane::view::AgentsSnapshot>>,
     ) -> ChatWidget {
@@ -6949,7 +7329,7 @@ mod tests {
         let mut w = widget();
         w.handle_paste(&path.display().to_string());
         typ(&mut w, "hi");
-        let ChatOutcome::Submit(_, images, _) = w.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, images, _) = w.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert_eq!(images, vec![path.clone()], "image rides the Submit payload");
@@ -7847,7 +8227,7 @@ mod tests {
     #[test]
     fn streaming_left_arrow_persists_partial_reply_before_cancelling() {
         let (mut widget, _mock) = widget_with_orchestrator();
-        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+        let ChatOutcome::Submit(_, _, _, token) = widget.submit_prompt("work".into()) else {
             panic!("turn submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -7960,7 +8340,7 @@ mod tests {
     #[test]
     fn between_tools_defers_then_second_confirm_restarts_agent_work() {
         let (mut widget, _mock) = widget_with_orchestrator();
-        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+        let ChatOutcome::Submit(_, _, _, token) = widget.submit_prompt("work".into()) else {
             panic!("turn submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -7997,7 +8377,7 @@ mod tests {
     #[test]
     fn non_restartable_tool_fails_closed_at_defer_cap() {
         let (mut widget, _mock) = widget_with_orchestrator();
-        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+        let ChatOutcome::Submit(_, _, _, token) = widget.submit_prompt("work".into()) else {
             panic!("turn submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -8258,7 +8638,7 @@ mod tests {
     fn core_bridge_inject_message_submits_template_but_displays_invocation() {
         let mut widget = widget();
         let outcome = widget.cmd_commit_push_pr("");
-        let ChatOutcome::Submit(payload, _, _token) = outcome else {
+        let ChatOutcome::Submit(payload, _, _, _token) = outcome else {
             panic!("prompt-type command must queue a turn");
         };
         // The model payload is the full expanded handler template …
@@ -8660,7 +9040,7 @@ mod tests {
         widget.apply_turn_event(TurnEvent::CompactEnded);
         assert!(matches!(
             widget.submit_prompt("running".into()),
-            ChatOutcome::Submit(_, _, _)
+            ChatOutcome::Submit(_, _, _, _)
         ));
         assert!(matches!(widget.cmd_compact(""), ChatOutcome::Continue));
         assert!(widget.queued_compact.is_some());
@@ -8967,7 +9347,7 @@ mod tests {
         }
         widget.set_command_registry(registry);
         let outcome = widget.cmd_reload_skills("");
-        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::RefreshCommandCatalog));
         let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
         assert!(
             systext.body().contains("Reloaded skills:"),
@@ -8989,6 +9369,10 @@ mod tests {
                 description: "plugin plan command".to_string(),
                 menu_description: Some("plugin command".to_string()),
                 aliases: vec!["/pp".to_string()],
+                hidden: false,
+                replaces_builtin: false,
+                argument_hint: None,
+                argument_names: Vec::new(),
             }],
         });
 
@@ -9102,13 +9486,14 @@ mod tests {
         let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow") else {
             panic!("dispatch")
         };
-        let ChatOutcome::QueuePrompt(_, _, old_owner) = widget.submit_prompt("old".into()) else {
+        let ChatOutcome::QueuePrompt(_, _, _, old_owner) = widget.submit_prompt("old".into())
+        else {
             panic!("queue")
         };
         widget.on_pane_outcome(BottomPaneOutcome::Interrupt);
         assert!(pending.is_cancelled());
         assert!(old_owner.is_cancelled());
-        let ChatOutcome::Submit(_, _, new_owner) = widget.submit_prompt("new".into()) else {
+        let ChatOutcome::Submit(_, _, _, new_owner) = widget.submit_prompt("new".into()) else {
             panic!("new turn")
         };
         assert!(!new_owner.is_cancelled());
@@ -9319,7 +9704,7 @@ mod tests {
     fn tui_prompt_command_expands_embedded_shell_before_submit() {
         let mut widget = widget();
         widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: false }));
-        let ChatOutcome::Submit(payload, _, _token) = widget.cmd_commit_push_pr("") else {
+        let ChatOutcome::Submit(payload, _, _, _token) = widget.cmd_commit_push_pr("") else {
             panic!("/commit-push-pr must submit a turn");
         };
         assert!(
@@ -9999,6 +10384,96 @@ mod tests {
     }
 
     #[test]
+    fn server_fallback_row_events_retract_and_stitch_exact_text_without_changing_selection() {
+        use crate::history_cell::message::AssistantTextCell;
+
+        let mut widget = widget_with_models();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ServerFallbackQueryModelChange {
+            to_model: "claude-sonnet-5".into(),
+        });
+        assert_eq!(
+            widget.server_fallback_model.as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert!(widget.spinner_text().contains("claude-sonnet-5"));
+        assert!(widget.session.models[0].is_current);
+        assert!(!widget.session.models[1].is_current);
+
+        let discarded_id = lingxi_core::types::MessageId::new();
+        widget.apply_turn_event(TurnEvent::AssistantBlockStart { block_key: 41 });
+        widget.apply_turn_event(TurnEvent::TextDelta("discarded refusal".into()));
+        widget.apply_turn_event(TurnEvent::AssistantBlockIdentity {
+            block_key: 41,
+            message_uuid: discarded_id.as_uuid().to_string(),
+        });
+        widget.apply_turn_event(TurnEvent::ServerFallbackTombstone {
+            message: lingxi_core::host::ServerFallbackTombstoneMessage {
+                uuid: discarded_id,
+                message_type: "assistant".into(),
+                timestamp: "2026-10-03T12:00:00.000Z".into(),
+                request_id: Some("request-1".into()),
+                request_ref: None,
+                provider_message_id: Some("provider-1".into()),
+                model: Some("claude-opus-4-8".into()),
+                stop_reason: Some("refusal".into()),
+                stop_details: None,
+                usage: None,
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "discarded refusal".into(),
+                    citations: None,
+                }],
+                is_api_error_message: None,
+                supersedes_uuids: None,
+            },
+            display_only: true,
+        });
+
+        let retained_id = lingxi_core::types::MessageId::new();
+        widget.apply_turn_event(TurnEvent::AssistantBlockStart { block_key: 42 });
+        widget.apply_turn_event(TurnEvent::TextDelta("retained🙂".into()));
+        widget.apply_turn_event(TurnEvent::AssistantBlockIdentity {
+            block_key: 42,
+            message_uuid: retained_id.as_uuid().to_string(),
+        });
+        widget.apply_turn_event(TurnEvent::RefusalContinuation {
+            phase: lingxi_core::host::RefusalContinuationPhase::Begin,
+            salvage_text: "retained🙂".into(),
+            join: lingxi_core::host::RefusalContinuationJoin::Exact,
+            replaces_uuids: vec![retained_id],
+            display_salvage_text: true,
+        });
+        let replacement_id = lingxi_core::types::MessageId::new();
+        widget.apply_turn_event(TurnEvent::AssistantBlockStart { block_key: 43 });
+        widget.apply_turn_event(TurnEvent::TextDelta(" fresh".into()));
+        widget.apply_turn_event(TurnEvent::AssistantBlockIdentity {
+            block_key: 43,
+            message_uuid: replacement_id.as_uuid().to_string(),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
+
+        let text_rows = widget
+            .transcript
+            .committed_cells()
+            .iter()
+            .filter_map(|cell| {
+                cell.as_any()
+                    .downcast_ref::<AssistantTextCell>()
+                    .map(|cell| cell.body().to_string())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_rows, ["retained🙂 fresh"]);
+        assert_eq!(
+            widget.server_fallback_model.as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert!(widget.session.models[0].is_current);
+        assert!(!widget.session.models[1].is_current);
+    }
+
+    #[test]
     fn active_streaming_tail_stays_live_until_turn_ends() {
         let mut widget = widget();
         submit_command(&mut widget, "hi");
@@ -10210,7 +10685,7 @@ mod tests {
     fn ctrl_c_keeps_turn_owned_until_terminal_and_heartbeats_continue() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, token) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, token) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10285,7 +10760,7 @@ mod tests {
     fn cancellation_drops_open_queued_and_late_interactive_prompts() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10353,7 +10828,7 @@ mod tests {
     fn cancellation_preserves_a_background_owned_permission_prompt() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10407,7 +10882,7 @@ mod tests {
     fn cancellation_preserves_a_queued_background_owned_permission_prompt() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10553,7 +11028,7 @@ mod tests {
         // the cancelled-current_turn check stays.
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10575,7 +11050,7 @@ mod tests {
         let mut widget = widget();
         // Registered command: focused view opens, no prompt turn starts.
         let outcome = submit_command(&mut widget, "/help");
-        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::RefreshCommandCatalog));
         assert!(widget.bottom_pane().view_stack().contains::<ScreenView>());
         assert!(widget.transcript().is_empty(), "no scrollback dump");
         assert!(!widget.turn_running());
@@ -10623,7 +11098,7 @@ mod tests {
         let outcome = submit_command(&mut widget, "/image /nonexistent/typo.png");
         assert!(matches!(outcome, ChatOutcome::Continue));
         typ(&mut widget, "hi");
-        let ChatOutcome::Submit(_, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert!(images.is_empty(), "bad path must not ride the next turn");
@@ -10641,7 +11116,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
         widget.clear_transcript();
         typ(&mut widget, "hi");
-        let ChatOutcome::Submit(_, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert!(
@@ -10748,7 +11223,7 @@ mod tests {
     fn interrupt_drops_a_queued_background_ask_whose_panel_already_died() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -11608,7 +12083,7 @@ mod tests {
             assert!(widget.transcript().is_empty());
             assert!(matches!(
                 widget.submit_prompt("fresh prompt".into()),
-                ChatOutcome::Submit(_, _, _)
+                ChatOutcome::Submit(_, _, _, _)
             ));
         }
         let mut widget = widget();
@@ -11656,7 +12131,7 @@ mod tests {
             .contains("old partial reply"));
         assert!(matches!(
             widget.submit_prompt("next prompt after failure".into()),
-            ChatOutcome::Submit(_, _, _)
+            ChatOutcome::Submit(_, _, _, _)
         ));
         assert!(matches!(
             widget.cmd_clear(""),
@@ -11708,7 +12183,7 @@ mod tests {
         assert_eq!(widget.cost, None);
         assert!(matches!(
             widget.submit_prompt("new prompt".into()),
-            ChatOutcome::Submit(_, _, _)
+            ChatOutcome::Submit(_, _, _, _)
         ));
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::TextDelta("fresh reply".into()));
@@ -12185,6 +12660,31 @@ mod tests {
     }
 
     #[test]
+    fn task_named_tool_keeps_ordinary_activity_without_agent_status() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let id = lingxi_core::types::ToolUseId::from("ordinary-task-tool");
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: id.clone(),
+            tool: "Task".into(),
+            input: serde_json::json!({ "description": "Ordinary task" }),
+        });
+        assert_eq!(widget.activity.as_deref(), Some("Running Task"));
+        assert!(widget.foreground_agents.is_empty());
+        assert!(widget.bottom_pane().running_agents().is_empty());
+        assert_eq!(widget.active_tool_id.as_ref(), Some(&id));
+
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id,
+            tool: "Task".into(),
+            result: serde_json::json!({ "success": true }),
+        });
+        assert!(widget.active_tool_id.is_none());
+        assert!(widget.foreground_agents.is_empty());
+        assert!(widget.bottom_pane().running_agents().is_empty());
+    }
+
+    #[test]
     fn agent_status_combines_foreground_and_background_lifecycles() {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -12340,7 +12840,8 @@ mod tests {
         assert_eq!(activity_label("Glob"), "Searching");
         assert_eq!(activity_label("WebFetch"), "Browsing");
         assert_eq!(activity_label("WebSearch"), "Browsing");
-        assert_eq!(activity_label("Task"), "Delegating");
+        assert_eq!(activity_label("Agent"), "Delegating");
+        assert_eq!(activity_label("Task"), "Running Task");
         assert_eq!(activity_label("SomeMcpTool"), "Running SomeMcpTool");
     }
 

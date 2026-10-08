@@ -330,6 +330,12 @@ pub struct BottomPane {
     view_stack: ViewStack,
     /// Owner-fed task status (spinner text + running flag).
     status: BottomPaneStatus,
+    /// Most recent Mod toast, held only until its timeout expires.
+    mod_toast: Option<(String, Instant)>,
+    /// Insertion-ordered pinned lines, one per plugin.
+    mod_statuses: Vec<(String, String)>,
+    /// Current terminal `AbovePrompt` Mod tree, flattened to its measured row budget.
+    mod_render_lines: Vec<String>,
     /// Mirror of the transcript's verbose mode, for the status hint text.
     verbose: bool,
     /// Preview of queued inputs (empty seam until a queue source exists).
@@ -411,6 +417,9 @@ impl BottomPane {
             pending_pastes: Vec::new(),
             view_stack: ViewStack::new(),
             status: BottomPaneStatus::default(),
+            mod_toast: None,
+            mod_statuses: Vec::new(),
+            mod_render_lines: Vec::new(),
             verbose: false,
             pending_input_preview: PendingInputPreview::new(),
             planned_tasks: Vec::new(),
@@ -451,8 +460,57 @@ impl BottomPane {
     /// completion popup (user commands, skills, plugin/bundled commands). Called
     /// when the command registry is wired and after `/reload-skills`.
     pub fn set_registry_commands(&mut self, rows: Vec<RegistrySlashRow>) {
+        self.view_stack
+            .apply_owner_update(OwnerViewUpdate::Commands(rows.clone()));
         self.registry_commands = rows;
         self.sync_completion();
+    }
+
+    pub(crate) fn registry_commands(&self) -> &[RegistrySlashRow] {
+        &self.registry_commands
+    }
+
+    /// Native typeahead uses `argumentHint` for an exact `/command `, then
+    /// shows the remaining declared argument names after each completed arg.
+    fn command_argument_hint(&self) -> Option<String> {
+        let text = self.composer.text();
+        let (name, args) = text.split_once(' ')?;
+        if !text.ends_with(' ') || !name.starts_with('/') || name.len() < 2 {
+            return None;
+        }
+        if let Some(row) = self
+            .registry_commands
+            .iter()
+            .find(|row| row.name == name || row.aliases.iter().any(|alias| alias == name))
+        {
+            if args.is_empty() {
+                if let Some(hint) = row.argument_hint.as_deref().filter(|hint| !hint.is_empty()) {
+                    return Some(hint.to_owned());
+                }
+            }
+            if row.argument_names.is_empty() {
+                return None;
+            }
+            let parsed = command_api::argument_substitution::parse_arguments(args);
+            let typed = if parsed.is_empty() && !args.trim().is_empty() {
+                args.split_whitespace().map(str::to_owned).collect()
+            } else {
+                parsed
+            };
+            return command_api::argument_substitution::generate_progressive_argument_hint(
+                &row.argument_names,
+                &typed,
+            );
+        }
+        if !args.is_empty() {
+            return None;
+        }
+        crate::command::BUILTIN
+            .iter()
+            .find(|command| command.name == name || command.aliases.contains(&name))
+            .map(|command| command.hint)
+            .filter(|hint| !hint.is_empty())
+            .map(str::to_owned)
     }
 
     /// Enable/disable emoji shortcode completion for this mounted session.
@@ -679,6 +737,13 @@ impl BottomPane {
     /// input routing so an idle questionnaire can auto-continue when its
     /// countdown expires.
     pub fn handle_view_tick(&mut self, now: Instant) -> BottomPaneOutcome {
+        if self
+            .mod_toast
+            .as_ref()
+            .is_some_and(|(_, until)| now >= *until)
+        {
+            self.mod_toast = None;
+        }
         self.view_stack
             .route_tick(now)
             .map_or(BottomPaneOutcome::Consumed, Self::map_view_outcome)
@@ -1032,6 +1097,58 @@ impl BottomPane {
     /// reflect the owner's current turn state.
     pub fn set_task_running(&mut self, status: BottomPaneStatus) {
         self.status = status;
+    }
+
+    /// Show a transient Mod notification below the composer.
+    pub fn set_mod_toast(&mut self, text: String, timeout_ms: u64) {
+        self.mod_toast = Some((text, Instant::now() + Duration::from_millis(timeout_ms)));
+    }
+
+    /// Replace or clear one plugin's pinned status without affecting others.
+    pub fn set_mod_status(&mut self, plugin: String, text: Option<String>) {
+        if let Some(index) = self
+            .mod_statuses
+            .iter()
+            .position(|(name, _)| name == &plugin)
+        {
+            if let Some(text) = text {
+                self.mod_statuses[index].1 = text;
+            } else {
+                self.mod_statuses.remove(index);
+            }
+        } else if let Some(text) = text {
+            self.mod_statuses.push((plugin, text));
+        }
+    }
+
+    /// Replace the current Mod `AbovePrompt` tree's terminal rows.
+    pub fn set_mod_render_lines(&mut self, lines: Vec<String>, max_rows: u16) {
+        self.mod_render_lines = lines.into_iter().take(usize::from(max_rows)).collect();
+    }
+
+    pub fn clear_mod_render_lines(&mut self) {
+        self.mod_render_lines.clear();
+    }
+
+    /// Remaining rows for the `AbovePrompt` site after the pane's other
+    /// current contents are accounted for, bounded by the app's viewport.
+    #[must_use]
+    pub fn mod_ui_row_budget_for(&self, width: u16, running: bool, height_limit: u16) -> u16 {
+        if self.full_frame_view().is_some() {
+            return 0;
+        }
+        let rendered_rows = u16::try_from(self.mod_render_lines.len()).unwrap_or(u16::MAX);
+        let baseline = self
+            .desired_height_for(width, running)
+            .saturating_sub(rendered_rows);
+        height_limit.saturating_sub(baseline)
+    }
+
+    /// Drop transient and pinned Mod UI when the owning session is cleared.
+    pub fn clear_mod_ui(&mut self) {
+        self.mod_toast = None;
+        self.mod_statuses.clear();
+        self.mod_render_lines.clear();
     }
 
     /// Supply the full terminal row count for Claude-compatible task capping.
@@ -2078,12 +2195,39 @@ impl BottomPane {
             input_status::task_lines(&self.planned_tasks, &self.theme)
         };
         lines.extend(tasks);
+        lines.extend(self.mod_render_lines.iter().map(|text| {
+            Line::from(Span::styled(
+                text.clone(),
+                Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
+            ))
+        }));
+        lines
+    }
+
+    fn mod_toast_line(&self) -> Option<Line<'static>> {
+        let (text, until) = self.mod_toast.as_ref()?;
+        (Instant::now() < *until).then(|| {
+            Line::from(Span::styled(
+                text.clone(),
+                Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
+            ))
+        })
+    }
+
+    fn mod_notification_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = self.mod_toast_line().into_iter().collect::<Vec<_>>();
+        lines.extend(self.mod_statuses.iter().map(|(_, text)| {
+            Line::from(Span::styled(
+                text.clone(),
+                Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
+            ))
+        }));
         lines
     }
 
     /// The pane's vertical zones within `area`: running status, context banner,
-    /// queued-input preview, planned tasks, composer, live agents, permission
-    /// mode, then the completion/footer slot.
+    /// queued-input preview, planned tasks, composer, Mod toast, live agents,
+    /// permission mode, then the completion/footer slot.
     fn zones(&self, area: Rect) -> std::rc::Rc<[Rect]> {
         let below = if self.accessibility_announcement.is_some() {
             footer::footer_height(&self.footer_props())
@@ -2106,6 +2250,9 @@ impl BottomPane {
                 Constraint::Length(self.pending_input_preview.desired_height(area.width)),
                 Constraint::Length(task_rows),
                 Constraint::Min(3),
+                Constraint::Length(
+                    u16::try_from(self.mod_notification_lines().len()).unwrap_or(u16::MAX),
+                ),
                 Constraint::Length(agent_rows),
                 Constraint::Length(mode_row),
                 Constraint::Length(below),
@@ -2165,7 +2312,16 @@ impl BottomPane {
         };
         let mode_row =
             permission_mode_indicator::indicator_height(self.permission_mode, &self.theme);
-        let base = status + banner + preview + task_rows + composer + agent_rows + mode_row + below;
+        let notifications = u16::try_from(self.mod_notification_lines().len()).unwrap_or(u16::MAX);
+        let base = status
+            + banner
+            + preview
+            + task_rows
+            + composer
+            + notifications
+            + agent_rows
+            + mode_row
+            + below;
         let overlay = if let Some(view) = self.view_stack.active() {
             view.desired_height(width)
         } else {
@@ -2215,20 +2371,23 @@ impl Renderable for BottomPane {
         }
         self.pending_input_preview.render(zones[2], buf);
         Paragraph::new(self.planned_task_lines()).render(zones[3], buf);
+        let argument_hint = self.command_argument_hint();
         ComposerView::new(&self.composer)
             .with_attached_images(&self.attached_image_labels)
+            .with_argument_hint(argument_hint.as_deref())
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
             .render(zones[4], buf);
+        Paragraph::new(self.mod_notification_lines()).render(zones[5], buf);
         Paragraph::new(input_status::agent_lines(&self.running_agents, &self.theme))
-            .render(zones[5], buf);
+            .render(zones[6], buf);
         // Permission-mode indicator (below the composer, above the footer);
         // empty for `Default` mode (zero-height zone → nothing drawn).
         if let Some(line) =
             permission_mode_indicator::indicator_line(self.permission_mode, &self.theme)
         {
-            Paragraph::new(line).render(zones[6], buf);
+            Paragraph::new(line).render(zones[7], buf);
         }
-        let below = zones[7];
+        let below = zones[8];
         if self.accessibility_announcement.is_some() {
             footer::render_footer(below, buf, &self.footer_props(), &self.theme);
         } else if let Some(popup) = &self.completion {
@@ -2602,6 +2761,65 @@ mod tests {
     use super::*;
     use crate::bottom_pane::view::AgentsPaneRow;
     use crate::renderable::Renderable;
+
+    #[test]
+    fn mod_toast_is_visible_below_composer_then_expires() {
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_mod_toast("Done".into(), 10);
+        assert_eq!(pane.mod_toast_line().unwrap().spans[0].content, "Done");
+        assert!(pane.planned_task_lines().is_empty());
+        let zones = pane.zones(Rect::new(0, 0, 80, 20));
+        assert_eq!(zones[5].y, zones[4].y + zones[4].height);
+        assert_eq!(zones[5].height, 1);
+        assert!(pane.mod_toast.is_some());
+        pane.handle_view_tick(Instant::now() + Duration::from_millis(11));
+        assert!(pane.mod_toast.is_none());
+        assert!(pane.mod_toast_line().is_none());
+    }
+
+    #[test]
+    fn mod_status_is_pinned_per_plugin_until_cleared() {
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_mod_status("one".into(), Some("First".into()));
+        pane.set_mod_status("two".into(), Some("Second".into()));
+        pane.set_mod_status("one".into(), Some("Updated".into()));
+        assert_eq!(pane.mod_notification_lines().len(), 2);
+        assert_eq!(
+            pane.mod_statuses,
+            vec![
+                ("one".into(), "Updated".into()),
+                ("two".into(), "Second".into())
+            ]
+        );
+        pane.set_mod_status("one".into(), None);
+        assert_eq!(pane.mod_statuses, vec![("two".into(), "Second".into())]);
+        assert!(pane.planned_task_lines().is_empty());
+        pane.clear_mod_ui();
+        assert!(pane.mod_notification_lines().is_empty());
+    }
+
+    #[test]
+    fn mod_above_prompt_rows_follow_the_budget_and_clear_with_the_session_ui() {
+        let mut pane = BottomPane::new(Theme::dark());
+        let baseline = pane.desired_height_for(80, false);
+        assert_eq!(pane.mod_ui_row_budget_for(80, false, baseline + 5), 5);
+        pane.set_mod_render_lines(
+            vec!["First row".into(), "Second row".into(), "Third row".into()],
+            2,
+        );
+        assert_eq!(
+            pane.mod_ui_row_budget_for(80, false, baseline + 5),
+            5,
+            "the measured budget excludes the current tree's rows"
+        );
+        let lines = pane.planned_task_lines();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].content, "First row");
+        assert_eq!(lines[1].spans[0].content, "Second row");
+        pane.clear_mod_ui();
+        assert!(pane.planned_task_lines().is_empty());
+        assert_eq!(pane.mod_ui_row_budget_for(80, false, baseline + 5), 5);
+    }
 
     /// A scripted view: returns the next queued outcome per key/paste.
     struct StubView {
@@ -3496,6 +3714,10 @@ mod tests {
             description: "dynamic".to_string(),
             menu_description: Some("dynamic".to_string()),
             aliases: vec!["/pz".to_string()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
         }]);
         let after = pane
             .completion()
@@ -3509,6 +3731,98 @@ mod tests {
             "dynamic registry row missing after refresh: {after:?}"
         );
         assert_ne!(before, "/plan-z");
+    }
+
+    #[test]
+    fn described_command_argument_hint_appears_only_before_args() {
+        let mut builtin_pane = pane();
+        typ(&mut builtin_pane, "/model ");
+        assert_eq!(
+            builtin_pane.command_argument_hint().as_deref(),
+            Some("<model>")
+        );
+
+        let mut described_pane = pane();
+        described_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/model".into(),
+            description: "Choose a model".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: true,
+            argument_hint: Some("<choice>".into()),
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut described_pane, "/model ");
+        assert_eq!(
+            described_pane.command_argument_hint().as_deref(),
+            Some("<choice>")
+        );
+        typ(&mut described_pane, "opus");
+        assert_eq!(described_pane.command_argument_hint(), None);
+
+        let mut removed_hint_pane = pane();
+        removed_hint_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/model".into(),
+            description: "Choose a model".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: true,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut removed_hint_pane, "/model ");
+        assert_eq!(removed_hint_pane.command_argument_hint(), None);
+    }
+
+    #[test]
+    fn prompt_argument_hint_advances_after_completed_arguments() {
+        let mut prompt_pane = pane();
+        prompt_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/deploy".into(),
+            description: "Deploy a target".into(),
+            menu_description: None,
+            aliases: vec!["/ship".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: Some("<target>".into()),
+            argument_names: vec!["target".into(), "message".into(), "mode".into()],
+        }]);
+        typ(&mut prompt_pane, "/deploy ");
+        assert_eq!(
+            prompt_pane.command_argument_hint().as_deref(),
+            Some("<target>")
+        );
+        typ(&mut prompt_pane, "prod ");
+        assert_eq!(
+            prompt_pane.command_argument_hint().as_deref(),
+            Some("[message] [mode]")
+        );
+        typ(&mut prompt_pane, "\"two words\" ");
+        assert_eq!(
+            prompt_pane.command_argument_hint().as_deref(),
+            Some("[mode]")
+        );
+        typ(&mut prompt_pane, "fast ");
+        assert_eq!(prompt_pane.command_argument_hint(), None);
+
+        let mut alias_pane = pane();
+        alias_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/deploy".into(),
+            description: "Deploy a target".into(),
+            menu_description: None,
+            aliases: vec!["/ship".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: vec!["target".into(), "mode".into()],
+        }]);
+        typ(&mut alias_pane, "/ship ");
+        assert_eq!(
+            alias_pane.command_argument_hint().as_deref(),
+            Some("[target] [mode]")
+        );
     }
 
     #[test]

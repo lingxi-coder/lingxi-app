@@ -4,7 +4,7 @@
 //! 2.1.252 binary's `agentsCommandHandler` +
 //! `printAgentsJson` (`pGf` @223853400):
 //!
-//! * `--help`/`-h` → the captured fixture text VERBATIM (commander's layout;
+//! * `--help`/`-h` → the captured layout with the current CLI name (commander's layout;
 //!   clap cannot render it, so help is a manual flag printing the locked
 //!   fixture — same idiom as `gateway.rs`).
 //! * `--json` → the live-session registry (`~/.lingxi/sessions/<pid>.json`)
@@ -42,9 +42,14 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The locked `claude agents --help` text — byte-identical to the captured
-/// 2.1.252 fixture (`cli_agents.rs` asserts this output end-to-end).
-pub const AGENTS_HELP: &str = include_str!("../../assets/cc_2_1_252_agents_help.txt");
+/// Render the captured upstream layout with the current CLI executable name.
+pub fn agents_help() -> String {
+    include_str!("../../assets/cc_2_1_252_agents_help.txt").replacen(
+        "Usage: claude agents [options]",
+        "Usage: lingxi-cli agents [options]",
+        1,
+    )
+}
 
 /// `agents` args — byte-match `claude agents --help` (options only; no
 /// children). Repeatable options (`--add-dir`, `--mcp-config`, `--plugin-dir`)
@@ -153,7 +158,7 @@ impl Cli {
 /// Run the `agents` family.
 pub async fn run(cli: &Cli) -> i32 {
     if cli.help {
-        print!("{AGENTS_HELP}");
+        print!("{}", agents_help());
         return crate::exit_codes::SUCCESS;
     }
     if cli.json {
@@ -821,7 +826,7 @@ fn fallback_connect_auth_methods() -> std::collections::BTreeMap<String, String>
             let tag = match &provider.auth {
                 ApiKey | Bearer => "api_key",
                 CopilotBearer => "copilot_device",
-                ChatGptOAuth | OAuthBearer | AwsSigV4 | GcpToken | AzureToken => "oauth",
+                ChatGptOAuth | ChatGptPlan | OAuthBearer | AwsSigV4 | GcpToken | AzureToken => "oauth",
                 None => return Option::None,
             };
             Some((provider.profile_name.clone(), tag.to_string()))

@@ -63,6 +63,8 @@ pub struct Runtime {
     /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
     /// handlers (M5-09/M5-10/M5-11).
     pub dispatcher: RegistrySlashDispatcher,
+    /// Live command catalog whose Mod queue is bound by the mounted TUI host.
+    pub mod_command_catalog: Arc<command_api::RegistryModCommandCatalog>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// (M9-05) The desktop task registry shared with the tool context. The TUI
@@ -326,6 +328,9 @@ pub enum InitError {
     /// installed; payload is the platform-specific install hint.
     #[error("tmux is not installed.\n{0}")]
     TmuxNotInstalled(String),
+    /// Explicit custom-agent configuration could not be parsed.
+    #[error("Invalid --agents configuration: {0}")]
+    InvalidAgents(String),
     /// Custom Anthropic beta headers require an API-key-backed first-party
     /// Anthropic session; OAuth and alternate providers reject them.
     #[error("--betas requires an Anthropic API key and a first-party Anthropic model")]
@@ -336,6 +341,7 @@ impl From<harness_runtime::desktop::BuildError> for InitError {
     fn from(e: harness_runtime::desktop::BuildError) -> Self {
         match e {
             harness_runtime::desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
+            harness_runtime::desktop::BuildError::InvalidAgents(m) => Self::InvalidAgents(m),
             harness_runtime::desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
             harness_runtime::desktop::BuildError::DurableSession(m) => Self::DurableSession(m),
             harness_runtime::desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
@@ -876,12 +882,16 @@ pub(crate) fn resolve_desktop_config_at(
     let _ = argv.no_stream;
 
     DesktopConfig {
+        verified_computer_profiles: Vec::new(),
+        composition: None,
+        defer_session_start: false,
         build_info: harness_runtime::desktop::BuildInfo::new(
             env!("CARGO_PKG_VERSION"),
             option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
         ),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        mod_render_surface: None,
         // Real CLI session: the machine's keychain and env ARE legitimate
         // credential sources here.
         isolated_credential_storage: false,
@@ -889,6 +899,9 @@ pub(crate) fn resolve_desktop_config_at(
         injected_plugin_secrets: std::collections::BTreeMap::new(),
         api_base: resolve_api_base(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+        api_key_source: llm_runtime::CredentialSource::Environment {
+            variable: "ANTHROPIC_API_KEY".into(),
+        },
         api_key_helper: if restricted {
             flag_settings
                 .as_ref()
@@ -1084,6 +1097,10 @@ pub(crate) fn resolve_desktop_config_at(
         parent_session_id: None,
         // CLI `--disable-slash-commands`: empties the command/skill registry.
         disable_slash_commands: argv.disable_slash_commands,
+        // The CLI has no per-session skill allowlist input: `None` means all
+        // eligible registered skills remain model-invocable. The separate
+        // `--disable-slash-commands` flag still empties the registry entirely.
+        session_skill_allowlist: None,
         // CLI `--add-dir <directories...>`: extra tool-access directories,
         // unioned into the permission working-dir set in `build()`.
         add_dir: argv.add_dir.clone().unwrap_or_default(),
@@ -1263,8 +1280,8 @@ pub(crate) fn parse_flag_settings_checked(
 /// Build the full runtime from parsed argv + the chosen output stream.
 ///
 /// `output` is the sink the orchestrator will push turn events to (plain
-/// stdout or NDJSON, projected from `crate::output::OutputSink` through
-/// `crate::output_adapter::SinkAdapter`). M5-12 Task 9 wires this end-to-end
+/// stdout or NDJSON, projected from `harness_runtime::headless::output::OutputSink` through
+/// `harness_runtime::headless::output_adapter::SinkAdapter`). M5-12 Task 9 wires this end-to-end
 /// so `--json` produces NDJSON `text` / `tool_call` / `turn_end` lines.
 ///
 /// **F2-01**: the actual assembly is delegated to [`harness_runtime::desktop::build`].
@@ -1325,7 +1342,7 @@ fn bind_tui_permission_gate(gate: &tui::permission_gate::TuiPermissionGate, runt
     if let Some(policy_gate) = &runtime.enforcing_permission_gate {
         let policy_gate = Arc::downgrade(policy_gate);
         gate.set_policy_rule_authority(Arc::new(move |name, input| {
-            policy_gate.upgrade().map_or(true, |gate| {
+            policy_gate.upgrade().is_none_or(|gate| {
                 gate.check_noninteractive_with_allow_rules(name, input, &[])
                     .is_some()
             })
@@ -1429,6 +1446,7 @@ pub async fn build_runtime_from_config(
         fusion_recorder_factory: rt.fusion_recorder_factory,
         session_lifecycle: rt.session_lifecycle,
         dispatcher: rt.dispatcher,
+        mod_command_catalog: rt.mod_command_catalog,
         auth: rt.auth,
         enforcing_permission_gate: rt.enforcing_permission_gate,
         task_registry: rt.task_registry,

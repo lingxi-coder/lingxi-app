@@ -524,6 +524,12 @@ mod unix {
         connection
             .write(&WorkerToParent::Ready {
                 task_id: task_id.clone(),
+                selection: lingxi_core::host::team_spawn::TeamSpawnSeam::resolved_model_selection(
+                    runtime.task_registry.as_ref(),
+                    &task_id,
+                )
+                .await
+                .map_err(|error| error.to_string())?,
             })
             .await?;
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));

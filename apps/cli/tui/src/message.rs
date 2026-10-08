@@ -47,6 +47,9 @@ pub fn render_message(
 ) -> Vec<StyledLine> {
     let width = if width == 0 { DEFAULT_WIDTH } else { width };
     match entry {
+        RenderedMessage::IdentifiedTranscriptRow { message, .. } => {
+            render_message(message, width, theme, verbose)
+        }
         RenderedMessage::UserText { body, .. } => user_text_lines(body, theme),
         RenderedMessage::AssistantText { body, .. } => assistant_lines(body, width, theme),
         RenderedMessage::SystemText { body, is_error, .. } => {
@@ -454,6 +457,7 @@ mod tests {
     // compile, forcing a new coverage fixture.
     fn variant_name(m: &RenderedMessage) -> &'static str {
         match m {
+            RenderedMessage::IdentifiedTranscriptRow { .. } => "IdentifiedTranscriptRow",
             RenderedMessage::UserText { .. } => "UserText",
             RenderedMessage::AssistantText { .. } => "AssistantText",
             RenderedMessage::SystemText { .. } => "SystemText",
@@ -491,6 +495,18 @@ mod tests {
 
     fn text_fixtures() -> Vec<Fixture> {
         vec![
+            (
+                "IdentifiedTranscriptRow",
+                RenderedMessage::IdentifiedTranscriptRow {
+                    message: Box::new(RenderedMessage::UserText {
+                        body: "selected".to_string(),
+                        timestamp: 0,
+                    }),
+                    request_id: "transcript-uuid".to_string(),
+                },
+                false,
+                Expect::Visible(&["> selected"]),
+            ),
             (
                 "UserText",
                 RenderedMessage::UserText {
@@ -1050,7 +1066,7 @@ mod tests {
             .collect();
         assert_eq!(
             names.len(),
-            31,
+            32,
             "one fixture per top-level variant at minimum: {names:?}"
         );
     }

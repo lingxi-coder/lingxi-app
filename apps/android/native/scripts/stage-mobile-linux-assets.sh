@@ -22,7 +22,7 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANDROID_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${ANDROID_DIR}/../../.." && pwd)"
-RUNTIME_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/runtime_source.py" --root)"
+LOCAL_APP_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/local_app_source.py" --root)"
 SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 NATIVE_ROOT="${ANDROID_DIR}/app/build/mobileLinuxNative/${VARIANT}/native-support"
 OUTPUT="${ANDROID_DIR}/app/build/generated/mobileLinux/${VARIANT}/assets/mobile-linux"
@@ -33,4 +33,4 @@ bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh" --release --apk-dir "${APK
 
 exec python3 "${SCRIPT_DIR}/stage-mobile-linux-assets.py" \
   --input "${INPUT_DIR}" --output "${OUTPUT}" --sdk-root "${SDK_ROOT}" \
-  --runtime-root "${RUNTIME_ROOT}" --native-root "${NATIVE_ROOT}"
+  --local-app-root "${LOCAL_APP_ROOT}" --native-root "${NATIVE_ROOT}"

@@ -163,12 +163,12 @@ jobs:
         run: |
           python3 scripts/local-apps/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
           sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
-          runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
+          local_app_root="$(python3 scripts/lib/local_app_source.py --root)"
           for variant in play direct; do
             python3 apps/android/native/scripts/stage-mobile-linux-assets.py \
               --input "$RUNNER_TEMP/sdk-rootfs" \
               --output "apps/android/native/app/build/generated/mobileLinux/$variant/assets/mobile-linux" \
-              --sdk-root "$sdk_root" --runtime-root "$runtime_root" \
+              --sdk-root "$sdk_root" --local-app-root "$local_app_root" \
               --native-root "apps/android/native/app/build/mobileLinuxNative/$variant/native-support"
           done
 
@@ -247,7 +247,7 @@ jobs:
             --input "$RUNNER_TEMP/sdk-rootfs" \
             --output apps/android/native/app/build/generated/mobileLinux/play/assets/mobile-linux \
             --sdk-root "$(python3 scripts/lib/mobile_linux_source.py --root)" \
-            --runtime-root "$(python3 scripts/lib/runtime_source.py --root)" \
+            --local-app-root "$(python3 scripts/lib/local_app_source.py --root)" \
             --native-root apps/android/native/app/build/mobileLinuxNative/play/native-support
 
       # api-level 30 (>= minSdk 26), x86_64 + google_apis for KVM-accelerated

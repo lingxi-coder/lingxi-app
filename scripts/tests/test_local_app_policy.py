@@ -35,6 +35,7 @@ class SmokeRoutingTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.host = self.root / "host"
         self.runtime = self.root / "harness"
+        self.local_app = self.root / "local-app"
         self.sdk = self.root / "sdk"
         self.log = self.root / "calls"
         self.env = {**os.environ, ENABLED_ENV: "0",
@@ -44,14 +45,15 @@ class SmokeRoutingTests(unittest.TestCase):
             self.env.pop(name, None)
         self.write(self.host / "scripts/local-apps/smoke.sh",
                    (HOST / "scripts/local-apps/smoke.sh").read_text())
-        for name, path in (("runtime_source", self.runtime), ("mobile_linux_source", self.sdk)):
+        for name, path in (("runtime_source", self.runtime), ("local_app_source", self.local_app),
+                           ("mobile_linux_source", self.sdk)):
             self.write(self.host / f"scripts/lib/{name}.py", f"print({str(path)!r})\n")
         for name in ("check-authorizations", "check-store-compliance"):
             self.gate(self.host / f"scripts/local-apps/{name}.sh", f"host-{name}")
         self.python_gate(self.host / "scripts/local-apps/verify-local-app-host.py", "host-policy")
         for name in ("check-authorizations", "check-rootfs-manifest", "check-sbom-and-licenses"):
             self.gate(self.runtime / f"scripts/local-apps/{name}.sh", name)
-        self.python_gate(self.runtime / "scripts/local-apps/verify-local-app-supply-chain.py", "supply-chain")
+        self.python_gate(self.local_app / "scripts/runtime/verify-local-app-supply-chain.py", "supply-chain")
         # The host policy fixture exposes the SDK resource-contract entrypoint.
         self.gate(self.sdk / "scripts/checks/check-resource-contracts.sh", "sdk-contracts")
 
@@ -86,6 +88,8 @@ sys.exit(1 if os.environ['POLICY_TEST_FAIL'] == {name!r} else 0)
             "host-check-authorizations", "host-check-store-compliance", "host-policy",
             "check-authorizations", "sdk-contracts", "check-sbom-and-licenses", "supply-chain"])
         self.assertIn(f"--sdk-root {self.sdk}", calls[-1])
+        # The verifier attests the Local App checkout the product pins, not the Harness one.
+        self.assertIn(f"--repo-root {self.local_app}", calls[-1])
         self.assertNotIn("--release", calls[-1])
 
     def test_gate_failures_stop_before_later_gates(self):
@@ -143,7 +147,7 @@ class LockedProfilePolicyTests(unittest.TestCase):
         cls.local_app = Path(resolve_local_app()["root"])
         cls.dot_dir = branding_constant("DOT_DIR", cls.resolved)
         spec = importlib.util.spec_from_file_location(
-            "locked_local_app_policy", cls.runtime / "scripts/local-apps/verify-local-app-supply-chain.py")
+            "locked_local_app_policy", cls.local_app / "scripts/runtime/verify-local-app-supply-chain.py")
         cls.verify = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.verify)
 

@@ -10,7 +10,8 @@ enabled="${LINGXI_MOBILE_LINUX_ENABLED:-0}"
 python3 "${script_dir}/verify-local-app-host.py" --repo-root "${repo_root}"
 RUNTIME_ROOT="$(python3 "${script_dir}/../lib/runtime_source.py" --root)"
 SDK_ROOT="$(python3 "${script_dir}/../lib/mobile_linux_source.py" --root)"
-# LingXi owns the host release policy and composes the Harness and SDK gates.
+LOCAL_APP_ROOT="$(python3 "${script_dir}/../lib/local_app_source.py" --root)"
+# LingXi owns the host release policy and composes the Harness, SDK and Local App gates.
 # Every gate receives sources resolved from the product's canonical Cargo pins.
 "${RUNTIME_ROOT}/scripts/local-apps/check-authorizations.sh"
 if [[ "${enabled}" == "1" ]]; then
@@ -26,12 +27,12 @@ if [[ "${enabled}" == "1" ]]; then
     echo "LINGXI_LOCAL_APP_APK_DIR is required for an enabled local-app runtime release" >&2
     exit 1
   fi
-  python3 "${RUNTIME_ROOT}/scripts/local-apps/verify-local-app-supply-chain.py" \
-    --repo-root "${RUNTIME_ROOT}" --sdk-root "${SDK_ROOT}" \
+  python3 "${LOCAL_APP_ROOT}/scripts/runtime/verify-local-app-supply-chain.py" \
+    --repo-root "${LOCAL_APP_ROOT}" --sdk-root "${SDK_ROOT}" \
     --release --apk-dir "${LINGXI_LOCAL_APP_APK_DIR}"
 else
-  python3 "${RUNTIME_ROOT}/scripts/local-apps/verify-local-app-supply-chain.py" \
-    --repo-root "${RUNTIME_ROOT}" --sdk-root "${SDK_ROOT}"
+  python3 "${LOCAL_APP_ROOT}/scripts/runtime/verify-local-app-supply-chain.py" \
+    --repo-root "${LOCAL_APP_ROOT}" --sdk-root "${SDK_ROOT}"
 fi
 
 echo "mobile-linux guardrail smoke checks passed"

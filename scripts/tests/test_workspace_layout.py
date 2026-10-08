@@ -125,14 +125,16 @@ class WorkspaceLayoutTests(unittest.TestCase):
     def test_local_app_builds_use_locked_sources_and_host_output_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            host, upstream, sdk, tools = (root / name for name in ("host", "harness", "sdk", "bin"))
+            host, upstream, local_app, sdk, tools = (root / name for name in ("host", "harness", "local-app", "sdk", "bin"))
             scripts = host / "scripts/local-apps"
             scripts.mkdir(parents=True)
             (host / "scripts/lib").mkdir()
             (upstream / "scripts/local-apps").mkdir(parents=True)
+            (local_app / "scripts/runtime").mkdir(parents=True)
             sdk.mkdir()
             tools.mkdir()
-            for name, source in (("runtime_source.py", upstream), ("mobile_linux_source.py", sdk)):
+            for name, source in (("runtime_source.py", upstream), ("local_app_source.py", local_app),
+                                 ("mobile_linux_source.py", sdk)):
                 _ = (host / "scripts/lib" / name).write_text(f"print({str(source)!r})\n")
             python = tools / "python3"
             _ = python.write_text(f"#!{sys.executable}\nimport os, sys\nos.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n")
@@ -142,7 +144,12 @@ class WorkspaceLayoutTests(unittest.TestCase):
                 with self.subTest(entrypoint=name):
                     entrypoint = scripts / name
                     _ = shutil.copy2(ROOT / "scripts/local-apps" / name, entrypoint)
-                    _ = (upstream / "scripts/local-apps" / name).write_text("#!/bin/bash\nprintf '%s\\0' \"$@\"\n")
+                    # The rootfs builder is the Harness's; the node-modules builder is the Local App's.
+                    if name == "build-local-app-rootfs.sh":
+                        _ = (upstream / "scripts/local-apps" / name).write_text("#!/bin/bash\nprintf '%s\\0' \"$@\"\n")
+                    else:
+                        _ = (local_app / "scripts/runtime/build-local-app-node-modules.py").write_text(
+                            "import sys\nsys.stdout.write(''.join(a + '\\0' for a in sys.argv[1:]))\n")
                     result = subprocess.run(["bash", str(entrypoint), "--arch", "aarch64"],
                                             cwd=root, env=environment, capture_output=True, check=True)
                     arguments = result.stdout.decode().rstrip("\0").split("\0")
@@ -157,6 +164,21 @@ class WorkspaceLayoutTests(unittest.TestCase):
                         self.assertEqual(options["--output-dir"], str(host / "apps/ios/native/build/local-app-node-modules/aarch64"))
                     self.assertFalse((upstream / "target").exists())
                     self.assertFalse((sdk / "target").exists())
+            # The verifier and the stager run from the Local App checkout, attesting that checkout against the SDK,
+            # whatever root the caller names.
+            _ = shutil.copy2(ROOT / "scripts/lib/local_app_delegate.py", host / "scripts/lib/local_app_delegate.py")
+            for tool in ("verify-local-app-supply-chain", "stage-local-app-runtime"):
+                with self.subTest(delegate=tool):
+                    _ = shutil.copy2(ROOT / "scripts/local-apps" / f"{tool}.py", scripts / f"{tool}.py")
+                    _ = (local_app / "scripts/runtime" / f"{tool}.py").write_text(
+                        "import sys\nsys.stdout.write(''.join(a + '\\0' for a in sys.argv[1:]))\n")
+                    for given in ([], ["--repo-root", str(root / "elsewhere")]):
+                        result = subprocess.run([sys.executable, str(scripts / f"{tool}.py"), "--release", *given],
+                                                cwd=root, capture_output=True, check=True)
+                        arguments = result.stdout.decode().rstrip("\0").split("\0")
+                        self.assertEqual(arguments[arguments.index("--repo-root") + 1], str(local_app))
+                        self.assertEqual(arguments[arguments.index("--sdk-root") + 1], str(sdk))
+                        self.assertIn("--release", arguments)
 
 
 if __name__ == "__main__":

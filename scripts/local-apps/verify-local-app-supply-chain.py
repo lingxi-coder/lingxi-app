@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Invoke the supported tool from its Cargo-locked upstream source."""
+"""Invoke the supported tool from the Local App source this product pins."""
 import pathlib
-import subprocess
 import sys
-resolver = pathlib.Path(__file__).resolve().parents[1] / "lib/runtime_source.py"
-root = subprocess.check_output([sys.executable, str(resolver), "--root"], text=True).strip()
-args = sys.argv[1:]
-if "--repo-root" in args:
-    args[args.index("--repo-root") + 1] = root
-raise SystemExit(subprocess.call([sys.executable, str(pathlib.Path(root) / "scripts/local-apps/verify-local-app-supply-chain.py"), *args]))
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+from local_app_delegate import run
+
+raise SystemExit(run("verify-local-app-supply-chain.py", sys.argv[1:]))

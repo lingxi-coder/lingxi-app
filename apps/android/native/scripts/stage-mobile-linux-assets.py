@@ -65,9 +65,9 @@ def inspect_release(sdk, source, abi, version, pins):
     return manifest, archive
 
 
-def stage(source, output, sdk, runtime, native):
+def stage(source, output, sdk, local_app, native):
     output = output.resolve()
-    for protected in (source, sdk, runtime, native):
+    for protected in (source, sdk, local_app, native):
         protected = protected.resolve()
         if output.is_relative_to(protected) or protected.is_relative_to(output):
             raise ValueError(f"output overlaps immutable inputs: {protected}")
@@ -106,7 +106,7 @@ def stage(source, output, sdk, runtime, native):
         }
         (temporary / "mobile-linux-pins.json").write_text(json.dumps(compatibility_pins, indent=2) + "\n")
         shutil.copy2(pins_path, temporary / "runtime-pins.json")
-        shutil.copy2(runtime / "docs/mobile-linux/local-app-runtime-pins.json", temporary / "local-app-runtime-pins.json")
+        shutil.copy2(local_app / "docs/runtime/local-app-runtime-pins.json", temporary / "local-app-runtime-pins.json")
         licenses = temporary / "licenses"
         licenses.mkdir()
         shutil.copy2(sdk / "docs/mobile-linux/LICENSES/NOTICE.md", licenses / "NOTICE.md")
@@ -125,11 +125,11 @@ def stage(source, output, sdk, runtime, native):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("input", "output", "sdk-root", "runtime-root", "native-root"):
+    for name in ("input", "output", "sdk-root", "local-app-root", "native-root"):
         parser.add_argument("--" + name, type=Path, required=True)
     args = parser.parse_args()
     try:
-        stage(args.input, args.output, args.sdk_root, args.runtime_root, args.native_root)
+        stage(args.input, args.output, args.sdk_root, args.local_app_root, args.native_root)
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"stage-mobile-linux-assets: {error}\n")
 

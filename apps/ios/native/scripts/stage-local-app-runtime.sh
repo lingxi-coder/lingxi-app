@@ -18,11 +18,12 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${IOS_DIR}/../../.." && pwd)"
-RUNTIME_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/runtime_source.py" --root)"
+LOCAL_APP_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/local_app_source.py" --root)"
+SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 OUTPUT="${IOS_DIR}/build/local-app-runtime/${VARIANT}"
 
-python3 "${RUNTIME_ROOT}/scripts/local-apps/stage-local-app-runtime.py" \
-  --repo-root "${RUNTIME_ROOT}" \
+python3 "${LOCAL_APP_ROOT}/scripts/runtime/stage-local-app-runtime.py" \
+  --repo-root "${LOCAL_APP_ROOT}" --sdk-root "${SDK_ROOT}" \
   --node-modules "${NODE_MODULES}" \
   --output "${OUTPUT}" \
   --platform ios \

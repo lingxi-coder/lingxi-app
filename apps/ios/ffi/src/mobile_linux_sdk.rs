@@ -14,7 +14,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 const LINGXI_DOT_DIR: &str = ".lingxi";
-const LOCAL_APP_BUILD_GUEST_ROOT: &str = local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_ROOT;
+const LOCAL_APP_BUILD_GUEST_ROOT: &str =
+    local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_ROOT;
 
 /// Immutable iSH runtime identity and path configuration supplied by the iOS
 /// framework bridge.

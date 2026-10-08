@@ -17,6 +17,25 @@ jobs:
           python3 scripts/tests/test_local_app_source.py
           python3 scripts/tests/test_fetch_sdk_rootfs.py
           python3 scripts/tests/test_workspace_layout.py
+      - name: Test Local App policy, Host SDK and Android JNI rejection cases
+        run: |
+          # The policy gates shell out to ripgrep.
+          sudo apt-get install -y --no-install-recommends ripgrep
+          python3 scripts/tests/test_local_app_policy.py
+          python3 scripts/tests/test_host_sdk_integration.py
+          python3 scripts/tests/test_android_jni_promotion.py
+      - name: Every Python test file is run by this workflow
+        run: |
+          # test_gate_triggers.py runs check-all.sh, so check-all.sh cannot
+          # discover tests itself; this is the guard against a test nobody runs.
+          missing=0
+          for f in scripts/tests/test_*.py; do
+            if ! grep -qF "$f" .github/workflows/ci.yml; then
+              echo "not run by CI: $f" >&2
+              missing=1
+            fi
+          done
+          exit "$missing"
       - name: Validate the pinned runtime, SDK and Local App sources
         run: python3 scripts/checks/check-runtime-dependency.py
       - name: Run every checked-in product gate

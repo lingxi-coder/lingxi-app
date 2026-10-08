@@ -17,6 +17,7 @@
     "harness-runtime",
     "hooks",
     "http-client",
+    "json-projection",
     "jsonrpc",
     "llm-runtime",
     "local-apps",

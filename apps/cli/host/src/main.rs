@@ -39,6 +39,7 @@ fn main() {
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
+                .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
                 .build()
                 .expect("build CLI runtime");
             runtime.block_on(run_cli(args))

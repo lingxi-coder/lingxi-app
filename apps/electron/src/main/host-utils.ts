@@ -620,6 +620,22 @@ export function buildBridgeEnvironment(source: NodeJS.ProcessEnv, apiBaseUrl?: s
   return result;
 }
 
+/** Packaged Mod compilation uses the app-owned Bun sidecar; development may opt into a path or use PATH. */
+export function resolveModBunExecutable(options: {
+  isPackaged: boolean;
+  resourcesPath?: string;
+  configuredPath?: string;
+  platform?: NodeJS.Platform;
+}): string | undefined {
+  if (options.isPackaged) {
+    if (!options.resourcesPath) throw new Error('packaged resources path is unavailable');
+    const platform = options.platform ?? process.platform;
+    return join(options.resourcesPath, 'bin', platform === 'win32' ? 'bun.exe' : 'bun');
+  }
+  const configured = options.configuredPath;
+  return configured && configured.length > 0 && !configured.includes('\0') ? configured : undefined;
+}
+
 export function buildBridgeArguments(config: {
   workspace: string;
   bridgeDir: string;

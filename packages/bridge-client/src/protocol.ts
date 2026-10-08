@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '17.0.0';
+export const CLIENT_PROTOCOL_VERSION = '19.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -286,11 +286,321 @@ export interface CronJobDto {
   last_fired_at?: number;
 }
 
+/** JSON value carried by the isolated Mod UI protocol boundary. */
+export type UiJsonValue = null | boolean | number | string | UiJsonValue[] | { [key: string]: UiJsonValue };
+
+export type NativeUiComponent =
+  | 'AskUserQuestion'
+  | 'UserMessage'
+  | 'AssistantMessage'
+  | 'ToolUse'
+  | 'ToolResult'
+  | 'ToolGroup'
+  | 'ToolProgress'
+  | 'CommandOutput'
+  | 'Spinner'
+  | 'TurnDuration'
+  | 'InfoNotice'
+  | 'SessionMode'
+  | 'PromptHint'
+  | 'AbovePrompt'
+  | 'Pane';
+
+export interface NativeUiViewportDto {
+  columns: number;
+  rows: number;
+  isFullscreen?: boolean;
+}
+
+export interface NativeUiOnScreenDto {
+  first: number;
+  last: number;
+  of: number;
+}
+
+export interface NativeUiKeyedRegionDto {
+  plugin: string;
+  key: string;
+  top: number;
+  bottom: number;
+}
+
+export interface NativeUiBenchRequestDto {
+  seq: number;
+  t0: number;
+}
+
+export interface NativeUiClientAddressDto {
+  plugin: string;
+  component: NativeUiComponent;
+  instance_id: string;
+  client: string;
+  module: string;
+}
+
+export type NativeUiClientPressEventDto =
+  | { type: 'press' }
+  | { type: 'input'; kind: 'change' | 'submit'; value: string }
+  | { type: 'select'; value: string };
+
+export type NativeUiSurfaceDto = 'desktop' | 'mobile' | 'vscode';
+
+/** Native parent-surface controls. These are distinct from Client `ui_client_press`. */
+export type NativeUiParentControlRequest =
+  | {
+      subtype: 'ui_press';
+      plugin: string;
+      handle: number;
+      key?: string;
+      surface?: NativeUiSurfaceDto;
+      href?: string;
+      client_id?: string;
+    }
+  | {
+      subtype: 'ui_input';
+      plugin: string;
+      handle: number;
+      kind: 'change' | 'submit';
+      value: string;
+      key?: string;
+      component?: NativeUiComponent;
+      instance_id?: string;
+      surface?: NativeUiSurfaceDto;
+      client_id?: string;
+    }
+  | {
+      subtype: 'ui_select';
+      plugin: string;
+      handle: number;
+      value: string;
+      key?: string;
+      component?: NativeUiComponent;
+      instance_id?: string;
+      surface?: NativeUiSurfaceDto;
+      client_id?: string;
+    };
+
+/** Native `ui_*` payloads. The transport wraps these JSON bodies in strings. */
+export type NativeUiControlRequest =
+  | {
+      subtype: 'ui_render';
+      surface: 'desktop' | 'mobile' | 'vscode';
+      component: NativeUiComponent;
+      instance_id: string;
+      props: Record<string, UiJsonValue>;
+      client_id?: string;
+      viewport?: NativeUiViewportDto;
+      on_screen?: NativeUiOnScreenDto | null;
+      content_rows?: number;
+      keyed?: NativeUiKeyedRegionDto[];
+      bench?: NativeUiBenchRequestDto;
+    }
+  | { subtype: 'ui_client_module'; plugin: string }
+  | (NativeUiClientAddressDto & {
+      subtype: 'ui_client_press';
+      element: string;
+      event: NativeUiClientPressEventDto;
+    })
+  | (NativeUiClientAddressDto & { subtype: 'ui_message'; data: UiJsonValue })
+  | (NativeUiClientAddressDto & {
+      subtype: 'ui_client_fault';
+      phase: 'load' | 'render' | 'run';
+      reason: string;
+    })
+  | NativeUiParentControlRequest;
+
+export interface NativeUiRenderResponseDto {
+  tree: UiJsonValue;
+  props: Record<string, UiJsonValue>;
+  rewritten: boolean;
+  hooked: boolean;
+  client_modules?: Record<string, string>;
+  bench?: Record<string, UiJsonValue>;
+}
+
+export interface NativeUiClientModuleResponseDto {
+  plugin: string;
+  hash: string;
+  modules: Array<{ module: string; entry: string; component: string }>;
+  runtime: string;
+  limits: { nodes: number; depth: number; chars: number; values: number; dataDepth: number };
+  files: Array<{ key: string; source: string }>;
+}
+
+export interface NativeUiClientPressResponseDto {
+  handled: boolean;
+  reached?: NativeUiClientPressReachedDto;
+}
+
+export interface NativeUiParentPressResponseDto {
+  handled: boolean;
+  element?: string;
+}
+
+export interface NativeUiParentInputResponseDto {
+  handled: boolean;
+  element?: string;
+  value?: string;
+}
+
+export interface NativeUiParentSelectResponseDto {
+  handled: boolean;
+  element?: string;
+  value?: string;
+}
+
+export interface NativeUiClientPressReachedDto {
+  element: string;
+  value?: string;
+}
+
+export interface NativeUiMessageResponseDto {
+  handled: boolean;
+  props?: UiJsonValue;
+}
+
+export interface NativeUiClientFaultResponseDto {
+  handled: boolean;
+}
+
+export type NativeUiControlResponse =
+  | NativeUiRenderResponseDto
+  | NativeUiClientModuleResponseDto
+  | NativeUiClientPressResponseDto
+  | NativeUiParentPressResponseDto
+  | NativeUiParentInputResponseDto
+  | NativeUiParentSelectResponseDto
+  | NativeUiMessageResponseDto
+  | NativeUiClientFaultResponseDto
+  | null;
+
+export type NativeUiControlResponseFor<T extends NativeUiControlRequest> = T extends { subtype: 'ui_render' }
+  ? NativeUiRenderResponseDto
+  : T extends { subtype: 'ui_client_module' }
+    ? NativeUiClientModuleResponseDto | null
+    : T extends { subtype: 'ui_client_press' }
+      ? NativeUiClientPressResponseDto
+      : T extends { subtype: 'ui_press' }
+        ? NativeUiParentPressResponseDto
+        : T extends { subtype: 'ui_input' }
+          ? NativeUiParentInputResponseDto
+          : T extends { subtype: 'ui_select' }
+            ? NativeUiParentSelectResponseDto
+      : T extends { subtype: 'ui_message' }
+        ? NativeUiMessageResponseDto
+        : NativeUiClientFaultResponseDto;
+
+/** Local Harness VM operation request; source code is never part of this DTO. */
+export type UiClientOperation =
+  | {
+      type: 'mount'; surface: 'desktop'; component: NativeUiComponent; instance_id: string;
+      plugin: string; client: string; module: string; render_revision: number; columns: number; rows: number;
+    }
+  | { type: 'render'; runtimeId: string; render_revision: number }
+  | { type: 'unmount'; runtimeId: string; render_revision: number }
+  | { type: 'setProps'; runtimeId: string; render_revision: number; props: Record<string, UiJsonValue> }
+  | { type: 'resize'; runtimeId: string; render_revision: number; columns: number; rows: number }
+  | { type: 'pointer'; runtimeId: string; render_revision: number; event: UiJsonValue }
+  | { type: 'key'; runtimeId: string; render_revision: number; event: UiJsonValue }
+  | { type: 'runHeld'; runtimeId: string; render_revision: number; event?: UiJsonValue; handle: number }
+  | {
+      type: 'draw_commit'; surface: 'desktop'; component: NativeUiComponent; instance_id: string;
+      render_revision: number; clients: Array<{ plugin: string; key: string; module: string }>;
+    }
+  | { type: 'draw_unmount'; surface: 'desktop'; component: NativeUiComponent; instance_id: string; render_revision: number };
+
+export interface UiClientFrameDto {
+  runtimeId: string;
+  renderRevision: number;
+  /** Host-local per-runtime ordering for RPC and asynchronous frames. */
+  frameSequence: number;
+  tree: UiJsonValue;
+  hasPointerListener: boolean;
+  hasKeyListener: boolean;
+}
+
+/** Worker-side failure published asynchronously without a successful tree frame. */
+export interface UiClientWorkerFaultSnapshotDto {
+  renderRevision: number;
+  fault: UiClientWorkerFaultResponseDto['fault'];
+}
+
+export type UiClientFrameEventPayloadDto = Omit<UiClientFrameDto, 'runtimeId'> | UiClientWorkerFaultSnapshotDto;
+
+export interface UiClientHandledOperationResponseDto {
+  handled: boolean;
+  renderRevision: number;
+}
+
+/** A frame operation was safely ignored because its runtime/revision is stale. */
+export interface UiClientOperationNoopResponseDto {
+  handled: false;
+  renderRevision: number;
+}
+
+/** A worker fault is a leaf result for this operation, not a second fault command. */
+export interface UiClientWorkerFaultResponseDto {
+  handled: false;
+  renderRevision: number;
+  runtimeId?: string;
+  fault: {
+    phase: 'load' | 'render' | 'run';
+    reason: string;
+    source: 'worker';
+  };
+}
+
+export type UiClientFrameOperationResponseDto =
+  | UiClientFrameDto
+  | UiClientOperationNoopResponseDto
+  | UiClientWorkerFaultResponseDto;
+
+export type UiClientOperationResponse = UiClientFrameOperationResponseDto | UiClientHandledOperationResponseDto;
+
+export type UiClientOperationResponseFor<T extends UiClientOperation> = T extends
+  | { type: 'mount' | 'render' | 'setProps' | 'resize' | 'pointer' | 'key' | 'runHeld' }
+  ? UiClientFrameOperationResponseDto
+  : UiClientHandledOperationResponseDto;
+
+/** Host-local runtime facts are separate from Native UI JSON. */
+export interface UiControlMetadataDto {
+  renderRevision?: number;
+  clientRuntimeEpochs?: Record<string, number>;
+  /** Opaque Native Client failure-state version for this parent render site. */
+  clientStateToken?: string;
+}
+
+export interface UiControlCallResultDto<TResponse = NativeUiControlResponse> {
+  response: TResponse;
+  metadata?: UiControlMetadataDto;
+}
+
+export interface UiClientFrameEventDto {
+  sessionId: string;
+  runtimeId: string;
+  frame: UiClientFrameEventPayloadDto;
+}
+
+export interface UiInvalidateEventDto {
+  sessionId: string;
+  instances?: Array<{ surface: 'desktop' | 'mobile' | 'vscode'; component: NativeUiComponent; instance_id: string }>;
+  uuid: string;
+}
+
 export type ClientCommand =
   | { type: 'cron_run_started'; run_id: string; session_id: string }
   | { type: 'scheduled_run_turn'; run_id: string; prompt: string; model: string; reasoning: ReasoningSelectionDto }
   | { type: 'cron_run_completed'; run_id: string; session_id?: string | null; summary?: string | null; error?: string | null }
   | { type: 'cron_manage'; request_id: string; request: CronRequestDto }
+  | { type: 'ui_render'; request_id: string; request_json: string }
+  | { type: 'ui_client_module'; request_id: string; plugin: string }
+  | { type: 'ui_message'; request_id: string; request_json: string }
+  | { type: 'ui_client_fault'; request_id: string; request_json: string }
+  | { type: 'ui_client_press'; request_id: string; request_json: string }
+  | { type: 'ui_press'; request_id: string; request_json: string }
+  | { type: 'ui_input'; request_id: string; request_json: string }
+  | { type: 'ui_select'; request_id: string; request_json: string }
+  | { type: 'ui_client_operation'; request_id: string; operation_json: string }
   // ── Turn driving ──────────────────────────────────────────────────────────
   | {
       type: 'send_prompt';
@@ -355,6 +665,9 @@ export type ClientCommand =
   | { type: 'resume_session'; session_id: string; cwd?: string }
   | { type: 'list_sessions'; limit?: number }
   | { type: 'fork_session'; session_id: string; target_mode: SessionModeDto }
+  // Explicit UI mount lifecycle; transport hello/close does not imply an attach.
+  | { type: 'ui_attach'; surface: 'desktop' | 'mobile' | 'vscode'; client_id: string }
+  | { type: 'ui_detach'; client_id: string }
   // ── Auth + session control ────────────────────────────────────────────────
   | { type: 'login' }
   | { type: 'logout' }
@@ -957,6 +1270,15 @@ export interface SessionAgentSummaryDto {
   status: string;
   latest_activity?: string;
   updated_at_ms?: number;
+}
+
+/** One UUID-addressable persisted row in a session-agent transcript. */
+export interface SessionAgentMessageRowDto {
+  message_index: number;
+  message_uuid: string;
+  message: MessageDto;
+  /** Complete serialized Native synthetic API-error row, kept losslessly. */
+  api_error_json?: string;
 }
 
 /** Connection status for an MCP server (listings.rs `McpStatusDto`). */
@@ -2036,6 +2358,33 @@ export interface CostDto {
   formatted: string;
 }
 
+/** Provider message facts retained on an accepted server-fallback tombstone. */
+export interface ServerFallbackProviderMessageDto {
+  id?: string;
+  model?: string;
+  stop_reason?: string;
+  stop_details_json?: string;
+  usage_json?: string;
+  /** Serialized array of the complete provider content blocks. */
+  content_json: string;
+}
+
+/** Complete durable-row facts forwarded when accepted server fallback removes a row. */
+export interface ServerFallbackTombstoneMessageDto {
+  uuid: string;
+  /** Native outer row kind, serialized on the wire as `type`. */
+  type: string;
+  timestamp: string;
+  request_id?: string;
+  request_ref_json?: string;
+  message: ServerFallbackProviderMessageDto;
+  is_api_error_message?: boolean;
+  supersedes_uuids?: string[];
+}
+
+export type RefusalContinuationPhaseDto = 'begin';
+export type RefusalContinuationJoinDto = 'exact';
+
 /**
 /**
  * Outbound events the engine streams to a client (events.rs `ClientEvent`).
@@ -2048,11 +2397,38 @@ export type ClientEvent =
   | { type: 'cron_run_bound'; run_id: string; error?: string | null }
   | { type: 'cron_run_requested'; run_id: string; task: CronJobDto }
   | { type: 'cron_result'; request_id: string; jobs: CronJobDto[]; error?: string }
+  | { type: 'ui_control_result'; request_id: string; response_json?: string; metadata_json?: string; error?: string }
+  | { type: 'ui_client_frame'; runtime_id: string; frame_json: string }
+  | { type: 'ui_invalidate'; instances_json?: string; uuid: string; session_id: string }
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
   | { type: 'message_identity'; message_id: string }
   | { type: 'message_retracted'; message_id: string }
+  /** Native route receipt for an accepted server-fallback hop. */
+  | { type: 'query_model_change'; to_model: string }
+  /** Host/client key for deltas until the completed text block has a durable UUID. */
+  | { type: 'assistant_block_start'; block_key: number }
+  /** Maps a transient block key to the persisted JSONL row UUID. */
+  | { type: 'assistant_block_identity'; block_key: number; message_uuid: string }
+  /** Complete row facts for a row removed by accepted server fallback. */
+  | { type: 'tombstone'; message: ServerFallbackTombstoneMessageDto; display_only: boolean }
+  /** Native refusal-text continuation; `display_salvage_text` is a host display policy. */
+  | {
+      type: 'refusal_continuation';
+      phase: RefusalContinuationPhaseDto;
+      salvage_text: string;
+      join: RefusalContinuationJoinDto;
+      replaces_uuids: string[];
+      display_salvage_text: boolean;
+    }
+  /** TUI user-row token resolved to the UUID from successful transcript persistence. */
+  | { type: 'user_transcript_row_identity'; row_token: string; uuid: string }
+  /** Persisted text-row UUIDs, grouped by an internal assistant response identity. */
+  | { type: 'assistant_transcript_row_uuids'; message_id: string; uuids: Array<string | null> }
   | { type: 'system_notice'; message: string; is_error: boolean }
+  | { type: 'ui_log'; plugin: string; text: string }
+  | { type: 'ui_toast'; plugin: string; text: string; timeout_ms: number }
+  | { type: 'ui_status'; plugin: string; text: string | null }
   | { type: 'scheduled_task_fire'; message: string }
   | {
       type: 'loop_wakeup';
@@ -2135,7 +2511,7 @@ export type ClientEvent =
       type: 'session_agent_transcript';
       session_id: string;
       agent_id: string;
-      messages: MessageDto[];
+      messages: SessionAgentMessageRowDto[];
       next_message_index: number;
       revision: number;
     }
@@ -2145,8 +2521,11 @@ export type ClientEvent =
       session_id: string;
       agent_id: string;
       message_index: number;
+      message_uuid: string;
       message: MessageDto;
+      api_error_json?: string;
     }
+  | { type: 'session_agent_tombstone'; session_id: string; agent_id: string; message_uuid: string; display_only: boolean }
   // ── Listing / screen events ─────────────────────────────────────────────────
   | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
   | { type: 'provider_model_catalog'; providers: ProviderModelCatalogEntryDto[] }

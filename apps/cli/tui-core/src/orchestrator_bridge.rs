@@ -510,7 +510,7 @@ impl OutputStream for BridgeOutputStream {
         let _ = self.tx.send(TurnEvent::TurnStarted);
     }
 
-    async fn emit_text(&self, text: &str) {
+    async fn emit_text(&self, text: &str, _utf16_code_units: Option<&[u16]>) {
         let _ = self.tx.send(TurnEvent::TextDelta(text.to_string()));
     }
 
@@ -652,6 +652,7 @@ impl OutputStream for BridgeOutputStream {
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
+        _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
         let _ = self.tx.send(TurnEvent::ToolUseStart {
             id: id.clone(),
@@ -713,6 +714,7 @@ impl OutputStream for BridgeOutputStream {
         tool: &str,
         model_text: &str,
         result: &serde_json::Value,
+        _projection: Option<&lingxi_core::host::ToolResultProjection>,
     ) {
         // (gap-3 general) Many tools return a structured `data` object with no
         // human-display string (Read's `{type,file:{…}}`, …), so the scrollback
@@ -955,7 +957,7 @@ mod tests {
     async fn emit_text_translates_to_text_delta() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        bridge.emit_text("hello").await;
+        bridge.emit_text("hello", None).await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::TextDelta(ref s) if s == "hello"));
     }
@@ -1082,7 +1084,12 @@ mod tests {
         let bridge = BridgeOutputStream::new(tx);
         let id = lingxi_core::types::ToolUseId::new();
         bridge
-            .emit_tool_call(&id, "Read", &serde_json::json!({"file_path": "/tmp/x"}))
+            .emit_tool_call(
+                &id,
+                "Read",
+                &serde_json::json!({"file_path": "/tmp/x"}),
+                None,
+            )
             .await;
         match rx.recv().await.unwrap() {
             TurnEvent::ToolUseStart {

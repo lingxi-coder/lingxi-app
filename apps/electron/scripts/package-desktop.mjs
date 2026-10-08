@@ -46,6 +46,7 @@ import {
   buildCredentialBrokerResources,
   signBinary,
 } from './credential-broker.mjs';
+import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
 
 function log(message) {
   process.stdout.write(`[package:desktop] ${message}\n`);
@@ -135,7 +136,7 @@ function createArchive(paths) {
   }
 }
 
-async function assembleDarwin(paths, metadata, electronDist, sidecar) {
+async function assembleDarwin(paths, metadata, electronDist, sidecar, modCompiler) {
   if (process.env['LINGXI_CREDENTIAL_BROKER_TEST_MOCK'] !== '1') {
     throw new Error(
       'generic macOS packaging is test-only; use npm run package:mac with an Apple signing identity and provisioning profile',
@@ -154,6 +155,7 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar) {
   const packagedSidecar = join(binDir, 'bridge-server');
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
+  const packagedModCompiler = stageModBun(resources, modCompiler);
   const brokerResourceRoot = join(resources, BROKER_RESOURCE_DIRNAME);
   buildCredentialBrokerResources(brokerResourceRoot, {
     version: metadata.version,
@@ -168,6 +170,8 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar) {
   assertBinaryArchitecture(packagedSidecar, paths, 'packaged bridge-server sidecar');
   if (!commandAvailable('/usr/bin/codesign')) throw new Error('codesign is required for macOS package tests');
   signBinary(packagedSidecar, '-', BRIDGE_SERVER_IDENTIFIER);
+  signBinary(packagedModCompiler, '-', `${BUNDLE_ID}.mod-compiler`);
+  sealModBun(resources);
   signBinary(
     join(brokerResourceRoot, 'bin', 'lingxi-credential-client'),
     '-',
@@ -182,7 +186,7 @@ async function assembleDarwin(paths, metadata, electronDist, sidecar) {
   ], { stdio: 'inherit' });
 }
 
-async function assemblePortable(paths, metadata, electronDist, sidecar) {
+async function assemblePortable(paths, metadata, electronDist, sidecar, modCompiler) {
   cpSync(electronDist, paths.payloadRoot, { recursive: true });
   const resources = join(paths.payloadRoot, 'resources');
   rmSync(join(resources, 'default_app.asar'), { force: true });
@@ -192,6 +196,7 @@ async function assemblePortable(paths, metadata, electronDist, sidecar) {
   const sidecarName = paths.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
   const packagedSidecar = join(binDir, sidecarName);
   copyFileSync(sidecar, packagedSidecar);
+  stageModBun(resources, modCompiler);
   copyFileSync(join(packageRoot, 'INTERNAL_BETA.md'), join(resources, 'INTERNAL_BETA.md'));
   const sourceExecutable = join(paths.payloadRoot, paths.platform === 'win32' ? 'electron.exe' : 'electron');
   const executable = join(paths.payloadRoot, paths.platform === 'win32' ? `${APP_NAME}.exe` : 'lingxi-code');
@@ -216,6 +221,8 @@ async function main() {
       ?? join(cargoTargetDir, 'release', target.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server'),
   );
   assertBinaryArchitecture(sidecar, target, 'release bridge-server sidecar');
+  const modCompiler = await prepareModBun(target);
+  assertBinaryArchitecture(modCompiler.executable, target, 'Mod Bun compiler');
   scanTreeForForbiddenContent(sidecar);
 
   run('npm', ['run', 'build'], join(repoRoot, 'packages', 'bridge-client'));
@@ -224,8 +231,8 @@ async function main() {
   unlinkIfPresent(paths.checksumPath);
   unlinkIfPresent(paths.metadataPath);
 
-  if (target.platform === 'darwin') await assembleDarwin(paths, metadata, electronDist, sidecar);
-  else await assemblePortable(paths, metadata, electronDist, sidecar);
+  if (target.platform === 'darwin') await assembleDarwin(paths, metadata, electronDist, sidecar, modCompiler);
+  else await assemblePortable(paths, metadata, electronDist, sidecar, modCompiler);
 
   scanTreeForForbiddenContent(paths.payloadRoot);
   normalizeTimestamps(paths.payloadRoot);

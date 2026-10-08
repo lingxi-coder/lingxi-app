@@ -20,6 +20,7 @@ import {
   walkTree,
 } from './package-support.mjs';
 import { BROKER_RESOURCE_DIRNAME } from './credential-broker.mjs';
+import { modBunFilename, verifyModBun } from './mod-bun.mjs';
 
 function requirePath(path, label) {
   if (!existsSync(path)) throw new Error(`${label} is missing: ${path}`);
@@ -50,6 +51,7 @@ export function verifyDesktopPackage(root, platform, arch) {
   requirePath(asar, 'application asar');
   requirePath(sidecar, 'bridge-server sidecar');
   requirePath(executable, 'Electron executable');
+  verifyModBun(resources, platform, arch);
   if (platform === 'darwin') {
     const brokerPaths = [
       join(resources, BROKER_RESOURCE_DIRNAME, 'broker-manifest.json'),
@@ -69,6 +71,7 @@ export function verifyDesktopPackage(root, platform, arch) {
     }
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', brokerPaths[2]], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', brokerPaths[3]], { stdio: 'pipe' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', modBunFilename(platform))], { stdio: 'pipe' });
   }
   if (existsSync(join(resources, 'default_app.asar'))) throw new Error('Electron default_app.asar remains in the package');
   if (existsSync(join(resources, 'app'))) throw new Error('unpacked resources/app remains beside app.asar');

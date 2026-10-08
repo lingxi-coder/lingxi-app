@@ -1,8 +1,7 @@
-use super::run_oneshot;
 use crate::argv::Argv;
 use crate::exit_codes;
 use crate::init::Runtime;
-use crate::output::OutputSink;
+use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::{FileSystem, OrchestratorHandle};
 use permission;
 #[cfg(unix)]
@@ -52,117 +51,6 @@ pub async fn run_resume(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -
         ResumeRoute::LoadById => run_resume_by_id(argv, runtime, sink).await,
         ResumeRoute::IocraftScreen => run_resume_iocraft(argv, sink).await,
         ResumeRoute::StdioPicker => run_resume_stdio_picker(argv, sink).await,
-    }
-}
-
-/// (CLI-16, cc 2.1.238) `--rewind-files <user-message-id>` — "Restore files to
-/// state at the specified user message and exit (requires --resume)"
-/// (oracle @307409495; hidden, present in 2.1.220 too). The port had the whole
-/// machinery — [`session::file_history::rewind_from_disk`] rebuilds a
-/// `FileHistory` from the persisted transcript and restores the tracked
-/// backups — but no argv seam ever reached it.
-///
-/// Oracle order (@307222470, inside `runHeadless` after the transcript loads):
-///
-/// ```js
-/// if(c.rewindFiles){
-///   let ze=L.find((Ze)=>Ze.uuid===c.rewindFiles);
-///   if(!ze||ze.type!=="user"){…`Error: --rewind-files requires a user message UUID, but ${c.rewindFiles} is not a user message in this session`; exit(1)}
-///   let Te=await ZRy(c.rewindFiles,r(),!1);
-///   if(!Te.canRewind){…`Error: ${Te.error||"Unexpected error"}`; exit(1)}
-///   …
-///   bl(`Files rewound to state at message ${c.rewindFiles}\n`), exit(0)}
-/// ```
-///
-/// The two argv gates that precede it (`requires --resume`, `cannot be used
-/// with a prompt`) live in [`Argv::validate_truncating_resume_args`] so they
-/// fire in the oracle's position, before any session load.
-///
-/// The `skippedLinks` warning line IS ported now (2.1.216): `FileHistory`
-/// refuses to restore or delete through a symlink / hard link at a tracked path
-/// and returns the count, so the sentence reports a filter that really ran.
-pub(crate) async fn run_rewind_files(argv: &Argv, sink: &dyn OutputSink) -> i32 {
-    let Some(target) = argv.rewind_files.as_deref() else {
-        return exit_codes::SUCCESS;
-    };
-    // `--rewind-files` is `requires --resume`-gated, so the session is whatever
-    // `--resume` names. A bare `--resume` (picker) has no id to rewind against.
-    let raw = argv.resume.as_deref().unwrap_or("").trim();
-    let session_id = match resolve_session_id(raw) {
-        Ok(id) => id,
-        Err(error) => {
-            sink.error("runtime", &error.to_string()).await;
-            return exit_codes::RUNTIME_ERROR;
-        }
-    };
-    let messages = match load_resume_session(session_id).await {
-        Ok(m) => m,
-        Err(error) => {
-            sink.error("runtime", &error.to_string()).await;
-            return exit_codes::RUNTIME_ERROR;
-        }
-    };
-    // `L.find(e=>e.uuid===c.rewindFiles)` then `!ze || ze.type!=="user"` — one
-    // message, byte-exact, for both the missing and the wrong-kind case.
-    let names_user_entry = messages
-        .iter()
-        .any(|m| m.uuid == target && m.message_type == "user");
-    if !names_user_entry {
-        eprintln!(
-            "Error: --rewind-files requires a user message UUID, but {target} is not a user message in this session"
-        );
-        return exit_codes::ARGV_ERROR;
-    }
-    let message_id = match uuid::Uuid::parse_str(target) {
-        Ok(id) => id,
-        Err(_) => {
-            eprintln!(
-                "Error: --rewind-files requires a user message UUID, but {target} is not a user message in this session"
-            );
-            return exit_codes::ARGV_ERROR;
-        }
-    };
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match session::file_history::rewind_from_disk(
-        &lingxi_home_dir(),
-        &cwd.to_string_lossy(),
-        session_id,
-        message_id,
-    )
-    .await
-    {
-        Ok(outcome) => {
-            // `if(Te.skippedLinks)process.stderr.write(`Warning: ${…} tracked
-            // ${…===1?"path was":"paths were"} skipped: ${SDt}. Run with --debug
-            // for the paths.\n`)` — emitted BEFORE the success line, on stderr.
-            if outcome.skipped_links > 0 {
-                let noun = if outcome.skipped_links == 1 {
-                    "path was"
-                } else {
-                    "paths were"
-                };
-                eprintln!(
-                    "Warning: {} tracked {noun} skipped: the tracked path is (or became) a link \
-                     or other non-regular file, its directory changed since the checkpoint, or \
-                     its backup could not be safely read. Run with --debug for the paths.",
-                    outcome.skipped_links
-                );
-            }
-            // `bl(...)` is the stdout writer; the oracle's literal already ends
-            // in `\n`, which `println!` supplies.
-            println!("Files rewound to state at message {target}");
-            exit_codes::SUCCESS
-        }
-        // `if(!Te.canRewind){process.stderr.write(`Error: ${Te.error||"Unexpected error"}`)}`
-        Err(error) => {
-            let detail = if error.is_empty() {
-                "Unexpected error".to_string()
-            } else {
-                error
-            };
-            eprintln!("Error: {detail}");
-            exit_codes::RUNTIME_ERROR
-        }
     }
 }
 
@@ -254,7 +142,6 @@ pub(super) fn parse_pr_value(raw: &str) -> Option<u64> {
 ///
 /// Once confirmed present the dispatch mirrors the FRESH launch's
 /// [`crate::mode::decide_mode`]:
-///   - a non-empty prompt → run the follow-up turn one-shot (`run_oneshot`);
 ///   - else under a full TTY (no `--no-tui`) → mount the live TUI with the
 ///     prior conversation replayed (M5-13 — [`mount_resumed_tui`]);
 ///   - else (`--no-tui` / non-TTY, no prompt) → keep the stdio fallback:
@@ -300,7 +187,7 @@ pub(super) async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn 
 /// on a unique hit, and `Err(message)` for a no-match, an ambiguous match, or a
 /// real catalog I/O failure. A genuinely empty catalog still follows the
 /// no-match copy; unreadable/corrupt storage must not masquerade as one.
-pub(super) async fn resolve_resume_title(arg: &str) -> Result<Option<uuid::Uuid>, String> {
+pub(crate) async fn resolve_resume_title(arg: &str) -> Result<Option<uuid::Uuid>, String> {
     if arg.is_empty() {
         return Ok(None);
     }
@@ -429,7 +316,7 @@ pub async fn run_continue(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
 /// (prompt one-shot → TUI mount → stdio fallback).
 pub(super) async fn resume_resolved_session(
     argv: &Argv,
-    runtime: &Runtime,
+    _runtime: &Runtime,
     sink: &dyn OutputSink,
     session_id: uuid::Uuid,
 ) -> i32 {
@@ -448,91 +335,6 @@ pub(super) async fn resume_resolved_session(
     // lines used to seed the orchestrator. The TUI render path reloads the full
     // routed entry stream below so pre-compaction rows remain visible.
     let messages = loaded.unwrap_or_default();
-
-    // (CLI-13, cc 2.1.238) The truncating resume. The oracle runs this block
-    // IMMEDIATELY after the transcript load and before anything consumes
-    // `u.messages` (@307370121), so it sits here — ahead of the prompt/TUI
-    // split below, which is where the history is first seeded.
-    //
-    // Both flags are print-mode-only ("Ignored outside print mode" in their own
-    // help text), and `validate_truncating_resume_args` has already enforced
-    // `--resume-session-at requires --resume` and `--resume-drops-turn requires
-    // --resume-session-at`.
-    let messages = if argv.print {
-        match crate::resume_truncation::apply_truncating_resume(
-            messages,
-            argv.resume_session_at.as_deref(),
-            argv.resume_drops_turn.as_deref(),
-        ) {
-            Ok(m) => m,
-            Err(message) => {
-                sink.error("runtime", &message).await;
-                return exit_codes::RUNTIME_ERROR;
-            }
-        }
-    } else {
-        messages
-    };
-
-    // A follow-up prompt keeps the one-shot path (matches the fresh
-    // `Mode::Print` arm): print the resume line then run the turn. The prompt
-    // continues the *resumed* conversation only when the orchestrator carries
-    // the replayed history — but the supplied `runtime` is the standard
-    // sink-adapter build, so seed its session here too before running.
-    let (resolved_permission_mode, _notice) = crate::resolve_permission_mode(argv);
-    let resolved_permission_mode = runtime
-        .orchestrator
-        .permission_mode()
-        .as_deref()
-        .map(permission::permission_mode_from_cli_string)
-        .unwrap_or(resolved_permission_mode);
-    let explicit_permission_mode = resume_has_permission_mode_override(argv);
-    if let Some(p) = &argv.prompt {
-        if !p.trim().is_empty() {
-            if let Err(error) = seed_orchestrator_session(
-                &runtime.orchestrator,
-                session_id,
-                &messages,
-                resolved_permission_mode,
-                explicit_permission_mode,
-                resume_has_model_override(argv, runtime.model_provenance),
-            )
-            .await
-            {
-                sink.error("runtime", &format!("resume permission mode: {error}"))
-                    .await;
-                return exit_codes::RUNTIME_ERROR;
-            }
-            let entries = match load_resume_entries(session_id).await {
-                Ok(entries) => entries,
-                Err(error) => {
-                    sink.error("runtime", &format!("resume deferred tools: {error}"))
-                        .await;
-                    return exit_codes::RUNTIME_ERROR;
-                }
-            };
-            // Prompt snapshots and skill attachments are generic records and
-            // may not be part of the resumable user/assistant chain used by the
-            // seed helper. Keep usage/compaction counters on that normalized
-            // chain; raw entries are only a metadata source here.
-            runtime
-                .orchestrator
-                .restore_resume_prompt_metadata(&entries)
-                .await;
-            if let Err(error) = orchestrator::replay_deferred_tools_after_resume(
-                &runtime.orchestrator,
-                orchestrator::deferred_tool_replays_from_messages(&entries),
-            )
-            .await
-            {
-                sink.error("runtime", &format!("resume deferred tools: {error}"))
-                    .await;
-                return exit_codes::RUNTIME_ERROR;
-            }
-            sink.text(&format!("Resumed session {session_id}\n")).await;
-            return run_oneshot(argv, runtime, sink).await;
-        }
-    }
 
     // No prompt: mirror the fresh interactive dispatch. Under a full TTY (and no
     // `--no-tui`) run the same trust + dangerous-bypass acknowledgement gates
@@ -761,7 +563,7 @@ pub(super) async fn mount_resumed_tui_inner(
     // registration through so status + permissionClass stay on `sessions/<pid>.json`.
     // A carried one-shot notice (the `/branch` success confirmation) renders as
     // the newest system cell.
-    let mut resumed_messages = tui::replay::rebuild_from_jsonl(&entries);
+    let mut resumed_messages = tui::replay::rebuild_from_jsonl_with_request_ids(&entries);
     if let Some(body) = boot_notice {
         resumed_messages.push(tui_core::message::RenderedMessage::SystemText {
             body,
@@ -1380,6 +1182,8 @@ pub(crate) async fn seed_orchestrator_session(
     let mut session = session_handle.lock().await;
     session.session_id = replayed.session_id;
     session.history = replayed.history;
+    session.compacted_user_turns = replayed.compacted_user_turns;
+    session.virtual_user_messages = replayed.virtual_user_messages;
     session.transcript_only_messages = replayed.transcript_only_messages;
     session.compact_summary_messages = replayed.compact_summary_messages;
     session.active_goal = replayed.active_goal;

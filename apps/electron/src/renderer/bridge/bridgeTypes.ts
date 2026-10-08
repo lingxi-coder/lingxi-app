@@ -107,6 +107,8 @@ export interface TrackedSpeechEvent {
 }
 
 export interface UseBridge {
+  /** Stable per-renderer identity shared by ui_attach and parent UI requests. */
+  readonly uiSurfaceClientId: string;
   readonly hosted: boolean;
   readonly loading: boolean;
   readonly bootstrap: BootstrapState | null;

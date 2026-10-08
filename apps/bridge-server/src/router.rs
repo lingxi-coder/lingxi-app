@@ -83,6 +83,7 @@ use command_api::model::CommandSource;
 use command_api::parser::parse_slash_command;
 use command_api::registry::CommandRegistry;
 use lingxi_core::host::auth::{AuthHandle, LoginInfo};
+use lingxi_core::host::orchestrator::HandleError;
 use lingxi_core::host::orchestrator::OrchestratorHandle;
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
 use lingxi_core::host::SlashCommandDispatcher;
@@ -104,9 +105,16 @@ pub struct SessionStoreContext {
     lingxi_home: PathBuf,
     session_cwd: String,
     fs: Arc<dyn lingxi_core::host::FileSystem>,
+    transcript_writer: Option<Arc<session::jsonl::JsonlWriter>>,
 }
 
 impl SessionStoreContext {
+    /// Retain the prepared session's authoritative writer for identity snapshots.
+    pub fn with_transcript_writer(mut self, writer: Option<Arc<session::jsonl::JsonlWriter>>) -> Self {
+        self.transcript_writer = writer;
+        self
+    }
+
     /// Retain a zero-message conversation that owns a durable scheduled task.
     async fn ensure_scheduled_chat(&self, session_id: &str) -> Result<(), String> {
         let session_uuid = lingxi_core::types::SessionId::parse_prefixed(session_id)
@@ -164,6 +172,7 @@ impl SessionStoreContext {
             lingxi_home,
             session_cwd,
             fs,
+            transcript_writer: None,
         }
     }
 }
@@ -612,6 +621,38 @@ impl EngineCommandRouter {
     pub fn is_turn_active(&self) -> bool {
         self.turn_active.load(Ordering::SeqCst)
     }
+
+    async fn dispatch_mod_ui_control_result(
+        &self,
+        request_id: String,
+        request: Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String>,
+        sink: &dyn ClientEventSink,
+    ) {
+        let result = match request {
+            Ok(request) => self.handle.mod_ui_control(request).await,
+            Err(error) => Err(HandleError::ActionFailed(error)),
+        };
+        sink.emit(client::adapter::turn::mod_ui_control_result_event(
+            request_id, result,
+        ))
+        .await;
+    }
+
+    async fn dispatch_mod_ui_client_operation_result(
+        &self,
+        request_id: String,
+        operation: Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String>,
+        sink: &dyn ClientEventSink,
+    ) {
+        let result = match operation {
+            Ok(operation) => self.handle.mod_ui_client_operation(operation).await,
+            Err(error) => Err(HandleError::ActionFailed(error)),
+        };
+        sink.emit(client::adapter::turn::mod_ui_client_operation_result_event(
+            request_id, result,
+        ))
+        .await;
+    }
 }
 
 #[async_trait]
@@ -672,6 +713,92 @@ impl CommandRouter for EngineCommandRouter {
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
+            ClientCommand::UiRender {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_render");
+                self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
+                    .await;
+            }
+            ClientCommand::UiClientModule { request_id, plugin } => {
+                let request = Ok(serde_json::json!({
+                    "subtype": "ui_client_module",
+                    "plugin": plugin,
+                }).into());
+                self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
+                    .await;
+            }
+            ClientCommand::UiMessage {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_message",
+                );
+                self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
+                    .await;
+            }
+            ClientCommand::UiClientFault {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_client_fault",
+                );
+                self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
+                    .await;
+            }
+            ClientCommand::UiClientPress {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_client_press",
+                );
+                self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
+                    .await;
+            }
+            ClientCommand::UiPress {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_press");
+                self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
+                    .await;
+            }
+            ClientCommand::UiInput {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_input");
+                self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
+                    .await;
+            }
+            ClientCommand::UiSelect {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_select");
+                self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
+                    .await;
+            }
+            ClientCommand::UiClientOperation {
+                request_id,
+                operation_json,
+            } => {
+                let operation =
+                    client::adapter::turn::parse_mod_ui_client_operation(&operation_json);
+                self.dispatch_mod_ui_client_operation_result(request_id, operation, sink.as_ref())
+                    .await;
+            }
             // Both arms write the durable automation store — `started` binds a
             // session id into it, `complete` records a run result — so they sit
             // behind the same trust gate as the `CronManage` mutations below.
@@ -1113,7 +1240,17 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::RunSlashCommand { raw, turn_id } => {
                 if let Some(dispatcher) = self.dispatcher.as_ref() {
                     let before = self.capture_slash_authority().await;
-                    let (display, is_error) = match dispatcher.dispatch(&raw).await {
+                    let context = command_api::ModCommandRunContext {
+                        origin: serde_json::json!({"kind":"bridge"}),
+                        is_fullscreen: false,
+                        columns: 80,
+                    };
+                    let (display, is_error) = match command_api::with_mod_command_context(
+                        context,
+                        dispatcher.dispatch(&raw),
+                    )
+                    .await
+                    {
                         lingxi_core::host::SlashDispatchResult::Handled { display } => {
                             (display, false)
                         }

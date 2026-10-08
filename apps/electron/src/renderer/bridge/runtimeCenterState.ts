@@ -5,6 +5,7 @@ import type {
   ImageRefDto,
   MessageDto,
   PlanTaskDto,
+  SessionAgentMessageRowDto,
   PermissionRequest,
   SessionAgentSummaryDto,
   TaskRowDto,
@@ -40,11 +41,13 @@ export interface RuntimeResource {
 }
 
 export interface AgentTranscriptState {
+  /** Persisted rows retain Native UUID/error metadata for exact deletion. */
+  readonly rows: readonly SessionAgentMessageRowDto[];
   readonly messages: readonly MessageDto[];
   readonly revision: number;
   readonly nextMessageIndex: number;
-  /** Sparse indexes let a late snapshot retain already-arrived live tail rows. */
-  readonly messageIndexes: Readonly<Record<string, number>>;
+  /** Tombstones outlive stale snapshots and late events for this agent. */
+  readonly tombstonedMessageUuids: Readonly<Record<string, true>>;
 }
 
 export interface RuntimeCenterState {
@@ -204,42 +207,56 @@ function messageKey(index: number): string {
   return String(index);
 }
 
+function hasOwn(record: object, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function emptyAgentTranscript(): AgentTranscriptState {
+  return { rows: [], messages: [], revision: 0, nextMessageIndex: 0, tombstonedMessageUuids: {} };
+}
+
 function transcriptFromEntries(
-  entries: Readonly<Record<string, MessageDto>>,
+  entries: Readonly<Record<string, SessionAgentMessageRowDto>>,
   revision: number,
   nextMessageIndex: number,
+  tombstonedMessageUuids: Readonly<Record<string, true>>,
 ): AgentTranscriptState {
   const ordered = Object.entries(entries)
-    .map(([index, message]) => [Number(index), message] as const)
-    .filter(([index]) => Number.isSafeInteger(index) && index >= 0)
+    .map(([, row]) => [row.message_index, row] as const)
+    .filter(([index, row]) => Number.isSafeInteger(index) && index >= 0
+      && !hasOwn(tombstonedMessageUuids, row.message_uuid))
     .sort(([left], [right]) => left - right);
+  const rows = ordered.map(([, row]) => row);
   return {
-    messages: ordered.map(([, message]) => message),
+    rows,
+    messages: rows.map((row) => row.message),
     revision,
     nextMessageIndex,
-    messageIndexes: Object.fromEntries(ordered.map(([index]) => [messageKey(index), index])),
+    tombstonedMessageUuids,
   };
 }
 
-function entriesFromTranscript(transcript: AgentTranscriptState): Record<string, MessageDto> {
-  const entries: Record<string, MessageDto> = {};
-  const indexes = Object.entries(transcript.messageIndexes).sort(([, left], [, right]) => left - right);
-  transcript.messages.forEach((message, position) => {
-    const mapped = indexes[position]?.[0];
-    entries[mapped ?? messageKey(position)] = message;
-  });
-  return entries;
+function entriesFromTranscript(transcript: AgentTranscriptState): Record<string, SessionAgentMessageRowDto> {
+  return Object.fromEntries(transcript.rows.map((row) => [messageKey(row.message_index), row]));
 }
 
 function mergeTranscriptSnapshot(
   previous: AgentTranscriptState | undefined,
-  messages: readonly MessageDto[],
+  messages: readonly SessionAgentMessageRowDto[],
   revision: number,
   nextMessageIndex: number,
 ): AgentTranscriptState {
   if (previous && revision < previous.revision) return previous;
-  const incoming: Record<string, MessageDto> = {};
-  messages.forEach((message, index) => { incoming[messageKey(index)] = message; });
+  const tombstones = previous?.tombstonedMessageUuids ?? {};
+  const incoming: Record<string, SessionAgentMessageRowDto> = {};
+  let observedNextMessageIndex = nextMessageIndex;
+  messages.forEach((row) => {
+    observedNextMessageIndex = Math.max(
+      observedNextMessageIndex,
+      Math.min(Number.MAX_SAFE_INTEGER, row.message_index + 1),
+    );
+    if (!hasOwn(tombstones, row.message_uuid)) incoming[messageKey(row.message_index)] = row;
+  });
   // A revision-aware poll can race a live message event. Keep only the live
   // tail beyond the snapshot's watermark; rows covered by the snapshot are
   // replaced authoritatively.
@@ -247,27 +264,56 @@ function mergeTranscriptSnapshot(
     const previousEntries = entriesFromTranscript(previous);
     for (const [index, message] of Object.entries(previousEntries)) {
       const numeric = Number(index);
-      if (numeric >= nextMessageIndex && incoming[index] === undefined) incoming[index] = message;
+      if (numeric >= nextMessageIndex && incoming[index] === undefined
+        && !hasOwn(tombstones, message.message_uuid)) incoming[index] = message;
     }
   }
-  return transcriptFromEntries(incoming, revision, Math.max(nextMessageIndex, previous?.nextMessageIndex ?? 0));
+  return transcriptFromEntries(
+    incoming,
+    revision,
+    Math.max(observedNextMessageIndex, previous?.nextMessageIndex ?? 0),
+    tombstones,
+  );
 }
 
 function mergeTranscriptMessage(
   previous: AgentTranscriptState | undefined,
   index: number,
-  message: MessageDto,
+  row: SessionAgentMessageRowDto,
 ): AgentTranscriptState {
-  if (!Number.isSafeInteger(index) || index < 0) return previous ?? {
-    messages: [], revision: 0, nextMessageIndex: 0, messageIndexes: {},
-  };
+  if (!Number.isSafeInteger(index) || index < 0 || row.message_index !== index) return previous ?? emptyAgentTranscript();
+  const tombstones = previous?.tombstonedMessageUuids ?? {};
+  if (hasOwn(tombstones, row.message_uuid)) return previous ?? emptyAgentTranscript();
   const entries = previous ? entriesFromTranscript(previous) : {};
   const key = messageKey(index);
-  if (entries[key] !== undefined && JSON.stringify(entries[key]) === JSON.stringify(message)) {
+  if (entries[key] !== undefined && JSON.stringify(entries[key]) === JSON.stringify(row)) {
     return previous as AgentTranscriptState;
   }
-  entries[key] = message;
-  return transcriptFromEntries(entries, previous?.revision ?? 0, Math.max(index + 1, previous?.nextMessageIndex ?? 0));
+  for (const [existingIndex, existingRow] of Object.entries(entries)) {
+    if (existingIndex !== key && existingRow.message_uuid === row.message_uuid) delete entries[existingIndex];
+  }
+  entries[key] = row;
+  return transcriptFromEntries(
+    entries,
+    previous?.revision ?? 0,
+    Math.max(index + 1, previous?.nextMessageIndex ?? 0),
+    tombstones,
+  );
+}
+
+function removeTranscriptMessage(
+  previous: AgentTranscriptState | undefined,
+  messageUuid: string,
+): AgentTranscriptState {
+  const transcript = previous ?? emptyAgentTranscript();
+  if (hasOwn(transcript.tombstonedMessageUuids, messageUuid)
+    && !transcript.rows.some((row) => row.message_uuid === messageUuid)) return transcript;
+  const entries = entriesFromTranscript(transcript);
+  for (const [index, row] of Object.entries(entries)) {
+    if (row.message_uuid === messageUuid) delete entries[index];
+  }
+  const tombstonedMessageUuids = { ...transcript.tombstonedMessageUuids, [messageUuid]: true as const };
+  return transcriptFromEntries(entries, transcript.revision, transcript.nextMessageIndex, tombstonedMessageUuids);
 }
 
 export function resourceFromAttachment(attachment: AttachmentDto): RuntimeResource {
@@ -477,7 +523,12 @@ export function reduceRuntimeCenterEvent(
         ...state,
         transcripts: {
           ...state.transcripts,
-          [event.agent_id]: mergeTranscriptMessage(state.transcripts[event.agent_id], event.message_index, event.message),
+          [event.agent_id]: mergeTranscriptMessage(state.transcripts[event.agent_id], event.message_index, {
+            message_index: event.message_index,
+            message_uuid: event.message_uuid,
+            message: event.message,
+            ...(event.api_error_json === undefined ? {} : { api_error_json: event.api_error_json }),
+          }),
         },
       };
     }
@@ -495,6 +546,16 @@ export function reduceRuntimeCenterEvent(
           ),
         },
       };
+    case 'session_agent_tombstone': {
+      if (event.session_id !== sessionId) return state;
+      return {
+        ...state,
+        transcripts: {
+          ...state.transcripts,
+          [event.agent_id]: removeTranscriptMessage(state.transcripts[event.agent_id], event.message_uuid),
+        },
+      };
+    }
     case 'attachment':
       return addRuntimeResources(state, [resourceFromAttachment(event.attachment)]);
     case 'plan_updated':

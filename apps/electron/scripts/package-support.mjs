@@ -440,9 +440,9 @@ export function forbiddenContentRules(root = packageRoot) {
     ...new Set(paths.map((value) => resolve(value))),
   ].map((value) => ({ label: `absolute developer path ${value}`, pattern: new RegExp(escaped(value), 'g') })).concat([
     // The official prebuilt sherpa-onnx static archive embeds its public
-    // GitHub Actions checkout prefix in C++ assertion strings. It identifies
-    // upstream source, not a local developer or secret-bearing path.
-    { label: 'absolute macOS user path', pattern: /\/Users\/(?!runner\/work\/(?:sherpa-onnx\/sherpa-onnx|onnxruntime-libs\/onnxruntime-libs)\/)[A-Za-z0-9._-]+\//g },
+    // GitHub Actions checkout prefix in C++ assertion strings. Bun's compiler
+    // likewise embeds the upstream lol-html and WebKit build prefixes.
+    { label: 'absolute macOS user path', pattern: /\/Users\/(?!runner\/work\/(?:sherpa-onnx\/sherpa-onnx|onnxruntime-libs\/onnxruntime-libs)\/|runner\/work\/_temp\/webkit-release\/(?:WTF\/Headers\/wtf\/|JavaScriptCore\/DerivedSources\/)|administrator\/Library\/Services\/buildkite-agent\/builds\/darwin-(?:aarch64|x64)-\d+-\d+\/bun\/bun\/vendor\/lolhtml\/src\/)[A-Za-z0-9._-]+\//g },
     { label: 'package secret canary', pattern: new RegExp(escaped(canary), 'g') },
     { label: 'API secret', pattern: /(?:sk-ant-api\d{2}|sk-proj|sk-svcacct)-[A-Za-z0-9_-]{16,}/g },
     { label: 'API secret assignment', pattern: /(?:ANTHROPIC|OPENAI|LINGXI)_API_KEY\s*[=:]\s*["']?[A-Za-z0-9_-]{12,}/g },

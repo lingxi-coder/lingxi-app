@@ -33,6 +33,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+struct CliDesktopDiagnostics;
+#[async_trait]
+impl harness_runtime::desktop::DesktopDiagnosticSink for CliDesktopDiagnostics {
+    async fn stderr_line(&self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
     pub catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
@@ -867,12 +875,12 @@ pub(crate) fn resolve_desktop_config_at(
         None
     };
     // `--json-schema` is structured-output, "only works with --print". Parse the
-    // schema string to a JSON value (print-gated). An unparseable schema is
+    // Preserve exact JSON strings and property names (print-gated). An unparseable schema is
     // dropped → structured output simply does not activate (the turn runs normally).
     let json_schema = if argv.print {
         argv.json_schema
             .as_ref()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|s| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(s).ok())
     } else {
         None
     };
@@ -882,9 +890,20 @@ pub(crate) fn resolve_desktop_config_at(
     let _ = argv.no_stream;
 
     DesktopConfig {
-        verified_computer_profiles: Vec::new(),
+        diagnostics: Some(Arc::new(CliDesktopDiagnostics)),
         composition: None,
         defer_session_start: false,
+        session_transcript_path: None,
+        session_resume_snapshot: None,
+        session_resume_cost: None,
+        max_structured_output_retries: 5,
+        mcp_services_factory: None,
+        user_agent_environment: None,
+        request_identity: None,
+        anthropic_compatible_version: None,
+        anthropic_client_metadata: None,
+        native_thinking_display: None,
+        oauth_environment_lookup: None,
         build_info: harness_runtime::desktop::BuildInfo::new(
             env!("CARGO_PKG_VERSION"),
             option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
@@ -1195,6 +1214,7 @@ pub(crate) fn resolve_desktop_config_at(
         )),
         ask_user_question_tx: None,
         computer_access_tx: None,
+        verified_computer_profiles: Vec::new(),
         session_agent_observer: None,
         // No device audio on the CLI/TUI path: audio is proxied to a connected
         // client, and this host has none. The `voice`/`speech` tools are

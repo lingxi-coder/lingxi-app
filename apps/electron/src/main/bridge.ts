@@ -1,4 +1,13 @@
-import { BridgeClient } from '@lingxi/bridge-client';
+import {
+  BridgeClient,
+  SessionEventCorrelator,
+  buildNativeUiControlCommand,
+  parseUiFrameEvent,
+  parseUiInvalidateEvent,
+  validateNativeUiControlResponseJson,
+  validateUiClientOperationResponseJson,
+  validateUiControlMetadataJson,
+} from '@lingxi/bridge-client';
 import type {
   AskUserQuestionRequestDto,
   AudioOperationRequestDto,
@@ -11,6 +20,9 @@ import type {
   CronRequestDto,
   PermissionModeId,
   PermissionRequest,
+  NativeUiControlResponse,
+  UiClientOperationResponse,
+  UiControlCallResultDto,
 } from '@lingxi/bridge-client';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { spawn } from 'node:child_process';
@@ -53,6 +65,10 @@ import {
   CH_DENY,
   CH_DENY_COMPUTER_ACCESS,
   CH_EVENT,
+  CH_MOD_UI_CONTROL,
+  CH_MOD_UI_FRAME,
+  CH_MOD_UI_INVALIDATE,
+  CH_MOD_UI_OPERATION,
   CH_PERMISSION,
   CH_SEND_PROMPT,
   CH_STATE_CHANGED,
@@ -81,6 +97,7 @@ import {
   buildBridgeEnvironment,
   buildCredentialEnvelope,
   diagnosticEvent,
+  resolveModBunExecutable,
   sanitizeDiagnostic,
 } from './host-utils.js';
 import type { OpenAiOAuthSession } from './host-utils.js';
@@ -90,6 +107,8 @@ import {
   validateAskUserQuestionAnswers,
   validateBridgeLockfile,
   validateClientCommand,
+  validateModUiControlRequest,
+  validateModUiOperation,
   validateComputerAccessResponse,
   validateImageRefs,
   validateOptionalTurnId,
@@ -163,6 +182,7 @@ export class SessionRuntime {
   private readonly pendingCredentialOperations = new Map<number, PendingCredentialOperation>();
   private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
   private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
+  private readonly pendingModUiRequests = new SessionEventCorrelator<Extract<ClientEvent, { type: 'ui_control_result' }>>();
   private archiving = false;
   private activeCronExecutions = 0;
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
@@ -738,7 +758,10 @@ export class SessionRuntime {
       // buffer without bound or replay stale cumulative totals on reload.
       const replay = event.type === 'status_snapshot'
         ? this.replayEvents.filter(({ event: retained }) => retained.type !== 'status_snapshot')
-        : this.replayEvents;
+        : event.type === 'ui_status'
+          ? this.replayEvents.filter(({ event: retained }) =>
+              retained.type !== 'ui_status' || retained.plugin !== event.plugin)
+          : this.replayEvents;
       this.replayEvents = [...replay, envelope];
     }
     return envelope;
@@ -1290,9 +1313,24 @@ export class SessionRuntime {
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
 
+    const environment = buildBridgeEnvironment(process.env, launch.apiBaseUrl);
+    // The packaged Electron executable has Node mode, so Mod workers do not
+    // depend on a separate system Node installation.
+    environment.LINGXI_MOD_NODE_EXECUTABLE = process.execPath;
+    // Mod UI source is compiled by Bun on the host side. Packaged builds use
+    // the app-owned sidecar; development may pin an explicit Bun binary, and
+    // otherwise leaves this unset so the engine resolves `bun` from PATH.
+    const bunExecutable = resolveModBunExecutable({
+      isPackaged: this.opts.isPackaged === true,
+      resourcesPath: this.opts.resourcesPath ?? process.resourcesPath,
+      configuredPath: process.env.LINGXI_MOD_BUN_EXECUTABLE,
+    });
+    if (bunExecutable) {
+      environment.LINGXI_MOD_BUN_EXECUTABLE = bunExecutable;
+    }
     const child = spawn(bin, args, {
       cwd: launch.workspace,
-      env: buildBridgeEnvironment(process.env, launch.apiBaseUrl),
+      env: environment,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       detached: process.platform !== 'win32',
@@ -1498,6 +1536,33 @@ export class SessionRuntime {
     // from SessionResumed by other connection events. Live deltas still need a turn.
     client.on('event', (event: ClientEvent) => {
       if (generation !== this.generation) return;
+      if (event.type === 'ui_control_result') {
+        this.pendingModUiRequests.resolve(this.sessionId, event.request_id, event);
+        return;
+      }
+      if (event.type === 'ui_client_frame') {
+        try {
+          const { runtimeId, frame } = parseUiFrameEvent(this.sessionId, event.runtime_id, event.frame_json);
+          this.broadcastModUiEvent(CH_MOD_UI_FRAME, { runtimeId, frame });
+        } catch {
+          this.diagnostics.add('warn', 'bridge', 'dropped invalid Mod UI frame');
+        }
+        return;
+      }
+      if (event.type === 'ui_invalidate') {
+        try {
+          const invalidation = parseUiInvalidateEvent(
+            this.sessionId, event.session_id, event.uuid, event.instances_json,
+          );
+          this.broadcastModUiEvent(CH_MOD_UI_INVALIDATE, {
+            uuid: invalidation.uuid,
+            ...(invalidation.instances === undefined ? {} : { instances: invalidation.instances }),
+          });
+        } catch {
+          this.diagnostics.add('warn', 'bridge', 'dropped invalid Mod UI invalidation');
+        }
+        return;
+      }
       if (event.type === 'audio_request') {
         void this.dispatchAudioRequest(client, generation, event.request);
         return;
@@ -2156,6 +2221,16 @@ export class SessionRuntime {
       this.assertSender(event);
       await this.dispatchCommand(command);
     });
+    ipcMain.handle(CH_MOD_UI_CONTROL, (event: IpcMainInvokeEvent, sessionId: unknown, request: unknown) => {
+      this.assertSender(event);
+      if (sessionId !== this.sessionId) throw new Error('Mod UI session mismatch');
+      return this.dispatchModUiControl(request);
+    });
+    ipcMain.handle(CH_MOD_UI_OPERATION, (event: IpcMainInvokeEvent, sessionId: unknown, operation: unknown) => {
+      this.assertSender(event);
+      if (sessionId !== this.sessionId) throw new Error('Mod UI session mismatch');
+      return this.dispatchModUiOperation(operation);
+    });
     ipcMain.handle(CH_CONNECTION_STATE, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       return this.state;
@@ -2167,11 +2242,59 @@ export class SessionRuntime {
     for (const channel of [
       CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
       CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION,
-      CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
+      CH_CANCEL, CH_COMMAND, CH_MOD_UI_CONTROL, CH_MOD_UI_OPERATION, CH_CONNECTION_STATE,
     ]) {
       ipcMain.removeHandler(channel);
     }
     this.ipcRegistered = false;
+  }
+
+  /** Renderer UI control is a narrow typed lane, separate from generic `command()`. */
+  async dispatchModUiControl(value: unknown): Promise<UiControlCallResultDto<NativeUiControlResponse>> {
+    const request = validateModUiControlRequest(value);
+    const result = await this.requestModUiResult((request_id) => buildNativeUiControlCommand(request, request_id));
+    if (result.error !== undefined) {
+      if (result.response_json !== undefined || result.metadata_json !== undefined) throw new Error('UI control result mixed error and response fields');
+      throw new Error(result.error);
+    }
+    if (result.response_json === undefined) throw new Error('UI control result is missing its response');
+    const response = validateNativeUiControlResponseJson(request, result.response_json);
+    let metadata: ReturnType<typeof validateUiControlMetadataJson> | undefined;
+    if (result.metadata_json !== undefined) metadata = validateUiControlMetadataJson(result.metadata_json);
+    if (request.subtype === 'ui_render' && metadata === undefined) throw new Error('UI render result is missing its render revision');
+    if (request.subtype !== 'ui_render' && metadata !== undefined) throw new Error('unexpected UI control metadata');
+    return { response, ...(metadata === undefined ? {} : { metadata }) };
+  }
+
+  /** Renderer requests for Harness VM operations use the same session/request correlation. */
+  async dispatchModUiOperation(value: unknown): Promise<UiClientOperationResponse> {
+    const operation = validateModUiOperation(value);
+    const result = await this.requestModUiResult((request_id) => ({
+      type: 'ui_client_operation', request_id, operation_json: JSON.stringify(operation),
+    }));
+    if (result.error !== undefined) {
+      if (result.response_json !== undefined || result.metadata_json !== undefined) throw new Error('UI operation result mixed error and response fields');
+      throw new Error(result.error);
+    }
+    if (result.response_json === undefined || result.metadata_json !== undefined) throw new Error('invalid UI operation response envelope');
+    return validateUiClientOperationResponseJson(operation, result.response_json);
+  }
+
+  private async requestModUiResult(
+    commandFor: (requestId: string) => ClientCommand,
+  ): Promise<Extract<ClientEvent, { type: 'ui_control_result' }>> {
+    const requestId = randomUUID();
+    const response = this.pendingModUiRequests.request(this.sessionId, requestId, 30_000);
+    try {
+      this.requireClient().sendCommand(commandFor(requestId));
+    } catch (error) {
+      this.pendingModUiRequests.reject(
+        this.sessionId,
+        requestId,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+    return response;
   }
 
   /**
@@ -2540,6 +2663,15 @@ export class SessionRuntime {
     }
   }
 
+  /** Mod UI events always carry a session envelope, including legacy runtimes. */
+  private broadcastModUiEvent(channel: string, event: unknown): void {
+    const envelope = { sessionId: this.sessionId, event };
+    for (const webContents of this.targets.keys()) {
+      if (webContents.isDestroyed()) this.targets.delete(webContents);
+      else webContents.send(channel, envelope);
+    }
+  }
+
   private sendToWindow(webContents: WebContents, channel: string, payload: unknown): void {
     const value = this.opts.envelopeEvents
       ? { sessionId: this.sessionId, event: payload }
@@ -2589,6 +2721,7 @@ export class SessionRuntime {
   }
 
   private clearPendingConnectionOperations(): void {
+    this.pendingModUiRequests.rejectSession(this.sessionId, new Error('Mod UI request interrupted.'));
     for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
     this.pendingCron.clear();
     for (const pending of this.pendingScheduledTurns.values()) pending.reject(new Error('Scheduled execution interrupted.'));

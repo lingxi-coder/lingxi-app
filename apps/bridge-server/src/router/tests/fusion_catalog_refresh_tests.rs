@@ -28,6 +28,12 @@ impl ClientEventSink for SilentSink {
 struct MockAuth;
 #[async_trait::async_trait]
 impl AuthHandle for MockAuth {
+    fn register_account_change_observer(
+        &self,
+        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+    ) {
+    }
+
     async fn login(&self) -> Result<LoginInfo, AuthError> {
         Ok(LoginInfo {
             email: "u@x.com".into(),
@@ -149,6 +155,72 @@ async fn task_message_uses_trusted_registry_route_and_preserves_workspace_gate()
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn ui_control_command_is_correlated_and_variant_subtype_is_strict() {
+    let router = EngineCommandRouter::new(
+        Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry::default()),
+        None,
+        None,
+    );
+    let sink = Arc::new(TaskMessageSink::default());
+
+    router
+        .route(
+            ClientCommand::UiRender {
+                request_id: "render-request-1".into(),
+                request_json: r#"{"subtype":"ui_message"}"#.into(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        *sink.0.lock().unwrap(),
+        vec![ClientEvent::UiControlResult {
+            request_id: "render-request-1".into(),
+            response_json: None,
+            metadata_json: None,
+            error: Some("handle action failed: Mod UI control subtype must be ui_render".into(),),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn local_ui_operation_returns_session_handle_error_with_outer_correlator() {
+    let router = EngineCommandRouter::new(
+        Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
+        Arc::new(MockAuth),
+        Arc::new(MockTaskRegistry::default()),
+        None,
+        None,
+    );
+    let sink = Arc::new(TaskMessageSink::default());
+
+    router
+        .route(
+            ClientCommand::UiClientOperation {
+                request_id: "operation-request-2".into(),
+                operation_json: r#"{"subtype":"mount"}"#.into(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        *sink.0.lock().unwrap(),
+        vec![ClientEvent::UiControlResult {
+            request_id: "operation-request-2".into(),
+            response_json: None,
+            metadata_json: None,
+            error: Some(
+                "handle action failed: Mod Client operations need a Mod-aware session".into(),
+            ),
+        }]
+    );
 }
 
 struct CronPermissionSink;

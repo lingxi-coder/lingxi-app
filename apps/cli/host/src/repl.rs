@@ -5,11 +5,11 @@
 
 use crate::argv::Argv;
 use crate::exit_codes;
-use crate::output::{JsonSink, OutputSink, PlainSink};
-use crate::output_adapter::SinkAdapter;
 use crate::repl_loop::{step_with_notifications, StepOutcome, TaskNotificationWake};
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
+use harness_runtime::headless::output::{JsonSink, OutputSink, PlainSink};
+use harness_runtime::headless::output_adapter::SinkAdapter;
 use lingxi_core::host::task_registry::TaskRegistryHandle;
 use lingxi_core::host::{OrchestratorHandle, OutputStream};
 use lingxi_core::types::SessionId;
@@ -362,9 +362,15 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     // Build the output sink first — it is constructor-injected into the
     // orchestrator via `build_runtime`.
     let sink: Arc<dyn OutputSink> = if argv.json {
-        Arc::new(JsonSink::new(SessionId::new()))
+        Arc::new(JsonSink::new(
+            SessionId::new(),
+            crate::headless_host::process_stdout(),
+        ))
     } else {
-        Arc::new(PlainSink::new())
+        Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ))
     };
     let adapter: Arc<dyn OutputStream> = Arc::new(SinkAdapter::new(sink.clone()));
 
@@ -940,7 +946,10 @@ mod tests {
             killed: std::sync::Mutex::new(Vec::new()),
         };
         let handle = orchestrator::test_support::MockOrchestratorHandle::new();
-        let sink = crate::output::PlainSink::new();
+        let sink = harness_runtime::headless::output::PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        );
         assert!(
             !super::confirm_repl_exit(&scripted_reader(b"3\n"), &handle, &registry, &sink, true)
                 .await
@@ -979,7 +988,15 @@ mod retained_shutdown_tests {
             .unwrap();
             runtime.session_state.flush().await.unwrap();
             assert_eq!(
-                finish_repl_lifecycle(&runtime, &PlainSink::new(), code).await,
+                finish_repl_lifecycle(
+                    &runtime,
+                    &PlainSink::new(
+                        crate::headless_host::process_stdout(),
+                        crate::headless_host::process_stderr()
+                    ),
+                    code
+                )
+                .await,
                 code
             );
             assert!(runtime.orchestrator.current_should_exit());

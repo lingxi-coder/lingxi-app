@@ -74,6 +74,11 @@ jobs:
             packages/bridge-client/package-lock.json
             apps/electron/package-lock.json
 
+      - name: Install Mod source compiler
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.11'
+
       - name: Remap build-machine paths
         shell: bash
         run: |

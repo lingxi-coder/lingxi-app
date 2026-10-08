@@ -44,6 +44,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         build_info: harness_runtime::desktop::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,
@@ -105,6 +106,8 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         session_id_override: None,
         session_writer_lease: None,
         disable_slash_commands: false,
+        // This fixture has no per-session skill allowlist input.
+        session_skill_allowlist: None,
         add_dir: Vec::new(),
         cli_mcp_servers: Vec::new(),
         strict_mcp_config: false,
@@ -124,6 +127,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         bg_session_forker: None,
         worktree_launch: None,
         tmux_launch: None,
+        ..Default::default()
     };
     (tmp, cfg)
 }

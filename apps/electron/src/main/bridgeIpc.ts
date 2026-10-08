@@ -18,6 +18,14 @@ export const CH_CANCEL = 'lingxi:cancel';
 
 export const CH_COMMAND = 'lingxi:command';
 
+export const CH_MOD_UI_CONTROL = 'lingxi:modUi:control';
+
+export const CH_MOD_UI_OPERATION = 'lingxi:modUi:operation';
+
+export const CH_MOD_UI_FRAME = 'lingxi:modUi:frame';
+
+export const CH_MOD_UI_INVALIDATE = 'lingxi:modUi:invalidate';
+
 export const CH_CONNECTION_STATE = 'lingxi:connectionState';
 
 export const CH_EVENT = 'lingxi:event';

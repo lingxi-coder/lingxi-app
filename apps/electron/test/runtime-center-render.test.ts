@@ -22,7 +22,7 @@ import * as React from 'react';
 
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import type { TaskRowDto } from '@lingxi/bridge-client';
+import type { MessageDto, TaskRowDto } from '@lingxi/bridge-client';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { TaskDetail } from '../src/renderer/components/RuntimeCenter';
@@ -260,6 +260,7 @@ test('plan approval state overrides running label and clears after either decisi
 function renderAgentActivity(status: string, activity?: string, withTranscript = true): string {
   const bridge = runtimeBridge();
   const active = { kind: 'agent', id: 'reviewer-progress' } as const;
+  const transcriptMessage: MessageDto = { role: 'user', blocks: [{ type: 'text', text: 'Review these changes.' }], images: [] };
   bridge.runtimeCenter = {
     ...bridge.runtimeCenter, inspectorOpen: true, activeItem: active, tabs: [active],
     agents: {
@@ -267,8 +268,9 @@ function renderAgentActivity(status: string, activity?: string, withTranscript =
     },
     transcripts: withTranscript ? {
       [active.id]: {
-        messages: [{ role: 'user', blocks: [{ type: 'text', text: 'Review these changes.' }], images: [] }],
-        revision: 1, nextMessageIndex: 1, messageIndexes: {},
+        rows: [{ message_index: 0, message_uuid: '11111111-1111-4111-8111-111111111111', message: transcriptMessage }],
+        messages: [transcriptMessage],
+        revision: 1, nextMessageIndex: 1, tombstonedMessageUuids: {},
       },
     } : {},
   };

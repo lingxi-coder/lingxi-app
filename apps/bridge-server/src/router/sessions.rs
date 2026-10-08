@@ -98,26 +98,10 @@ pub(super) async fn read_session_agent_summary(
     }
     if let Some(parent) = path.parent() {
         let row_path = session::agent_rows::row_path(parent, &agent_id);
-        let relative = row_path
-            .strip_prefix(root)
-            .ok()
-            .map(std::path::Path::to_path_buf);
-        let root = root.to_path_buf();
-        let row = if let Some(relative) = relative {
-            tokio::task::spawn_blocking(move || {
-                lingxi_core::host::rooted_fs::read_to_string_limited(
-                    &root,
-                    &relative,
-                    session::agent_rows::ROW_MAX_BYTES,
-                )
-                .ok()
-                .and_then(|text| {
-                    serde_json::from_str::<session::agent_rows::ParkedAgentRow>(&text).ok()
-                })
-            })
-            .await
-            .ok()
-            .flatten()
+        let row = if row_path.strip_prefix(root).is_ok() {
+            // `read_row` validates and reconstructs the current typed snapshot,
+            // including its content-addressed spawn payload and attachments.
+            session::agent_rows::read_row(parent, &agent_id).await
         } else {
             None
         };
@@ -434,7 +418,7 @@ impl EngineCommandRouter {
             return;
         };
         let requested_session_id = self.handle.current_session_id().await;
-        let (messages, revision) = if agent_id == "main" {
+        let (messages, revision, next_message_index) = if agent_id == "main" {
             let uuid = requested_session_id.as_uuid();
             match orchestrator::replay_session_state(
                 &store.lingxi_home,
@@ -450,7 +434,7 @@ impl EngineCommandRouter {
                         &store.session_cwd,
                         &uuid.to_string(),
                     );
-                    let raw = match tokio::fs::read(path).await {
+                    let raw = match tokio::fs::read(&path).await {
                         Ok(raw) => raw,
                         Err(error) => {
                             tracing::warn!(%error, "bridge-server: main transcript unreadable");
@@ -464,17 +448,24 @@ impl EngineCommandRouter {
                             return;
                         }
                     };
-                    (
-                        // Same transcript the resume path emits, so it must be
-                        // lowered the same way — a `main` row whose spawn
-                        // results were dropped here would re-open the very
-                        // anchoring gap the resume path closes.
-                        client::adapter::lowering::lower_transcript_with_tool_results(
-                            &replayed.display_history,
-                            &replayed.client_state_tool_results,
-                        ),
-                        harness_runtime::desktop::session_agents::transcript_revision(&raw),
-                    )
+                    let Some(writer) = store.transcript_writer.as_ref() else {
+                        sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal,
+                            message: "main transcript identity owner is unavailable".into() }).await;
+                        return;
+                    };
+                    let snapshot = async {
+                        let identities = harness_runtime::session_agent_transcript::session_identity_snapshot_for_path(writer, &path).await?;
+                        let rows = harness_runtime::session_agent_transcript::parse_main_session_agent_message_rows(&replayed, &identities)?;
+                        Ok::<_, String>((rows, identities.next_message_index))
+                    }.await;
+                    let (rows, next) = match snapshot {
+                        Ok(value) => value,
+                        Err(message) => {
+                            sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message }).await;
+                            return;
+                        }
+                    };
+                    (rows, harness_runtime::desktop::session_agents::transcript_revision(&raw), next)
                 }
                 Err(error) => {
                     sink.emit(ClientEvent::Error {
@@ -515,6 +506,7 @@ impl EngineCommandRouter {
                     return;
                 }
             };
+            let transcript_path = path.clone();
             let raw = match path {
                 Some(path) => {
                     match harness_runtime::desktop::session_agents::read_transcript(&dir, &path)
@@ -556,25 +548,23 @@ impl EngineCommandRouter {
                     return;
                 }
             };
-            if let Some(line) =
-                harness_runtime::desktop::session_agents::first_corrupt_transcript_line(&raw)
-            {
-                tracing::warn!(
-                    line,
-                    "bridge-server: corrupt session agent transcript rejected"
-                );
-                sink.emit(ClientEvent::Error {
-                    kind: ErrorKindDto::Internal,
-                    message: "load session agent transcript failed: transcript is corrupt"
-                        .to_string(),
-                })
-                .await;
-                return;
-            }
-            (
-                harness_runtime::desktop::session_agents::lower_transcript(&raw),
-                harness_runtime::desktop::session_agents::transcript_revision(&raw),
-            )
+            let rows = match harness_runtime::session_agent_transcript::parse_session_agent_message_rows(&raw) {
+                Ok(rows) => rows,
+                Err(message) => {
+                    sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message: format!("load session agent transcript failed: transcript is corrupt ({message})") }).await;
+                    return;
+                }
+            };
+            let next = match harness_runtime::session_agent_transcript::read_session_agent_next_message_index(
+                store.fs.as_ref(), transcript_path.as_deref().expect("validated transcript path"),
+            ).await {
+                Ok(next) => next,
+                Err(error) => {
+                    sink.emit(ClientEvent::Error { kind: ErrorKindDto::Internal, message: error.to_string() }).await;
+                    return;
+                }
+            };
+            (rows, harness_runtime::desktop::session_agents::transcript_revision(&raw), next)
         };
         if self.handle.current_session_id().await != requested_session_id {
             return;
@@ -582,7 +572,7 @@ impl EngineCommandRouter {
         sink.emit(ClientEvent::SessionAgentTranscript {
             session_id: requested_session_id.as_uuid().to_string(),
             agent_id,
-            next_message_index: messages.len() as u64,
+            next_message_index,
             messages,
             revision,
         })

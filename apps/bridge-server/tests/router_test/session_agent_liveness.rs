@@ -274,6 +274,11 @@ async fn a_parked_row_reports_the_wire_word_rather_than_the_footer_group_word() 
             agent_id: id,
             description: "Runtime reviewer".into(),
             request: Default::default(),
+            // This fixture represents an agent that neither opted into
+            // handback nor recorded any handback state/history.
+            handback_opt_in: false,
+            handback_state: None,
+            handback_history: Vec::new(),
         },
     )
     .await

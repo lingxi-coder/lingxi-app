@@ -468,9 +468,12 @@ mod unix {
         if let Some(model) = &manifest.request.model {
             cfg.default_model = model.clone();
         }
-        let output = Arc::new(crate::output_adapter::SinkAdapter::new(Arc::new(
-            crate::output::PlainSink::new(),
-        )));
+        let output = Arc::new(harness_runtime::headless::output_adapter::SinkAdapter::new(
+            Arc::new(harness_runtime::headless::output::PlainSink::new(
+                crate::headless_host::process_stdout(),
+                crate::headless_host::process_stderr(),
+            )),
+        ));
         let runtime =
             harness_runtime::desktop::build(cfg, output, Arc::new(InjectedPermissionSink))
                 .await

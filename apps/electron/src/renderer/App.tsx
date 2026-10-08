@@ -23,6 +23,8 @@ import { PermissionPrompt } from './components/PermissionPrompt';
 import { SettingsScreen } from './components/settings/SettingsScreen';
 import { ScheduledTasks } from './components/ScheduledTasks';
 import { Stage } from './components/Stage';
+import { ModUiAbovePrompt, ModUiParentSite, ModUiSurfaceClientIdProvider } from './components/modUiAbovePrompt';
+import { askUserQuestionWithResponseProps, nativeAskUserQuestionProps } from './components/nativeUiSiteProps';
 import { CommandResultPanel } from './components/CommandResultPanel';
 import './components/CommandResultPanel.css';
 import { Theme } from './theme/ThemeContext';
@@ -41,6 +43,14 @@ export function App() {
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
+  const [visibleModToast, setVisibleModToast] = useState<typeof bridge.conversation.modToast>(null);
+  useEffect(() => {
+    const toast = bridge.conversation.modToast;
+    setVisibleModToast(toast);
+    if (!toast) return;
+    const timer = window.setTimeout(() => setVisibleModToast(null), toast.timeoutMs);
+    return () => window.clearTimeout(timer);
+  }, [bridge.conversation.modToast]);
   const workspace = bridge.bootstrap?.workspace;
   const planCalls = useMemo(() => conversationPlans(bridge.conversation.items, bridge.runtimeCenter.submittedPlanState.calls), [bridge.runtimeCenter.submittedPlanState.calls, bridge.conversation.items]);
   const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
@@ -93,9 +103,11 @@ export function App() {
     : bridge.activeSession
       ? 'This session has no messages yet. Ask LingXi to inspect the project.'
       : 'Create a session and ask LingXi to inspect, explain, or change this project.';
+  const askQuestion = bridge.sessionLoading ? null : bridge.pendingAskUserQuestion;
 
   return (
     <Theme.Provider value={palette}>
+      <ModUiSurfaceClientIdProvider clientId={bridge.uiSurfaceClientId}>
       <GitWorkspaceProvider scope={gitScope} onOpen={() => bridge.openRuntimeItem({ kind: 'section', id: 'review' })} onTerminal={() => { if (!terminal.open) terminal.toggle(); }}>
       <div
         className="desktop-shell"
@@ -148,6 +160,7 @@ export function App() {
                   // Item ids restart at `i1` in every session; the Stage's
                   // collapse map is scoped by this and dropped when it changes.
                   sessionKey={bridge.conversation.sessionKey}
+                  modUiSessionId={settledSession?.sessionId ?? ''}
                   foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
                 />
                 <PermissionPrompt
@@ -155,10 +168,27 @@ export function App() {
                   onApprove={(requestId, response) => { void bridge.approve(requestId, response).catch(() => undefined); }}
                   onDeny={(requestId) => { void bridge.deny(requestId).catch(() => undefined); }}
                 />
-                <AskUserQuestionPrompt
-                  request={bridge.sessionLoading ? null : bridge.pendingAskUserQuestion}
-                  onSubmit={(requestId, answers) => { void bridge.answerAskUserQuestion(requestId, answers).catch(() => undefined); }}
-                  onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
+                {askQuestion && <ModUiParentSite
+                  sessionId={settledSession?.sessionId ?? ''}
+                  surface="desktop"
+                  component="AskUserQuestion"
+                  instanceId={`ask-user-question:${askQuestion.request_id}`}
+                  props={nativeAskUserQuestionProps(askQuestion)}
+                  engineFallback={({ responseProps }) => <AskUserQuestionPrompt
+                    request={askUserQuestionWithResponseProps(askQuestion, responseProps)}
+                    onSubmit={(requestId, answers) => { void bridge.answerAskUserQuestion(requestId, answers).catch(() => undefined); }}
+                    onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
+                  />}
+                >
+                  <AskUserQuestionPrompt
+                    request={askQuestion}
+                    onSubmit={(requestId, answers) => { void bridge.answerAskUserQuestion(requestId, answers).catch(() => undefined); }}
+                    onCancel={(requestId) => { void bridge.cancelAskUserQuestion(requestId).catch(() => undefined); }}
+                  />
+                </ModUiParentSite>}
+                <ModUiAbovePrompt
+                  sessionId={bridge.conversation.sessionKey}
+                  enabled={page === 'chat' && settingsRoute === null && !bridge.sessionLoading}
                 />
                 <BetaComposer
                   bridge={bridge}
@@ -175,6 +205,18 @@ export function App() {
                   onSetTheme={changeTheme}
                   onOpenProviderSettings={(providerId, modelReference, restoreFocus) => setSettingsRoute({ pageId: 'provider-credentials', providerId, pendingModelReference: modelReference, restoreFocus })}
                 />
+                {!bridge.sessionLoading && visibleModToast && (
+                  <div role="status" aria-live="polite" style={{ padding: '7px 16px',
+                    color: palette.text, background: palette.stageBg, fontSize: 12 }}>
+                    {visibleModToast.text}
+                  </div>
+                )}
+                {!bridge.sessionLoading && bridge.conversation.modStatuses.map((status) => (
+                  <div key={status.plugin} role="status" style={{ padding: '4px 16px',
+                    color: palette.text, background: palette.stageBg, fontSize: 12 }}>
+                    {status.text}
+                  </div>
+                ))}
             </div>
             {!bridge.sessionLoading && <RuntimeCenterOverview bridge={planBridge} />}
           </div>
@@ -218,7 +260,8 @@ export function App() {
           />
         )}
       </div>
-    </GitWorkspaceProvider>
+      </GitWorkspaceProvider>
+      </ModUiSurfaceClientIdProvider>
     </Theme.Provider>
   );
 }

@@ -18,6 +18,7 @@ import type {
 } from '@lingxi/bridge-client';
 import {
   beginCompaction,
+  beginSlashCommand,
   beginLocalSlashCommand,
   conversationFromMessages,
   emptyConversation,
@@ -112,6 +113,33 @@ test('every item carries a distinct stable id, so the Stage never keys on an ind
   assert.equal(firstTool(s).id, 'toolu_1');
 });
 
+test('tool Native render facts retain original JSON without changing the derived card view', () => {
+  let state = reduceEvent(emptyConversation(), {
+    type: 'tool_use_started', id: 'toolu-native', tool: 'Read',
+    input_json: '{"file_path":"src/main.rs"}', header: READ_HEADER,
+  });
+  const running = firstTool(state);
+  assert.deepEqual(running.nativeInput, { file_path: 'src/main.rs' });
+  assert.equal(running.view, READ_HEADER);
+
+  state = reduceEvent(state, {
+    type: 'tool_use_result', id: 'toolu-native', tool: 'Read',
+    result_json: '{"content":"source"}', is_error: false, display: DISPLAY,
+  });
+  const settled = firstTool(state);
+  assert.deepEqual(settled.nativeOutput, { content: 'source' });
+  assert.equal(settled.result, DISPLAY);
+});
+
+test('slash command Native props retain arguments from the original command input', () => {
+  const state = reduceEvent(beginSlashCommand(emptyConversation(), '/help detail files'), {
+    type: 'slash_command_result', display: 'files shown', is_error: false,
+  });
+  const command = state.commandResult;
+  assert.equal(command?.name, '/help');
+  assert.equal(command?.args, 'detail files');
+});
+
 test('text_delta accumulates into a single open assistant narration line', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'turn_started' });
@@ -122,6 +150,61 @@ test('text_delta accumulates into a single open assistant narration line', () =>
   assert.equal(lines.length, 1);
   assert.equal(lines[0].text, 'Hello world');
   assert.equal(lines[0].streamed, true);
+});
+
+test('server fallback maps real block UUIDs, removes tombstones, and stitches retained refusal text', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started', turn_id: 8 });
+  s = reduceEvent(s, { type: 'query_model_change', to_model: 'claude-sonnet-4' });
+  s = reduceEvent(s, { type: 'assistant_block_start', block_key: 41 });
+  s = reduceEvent(s, { type: 'text_delta', text: 'discarded attempt' });
+  s = reduceEvent(s, {
+    type: 'assistant_block_identity', block_key: 41,
+    message_uuid: 'discarded-row',
+  });
+  s = reduceEvent(s, {
+    type: 'tombstone', display_only: true,
+    message: {
+      uuid: 'discarded-row', type: 'assistant', timestamp: '2026-10-03T12:00:00.000Z',
+      message: { content_json: '[{"type":"text","text":"discarded attempt"}]' },
+    },
+  });
+
+  s = reduceEvent(s, { type: 'assistant_block_start', block_key: 42 });
+  s = reduceEvent(s, { type: 'text_delta', text: 'retained' });
+  s = reduceEvent(s, {
+    type: 'assistant_block_identity', block_key: 42,
+    message_uuid: 'retained-row',
+  });
+  s = reduceEvent(s, {
+    type: 'refusal_continuation', phase: 'begin', salvage_text: 'retained', join: 'exact',
+    replaces_uuids: ['retained-row'], display_salvage_text: true,
+  });
+  s = reduceEvent(s, { type: 'assistant_block_start', block_key: 43 });
+  s = reduceEvent(s, { type: 'text_delta', text: ' fresh' });
+  s = reduceEvent(s, {
+    type: 'assistant_block_identity', block_key: 43,
+    message_uuid: 'replacement-row',
+  });
+
+  const narration = s.items.filter((item): item is Narration => item.type === 'narration');
+  assert.equal(narration.length, 1);
+  assert.equal(narration[0]?.text, 'retained fresh');
+  assert.equal(narration[0]?.transcriptUuid, 'replacement-row');
+  assert.equal(narration[0]?.servedModel, 'claude-sonnet-4');
+  assert.equal(s.serverFallbackModel, 'claude-sonnet-4', 'a server hop does not rewrite the selected model');
+});
+
+test('assistant transcript-row UUID event maps persisted text UUIDs by response identity', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started' });
+  s = reduceEvent(s, { type: 'assistant_block_start', block_key: 7 });
+  s = reduceEvent(s, { type: 'text_delta', text: 'first' });
+  s = reduceEvent(s, { type: 'message_identity', message_id: 'response-key' });
+  s = reduceEvent(s, { type: 'message_complete' });
+  s = reduceEvent(s, {
+    type: 'assistant_transcript_row_uuids', message_id: 'response-key', uuids: ['persisted-row'],
+  });
+  const row = s.items.find((item): item is Narration => item.type === 'narration');
+  assert.equal(row?.transcriptUuid, 'persisted-row');
 });
 
 test('message_complete closes the open line so the next delta starts a new one', () => {
@@ -338,6 +421,39 @@ test('system_notice remains non-terminal while surfacing its severity', () => {
   });
   assert.equal(s.running, true);
   assert.equal((s.items.at(-1) as Narration).text, 'Recovered persisted state.');
+});
+
+test('ui_log creates a separate dim Mod row without model narration', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started' });
+  s = reduceEvent(s, { type: 'ui_log', plugin: 'review', text: 'Found a mismatch' });
+  assert.equal(s.running, true);
+  assert.equal(s.lastError, null);
+  assert.deepEqual(s.items.at(-1), {
+    type: 'mod-log', id: 'i1', plugin: 'review', text: 'Found a mismatch',
+  });
+});
+
+test('ui_toast stays out of conversation items and is replaced by the next toast', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'ui_toast', plugin: 'review', text: 'First', timeout_ms: 4000 });
+  assert.deepEqual(s.items, []);
+  assert.deepEqual(s.modToast, { plugin: 'review', text: 'First', timeoutMs: 4000, sequence: 1 });
+  s = reduceEvent(s, { type: 'ui_toast', plugin: 'review', text: 'First', timeout_ms: 2000 });
+  assert.deepEqual(s.modToast, { plugin: 'review', text: 'First', timeoutMs: 2000, sequence: 2 });
+  assert.deepEqual(reduceEvent(s, { type: 'session_ended' }).modToast, null);
+});
+
+test('ui_status keeps one pinned line per plugin and clears only its owner', () => {
+  let s = emptyConversation();
+  s = reduceEvent(s, { type: 'ui_status', plugin: 'one', text: 'First' });
+  s = reduceEvent(s, { type: 'ui_status', plugin: 'two', text: 'Second' });
+  s = reduceEvent(s, { type: 'ui_status', plugin: 'one', text: 'Updated' });
+  assert.deepEqual(s.modStatuses, [
+    { plugin: 'one', text: 'Updated' }, { plugin: 'two', text: 'Second' },
+  ]);
+  assert.deepEqual(s.items, []);
+  s = reduceEvent(s, { type: 'ui_status', plugin: 'one', text: null });
+  assert.deepEqual(s.modStatuses, [{ plugin: 'two', text: 'Second' }]);
+  assert.deepEqual(reduceEvent(s, { type: 'session_ended' }).modStatuses, []);
 });
 
 test('a fixed schedule fire is visible before a turn and creates no dynamic fold marker', () => {

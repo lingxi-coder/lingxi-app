@@ -8,7 +8,10 @@ import type {
   PluginAdminCommandDto,
   ReasoningSelectionDto,
   SkillAdminCommandDto,
+  NativeUiControlRequest,
+  UiClientOperation,
 } from '@lingxi/bridge-client';
+import { validateNativeUiControlRequest, validateUiClientOperation } from '@lingxi/bridge-client';
 import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
 import { ALLOWED_CLIENT_COMMAND_TYPES, ALLOWED_REFRESH_LISTING_KINDS } from '../shared/clientCommands.js';
 import { isBase64 } from '../shared/base64.js';
@@ -368,6 +371,19 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'list_sessions':
       exactKeys(input, ['type', 'limit']);
       return input['limit'] === undefined ? { type } : { type, limit: integer(input['limit'], 'limit', 1, 200) };
+    case 'ui_attach': {
+      exactKeys(input, ['type', 'surface', 'client_id']);
+      const surface = enumValue(input['surface'], 'UI surface', ['desktop', 'mobile', 'vscode']);
+      const client_id = string(input['client_id'], 'UI client id', 64);
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(client_id)) throw new Error('invalid UI client id');
+      return { type, surface, client_id };
+    }
+    case 'ui_detach': {
+      exactKeys(input, ['type', 'client_id']);
+      const client_id = string(input['client_id'], 'UI client id', 64);
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(client_id)) throw new Error('invalid UI client id');
+      return { type, client_id };
+    }
     case 'login':
     case 'logout':
     case 'force_compact':
@@ -492,6 +508,15 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     default:
       throw new Error('command is not allowed');
   }
+}
+
+/** Narrow IPC validators for the dedicated Mod UI surface; generic `command()` stays bounded. */
+export function validateModUiControlRequest(value: unknown): NativeUiControlRequest {
+  return validateNativeUiControlRequest(value);
+}
+
+export function validateModUiOperation(value: unknown): UiClientOperation {
+  return validateUiClientOperation(value);
 }
 
 export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActive: boolean): void {

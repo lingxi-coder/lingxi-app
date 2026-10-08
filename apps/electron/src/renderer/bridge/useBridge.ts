@@ -111,6 +111,7 @@ import type {
   WorkspaceFilePreview,
 } from './lingxi.js';
 import { saveProviderSettings } from './providerSettingsSave.js';
+import { createUiSurfaceClientId, UiSurfaceLifecycleQueue } from './uiSurfaceLifecycle.js';
 import {
   interruptConfigurationOperations,
   requestConfigurationOperation,
@@ -178,6 +179,11 @@ function getHost(): LingxiApi | undefined {
 export function useBridge(): UseBridge {
   const hostRef = useRef(getHost());
   const host = hostRef.current;
+  const uiSurfaceClientId = useRef<string | null>(null);
+  if (uiSurfaceClientId.current === null) uiSurfaceClientId.current = createUiSurfaceClientId();
+  const stableUiSurfaceClientId = uiSurfaceClientId.current;
+  const uiSurfaceLifecycle = useRef<UiSurfaceLifecycleQueue | null>(null);
+  if (uiSurfaceLifecycle.current === null) uiSurfaceLifecycle.current = new UiSurfaceLifecycleQueue();
   const hosted = host !== undefined;
   const [loading, setLoading] = useState(hosted);
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
@@ -364,6 +370,18 @@ export function useBridge(): UseBridge {
   const computerAccessQueue = runtime?.computerAccessQueue ?? [];
   const askUserQuestionQueue = runtime?.askUserQuestionQueue ?? [];
   const isCancelling = runtime?.isCancelling ?? false;
+
+  useEffect(() => {
+    if (sessionLoading || !host || !activeSessionId || connection.status !== 'connected') return;
+    const clientId = stableUiSurfaceClientId;
+    const lifecycle = uiSurfaceLifecycle.current;
+    if (!clientId || !lifecycle) return;
+
+    void lifecycle.attach(host, activeSessionId, clientId).catch(() => undefined);
+    return () => {
+      void lifecycle.detach(host, activeSessionId, clientId).catch(() => undefined);
+    };
+  }, [activeSessionId, connection.status, host, sessionLoading, stableUiSurfaceClientId]);
 
   const updateRuntime = useCallback((sessionId: string, updater: (state: RuntimeState) => RuntimeState): void => {
     setRuntimeStates((previous) => {
@@ -2113,6 +2131,7 @@ export function useBridge(): UseBridge {
   return {
     scheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
     manageCron,
+    uiSurfaceClientId: stableUiSurfaceClientId,
     hosted,
     loading,
     bootstrap: presentedBootstrap,

@@ -13,6 +13,8 @@ import {
   validateImageRefs,
   validatePermissionResponse,
   validatePrompt,
+  validateModUiControlRequest,
+  validateModUiOperation,
 } from '../src/main/validation';
 
 test('clipboard writes accept only bounded plain text', () => {
@@ -258,6 +260,38 @@ test('session lifecycle commands cannot cross the renderer command boundary', ()
   );
 });
 
+test('UI surface lifecycle commands enforce the native client id and surface contract', () => {
+  for (const surface of ['desktop', 'mobile', 'vscode'] as const) {
+    const command = { type: 'ui_attach', surface, client_id: 'renderer-window-1' } as const;
+    assert.deepEqual(validateClientCommand(command), command);
+  }
+  const detach = { type: 'ui_detach', client_id: 'renderer-window-1' } as const;
+  assert.deepEqual(validateClientCommand(detach), detach);
+  assert.deepEqual(
+    validateClientCommand({ type: 'ui_attach', surface: 'desktop', client_id: 'a'.repeat(64) }),
+    { type: 'ui_attach', surface: 'desktop', client_id: 'a'.repeat(64) },
+  );
+
+  for (const client_id of ['', 'a'.repeat(65), 'renderer/1', 'renderer 1', 'window-é']) {
+    assert.throws(
+      () => validateClientCommand({ type: 'ui_attach', surface: 'desktop', client_id }),
+      /invalid UI client id/,
+    );
+    assert.throws(
+      () => validateClientCommand({ type: 'ui_detach', client_id }),
+      /invalid UI client id/,
+    );
+  }
+  assert.throws(
+    () => validateClientCommand({ type: 'ui_attach', surface: 'terminal', client_id: 'renderer-1' }),
+    /invalid UI surface/,
+  );
+  assert.throws(
+    () => validateClientCommand({ type: 'ui_attach', surface: 'desktop', client_id: 'renderer-1', viewport: {} }),
+    /unsupported fields/,
+  );
+});
+
 test('active turns allow live model and permission controls but reject session lifecycle mutations', () => {
   for (const command of [
     { type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } },
@@ -455,4 +489,26 @@ test('cron_manage accepts the v2 lifecycle actions and validates the automation 
   assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, targetSessionId: undefined } }), /select a target session/);
   assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, surprise: true } }), /unsupported fields/);
   assert.throws(() => manage({ action: 'prune_history', id: 'task-1' }), /invalid cron action/);
+});
+
+test('Mod UI payloads use dedicated typed guards and stay outside generic command()', () => {
+  const control = {
+    subtype: 'ui_render', surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1', props: {},
+  };
+  assert.deepEqual(validateModUiControlRequest(control), control);
+  assert.deepEqual(validateModUiControlRequest({ ...control, arbitrary: true }), control);
+  assert.throws(() => validateClientCommand({ type: 'ui_render', request_id: 'r1', request_json: JSON.stringify(control) }), /not allowed/);
+  assert.deepEqual(validateModUiControlRequest({
+    subtype: 'ui_input', plugin: 'plugin-a', handle: 3, kind: 'change', value: '', arbitrary: true,
+  }), {
+    subtype: 'ui_input', plugin: 'plugin-a', handle: 3, kind: 'change', value: '', surface: 'desktop',
+  });
+  assert.throws(() => validateClientCommand({ type: 'ui_input', request_id: 'r1', request_json: '{}' }), /not allowed/);
+
+  const operation = {
+    type: 'mount', surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1',
+    plugin: 'plugin-a', client: 'client-a', module: 'main', render_revision: 1, columns: 80, rows: 24,
+  };
+  assert.deepEqual(validateModUiOperation(operation), operation);
+  assert.throws(() => validateModUiOperation({ ...operation, source: 'renderer-provided-code' }), /unsupported fields/);
 });

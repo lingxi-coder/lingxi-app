@@ -4,11 +4,12 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-13-repl-mode.md` Task 4.
 
 use crate::idle_notify::IdleNotifier;
-use crate::output::OutputSink;
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
+use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use orchestrator::{OrchestratorError, TurnOutcome};
+use std::io::IsTerminal;
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -238,7 +239,19 @@ where
 
     // 3. Dispatch: slash command vs plain text.
     if input.starts_with('/') {
-        let res = dispatcher.dispatch(input).await;
+        let columns = if std::io::stdout().is_terminal() {
+            crossterm::terminal::size()
+                .map(|(columns, _)| columns.max(1))
+                .unwrap_or(80)
+        } else {
+            80
+        };
+        let context = command_api::ModCommandRunContext {
+            origin: serde_json::json!({"kind":"composer"}),
+            is_fullscreen: false,
+            columns,
+        };
+        let res = command_api::with_mod_command_context(context, dispatcher.dispatch(input)).await;
         match res {
             SlashDispatchResult::Handled { display }
             | SlashDispatchResult::Unknown { display, .. } => {
@@ -359,8 +372,8 @@ mod tests {
     // by withholding stdin until after the timer has had its chance to win.
 
     use crate::idle_notify::IdleNotifier;
-    use crate::output::PlainSink;
     use futures::future::BoxFuture;
+    use harness_runtime::headless::output::PlainSink;
     use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
     use orchestrator::test_support::MockOrchestratorHandle;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -433,7 +446,10 @@ mod tests {
 
         let dispatcher = NoopDispatcher;
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
-        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
         let sigint = SigintSource::spawn();
 
         let line_owned = format!("{line}\n");
@@ -518,7 +534,10 @@ mod tests {
         let mut stderr = Vec::new();
         let dispatcher = NoopDispatcher;
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
-        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
         let sigint = SigintSource::spawn();
         let writer_task = tokio::spawn(async move {
             let _ = writer.write_all(b"hello\n").await;
@@ -578,7 +597,10 @@ mod tests {
         let mut stderr = Vec::new();
         let dispatcher = NoopDispatcher;
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
-        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
         let sigint = SigintSource::spawn();
 
         // `run_turn_fn` re-locks the SAME shared reader and reads the queued
@@ -642,7 +664,10 @@ mod tests {
         let stdin = shared_stdin(client);
         let mut stderr = Vec::new();
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
-        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
         let sigint = SigintSource::spawn();
 
         let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -762,7 +787,10 @@ mod tests {
                 &mut Vec::new(),
                 &NoopDispatcher,
                 Arc::new(MockOrchestratorHandle::new()),
-                Arc::new(PlainSink::new()),
+                Arc::new(PlainSink::new(
+                    crate::headless_host::process_stdout(),
+                    crate::headless_host::process_stderr(),
+                )),
                 &SigintSource::spawn(),
                 None,
                 Some(wake.as_ref()),
@@ -816,7 +844,10 @@ mod tests {
             &mut Vec::new(),
             &NoopDispatcher,
             Arc::new(MockOrchestratorHandle::new()),
-            Arc::new(PlainSink::new()),
+            Arc::new(PlainSink::new(
+                crate::headless_host::process_stdout(),
+                crate::headless_host::process_stderr(),
+            )),
             &SigintSource::spawn(),
             None,
             Some(&host),

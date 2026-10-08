@@ -2,7 +2,7 @@ import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ClientEvent, MessageDto, PlanTaskDto } from '@lingxi/bridge-client';
+import type { ClientEvent, MessageDto, PlanTaskDto, SessionAgentMessageRowDto } from '@lingxi/bridge-client';
 
 import {
   shouldPollOverviewTasks,
@@ -26,6 +26,15 @@ function textMessage(role: string, text: string): MessageDto {
   return { role, blocks: [{ type: 'text', text }], images: [] };
 }
 
+function agentMessageRow(
+  message_index: number,
+  message_uuid: string,
+  message: MessageDto,
+  api_error_json?: string,
+): SessionAgentMessageRowDto {
+  return { message_index, message_uuid, message, ...(api_error_json === undefined ? {} : { api_error_json }) };
+}
+
 test('runtime inspector reuses tabs and selects an adjacent fallback on close', () => {
   const task = { kind: 'task' as const, id: 'task-1' };
   const agent = { kind: 'agent' as const, id: 'agent:11111111-2222-4333-8444-555555555555' };
@@ -44,31 +53,97 @@ test('runtime inspector reuses tabs and selects an adjacent fallback on close', 
 test('agent transcript snapshots retain a racing live tail and reject stale revisions', () => {
   const sessionId = 'session-a';
   const agentId = 'agent:11111111-2222-4333-8444-555555555555';
-  const first = textMessage('user', 'prompt');
-  const second = textMessage('assistant', 'answer');
-  const tail = textMessage('assistant', 'live tail');
+  const first = agentMessageRow(0, '11111111-1111-4111-8111-111111111111', textMessage('user', 'prompt'));
+  const second = agentMessageRow(1, '22222222-2222-4222-8222-222222222222', textMessage('assistant', 'answer'));
+  const tail = agentMessageRow(2, '33333333-3333-4333-8333-333333333333', textMessage('assistant', 'live tail'));
   let state = emptyRuntimeCenterState();
   state = reduceRuntimeCenterEvent(state, {
     type: 'session_agent_message', session_id: sessionId, agent_id: agentId,
-    message_index: 2, message: tail,
+    message_index: tail.message_index, message_uuid: tail.message_uuid, message: tail.message,
   } satisfies ClientEvent, sessionId);
   state = reduceRuntimeCenterEvent(state, {
     type: 'session_agent_transcript', session_id: sessionId, agent_id: agentId,
     messages: [first, second], next_message_index: 2, revision: 4,
   } satisfies ClientEvent, sessionId);
-  assert.deepEqual(state.transcripts[agentId]?.messages, [first, second, tail]);
+  assert.deepEqual(state.transcripts[agentId]?.messages, [first.message, second.message, tail.message]);
+  assert.deepEqual(state.transcripts[agentId]?.rows, [first, second, tail]);
 
   state = reduceRuntimeCenterEvent(state, {
     type: 'session_agent_transcript', session_id: sessionId, agent_id: agentId,
     messages: [first], next_message_index: 1, revision: 3,
   } satisfies ClientEvent, sessionId);
-  assert.deepEqual(state.transcripts[agentId]?.messages, [first, second, tail]);
+  assert.deepEqual(state.transcripts[agentId]?.rows, [first, second, tail]);
 
   const foreign = reduceRuntimeCenterEvent(state, {
     type: 'session_agent_message', session_id: 'session-b', agent_id: agentId,
-    message_index: 3, message: textMessage('assistant', 'foreign'),
+    message_index: 3, message_uuid: '44444444-4444-4444-8444-444444444444',
+    message: textMessage('assistant', 'foreign'),
   } satisfies ClientEvent, sessionId);
   assert.equal(foreign, state);
+});
+
+test('agent tombstones delete by UUID, preserve error envelopes and monotonic indexes, and fence stale rows', () => {
+  const sessionId = 'session-a';
+  const agentId = 'agent:11111111-2222-4333-8444-555555555555';
+  const otherAgentId = 'agent:22222222-3333-4444-8555-666666666666';
+  const apiErrorJson = '{ "type": "api_error", "error": { "message": "rate limited" } }';
+  const first = agentMessageRow(0, '11111111-1111-4111-8111-111111111111', textMessage('assistant', 'first'), apiErrorJson);
+  const discarded = agentMessageRow(2, '22222222-2222-4222-8222-222222222222', textMessage('assistant', 'discarded'));
+  const liveTail = agentMessageRow(4, '44444444-4444-4444-8444-444444444444', textMessage('assistant', 'live tail'));
+  const unrelated = agentMessageRow(0, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', textMessage('assistant', 'other agent'));
+  let state = emptyRuntimeCenterState();
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'session_agent_transcript', session_id: sessionId, agent_id: agentId,
+    messages: [first, discarded], next_message_index: 4, revision: 8,
+  } satisfies ClientEvent, sessionId);
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'session_agent_message', session_id: sessionId, agent_id: agentId,
+    message_index: liveTail.message_index, message_uuid: liveTail.message_uuid, message: liveTail.message,
+  } satisfies ClientEvent, sessionId);
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'session_agent_transcript', session_id: sessionId, agent_id: otherAgentId,
+    messages: [unrelated], next_message_index: 1, revision: 1,
+  } satisfies ClientEvent, sessionId);
+
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'session_agent_tombstone', session_id: sessionId, agent_id: agentId,
+    message_uuid: discarded.message_uuid, display_only: true,
+  } satisfies ClientEvent, sessionId);
+  assert.deepEqual(state.transcripts[agentId]?.rows, [first, liveTail]);
+  assert.equal(state.transcripts[agentId]?.rows[0]?.api_error_json, apiErrorJson);
+  assert.equal(state.transcripts[agentId]?.nextMessageIndex, 5);
+  assert.deepEqual(state.transcripts[otherAgentId]?.rows, [unrelated]);
+
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'session_agent_transcript', session_id: sessionId, agent_id: agentId,
+    messages: [first, discarded], next_message_index: 4, revision: 8,
+  } satisfies ClientEvent, sessionId);
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'session_agent_message', session_id: sessionId, agent_id: agentId,
+    message_index: discarded.message_index, message_uuid: discarded.message_uuid, message: discarded.message,
+  } satisfies ClientEvent, sessionId);
+  assert.deepEqual(state.transcripts[agentId]?.rows, [first, liveTail], 'stale snapshot and live tail cannot resurrect a tombstoned UUID');
+
+  state = reduceRuntimeCenterEvent(state, {
+    type: 'session_agent_tombstone', session_id: sessionId, agent_id: agentId,
+    message_uuid: liveTail.message_uuid, display_only: false,
+  } satisfies ClientEvent, sessionId);
+  assert.deepEqual(state.transcripts[agentId]?.rows, [first]);
+  assert.equal(state.transcripts[agentId]?.nextMessageIndex, 5, 'removal does not reuse row indexes');
+  assert.equal(state.transcripts[otherAgentId]?.rows[0]?.message_uuid, unrelated.message_uuid);
+
+  const beforeSnapshotUuid = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  let beforeSnapshot = reduceRuntimeCenterEvent(emptyRuntimeCenterState(), {
+    type: 'session_agent_tombstone', session_id: sessionId, agent_id: agentId,
+    message_uuid: beforeSnapshotUuid, display_only: true,
+  } satisfies ClientEvent, sessionId);
+  beforeSnapshot = reduceRuntimeCenterEvent(beforeSnapshot, {
+    type: 'session_agent_transcript', session_id: sessionId, agent_id: agentId,
+    messages: [agentMessageRow(0, beforeSnapshotUuid, textMessage('assistant', 'already removed'))],
+    next_message_index: 1,
+    revision: 1,
+  } satisfies ClientEvent, sessionId);
+  assert.deepEqual(beforeSnapshot.transcripts[agentId]?.rows, [], 'a tombstone received before the first snapshot fences that UUID');
 });
 
 test('optimistic resources rollback only the failed send and never expose base64 in ids', () => {

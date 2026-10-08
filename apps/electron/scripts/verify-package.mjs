@@ -37,6 +37,7 @@ import {
   verifySignedEntitlements,
   verifyTeamIdentifier,
 } from './credential-broker.mjs';
+import { verifyModBun } from './mod-bun.mjs';
 
 function requirePath(path, kind = 'path') {
   if (!existsSync(path)) throw new Error(`required ${kind} is missing: ${path}`);
@@ -95,6 +96,9 @@ export function verifyPackage(root = packageRoot) {
     join(contents, 'Info.plist'),
     join(contents, 'MacOS', APP_NAME),
     join(resources, 'bin', 'bridge-server'),
+    join(resources, 'bin', 'bun'),
+    join(resources, 'mod-bun.json'),
+    join(resources, 'Bun-LICENSE.md'),
     join(resources, AUDIO_HELPER_APP),
     join(resources, AUDIO_HELPER_APP, 'Contents', 'Info.plist'),
     join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE),
@@ -122,6 +126,8 @@ export function verifyPackage(root = packageRoot) {
 
   assertArm64Executable(join(contents, 'MacOS', APP_NAME), `${APP_NAME} executable`);
   assertArm64Executable(join(resources, 'bin', 'bridge-server'), 'packaged bridge-server sidecar');
+  assertArm64Executable(join(resources, 'bin', 'bun'), 'packaged Mod compiler');
+  verifyModBun(resources, 'darwin', 'arm64');
   assertArm64Executable(
     join(resources, AUDIO_HELPER_APP, 'Contents', 'MacOS', AUDIO_HELPER_EXECUTABLE),
     'packaged audio helper app',
@@ -210,6 +216,9 @@ export function verifyPackage(root = packageRoot) {
     `${APP_NAME}.app/Contents/Info.plist`,
     `${APP_NAME}.app/Contents/MacOS/${APP_NAME}`,
     `${APP_NAME}.app/Contents/Resources/bin/bridge-server`,
+    `${APP_NAME}.app/Contents/Resources/bin/bun`,
+    `${APP_NAME}.app/Contents/Resources/mod-bun.json`,
+    `${APP_NAME}.app/Contents/Resources/Bun-LICENSE.md`,
     `${APP_NAME}.app/Contents/Resources/${AUDIO_HELPER_APP}/Contents/Info.plist`,
     `${APP_NAME}.app/Contents/Resources/${AUDIO_HELPER_APP}/Contents/MacOS/${AUDIO_HELPER_EXECUTABLE}`,
     `${APP_NAME}.app/Contents/Resources/${BROKER_RESOURCE_DIRNAME}/broker-manifest.json`,
@@ -230,6 +239,7 @@ export function verifyPackage(root = packageRoot) {
   if (commandAvailable('/usr/bin/codesign')) {
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', paths.appPath], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', 'bridge-server')], { stdio: 'pipe' });
+    execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, 'bin', 'bun')], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, AUDIO_HELPER_APP)], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, BROKER_RESOURCE_DIRNAME, 'bin', 'lingxi-credential-client')], { stdio: 'pipe' });
     execFileSync('/usr/bin/codesign', ['--verify', '--strict', join(resources, BROKER_RESOURCE_DIRNAME, 'LingXiCredentialBroker.app')], { stdio: 'pipe' });
@@ -249,6 +259,7 @@ export function verifyPackage(root = packageRoot) {
     if (teamId) {
       verifyIdentifier(paths.appPath, identifiers.desktopBundleId, teamId);
       verifyIdentifier(join(resources, 'bin', 'bridge-server'), identifiers.bridgeServerIdentifier, teamId);
+      verifyIdentifier(join(resources, 'bin', 'bun'), `${identifiers.desktopBundleId}.mod-compiler`, teamId);
       validateProvisioningProfile(
         join(resources, AUDIO_HELPER_APP, 'Contents', 'embedded.provisionprofile'),
         teamId,

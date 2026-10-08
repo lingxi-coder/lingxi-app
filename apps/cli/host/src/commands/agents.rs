@@ -826,7 +826,9 @@ fn fallback_connect_auth_methods() -> std::collections::BTreeMap<String, String>
             let tag = match &provider.auth {
                 ApiKey | Bearer => "api_key",
                 CopilotBearer => "copilot_device",
-                ChatGptOAuth | ChatGptPlan | OAuthBearer | AwsSigV4 | GcpToken | AzureToken => "oauth",
+                ChatGptOAuth | ChatGptPlan | OAuthBearer | AwsSigV4 | GcpToken | AzureToken => {
+                    "oauth"
+                }
                 None => return Option::None,
             };
             Some((provider.profile_name.clone(), tag.to_string()))

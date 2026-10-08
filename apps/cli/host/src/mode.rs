@@ -1,5 +1,5 @@
 //! Three-way mode dispatch added in M6-01. Routes argv to one of:
-//! - `Mode::Print(prompt)`: existing `run::run_oneshot` (v0.6.0, unchanged)
+//! - `Mode::Print(prompt)`: the Harness headless runner
 //! - `Mode::Tui`: the ratatui TUI via `run_ratatui` (default)
 //! - `Mode::StdioRepl`: existing `repl::run_repl` (v0.6.0, kept as `--no-tui`
 //!   and non-TTY fallback)
@@ -59,7 +59,7 @@ pub(crate) fn is_full_tty() -> bool {
 
 use crate::exit_codes;
 use crate::init::Runtime;
-use crate::output::OutputSink;
+use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -154,7 +154,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                 .into_iter()
                 .take(ids.len())
                 .filter_map(|command| {
-                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
+                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput { queue_delivery: None,
                         text: command.text()?.to_owned(),
                         origin_kind: match command.source {
                             msgqueue::QueueSource::AgentSendMessage => Some("peer"),
@@ -162,6 +162,8 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                             msgqueue::QueueSource::Cron => Some("scheduled-trigger"),
                             _ => None,
                         },
+                        projected_content: None,
+                        source_message_uuid: None,
                     })
                 })
                 .collect(),
@@ -1065,7 +1067,7 @@ fn build_model_details(m: &lingxi_core::host::ModelListing) -> Vec<String> {
 
 /// Execute the chosen mode. Returns the process exit code.
 ///
-/// `Mode::Print` uses the caller-provided runtime. Interactive modes own their
+/// Print sessions enter the Harness headless runner. Interactive modes own their
 /// runtime construction so callers can route to them without pre-building and
 /// discarding a generic runtime.
 pub async fn dispatch(
@@ -1076,10 +1078,8 @@ pub async fn dispatch(
 ) -> i32 {
     match mode {
         Mode::Print(_) => {
-            // run_oneshot reads the prompt directly from argv.prompt;
-            // the captured-prompt copy in Mode::Print(prompt) exists for
-            // test introspection only.
-            crate::run::run_oneshot(argv, runtime, sink.as_ref()).await
+            let (permission_mode, _) = crate::resolve_permission_mode(argv);
+            crate::headless_host::run(argv, permission_mode).await
         }
         Mode::StdioRepl => {
             let _ = runtime;
@@ -3815,7 +3815,7 @@ pub(crate) async fn rollback_cd_after_launch_identity_failure(
     }
 }
 
-fn fail_current_background_job_after_cd_failure(detail: &str) {
+pub(crate) fn fail_current_background_job_after_cd_failure(detail: &str) {
     let Ok(job_dir_raw) = std::env::var("LINGXI_JOB_DIR") else {
         return;
     };

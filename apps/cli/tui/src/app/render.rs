@@ -77,6 +77,7 @@ impl<'cb> RataApp<'cb> {
             }
             let size = terminal.size()?;
             self.chat_widget.set_terminal_rows(size.height);
+            self.request_mod_ui_render(size.width, size.height);
             if self.fullscreen {
                 terminal.resize(size);
                 let full = Rect::new(0, 0, size.width, size.height);

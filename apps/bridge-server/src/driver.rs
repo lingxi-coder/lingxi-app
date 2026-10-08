@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use client::adapter::{lowering::lower_cost_snapshot, ClientEventSink};
-use client::protocol::commands::ImageRefDto;
+use client::protocol::commands::{ImageRefDto, UiSurfaceDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
 use lingxi_core::host::OrchestratorHandle;
 // `ImageSource` is re-exported from the orchestrator (the canonical, FROZEN
@@ -115,6 +115,32 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         taken
+    }
+
+    async fn take_mid_turn_batch(
+        &self,
+    ) -> Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>> {
+        let batch = self.queue.take_mid_turn_commands().await?;
+        self.foreign_inputs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(
+            batch
+                .into_iter()
+                .filter_map(|command| {
+                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput { queue_delivery: None,
+                        text: command.text()?.to_owned(),
+                        origin_kind: match command.source {
+                            msgqueue::QueueSource::AgentSendMessage => Some("peer"),
+                            msgqueue::QueueSource::TaskCompletion => Some("task-notification"),
+                            msgqueue::QueueSource::Cron => Some("scheduled-trigger"),
+                            _ => None,
+                        },
+                        projected_content: None,
+                        source_message_uuid: None,
+                    })
+                })
+                .collect(),
+        )
     }
 }
 
@@ -891,6 +917,24 @@ impl TurnDriver for OrchestratorTurnDriver {
         )
     }
 
+    async fn ui_attach(&self, client_id: &str, surface: UiSurfaceDto) -> bool {
+        let surface = match surface {
+            UiSurfaceDto::Desktop => orchestrator::config::ModRenderSurface::Desktop,
+            UiSurfaceDto::Mobile => orchestrator::config::ModRenderSurface::Mobile,
+            UiSurfaceDto::Vscode => orchestrator::config::ModRenderSurface::Vscode,
+        };
+        self.orchestrator.mod_ui_attach(client_id, surface).await
+    }
+
+    async fn ui_detach(&self, client_id: &str) -> bool {
+        self.orchestrator
+            .mod_ui_detach(
+                client_id,
+                orchestrator::mod_surface_roster::ModSurfaceDetachReason::Detach,
+            )
+            .await
+    }
+
     async fn stop_dynamic_loop(&self) {
         tool_cron::stop_dynamic_loop(self.wakeup_scheduler.as_ref()).await;
         if let Some(runtime) = &self.loop_runtime {
@@ -1276,7 +1320,7 @@ mod tests {
         assert!(
             content
                 .iter()
-                .any(|b| matches!(b, ContentBlock::Text { text } if text == "describe this")),
+                .any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "describe this")),
             "the prompt text must precede the image: {content:?}"
         );
         let source = content
@@ -1420,7 +1464,7 @@ mod tests {
         let content = first_user_content(&calls[0].messages);
         assert!(content
             .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text } if text == "queued image")));
+            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "queued image")));
         assert!(content.iter().any(|block| matches!(block, ContentBlock::Image { source: ImageSource::Base64 { media_type, data } } if media_type == &image.media_type && data == &image.base64)));
     }
 
@@ -1437,7 +1481,9 @@ mod tests {
                         goal_retry_id: None,
                         text: "first".to_string(),
                         is_meta: false,
+                        mod_origin: Some(serde_json::json!({"kind":"bridge"})),
                         message_id: None,
+                        transcript_row_token: None,
                         queue_priority: None,
                         scheduled_task_id: None,
                         scheduled_fire_id: None,
@@ -1446,7 +1492,9 @@ mod tests {
                         goal_retry_id: None,
                         text: "second".to_string(),
                         is_meta: false,
+                        mod_origin: Some(serde_json::json!({"kind":"bridge"})),
                         message_id: None,
+                        transcript_row_token: None,
                         queue_priority: None,
                         scheduled_task_id: None,
                         scheduled_fire_id: None,

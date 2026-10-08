@@ -949,3 +949,98 @@ async fn unowned_question_publication_during_close_finishes_and_is_joined() {
     drop(socket);
     endpoint.shutdown().await;
 }
+
+#[tokio::test]
+async fn mod_ui_request_uses_correlated_unscoped_reply_while_turn_is_active() {
+    let connection = BridgeConnection::new();
+    let (endpoint, mut socket, sink) = captured_sink().await;
+    connection.close_connection(Some(&sink)).await;
+    assert!(connection.claim_outbound(&sink).await);
+    connection.handle_hello(3, hello()).await;
+    assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+
+    let _turn_owner = connection.active_turn.begin(Some(7));
+    connection.turn_running.store(true, Ordering::SeqCst);
+    connection
+        .dispatch(ClientCommand::UiClientModule {
+            request_id: "module-active-turn".into(),
+            plugin: "unavailable-plugin".into(),
+        })
+        .await;
+
+    assert!(matches!(
+        next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::UiControlResult {
+            request_id,
+            response_json: None,
+            metadata_json: None,
+            error: Some(_),
+        }) if request_id == "module-active-turn"
+    ));
+    for (command, expected_id) in [
+        (
+            ClientCommand::UiPress {
+                request_id: "parent-press-active-turn".into(),
+                request_json: r#"{"subtype":"ui_press","plugin":"review","handle":1}"#.into(),
+            },
+            "parent-press-active-turn",
+        ),
+        (
+            ClientCommand::UiInput {
+                request_id: "parent-input-active-turn".into(),
+                request_json: r#"{"subtype":"ui_input","plugin":"review","handle":1,"kind":"change","value":"x"}"#.into(),
+            },
+            "parent-input-active-turn",
+        ),
+        (
+            ClientCommand::UiSelect {
+                request_id: "parent-select-active-turn".into(),
+                request_json: r#"{"subtype":"ui_select","plugin":"review","handle":1,"value":"x"}"#.into(),
+            },
+            "parent-select-active-turn",
+        ),
+    ] {
+        connection.dispatch(command).await;
+        assert!(matches!(
+            next_frame(&mut socket).await,
+            Frame::Event(ClientEvent::UiControlResult {
+                request_id,
+                response_json: None,
+                metadata_json: None,
+                error: Some(_),
+            }) if request_id == expected_id
+        ));
+    }
+    connection
+        .event_sink()
+        .emit(ClientEvent::UiInvalidate {
+            instances_json: Some("[]".into()),
+            uuid: "invalidate-1".into(),
+            session_id: "session-1".into(),
+        })
+        .await;
+    assert!(matches!(
+        next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::UiInvalidate {
+            uuid,
+            session_id,
+            ..
+        }) if uuid == "invalidate-1" && session_id == "session-1"
+    ));
+    connection
+        .event_sink()
+        .emit(ClientEvent::UiClientFrame {
+            runtime_id: "runtime-1".into(),
+            frame_json: r#"{"type":"ui.render"}"#.into(),
+        })
+        .await;
+    assert!(matches!(
+        next_frame(&mut socket).await,
+        Frame::Event(ClientEvent::UiClientFrame { runtime_id, .. })
+            if runtime_id == "runtime-1"
+    ));
+
+    connection.close_connection(Some(&sink)).await;
+    drop(socket);
+    endpoint.shutdown().await;
+}

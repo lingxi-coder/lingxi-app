@@ -4,9 +4,11 @@
  */
 
 export * from './protocol.js';
+export * from './uiControlCommands.js';
 export * from './toolview.js';
 export * from './lockfile.js';
 export * from './validation.js';
+export * from './eventCorrelation.js';
 export { versionCompatible } from './version.js';
 export {
   BridgeClient,

@@ -49,6 +49,8 @@ test('the shared definition covers every newly-added command and listing kind', 
     'update_workspace_directories',
     'upsert_mcp_server',
     'remove_mcp_server',
+    'ui_attach',
+    'ui_detach',
   ];
   for (const name of newCommands) {
     assert.ok(shared.includes(`'${name}'`), `expected AllowedClientCommand to mention '${name}'`);
@@ -80,6 +82,7 @@ test('the allowlists are the exposed subset of the exhaustive desktop dispositio
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.request_exit, 'not_applicable');
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.resume_workflow, 'not_applicable');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.turn_recovery_state, 'degraded');
+  assert.equal(CLIENT_EVENT_DISPOSITIONS.session_agent_tombstone, 'exposed');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.app_event, 'not_applicable');
 });
 

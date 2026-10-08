@@ -34,6 +34,23 @@ impl SelectionState {
         }
     }
 
+    /// Read an in-progress drag without consuming it.
+    pub fn current_text(&self, buffer: &Buffer) -> Option<String> {
+        let (anchor, cursor) = (self.anchor?, self.cursor?);
+        if !self.dragging || anchor == cursor {
+            return None;
+        }
+        let text = extract_selection(buffer, anchor, cursor);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Inclusive screen rows covered by the current drag.
+    #[must_use]
+    pub fn selected_rows(&self) -> Option<(u16, u16)> {
+        let (anchor, cursor) = (self.anchor?, self.cursor?);
+        Some((anchor.y.min(cursor.y), anchor.y.max(cursor.y)))
+    }
+
     /// Finish the drag and return the selected text.
     ///
     /// Empty/whitespace-only selections return `None`, matching native
@@ -203,5 +220,16 @@ mod tests {
             selection.finish_at(Position::new(9, 0), buffer.area, &buffer),
             Some("ab武汉cd".to_string())
         );
+    }
+
+    #[test]
+    fn in_progress_drag_is_readable_without_finishing_it() {
+        let buffer = buffer();
+        let mut selection = SelectionState::default();
+        selection.begin(Position::new(0, 0), buffer.area);
+        assert_eq!(selection.current_text(&buffer), None);
+        selection.update(Position::new(3, 0), buffer.area);
+        assert_eq!(selection.current_text(&buffer), Some("ab武".into()));
+        assert!(selection.is_dragging());
     }
 }

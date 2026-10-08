@@ -4,15 +4,11 @@ use super::bypass_env;
 use super::command_line_output::commander_error;
 use super::command_line_output::commander_help;
 use super::commands;
-use super::control_plane;
 use super::cwd;
 use super::exit_codes;
 use super::init;
 use super::logging;
 use super::mode;
-use super::output;
-use super::output_adapter;
-use super::permission_prompt_notify;
 use super::permission_settings::resolve_permission_mode;
 use super::process_wrapper;
 use super::run;
@@ -21,9 +17,10 @@ use super::startup::run_config_startup;
 use super::startup::startup_deprecation_notice;
 use super::startup_resources;
 use super::startup_trace;
-use super::stream_json;
 use crate::argv::Argv;
 use clap::error::ErrorKind;
+use harness_runtime::headless::output;
+use harness_runtime::headless::output_adapter;
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
@@ -466,9 +463,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
                     | Some(crate::commands::plugin::Sub::Update(_))
             ) {
                 let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
-                    Arc::new(output::JsonSink::new(lingxi_core::types::SessionId::new()))
+                    Arc::new(output::JsonSink::new(
+                        lingxi_core::types::SessionId::new(),
+                        crate::headless_host::process_stdout(),
+                    ))
                 } else {
-                    Arc::new(output::PlainSink::new())
+                    Arc::new(output::PlainSink::new(
+                        crate::headless_host::process_stdout(),
+                        crate::headless_host::process_stderr(),
+                    ))
                 };
                 let adapter: Arc<dyn lingxi_core::host::OutputStream> =
                     Arc::new(output_adapter::SinkAdapter::new(sink));
@@ -593,7 +596,7 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     }
 
     // (CLI-13) The truncating resume itself lives in
-    // `crate::resume_truncation::apply_truncating_resume`, applied by
+    // `harness_runtime::headless::resume_truncation::apply_truncating_resume`, applied by
     // `run::resume_resolved_session` immediately after the transcript load —
     // the oracle's own position (@307370121). It stops the chain at the named
     // entry and, when `--resume-drops-turn` is supplied, REFUSES when the
@@ -658,190 +661,35 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::ARGV_ERROR;
     }
 
-    // (CLI-16, cc2.1.238) `--rewind-files <user-message-id>` — "Restore files to
-    // state at the specified user message and exit (requires --resume)". In the
-    // oracle this branch sits inside `runHeadless` right after the transcript
-    // loads (@307222364) and ALWAYS exits, so it never reaches the prompt gate
-    // or the `--output-format=stream-json requires --verbose` gate below it —
-    // hence its position HERE, ahead of both output-format branches, rather
-    // than down with the `--continue`/`--resume` dispatch. Its two argv gates
-    // fired above; the sink is built inline because `make_sink` is defined
-    // after the `&mut parsed` startup-resource pass.
-    if parsed.print && parsed.rewind_files.is_some() {
-        let sink: Arc<dyn output::OutputSink> = if parsed.is_json_output() {
-            Arc::new(output::JsonSink::new(lingxi_core::types::SessionId::new()))
-        } else {
-            Arc::new(output::PlainSink::new())
-        };
-        return run::run_rewind_files(&parsed, sink.as_ref()).await;
-    }
-
-    // stream-json: `--output-format stream-json --verbose` (print-only, no
-    // SinkAdapter/OutputSink layer — the StreamJsonStream IS the OutputStream).
-    //
-    // Gate: when `--print`/`-p` is combined with `stream-json` the caller MUST
-    // also pass `--verbose` (mirrors claude-code's argv validation:
-    // `main.tsx printMode && !verbose && outputFormat=="stream-json"` →
-    // "When using --print, --output-format=stream-json requires --verbose").
-    if parsed.is_stream_json() {
-        if parsed.print && !parsed.verbose {
+    // All non-interactive formats and session sources enter the same runner.
+    // Rewind is a standalone operation and precedes the stream verbosity gate.
+    let chosen = mode::decide_mode(&parsed);
+    let headless =
+        parsed.print || parsed.is_stream_json() || matches!(chosen, mode::Mode::Print(_));
+    if headless {
+        if parsed.rewind_files.is_none()
+            && parsed.is_stream_json()
+            && parsed.print
+            && !parsed.verbose
+        {
             eprintln!("Error: When using --print, --output-format=stream-json requires --verbose");
             return exit_codes::ARGV_ERROR;
         }
-        let stream = Arc::new(stream_json::StreamJsonStream::new_placeholder());
-        lingxi_core::host::OutputStream::set_thinking_display(
-            stream.as_ref(),
-            parsed.thinking_display.as_deref(),
-        );
-        // P4: wire --include-partial-messages and --include-hook-events flags
-        // before build_runtime so the stream is fully configured before any
-        // hook or SSE events flow through it.
-        stream.set_flags(parsed.include_partial_messages, parsed.include_hook_events);
-        // (2.1.211) Carry the effective `--forward-subagent-text` state (flag OR
-        // truthy CLAUDE_CODE_FORWARD_SUBAGENT_TEXT), gated to the valid --print +
-        // stream-json context — an explicit flag in the wrong context already
-        // errored above; an env-only opt-in in the wrong context stays disabled.
-        stream.set_forward_subagent_text(
-            parsed.forward_subagent_text_effective() && parsed.print && parsed.is_stream_json(),
-        );
-        let adapter: Arc<dyn lingxi_core::host::OutputStream> = stream.clone();
-
-        // P5 Phase 2: for the bidirectional `--input-format stream-json` path,
-        // build the shared control plane BEFORE `build_runtime` (its outbound
-        // handle comes from the stream, available now) and inject the
-        // `can_use_tool` permission decider as the inner transport. The
-        // `PolicyPermissionGate` (enforcement default on) wraps it as the OUTER
-        // local pre-check, so only an unresolved `Ask` round-trips over stdio.
-        // The output-only print path keeps the headless deny-on-ask default
-        // (no stdin reader to answer a control_response).
-        // (2.1.259) `--permission-prompts none` removes the prompt surface. When
-        // a surface WAS configured, say so rather than letting it look connected:
-        // oracle `if(Hn){me.hostAnswersElicitations=!1; if(Rn!==void 0) log(...)}`,
-        // where `Rn` is `"stdio"` for the SDK host or the `--permission-prompt-tool`.
-        if parsed.permission_prompts_none() {
-            if let Some(surface) = if parsed.is_stream_json_input() {
-                Some("SDK host")
-            } else if parsed.permission_prompt_tool.is_some() {
-                Some("--permission-prompt-tool")
-            } else {
-                None
-            } {
-                eprintln!(
-                    "--permission-prompts none: permission prompts are answered with a local deny; the {surface} is not consulted"
-                );
-            }
+        if parsed.permission_prompts_none()
+            && !parsed.is_stream_json_input()
+            && parsed.permission_prompt_tool.is_some()
+        {
+            eprintln!("--permission-prompts none: permission prompts are answered with a local deny; the --permission-prompt-tool is not consulted");
         }
-
-        let control_plane = if parsed.is_stream_json_input() {
-            let plane = control_plane::StdioControlPlane::new(stream.outbound_tx());
-            // GATE-SYSMSG-01: share the stream's session-id handle so a locally
-            // denied tool emits a `permission_denied` system message stamped with
-            // the same `session_id` as every data frame.
-            plane.set_session_id(stream.session_id_handle());
-            Some(plane)
-        } else {
-            None
-        };
-
-        let runtime = if let Some(plane) = &control_plane {
-            let mut cfg = init::resolve_desktop_config(&parsed, permission_mode);
-            // §2b: persist an ALLOW response's `updatedPermissions` rule updates to
-            // the SAME settings tree the engine resolved (claude-code
-            // `persistPermissionUpdates`). Paths come from the same `cfg` so a
-            // host-allowed rule lands where the next session loads it.
-            let gate = Arc::new(
-                control_plane::StdioControlPermissionGate::new(plane.clone()).with_persist(
-                    permission::PermissionPaths {
-                        lingxi_home: cfg.lingxi_home.clone(),
-                        cwd: cfg.cwd.clone(),
-                    },
-                ),
-            );
-            // SH-02: keep a typed handle so the `permission_prompt` notifier
-            // can be attached once the orchestrator exists (the gate itself has
-            // to be built FIRST — it is injected into the runtime config).
-            let gate_handle = gate.clone();
-            cfg.injected_permission_gate = Some(gate as Arc<dyn permission::gate::PermissionGate>);
-            let rt = match init::build_cli_runtime_from_config(cfg, adapter, &parsed).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("lingxi-cli: {e}");
-                    return exit_codes::RUNTIME_ERROR;
-                }
-            };
-            // SH-02 — this is what makes `Cou` reachable: without it the gate's
-            // `OnceLock` stays empty and every armed guard is inert.
-            gate_handle.set_prompt_notifier(Arc::new(
-                permission_prompt_notify::OrchestratorPermissionPromptNotifier::new(
-                    rt.orchestrator.clone(),
-                ),
-            ));
-            init::auto_connect_ide_if_requested(&parsed, &rt).await;
-            rt
-        } else {
-            match init::build_runtime(&parsed, adapter, permission_mode).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("lingxi-cli: {e}");
-                    return exit_codes::RUNTIME_ERROR;
-                }
-            }
-        };
-        // OR-1: point the stream at the orchestrator's LIVE permission-denial
-        // cell, so the `result` frame reports the run's refused tool calls
-        // instead of a hardcoded `[]`. Shared (not snapshotted) so none of the
-        // six result-emit sites has to remember to push the list.
-        stream.share_permission_denials(runtime.orchestrator.permission_denials_handle());
         if let Some(notice) = startup_deprecation_notice(&parsed) {
             eprintln!("{notice}");
         }
         if let Some(notice) = &permission_notice {
             eprintln!("{notice}");
         }
-        // P3: when --input-format=stream-json is also set, use the multi-turn
-        // stdin loop instead of the single-prompt one-shot path.
-        if let Some(plane) = control_plane {
-            return run::run_stream_json_input_loop(
-                &parsed,
-                &runtime,
-                stream,
-                permission_mode,
-                plane,
-            )
-            .await;
-        }
-        return run::run_stream_json_print(&parsed, &runtime, stream, permission_mode).await;
+        return crate::headless_host::run(&parsed, permission_mode).await;
     }
 
-    // `--output-format json` / `--json` in PRINT mode: emit only the final
-    // result JSON line (suppress all streaming frames). Only intercept when
-    // a non-slash prompt is present or `--print` is active (no slash prompt)
-    // — slash commands keep the old JSON event format, interactive/REPL mode
-    // with `--json` falls through to the normal dispatch path (repl.rs handles it).
-    let is_non_slash_print = parsed
-        .prompt
-        .as_deref()
-        .is_some_and(|p| !p.trim_start().starts_with('/'));
-    if parsed.is_json_output() && (is_non_slash_print || parsed.print) {
-        let stream = Arc::new(stream_json::StreamJsonStream::new_json_mode_placeholder());
-        let adapter: Arc<dyn lingxi_core::host::OutputStream> = stream.clone();
-        let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("lingxi-cli: {e}");
-                return exit_codes::RUNTIME_ERROR;
-            }
-        };
-        if let Some(notice) = startup_deprecation_notice(&parsed) {
-            eprintln!("{notice}");
-        }
-        if let Some(notice) = &permission_notice {
-            eprintln!("{notice}");
-        }
-        return run::run_json_print(&parsed, &runtime, stream, permission_mode).await;
-    }
-
-    let chosen = mode::decide_mode(&parsed);
     startup_trace::mark("mode_decide");
 
     // (2.1.201) Resolve + cache the accessibility screen-reader gate ONCE. This
@@ -911,9 +759,15 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
 
     let make_sink = || -> Arc<dyn output::OutputSink> {
         if parsed.is_json_output() {
-            Arc::new(output::JsonSink::new(lingxi_core::types::SessionId::new()))
+            Arc::new(output::JsonSink::new(
+                lingxi_core::types::SessionId::new(),
+                crate::headless_host::process_stdout(),
+            ))
         } else {
-            Arc::new(output::PlainSink::new())
+            Arc::new(output::PlainSink::new(
+                crate::headless_host::process_stdout(),
+                crate::headless_host::process_stderr(),
+            ))
         }
     };
 
@@ -977,18 +831,6 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         mode::Mode::Tui | mode::Mode::StdioRepl => {
             mode::dispatch_interactive(chosen, &parsed).await
         }
-        mode::Mode::Print(_) => {
-            let sink = make_sink();
-            let adapter: Arc<dyn lingxi_core::host::OutputStream> =
-                Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
-            let runtime = match init::build_runtime(&parsed, adapter, permission_mode).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("lingxi-cli: {e}");
-                    return exit_codes::RUNTIME_ERROR;
-                }
-            };
-            mode::dispatch(chosen, &parsed, &runtime, sink).await
-        }
+        mode::Mode::Print(_) => crate::headless_host::run(&parsed, permission_mode).await,
     }
 }

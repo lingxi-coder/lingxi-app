@@ -585,11 +585,27 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     let trusted = args.trusted_workspace;
 
     DesktopConfig {
+        diagnostics: None,
+        composition: None,
+        defer_session_start: false,
+        session_transcript_path: None,
+        session_resume_snapshot: None,
+        session_resume_cost: None,
+        max_structured_output_retries: 5,
+        mcp_services_factory: None,
+        user_agent_environment: None,
+        request_identity: None,
+        anthropic_compatible_version: None,
+        anthropic_client_metadata: None,
+        native_thinking_display: None,
+        oauth_environment_lookup: None,
+        verified_computer_profiles: Vec::new(),
         build_info: harness_runtime::desktop::BuildInfo::new(
             env!("CARGO_PKG_VERSION"),
             option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
         ),
         host_workspace_trusted: Some(trusted),
+        mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
         enable_automation_scheduler: args.scheduled_controller,
         initial_teammate_team_name: None,
         api_base: resolve_api_base(),
@@ -597,6 +613,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // assigned by `main` immediately before assembly. Never inherit them
         // from environment or argv.
         api_key: String::new(),
+        api_key_source: llm_runtime::CredentialSource::Configured,
         // The packaged bridge gets an explicit process-local store. Desktop,
         // CLI, and TUI own persistent broker access; this sidecar receives only
         // its current session credential over stdin.
@@ -701,6 +718,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         parent_session_id: None,
         // The Electron bridge has no --disable-slash-commands flag.
         disable_slash_commands: false,
+        // There is no per-session skill allowlist input on the bridge. `None`
+        // keeps all otherwise eligible registered skills model-invocable.
+        session_skill_allowlist: None,
         // The Electron bridge has no --add-dir flag.
         add_dir: Vec::new(),
         // The Electron bridge has no --mcp-config flag.
@@ -944,7 +964,10 @@ fn canonical_session_id(raw: Option<&str>) -> Result<String, String> {
     .unwrap_or_else(|| Ok(lingxi_core::types::SessionId::new().as_uuid().to_string()))
 }
 
-fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, String> {
+fn initialize_live_session(
+    cfg: &mut DesktopConfig,
+    receive_gate: Option<Arc<lingxi_core::host::uds_inbox::PeerReceiveGateSlot>>,
+) -> Result<LiveSessionGuard, String> {
     let session_id = canonical_session_id(cfg.session_id_override.as_deref())?;
     cfg.session_id_override = Some(session_id.clone());
 
@@ -1006,10 +1029,15 @@ fn initialize_live_session(cfg: &mut DesktopConfig) -> Result<LiveSessionGuard, 
     );
 
     let socket = lingxi_core::host::uds_inbox::default_socket_path(pid);
-    let inbox_started = match lingxi_core::host::uds_inbox::start_process_inbox_for_session(
-        socket,
-        &session_id,
-    ) {
+    let inbox = match receive_gate {
+        Some(slot) => lingxi_core::host::uds_inbox::start_process_inbox_for_session_with_gate(
+            socket,
+            &session_id,
+            slot,
+        ),
+        None => lingxi_core::host::uds_inbox::start_process_inbox_for_session(socket, &session_id),
+    };
+    let inbox_started = match inbox {
         Ok(path) => {
             live_session.inbox_started = true;
             dir.upsert_identity(
@@ -1256,7 +1284,8 @@ pub async fn assemble_with_credentials(
         lingxi_core::host::CredentialStoragePolicy::NativeOrMemory
     );
     let enable_automation_scheduler = cfg.enable_automation_scheduler;
-    let mut live_session = initialize_live_session(&mut cfg)?;
+    let receive_gate = Arc::new(lingxi_core::host::uds_inbox::PeerReceiveGateSlot::new());
+    let mut live_session = initialize_live_session(&mut cfg, Some(receive_gate.clone()))?;
     let connection = BridgeConnection::new();
 
     // Preserve only the non-secret parent-source fact before `cfg` moves. The
@@ -1430,6 +1459,7 @@ pub async fn assemble_with_credentials(
         harness_runtime::desktop::build_with_host_automation(cfg, output, permission_sink, shared)
             .await
             .map_err(|e| e.to_string())?;
+    receive_gate.set(runtime.orchestrator.clone());
     // The runtime cloned the exact construction-only lease into its hydrated
     // coordinator. Do not let the bridge's process-registration guard pin the
     // old session through later hot clear/resume operations.
@@ -1477,6 +1507,9 @@ pub async fn assemble_with_credentials(
     // `Now`-command abort from a user interrupt) and the queue's now-abort hook
     // (sets it to `QueueNowCommand` right before firing the active-turn token).
     let queue = connection.queue_handle();
+    runtime
+        .mod_command_catalog
+        .bind_queue(connection.mod_command_queue());
     if let Some(inbox) = runtime
         .coordinator
         .mailbox_router
@@ -1612,7 +1645,7 @@ pub async fn assemble_with_credentials(
         .with_provider_model_catalog_listings(provider_model_catalog_listings)
         .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
         .with_http(runtime.http.clone())
-        .with_session_store(session_store)
+        .with_session_store(session_store.with_transcript_writer(runtime.orchestrator.session_transcript_writer()))
         .with_session_agent_observer(session_agent_observer)
         .with_team_registry(runtime.coordinator.clone())
         .with_settings_context(settings_context)
@@ -1989,7 +2022,8 @@ mod tests {
         cfg.lingxi_home = home.path().to_path_buf();
         cfg.session_id_override = Some(session_id.to_string());
 
-        let guard = initialize_live_session(&mut cfg).expect("transcript is not a live writer");
+        let guard =
+            initialize_live_session(&mut cfg, None).expect("transcript is not a live writer");
         assert_eq!(guard.session_id, session_id);
         assert!(guard
             .dir
@@ -2031,13 +2065,13 @@ mod tests {
         cfg_a.cwd = cwd.path().to_path_buf();
         cfg_a.lingxi_home = home.path().to_path_buf();
         cfg_a.session_id_override = Some(session_a.to_string());
-        let guard_a = initialize_live_session(&mut cfg_a).expect("start generation A");
+        let guard_a = initialize_live_session(&mut cfg_a, None).expect("start generation A");
 
         let mut cfg_c = resolve_desktop_config(&BridgeArgs::default());
         cfg_c.cwd = cwd.path().to_path_buf();
         cfg_c.lingxi_home = home.path().to_path_buf();
         cfg_c.session_id_override = Some(session_c.to_string());
-        let guard_c = initialize_live_session(&mut cfg_c).expect("start generation C");
+        let guard_c = initialize_live_session(&mut cfg_c, None).expect("start generation C");
         let dir = guard_c.dir.clone();
 
         // Seed A's inbox only AFTER C has taken the process session id. While A
@@ -2267,6 +2301,10 @@ mod tests {
     fn workspace_is_untrusted_by_default() {
         let cfg = resolve_desktop_config(&BridgeArgs::default());
         assert_eq!(cfg.host_workspace_trusted, Some(false));
+        assert_eq!(
+            cfg.mod_render_surface,
+            Some(harness_runtime::desktop::ModRenderSurface::Desktop)
+        );
         assert!(cfg.api_key.is_empty(), "credentials must not come from env");
         assert!(cfg.api_key_helper.is_none());
         assert!(cfg.provider_profiles.is_none());
@@ -2339,12 +2377,11 @@ mod tests {
         assert_eq!(cfg.mcp_paths.len(), 2);
         assert!(cfg.memory_provider.is_some());
         assert!(cfg.api_key_helper.is_none());
-        assert!(cfg
-            .provider_profiles
-            .as_ref()
-            .is_none_or(|profiles| profiles
+        assert!(cfg.provider_profiles.as_ref().is_none_or(|profiles| {
+            profiles
                 .values()
-                .all(|profile| profile.get("apiKeyEnv").is_none())));
+                .all(|profile| profile.get("apiKeyEnv").is_none())
+        }));
         assert_eq!(
             cfg.credential_storage_policy,
             CredentialStoragePolicy::NativeOrMemory,
@@ -2396,12 +2433,29 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            diagnostics: None,
+            composition: None,
+            defer_session_start: false,
+            session_transcript_path: None,
+            session_resume_snapshot: None,
+            session_resume_cost: None,
+            max_structured_output_retries: 5,
+            mcp_services_factory: None,
+            user_agent_environment: None,
+            request_identity: None,
+            anthropic_compatible_version: None,
+            anthropic_client_metadata: None,
+            native_thinking_display: None,
+            oauth_environment_lookup: None,
+            verified_computer_profiles: Vec::new(),
+            api_key_source: llm_runtime::CredentialSource::Configured,
             build_info: harness_runtime::desktop::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
             ),
             enable_automation_scheduler: false,
             host_workspace_trusted: Some(true),
+            mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
             initial_teammate_team_name: None,
             // This unit test must not require the signed macOS Credential
             // Broker or inherit a developer login keychain.
@@ -2455,6 +2509,7 @@ mod tests {
             session_writer_lease: None,
             parent_session_id: None,
             disable_slash_commands: false,
+            session_skill_allowlist: None,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             strict_mcp_config: false,

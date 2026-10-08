@@ -2,9 +2,9 @@ import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useT } from '../theme/ThemeContext';
-import type { RunItem, TurnFileChange } from '../model/runItem';
+import type { CommandRunItem, RunItem, TurnFileChange } from '../model/runItem';
 import {
   commandDefaultOpen,
   narrationDefaultOpen,
@@ -14,11 +14,11 @@ import { collapseFor, collapseInitial, collapseOpen, collapseSet } from './colla
 import { CommandOutput } from './CommandOutput';
 import { CompactionStatus } from './CompactionStatus';
 import { Icon } from './Icon';
-import type { SessionAgentSummaryDto } from '@lingxi/bridge-client';
+import type { SessionAgentSummaryDto, UiJsonValue } from '@lingxi/bridge-client';
 import { TranscriptAgents } from './TranscriptAgents';
 import { anchorTranscriptAgents, placeTranscriptAgents, type AgentAnchors } from './transcriptAgentPlacement';
 import { ApiRetryNotice, type ApiRetryStatus } from './ApiRetryNotice';
-import { transcriptRows } from './transcriptRows';
+import { transcriptRows, type TranscriptToolGroup } from './transcriptRows';
 import { ToolGroup } from './ToolGroup';
 import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
@@ -26,6 +26,13 @@ import { CommandIdentity } from './CommandIdentity';
 import { parseSlashCommandMessage } from './slashCommandMessage';
 import { formatClockTime } from '../bridge/sessionPresentation';
 import { promptWithMentionLinks } from '../bridge/composerMentions';
+import { ModUiParentSite } from './modUiAbovePrompt';
+import {
+  assistantFirstOfReplyByItem,
+  nativeCommandOutputProps,
+  nativeNarrationProps,
+  nativeToolGroupProps,
+} from './nativeUiSiteProps';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
 const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
@@ -129,6 +136,89 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
   );
 });
 
+const NativeNarrationRow = memo(function NativeNarrationRow({
+  sessionId,
+  item,
+  open,
+  isFirstOfReply,
+  onSetOpen,
+}: {
+  sessionId: string;
+  item: Extract<RunItem, { type: 'narration' }> & { role: 'user' | 'assistant' };
+  open: boolean;
+  isFirstOfReply: boolean;
+  onSetOpen(id: string, next: boolean): void;
+}) {
+  const requestProps = useMemo(() => nativeNarrationProps(item, isFirstOfReply), [item, isFirstOfReply]);
+  const defaultRow = <NarrationLine item={item} open={open} onSetOpen={onSetOpen} />;
+  const engineFallback = ({ responseProps }: { responseProps: Record<string, UiJsonValue> }) => {
+    const text = responseProps.text;
+    const engineItem = typeof text === 'string' && text !== item.text ? { ...item, text } : item;
+    return <NarrationLine item={engineItem} open={open} onSetOpen={onSetOpen} />;
+  };
+  return <ModUiParentSite
+    sessionId={sessionId}
+    surface="desktop"
+    component={item.role === 'user' ? 'UserMessage' : 'AssistantMessage'}
+    instanceId={`message:${item.id}`}
+    props={requestProps}
+    engineFallback={engineFallback}
+  >{defaultRow}</ModUiParentSite>;
+});
+
+interface NativeToolGroupSiteProps {
+  sessionId: string;
+  group: TranscriptToolGroup;
+  expanded: boolean;
+  stateToken: object;
+  children: ReactNode;
+}
+
+const NativeToolGroupSite = memo(function NativeToolGroupSite({
+  sessionId,
+  group,
+  expanded,
+  children,
+}: NativeToolGroupSiteProps) {
+  const requestProps = useMemo(() => nativeToolGroupProps(group, expanded), [group, expanded]);
+  return <ModUiParentSite
+    sessionId={sessionId}
+    surface="desktop"
+    component="ToolGroup"
+    instanceId={`tool-group:${group.id}`}
+    props={requestProps}
+    engineFallback={children}
+  >{children}</ModUiParentSite>;
+}, (previous, next) => previous.sessionId === next.sessionId
+  && previous.group.id === next.group.id
+  && previous.expanded === next.expanded
+  && previous.stateToken === next.stateToken
+  && previous.group.tools.length === next.group.tools.length
+  && previous.group.tools.every((tool, index) => tool === next.group.tools[index]));
+
+const NativeCommandOutputRow = memo(function NativeCommandOutputRow({
+  sessionId,
+  item,
+  open,
+  onSetOpen,
+}: {
+  sessionId: string;
+  item: CommandRunItem;
+  open: boolean;
+  onSetOpen(id: string, next: boolean): void;
+}) {
+  const requestProps = useMemo(() => nativeCommandOutputProps(item), [item]);
+  const output = <CommandOutput item={item} open={open} onSetOpen={onSetOpen} />;
+  return <ModUiParentSite
+    sessionId={sessionId}
+    surface="desktop"
+    component="CommandOutput"
+    instanceId={`command:${item.id}`}
+    props={requestProps}
+    engineFallback={output}
+  >{output}</ModUiParentSite>;
+});
+
 /**
  * When the user sent the prompt, plus a copy button, sitting under the bubble.
  *
@@ -224,6 +314,8 @@ interface StageProps {
    * scoped by this and dropped when it changes.
    */
   sessionKey?: string;
+  /** Actual host session id used for per-row Native Parent UI controls. */
+  modUiSessionId?: string;
   /**
    * Rows collapsed behind a `/loop` no-op fold
    * (`ConversationState.foldedItemIds`). Hidden until their fold row is opened,
@@ -242,7 +334,7 @@ interface StageProps {
  */
 const BOTTOM_SLACK = 24;
 
-export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
+export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -323,6 +415,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
   const rows = useMemo(() => placeTranscriptAgents(
     transcriptRows(items, running, Boolean(pendingActivity?.trim())), liveItems, agents ?? [], anchors,
   ), [items, liveItems, running, pendingActivity, agents, anchors]);
+  const firstAssistantById = useMemo(() => assistantFirstOfReplyByItem(liveItems), [liveItems]);
 
   const tailThinking = rows.at(-1)?.type === 'thinking' ? rows.at(-1) : undefined;
 
@@ -583,6 +676,16 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
             const document = submittedPlans.find(plan => plan.id === item.id);
             if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
             const user = item.role === 'user';
+            const narrationOpen = collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(item);
+            const narration = item.role === 'user' || item.role === 'assistant'
+              ? <NativeNarrationRow
+                sessionId={modUiSessionId}
+                item={item as Extract<RunItem, { type: 'narration' }> & { role: 'user' | 'assistant' }}
+                open={narrationOpen}
+                isFirstOfReply={item.role === 'assistant' ? firstAssistantById.get(item.id) ?? false : false}
+                onSetOpen={setOpen}
+              />
+              : <NarrationLine item={item} open={narrationOpen} onSetOpen={setOpen} />;
             // A user row is a COLUMN so the actions sit under the bubble and
             // share its right edge; an assistant row stays a single line.
             return (
@@ -598,11 +701,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
                   gap: user ? 4 : 10, width: '100%', animation: 'fade-in 0.3s ease',
                 }}
               >
-                <NarrationLine
-                  item={item}
-                  open={collapseOpen(visible, sessionKey, item.id) ?? narrationDefaultOpen(item)}
-                  onSetOpen={setOpen}
-                />
+                {narration}
                 {/*
                   Keyed by the SESSION, not just by the item: ids restart at `i1`
                   for every session, so switching straight from one resumed
@@ -612,6 +711,14 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
                 */}
                 {user && goalMessageObjective(item.text) && !item.delivery && <div className="goal-message-caption" style={{ color: t.text3 }}><Icon name="goal" size={14} /><span>Sent as goal</span></div>}
                 {user && <UserMessageActions key={sessionKey} text={item.text} sentAt={item.sentAt} />}
+              </div>
+            );
+          }
+          if (item.type === 'mod-log') {
+            return (
+              <div className="transcript-run-item" data-run-type="ui-log" key={item.id} role="status"
+                style={{ color: t.text3, fontSize: 13, lineHeight: 1.55, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                {item.plugin}: {item.text}
               </div>
             );
           }
@@ -628,24 +735,35 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
             );
           }
           if (item.type === 'tool-group' && item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
-            return <div key={item.id} className="transcript-run-item">{item.tools.map(tool => {
+            const groupDefault = <div className="transcript-run-item">{item.tools.map(tool => {
               const plan = submittedPlans.find(plan => plan.id === tool.id);
-              return plan ? <PlanPreview key={tool.id} content={plan.content} status={plan.status} writing={tool.status === 'running' && plan.status === 'submitted'} onOpen={() => onOpenPlan ? onOpenPlan(plan.id) : setLocalPlan(plan)}/> : <ToolGroup key={tool.id} group={{...item,id:tool.id,tools:[tool]}} open={collapseOpen(visible,sessionKey,tool.id) ?? false} toolOpen={id=>collapseOpen(visible,sessionKey,id)} onSetOpen={setOpen}/>;
+              return plan ? <PlanPreview key={tool.id} content={plan.content} status={plan.status} writing={tool.status === 'running' && plan.status === 'submitted'} onOpen={() => onOpenPlan ? onOpenPlan(plan.id) : setLocalPlan(plan)}/> : <ToolGroup key={tool.id} group={{...item,id:tool.id,tools:[tool]}} modUiSessionId={modUiSessionId} open={collapseOpen(visible,sessionKey,tool.id) ?? false} toolOpen={id=>collapseOpen(visible,sessionKey,id)} onSetOpen={setOpen}/>;
             })}</div>;
+            if (item.tools.length < 2) return <Fragment key={item.id}>{groupDefault}</Fragment>;
+            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            return <NativeToolGroupSite key={item.id} sessionId={modUiSessionId} group={item}
+              expanded={expanded} stateToken={visible}>
+              {groupDefault}
+            </NativeToolGroupSite>;
           }
           if (item.type === 'tool-group') {
-            return (
-              <div className="transcript-run-item" data-run-type="tool" key={item.id}>
-                <ToolGroup group={item} open={collapseOpen(visible, sessionKey, item.id) ?? false}
-                  toolOpen={(id) => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} />
-              </div>
-            );
+            const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
+            const groupDefault = <div className="transcript-run-item" data-run-type="tool">
+              <ToolGroup group={item} modUiSessionId={modUiSessionId} open={expanded}
+                toolOpen={(id) => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} />
+            </div>;
+            if (item.tools.length < 2) return <Fragment key={item.id}>{groupDefault}</Fragment>;
+            return <ModUiParentSite key={item.id} sessionId={modUiSessionId} surface="desktop" component="ToolGroup"
+              instanceId={`tool-group:${item.id}`} props={nativeToolGroupProps(item, expanded)} engineFallback={groupDefault}>
+              {groupDefault}
+            </ModUiParentSite>;
           }
           if (item.type === 'command') {
             return (
               <div className="transcript-run-item" data-run-type="command" key={item.id} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <CommandOutput
+                  <NativeCommandOutputRow
+                    sessionId={modUiSessionId}
                     item={item}
                     open={collapseOpen(visible, sessionKey, item.id) ?? commandDefaultOpen(item)}
                     onSetOpen={setOpen}

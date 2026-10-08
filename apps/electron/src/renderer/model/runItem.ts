@@ -11,13 +11,13 @@
  *     the array index, which silently reassigns every open/closed disclosure
  *     the moment an item is inserted above it. Ids are assigned by the reducer
  *     and never reused within a conversation.
- *  2. **A tool call carries the engine's derived view, not raw JSON.** `view`
- *     and `result` are the wire DTOs the engine computed once
- *     (`tui-core/src/tool_display/`); the renderer never re-parses
- *     `input_json`/`result_json` to rebuild a header.
+ *  2. **A tool call carries the engine's derived view for Product's normal UI.**
+ *     `view` and `result` are the wire DTOs the engine computed once
+ *     (`tui-core/src/tool_display/`). Separate raw parsed payloads are retained
+ *     only for Native UI render-site props; they never rebuild Product's cards.
  */
 
-import type { MessageImageDto, StructuredDiffDto, ToolHeaderDto, ToolResultDisplayDto } from '@lingxi/bridge-client';
+import type { MessageImageDto, StructuredDiffDto, ToolHeaderDto, ToolResultDisplayDto, UiJsonValue } from '@lingxi/bridge-client';
 
 /** Lifecycle of one tool call as the transcript sees it. */
 export type ToolRunStatus = 'running' | 'done' | 'error';
@@ -36,8 +36,16 @@ export interface ToolRunItem {
   readonly view: ToolHeaderDto;
   /** Pre-derived result block. Absent while running, or on an older engine. */
   readonly result?: ToolResultDisplayDto;
+  /** Raw parsed tool input retained for Native ToolUse render props. */
+  readonly nativeInput?: UiJsonValue;
+  /** Raw parsed tool output retained for Native ToolUse/ToolResult render props. */
+  readonly nativeOutput?: UiJsonValue;
   /** Degraded plain-text body used only when {@link result} is absent. */
   readonly note?: string;
+  /** Persisted outer JSONL row UUID, resolved by assistant-block identity events. */
+  readonly transcriptUuid?: string;
+  /** Host-only content-block key used until the completed row UUID arrives. */
+  readonly blockKey?: number;
   /** Latest `tool_heartbeat` elapsed time, quantized to whole seconds. */
   readonly elapsedMs?: number;
 }
@@ -90,6 +98,12 @@ export interface NarrationRunItem {
    * viewport the instant it finishes. Rehydrated history leaves this unset.
    */
   readonly streamed?: boolean;
+  /** Persisted outer JSONL row UUID, resolved at assistant block completion. */
+  readonly transcriptUuid?: string;
+  /** Host-only content-block key used until the completed row UUID arrives. */
+  readonly blockKey?: number;
+  /** Model serving this response after a native server-fallback hop, if any. */
+  readonly servedModel?: string;
   /** Durable image projections attached to a user prompt. */
   readonly images?: readonly MessageImageDto[];
 }
@@ -126,12 +140,22 @@ export interface MetaRunItem {
   readonly files?: TurnFileChange[];
 }
 
+/** A Mod log line shown as a dim transcript row, separate from model text. */
+export interface ModLogRunItem {
+  readonly type: 'mod-log';
+  readonly id: string;
+  readonly plugin: string;
+  readonly text: string;
+}
+
 /** Output from a slash command — the engine's text, or a local command's own reply. */
 export interface CommandRunItem {
   readonly type: 'command';
   readonly id: string;
   /** The command as typed, e.g. `/status`. Empty when the result had no pending line. */
   readonly name: string;
+  /** Arguments typed after the slash command name, when the host retained them. */
+  readonly args?: string;
   readonly output: string;
   readonly isError: boolean;
 }
@@ -207,6 +231,7 @@ export type RunItem =
   | NarrationRunItem
   | ToolRunItem
   | MetaRunItem
+  | ModLogRunItem
   | AudioRunItem
   | ThinkingRunItem
   | CommandRunItem

@@ -16,6 +16,7 @@ import {
   defaultSettings,
   parseSettings,
   publicSettings,
+  resolveModBunExecutable,
   sanitizeDiagnostic,
   setWorkspaceTrust,
   withActiveProject,
@@ -299,6 +300,19 @@ test('trust follows symlink targets and fails closed when executable config exce
 test('bridge environment is allowlisted and never inherits credentials', () => {
   const result = buildBridgeEnvironment({ PATH: '/bin', HOME: '/home/user', ANTHROPIC_API_KEY: 'secret', RANDOM_VAR: 'no' }, 'https://api.example.test');
   assert.deepEqual(result, { HOME: '/home/user', PATH: '/bin', LINGXI_API_BASE_URL: 'https://api.example.test' });
+});
+
+test('Mod UI Bun resolution uses the packaged sidecar and otherwise only an explicit development path', () => {
+  assert.equal(
+    resolveModBunExecutable({ isPackaged: true, resourcesPath: '/app/resources', configuredPath: '/ignored/bun' }),
+    join('/app/resources', 'bin', process.platform === 'win32' ? 'bun.exe' : 'bun'),
+  );
+  assert.equal(resolveModBunExecutable({ isPackaged: true, resourcesPath: '/app/resources', platform: 'win32' }), '/app/resources/bin/bun.exe');
+  assert.equal(resolveModBunExecutable({ isPackaged: true, resourcesPath: '/app/resources', platform: 'darwin' }), '/app/resources/bin/bun');
+  assert.equal(resolveModBunExecutable({ isPackaged: false, resourcesPath: '/app/resources', configuredPath: '/custom/bun' }), '/custom/bun');
+  assert.equal(resolveModBunExecutable({ isPackaged: false, resourcesPath: '/app/resources' }), undefined, 'undefined keeps Host PATH resolution');
+  assert.equal(resolveModBunExecutable({ isPackaged: false, configuredPath: '\0bad' }), undefined);
+  assert.throws(() => resolveModBunExecutable({ isPackaged: true }), /resources path is unavailable/);
 });
 
 test('bridge arguments carry trust and stdin intent but never credential material', () => {

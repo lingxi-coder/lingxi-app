@@ -115,6 +115,8 @@ impl Tool for AccessRequestingTool {
         };
         let response = self.access_resolver.resolve(request).await;
         Ok(ToolCallResult {
+            data_projection: None,
+            model_content_projection: None,
             data: json!({
                 "granted_apps": response.granted_apps,
                 "clipboard_read": response.clipboard_read,
@@ -126,6 +128,7 @@ impl Tool for AccessRequestingTool {
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            mcp_meta_projection: None,
         })
     }
 }

@@ -191,6 +191,12 @@ struct MockAuth;
 
 #[async_trait]
 impl AuthHandle for MockAuth {
+    fn register_account_change_observer(
+        &self,
+        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+    ) {
+    }
+
     async fn login(&self) -> Result<LoginInfo, AuthError> {
         Ok(LoginInfo {
             email: "u@x.com".into(),
@@ -1642,7 +1648,7 @@ async fn slash_command_routes_to_registry() {
 }
 
 #[tokio::test]
-async fn refresh_slash_commands_reads_live_registry_catalog() {
+async fn refresh_slash_commands_applies_mod_descriptions_to_live_catalog() {
     use command_api::dispatcher::RegistrySlashDispatcher;
     use command_api::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
     use command_api::registry::CommandRegistry;
@@ -1666,9 +1672,10 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
     });
     let shared = Arc::new(RwLock::new(reg));
     let dispatcher = Arc::new(RegistrySlashDispatcher::new(shared.clone()));
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_mod_describe_rewrite("deploy", "launch safely", Some("<target>"), true);
     let router = EngineCommandRouter::new(
-        Arc::new(MockOrchestratorHandle::new())
-            as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
+        handle.clone() as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
@@ -1690,7 +1697,11 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
         [ClientEvent::SlashCommandCatalog { commands }] => {
             assert!(
                 commands.iter().any(|cmd| {
-                    cmd.name == "deploy" && cmd.description == "ship it" && cmd.source == "project"
+                    cmd.name == "deploy"
+                        && cmd.description == "launch safely"
+                        && cmd.source == "project"
+                        && cmd.argument_hint.as_deref() == Some("<target>")
+                        && cmd.hidden
                 }),
                 "expected live registry command in catalog, got {commands:?}"
             );
@@ -1705,6 +1716,16 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
         }
         other => panic!("expected SlashCommandCatalog, got {other:?}"),
     }
+    assert!(handle.mod_describe_inputs().iter().any(|input| {
+        input
+            == &serde_json::json!({
+                "command": "deploy",
+                "description": "ship it",
+                "isHidden": false,
+                "immediate": false,
+                "provider": {"plugin": "project", "tier": "user"}
+            })
+    }));
 }
 
 #[tokio::test]
@@ -2320,6 +2341,8 @@ fn seed_session_agent_transcript(
             "{}\n",
             serde_json::json!({
                 "message": message,
+                "uuid": message.id().as_uuid().to_string(),
+                "message_index": 0,
                 "status": "idle",
                 "agent_name": "Runtime reviewer",
                 "agent_type": "reviewer",
@@ -2328,7 +2351,37 @@ fn seed_session_agent_transcript(
         ),
     )
     .unwrap();
+    std::fs::write(path.with_file_name(format!("agent-{agent_id}.jsonl.meta")), "{\"next_message_index\":1}").unwrap();
     (agent_id, path)
+}
+
+#[tokio::test]
+async fn session_agent_main_snapshot_uses_the_shared_writer_identity_without_rewriting_native_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let session_id = handle.current_session_id().await;
+    let message_id = "11111111-1111-4111-8111-111111111111";
+    seed_session_file_with_ids(root.path(), &session_id.as_uuid().to_string(), message_id, "native input");
+    let cwd = root.path().to_string_lossy().into_owned();
+    let home = root.path().join(".lingxi");
+    let path = orchestrator::transcript_paths::main_transcript_path(&home, &cwd, &session_id.as_uuid().to_string());
+    let before = std::fs::read(&path).unwrap();
+    let fs = Arc::new(NativeFileSystem::new(root.path().to_path_buf()));
+    let writer = Arc::new(session::jsonl::JsonlWriter::new(path.clone(), fs.clone()));
+    let router = router_with_store(handle, root.path()).with_session_store(
+        SessionStoreContext::new(home, cwd, fs).with_transcript_writer(Some(writer)),
+    );
+    let sink = CapturingSink::arc();
+    router.route(ClientCommand::LoadSessionAgentTranscript { agent_id: "main".into() }, sink.clone()).await;
+    let events = sink.events().await;
+    let [ClientEvent::SessionAgentTranscript { messages, next_message_index, .. }] = events.as_slice() else {
+        panic!("expected main transcript snapshot: {events:?}");
+    };
+    assert_eq!(*next_message_index, 1);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message_uuid, message_id);
+    assert_eq!(messages[0].message_index, 0);
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[tokio::test]

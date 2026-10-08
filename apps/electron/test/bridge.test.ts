@@ -16,6 +16,7 @@ import {
   stopLegacyOrphanBridges,
 } from '../src/main/bridgeDiscovery.js';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
+import { CH_EVENT, CH_MOD_UI_FRAME, CH_MOD_UI_INVALIDATE } from '../src/main/bridgeIpc.js';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 
@@ -441,6 +442,73 @@ test('resumed usage and cumulative status reach the renderer and survive replay 
   const reloaded = runtime.replaySnapshot().reduce((state, { event }) => reduceEvent(state, event), emptyConversation());
   assert.equal(reloaded.usage, null, 'renderer reload replays compaction invalidation after recovered usage');
   assert.ok(runtime.replaySnapshot().some(({ event }) => event.type === 'compaction_status'));
+});
+
+test('Mod pinned statuses replay only the latest value per plugin', () => {
+  const sessionId = '12121212-3434-4567-8899-bbbbbbbbbbbb';
+  const client = new EventEmitter();
+  const runtime = new SessionRuntime({
+    sessionId,
+    projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+  });
+  (runtime as any).broadcast = () => {};
+  (runtime as any).wireClient(client, 0);
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  client.emit('event', { type: 'ui_status', plugin: 'one', text: 'First' });
+  client.emit('event', { type: 'ui_status', plugin: 'two', text: 'Second' });
+  client.emit('event', { type: 'ui_status', plugin: 'one', text: null });
+  const statuses = runtime.replaySnapshot().filter(({ event }) => event.type === 'ui_status');
+  assert.deepEqual(statuses.map(({ event }) => event), [
+    { type: 'ui_status', plugin: 'two', text: 'Second' },
+    { type: 'ui_status', plugin: 'one', text: null },
+  ]);
+  const restored = runtime.replaySnapshot().reduce((state, { event }) => reduceEvent(state, event), emptyConversation());
+  assert.deepEqual(restored.modStatuses, [{ plugin: 'two', text: 'Second' }]);
+});
+
+test('server fallback block and tombstone events are turn-owned and replay in source order', () => {
+  const sessionId = '12121212-3434-4567-8899-cccccccccccc';
+  const client = new EventEmitter();
+  const runtime = new SessionRuntime({
+    sessionId,
+    projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+  });
+  (runtime as any).broadcast = () => {};
+  (runtime as any).wireClient(client, 0);
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  client.emit('event', { type: 'turn_started', turn_id: 3 });
+  client.emit('event', { type: 'query_model_change', to_model: 'claude-sonnet-4' });
+  client.emit('event', { type: 'assistant_block_start', block_key: 91 });
+  client.emit('event', { type: 'text_delta', text: 'discarded' });
+  client.emit('event', { type: 'assistant_block_identity', block_key: 91, message_uuid: 'old-row' });
+  client.emit('event', {
+    type: 'tombstone', display_only: true,
+    message: {
+      uuid: 'old-row', type: 'assistant', timestamp: '2026-10-03T12:00:00.000Z',
+      message: { content_json: '[{"type":"text","text":"discarded"}]' },
+    },
+  });
+  client.emit('event', {
+    type: 'refusal_continuation', phase: 'begin', salvage_text: 'retained', join: 'exact',
+    replaces_uuids: [], display_salvage_text: true,
+  });
+  client.emit('event', { type: 'assistant_block_start', block_key: 92 });
+  client.emit('event', { type: 'text_delta', text: ' answer' });
+  client.emit('event', { type: 'assistant_block_identity', block_key: 92, message_uuid: 'new-row' });
+
+  const events = runtime.replaySnapshot().map(({ event }) => event);
+  assert.deepEqual(events.slice(2).map((event) => event.type), [
+    'query_model_change', 'assistant_block_start', 'text_delta', 'assistant_block_identity',
+    'tombstone', 'refusal_continuation', 'assistant_block_start', 'text_delta', 'assistant_block_identity',
+  ]);
+  const restored = events.reduce((state, event) => reduceEvent(state, event), emptyConversation());
+  const narration = restored.items.filter((item) => item.type === 'narration');
+  assert.equal(narration.length, 1);
+  assert.equal(narration[0]?.text, 'retained answer');
+  assert.equal(narration[0]?.transcriptUuid, 'new-row');
+  assert.equal(narration[0]?.servedModel, 'claude-sonnet-4');
 });
 
 test('restored snapshots survive interleaved events but late live usage is rejected', () => {
@@ -2958,4 +3026,149 @@ test('Windows owned adopted process drains after RequestExit without a synthetic
     process.kill = originalKill;
     Object.defineProperty(process, 'platform', platform);
   }
+});
+
+test('Mod UI requests and event frames stay bound to their session and request ids', async () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const webContents = fakeWebContents(sent);
+  const makeRuntime = (sessionId: string) => {
+    const runtime = new SessionRuntime({
+      launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+      sessionId,
+      projectPath: '/workspace',
+      registerIpc: false,
+      envelopeEvents: true,
+    });
+    runtime.registerWindow(webContents as any, 'app://desktop/index.html');
+    const commands: any[] = [];
+    const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+    client.sendCommand = (command) => { commands.push(command); };
+    (runtime as any).client = client;
+    (runtime as any).activeWorkspace = '/workspace';
+    (runtime as any).activeWorkspaceTrusted = true;
+    (runtime as any).generation = 1;
+    (runtime as any).wireClient(client, 1);
+    return { runtime, commands, client };
+  };
+  const firstId = '11111111-2222-4333-8444-555555555555';
+  const secondId = '22222222-3333-4444-8555-666666666666';
+  const first = makeRuntime(firstId);
+  const second = makeRuntime(secondId);
+  const request = {
+    subtype: 'ui_render', surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1',
+    props: { plugin_owned: { display: true } }, future_control_field: 'strip-me',
+  } as const;
+  const firstPending = first.runtime.dispatchModUiControl(request);
+  const secondPending = second.runtime.dispatchModUiControl(request);
+  const firstCommand = first.commands[0]!;
+  const secondCommand = second.commands[0]!;
+  assert.equal(firstCommand.type, 'ui_render');
+  assert.equal(secondCommand.type, 'ui_render');
+  assert.notEqual(firstCommand.request_id, secondCommand.request_id);
+  assert.deepEqual(JSON.parse(firstCommand.request_json), {
+    subtype: 'ui_render', surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1',
+    props: { plugin_owned: { display: true } },
+  });
+
+  let secondSettled = false;
+  void secondPending.then(() => { secondSettled = true; });
+  const response = JSON.stringify({ tree: { type: 'text', text: 'ok' }, props: {}, rewritten: false, hooked: true });
+  const metadata = JSON.stringify({ renderRevision: 7, clientStateToken: '42' });
+  second.client.emit('event', { type: 'ui_control_result', request_id: firstCommand.request_id, response_json: response, metadata_json: metadata });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondSettled, false, 'a matching request id from another session cannot settle this caller');
+  second.client.emit('event', { type: 'ui_control_result', request_id: secondCommand.request_id, response_json: response, metadata_json: metadata });
+  first.client.emit('event', { type: 'ui_control_result', request_id: firstCommand.request_id, response_json: response, metadata_json: metadata });
+  assert.deepEqual(await firstPending, { response: JSON.parse(response), metadata: { renderRevision: 7, clientStateToken: '42' } });
+  assert.deepEqual(await secondPending, { response: JSON.parse(response), metadata: { renderRevision: 7, clientStateToken: '42' } });
+
+  const parentRequests = [
+    { subtype: 'ui_press', plugin: 'plugin-a', handle: 4, key: 'button', client_id: 'renderer-1' },
+    { subtype: 'ui_input', plugin: 'plugin-a', handle: 5, kind: 'submit', value: 'typed', key: 'field' },
+    { subtype: 'ui_select', plugin: 'plugin-a', handle: 6, value: 'selected', key: 'choice' },
+  ] as const;
+  const parentResponses = [
+    { handled: true, element: 'button' },
+    { handled: true, element: 'field', value: 'typed' },
+    { handled: false },
+  ];
+  for (const [index, parentRequest] of parentRequests.entries()) {
+    const pending = first.runtime.dispatchModUiControl(parentRequest);
+    const parentCommand = first.commands.at(-1)!;
+    assert.equal(parentCommand.type, parentRequest.subtype);
+    const requestJson = JSON.parse(parentCommand.request_json);
+    assert.deepEqual(requestJson, { ...parentRequest, surface: 'desktop' });
+    first.client.emit('event', {
+      type: 'ui_control_result', request_id: parentCommand.request_id,
+      response_json: JSON.stringify(parentResponses[index]),
+    });
+    assert.deepEqual(await pending, { response: parentResponses[index] });
+  }
+
+  const operation = {
+    type: 'mount', surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1',
+    plugin: 'plugin-a', client: 'client-a', module: 'main', render_revision: 7, columns: 80, rows: 24,
+  } as const;
+  const operationPending = first.runtime.dispatchModUiOperation(operation);
+  const operationCommand = first.commands.at(-1)!;
+  assert.equal(operationCommand.type, 'ui_client_operation');
+  assert.deepEqual(JSON.parse(operationCommand.operation_json), operation);
+  first.client.emit('event', {
+    type: 'ui_control_result', request_id: operationCommand.request_id,
+    response_json: JSON.stringify({ runtimeId: 'runtime-1', renderRevision: 7, frameSequence: 1, tree: { type: 'text', text: 'mount' }, hasPointerListener: true, hasKeyListener: false }),
+  });
+  assert.deepEqual(await operationPending, {
+    runtimeId: 'runtime-1', renderRevision: 7, frameSequence: 1, tree: { type: 'text', text: 'mount' },
+    hasPointerListener: true, hasKeyListener: false,
+  });
+
+  first.client.emit('event', {
+    type: 'ui_client_frame', runtime_id: 'runtime-1',
+    frame_json: JSON.stringify({ renderRevision: 7, frameSequence: 2, tree: { type: 'text', text: 'frame' }, hasPointerListener: true, hasKeyListener: false }),
+  });
+  first.client.emit('event', {
+    type: 'ui_client_frame', runtime_id: 'runtime-1',
+    frame_json: JSON.stringify({
+      renderRevision: 7,
+      fault: { phase: 'run', reason: 'asynchronous client callback failed', source: 'worker' },
+    }),
+  });
+  first.client.emit('event', {
+    type: 'ui_invalidate', session_id: firstId, uuid: 'invalidate-1',
+    instances_json: JSON.stringify([{ surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1' }]),
+  });
+  first.client.emit('event', { type: 'ui_invalidate', session_id: secondId, uuid: 'wrong-session' });
+  const frames = sent.filter((event) => event.channel === CH_MOD_UI_FRAME);
+  const invalidations = sent.filter((event) => event.channel === CH_MOD_UI_INVALIDATE);
+  assert.deepEqual(frames, [{
+    channel: CH_MOD_UI_FRAME,
+    payload: {
+      sessionId: firstId,
+      event: {
+        runtimeId: 'runtime-1',
+        frame: { renderRevision: 7, frameSequence: 2, tree: { type: 'text', text: 'frame' }, hasPointerListener: true, hasKeyListener: false },
+      },
+    },
+  }, {
+    channel: CH_MOD_UI_FRAME,
+    payload: {
+      sessionId: firstId,
+      event: {
+        runtimeId: 'runtime-1',
+        frame: {
+          renderRevision: 7,
+          fault: { phase: 'run', reason: 'asynchronous client callback failed', source: 'worker' },
+        },
+      },
+    },
+  }]);
+  assert.deepEqual(invalidations, [{
+    channel: CH_MOD_UI_INVALIDATE,
+    payload: { sessionId: firstId, event: {
+      uuid: 'invalidate-1',
+      instances: [{ surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1' }],
+    } },
+  }]);
+  assert.equal(sent.some((event) => event.channel === CH_EVENT && (event.payload as any)?.event?.type?.startsWith('ui_')), false,
+    'private UI results/frames do not enter the general sequenced event stream');
 });

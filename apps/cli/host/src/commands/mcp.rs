@@ -542,13 +542,14 @@ impl McpProtocolOutput {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::OutputStream for McpProtocolOutput {
-    async fn emit_text(&self, _text: &str) {}
+    async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
 
     async fn emit_tool_call(
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _input: &serde_json::Value,
+        _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
     }
 
@@ -558,6 +559,7 @@ impl lingxi_core::host::OutputStream for McpProtocolOutput {
         _tool: &str,
         _model_text: &str,
         _result: &serde_json::Value,
+        _projection: Option<&lingxi_core::host::ToolResultProjection>,
     ) {
     }
 
@@ -766,11 +768,11 @@ async fn serve_stdio(
                     }
                     "tools/list" => {
                         let tools = orchestrator.mcp_tool_definitions().await;
-                        let response = jsonrpc_result(
+                        let response = tools_list_response(
                             request_id.unwrap_or(serde_json::Value::Null),
-                            serde_json::json!({ "tools": tools }),
-                        );
-                        write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
+                            tools,
+                        )?;
+                        write_protocol_bytes(&writer, response.into_bytes()).await.map_err(|e| e.to_string())?;
                     }
                     "tools/call" => {
                         let id = request_id.unwrap_or(serde_json::Value::Null);
@@ -943,8 +945,29 @@ async fn write_protocol_frame(
     writer: &ProtocolWriter,
     frame: &serde_json::Value,
 ) -> std::io::Result<()> {
-    let mut bytes = serde_json::to_vec(frame)
+    let bytes = serde_json::to_vec(frame)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_protocol_bytes(writer, bytes).await
+}
+
+fn tools_list_response(
+    id: serde_json::Value,
+    tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> Result<String, String> {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    let tools = Utf16JsonProjection::array(tools).map_err(|error| error.to_string())?;
+    let mut result = Utf16JsonProjection::plain(serde_json::json!({}));
+    result
+        .set_field("tools", tools)
+        .map_err(|error| error.to_string())?;
+    let mut response = Utf16JsonProjection::plain(jsonrpc_result(id, serde_json::json!({})));
+    response
+        .set_field("result", result)
+        .map_err(|error| error.to_string())?;
+    response.to_json_string().map_err(|error| error.to_string())
+}
+
+async fn write_protocol_bytes(writer: &ProtocolWriter, mut bytes: Vec<u8>) -> std::io::Result<()> {
     bytes.push(b'\n');
     let mut stdout = writer.lock().await;
     stdout.write_all(&bytes).await?;
@@ -3816,8 +3839,27 @@ mod url_redaction_tests {
 #[cfg(test)]
 mod serve_protocol_tests {
     use super::{
-        credential_accounts_for_server, initialize_response, jsonrpc_error, windows_path_to_wsl,
+        credential_accounts_for_server, initialize_response, jsonrpc_error, tools_list_response,
+        windows_path_to_wsl,
     };
+
+    #[test]
+    fn tools_list_preserves_exact_schema_strings_and_keys_without_private_fields() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let tool = Utf16JsonProjection::parse(
+            r#"{"name":"exact","inputSchema":{"type":"object","properties":{"\ud800":{"description":"\udc00"}}}}"#,
+        ).unwrap();
+        let frame = tools_list_response(serde_json::json!("list-1"), vec![tool]).unwrap();
+        assert!(
+            frame.contains(r#""\ud800":{"description":"\udc00"}"#),
+            "{frame}"
+        );
+        assert!(!frame.contains("\"strings\""));
+        assert!(!frame.contains("\"keys\""));
+        let parsed = Utf16JsonProjection::parse(&frame).unwrap();
+        assert_eq!(parsed.value["id"], "list-1");
+        assert_eq!(parsed.value["result"]["tools"][0]["name"], "exact");
+    }
 
     #[test]
     fn initialize_response_is_a_stable_2025_06_18_frame() {

@@ -28,6 +28,7 @@ import type { ToolIconDto } from '@lingxi/bridge-client';
 import { standaloneJsonForDisplay } from '../markdown';
 import type { ToolRunItem } from '../model/runItem';
 import { toolDisplayHeader, toolHasBody, toolTruncationNotice } from '../model/runItem';
+import { nativeToolResultProps, nativeToolUseProps } from './nativeUiSiteProps';
 import { useT } from '../theme/ThemeContext';
 import { ltrAnchored } from './bidi';
 import { CodeBlock } from './CodeBlock';
@@ -35,6 +36,7 @@ import { DiffView } from './DiffView';
 import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
 import { ToolActivityIcon } from './ToolActivityIcon';
+import { ModUiParentSite } from './modUiAbovePrompt';
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
   fontSize: 13,
@@ -63,6 +65,8 @@ const BODY_STYLE: CSSProperties = Object.freeze({
 
 export interface ToolCallProps {
   item: ToolRunItem;
+  /** Real desktop session id for Native ToolUse/ToolResult render sites. */
+  modUiSessionId?: string;
   /** Explicit user choice, or `undefined` to use the engine's default. */
   open?: boolean;
   /** Record an explicit choice for this id in the caller's store. */
@@ -124,7 +128,7 @@ function ToolGlyph({ item, permissionRequest }: { item: ToolRunItem; permissionR
   );
 }
 
-export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCallProps) {
+export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onSetOpen }: ToolCallProps) {
   const t = useT();
   const { result } = item;
   const view = toolDisplayHeader(item);
@@ -198,7 +202,47 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
     </span>
   );
 
-  return (
+  const resultContent = <>
+    {diff && (
+      <div style={{ marginTop: 6 }}>
+        <DiffView diff={diff} />
+      </div>
+    )}
+    {body !== undefined && (
+      permissionRequest && jsonBody === undefined ? (
+        <div className="permission-tool-message">{body}</div>
+      ) : jsonBody !== undefined ? (
+        <div style={{ marginTop: 6 }}>
+          <CodeBlock code={jsonBody} language="json" variant="tool" />
+        </div>
+      ) : (
+        <pre
+          className="mono-code"
+          style={{
+            ...BODY_STYLE,
+            marginLeft: 0,
+            background: t.windowBg,
+            color: item.status === 'error' ? t.danger : t.text2,
+            border: `0.5px solid ${t.border}`,
+          }}
+        >
+          {body}
+        </pre>
+      )
+    )}
+    {permissionStatusInBody && (
+      <div className="permission-tool-status" data-tone={permissionStatusTone} role="status">
+        <Icon name={permissionStatusIcon} size={14} stroke={2} />
+        <span>{permissionStatusText}</span>
+      </div>
+    )}
+    {truncationNotice && (
+      <div style={{ marginTop: 4, fontSize: 11.5, fontStyle: 'italic', color: t.text4 }}>
+        {truncationNotice}
+      </div>
+    )}
+  </>;
+  const rowContent = (
     <div
       className="transcript-tool-row"
       data-status={item.status}
@@ -228,6 +272,7 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
         <Disclosure
           id={item.id}
           open={isOpen}
+          keepMounted={item.status !== 'running' && Boolean(modUiSessionId)}
           onToggle={() => onSetOpen(item.id, !isOpen)}
           summary={summary}
           buttonClassName="tool-disclosure-trigger"
@@ -236,52 +281,42 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
             ? { marginLeft: 0, padding: '0 14px 14px 56px' }
             : { marginLeft: 29 }}
         >
-            {diff && (
-              <div style={{ marginTop: 6 }}>
-                <DiffView diff={diff} />
-              </div>
-            )}
-            {body !== undefined && (
-              permissionRequest && jsonBody === undefined ? (
-                <div className="permission-tool-message">{body}</div>
-              ) : jsonBody !== undefined ? (
-                <div style={{ marginTop: 6 }}>
-                  <CodeBlock code={jsonBody} language="json" variant="tool" />
-                </div>
-              ) : (
-                <pre
-                  className="mono-code"
-                  style={{
-                    ...BODY_STYLE,
-                    marginLeft: 0,
-                    background: t.windowBg,
-                    color: item.status === 'error' ? t.danger : t.text2,
-                    border: `0.5px solid ${t.border}`,
-                  }}
-                >
-                  {body}
-                </pre>
-              )
-            )}
-            {permissionStatusInBody && (
-              <div className="permission-tool-status" data-tone={permissionStatusTone} role="status">
-                <Icon name={permissionStatusIcon} size={14} stroke={2} />
-                <span>{permissionStatusText}</span>
-              </div>
-            )}
-            {/* The engine clamped the body; say so where the shortfall is
-                actually visible, not only on the collapsed label. */}
-            {truncationNotice && (
-              <div style={{ marginTop: 4, fontSize: 11.5, fontStyle: 'italic', color: t.text4 }}>
-                {truncationNotice}
-              </div>
-            )}
+          <ModUiParentSite
+            sessionId={item.status === 'running' ? '' : modUiSessionId ?? ''}
+            surface="desktop"
+            component="ToolResult"
+            instanceId={`tool-result:${item.id}`}
+            props={nativeToolResultProps(item)}
+            engineFallback={isOpen ? resultContent : null}
+          >
+            {isOpen ? resultContent : null}
+          </ModUiParentSite>
         </Disclosure>
       ) : (
-        <div className="tool-call-line" style={{ minHeight: 40, padding: '2px 0' }}>
-          {summary}
-        </div>
+        <>
+          <div className="tool-call-line" style={{ minHeight: 40, padding: '2px 0' }}>
+            {summary}
+          </div>
+          {item.status !== 'running' && modUiSessionId && (
+            <ModUiParentSite
+              sessionId={modUiSessionId}
+              surface="desktop"
+              component="ToolResult"
+              instanceId={`tool-result:${item.id}`}
+              props={nativeToolResultProps(item)}
+              engineFallback={null}
+            />
+          )}
+        </>
       )}
     </div>
   );
+  return modUiSessionId ? <ModUiParentSite
+    sessionId={modUiSessionId}
+    surface="desktop"
+    component="ToolUse"
+    instanceId={`tool-use:${item.id}`}
+    props={nativeToolUseProps(item)}
+    engineFallback={rowContent}
+  >{rowContent}</ModUiParentSite> : rowContent;
 });

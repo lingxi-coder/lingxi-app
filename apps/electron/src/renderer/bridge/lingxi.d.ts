@@ -9,8 +9,15 @@ import type {
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
   ImageRefDto,
+  NativeUiControlRequest,
+  NativeUiControlResponseFor,
   PermissionResponseDto,
   SessionRowDto,
+  UiClientFrameEventDto,
+  UiClientOperation,
+  UiClientOperationResponseFor,
+  UiControlCallResultDto,
+  UiInvalidateEventDto,
 } from '@lingxi/bridge-client';
 import type { HostPermissionRequest } from '../../shared/permission.js';
 import type { AllowedClientCommand } from '../../shared/clientCommands.js';
@@ -113,6 +120,19 @@ export interface NativeAudioApi {
   onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
 }
 
+export interface ModUiApi {
+  control<T extends NativeUiControlRequest>(
+    sessionId: string,
+    request: T,
+  ): Promise<UiControlCallResultDto<NativeUiControlResponseFor<T>>>;
+  operation<T extends UiClientOperation>(
+    sessionId: string,
+    operation: T,
+  ): Promise<UiClientOperationResponseFor<T>>;
+  onFrame(callback: (event: UiClientFrameEventDto) => void): Unsubscribe;
+  onInvalidate(callback: (event: UiInvalidateEventDto) => void): Unsubscribe;
+}
+
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
@@ -184,6 +204,7 @@ export interface LingxiApi {
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
   audio: NativeAudioApi;
+  modUi: ModUiApi;
 }
 
 declare global {

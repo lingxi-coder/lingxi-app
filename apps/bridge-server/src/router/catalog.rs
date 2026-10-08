@@ -17,7 +17,9 @@ use client::protocol::listings::SlashCommandDto;
 use command_api::builtin_support::names::core_description;
 use command_api::builtin_support::names::is_palette_hidden;
 use command_api::registry::CommandRegistry;
+use futures_util::future::join_all;
 use lingxi_core::host::task_registry::TaskListFilter;
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SlashAuthoritySnapshot {
@@ -35,8 +37,49 @@ impl EngineCommandRouter {
     pub(super) async fn slash_command_catalog(&self) -> Option<Vec<SlashCommandDto>> {
         let registry = self.slash_registry.as_ref()?;
         let reg = registry.read().await;
-        Some(Self::slash_command_catalog_from_registry(&reg))
+        let mut commands = Self::slash_command_catalog_from_registry(&reg);
+        let inputs = commands
+            .iter()
+            .map(|command| {
+                let provider = reg.resolve(&command.name).map_or_else(
+                    || json!({"plugin": "engine", "tier": "core"}),
+                    |source| reg.mod_describe_provider(source),
+                );
+                let mut input = json!({
+                    "command": command.name,
+                    "description": command.description,
+                    "isHidden": command.hidden,
+                    "immediate": reg.mod_immediate_of(&command.name).unwrap_or(false),
+                    "provider": provider,
+                });
+                if let Some(hint) = &command.argument_hint {
+                    input["argumentHint"] = Value::String(hint.clone());
+                }
+                input
+            })
+            .collect::<Vec<_>>();
+        drop(reg);
+        let described = join_all(inputs.into_iter().map(|input| {
+            let handle = &self.handle;
+            async move { handle.mod_describe_command(input).await }
+        }))
+        .await;
+        for (command, answer) in commands.iter_mut().zip(described) {
+            if let (Some(description), Some(hidden)) = (
+                answer.get("description").and_then(Value::as_str),
+                answer.get("isHidden").and_then(Value::as_bool),
+            ) {
+                command.description = description.to_owned();
+                command.hidden = hidden;
+                command.argument_hint = answer
+                    .get("argumentHint")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+            }
+        }
+        Some(commands)
     }
+
     pub(super) fn slash_command_catalog_from_registry(
         reg: &CommandRegistry,
     ) -> Vec<SlashCommandDto> {

@@ -99,36 +99,9 @@ for (const family of families.filter((name) => name !== 'react-dom')) {
   });
 }
 
-// Execute the checked-in iOS Host API, so scalar helper tests exercise the
-// production request encoder rather than a duplicate of its argument shape.
-function nativeHost() {
-  const swift = readFileSync(new URL('../../apps/ios/native/Sources/LocalApps/LocalAppWebView.swift', import.meta.url), 'utf8');
-  const start = swift.indexOf('      const pending = new Map();');
-  const end = swift.indexOf('    })();', start);
-  assert.ok(start !== -1 && end > start);
-  const messages = [];
-  const window = { webkit: { messageHandlers: new Proxy({}, {
-    get: () => ({ postMessage(message) {
-      messages.push(message);
-      queueMicrotask(() => window.lingxi.__resolve({ requestId: message.requestId, result: { ok: true } }));
-    } }),
-  }) } };
-  vm.runInNewContext(swift.slice(start, end), { window, crypto: globalThis.crypto, TextEncoder });
-  return { window, messages };
-}
-
-for (const family of families) {
-  test(`${family}: helpers encode scalar haptics and deep links through the real Host`, async () => {
-    const { window, messages } = nativeHost();
-    const bridge = load(family, 'lingxi-bridge.js', { window });
-    await bridge.triggerHaptics('light');
-    await bridge.openDeepLink('lingxi://apps');
-    assert.deepEqual(JSON.parse(JSON.stringify(messages.map(({ operation, payload }) => ({ operation, payload })))), [
-      { operation: 'haptics', payload: { style: 'light' } },
-      { operation: 'deepLink', payload: { url: 'lingxi://apps' } },
-    ]);
-  });
-}
+// The iOS WebView Host API these tests used to execute was removed with the mobile Local App UI. The two tests that
+// ran the template bridge against it (haptics and deep-link encoding; network and runtime-status requests) return
+// with the mod that brings the WebView back.
 
 for (const family of families.filter((name) => name !== 'react-dom')) {
   test(`${family}: DPR changes resize backing store even with ResizeObserver available`, () => {
@@ -304,16 +277,3 @@ test('Babylon: terminal cleanup prevents restarting a disposed engine and late p
   assert.equal(scheduling.state.starts, 1);
   assert.equal(scheduling.state.stops, 1);
 });
-
-for (const family of families) {
-  test(`${family}: network and runtime helpers use current Host contracts`, async () => {
-    const { window, messages } = nativeHost();
-    const bridge = load(family, 'lingxi-bridge.js', { window });
-    await bridge.requestNetwork({ url: 'https://example.com', method: 'GET' });
-    await bridge.requestRuntimeStatus();
-    assert.deepEqual(JSON.parse(JSON.stringify(messages.map(({ operation, payload }) => ({ operation, payload })))), [
-      { operation: 'fetch', payload: { url: 'https://example.com', method: 'GET' } },
-      { operation: 'info', payload: {} },
-    ]);
-  });
-}

@@ -119,7 +119,7 @@ def validate_processing_sources(repo_root):
             r'BGTaskScheduler\.shared\.register\(forTaskWithIdentifier:\s*identifier',
             r'processingTask\.expirationHandler\s*=\s*\{\s*worker\.cancel\(\)',
             r'task\?\.setTaskCompleted\(success:\s*success\)'],
-        "LocalApps/LocalAppsStore.swift": [r'let\s+localAppBackgroundTaskIdentifier\s*=\s*"' + prefix + r'\.localapps\.background"',
+        "App/LocalAppBackgroundTaskBridge.swift": [r'let\s+localAppBackgroundTaskIdentifier\s*=\s*"' + prefix + r'\.localapps\.background"',
             r'BGTaskScheduler\.shared\.register\(\s*forTaskWithIdentifier:\s*localAppBackgroundTaskIdentifier',
             r'BGProcessingTaskRequest\(identifier:\s*localAppBackgroundTaskIdentifier\)',
             r'processing\.expirationHandler\s*=\s*\{\s*worker\.cancel\(\)',

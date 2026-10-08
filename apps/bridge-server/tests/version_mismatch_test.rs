@@ -47,7 +47,7 @@ struct RecordingTurnDriver {
 
 #[async_trait]
 impl TurnDriver for RecordingTurnDriver {
-    async fn run_turn(&self, _prompt: String) {
+    async fn run_turn(&self, _prompt: lingxi_core::types::utf16_json::Utf16JsonProjection) {
         self.ran.store(true, Ordering::SeqCst);
     }
 }

@@ -6,10 +6,21 @@ use crate::multiagent::adapter::MultiAgentFeed;
 use crate::multiagent::event::MultiAgentEvent;
 use crate::multiagent::state::{sanitize_task_text, TaskRow, WorkflowRow};
 use async_trait::async_trait;
+use client::protocol::text::ClientTextDto;
 use lingxi_core::host::task_registry::{
     TaskListFilter, TaskRecord, TaskRegistryHandle, WorkflowRecord,
 };
 use std::sync::Arc;
+
+fn client_text_from_projection(
+    value: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> ClientTextDto {
+    ClientTextDto::from_code_units(
+        value
+            .string_units("")
+            .expect("task text source is a root-string projection"),
+    )
+}
 
 /// Maps a `TaskRecord` (the trait's wire shape) onto a `TaskRow` (the TUI's
 /// presentation shape). Total — every `TaskRecord` field has a `TaskRow` home.
@@ -23,8 +34,8 @@ pub fn task_row_from_record(r: TaskRecord) -> TaskRow {
         task_id: r.task_id,
         task_type: r.task_type,
         status: r.status,
-        description: r.description,
-        command: r.command,
+        description: client_text_from_projection(&r.description),
+        command: r.command.as_ref().map(client_text_from_projection),
         stage: r.stage.as_deref().map(sanitize_task_text),
         error: r
             .error
@@ -47,8 +58,8 @@ pub fn task_row_from_record_ref(r: &TaskRecord) -> TaskRow {
         task_id: r.task_id.clone(),
         task_type: r.task_type.clone(),
         status: r.status.clone(),
-        description: r.description.clone(),
-        command: r.command.clone(),
+        description: client_text_from_projection(&r.description),
+        command: r.command.as_ref().map(client_text_from_projection),
         stage: r.stage.as_deref().map(sanitize_task_text),
         error: r
             .error
@@ -196,6 +207,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn task_row_description_and_command_keep_exact_source_units() {
+        let description =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""desc\ud800""#).unwrap();
+        let command =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""cmd\udfff""#).unwrap();
+        let record = TaskRecord {
+            description,
+            command: Some(command),
+            ..TaskRecord::default()
+        };
+
+        let row = task_row_from_record_ref(&record);
+        assert_eq!(
+            row.description.code_units,
+            [
+                u16::from(b'd'),
+                u16::from(b'e'),
+                u16::from(b's'),
+                u16::from(b'c'),
+                0xD800
+            ]
+        );
+        assert_eq!(
+            row.command.as_ref().unwrap().code_units,
+            [u16::from(b'c'), u16::from(b'm'), u16::from(b'd'), 0xDFFF]
+        );
+
+        let owned_row = task_row_from_record(record);
+        assert_eq!(owned_row.description, row.description);
+        assert_eq!(owned_row.command, row.command);
+    }
+
     #[tokio::test]
     async fn poll_maps_registry_records_to_task_rows() {
         let stub = Arc::new(StubTasks::new(vec![
@@ -232,7 +276,7 @@ mod tests {
                 assert_eq!(rows[0].task_id, "b00000001");
                 assert_eq!(rows[0].task_type, "local_bash");
                 assert_eq!(rows[1].status, "completed");
-                assert_eq!(rows[1].description, "explore");
+                assert_eq!(rows[1].description.display(), "explore");
                 assert_eq!(rows[2].stage.as_deref(), Some("Running panels 2/3"));
                 assert_eq!(rows[2].error.as_deref(), Some("provider failed"));
             }

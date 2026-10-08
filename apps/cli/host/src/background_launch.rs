@@ -10,6 +10,7 @@ use crate::agents_registry;
 use crate::argv::Argv;
 use crate::daemon_roster::{self, Dispatch, Launch};
 use lingxi_core::host::rooted_fs::{self, AtomicWriteOptions};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind};
@@ -100,8 +101,18 @@ pub struct BackgroundLaunchOptions {
     pub plan_mode_instructions: Option<String>,
     pub max_budget_usd: Option<f64>,
     pub no_stream: bool,
-    pub system_prompt: Option<String>,
-    pub append_system_prompt: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+    )]
+    pub system_prompt: Option<Utf16JsonProjection>,
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option"
+    )]
+    pub append_system_prompt: Option<Utf16JsonProjection>,
     pub system_prompt_file: Option<PathBuf>,
     pub append_system_prompt_file: Option<PathBuf>,
     pub allowed_tools: Option<Vec<String>>,
@@ -291,8 +302,13 @@ pub struct BackgroundLaunchSpec {
     pub worktree_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_ownership_token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub initial_prompt: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub initial_prompt: Option<Utf16JsonProjection>,
     /// Live TUI boundary state for a mid-turn foreground→background handoff.
     /// Older launch specs omit it and resume with an empty composer/queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -867,8 +883,10 @@ fn from_legacy_dispatch(
             .map(|worktree| worktree.ownership_token.clone()),
         initial_prompt: job
             .initial_prompt
-            .clone()
-            .filter(|prompt| !prompt.trim().is_empty()),
+            .as_ref()
+            .filter(|prompt| !prompt.trim().is_empty())
+            .cloned()
+            .map(Utf16JsonProjection::from),
         shell_handoff: Vec::new(),
         handoff: None,
         options,
@@ -983,7 +1001,7 @@ mod tests {
             origin_cwd: "/tmp/project".to_string(),
             worktree_path: None,
             worktree_ownership_token: None,
-            initial_prompt: Some("hello".to_string()),
+            initial_prompt: Some("hello".to_string().into()),
             shell_handoff: Vec::new(),
             handoff: None,
             options: BackgroundLaunchOptions {
@@ -1039,6 +1057,20 @@ mod tests {
     fn launch_spec_round_trips_atomically_and_tui_argv_is_promptless() {
         let home = tmpdir();
         let mut spec = sample("abcd1234", BackgroundLaunchKind::Fresh);
+        spec.initial_prompt = Some(
+            Utf16JsonProjection::root_string(
+                "go\u{fffd}".to_string(),
+                vec![0x0067, 0x006f, 0xd800],
+            )
+            .unwrap(),
+        );
+        spec.options.system_prompt = Some(
+            Utf16JsonProjection::root_string(
+                "sys\u{fffd}".to_string(),
+                vec![0x0073, 0x0079, 0x0073, 0xd800],
+            )
+            .unwrap(),
+        );
         spec.handoff = Some(lingxi_core::host::BackgroundingSnapshot::Idle {
             queued_commands: vec!["/compact keep tests".into()],
             draft: "draft 🦀".into(),
@@ -1047,6 +1079,15 @@ mod tests {
         write_launch_spec(&home, "abcd1234", &spec).unwrap();
         let read = read_launch_spec(&home, "abcd1234").unwrap();
         assert_eq!(read, spec);
+        assert_eq!(
+            read.initial_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_units("")),
+            Some(vec![0x0067, 0x006f, 0xd800])
+        );
+        let launch_json = std::fs::read_to_string(launch_spec_path(&home, "abcd1234")).unwrap();
+        assert!(launch_json.contains(r#""initialPrompt":"go\ud800""#));
+        assert!(launch_json.contains(r#""systemPrompt":"sys\ud800""#));
         assert!(!launch_spec_path(&home, "abcd1234")
             .with_extension(format!("tmp.{}", std::process::id()))
             .exists());
@@ -1588,7 +1629,7 @@ mod tests {
             respawn_flags: &flags,
             in_flight: None,
             backend: Some("daemon"),
-            initial_prompt: Some("continue"),
+            initial_prompt: Some("continue".into()),
             detail: None,
             worker_pid: None,
             worker_proc_start: None,

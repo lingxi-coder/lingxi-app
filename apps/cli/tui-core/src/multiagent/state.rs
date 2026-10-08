@@ -22,13 +22,13 @@ pub struct TaskRow {
     pub task_type: String,
     /// Status wire string (e.g. `"running"`).
     pub status: String,
-    /// Human-readable description.
-    pub description: String,
+    /// Exact task description. Renderers convert to display text at the UI sink.
+    pub description: ClientTextDto,
     /// (BASH-ROW-USES-DESCRIPTION-NOT-COMMAND) The shell command, for
     /// `local_bash` tasks only — claude-code's `BackgroundTask.tsx` shows
     /// this (not `description`) for non-monitor local-shell rows. `None`
     /// for every other task type.
-    pub command: Option<String>,
+    pub command: Option<ClientTextDto>,
     /// `local_fusion` only: the host-owned current progress-stage label.
     /// Values from the registry are sanitized before they reach the TUI.
     pub stage: Option<String>,

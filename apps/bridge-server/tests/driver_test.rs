@@ -68,14 +68,14 @@ async fn run_turn_streams_text_delta_then_turn_ended_into_sink() {
     // The PRODUCTION driver under test.
     let driver: Arc<dyn TurnDriver> = Arc::new(OrchestratorTurnDriver::new(orchestrator));
 
-    driver.run_turn("say hi".to_string()).await;
+    driver.run_turn("say hi".into()).await;
 
     let events = sink.events().await;
 
     // The streamed assistant text arrives first.
     let saw_text = events
         .iter()
-        .any(|e| matches!(e, ClientEvent::TextDelta { text } if text == "hello from the engine"));
+        .any(|e| matches!(e, ClientEvent::TextDelta { text } if text.display() == "hello from the engine"));
     assert!(
         saw_text,
         "expected a TextDelta with the streamed text, got: {events:?}"

@@ -721,10 +721,11 @@ pub async fn run_pty_session(cli: &PtySessionCli) -> i32 {
     ));
     registration.update_status("idle", None);
 
-    let initial_prompt = launch
-        .initial_prompt
-        .clone()
-        .filter(|prompt| !prompt.trim().is_empty());
+    let initial_prompt = launch.initial_prompt.clone().filter(|prompt| {
+        prompt
+            .string_at("")
+            .is_some_and(|text| !text.trim().is_empty())
+    });
     let outcome = match launch.launch {
         BackgroundLaunchKind::Fresh => {
             let tui_build =
@@ -895,7 +896,7 @@ mod tests {
                 origin_cwd: cwd,
                 worktree_path: None,
                 worktree_ownership_token: None,
-                initial_prompt: Some(prompt.to_string()),
+                initial_prompt: Some(prompt.to_string().into()),
                 shell_handoff: Vec::new(),
                 handoff: None,
                 options: crate::background_launch::BackgroundLaunchOptions::default(),
@@ -987,7 +988,7 @@ mod tests {
     async fn ok_execution_marks_job_done() {
         let home = tmpdir();
         seed_job(&home, "bc7c6b33", "port the daemon");
-        let mut seen: Option<String> = None;
+        let mut seen: Option<lingxi_core::types::utf16_json::Utf16JsonProjection> = None;
         let code = run_worker_core(&home, "bc7c6b33", |spec| {
             seen = spec.launch.initial_prompt.clone();
             async move { Ok(()) }
@@ -995,7 +996,12 @@ mod tests {
         .await;
         assert_eq!(code, exit_codes::SUCCESS);
         // The executor received the persisted prompt.
-        assert_eq!(seen.as_deref(), Some("port the daemon"));
+        assert_eq!(
+            seen.as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
+            Some("port the daemon")
+        );
         // The job transitioned working → done (terminal).
         let job = read_job(&home, "bc7c6b33").unwrap();
         assert_eq!(job.state, "done");

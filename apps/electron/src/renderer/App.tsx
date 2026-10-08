@@ -41,6 +41,14 @@ export function App() {
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const palette = useMemo(() => tokens(theme === 'dark'), [theme]);
   const bridge = useBridge();
+  const [visibleModToast, setVisibleModToast] = useState<typeof bridge.conversation.modToast>(null);
+  useEffect(() => {
+    const toast = bridge.conversation.modToast;
+    setVisibleModToast(toast);
+    if (!toast) return;
+    const timer = window.setTimeout(() => setVisibleModToast(null), toast.timeoutMs);
+    return () => window.clearTimeout(timer);
+  }, [bridge.conversation.modToast]);
   const workspace = bridge.bootstrap?.workspace;
   const planCalls = useMemo(() => conversationPlans(bridge.conversation.items, bridge.runtimeCenter.submittedPlanState.calls), [bridge.runtimeCenter.submittedPlanState.calls, bridge.conversation.items]);
   const planBridge = { ...bridge, runtimeCenter: { ...bridge.runtimeCenter, submittedPlan: planCalls.at(-1) ?? bridge.runtimeCenter.submittedPlan, submittedPlanState: { ...bridge.runtimeCenter.submittedPlanState, calls: planCalls } } };
@@ -175,6 +183,18 @@ export function App() {
                   onSetTheme={changeTheme}
                   onOpenProviderSettings={(providerId, modelReference, restoreFocus) => setSettingsRoute({ pageId: 'provider-credentials', providerId, pendingModelReference: modelReference, restoreFocus })}
                 />
+                {!bridge.sessionLoading && visibleModToast && (
+                  <div role="status" aria-live="polite" style={{ padding: '7px 16px',
+                    color: palette.text, background: palette.stageBg, fontSize: 12 }}>
+                    {visibleModToast.text}
+                  </div>
+                )}
+                {!bridge.sessionLoading && bridge.conversation.modStatuses.map((status) => (
+                  <div key={status.plugin} role="status" style={{ padding: '4px 16px',
+                    color: palette.text, background: palette.stageBg, fontSize: 12 }}>
+                    {status.text}
+                  </div>
+                ))}
             </div>
             {!bridge.sessionLoading && <RuntimeCenterOverview bridge={planBridge} />}
           </div>

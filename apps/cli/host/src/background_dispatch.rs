@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Default)]
 pub struct ForkLaunchContext {
     pub model: Option<String>,
-    pub system_prompt: Option<String>,
+    pub system_prompt: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     pub options: Option<BackgroundLaunchOptions>,
     pub transcript_path: Option<String>,
     /// Mid-turn UI boundary restored by the hidden background TUI.
@@ -117,6 +117,19 @@ fn intent_from_prompt(prompt: Option<&str>) -> Option<String> {
     const MAX: usize = 200;
     let capped: String = first.chars().take(MAX).collect();
     Some(capped)
+}
+
+fn source_prompt_is_blank(prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
+    prompt
+        .string_at("")
+        .is_none_or(|text| text.trim().is_empty())
+}
+
+fn intent_from_source_prompt(
+    prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Option<String> {
+    let text = prompt.string_at("")?;
+    intent_from_prompt(Some(text.as_ref()))
 }
 
 fn captured_terminal_size() -> TerminalSize {
@@ -408,7 +421,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
         worktree_ownership_token: worktree_path
             .as_ref()
             .map(|_| uuid::Uuid::new_v4().to_string()),
-        initial_prompt: argv.prompt.clone(),
+        initial_prompt: argv.prompt.clone().map(Into::into),
         shell_handoff: Vec::new(),
         handoff: None,
         options,
@@ -470,7 +483,7 @@ pub fn dispatch_forked_session(
     runtime_dir: &Path,
     cwd: &str,
     session_id: &str,
-    prompt: &str,
+    prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
 ) -> std::io::Result<String> {
     dispatch_forked_session_with_context(
         config_home,
@@ -488,7 +501,7 @@ pub fn dispatch_forked_session_with_context(
     runtime_dir: &Path,
     cwd: &str,
     session_id: &str,
-    prompt: &str,
+    prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     context: &ForkLaunchContext,
 ) -> std::io::Result<String> {
     dispatch_resumed_session_inner(
@@ -534,7 +547,7 @@ pub fn dispatch_resumed_session_with_context(
         runtime_dir,
         cwd,
         session_id,
-        "",
+        &lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
         false,
         context,
         &SystemLockProbe,
@@ -550,7 +563,7 @@ fn dispatch_forked_session_inner<LP: LockProbe, S: DaemonSpawner>(
     runtime_dir: &Path,
     cwd: &str,
     session_id: &str,
-    prompt: &str,
+    prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     lock_probe: &LP,
     spawner: &mut S,
 ) -> std::io::Result<String> {
@@ -573,7 +586,7 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
     runtime_dir: &Path,
     cwd: &str,
     session_id: &str,
-    prompt: &str,
+    prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     fork: bool,
     context: &ForkLaunchContext,
     lock_probe: &LP,
@@ -584,8 +597,8 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
     let short = agents_registry::mint_short_id(config_home);
     let worker_generation = uuid::Uuid::new_v4().to_string();
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let seed_prompt = (!prompt.trim().is_empty()).then(|| prompt.to_string());
-    let intent = intent_from_prompt(seed_prompt.as_deref());
+    let seed_prompt = (!source_prompt_is_blank(prompt)).then(|| prompt.clone());
+    let intent = seed_prompt.as_ref().and_then(intent_from_source_prompt);
     let terminal = captured_terminal_size();
     let transcript = match context.transcript_path.as_deref() {
         Some(path) => validate_transcript_path(config_home, Path::new(path))?,
@@ -702,7 +715,12 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
             ) {
                 // The caller must retain its export fence when publication's
                 // effect is uncertain; a queued daemon may already see intent.
-                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, format!("background publication failed ({error}); cannot fence shell handoff ({fence})")));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!(
+                        "background publication failed ({error}); cannot fence shell handoff ({fence})"
+                    ),
+                ));
             }
         }
         return Err(error);
@@ -1137,7 +1155,13 @@ mod tests {
         assert!(!crate::daemon_roster::roster_path(&home).exists());
         let spec = crate::background_launch::read_launch_spec(&home, &short).unwrap();
         assert_eq!(spec.launch, BackgroundLaunchKind::Fresh);
-        assert_eq!(spec.initial_prompt.as_deref(), argv.prompt.as_deref());
+        assert_eq!(
+            spec.initial_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
+            argv.prompt.as_deref()
+        );
         assert_eq!(
             spec.transcript_path,
             session::jsonl::path::session_path(&home, &spec.cwd, &spec.session_id)
@@ -1228,7 +1252,7 @@ mod tests {
             &home,
             "/tmp/proj",
             session_id,
-            "",
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             &lockp,
             &mut spawner,
         )
@@ -1284,7 +1308,7 @@ mod tests {
             transcript_path: Some(target.display().to_string()),
             options: Some(BackgroundLaunchOptions {
                 model: Some("captured-model".to_string()),
-                system_prompt: Some("captured system".to_string()),
+                system_prompt: Some("captured system".into()),
                 ..BackgroundLaunchOptions::default()
             }),
             handoff: Some(lingxi_core::host::BackgroundingSnapshot::Idle {
@@ -1316,7 +1340,11 @@ mod tests {
         );
         assert_eq!(spec.options.model.as_deref(), Some("captured-model"));
         assert_eq!(
-            spec.options.system_prompt.as_deref(),
+            spec.options
+                .system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
             Some("captured system")
         );
         let handoff = spec

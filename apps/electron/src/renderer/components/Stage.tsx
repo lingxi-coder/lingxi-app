@@ -615,6 +615,14 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
               </div>
             );
           }
+          if (item.type === 'mod-log') {
+            return (
+              <div className="transcript-run-item" data-run-type="ui-log" key={item.id} role="status"
+                style={{ color: t.text3, fontSize: 13, lineHeight: 1.55, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                {item.plugin}: {item.text}
+              </div>
+            );
+          }
           if (item === tailThinking) return null;
           if (item.type === 'thinking') {
             // A backoff owns the waiting indicator while it lasts: "Thinking…"

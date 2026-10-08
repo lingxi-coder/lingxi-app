@@ -54,10 +54,10 @@ struct EchoTurnDriver {
 
 #[async_trait]
 impl TurnDriver for EchoTurnDriver {
-    async fn run_turn(&self, prompt: String) {
+    async fn run_turn(&self, prompt: lingxi_core::types::utf16_json::Utf16JsonProjection) {
         self.sink
             .emit(ClientEvent::TextDelta {
-                text: format!("echo: {prompt}"),
+                text: format!("echo: {}", prompt.string_at("").unwrap_or_default()).into(),
             })
             .await;
         self.sink
@@ -249,7 +249,8 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
         match next_frame(&mut ws).await {
             Frame::Event(ClientEvent::TextDelta { text }) => {
                 assert_eq!(
-                    text, "echo: ping",
+                    text.display(),
+                    "echo: ping",
                     "echo driver returns the prompt verbatim"
                 );
                 saw_text_at.get_or_insert(i);

@@ -542,13 +542,13 @@ impl McpProtocolOutput {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::OutputStream for McpProtocolOutput {
-    async fn emit_text(&self, _text: &str) {}
+    async fn emit_text(&self, _text: &lingxi_core::types::utf16_json::Utf16JsonProjection) {}
 
     async fn emit_tool_call(
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
     }
 
@@ -556,8 +556,8 @@ impl lingxi_core::host::OutputStream for McpProtocolOutput {
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        _model_text: &str,
-        _result: &serde_json::Value,
+        _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
     }
 
@@ -3896,7 +3896,9 @@ mod name_validation_tests {
             let err = validate_mcp_server_name(bad).expect_err("invalid name must be rejected");
             assert_eq!(
                 err,
-                format!("Invalid name {bad}. Names can only contain letters, numbers, hyphens, and underscores.")
+                format!(
+                    "Invalid name {bad}. Names can only contain letters, numbers, hyphens, and underscores."
+                )
             );
         }
     }

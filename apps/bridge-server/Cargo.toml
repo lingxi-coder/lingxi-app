@@ -90,6 +90,7 @@ tokio-util = { workspace = true }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+futures-util.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
@@ -111,7 +112,6 @@ tool-computer-use = { workspace = true }
 # runtime's clock rather than by sleeping for the real timeout.
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = "0.21"
-futures-util.workspace = true
 http = "1"
 once_cell = "1"
 # S2: deterministic sandbox dirs for the boot/assembly + end-to-end serve tests.

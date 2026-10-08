@@ -82,6 +82,19 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
     }
 
     async fn take_mid_turn_input(&self) -> Option<String> {
+        let batch = self.take_mid_turn_batch().await?;
+        Some(
+            batch
+                .into_iter()
+                .map(|input| input.text)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    async fn take_mid_turn_batch(
+        &self,
+    ) -> Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>> {
         discard_cancelled_queued_prompts(&self.queue, &self.state).await;
         let candidates = self
             .queue
@@ -128,18 +141,37 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                 host.state.invalidate_noop_streak();
             }
         }
-        let joined = msgqueue::join_prompt_values(&batch).map(|(joined, _)| joined);
+        let joined = msgqueue::join_prompt_values(&batch);
         self.queue
             .consume(&consumed, "drained mid-turn into running turn")
             .await;
         for id in consumed {
             self.state.order.lock().unwrap().queued.remove(&id);
         }
-        joined
+        let (_, ids) = joined?;
+        Some(
+            batch
+                .into_iter()
+                .take(ids.len())
+                .filter_map(|command| {
+                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
+                        text: command.text()?.to_owned(),
+                        origin_kind: match command.source {
+                            msgqueue::QueueSource::AgentSendMessage => Some("peer"),
+                            msgqueue::QueueSource::TaskCompletion => Some("task-notification"),
+                            msgqueue::QueueSource::Cron => Some("scheduled-trigger"),
+                            _ => None,
+                        },
+                    })
+                })
+                .collect(),
+        )
     }
 }
 
-fn tui_prompt_command(text: String) -> msgqueue::QueuedCommand {
+fn tui_prompt_command(
+    text: core::types::utf16_json::Utf16JsonProjection,
+) -> msgqueue::QueuedCommand {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     msgqueue::QueuedCommand {
         scheduled_task_id: None,
@@ -281,18 +313,24 @@ pub(crate) async fn clear_tui_backend(
 
 fn slash_model_prompt(
     result: lingxi_core::host::SlashDispatchResult,
+    fallback_input: core::types::utf16_json::Utf16JsonProjection,
     tx: &tokio::sync::mpsc::UnboundedSender<tui::TurnEvent>,
-) -> Option<String> {
+) -> Option<core::types::utf16_json::Utf16JsonProjection> {
     use lingxi_core::host::SlashDispatchResult;
     match result {
         SlashDispatchResult::RunAsTurn { prompt } => Some(prompt),
-        SlashDispatchResult::Handled { display } | SlashDispatchResult::Unknown { display, .. } => {
+        SlashDispatchResult::Handled { display } => {
             let _ = tx.send(tui::TurnEvent::SystemNotice {
-                body: display,
+                body: display.string_at("").unwrap_or_default().to_owned(),
                 is_error: false,
             });
             None
         }
+        // Unknown slash commands and parser failures remain ordinary user
+        // prompts in Claude Code. The dispatcher result carries the original
+        // source only for ParseFailure; use the composer source for Unknown.
+        SlashDispatchResult::Unknown { .. } => Some(fallback_input),
+        SlashDispatchResult::ParseFailure { input } => Some(input),
         SlashDispatchResult::NotASlashCommand => None,
     }
 }
@@ -320,11 +358,32 @@ struct HostSubmissionOrder {
 struct HostPromptQueueState {
     shutdown: CancellationToken,
     loop_host: std::sync::OnceLock<Arc<crate::loop_wakeup::CliLoopHost>>,
+    mod_dispatcher: std::sync::OnceLock<Arc<dyn lingxi_core::host::SlashCommandDispatcher>>,
+    mod_commands: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            (
+                String,
+                tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+            ),
+        >,
+    >,
+    mod_prompts: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            (
+                String,
+                bool,
+                tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
+            ),
+        >,
+    >,
     // Immutable ownership lasts for this host session, including canceled
     // tombstones: a consumer may hold a queue snapshot while cleanup retires
     // its ordering entry. Missing ownership still means a real unowned input.
     // This map is never persisted and drops with the host queue state.
     owners: std::sync::Mutex<std::collections::HashMap<String, CancellationToken>>,
+    transcript_row_tokens: std::sync::Mutex<std::collections::HashMap<String, String>>,
     order: std::sync::Mutex<HostSubmissionOrder>,
     published: tokio::sync::Notify,
     #[cfg(test)]
@@ -355,6 +414,19 @@ impl HostPromptQueueState {
         if !command.is_main_thread() {
             return false;
         }
+        // A Mod may queue a command from a session.start hook while the
+        // initiating slash dispatch still owns its reservation. Its caller is
+        // waiting for this queue item, so it must remain drainable.
+        if command.source == msgqueue::QueueSource::Plugin
+            && (self
+                .mod_commands
+                .lock()
+                .unwrap()
+                .contains_key(&command.uuid)
+                || self.mod_prompts.lock().unwrap().contains_key(&command.uuid))
+        {
+            return true;
+        }
         let order = self.order.lock().unwrap();
         let next_slash = order.slashes.first().copied().unwrap_or(u64::MAX);
         match order.queued.get(&command.uuid) {
@@ -366,6 +438,77 @@ impl HostPromptQueueState {
                         .any(|(id, earlier)| !selected.contains(id) && earlier < sequence)
             }
             None => order.slashes.is_empty(),
+        }
+    }
+}
+
+struct TuiModCommandQueue {
+    queue: Arc<msgqueue::MessageQueueManager>,
+    state: Arc<HostPromptQueueState>,
+}
+
+#[async_trait::async_trait]
+impl command_api::ModCommandQueue for TuiModCommandQueue {
+    async fn enqueue(
+        &self,
+        plugin: &str,
+        command: &str,
+        args: &str,
+    ) -> Result<serde_json::Value, String> {
+        let text = if args.is_empty() {
+            format!("/{command}")
+        } else {
+            format!("/{command} {args}")
+        };
+        let mut queued = tui_prompt_command(text);
+        queued.uuid = format!("mod-command-{}", uuid::Uuid::new_v4());
+        queued.priority = msgqueue::QueuePriority::Later;
+        queued.source = msgqueue::QueueSource::Plugin;
+        queued.is_meta = true;
+        let id = queued.uuid.clone();
+        let (settle, receiver) = tokio::sync::oneshot::channel();
+        self.state
+            .mod_commands
+            .lock()
+            .unwrap()
+            .insert(id.clone(), (plugin.to_owned(), settle));
+        self.queue.enqueue(queued).await;
+        tokio::select! {
+            result = receiver => result.map_err(|_| "the command did not run".to_owned())?,
+            _ = self.state.shutdown.cancelled() => {
+                self.state.mod_commands.lock().unwrap().remove(&id);
+                self.queue.remove(&[id], "Mod command host shutdown").await;
+                Err("the command was removed from the queue before it ran".into())
+            }
+        }
+    }
+
+    async fn enqueue_prompt(
+        &self,
+        plugin: &str,
+        text: &str,
+        as_user: bool,
+    ) -> Result<serde_json::Value, String> {
+        let mut queued = tui_prompt_command(text.to_owned());
+        queued.uuid = format!("mod-prompt-{}", uuid::Uuid::new_v4());
+        queued.priority = msgqueue::QueuePriority::Later;
+        queued.source = msgqueue::QueueSource::Plugin;
+        queued.is_meta = !as_user;
+        let id = queued.uuid.clone();
+        let (settle, receiver) = tokio::sync::oneshot::channel();
+        self.state
+            .mod_prompts
+            .lock()
+            .unwrap()
+            .insert(id.clone(), (plugin.to_owned(), as_user, settle));
+        self.queue.enqueue(queued).await;
+        tokio::select! {
+            result = receiver => result.map_err(|_| "the prompt did not run".to_owned())?,
+            _ = self.state.shutdown.cancelled() => {
+                self.state.mod_prompts.lock().unwrap().remove(&id);
+                self.queue.remove(&[id], "Mod prompt host shutdown").await;
+                Ok(serde_json::json!({"drop":"the prompt was removed from the queue before it ran"}))
+            }
         }
     }
 }
@@ -492,6 +635,12 @@ async fn retire_cancelled_prompt_ids(
 ) {
     queue.remove(&cancelled, "cancelled prompt owner").await;
     for id in cancelled {
+        state.transcript_row_tokens.lock().unwrap().remove(&id);
+        if let Some((_, _, settle)) = state.mod_prompts.lock().unwrap().remove(&id) {
+            let _ = settle.send(Ok(serde_json::json!({
+                "drop":"the prompt was removed from the queue before it ran"
+            })));
+        }
         state.order.lock().unwrap().queued.remove(&id);
     }
 }
@@ -517,6 +666,11 @@ async fn dequeue_after_slash_dispatch(
         let cancel =
             owner.map_or_else(|| state.shutdown.child_token(), |owner| owner.child_token());
         if cancel.is_cancelled() {
+            state
+                .transcript_row_tokens
+                .lock()
+                .unwrap()
+                .remove(&command.uuid);
             continue;
         }
         return Some((command, cancel));
@@ -530,11 +684,104 @@ async fn drain_teammate_prompts(
     pending_slashes: &HostPromptQueueState,
 ) {
     while let Some((command, cancel)) = dequeue_after_slash_dispatch(queue, pending_slashes).await {
-        let Some(text) = command.text() else {
+        let transcript_row_token = pending_slashes
+            .transcript_row_tokens
+            .lock()
+            .unwrap()
+            .remove(&command.uuid);
+        let Some(text) = command.text_projection().cloned() else {
             continue;
         };
+        let text_display = text.string_at("").unwrap_or_default();
+        let mod_command = pending_slashes
+            .mod_commands
+            .lock()
+            .unwrap()
+            .remove(&command.uuid);
+        let mod_submission = pending_slashes
+            .mod_prompts
+            .lock()
+            .unwrap()
+            .remove(&command.uuid);
         if cancel.is_cancelled() {
+            if let Some((_, settle)) = mod_command {
+                let _ = settle.send(Err("the turn was interrupted before the command ran".into()));
+            }
+            if let Some((_, _, settle)) = mod_submission {
+                let _ = settle.send(Ok(serde_json::json!({"drop":"the prompt was removed from the queue before it ran"})));
+            }
             continue;
+        }
+        let mut mod_prompt = None;
+        let mut mod_settle = None;
+        let mut mod_as_user = false;
+        let mut mod_origin = None;
+        if let Some((plugin, as_user, settle)) = mod_submission {
+            mod_prompt = Some(text.clone());
+            mod_settle = Some(settle);
+            mod_as_user = as_user;
+            mod_origin = Some(if as_user {
+                serde_json::json!({"kind":"plugin","name":plugin,"asUser":true})
+            } else {
+                serde_json::json!({"kind":"plugin","name":plugin})
+            });
+        } else if command.source == msgqueue::QueueSource::Plugin {
+            let Some((plugin, settle)) = mod_command else {
+                continue;
+            };
+            mod_origin = Some(serde_json::json!({"kind":"plugin","name":plugin}));
+            let Some(dispatcher) = pending_slashes.mod_dispatcher.get() else {
+                let _ = settle.send(Err("Mod command dispatcher is unavailable".into()));
+                continue;
+            };
+            let columns = crossterm::terminal::size()
+                .map(|(columns, _)| columns.max(1))
+                .unwrap_or(80);
+            let context = command_api::ModCommandRunContext {
+                origin: serde_json::json!({"kind":"plugin","name":plugin}),
+                is_fullscreen: true,
+                columns,
+            };
+            let (dispatch, settlement) =
+                command_api::with_mod_command_capture(context, dispatcher.dispatch(text.clone()))
+                    .await;
+            match dispatch {
+                lingxi_core::host::SlashDispatchResult::Handled { display } => {
+                    let _ = turn_tx.send(tui::TurnEvent::SystemNotice {
+                        body: display.string_at("").unwrap_or_default().to_owned(),
+                        is_error: false,
+                    });
+                    let _ = settle.send(Ok(settlement.unwrap_or_else(|| {
+                        let encoded = display
+                            .to_json_string()
+                            .expect("command output is a valid source projection");
+                        core::types::utf16_json::Utf16JsonProjection::parse(&format!(
+                            "{{\"text\":{encoded}}}"
+                        ))
+                        .expect("generated object contains one valid source JSON value")
+                    })));
+                    continue;
+                }
+                lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
+                    mod_prompt = Some(prompt);
+                    mod_settle = Some(settle);
+                }
+                lingxi_core::host::SlashDispatchResult::Unknown { display, .. } => {
+                    let _ = settle.send(Err(display.string_at("").unwrap_or_default().to_owned()));
+                    continue;
+                }
+                lingxi_core::host::SlashDispatchResult::ParseFailure { input: _ } => {
+                    let _ =
+                        settle.send(Err("Commands are in the form `/command [args]`".to_string()));
+                    continue;
+                }
+                lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
+                    let _ = settle.send(Err(format!(
+                        "{plugin}: queued command was not a slash command"
+                    )));
+                    continue;
+                }
+            }
         }
         if let Some(host) = pending_slashes.loop_host.get() {
             host.refresh_session().await;
@@ -546,12 +793,12 @@ async fn drain_teammate_prompts(
                 if command.source == msgqueue::QueueSource::Cron
                     && !command.uuid.starts_with("loop-wakeup-")
                 {
-                    return host.resolve_scheduled(text).map(Some);
+                    return host.resolve_scheduled(text_display).map(Some);
                 }
                 host.begin(
                     (command.source == msgqueue::QueueSource::Cron
                         && command.uuid.starts_with("loop-wakeup-"))
-                    .then_some(text),
+                    .then_some(text_display),
                     command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
                 )
             })
@@ -563,27 +810,62 @@ async fn drain_teammate_prompts(
                     body: error.to_string(),
                     is_error: true,
                 });
+                if let Some(settle) = mod_settle.take() {
+                    let _ = settle.send(Err(error.to_string()));
+                }
                 continue;
             }
         };
-        let text = resolved.as_deref().unwrap_or(text);
+        let text = mod_prompt
+            .or_else(|| resolved.map(Into::into))
+            .unwrap_or(text);
         let _ = turn_tx.send(tui::TurnEvent::TurnStartedWithCancel(cancel.clone()));
         queue.register_active_turn(cancel.clone()).await;
+        if let Some(settle) = mod_settle.take() {
+            let result = if command.uuid.starts_with("mod-prompt-") {
+                serde_json::json!({"text":text.string_at("").unwrap_or_default()})
+            } else {
+                serde_json::json!({})
+            };
+            let _ = settle.send(Ok(result));
+        }
         let cancel_probe = cancel.clone();
         let result = if let Some(host) = pending_slashes.loop_host.get().filter(|_| {
             command.source == msgqueue::QueueSource::Cron || command.uuid.starts_with("goal-retry-")
         }) {
-            host.run_scheduled(text, &command, cancel).await
+            orchestrator::mod_prompt_origin::with_origin(
+                serde_json::json!({"kind":"scheduled-trigger"}),
+                host.run_scheduled(text.string_at("").unwrap_or_default(), &command, cancel),
+            )
+            .await
         } else {
-            orchestrator
-                .run_queued_turn_streaming(
-                    text,
-                    cancel,
-                    command.source == msgqueue::QueueSource::PromptInput && !command.is_meta,
+            let origin = mod_origin.unwrap_or_else(|| match command.source {
+                msgqueue::QueueSource::PromptInput => serde_json::json!({"kind":"composer"}),
+                msgqueue::QueueSource::Cron => serde_json::json!({"kind":"scheduled-trigger"}),
+                msgqueue::QueueSource::AgentSendMessage => serde_json::json!({"kind":"peer"}),
+                _ => serde_json::json!({"kind":"unclassified"}),
+            });
+            let in_human_turn = mod_as_user
+                || command.source == msgqueue::QueueSource::PromptInput && !command.is_meta;
+            let turn_result = if let Some(row_token) = transcript_row_token {
+                orchestrator::mod_prompt_origin::with_origin(
+                    origin,
+                    orchestrator.run_queued_turn_streaming_with_row_token(
+                        &text,
+                        cancel,
+                        in_human_turn,
+                        row_token,
+                    ),
                 )
                 .await
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+            } else {
+                orchestrator::mod_prompt_origin::with_origin(
+                    origin,
+                    orchestrator.run_queued_turn_streaming(&text, cancel, in_human_turn),
+                )
+                .await
+            };
+            turn_result.map(|_| ()).map_err(|error| error.to_string())
         };
         if let Err(error) = result {
             let _ = turn_tx.send(tui::TurnEvent::TextDelta(error.to_string()));
@@ -905,7 +1187,12 @@ async fn run_tui(argv: &Argv) -> i32 {
         } else if let Some(derived) = display {
             lingxi_core::host::live_sessions::set_process_name(derived);
         }
-        ensure_live_messaging(&initial_session_id.to_string(), user_name, Some(&reg));
+        ensure_live_messaging(
+            &initial_session_id.to_string(),
+            user_name,
+            Some(&reg),
+            tui_build.runtime.orchestrator.clone(),
+        );
         reg
     };
     // FRESH launch: ratatui (`tui-rata`) is the only TUI backend. It drives the
@@ -950,12 +1237,15 @@ pub(crate) fn ensure_live_messaging(
     session_id: &str,
     user_name: Option<&str>,
     registration: Option<&Arc<crate::agents_registry::SessionRegistration>>,
+    receive_gate: Arc<dyn lingxi_core::host::uds_inbox::PeerReceiveGate>,
 ) {
     let home = crate::run::lingxi_home_dir();
     let dir = lingxi_core::host::live_sessions::LiveSessionDir::at_live(
         crate::agents_registry::sessions_dir(&home),
     );
     let previous_session_id = lingxi_core::host::live_sessions::process_session_id();
+    let gate_slot = Arc::new(lingxi_core::host::uds_inbox::PeerReceiveGateSlot::new());
+    gate_slot.set(receive_gate.clone());
     if lingxi_core::host::live_sessions::process_dir().is_none() {
         let claim =
             lingxi_core::host::live_sessions::install_process(dir.clone(), session_id, user_name);
@@ -997,7 +1287,9 @@ pub(crate) fn ensure_live_messaging(
     }
     let path = match lingxi_core::host::uds_inbox::process_socket_path() {
         Some(_) if previous_session_id.as_deref() != Some(session_id) => {
-            match lingxi_core::host::uds_inbox::retarget_process_inbox(session_id) {
+            match lingxi_core::host::uds_inbox::retarget_process_inbox_with_gate(
+                session_id, gate_slot,
+            ) {
                 Ok(path) => Some(path),
                 Err(error) => {
                     tracing::warn!(%error, "cross-session inbox could not follow session switch");
@@ -1008,7 +1300,10 @@ pub(crate) fn ensure_live_messaging(
                 }
             }
         }
-        Some(existing) => Some(existing),
+        Some(existing) => {
+            lingxi_core::host::uds_inbox::set_process_inbox_receive_gate(receive_gate);
+            Some(existing)
+        }
         None => {
             // (CLI-12, cc2.1.238) `--messaging-socket-path <path>` overrides the
             // auto-generated `mum()` path; absent, the oracle's own default
@@ -1016,7 +1311,9 @@ pub(crate) fn ensure_live_messaging(
             let sock = messaging_socket_override().unwrap_or_else(|| {
                 lingxi_core::host::uds_inbox::default_socket_path(std::process::id())
             });
-            match lingxi_core::host::uds_inbox::start_process_inbox_for_session(sock, session_id) {
+            match lingxi_core::host::uds_inbox::start_process_inbox_for_session_with_gate(
+                sock, session_id, gate_slot,
+            ) {
                 Ok(path) => Some(path),
                 Err(error) => {
                     tracing::warn!(%error, "cross-session inbox unavailable");
@@ -1164,7 +1461,7 @@ pub(crate) async fn run_ratatui_with_initial_prompt(
     tui_build: crate::init::TuiBuild,
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
     resumed_messages: Vec<tui::RenderedMessage>,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<core::types::utf16_json::Utf16JsonProjection>,
 ) -> RunOutcome {
     run_ratatui_with_initial_state(
         tui_build,
@@ -1181,7 +1478,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     tui_build: crate::init::TuiBuild,
     registration: Option<Arc<crate::agents_registry::SessionRegistration>>,
     resumed_messages: Vec<tui::RenderedMessage>,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<core::types::utf16_json::Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
 ) -> RunOutcome {
     let session_lifecycle = tui_build.runtime.session_lifecycle.clone();
@@ -1228,7 +1525,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
         bypass_available,
     );
     let current_session_id = orchestrator.current_session_id().await.to_string();
-    ensure_live_messaging(&current_session_id, None, registration.as_ref());
+    ensure_live_messaging(
+        &current_session_id,
+        None,
+        registration.as_ref(),
+        concrete_orchestrator.clone(),
+    );
     let (bridge_rx, permission_rx, ask_user_question_rx, computer_access_rx) = match &registration {
         Some(reg) => (
             spawn_status_bridge_forwarder(tui_build.bridge_rx, reg.clone()),
@@ -1399,6 +1701,16 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // Plus an orchestrator/handle/tx triplet for the off-loop dispatch closure.
     // All taken BEFORE `on_submit` moves `orchestrator`/`handle` into its closure.
     let dispatch_dispatcher = std::sync::Arc::new(tui_build.runtime.dispatcher.clone_shared());
+    let mod_dispatcher: Arc<dyn lingxi_core::host::SlashCommandDispatcher> =
+        dispatch_dispatcher.clone();
+    let _ = pending_slashes.mod_dispatcher.set(mod_dispatcher);
+    tui_build
+        .runtime
+        .mod_command_catalog
+        .bind_queue(Arc::new(TuiModCommandQueue {
+            queue: prompt_queue.clone(),
+            state: pending_slashes.clone(),
+        }));
     let dispatch_orch = orchestrator.clone();
     let dispatch_handle = handle.clone();
     let dispatch_turn_tx = turn_tx.clone();
@@ -1532,14 +1844,29 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // engine's live `PluginManager` rather than a settings-file write.
     let reload_plugin_runtime = tui_build.runtime.plugin_runtime.clone();
     let reload_command_registry = command_registry.clone();
+    let reload_orchestrator = orchestrator.clone();
     let reload_handle = handle.clone();
     let reload_turn_tx = turn_tx.clone();
     let on_reload_plugins = move || {
         let rt = reload_plugin_runtime.clone();
         let registry = reload_command_registry.clone();
+        let orchestrator = reload_orchestrator.clone();
         let tx = reload_turn_tx.clone();
         reload_handle.spawn(async move {
-            run_reload_plugins(rt, registry, tx).await;
+            run_reload_plugins(rt, registry, orchestrator, tx).await;
+        });
+    };
+    let refresh_command_registry = command_registry.clone();
+    let refresh_command_orchestrator = orchestrator.clone();
+    let refresh_command_turn_tx = turn_tx.clone();
+    let refresh_command_handle = handle.clone();
+    let on_refresh_command_catalog = move || {
+        let registry = refresh_command_registry.clone();
+        let orchestrator = refresh_command_orchestrator.clone();
+        let tx = refresh_command_turn_tx.clone();
+        refresh_command_handle.spawn(async move {
+            let commands = described_tui_commands(&registry, orchestrator.as_ref()).await;
+            let _ = tx.send(tui::TurnEvent::CommandCatalogRefreshed { commands });
         });
     };
     // (/resume) Preload the recent-session rows for the interactive picker.
@@ -1617,6 +1944,9 @@ pub(crate) async fn run_ratatui_with_initial_state(
     if initial_cost > 0.0 {
         let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
     }
+    let _ = turn_tx.send(tui::TurnEvent::CommandCatalogRefreshed {
+        commands: described_tui_commands(&command_registry, orchestrator.as_ref()).await,
+    });
     let loop_host = crate::loop_wakeup::CliLoopHost::bind(
         &tui_build.runtime,
         prompt_queue.clone(),
@@ -1630,62 +1960,68 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let submit_turn_gate = teammate_turn_gate.clone();
     let submit_cancel_reason = queue_cancel_reason.clone();
     let submit_orchestrator = orchestrator.clone();
-    let on_submit =
-        move |prompt: String, images: Vec<std::path::PathBuf>, cancel: CancellationToken| {
-            let orch = submit_orchestrator.clone();
-            let tx = turn_tx.clone();
-            let queue = submit_queue.clone();
-            let pending_slashes = submit_pending_slashes.clone();
-            let reservation = PendingSlashReservation::new(&pending_slashes);
-            let turn_gate = submit_turn_gate.clone();
-            let cancel_reason = submit_cancel_reason.clone();
-            handle.spawn(async move {
-                let Some(_turn_guard) = acquire_ordered_host_turn(
-                    &turn_gate,
-                    &queue,
-                    orch.as_ref(),
-                    &tx,
-                    &pending_slashes,
-                    reservation,
-                    &cancel,
-                )
-                .await
-                else {
-                    return;
-                };
-                cancel_reason.reset();
-                if let Some(host) = pending_slashes.loop_host.get() {
-                    host.refresh_session().await;
-                    let _ = host.begin(None, true);
-                }
-                let cancel_probe = cancel.clone();
-                // Image-aware entry: with no images this is byte-identical to
-                // `run_turn_streaming_with_cancel`; with pasted/attached images
-                // they become `ContentBlock::Image` on the user message.
-                if let Err(e) = orch
-                    .run_turn_streaming_with_images(&prompt, &images, cancel)
-                    .await
-                {
-                    // A HARD terminal error (rate limit, auth, model-unavailable, …)
-                    // propagates as `Err` WITHOUT being surfaced as an assistant
-                    // message or an `emit_end_turn` — unlike a graceful `model_error`,
-                    // which the orchestrator renders + ends itself. So the retry loop
-                    // could exhaust (e.g. "Retrying… attempt 10/10") and then hang the
-                    // spinner forever with no error shown. Surface it as the turn's
-                    // reply and end the turn so the spinner + any "Retrying…" status
-                    // clear.
-                    let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
-                    let _ = tx.send(tui::TurnEvent::TurnEnded(
-                        lingxi_core::host::TurnOutcome::EndTurn,
-                    ));
-                }
-                if let Some(host) = pending_slashes.loop_host.get() {
-                    host.finish(&cancel_probe).await;
-                }
-                queue.clear_active_turn().await;
-                drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
-            });
-        };
+    let on_submit = move |prompt: core::types::utf16_json::Utf16JsonProjection,
+                          row_token: String,
+                          images: Vec<std::path::PathBuf>,
+                          cancel: CancellationToken| {
+        let orch = submit_orchestrator.clone();
+        let tx = turn_tx.clone();
+        let queue = submit_queue.clone();
+        let pending_slashes = submit_pending_slashes.clone();
+        let reservation = PendingSlashReservation::new(&pending_slashes);
+        let turn_gate = submit_turn_gate.clone();
+        let cancel_reason = submit_cancel_reason.clone();
+        handle.spawn(async move {
+            let Some(_turn_guard) = acquire_ordered_host_turn(
+                &turn_gate,
+                &queue,
+                orch.as_ref(),
+                &tx,
+                &pending_slashes,
+                reservation,
+                &cancel,
+            )
+            .await
+            else {
+                return;
+            };
+            cancel_reason.reset();
+            if let Some(host) = pending_slashes.loop_host.get() {
+                host.refresh_session().await;
+                let _ = host.begin(None, true);
+            }
+            let cancel_probe = cancel.clone();
+            // Image-aware entry: with no images this is byte-identical to
+            // `run_turn_streaming_with_cancel`; with pasted/attached images
+            // they become `ContentBlock::Image` on the user message.
+            if let Err(e) = orchestrator::mod_prompt_origin::with_origin(
+                serde_json::json!({"kind":"composer"}),
+                orch.run_turn_streaming_with_images_and_row_token(
+                    &prompt, &images, cancel, row_token,
+                ),
+            )
+            .await
+            {
+                // A HARD terminal error (rate limit, auth, model-unavailable, …)
+                // propagates as `Err` WITHOUT being surfaced as an assistant
+                // message or an `emit_end_turn` — unlike a graceful `model_error`,
+                // which the orchestrator renders + ends itself. So the retry loop
+                // could exhaust (e.g. "Retrying… attempt 10/10") and then hang the
+                // spinner forever with no error shown. Surface it as the turn's
+                // reply and end the turn so the spinner + any "Retrying…" status
+                // clear.
+                let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
+                let _ = tx.send(tui::TurnEvent::TurnEnded(
+                    lingxi_core::host::TurnOutcome::EndTurn,
+                ));
+            }
+            if let Some(host) = pending_slashes.loop_host.get() {
+                host.finish(&cancel_probe).await;
+            }
+            queue.clear_active_turn().await;
+            drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
+        });
+    };
     let queued_prompt_orch = concrete_orchestrator.clone();
     let queued_prompt_gate = teammate_turn_gate.clone();
     let queued_pending_slashes = pending_slashes.clone();
@@ -1693,41 +2029,48 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let queued_prompt_handle = tokio::runtime::Handle::current();
     let queued_prompt_tx = web_turn_tx.clone();
     let queued_task_registry = tui_build.runtime.task_registry.clone();
-    let on_queue_prompt =
-        move |prompt: String, images: Vec<std::path::PathBuf>, owner: CancellationToken| {
-            let queue = queued_prompt_queue.clone();
-            let orch = queued_prompt_orch.clone();
-            let gate = queued_prompt_gate.clone();
-            let pending_slashes = queued_pending_slashes.clone();
-            let tx = queued_prompt_tx.clone();
-            let command = tui_prompt_command(prompt);
-            let task_registry = queued_task_registry.clone();
-            let publication = PendingPromptEnqueue::new(&pending_slashes, &command.uuid, owner);
-            queued_prompt_handle.spawn(async move {
-                queue.enqueue(command).await;
-                if !lingxi_core::host::env::background_tasks_disabled() {
-                    task_registry
-                        .background_all_tasks_with_reason(
-                            lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
-                        )
-                        .await;
-                }
-                drop(publication);
-                discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
-                if !images.is_empty() {
-                    let _ = tx.send(tui::TurnEvent::SystemNotice {
-                        body: "Queued text; pending image attachments are not supported yet."
-                            .to_string(),
-                        is_error: true,
-                    });
-                }
-                // A local slash may finish before this enqueue task is polled.
-                // The same gate/barrier makes either ordering drain exactly once.
-                if let Ok(_guard) = gate.try_lock() {
-                    drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
-                }
-            });
-        };
+    let on_queue_prompt = move |prompt: core::types::utf16_json::Utf16JsonProjection,
+                                row_token: String,
+                                images: Vec<std::path::PathBuf>,
+                                owner: CancellationToken| {
+        let queue = queued_prompt_queue.clone();
+        let orch = queued_prompt_orch.clone();
+        let gate = queued_prompt_gate.clone();
+        let pending_slashes = queued_pending_slashes.clone();
+        let tx = queued_prompt_tx.clone();
+        let command = tui_prompt_command(prompt);
+        pending_slashes
+            .transcript_row_tokens
+            .lock()
+            .unwrap()
+            .insert(command.uuid.clone(), row_token);
+        let task_registry = queued_task_registry.clone();
+        let publication = PendingPromptEnqueue::new(&pending_slashes, &command.uuid, owner);
+        queued_prompt_handle.spawn(async move {
+            queue.enqueue(command).await;
+            if !lingxi_core::host::env::background_tasks_disabled() {
+                task_registry
+                    .background_all_tasks_with_reason(
+                        lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
+                    )
+                    .await;
+            }
+            drop(publication);
+            discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
+            if !images.is_empty() {
+                let _ = tx.send(tui::TurnEvent::SystemNotice {
+                    body: "Queued text; pending image attachments are not supported yet."
+                        .to_string(),
+                    is_error: true,
+                });
+            }
+            // A local slash may finish before this enqueue task is polled.
+            // The same gate/barrier makes either ordering drain exactly once.
+            if let Ok(_guard) = gate.try_lock() {
+                drain_teammate_prompts(&queue, orch.as_ref(), &tx, &pending_slashes).await;
+            }
+        });
+    };
     // One consumer preserves picker order across the live switch, persistence,
     // and the UI acknowledgement, without waiting for the running turn.
     let (model_selection_tx, mut model_selection_rx) =
@@ -2173,7 +2516,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             let old_session_id = orch.current_session_id().await.as_uuid().to_string();
             match clear_tui_backend(orch.as_ref(), title.as_deref()).await {
                 Ok(session_id) => {
-                    ensure_live_messaging(&session_id, None, registration.as_ref());
+                    ensure_live_messaging(&session_id, None, registration.as_ref(), orch.clone());
                     let cwd = cwd.cwd();
                     let background_error =
                         crate::background_launch::refresh_current_background_session(
@@ -2244,6 +2587,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                         });
                         return;
                     }
+                    let message = core::types::utf16_json::Utf16JsonProjection::from(message);
                     match registry.send_human_task_message(&task_id, &message).await {
                         Ok(()) => (format!("Message accepted for task {task_id}"), false),
                         Err(error) => (format!("Could not message task {task_id}: {error}"), true),
@@ -2267,7 +2611,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let dispatch_turn_gate = teammate_turn_gate.clone();
     let dispatch_cancel_reason = queue_cancel_reason.clone();
     let on_dispatch_slash =
-        move |input: String, control: tui::chat_widget::PendingSlashDispatch| {
+        move |input: core::types::utf16_json::Utf16JsonProjection,
+              control: tui::chat_widget::PendingSlashDispatch| {
             let token = control.cancellation.clone();
             let pending_slashes = dispatch_pending_slashes.clone();
             let reservation = PendingSlashReservation::new(&pending_slashes);
@@ -2282,7 +2627,20 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 // Keep dispatch cancellation independent from the active turn. A
                 // completed token also lets the widget discard its pending slot.
                 let completion = control.completed.drop_guard();
-                let Some(result) = unless_cancelled(&token, dispatcher.dispatch(&input)).await
+                let columns = crossterm::terminal::size()
+                    .map(|(columns, _)| columns.max(1))
+                    .unwrap_or(80);
+                let context = command_api::ModCommandRunContext {
+                    origin: serde_json::json!({"kind":"composer"}),
+                    is_fullscreen: true,
+                    columns,
+                };
+                let fallback_input = input.clone();
+                let Some(result) = unless_cancelled(
+                    &token,
+                    command_api::with_mod_command_context(context, dispatcher.dispatch(input)),
+                )
+                .await
                 else {
                     discard_cancelled_queued_prompts(&queue, &pending_slashes).await;
                     return;
@@ -2290,7 +2648,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                 if let Some(host) = pending_slashes.loop_host.get() {
                     host.refresh_session().await;
                 }
-                let prompt = slash_model_prompt(result, &tx);
+                let prompt = slash_model_prompt(result, fallback_input, &tx);
                 if prompt.is_none() {
                     drop(completion);
                     drop(reservation);
@@ -2323,9 +2681,11 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     let _ = host.begin(None, true);
                 }
                 let cancel_probe = token.clone();
-                if let Err(e) = orch
-                    .run_turn_streaming_with_images(&prompt, &[], token)
-                    .await
+                if let Err(e) = orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"composer"}),
+                    orch.run_turn_streaming_with_images(&prompt, &[], token),
+                )
+                .await
                 {
                     let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
                     let _ = tx.send(tui::TurnEvent::TurnEnded(
@@ -2539,6 +2899,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
                                 id: record.task_id.clone(),
                                 name,
                                 task_type: record.task_type.clone(),
+                                agent_type: record.agent_type.clone(),
                                 status: record.status.clone(),
                                 description: record.description.clone(),
                                 label: record.description.clone(),
@@ -2800,6 +3161,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_permission_action,
             on_plugin_action,
             on_reload_plugins,
+            on_refresh_command_catalog,
             on_bash,
             on_compact,
             on_summarize,
@@ -3190,6 +3552,189 @@ fn reload_summary_body(c: &harness_runtime::desktop::PluginRefreshCounts) -> Str
     body
 }
 
+fn command_source_text(
+    source: &core::types::utf16_json::Utf16JsonProjection,
+) -> client::protocol::text::ClientTextDto {
+    client::protocol::text::ClientTextDto::from_code_units(
+        source
+            .string_units("")
+            .expect("command catalog text is a root-string projection"),
+    )
+}
+
+fn command_source_slash_name(
+    source: &core::types::utf16_json::Utf16JsonProjection,
+) -> client::protocol::text::ClientTextDto {
+    let mut units = source
+        .string_units("")
+        .expect("command names are root-string projections");
+    if units.first().copied() != Some(b'/' as u16) {
+        units.insert(0, b'/' as u16);
+    }
+    client::protocol::text::ClientTextDto::from_code_units(units)
+}
+
+fn command_source_utf8(source: &core::types::utf16_json::Utf16JsonProjection) -> Option<String> {
+    String::from_utf16(&source.string_units("")?).ok()
+}
+
+fn command_describe_request(
+    command: core::types::utf16_json::Utf16JsonProjection,
+    description: core::types::utf16_json::Utf16JsonProjection,
+    hidden: bool,
+    immediate: bool,
+    provider: core::types::utf16_json::Utf16JsonProjection,
+    argument_hint: Option<core::types::utf16_json::Utf16JsonProjection>,
+) -> core::types::utf16_json::Utf16JsonProjection {
+    use core::types::utf16_json::Utf16JsonProjection as Ujp;
+
+    let mut input = Ujp::parse("{}").expect("static object");
+    input.set_field("command", command).expect("command object");
+    input
+        .set_field("description", description)
+        .expect("command object");
+    input
+        .set_field(
+            "isHidden",
+            Ujp::parse(if hidden { "true" } else { "false" }).expect("static boolean"),
+        )
+        .expect("command object");
+    input
+        .set_field(
+            "immediate",
+            Ujp::parse(if immediate { "true" } else { "false" }).expect("static boolean"),
+        )
+        .expect("command object");
+    input
+        .set_field("provider", provider)
+        .expect("command object");
+    if let Some(argument_hint) = argument_hint {
+        input
+            .set_field("argumentHint", argument_hint)
+            .expect("command object");
+    }
+    input
+}
+
+async fn described_tui_commands(
+    registry: &std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
+    orchestrator: &dyn OrchestratorHandle,
+) -> Vec<tui_core::orchestrator_bridge::CommandCatalogEntry> {
+    use core::types::utf16_json::Utf16JsonProjection as Ujp;
+    use tui_core::orchestrator_bridge::CommandCatalogEntry;
+
+    let mut entries = Vec::new();
+    for command in tui::command::BUILTIN {
+        let name = command.name.trim_start_matches('/');
+        let hint = (!command.hint.is_empty()).then(|| Ujp::from(command.hint));
+        let hidden = !command.advertised || tui::command::is_runtime_hidden(command.name);
+        let description = command.describe();
+        let request = command_describe_request(
+            Ujp::from(name),
+            Ujp::from(description.as_str()),
+            hidden,
+            command_api::builtin_support::names::command_describe_immediate(name),
+            Ujp::parse(r#"{"plugin":"engine","tier":"core"}"#).expect("static generated provider"),
+            hint.clone(),
+        );
+        entries.push((
+            CommandCatalogEntry {
+                name: command.name.into(),
+                description: client::protocol::text::ClientTextDto::from_utf8(&description),
+                menu_description: None,
+                aliases: command
+                    .aliases
+                    .iter()
+                    .map(|alias| client::protocol::text::ClientTextDto::from_utf8(alias))
+                    .collect(),
+                hidden,
+                replaces_builtin: true,
+                argument_hint: hint
+                    .as_ref()
+                    .and_then(|hint| hint.string_units(""))
+                    .map(client::protocol::text::ClientTextDto::from_code_units),
+                argument_names: Vec::new(),
+            },
+            request,
+        ));
+    }
+
+    let registry = registry.read().await;
+    let mut commands = registry.palette_commands();
+    commands.sort_by(|left, right| left.name.string_units("").cmp(&right.name.string_units("")));
+    for command in commands {
+        let slash_name = command_source_slash_name(&command.name);
+        if tui::command::BUILTIN.iter().any(|builtin| {
+            builtin
+                .name
+                .encode_utf16()
+                .eq(slash_name.code_units.iter().copied())
+        }) {
+            continue;
+        }
+        let hidden = command_source_utf8(&command.name)
+            .is_some_and(|name| command_api::builtin_support::names::is_palette_hidden(&name));
+        let hint = command.argument_hint.as_ref().map(command_source_text);
+        let request = command_describe_request(
+            command.name.clone(),
+            command.description.clone(),
+            hidden,
+            registry.mod_immediate_of(&command.name).unwrap_or(false),
+            registry.mod_describe_provider(&command),
+            command.argument_hint.clone(),
+        );
+        entries.push((
+            CommandCatalogEntry {
+                name: slash_name,
+                description: command_source_text(&command.description),
+                menu_description: command.menu_description.as_ref().map(command_source_text),
+                aliases: command
+                    .aliases
+                    .iter()
+                    .map(command_source_slash_name)
+                    .collect(),
+                hidden,
+                replaces_builtin: false,
+                argument_hint: hint,
+                argument_names: command
+                    .argument_names
+                    .iter()
+                    .map(command_source_text)
+                    .collect(),
+            },
+            request,
+        ));
+    }
+    drop(registry);
+
+    let answers = futures::future::join_all(
+        entries
+            .iter()
+            .map(|(_, input)| async { orchestrator.mod_describe_command(input.clone()).await }),
+    )
+    .await;
+    entries
+        .into_iter()
+        .zip(answers)
+        .map(|((mut entry, _), answer)| {
+            if let (Some(description), Some(hidden)) = (
+                answer.string_units("/description"),
+                answer
+                    .at_pointer("/isHidden")
+                    .and_then(|value| value.as_bool()),
+            ) {
+                entry.description =
+                    client::protocol::text::ClientTextDto::from_code_units(description);
+                entry.hidden = hidden;
+                entry.argument_hint = answer
+                    .string_units("/argumentHint")
+                    .map(client::protocol::text::ClientTextDto::from_code_units);
+            }
+            entry
+        })
+        .collect()
+}
+
 /// (`/reload-plugins`) Apply pending plugin enable/disable changes to the LIVE
 /// session: [`harness_runtime::desktop::PluginRuntime::refresh`] re-reads the on-disk
 /// enabled set and reconciles it into the engine's retained registries
@@ -3201,6 +3746,7 @@ fn reload_summary_body(c: &harness_runtime::desktop::PluginRefreshCounts) -> Str
 async fn run_reload_plugins(
     plugin_runtime: Option<std::sync::Arc<harness_runtime::desktop::PluginRuntime>>,
     command_registry: std::sync::Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
+    orchestrator: Arc<dyn OrchestratorHandle>,
     turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
 ) {
     use tui_core::orchestrator_bridge::TurnEvent;
@@ -3214,38 +3760,7 @@ async fn run_reload_plugins(
     };
 
     let c = rt.refresh().await;
-    let registry_rows = {
-        use command_api::SlashCommandKind;
-        let with_slash = |name: &str| {
-            if name.starts_with('/') {
-                name.to_string()
-            } else {
-                format!("/{name}")
-            }
-        };
-        command_registry
-            .read()
-            .await
-            .list_all()
-            .into_iter()
-            .filter(|cmd| {
-                matches!(
-                    cmd.kind,
-                    SlashCommandKind::Markdown { .. }
-                        | SlashCommandKind::Plugin { .. }
-                        | SlashCommandKind::Bundled { .. }
-                        | SlashCommandKind::Mcp { .. }
-                )
-            })
-            .filter(|cmd| cmd.user_invocable != Some(false))
-            .map(|cmd| tui_core::orchestrator_bridge::CommandCatalogEntry {
-                name: with_slash(&cmd.name),
-                description: cmd.description.clone(),
-                menu_description: cmd.menu_description.clone(),
-                aliases: cmd.aliases.iter().map(|alias| with_slash(alias)).collect(),
-            })
-            .collect()
-    };
+    let registry_rows = described_tui_commands(&command_registry, orchestrator.as_ref()).await;
     let _ = turn_tx.send(TurnEvent::CommandCatalogRefreshed {
         commands: registry_rows,
     });
@@ -5090,6 +5605,191 @@ async fn trust_gate() -> TrustGateOutcome {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn tui_catalog_uses_command_describe_for_builtins_and_registry_commands() {
+        use command_api::{CommandSource, SlashCommand, SlashCommandKind};
+
+        let mut registry = command_api::CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "deploy".into(),
+            description: "ship it".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: "/tmp/deploy.md".into(),
+                frontmatter: command_api::CommandFrontmatter::default(),
+                prompt_template: "deploy".into(),
+            },
+            argument_names: vec!["target".into(), "mode".into()],
+            ..SlashCommand::default()
+        });
+        registry.set_plugin_describe_provider(
+            lingxi_core::types::PluginId::new(),
+            "demo",
+            "demo@market",
+            "append",
+        );
+        registry.register_command(SlashCommand {
+            name: "demo:review".into(),
+            description: "Review a change".into(),
+            source: CommandSource::Plugin,
+            kind: SlashCommandKind::Markdown {
+                file_path: "/tmp/demo-review.md".into(),
+                frontmatter: command_api::CommandFrontmatter::default(),
+                prompt_template: "review".into(),
+            },
+            ..SlashCommand::default()
+        });
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let handle = orchestrator::test_support::MockOrchestratorHandle::new();
+        handle.set_mod_describe_rewrite("deploy", "launch safely", Some("<target>"), true);
+
+        let catalog = described_tui_commands(&registry, &handle).await;
+        let deploy = catalog
+            .iter()
+            .find(|entry| entry.name.code_units == "/deploy".encode_utf16().collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(deploy.description.display(), "launch safely");
+        assert_eq!(
+            deploy
+                .argument_hint
+                .as_ref()
+                .map(|hint| hint.display())
+                .as_deref(),
+            Some("<target>")
+        );
+        assert_eq!(
+            deploy
+                .argument_names
+                .iter()
+                .map(client::protocol::text::ClientTextDto::display)
+                .collect::<Vec<_>>(),
+            vec!["target".to_string(), "mode".to_string()]
+        );
+        assert!(deploy.hidden);
+        assert!(!deploy.replaces_builtin);
+        assert!(catalog.iter().any(|entry| {
+            entry.name.code_units == "/help".encode_utf16().collect::<Vec<_>>()
+                && entry.replaces_builtin
+        }));
+        let inputs = handle.mod_describe_inputs();
+        let projection =
+            |json: &str| core::types::utf16_json::Utf16JsonProjection::parse(json).unwrap();
+        assert!(inputs.iter().any(|input| {
+            input.string_at("/command") == Some("help")
+                && input.subprojection("/provider").is_ok_and(|provider| {
+                    provider.semantically_eq(&projection(r#"{"plugin":"engine","tier":"core"}"#))
+                })
+        }));
+        for name in ["fast", "effort"] {
+            assert!(inputs.iter().any(|input| {
+                input.string_at("/command") == Some(name)
+                    && input
+                        .at_pointer("/immediate")
+                        .and_then(|value| value.as_bool())
+                        == Some(true)
+            }));
+        }
+        for name in ["add-dir", "config", "help"] {
+            assert!(inputs.iter().any(|input| {
+                input.string_at("/command") == Some(name)
+                    && input
+                        .at_pointer("/immediate")
+                        .and_then(|value| value.as_bool())
+                        == Some(false)
+            }));
+        }
+        assert!(inputs.iter().any(|input| {
+            input.semantically_eq(&projection(
+                r#"{"command":"deploy","description":"ship it","isHidden":false,"immediate":false,"provider":{"plugin":"project","tier":"user"}}"#,
+            ))
+        }));
+        assert!(inputs.iter().any(|input| {
+            input.string_at("/command") == Some("demo:review")
+                && input.subprojection("/provider").is_ok_and(|provider| {
+                    provider
+                        .semantically_eq(&projection(r#"{"plugin":"demo@market","tier":"append"}"#))
+                })
+        }));
+    }
+
+    #[tokio::test]
+    async fn tui_catalog_keeps_source_command_text_and_dispatches_lone_units() {
+        use command_api::{CommandSource, SlashCommand, SlashCommandKind};
+        use core::types::utf16_json::Utf16JsonProjection;
+
+        let mut registry = command_api::CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: Utf16JsonProjection::parse(r#""plug\ud800""#).unwrap(),
+            description: Utf16JsonProjection::parse(r#""description\udfff""#).unwrap(),
+            aliases: vec![Utf16JsonProjection::parse(r#""alias\ud800""#).unwrap()],
+            argument_hint: Some(Utf16JsonProjection::parse(r#""hint\udfff""#).unwrap()),
+            argument_names: vec![Utf16JsonProjection::parse(r#""target\ud800""#).unwrap()],
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Markdown {
+                file_path: "/tmp/source-command.md".into(),
+                frontmatter: command_api::CommandFrontmatter::default(),
+                prompt_template: "source".into(),
+            },
+            ..SlashCommand::default()
+        });
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let handle = orchestrator::test_support::MockOrchestratorHandle::new();
+
+        let catalog = described_tui_commands(&registry, &handle).await;
+        let command = catalog
+            .iter()
+            .find(|entry| {
+                entry.name.code_units
+                    == vec![
+                        b'/' as u16,
+                        b'p' as u16,
+                        b'l' as u16,
+                        b'u' as u16,
+                        b'g' as u16,
+                        0xd800,
+                    ]
+            })
+            .expect("source name survives the catalog transport");
+        assert_eq!(
+            command.description.code_units,
+            vec![
+                b'd' as u16,
+                b'e' as u16,
+                b's' as u16,
+                b'c' as u16,
+                b'r' as u16,
+                b'i' as u16,
+                b'p' as u16,
+                b't' as u16,
+                b'i' as u16,
+                b'o' as u16,
+                b'n' as u16,
+                0xdfff,
+            ]
+        );
+        assert_eq!(command.aliases[0].code_units.last(), Some(&0xd800));
+        assert_eq!(
+            command.argument_hint.as_ref().unwrap().code_units.last(),
+            Some(&0xdfff)
+        );
+        assert_eq!(command.argument_names[0].code_units.last(), Some(&0xd800));
+        assert!(!command.hidden);
+        let source_command_units = vec![b'p' as u16, b'l' as u16, b'u' as u16, b'g' as u16, 0xd800];
+        let request = handle
+            .mod_describe_inputs()
+            .into_iter()
+            .find(|input| input.string_units("/command").as_deref() == Some(&source_command_units))
+            .expect("exact malformed source name reaches the Mod hook boundary");
+        assert_eq!(
+            request.string_units("/description").unwrap().last(),
+            Some(&0xdfff)
+        );
+        assert_eq!(
+            request.string_units("/argumentHint").unwrap().last(),
+            Some(&0xdfff)
+        );
+    }
+
     struct DelayedBashRunner {
         started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
         release: tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>,
@@ -5279,7 +5979,10 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RecordingHostTurns(std::sync::Mutex<Vec<String>>);
+    struct RecordingHostTurns(
+        std::sync::Mutex<Vec<String>>,
+        Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    );
 
     #[async_trait::async_trait]
     impl OrchestratorHandle for RecordingHostTurns {
@@ -5361,8 +6064,206 @@ mod tests {
             _cancel: CancellationToken,
         ) -> Result<lingxi_core::host::TurnOutcome, lingxi_core::host::HandleError> {
             self.0.lock().unwrap().push(prompt.to_string());
+            if let Some((started, release)) = &self.1 {
+                started.notify_one();
+                release.notified().await;
+            }
             Ok(lingxi_core::host::TurnOutcome::EndTurn)
         }
+    }
+
+    struct PromptModDispatcher;
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::SlashCommandDispatcher for PromptModDispatcher {
+        async fn dispatch(
+            &self,
+            _raw: core::types::utf16_json::Utf16JsonProjection,
+        ) -> lingxi_core::host::SlashDispatchResult {
+            lingxi_core::host::SlashDispatchResult::RunAsTurn {
+                prompt: "expanded plugin prompt".into(),
+            }
+        }
+    }
+
+    struct ModContextExecutor;
+
+    #[async_trait::async_trait]
+    impl command_api::ModCommandExecutor for ModContextExecutor {
+        async fn run(
+            &self,
+            _plugin: &str,
+            _command: &str,
+            args: &str,
+            context: command_api::ModCommandRunContext,
+        ) -> Result<String, String> {
+            let raw = format!(
+                "{}:{}:{}:{}:{args}",
+                context.origin["kind"].as_str().unwrap(),
+                context.origin["name"].as_str().unwrap_or("-"),
+                context.is_fullscreen,
+                context.columns
+            );
+            command_api::record_mod_command_settlement(serde_json::json!({"text":raw}));
+            Ok(format!("display: {raw}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn mod_command_run_queues_later_and_settles_after_slash_dispatch() {
+        use command_api::ModCommandQueue as _;
+        use hooks::mods::ModCommandCatalog as _;
+
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let registry = Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
+        let catalog = command_api::RegistryModCommandCatalog::new(registry.clone());
+        catalog.bind_executor(Arc::new(ModContextExecutor));
+        catalog
+            .register(
+                "demo",
+                serde_json::json!({"name":"hello","description":"Greet"}),
+            )
+            .await
+            .unwrap();
+        let _ = state
+            .mod_dispatcher
+            .set(Arc::new(command_api::RegistrySlashDispatcher::new(
+                registry,
+            )));
+        let runner = TuiModCommandQueue {
+            queue: queue.clone(),
+            state: state.clone(),
+        };
+        let call = tokio::spawn(async move { runner.enqueue("demo", "hello", "Ada").await });
+        let queued = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(command) = queue.peek(|_| true).await {
+                    break command;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(queued.source, msgqueue::QueueSource::Plugin);
+        assert_eq!(queued.priority, msgqueue::QueuePriority::Later);
+        assert_eq!(queued.text(), Some("/hello Ada"));
+        // A session.start hook can await its queued command while its parent
+        // slash still has a reservation. The consumer must make progress.
+        let _reservation = PendingSlashReservation::new(&state);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drain_teammate_prompts(&queue, &RecordingHostTurns::default(), &tx, &state),
+        )
+        .await
+        .unwrap();
+        let columns = crossterm::terminal::size()
+            .map(|(columns, _)| columns.max(1))
+            .unwrap_or(80);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(tui::TurnEvent::SystemNotice { body, is_error: false })
+                if body == format!("display: plugin:demo:true:{columns}:Ada")
+        ));
+        assert_eq!(
+            call.await.unwrap().unwrap(),
+            serde_json::json!({
+                "text":format!("plugin:demo:true:{columns}:Ada")
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_mod_prompt_submit_enters_real_turn_and_settles_at_admission() {
+        use command_api::ModCommandQueue as _;
+
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let runner = TuiModCommandQueue {
+            queue: queue.clone(),
+            state: state.clone(),
+        };
+        let call =
+            tokio::spawn(async move { runner.enqueue_prompt("demo", "follow up", true).await });
+        let queued = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(command) = queue.peek(|_| true).await {
+                    break command;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(queued.text(), Some("follow up"));
+        assert_eq!(queued.priority, msgqueue::QueuePriority::Later);
+        assert_eq!(queued.source, msgqueue::QueueSource::Plugin);
+        assert!(!queued.is_meta);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let turns = RecordingHostTurns::default();
+        drain_teammate_prompts(&queue, &turns, &tx, &state).await;
+        assert_eq!(
+            call.await.unwrap().unwrap(),
+            serde_json::json!({"text":"follow up"})
+        );
+        assert_eq!(turns.0.lock().unwrap().as_slice(), &["follow up"]);
+    }
+
+    #[tokio::test]
+    async fn tui_plugin_prompt_command_settles_before_model_turn_finishes() {
+        use command_api::ModCommandQueue as _;
+
+        let state = Arc::new(HostPromptQueueState::default());
+        let queue = Arc::new(msgqueue::MessageQueueManager::new());
+        let _ = state.mod_dispatcher.set(Arc::new(PromptModDispatcher));
+        let runner = TuiModCommandQueue {
+            queue: queue.clone(),
+            state: state.clone(),
+        };
+        let call = tokio::spawn(async move { runner.enqueue("demo", "hello", "Ada").await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while queue.peek(|_| true).await.is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let orchestrator = Arc::new(RecordingHostTurns(
+            std::sync::Mutex::new(Vec::new()),
+            Some((started.clone(), release.clone())),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let drain = tokio::spawn({
+            let orchestrator = orchestrator.clone();
+            let queue = queue.clone();
+            let state = state.clone();
+            async move { drain_teammate_prompts(&queue, orchestrator.as_ref(), &tx, &state).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), call)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            serde_json::json!({})
+        );
+        assert!(!drain.is_finished());
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), drain)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *orchestrator.0.lock().unwrap(),
+            vec!["expanded plugin prompt"]
+        );
     }
 
     #[tokio::test]
@@ -5767,6 +6668,7 @@ mod tests {
             lingxi_core::host::SlashDispatchResult::Handled {
                 display: "Stopped".into()
             },
+            "/stop".into(),
             &tx,
         )
         .is_none());
@@ -5776,17 +6678,43 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert!(slash_model_prompt(
             lingxi_core::host::SlashDispatchResult::NotASlashCommand,
+            "/not-a-slash".into(),
             &tx
         )
         .is_none());
+        assert!(rx.try_recv().is_err());
+        let original = core::types::utf16_json::Utf16JsonProjection::from("/   ");
+        assert_eq!(
+            slash_model_prompt(
+                lingxi_core::host::SlashDispatchResult::ParseFailure {
+                    input: original.clone(),
+                },
+                "/   ".into(),
+                &tx,
+            ),
+            Some(original)
+        );
+        assert_eq!(
+            slash_model_prompt(
+                lingxi_core::host::SlashDispatchResult::Unknown {
+                    name: "unknown".into(),
+                    display: "unknown slash".into(),
+                },
+                "/unknown fixed".into(),
+                &tx,
+            ),
+            Some("/unknown fixed".into())
+        );
         assert!(rx.try_recv().is_err());
         assert_eq!(
             slash_model_prompt(
                 lingxi_core::host::SlashDispatchResult::RunAsTurn {
                     prompt: "queued".into()
                 },
+                "fallback".into(),
                 &tx
             )
+            .and_then(|prompt| prompt.string_at("").map(str::to_owned))
             .as_deref(),
             Some("queued")
         );
@@ -6001,6 +6929,8 @@ mod tests {
     fn loaded_memory_file(path: &str, chars: usize) -> orchestrator::prompt::MemoryFile {
         orchestrator::prompt::MemoryFile {
             path: std::path::PathBuf::from(path),
+            parent: None,
+            source_content: None,
             body: "x".repeat(chars),
             is_local_override: false,
             tier: memory::lingxi_md::LingxiMdTier::Project,

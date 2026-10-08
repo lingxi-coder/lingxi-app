@@ -24,6 +24,7 @@ pub enum OwnerViewUpdate {
     Focus(FocusProjection),
     Agents(AgentsSnapshot),
     RunningAgents(Vec<RunningAgentStatus>),
+    Commands(Vec<super::completion_view::RegistrySlashRow>),
 }
 
 /// Owner-computed `/focus` transcript + activity projection.

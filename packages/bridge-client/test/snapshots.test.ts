@@ -1842,6 +1842,15 @@ function validateEvent(name: string, v: unknown): void {
     case 'system_notice':
       assert.ok(isString(o['message']) && isBool(o['is_error']));
       break;
+    case 'ui_log':
+      assert.ok(isString(o['plugin']) && isString(o['text']));
+      break;
+    case 'ui_toast':
+      assert.ok(isString(o['plugin']) && isString(o['text']) && isNumber(o['timeout_ms']));
+      break;
+    case 'ui_status':
+      assert.ok(isString(o['plugin']) && (o['text'] === null || isString(o['text'])));
+      break;
     case 'ask_user_question':
       validateAskUserQuestionRequest(o['request']);
       break;

@@ -67,25 +67,27 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use client::adapter::ClientEventSink;
 pub(crate) use client::adapter::controls::decode_reasoning_selection;
 use client::adapter::lowering::{
     lower_provider_model_catalog_entry, lower_status_snapshot, lower_task_output_chunk,
 };
-use client::adapter::ClientEventSink;
 use client::protocol::commands::{ClientCommand, ListingKindDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::listings::{AuthStateDto, SessionModeDto};
+use client::protocol::text::ClientTextDto;
 use command_api::model::CommandSource;
 use command_api::parser::parse_slash_command;
 use command_api::registry::CommandRegistry;
+use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::host::auth::{AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::OrchestratorHandle;
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
-use lingxi_core::host::SlashCommandDispatcher;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::RwLock;
 
 use crate::mcp_bridge::McpPaths;
@@ -200,9 +202,47 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// Plugin prompt commands — claude-code injects the expanded prompt as the
     /// user message). Returns `None` when no dispatcher is wired (the connection
     /// then falls back to the display-only `route` path).
-    async fn dispatch_slash(&self, _raw: &str) -> Option<SlashDispatchOutcome> {
+    async fn dispatch_slash(&self, _raw: Utf16JsonProjection) -> Option<SlashDispatchOutcome> {
         None
     }
+}
+
+pub(crate) fn source_text_eq_ascii(source: &Utf16JsonProjection, expected: &str) -> bool {
+    source
+        .string_units("")
+        .is_some_and(|units| units.iter().copied().eq(expected.encode_utf16()))
+}
+
+pub(crate) fn source_text_eq_ascii_ignore_case(
+    source: &Utf16JsonProjection,
+    expected: &str,
+) -> bool {
+    source.string_units("").is_some_and(|units| {
+        units.len() == expected.len()
+            && units
+                .iter()
+                .copied()
+                .zip(expected.bytes())
+                .all(|(unit, expected)| {
+                    unit <= 0x7f && (unit as u8).eq_ignore_ascii_case(&expected)
+                })
+    })
+}
+
+fn source_text_is_empty(source: &Utf16JsonProjection) -> bool {
+    source.string_units("").is_some_and(|units| units.is_empty())
+}
+
+fn concat_source_text(parts: &[&Utf16JsonProjection]) -> Utf16JsonProjection {
+    let units = parts
+        .iter()
+        .flat_map(|part| {
+            part.string_units("")
+                .expect("slash prompt fragments are root strings")
+        })
+        .collect::<Vec<_>>();
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display projection is derived from the exact UTF-16 units")
 }
 
 #[derive(Default)]
@@ -360,27 +400,30 @@ impl EngineCommandRouter {
 
     async fn dispatch_desktop_slash(
         &self,
-        raw: &str,
+        raw: &Utf16JsonProjection,
     ) -> Option<lingxi_core::host::SlashDispatchResult> {
         let parsed = parse_slash_command(raw)?;
-        match parsed.name.as_str() {
-            "diff" => {
-                let focus = parsed.raw_args.trim();
-                let prompt = if focus.is_empty() {
-                    "Inspect the current working tree and show the user the uncommitted diff. Do not modify any files.".to_string()
+        if source_text_eq_ascii(&parsed.name, "diff") {
+                let focus = parsed.raw_args;
+                let prompt: Utf16JsonProjection = if source_text_is_empty(&focus) {
+                    "Inspect the current working tree and show the user the uncommitted diff. Do not modify any files.".into()
                 } else {
-                    format!(
-                        "Inspect the current working tree and show the user the uncommitted diff, focusing on: {focus}. Do not modify any files."
-                    )
+                    let prefix: Utf16JsonProjection = "Inspect the current working tree and show the user the uncommitted diff, focusing on: ".into();
+                    let suffix: Utf16JsonProjection = ". Do not modify any files.".into();
+                    concat_source_text(&[&prefix, &focus, &suffix])
                 };
-                Some(lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt })
+                return Some(lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt });
             }
-            "plan" => Some(self.dispatch_desktop_plan(&parsed.raw_args).await),
-            _ => None,
+        if source_text_eq_ascii(&parsed.name, "plan") {
+            return Some(self.dispatch_desktop_plan(&parsed.raw_args).await);
         }
+        None
     }
 
-    async fn dispatch_desktop_plan(&self, args: &str) -> lingxi_core::host::SlashDispatchResult {
+    async fn dispatch_desktop_plan(
+        &self,
+        args: &Utf16JsonProjection,
+    ) -> lingxi_core::host::SlashDispatchResult {
         let previous_permission = self
             .handle
             .permission_mode()
@@ -391,7 +434,7 @@ impl EngineCommandRouter {
         if previous_permission != "plan" {
             if let Err(error) = self.handle.set_permission_mode("plan").await {
                 return lingxi_core::host::SlashDispatchResult::Handled {
-                    display: format!("Could not enable plan mode: {error}"),
+                    display: format!("Could not enable plan mode: {error}").into(),
                 };
             }
             lingxi_core::host::live_sessions::set_process_permission_mode("plan", false);
@@ -406,24 +449,26 @@ impl EngineCommandRouter {
                     );
                 }
                 return lingxi_core::host::SlashDispatchResult::Handled {
-                    display: format!("Could not enable plan mode: {error}"),
+                    display: format!("Could not enable plan mode: {error}").into(),
                 };
             }
         }
 
-        let request = args.trim();
-        if request.is_empty() || matches!(request, "open" | "share") {
+        if source_text_is_empty(args)
+            || source_text_eq_ascii(args, "open")
+            || source_text_eq_ascii(args, "share")
+        {
             let display = if was_plan_mode {
                 "Plan mode is already enabled. The current plan is shown above the composer."
             } else {
                 "Plan mode enabled. The next request will be planned before any changes are made."
             };
             lingxi_core::host::SlashDispatchResult::Handled {
-                display: display.to_string(),
+                display: display.into(),
             }
         } else {
             lingxi_core::host::SlashDispatchResult::RunAsTurn {
-                prompt: request.to_string(),
+                prompt: args.clone(),
             }
         }
     }
@@ -651,11 +696,16 @@ impl CommandRouter for EngineCommandRouter {
         Ok(events)
     }
 
-    async fn dispatch_slash(&self, raw: &str) -> Option<SlashDispatchOutcome> {
+    async fn dispatch_slash(&self, raw: Utf16JsonProjection) -> Option<SlashDispatchOutcome> {
         let before = self.capture_slash_authority().await;
-        let result = match self.dispatch_desktop_slash(raw).await {
+        let result = match self.dispatch_desktop_slash(&raw).await {
             Some(result) => result,
-            None => self.dispatcher.as_ref()?.dispatch(raw).await,
+            None => {
+                self.dispatcher
+                    .as_ref()?
+                    .dispatch(raw)
+                    .await
+            }
         };
         // Display-only feedback belongs to the client's command surface. Persist
         // actual task turns and command effects through their existing paths.
@@ -1113,7 +1163,19 @@ impl CommandRouter for EngineCommandRouter {
             ClientCommand::RunSlashCommand { raw, turn_id } => {
                 if let Some(dispatcher) = self.dispatcher.as_ref() {
                     let before = self.capture_slash_authority().await;
-                    let (display, is_error) = match dispatcher.dispatch(&raw).await {
+                    let context = command_api::ModCommandRunContext {
+                        origin: serde_json::json!({"kind":"bridge"}),
+                        is_fullscreen: false,
+                        columns: 80,
+                    };
+                    let (display, is_error) = match command_api::with_mod_command_context(
+                        context,
+                        dispatcher.dispatch(
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::from(raw.as_str()),
+                        ),
+                    )
+                    .await
+                    {
                         lingxi_core::host::SlashDispatchResult::Handled { display } => {
                             (display, false)
                         }
@@ -1127,13 +1189,18 @@ impl CommandRouter for EngineCommandRouter {
                         lingxi_core::host::SlashDispatchResult::RunAsTurn { prompt } => {
                             (prompt, false)
                         }
+                        lingxi_core::host::SlashDispatchResult::ParseFailure { .. } => (
+                            "Commands are in the form `/command [args]`".into(),
+                            true,
+                        ),
                         lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
-                            (format!("not a slash command: {raw}"), true)
+                            (format!("not a slash command: {raw}").into(), true)
                         }
                     };
                     sink.emit(ClientEvent::SlashCommandResult {
                         turn_id,
-                        display,
+                        display: ClientTextDto::from_projection(&display)
+                            .expect("slash command display is a root string"),
                         is_error,
                     })
                     .await;
@@ -1310,7 +1377,7 @@ impl CommandRouter for EngineCommandRouter {
                         sink.emit(ClientEvent::SessionEnded).await;
                         if let Some(message) = presence_warning {
                             sink.emit(ClientEvent::SystemNotice {
-                                message,
+                                message: message.into(),
                                 is_error: false,
                             })
                             .await;
@@ -1379,7 +1446,7 @@ impl CommandRouter for EngineCommandRouter {
                 .await;
                 if let Some(message) = presence_warning {
                     sink.emit(ClientEvent::SystemNotice {
-                        message,
+                        message: message.into(),
                         is_error: false,
                     })
                     .await;
@@ -1536,7 +1603,7 @@ impl CommandRouter for EngineCommandRouter {
                 }
                 if let Some(message) = presence_warning {
                     sink.emit(ClientEvent::SystemNotice {
-                        message,
+                        message: message.into(),
                         is_error: false,
                     })
                     .await;
@@ -1612,10 +1679,12 @@ impl CommandRouter for EngineCommandRouter {
                     })
                     .await;
                 } else {
+                    let message =
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::from(message);
                     match self.tasks.send_human_task_message(&task_id, &message).await {
                         Ok(()) => {
                             sink.emit(ClientEvent::SystemNotice {
-                                message: format!("Message accepted for task {task_id}"),
+                                message: format!("Message accepted for task {task_id}").into(),
                                 is_error: false,
                             })
                             .await
@@ -1776,9 +1845,9 @@ mod tasks;
 
 #[cfg(test)]
 use settings::parse_settings_patch;
+pub use tasks::TaskPoll;
 use tasks::emit_correlated_task_list;
 use tasks::task_status_wire;
-pub use tasks::TaskPoll;
 
 #[cfg(test)]
 use configuration::parse_mcp_config_json;

@@ -368,6 +368,19 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'list_sessions':
       exactKeys(input, ['type', 'limit']);
       return input['limit'] === undefined ? { type } : { type, limit: integer(input['limit'], 'limit', 1, 200) };
+    case 'ui_attach': {
+      exactKeys(input, ['type', 'surface', 'client_id']);
+      const surface = enumValue(input['surface'], 'UI surface', ['desktop', 'mobile', 'vscode']);
+      const client_id = string(input['client_id'], 'UI client id', 64);
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(client_id)) throw new Error('invalid UI client id');
+      return { type, surface, client_id };
+    }
+    case 'ui_detach': {
+      exactKeys(input, ['type', 'client_id']);
+      const client_id = string(input['client_id'], 'UI client id', 64);
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(client_id)) throw new Error('invalid UI client id');
+      return { type, client_id };
+    }
     case 'login':
     case 'logout':
     case 'force_compact':

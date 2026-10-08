@@ -33,7 +33,11 @@ struct ReplTaskWake {
 
 #[async_trait::async_trait]
 impl TaskNotificationWake for ReplTaskWake {
-    async fn send_human_task_message(&self, task_id: &str, message: &str) -> Result<(), String> {
+    async fn send_human_task_message(
+        &self,
+        task_id: &str,
+        message: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), String> {
         if !self.orchestrator.workspace_trusted().await {
             return Err("Trust this workspace before messaging a task".into());
         }
@@ -97,7 +101,13 @@ impl TaskNotificationWake for ReplTaskWake {
                                     .then(|| command.uuid.clone()),
                                 text: prompt.unwrap_or_else(|| raw.to_owned()),
                                 is_meta: true,
+                                mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
+                                    serde_json::json!({"kind":"auto-continuation"})
+                                } else {
+                                    serde_json::json!({"kind":"scheduled-trigger"})
+                                }),
                                 message_id: None,
+                                transcript_row_token: None,
                                 queue_priority: Some("later".into()),
                                 scheduled_task_id: command.scheduled_task_id.clone(),
                                 scheduled_fire_id: command.scheduled_fire_id.clone(),
@@ -163,6 +173,7 @@ async fn confirm_repl_exit<R: AsyncBufRead + Send + Unpin + ?Sized>(
                     };
                     match handle.background_conversation(snapshot).await {
                         Ok(receipt) => {
+                            let receipt = receipt.string_at("").unwrap_or_default();
                             sink.text(&format!(
                                 "{receipt}\nLocal tasks that could not be moved will be stopped.\n"
                             ))
@@ -504,7 +515,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
         let turn_loop_host = loop_host.clone();
         let turn_loop_queue = loop_queue.clone();
         let run_turn_fn =
-            move |prompt: String,
+            move |prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
                   token: CancellationToken|
                   -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>> {
                 let o = orch_for_turn.clone();
@@ -602,7 +613,11 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     finish_repl_lifecycle(&runtime, sink.as_ref(), exit_code).await
 }
 
-async fn finish_repl_lifecycle(runtime: &crate::init::Runtime, sink: &dyn OutputSink, exit_code: i32) -> i32 {
+async fn finish_repl_lifecycle(
+    runtime: &crate::init::Runtime,
+    sink: &dyn OutputSink,
+    exit_code: i32,
+) -> i32 {
     runtime.orchestrator.request_exit().await;
     let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
     for error in &shutdown.errors {
@@ -958,14 +973,25 @@ mod retained_shutdown_tests {
             let root = tempfile::tempdir().unwrap();
             let runtime = crate::init::build_runtime_from_config(
                 harness_runtime::desktop::DesktopConfig {
-                    lingxi_home: root.path().join("home"), cwd: root.path().to_path_buf(),
-                    isolated_credential_storage: true, ..Default::default()
-                }, Arc::new(orchestrator::test_support::MockOutputStream::new()),
-            ).await.unwrap();
+                    lingxi_home: root.path().join("home"),
+                    cwd: root.path().to_path_buf(),
+                    isolated_credential_storage: true,
+                    ..Default::default()
+                },
+                Arc::new(orchestrator::test_support::MockOutputStream::new()),
+            )
+            .await
+            .unwrap();
             runtime.session_state.flush().await.unwrap();
-            assert_eq!(finish_repl_lifecycle(&runtime, &PlainSink::new(), code).await, code);
+            assert_eq!(
+                finish_repl_lifecycle(&runtime, &PlainSink::new(), code).await,
+                code
+            );
             assert!(runtime.orchestrator.current_should_exit());
-            assert!(runtime.session_state.flush().await.is_err(), "REPL cannot return before its writer admission closes");
+            assert!(
+                runtime.session_state.flush().await.is_err(),
+                "REPL cannot return before its writer admission closes"
+            );
         }
     }
 }

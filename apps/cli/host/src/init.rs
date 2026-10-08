@@ -63,6 +63,8 @@ pub struct Runtime {
     /// Slash-command dispatcher seeded with the 94 builtins + 18 wired core
     /// handlers (M5-09/M5-10/M5-11).
     pub dispatcher: RegistrySlashDispatcher,
+    /// Live command catalog whose Mod queue is bound by the mounted TUI host.
+    pub mod_command_catalog: Arc<command_api::RegistryModCommandCatalog>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// (M9-05) The desktop task registry shared with the tool context. The TUI
@@ -882,6 +884,7 @@ pub(crate) fn resolve_desktop_config_at(
         ),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        mod_render_surface: None,
         // Real CLI session: the machine's keychain and env ARE legitimate
         // credential sources here.
         isolated_credential_storage: false,
@@ -1429,6 +1432,7 @@ pub async fn build_runtime_from_config(
         fusion_recorder_factory: rt.fusion_recorder_factory,
         session_lifecycle: rt.session_lifecycle,
         dispatcher: rt.dispatcher,
+        mod_command_catalog: rt.mod_command_catalog,
         auth: rt.auth,
         enforcing_permission_gate: rt.enforcing_permission_gate,
         task_registry: rt.task_registry,

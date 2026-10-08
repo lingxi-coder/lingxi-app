@@ -83,6 +83,8 @@ export const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'message_identity',
   'message_retracted',
   'system_notice',
+  'ui_log',
+  'ui_status',
   'loop_wakeup',
   'scheduled_task_fire',
   'session_ended',

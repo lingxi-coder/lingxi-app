@@ -18,9 +18,24 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
+
+fn display_source_value(source: &Utf16JsonProjection) -> serde_json::Value {
+    source
+        .to_json_string()
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_else(|| {
+            source
+                .string_at("")
+                .map_or(serde_json::Value::Null, |text| {
+                    serde_json::Value::String(text.to_owned())
+                })
+        })
+}
 
 /// One live heartbeat value retained by the bridge. Heartbeats are transient
 /// render state and therefore may be replaced by a newer value for the same
@@ -92,13 +107,21 @@ impl CoalescedToolHeartbeats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandCatalogEntry {
     /// Command name including the leading slash.
-    pub name: String,
+    pub name: client::protocol::text::ClientTextDto,
     /// Full searchable description.
-    pub description: String,
+    pub description: client::protocol::text::ClientTextDto,
     /// Optional compact menu description.
-    pub menu_description: Option<String>,
+    pub menu_description: Option<client::protocol::text::ClientTextDto>,
     /// Alternate names including the leading slash.
-    pub aliases: Vec<String>,
+    pub aliases: Vec<client::protocol::text::ClientTextDto>,
+    /// Hidden entries still dispatch and may surface on an exact name match.
+    pub hidden: bool,
+    /// A described static TUI command replaces its original menu row.
+    pub replaces_builtin: bool,
+    /// Argument hint returned by `command.describe`.
+    pub argument_hint: Option<client::protocol::text::ClientTextDto>,
+    /// Declared positional argument names for progressive hints after each argument.
+    pub argument_names: Vec<client::protocol::text::ClientTextDto>,
 }
 
 /// One live agent rendered next to the TUI composer.
@@ -337,9 +360,32 @@ pub enum TurnEvent {
     /// next render tick.
     SystemNotice {
         /// The notice text.
-        body: String,
+        body: client::protocol::text::ClientTextDto,
         /// `true` → render as an error (red); `false` → dim informational.
         is_error: bool,
+    },
+    /// A Mod log line displayed independently of assistant text.
+    UiLog {
+        plugin: String,
+        text: client::protocol::text::ClientTextDto,
+    },
+    /// A transient Mod notification shown near the composer.
+    UiToast {
+        plugin: String,
+        text: client::protocol::text::ClientTextDto,
+        timeout_ms: u64,
+    },
+    /// Set or clear a plugin's pinned line below the composer.
+    UiStatus {
+        plugin: String,
+        text: Option<client::protocol::text::ClientTextDto>,
+    },
+    /// The persisted top-level JSONL UUID for a live user row token.
+    TranscriptRowIdentity { row_token: String, uuid: String },
+    /// Persisted top-level JSONL UUIDs for text rows in a live assistant turn.
+    AssistantTranscriptRowUuids {
+        message_id: lingxi_core::types::MessageId,
+        uuids: Vec<Option<String>>,
     },
     /// The live command registry was reconciled. The render-thread owner swaps
     /// this complete snapshot into the bottom pane in one event, preserving the
@@ -396,7 +442,7 @@ pub enum TurnEvent {
     /// inner work is invisible. Rendered as an indented `⎿` line.
     SubagentActivity {
         /// Pre-formatted one-line summary, e.g. `"Read(src/main.rs)"`.
-        text: String,
+        text: client::protocol::text::ClientTextDto,
     },
     /// An API request failed with a retry-worthy error and is backing off before
     /// the next attempt. Rendered as Claude Code's `SystemAPIErrorMessage`:
@@ -457,14 +503,87 @@ impl OutputStream for BridgeOutputStream {
         let _ = self.tx.send(TurnEvent::TurnStarted);
     }
 
-    async fn emit_text(&self, text: &str) {
-        let _ = self.tx.send(TurnEvent::TextDelta(text.to_string()));
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
+        let _ = self.tx.send(TurnEvent::TextDelta(
+            text.string_at("").unwrap_or_default().to_owned(),
+        ));
     }
 
-    async fn emit_system_notice(&self, body: &str, is_error: bool) {
+    async fn emit_system_notice(
+        &self,
+        body: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        is_error: bool,
+    ) {
         let _ = self.tx.send(TurnEvent::SystemNotice {
-            body: body.to_string(),
+            body: client::protocol::text::ClientTextDto::from_code_units(
+                body.string_units("")
+                    .expect("system notice is a root JSON string"),
+            ),
             is_error,
+        });
+    }
+
+    async fn emit_mod_log(
+        &self,
+        plugin: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        let _ = self.tx.send(TurnEvent::UiLog {
+            plugin: plugin.to_string(),
+            text: client::protocol::text::ClientTextDto::from_code_units(
+                text.string_units("")
+                    .expect("Mod log output is a root-string projection"),
+            ),
+        });
+    }
+
+    async fn emit_mod_toast(
+        &self,
+        plugin: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        timeout_ms: u64,
+    ) {
+        let _ = self.tx.send(TurnEvent::UiToast {
+            plugin: plugin.to_string(),
+            text: client::protocol::text::ClientTextDto::from_code_units(
+                text.string_units("")
+                    .expect("Mod toast output is a root-string projection"),
+            ),
+            timeout_ms,
+        });
+    }
+
+    async fn emit_mod_status(
+        &self,
+        plugin: &str,
+        text: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    ) {
+        let _ = self.tx.send(TurnEvent::UiStatus {
+            plugin: plugin.to_string(),
+            text: text.map(|text| {
+                client::protocol::text::ClientTextDto::from_code_units(
+                    text.string_units("")
+                        .expect("Mod status output is a root-string projection"),
+                )
+            }),
+        });
+    }
+
+    async fn emit_user_transcript_row_identity(&self, row_token: &str, uuid: &str) {
+        let _ = self.tx.send(TurnEvent::TranscriptRowIdentity {
+            row_token: row_token.to_string(),
+            uuid: uuid.to_string(),
+        });
+    }
+
+    async fn emit_assistant_transcript_row_uuids(
+        &self,
+        message_id: &lingxi_core::types::MessageId,
+        uuids: &[Option<String>],
+    ) {
+        let _ = self.tx.send(TurnEvent::AssistantTranscriptRowUuids {
+            message_id: *message_id,
+            uuids: uuids.to_vec(),
         });
     }
 
@@ -480,9 +599,15 @@ impl OutputStream for BridgeOutputStream {
             .store(mode == Some("omitted"), Ordering::Relaxed);
     }
 
-    async fn emit_subagent_activity(&self, text: &str) {
+    async fn emit_subagent_activity(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
         let _ = self.tx.send(TurnEvent::SubagentActivity {
-            text: text.to_string(),
+            text: client::protocol::text::ClientTextDto::from_code_units(
+                text.string_units("")
+                    .expect("subagent activity is a root JSON string"),
+            ),
         });
     }
 
@@ -511,12 +636,12 @@ impl OutputStream for BridgeOutputStream {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
     ) {
         let _ = self.tx.send(TurnEvent::ToolUseStart {
             id: id.clone(),
             tool: tool.to_string(),
-            input: input.clone(),
+            input: display_source_value(input),
         });
     }
 
@@ -571,8 +696,8 @@ impl OutputStream for BridgeOutputStream {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        model_text: &str,
-        result: &serde_json::Value,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
     ) {
         // (gap-3 general) Many tools return a structured `data` object with no
         // human-display string (Read's `{type,file:{…}}`, …), so the scrollback
@@ -582,6 +707,8 @@ impl OutputStream for BridgeOutputStream {
         // `model_content` so `body_text` can surface it; the structured fields
         // stay intact for tools that render off them (Bash stdout/stderr,
         // Edit/Write diffs).
+        let result = display_source_value(result);
+        let model_text = model_text.string_at("").unwrap_or_default();
         let result = match result.as_object() {
             Some(obj) if !model_text.is_empty() && !obj.contains_key("model_content") => {
                 let mut obj = obj.clone();
@@ -749,7 +876,7 @@ mod tests {
     async fn emit_text_translates_to_text_delta() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        bridge.emit_text("hello").await;
+        bridge.emit_text(&Utf16JsonProjection::from("hello")).await;
         let ev = rx.recv().await.unwrap();
         assert!(matches!(ev, TurnEvent::TextDelta(ref s) if s == "hello"));
     }
@@ -759,12 +886,106 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
         bridge
-            .emit_system_notice("transcript unavailable", true)
+            .emit_system_notice(&"transcript unavailable".into(), true)
             .await;
         assert!(matches!(
             rx.recv().await.unwrap(),
             TurnEvent::SystemNotice { body, is_error }
-                if body == "transcript unavailable" && is_error
+                if body.display() == "transcript unavailable" && is_error
+        ));
+    }
+
+    #[tokio::test]
+    async fn emit_mod_log_keeps_plugin_and_text_separate() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let text = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#""Found a \ud800 mismatch""#,
+        )
+        .unwrap();
+        bridge.emit_mod_log("review", &text).await;
+        let expected = vec![
+            b'F' as u16,
+            b'o' as u16,
+            b'u' as u16,
+            b'n' as u16,
+            b'd' as u16,
+            b' ' as u16,
+            b'a' as u16,
+            b' ' as u16,
+            0xd800,
+            b' ' as u16,
+            b'm' as u16,
+            b'i' as u16,
+            b's' as u16,
+            b'm' as u16,
+            b'a' as u16,
+            b't' as u16,
+            b'c' as u16,
+            b'h' as u16,
+        ];
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiLog { plugin, text }
+                if plugin == "review" && text.code_units == expected
+        ));
+    }
+
+    #[tokio::test]
+    async fn mod_toast_and_status_keep_source_units_until_rendering() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let toast = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""toast \ud800""#)
+            .unwrap();
+        let status =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""status \udfff""#)
+                .unwrap();
+
+        bridge.emit_mod_toast("plugin", &toast, 2500).await;
+        bridge.emit_mod_status("plugin", Some(&status)).await;
+        bridge.emit_mod_status("plugin", None).await;
+
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiToast { plugin, text, timeout_ms }
+                if plugin == "plugin"
+                    && text.code_units == vec![b't' as u16, b'o' as u16, b'a' as u16, b's' as u16, b't' as u16, b' ' as u16, 0xd800]
+                    && timeout_ms == 2500
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiStatus { plugin, text: Some(text) }
+                if plugin == "plugin"
+                    && text.code_units == vec![b's' as u16, b't' as u16, b'a' as u16, b't' as u16, b'u' as u16, b's' as u16, b' ' as u16, 0xdfff]
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiStatus { plugin, text: None } if plugin == "plugin"
+        ));
+    }
+
+    #[tokio::test]
+    async fn transcript_row_identity_events_keep_persisted_uuids_separate_from_message_ids() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let message_id = lingxi_core::types::MessageId::new();
+        let persisted_uuid = "83f67a72-a806-49b7-9a18-e57307177a86";
+        bridge
+            .emit_user_transcript_row_identity("ui-row-token", persisted_uuid)
+            .await;
+        bridge
+            .emit_assistant_transcript_row_uuids(&message_id, &[Some(persisted_uuid.to_string())])
+            .await;
+
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::TranscriptRowIdentity { row_token, uuid }
+                if row_token == "ui-row-token" && uuid == persisted_uuid
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::AssistantTranscriptRowUuids { message_id: actual, uuids }
+                if actual == message_id && uuids == vec![Some(persisted_uuid.to_string())]
         ));
     }
 
@@ -839,7 +1060,12 @@ mod tests {
         let bridge = BridgeOutputStream::new(tx);
         let id = lingxi_core::types::ToolUseId::new();
         bridge
-            .emit_tool_call(&id, "Read", &serde_json::json!({"file_path": "/tmp/x"}))
+            .emit_tool_call(
+                &id,
+                "Read",
+                &Utf16JsonProjection::from_serde_value(&serde_json::json!({"file_path": "/tmp/x"}))
+                    .unwrap(),
+            )
             .await;
         match rx.recv().await.unwrap() {
             TurnEvent::ToolUseStart {

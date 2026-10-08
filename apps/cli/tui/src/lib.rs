@@ -39,6 +39,7 @@ pub mod fusion;
 pub mod history_cell;
 pub mod image_view;
 pub mod message;
+mod mod_ui_render;
 pub mod permission_gate;
 pub mod rate_limit_messages;
 pub mod raw_screen;

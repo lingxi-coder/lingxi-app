@@ -1,6 +1,6 @@
 use super::EngineCommandRouter;
-use client::adapter::lowering::lower_task_record;
 use client::adapter::ClientEventSink;
+use client::adapter::lowering::lower_task_record;
 use client::protocol::events::ClientEvent;
 use client::protocol::events::ErrorKindDto;
 use client::protocol::listings::TaskStatusDto;

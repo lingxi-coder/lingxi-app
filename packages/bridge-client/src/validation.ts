@@ -628,6 +628,17 @@ export function validateClientEvent(value: unknown): ClientEvent {
     return { type, event: validateAppEvent(input['event']) } as ClientEvent;
   }
   switch (type) {
+    case 'ui_log':
+      exactKeys(input, ['type', 'plugin', 'text'], 'client event');
+      return { type, plugin: string(input['plugin'], 'plugin'), text: string(input['text'], 'text') };
+    case 'ui_toast':
+      exactKeys(input, ['type', 'plugin', 'text', 'timeout_ms'], 'client event');
+      return { type, plugin: string(input['plugin'], 'plugin'),
+        text: string(input['text'], 'text'), timeout_ms: integer(input['timeout_ms'], 'timeout_ms') };
+    case 'ui_status':
+      exactKeys(input, ['type', 'plugin', 'text'], 'client event');
+      return { type, plugin: string(input['plugin'], 'plugin'),
+        text: input['text'] === null ? null : string(input['text'], 'text') };
     case 'task_row':
       exactKeys(input, ['type', 'task'], 'client event');
       return { type, task: taskRow(input['task']) };

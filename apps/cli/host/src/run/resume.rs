@@ -602,7 +602,7 @@ pub(crate) async fn mount_background_resumed_tui(
     session_id: uuid::Uuid,
     messages: Vec<JsonlMessage>,
     registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<core::types::utf16_json::Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: &crate::background_launch::BackgroundLaunchSpec,
 ) -> crate::mode::RunOutcome {
@@ -625,7 +625,7 @@ pub(super) async fn mount_resumed_tui_inner(
     messages: Vec<JsonlMessage>,
     carried_state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<core::types::utf16_json::Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: Option<&crate::background_launch::BackgroundLaunchSpec>,
 ) -> crate::mode::RunOutcome {
@@ -761,7 +761,7 @@ pub(super) async fn mount_resumed_tui_inner(
     // registration through so status + permissionClass stay on `sessions/<pid>.json`.
     // A carried one-shot notice (the `/branch` success confirmation) renders as
     // the newest system cell.
-    let mut resumed_messages = tui::replay::rebuild_from_jsonl(&entries);
+    let mut resumed_messages = tui::replay::rebuild_from_jsonl_with_request_ids(&entries);
     if let Some(body) = boot_notice {
         resumed_messages.push(tui_core::message::RenderedMessage::SystemText {
             body,
@@ -1380,6 +1380,8 @@ pub(crate) async fn seed_orchestrator_session(
     let mut session = session_handle.lock().await;
     session.session_id = replayed.session_id;
     session.history = replayed.history;
+    session.compacted_user_turns = replayed.compacted_user_turns;
+    session.virtual_user_messages = replayed.virtual_user_messages;
     session.transcript_only_messages = replayed.transcript_only_messages;
     session.compact_summary_messages = replayed.compact_summary_messages;
     session.active_goal = replayed.active_goal;

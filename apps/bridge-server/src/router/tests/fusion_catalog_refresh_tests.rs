@@ -44,19 +44,20 @@ impl AuthHandle for MockAuth {
 
 #[derive(Default)]
 struct MockTaskRegistry {
-    human_messages: std::sync::Mutex<Vec<(String, String)>>,
+    human_messages:
+        std::sync::Mutex<Vec<(String, lingxi_core::types::utf16_json::Utf16JsonProjection)>>,
 }
 #[async_trait::async_trait]
 impl TaskRegistryHandle for MockTaskRegistry {
     async fn send_human_task_message(
         &self,
         task_id: &str,
-        message: &str,
+        message: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<(), TaskRegistryError> {
         self.human_messages
             .lock()
             .unwrap()
-            .push((task_id.into(), message.into()));
+            .push((task_id.into(), message.clone()));
         Ok(())
     }
     async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
@@ -122,7 +123,10 @@ async fn task_message_uses_trusted_registry_route_and_preserves_workspace_gate()
         .await;
     assert_eq!(
         *registry.human_messages.lock().unwrap(),
-        vec![("a123".into(), "  continue\nnext".into())]
+        vec![(
+            "a123".into(),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from("  continue\nnext")
+        )]
     );
     assert!(sink.0.lock().unwrap().iter().any(|event| matches!(
         event,
@@ -305,10 +309,12 @@ async fn cron_host_trust_allows_persisted_crud_and_untrusted_mutations_are_rejec
     let mut delete = cron_request("delete");
     delete.id = Some(created[0].id.clone());
     assert!(route_cron(&router, delete).await.unwrap().is_empty());
-    assert!(route_cron(&trusted_router(), cron_request("list"))
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        route_cron(&trusted_router(), cron_request("list"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let shutdown = runtime.session_lifecycle.shutdown_and_drain().await;
     assert!(shutdown.complete, "shutdown errors: {:?}", shutdown.errors);
 }

@@ -640,9 +640,16 @@ async fn seed_orchestrator_session_replays_history_and_id() {
         );
     }
 
+    let mut virtual_user = jsonl_line("user", &serde_json::json!("synthetic follow-up"));
+    virtual_user
+        .extra
+        .insert("isVirtual".into(), serde_json::json!(true));
+    let virtual_id =
+        lingxi_core::types::MessageId::from_uuid(Uuid::parse_str(&virtual_user.uuid).unwrap());
     let messages = vec![
         jsonl_line("user", &serde_json::json!("hello from the past")),
         jsonl_line("assistant", &serde_json::json!("hi, welcome back")),
+        virtual_user,
     ];
     seed_orchestrator_session(
         &build.runtime.orchestrator,
@@ -662,7 +669,9 @@ async fn seed_orchestrator_session_replays_history_and_id() {
         lingxi_core::types::SessionId::from_uuid(resumed_id),
         "seed overrides the session id with the resumed id"
     );
-    assert_eq!(s.history.len(), 2, "both transcript lines replayed");
+    assert_eq!(s.history.len(), 3, "all transcript lines replayed");
+    assert!(s.virtual_user_messages.contains(&virtual_id));
+    assert_eq!(s.real_user_turns(), 1);
     match &s.history[0] {
         lingxi_core::types::ConversationMessage::User { content, .. } => {
             assert!(matches!(
@@ -2275,14 +2284,30 @@ impl OutputSink for RecordingFusionSink {
     async fn text(&self, _s: &str) {}
     async fn turn_start(&self) {}
     async fn turn_end(&self, _r: &str, _u: f64, _i: u64, _o: u64) {}
-    async fn tool_call(&self, _tool: &str, _input: &serde_json::Value) {}
-    async fn tool_result(&self, _tool: &str, _result: &serde_json::Value) {}
+    async fn tool_call(
+        &self,
+        _tool: &str,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+    }
+    async fn tool_result(
+        &self,
+        _tool: &str,
+        _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+    }
     async fn tool_heartbeat(&self, _id: &str, _tool: &str, _elapsed_ms: u64) {}
     async fn command_output(&self, name: &str, display: &str) {
         self.outputs
             .lock()
             .await
             .push((name.to_string(), display.to_string()));
+    }
+    async fn mod_log(
+        &self,
+        _plugin: &str,
+        _text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
     }
     async fn error(&self, code: &str, message: &str) {
         self.errors
@@ -2407,7 +2432,7 @@ fn local_fusion_task_id_to_await_requires_the_dispatched_command_to_be_fusion() 
     // The real /fusion shape: recovered.
     assert_eq!(
         local_fusion_task_id_to_await("/fusion review this", "f1a2b3c4d  quality  same-provider"),
-        Some("f1a2b3c4d")
+        Some("f1a2b3c4d".to_string())
     );
     // A DIFFERENT command's Handled display that collides with the
     // f+8 shape must NOT be mistaken for a fusion task id.

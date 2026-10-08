@@ -13,7 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 struct IdleDriver;
 #[async_trait]
 impl TurnDriver for IdleDriver {
-    async fn run_turn(&self, _: String) {}
+    async fn run_turn(&self, _: Utf16JsonProjection) {}
     async fn current_session_id(&self) -> Option<String> {
         Some("session-a".into())
     }

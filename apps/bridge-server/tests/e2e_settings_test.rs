@@ -119,6 +119,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         build_info: harness_runtime::desktop::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,

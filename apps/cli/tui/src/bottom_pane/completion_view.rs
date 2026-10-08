@@ -15,6 +15,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
+use client::protocol::text::ClientTextDto;
 
 /// Rows shown in the popup before it stops growing (and starts scrolling to
 /// follow the highlight).
@@ -25,10 +26,19 @@ const MAX_ROWS: usize = 6;
 pub struct CompletionItem {
     /// The text shown in the popup's left column.
     pub label: String,
-    /// The text inserted when the item is chosen.
-    pub insert: String,
+    /// Exact source text inserted when the item is chosen. `display()` is only
+    /// for UI rendering; the composer receives these units unchanged.
+    pub insert: ClientTextDto,
     /// A dim right-column hint (command description, or `""`).
     pub desc: String,
+}
+
+impl CompletionItem {
+    /// Display text for tests and human-visible selection feedback.
+    #[must_use]
+    pub fn display_insert(&self) -> String {
+        self.insert.display()
+    }
 }
 
 /// Emoji shortcode candidates supported by the composer.  Keeping this table
@@ -117,16 +127,20 @@ pub fn exact_emoji(fragment: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrySlashRow {
     /// Command name WITH the leading `/` (e.g. `/loop`).
-    pub name: String,
+    pub name: ClientTextDto,
     /// Full description (the model-facing text; used for match candidacy).
-    pub description: String,
+    pub description: ClientTextDto,
     /// Compact `/`-menu label (reference `menuDescription`). When present the
     /// popup shows this instead of `description` (`menuDescription ??
     /// description`); `None` falls back to `description`. Matching still uses
     /// `description`.
-    pub menu_description: Option<String>,
+    pub menu_description: Option<ClientTextDto>,
     /// Alternate names WITH the leading `/`.
-    pub aliases: Vec<String>,
+    pub aliases: Vec<ClientTextDto>,
+    pub hidden: bool,
+    pub replaces_builtin: bool,
+    pub argument_hint: Option<ClientTextDto>,
+    pub argument_names: Vec<ClientTextDto>,
 }
 
 /// A popup candidate: either a static builtin or a registry-backed command.
@@ -139,10 +153,17 @@ enum Cand<'a> {
 
 impl Cand<'_> {
     /// Command name WITH the leading `/`.
-    fn name(&self) -> &str {
+    fn name(&self) -> String {
         match self {
-            Cand::Builtin(c) => c.name,
-            Cand::Registry(r) => &r.name,
+            Cand::Builtin(c) => c.name.to_owned(),
+            Cand::Registry(r) => r.name.display(),
+        }
+    }
+
+    fn source_name(&self) -> ClientTextDto {
+        match self {
+            Cand::Builtin(c) => (*c.name).into(),
+            Cand::Registry(r) => r.name.clone(),
         }
     }
 
@@ -150,7 +171,7 @@ impl Cand<'_> {
     fn describe(&self) -> String {
         match self {
             Cand::Builtin(c) => c.describe(),
-            Cand::Registry(r) => r.description.clone(),
+            Cand::Registry(r) => r.description.display(),
         }
     }
 
@@ -162,16 +183,17 @@ impl Cand<'_> {
             Cand::Builtin(c) => c.describe(),
             Cand::Registry(r) => r
                 .menu_description
-                .clone()
-                .unwrap_or_else(|| r.description.clone()),
+                .as_ref()
+                .map(ClientTextDto::display)
+                .unwrap_or_else(|| r.description.display()),
         }
     }
 
     /// Alternate names WITH the leading `/`.
-    fn aliases(&self) -> Vec<&str> {
+    fn aliases(&self) -> Vec<String> {
         match self {
-            Cand::Builtin(c) => c.aliases.iter().copied().collect(),
-            Cand::Registry(r) => r.aliases.iter().map(String::as_str).collect(),
+            Cand::Builtin(c) => c.aliases.iter().map(|alias| (*alias).to_owned()).collect(),
+            Cand::Registry(r) => r.aliases.iter().map(ClientTextDto::display).collect(),
         }
     }
 }
@@ -182,7 +204,8 @@ impl Cand<'_> {
 /// [`command_items_merged`] with an empty registry snapshot.
 #[must_use]
 pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
-    command_items_merged(prefix, &[])
+    let prefix = core::types::utf16_json::Utf16JsonProjection::from(prefix);
+    command_items_merged(&prefix, &[])
 }
 
 /// The commands matching `prefix`, merging the static builtins with the
@@ -208,17 +231,35 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
 /// - the matched alias is shown in parens only when the user typed it
 ///   (`findMatchedAlias`), e.g. `/quit` → `/exit (quit)`.
 #[must_use]
-pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<CompletionItem> {
-    if !prefix.starts_with('/') {
+pub fn command_items_merged<'a>(
+    prefix: &core::types::utf16_json::Utf16JsonProjection,
+    registry: &'a [RegistrySlashRow],
+) -> Vec<CompletionItem> {
+    let Some(prefix_units) = prefix.string_units("") else {
+        return Vec::new();
+    };
+    if prefix_units.first().copied() != Some(b'/' as u16) {
         return Vec::new();
     }
-    let rest = &prefix[1..];
+    let rest_units = &prefix_units[1..];
+    let rest = String::from_utf16_lossy(rest_units);
     // `hasCommandArgs`: once arguments are being typed there are no command
-    // suggestions.
+    // suggestions. Matching here is presentation-only; insertion remains exact.
     if rest.contains(char::is_whitespace) {
         return Vec::new();
     }
     let query = rest.to_lowercase();
+    let replaces_builtin = |name: &str| {
+        registry
+            .iter()
+            .any(|row| row.replaces_builtin && row.name.code_units == name.encode_utf16().collect::<Vec<_>>())
+    };
+    let registry_is_available = |row: &&RegistrySlashRow| {
+        row.replaces_builtin
+            || !crate::command::BUILTIN
+                .iter()
+                .any(|builtin| builtin.name.encode_utf16().eq(row.name.code_units.iter().copied()))
+    };
 
     // Registry rows whose name a builtin already owns are dropped (the builtin
     // table is authoritative). Inlined at both use sites below — a shared
@@ -229,16 +270,24 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
     // `'static` builtins coerce down (covariance); order is irrelevant — the
     // result is sorted by name below.
     if query.is_empty() {
-        let mut commands: Vec<Cand> = registry
+        let mut commands: Vec<Cand<'a>> = registry
             .iter()
-            .filter(|r| !crate::command::BUILTIN.iter().any(|b| b.name == r.name))
+            .filter(registry_is_available)
+            .filter(|row| !row.hidden)
             .map(|r| Cand::Registry(r))
-            .chain(crate::command::advertised().map(|c| Cand::Builtin(c)))
             .collect();
-        commands.sort_by(|a, b| a.name().cmp(b.name()));
+        commands.extend(
+            crate::command::advertised()
+                .filter(|command| !replaces_builtin(command.name))
+                .map(|command| {
+                    let command: &'a crate::command::SlashCommand = command;
+                    Cand::Builtin(command)
+                }),
+        );
+        commands.sort_by(|left, right| left.name().cmp(&right.name()));
         return commands
             .into_iter()
-            .map(|c| item(c.name(), c.display_desc(), None))
+            .map(|c| item_source(&c.source_name(), c.display_desc(), None))
             .collect();
     }
 
@@ -248,34 +297,63 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
     // `hiddenExact`: an unadvertised builtin typed out in full surfaces — unless
     // a visible command shares the name. Only builtins carry a hidden flag;
     // registry rows are always visible.
-    let hidden_exact = crate::command::BUILTIN
+    let hidden_exact = registry
         .iter()
-        .filter(|c| !c.advertised || crate::command::is_runtime_hidden(c.name))
-        .find(|c| bare(c.name) == query);
+        .filter(registry_is_available)
+        .filter(|row| row.hidden)
+        .find(|row| {
+            let row_units = row.name.code_units.strip_prefix(&[b'/' as u16]).unwrap_or(&row.name.code_units);
+            match (String::from_utf16(row_units), String::from_utf16(rest_units)) {
+                (Ok(name), Ok(query)) => name.to_lowercase() == query.to_lowercase(),
+                _ => row_units == rest_units,
+            }
+        })
+        .map(Cand::Registry)
+        .or_else(|| {
+            crate::command::BUILTIN
+                .iter()
+                .filter(|command| !replaces_builtin(command.name))
+                .filter(|command| {
+                    !command.advertised || crate::command::is_runtime_hidden(command.name)
+                })
+                .find(|command| bare(command.name) == query)
+                .map(|command| {
+                    let command: &'a crate::command::SlashCommand = command;
+                    Cand::Builtin(command)
+                })
+        });
 
     // Candidates: commands the reference's Fuse index would match — name/alias
     // substring, name-part prefix, or description word prefix.
-    let mut candidates: Vec<Cand> = registry
+    let mut candidates: Vec<Cand<'a>> = registry
         .iter()
-        .filter(|r| !crate::command::BUILTIN.iter().any(|b| b.name == r.name))
+        .filter(registry_is_available)
+        .filter(|row| !row.hidden)
         .map(|r| Cand::Registry(r))
-        .chain(crate::command::advertised().map(|c| Cand::Builtin(c)))
-        .filter(|c| {
-            bare(c.name()).contains(&query)
-                || c.aliases().iter().any(|a| bare(a).contains(&query))
-                || bare(c.name())
-                    .split(['-', '_', ':'])
-                    .any(|part| part.starts_with(&query))
-                || c.describe().to_lowercase().split_whitespace().any(|word| {
-                    word.trim_matches(|ch: char| !ch.is_alphanumeric())
-                        .starts_with(&query)
-                })
-        })
         .collect();
+    candidates.extend(
+        crate::command::advertised()
+            .filter(|command| !replaces_builtin(command.name))
+            .map(|command| {
+                let command: &'a crate::command::SlashCommand = command;
+                Cand::Builtin(command)
+            }),
+    );
+    candidates.retain(|c| {
+        bare(&c.name()).contains(&query)
+            || c.aliases().iter().any(|a| bare(a).contains(&query))
+            || bare(&c.name())
+                .split(['-', '_', ':'])
+                .any(|part| part.starts_with(&query))
+            || c.describe().to_lowercase().split_whitespace().any(|word| {
+                word.trim_matches(|ch: char| !ch.is_alphanumeric())
+                    .starts_with(&query)
+            })
+    });
 
     // Rank tiers (the reference comparator, minus the Fuse-score tail).
     let tier = |c: &Cand| -> (u8, usize) {
-        let name = bare(c.name());
+        let name = bare(&c.name());
         if name == query {
             return (0, 0);
         }
@@ -295,7 +373,7 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
         }
         (4, 0)
     };
-    candidates.sort_by(|a, b| tier(a).cmp(&tier(b)).then(a.name().cmp(b.name())));
+    candidates.sort_by(|a, b| tier(a).cmp(&tier(b)).then(a.name().cmp(&b.name())));
 
     let mut items: Vec<CompletionItem> = candidates
         .into_iter()
@@ -306,12 +384,13 @@ pub fn command_items_merged(prefix: &str, registry: &[RegistrySlashRow]) -> Vec<
                 .into_iter()
                 .find(|a| bare(a).starts_with(&query))
                 .map(|a| a[1..].to_string());
-            item(c.name(), c.display_desc(), matched_alias.as_deref())
+            item_source(&c.source_name(), c.display_desc(), matched_alias.as_deref())
         })
         .collect();
     if let Some(hidden) = hidden_exact {
-        if !items.iter().any(|i| i.insert == hidden.name) {
-            items.insert(0, item(hidden.name, hidden.describe(), None));
+        let name = hidden.source_name();
+        if !items.iter().any(|i| i.insert.code_units == name.code_units) {
+            items.insert(0, item_source(&name, hidden.display_desc(), None));
         }
     }
     items
@@ -327,7 +406,24 @@ fn item(name: &str, desc: String, matched_alias: Option<&str>) -> CompletionItem
     };
     CompletionItem {
         label,
-        insert: name.to_string(),
+        insert: name.into(),
+        desc,
+    }
+}
+
+fn item_source(
+    name: &ClientTextDto,
+    desc: String,
+    matched_alias: Option<&str>,
+) -> CompletionItem {
+    let display = name.display();
+    let label = match matched_alias {
+        Some(alias) => format!("{display} ({alias})"),
+        None => display,
+    };
+    CompletionItem {
+        label,
+        insert: name.clone(),
         desc,
     }
 }
@@ -359,7 +455,13 @@ impl CompletionView {
 
     /// The text the highlighted item inserts.
     #[must_use]
-    pub fn selected_insert(&self) -> &str {
+    pub fn selected_insert(&self) -> String {
+        self.items[self.selected].insert.display()
+    }
+
+    /// Exact text inserted when a completion is selected.
+    #[must_use]
+    pub fn selected_source_insert(&self) -> &ClientTextDto {
         &self.items[self.selected].insert
     }
 
@@ -385,6 +487,7 @@ impl CompletionView {
     pub fn items(&self) -> &[CompletionItem] {
         &self.items
     }
+
 
     /// Move the highlight up (clamped).
     pub fn prev(&mut self) {
@@ -464,24 +567,28 @@ mod tests {
         assert_eq!(all.len(), crate::command::advertised().count());
         // "/m" matches /model + /mcp.
         let m = command_items("/m");
-        assert!(m.iter().any(|i| i.insert == "/model"));
-        assert!(m.iter().any(|i| i.insert == "/mcp"));
-        assert!(!m.iter().any(|i| i.insert == "/help"));
+        assert!(m.iter().any(|i| i.display_insert() == "/model"));
+        assert!(m.iter().any(|i| i.display_insert() == "/mcp"));
+        assert!(!m.iter().any(|i| i.display_insert() == "/help"));
         // Non-slash input yields nothing.
         assert!(command_items("model").is_empty());
         assert!(command_items("/zzz").is_empty());
         // Unadvertised registry entries never surface.
-        assert!(!all.iter().any(|i| i.insert == "/image"));
+        assert!(!all.iter().any(|i| i.display_insert() == "/image"));
     }
 
     fn rows(names: &[(&str, &str)]) -> Vec<RegistrySlashRow> {
         names
             .iter()
             .map(|(n, d)| RegistrySlashRow {
-                name: (*n).to_string(),
-                description: (*d).to_string(),
+                name: (*n).into(),
+                description: (*d).into(),
                 menu_description: None,
                 aliases: Vec::new(),
+                hidden: false,
+                replaces_builtin: false,
+                argument_hint: None,
+                argument_names: Vec::new(),
             })
             .collect()
     }
@@ -492,7 +599,7 @@ mod tests {
         // builtin-only popup — the R1 ordering guarantee is untouched.
         for q in ["/", "/m", "/re", "/help", "/zzz", "model"] {
             assert_eq!(
-                command_items_merged(q, &[]),
+                command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from(q), &[]),
                 command_items(q),
                 "query {q:?}"
             );
@@ -504,21 +611,40 @@ mod tests {
         let reg = rows(&[("/loop", "run a task on a loop"), ("/deploy", "ship it")]);
         // Bare "/" now includes the registry rows alongside the builtins,
         // alphabetically, and one more than the builtin-only count.
-        let all = command_items_merged("/", &reg);
+        let all = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &reg);
         assert_eq!(all.len(), crate::command::advertised().count() + reg.len());
-        assert!(all.iter().any(|i| i.insert == "/loop"));
-        assert!(all.iter().any(|i| i.insert == "/deploy"));
+        assert!(all.iter().any(|i| i.display_insert() == "/loop"));
+        assert!(all.iter().any(|i| i.display_insert() == "/deploy"));
         // Sorted by name: /deploy precedes /loop.
-        let d = all.iter().position(|i| i.insert == "/deploy").unwrap();
-        let l = all.iter().position(|i| i.insert == "/loop").unwrap();
+        let d = all.iter().position(|i| i.display_insert() == "/deploy").unwrap();
+        let l = all.iter().position(|i| i.display_insert() == "/loop").unwrap();
         assert!(d < l);
         // A query surfaces the registry command with its description.
-        let lo = command_items_merged("/lo", &reg);
+        let lo = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/lo"), &reg);
         let loop_row = lo
             .iter()
-            .find(|i| i.insert == "/loop")
+            .find(|i| i.display_insert() == "/loop")
             .expect("/loop matches /lo");
         assert_eq!(loop_row.desc, "run a task on a loop");
+    }
+
+    #[test]
+    fn malformed_source_command_name_keeps_exact_completion_insertion() {
+        let row = RegistrySlashRow {
+            name: ClientTextDto::from_code_units(vec![b'/' as u16, b'x' as u16, 0xd800]),
+            description: "source command".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        };
+        let prefix = core::types::utf16_json::Utf16JsonProjection::parse(r#""/x\ud800""#).unwrap();
+        let candidates = command_items_merged(&prefix, &[row]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].insert.code_units, vec![b'/' as u16, b'x' as u16, 0xd800]);
+        assert_eq!(candidates[0].display_insert(), "/x�");
     }
 
     #[test]
@@ -531,20 +657,24 @@ mod tests {
             description: "Review the changed code for reuse and altitude cleanups".into(),
             menu_description: Some("Clean up the changed code".into()),
             aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
         }];
         // Bare "/": the row shows the compact menu label, not the full description.
-        let all = command_items_merged("/", &reg);
-        let row = all.iter().find(|i| i.insert == "/simplify").unwrap();
+        let all = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &reg);
+        let row = all.iter().find(|i| i.display_insert() == "/simplify").unwrap();
         assert_eq!(row.desc, "Clean up the changed code");
         // Matching still works off the full description ("altitude" is only there).
-        assert!(command_items_merged("/altitude", &reg)
+        assert!(command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/altitude"), &reg)
             .iter()
-            .any(|i| i.insert == "/simplify"));
+            .any(|i| i.display_insert() == "/simplify"));
         // A row without a menu label falls back to its description.
         let reg2 = rows(&[("/verify", "Verify a code change end-to-end")]);
-        let v = command_items_merged("/", &reg2);
+        let v = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &reg2);
         assert_eq!(
-            v.iter().find(|i| i.insert == "/verify").unwrap().desc,
+            v.iter().find(|i| i.display_insert() == "/verify").unwrap().desc,
             "Verify a code change end-to-end"
         );
     }
@@ -554,11 +684,27 @@ mod tests {
         // A registry entry that reuses a builtin name never duplicates the
         // builtin row — the builtin surface is authoritative.
         let reg = rows(&[("/help", "SHOULD NOT WIN")]);
-        let all = command_items_merged("/", &reg);
+        let all = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &reg);
         assert_eq!(all.len(), crate::command::advertised().count());
-        let help: Vec<_> = all.iter().filter(|i| i.insert == "/help").collect();
+        let help: Vec<_> = all.iter().filter(|i| i.display_insert() == "/help").collect();
         assert_eq!(help.len(), 1);
         assert_ne!(help[0].desc, "SHOULD NOT WIN");
+    }
+
+    #[test]
+    fn mod_description_replaces_builtin_and_keeps_hidden_exact_match() {
+        let mut rows = rows(&[("/help", "Mod help"), ("/secret", "Secret command")]);
+        rows[0].replaces_builtin = true;
+        rows[1].hidden = true;
+        let all = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &rows);
+        assert_eq!(
+            all.iter().find(|item| item.display_insert() == "/help").unwrap().desc,
+            "Mod help"
+        );
+        assert!(!all.iter().any(|item| item.display_insert() == "/secret"));
+        assert!(command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/secret"), &rows)
+            .iter()
+            .any(|item| item.display_insert() == "/secret"));
     }
 
     #[test]
@@ -598,7 +744,7 @@ mod tests {
         let items: Vec<CompletionItem> = (0..10)
             .map(|i| CompletionItem {
                 label: format!("/cmd{i}"),
-                insert: format!("/cmd{i}"),
+                insert: ClientTextDto::from_code_units(format!("/cmd{i}").encode_utf16().collect()),
                 desc: String::new(),
             })
             .collect();

@@ -49,6 +49,8 @@ test('the shared definition covers every newly-added command and listing kind', 
     'update_workspace_directories',
     'upsert_mcp_server',
     'remove_mcp_server',
+    'ui_attach',
+    'ui_detach',
   ];
   for (const name of newCommands) {
     assert.ok(shared.includes(`'${name}'`), `expected AllowedClientCommand to mention '${name}'`);

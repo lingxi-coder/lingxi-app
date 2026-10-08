@@ -1636,13 +1636,13 @@ async fn slash_command_routes_to_registry() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, ClientEvent::SlashCommandResult { turn_id: Some(7), display, is_error: false } if !display.is_empty())),
+            .any(|e| matches!(e, ClientEvent::SlashCommandResult { turn_id: Some(7), display, is_error: false } if !display.display().is_empty())),
         "the slash command must route to the registry and surface a display, got {events:?}"
     );
 }
 
 #[tokio::test]
-async fn refresh_slash_commands_reads_live_registry_catalog() {
+async fn refresh_slash_commands_applies_mod_descriptions_to_live_catalog() {
     use command_api::dispatcher::RegistrySlashDispatcher;
     use command_api::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
     use command_api::registry::CommandRegistry;
@@ -1666,9 +1666,10 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
     });
     let shared = Arc::new(RwLock::new(reg));
     let dispatcher = Arc::new(RegistrySlashDispatcher::new(shared.clone()));
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_mod_describe_rewrite("deploy", "launch safely", Some("<target>"), true);
     let router = EngineCommandRouter::new(
-        Arc::new(MockOrchestratorHandle::new())
-            as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
+        handle.clone() as Arc<dyn lingxi_core::host::orchestrator::OrchestratorHandle>,
         Arc::new(MockAuth) as Arc<dyn AuthHandle>,
         Arc::new(MockTaskRegistry { rows: vec![] }) as Arc<dyn TaskRegistryHandle>,
         Some(dispatcher),
@@ -1690,7 +1691,11 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
         [ClientEvent::SlashCommandCatalog { commands }] => {
             assert!(
                 commands.iter().any(|cmd| {
-                    cmd.name == "deploy" && cmd.description == "ship it" && cmd.source == "project"
+                    cmd.name == "deploy"
+                        && cmd.description == "launch safely"
+                        && cmd.source == "project"
+                        && cmd.argument_hint.as_deref() == Some("<target>")
+                        && cmd.hidden
                 }),
                 "expected live registry command in catalog, got {commands:?}"
             );
@@ -1705,6 +1710,16 @@ async fn refresh_slash_commands_reads_live_registry_catalog() {
         }
         other => panic!("expected SlashCommandCatalog, got {other:?}"),
     }
+    assert!(handle.mod_describe_inputs().iter().any(|input| {
+        input
+            == &serde_json::json!({
+                "command": "deploy",
+                "description": "ship it",
+                "isHidden": false,
+                "immediate": false,
+                "provider": {"plugin": "project", "tier": "user"}
+            })
+    }));
 }
 
 #[tokio::test]
@@ -1719,14 +1734,14 @@ async fn desktop_plan_enables_plan_state_and_runs_the_argument_as_a_turn() {
     );
 
     let outcome = router
-        .dispatch_slash("/plan design the migration")
+        .dispatch_slash("/plan design the migration".into())
         .await
         .expect("Desktop /plan must not require the TUI dispatcher");
 
     assert_eq!(
         outcome.result,
         SlashDispatchResult::RunAsTurn {
-            prompt: "design the migration".to_string(),
+            prompt: "design the migration".into(),
         }
     );
     assert_eq!(
@@ -1751,12 +1766,13 @@ async fn desktop_diff_runs_as_a_read_only_turn_instead_of_returning_tui_only() {
     );
 
     let outcome = router
-        .dispatch_slash("/diff renderer")
+        .dispatch_slash("/diff renderer".into())
         .await
         .expect("Desktop /diff must not require the TUI dispatcher");
 
     match outcome.result {
         SlashDispatchResult::RunAsTurn { prompt } => {
+            let prompt = prompt.string_at("").unwrap_or_default();
             assert!(prompt.contains("uncommitted diff"));
             assert!(prompt.contains("renderer"));
             assert!(prompt.contains("Do not modify any files"));
@@ -1771,12 +1787,15 @@ struct MutatingDispatcher {
 
 #[async_trait]
 impl SlashCommandDispatcher for MutatingDispatcher {
-    async fn dispatch(&self, raw: &str) -> SlashDispatchResult {
+    async fn dispatch(
+        &self,
+        raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> SlashDispatchResult {
         use command_api::model::{
             CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind,
         };
 
-        if raw == "/install" {
+        if raw.string_at("") == Some("/install") {
             self.registry.write().await.register_command(SlashCommand {
                 name: "newcmd".to_string(),
                 description: "added during dispatch".to_string(),
@@ -1796,7 +1815,7 @@ impl SlashCommandDispatcher for MutatingDispatcher {
             }
         } else {
             SlashDispatchResult::Handled {
-                display: raw.to_string(),
+                display: raw.string_at("").unwrap_or_default().to_string(),
             }
         }
     }
@@ -1883,7 +1902,7 @@ async fn run_slash_command_emits_commands_changed_when_registry_mutates() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, ClientEvent::SlashCommandResult { turn_id: Some(9), display, is_error: false } if display == "installed")),
+            .any(|event| matches!(event, ClientEvent::SlashCommandResult { turn_id: Some(9), display, is_error: false } if display.display() == "installed")),
         "dispatcher reply must be surfaced, got {events:?}"
     );
     assert!(
@@ -2611,12 +2630,12 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     );
     assert!(messages.iter().any(|message| message.blocks.iter().any(|block| matches!(
         block,
-        client::protocol::message::MessageBlockDto::Text { text } if text == "pre-compaction question"
+        client::protocol::message::MessageBlockDto::Text { text } if text.display() == "pre-compaction question"
     ))));
     assert!(messages.iter().any(|message| {
         message.blocks.iter().any(|block| matches!(
         block,
-        client::protocol::message::MessageBlockDto::Text { text } if text == "pre-compaction answer"
+        client::protocol::message::MessageBlockDto::Text { text } if text.display() == "pre-compaction answer"
     ))
     }));
     // Assert the fold HAPPENED rather than the row simply being dropped —
@@ -2864,7 +2883,7 @@ const E2E_TOKEN: &str = "router-e2e-token-32chars00000000";
 struct NoopTurnDriver;
 #[async_trait]
 impl bridge_server::server::TurnDriver for NoopTurnDriver {
-    async fn run_turn(&self, _prompt: String) {}
+    async fn run_turn(&self, _prompt: lingxi_core::types::utf16_json::Utf16JsonProjection) {}
 }
 
 /// A no-op permission sink — the routed command never triggers `check()`.

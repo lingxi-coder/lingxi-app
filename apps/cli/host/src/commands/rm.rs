@@ -136,13 +136,10 @@ fn resolve_managed_worktree_binding(
             spec.worktree_path.as_deref(),
             spec.worktree_ownership_token.as_deref(),
         ) {
-            (Some(path), Some(token)) => ManagedWorktreeBinding::new(
-                short,
-                &spec.session_id,
-                Path::new(path),
-                token,
-            )
-            .map(Some),
+            (Some(path), Some(token)) => {
+                ManagedWorktreeBinding::new(short, &spec.session_id, Path::new(path), token)
+                    .map(Some)
+            }
             (Some(_), None) => Err(format!(
                 "Failed to verify managed-worktree deletion for {short}: unsafe legacy ownership metadata."
             )),
@@ -1350,7 +1347,7 @@ mod tests {
             origin_cwd: repo.display().to_string(),
             worktree_path: Some(managed.display().to_string()),
             worktree_ownership_token: write_token.then(|| token.clone()),
-            initial_prompt: Some("clean up".to_string()),
+            initial_prompt: Some("clean up".into()),
             shell_handoff: Vec::new(),
             handoff: None,
             options: BackgroundLaunchOptions::default(),

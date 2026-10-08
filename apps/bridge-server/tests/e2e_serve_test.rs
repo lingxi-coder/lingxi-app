@@ -44,6 +44,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         build_info: harness_runtime::desktop::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
         api_key_helper: None,
@@ -257,7 +258,7 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
     match frame {
         Frame::Event(ClientEvent::TextDelta { text }) => {
             assert!(
-                text.starts_with("Failed to authenticate."),
+                text.display().starts_with("Failed to authenticate."),
                 "the turn must carry upstream's auth copy, got {text:?}"
             );
             assert!(!text.contains("sk-"), "error must not embed a key");

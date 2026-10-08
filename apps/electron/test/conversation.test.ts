@@ -340,6 +340,39 @@ test('system_notice remains non-terminal while surfacing its severity', () => {
   assert.equal((s.items.at(-1) as Narration).text, 'Recovered persisted state.');
 });
 
+test('ui_log creates a separate dim Mod row without model narration', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'turn_started' });
+  s = reduceEvent(s, { type: 'ui_log', plugin: 'review', text: 'Found a mismatch' });
+  assert.equal(s.running, true);
+  assert.equal(s.lastError, null);
+  assert.deepEqual(s.items.at(-1), {
+    type: 'mod-log', id: 'i1', plugin: 'review', text: 'Found a mismatch',
+  });
+});
+
+test('ui_toast stays out of conversation items and is replaced by the next toast', () => {
+  let s = reduceEvent(emptyConversation(), { type: 'ui_toast', plugin: 'review', text: 'First', timeout_ms: 4000 });
+  assert.deepEqual(s.items, []);
+  assert.deepEqual(s.modToast, { plugin: 'review', text: 'First', timeoutMs: 4000, sequence: 1 });
+  s = reduceEvent(s, { type: 'ui_toast', plugin: 'review', text: 'First', timeout_ms: 2000 });
+  assert.deepEqual(s.modToast, { plugin: 'review', text: 'First', timeoutMs: 2000, sequence: 2 });
+  assert.deepEqual(reduceEvent(s, { type: 'session_ended' }).modToast, null);
+});
+
+test('ui_status keeps one pinned line per plugin and clears only its owner', () => {
+  let s = emptyConversation();
+  s = reduceEvent(s, { type: 'ui_status', plugin: 'one', text: 'First' });
+  s = reduceEvent(s, { type: 'ui_status', plugin: 'two', text: 'Second' });
+  s = reduceEvent(s, { type: 'ui_status', plugin: 'one', text: 'Updated' });
+  assert.deepEqual(s.modStatuses, [
+    { plugin: 'one', text: 'Updated' }, { plugin: 'two', text: 'Second' },
+  ]);
+  assert.deepEqual(s.items, []);
+  s = reduceEvent(s, { type: 'ui_status', plugin: 'one', text: null });
+  assert.deepEqual(s.modStatuses, [{ plugin: 'two', text: 'Second' }]);
+  assert.deepEqual(reduceEvent(s, { type: 'session_ended' }).modStatuses, []);
+});
+
 test('a fixed schedule fire is visible before a turn and creates no dynamic fold marker', () => {
   const s = reduceEvent(emptyConversation(), { type: 'scheduled_task_fire', message: 'Fixed task is ready' });
   assert.equal(s.running, false);

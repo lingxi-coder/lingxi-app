@@ -38,6 +38,7 @@ use lifecycle::{
 use lingxi_core::host::{
     McpStatus, OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission;
 pub(crate) use resume::{
     daemon_runtime_dir, drive_background_tui_switch_loop, drive_tui_switch_loop,
@@ -127,12 +128,15 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     if command == "/tasks" {
         if let Some(parsed) = lingxi_core::host::human_task_message::parse(args) {
             let result = match parsed {
-                Ok((task_id, message)) if runtime.orchestrator.workspace_trusted().await => runtime
-                    .task_registry
-                    .send_human_task_message(task_id, message)
-                    .await
-                    .map(|()| format!("Message accepted for task {task_id}"))
-                    .map_err(|error| error.to_string()),
+                Ok((task_id, message)) if runtime.orchestrator.workspace_trusted().await => {
+                    let message = Utf16JsonProjection::from(message);
+                    runtime
+                        .task_registry
+                        .send_human_task_message(task_id, &message)
+                        .await
+                        .map(|()| format!("Message accepted for task {task_id}"))
+                        .map_err(|error| error.to_string())
+                }
                 Ok(_) => Err("Trust this workspace before messaging a task".into()),
                 Err(error) => Err(error.into()),
             };
@@ -176,7 +180,11 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     // Non-slash branch — drive the orchestrator turn loop. Without a real
     // ANTHROPIC_API_KEY this returns 401; we surface the error verbatim.
     sink.turn_start().await;
-    let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+    let turn_result = orchestrator::mod_prompt_origin::with_origin(
+        serde_json::json!({"kind":"sdk"}),
+        runtime.orchestrator.run_turn(&prompt),
+    )
+    .await;
     let turn_result = match turn_result {
         Ok(outcome) => wind_down_print_tasks(
             runtime,
@@ -438,7 +446,11 @@ async fn run_stream_json_print_inner(
 
     // ③ Run the turn — streaming callbacks (emit_text / emit_tool_call /
     //    emit_message_start / emit_message_boundary) fire on the stream.
-    let turn_result = runtime.orchestrator.run_turn(&prompt).await;
+    let turn_result = orchestrator::mod_prompt_origin::with_origin(
+        serde_json::json!({"kind":"sdk"}),
+        runtime.orchestrator.run_turn(&prompt),
+    )
+    .await;
     let turn_result = match turn_result {
         Ok(outcome) => wind_down_print_tasks(
             runtime,
@@ -686,12 +698,14 @@ async fn run_stream_json_input_loop_inner(
         mut control_resp_rx,
         status: reader_status,
         reader,
-    } = stdin_channels.unwrap_or_else(|| spawn_stdin_router(
-        argv.replay_user_messages,
-        session_id_str.clone(),
-        stream.outbound_tx(),
-        queue_lifecycle.clone(),
-    ));
+    } = stdin_channels.unwrap_or_else(|| {
+        spawn_stdin_router(
+            argv.replay_user_messages,
+            session_id_str.clone(),
+            stream.outbound_tx(),
+            queue_lifecycle.clone(),
+        )
+    });
 
     // ORPHANED PERMISSION recovery channel. A late `control_response` whose
     // `can_use_tool` request was lost (process restart with `--resume`, or a
@@ -735,7 +749,9 @@ async fn run_stream_json_input_loop_inner(
                 StdinReaderStatus::Reading => {}
                 StdinReaderStatus::Eof | StdinReaderStatus::Stopped => return,
             }
-            if fatal_status.changed().await.is_err() { return; }
+            if fatal_status.changed().await.is_err() {
+                return;
+            }
         }
     }));
 
@@ -896,7 +912,9 @@ async fn run_stream_json_input_loop_inner(
                         &ctrl_file_suggestions,
                     )
                     .await;
-                    if subtype == "end_session" { break; }
+                    if subtype == "end_session" {
+                        break;
+                    }
                 }
             }
         }
@@ -1147,15 +1165,18 @@ async fn run_stream_json_input_loop_inner(
         // Probe handle: after the turn, `is_cancelled()` distinguishes an
         // interrupt-aborted turn from a completed one (binary `mCo(reason)`).
         let cancel_probe = cancel.clone();
-        let turn_result = runtime
-            .orchestrator
-            .run_turn_streaming_with_cancel_image_sources_and_message_id(
-                &prompt,
-                Vec::new(),
-                cancel,
-                external_message_id,
-            )
-            .await;
+        let turn_result = orchestrator::mod_prompt_origin::with_origin(
+            serde_json::json!({"kind":"sdk"}),
+            runtime
+                .orchestrator
+                .run_turn_streaming_with_cancel_image_sources_and_message_id(
+                    &prompt,
+                    Vec::new(),
+                    cancel,
+                    external_message_id,
+                ),
+        )
+        .await;
         // The control plane's token is also its busy flag. Release it only
         // after the orchestrator future has naturally completed so Block tools
         // remain protected, but always release it before accepting between-turn
@@ -1272,7 +1293,7 @@ async fn run_stream_json_input_loop_inner(
         let cost = runtime.orchestrator.snapshot_cost().await;
         stream
             .emit_result_success(
-                "",
+                &Utf16JsonProjection::from(""),
                 "end_turn",
                 &cost,
                 &model_str,
@@ -1429,7 +1450,11 @@ async fn run_structured_output(
             *s = None;
         }
         sink.turn_start().await;
-        let turn_result = runtime.orchestrator.run_turn(&turn_prompt).await;
+        let turn_result = orchestrator::mod_prompt_origin::with_origin(
+            serde_json::json!({"kind":"sdk"}),
+            runtime.orchestrator.run_turn(&turn_prompt),
+        )
+        .await;
         stop_background_agents_at_budget(
             max_budget_usd,
             runtime.orchestrator.as_ref(),
@@ -1473,6 +1498,35 @@ pub async fn run_slash_command(input: &str, runtime: &Runtime, sink: &dyn Output
     run_slash_command_with_budget(input, runtime, None, sink).await
 }
 
+async fn run_slash_prompt_turn(
+    prompt: core::types::utf16_json::Utf16JsonProjection,
+    max_budget_usd: Option<f64>,
+    runtime: &Runtime,
+    sink: &dyn OutputSink,
+) -> i32 {
+    sink.turn_start().await;
+    let turn_result = orchestrator::mod_prompt_origin::with_origin(
+        serde_json::json!({"kind":"sdk"}),
+        runtime
+            .orchestrator
+            .run_turn_streaming_with_cancel(&prompt, tokio_util::sync::CancellationToken::new()),
+    )
+    .await;
+    stop_background_agents_at_budget(
+        max_budget_usd,
+        runtime.orchestrator.as_ref(),
+        runtime.task_registry.as_ref(),
+    )
+    .await;
+    match turn_result {
+        Ok(_outcome) => exit_codes::SUCCESS,
+        Err(error) => {
+            sink.error("runtime", &error.to_string()).await;
+            exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
 /// Budget-aware internal form used by print mode. Keeping the public wrapper's
 /// original signature avoids breaking downstream callers of the CLI library.
 async fn run_slash_command_with_budget(
@@ -1481,9 +1535,17 @@ async fn run_slash_command_with_budget(
     max_budget_usd: Option<f64>,
     sink: &dyn OutputSink,
 ) -> i32 {
-    match runtime.dispatcher.dispatch(input).await {
+    let context = command_api::ModCommandRunContext {
+        origin: serde_json::json!({"kind":"sdk"}),
+        is_fullscreen: false,
+        columns: 80,
+    };
+    let input_source = core::types::utf16_json::Utf16JsonProjection::from(input);
+    match command_api::with_mod_command_context(context, runtime.dispatcher.dispatch(input_source))
+        .await
+    {
         SlashDispatchResult::Handled { display } => {
-            sink.command_output("", &display).await;
+            sink.command_output_source("", &display).await;
             // G002: `/fusion` spawns a background `local_fusion` task and
             // returns `Handled` immediately (design: no auto-turn). In print
             // mode nothing else keeps the process alive, so without this the
@@ -1497,7 +1559,7 @@ async fn run_slash_command_with_budget(
             match local_fusion_task_id_to_await(input, &display) {
                 Some(task_id) => {
                     let outcome =
-                        await_local_fusion_result(task_id, runtime.task_registry.as_ref(), sink)
+                        await_local_fusion_result(&task_id, runtime.task_registry.as_ref(), sink)
                             .await;
                     fusion_result_exit_code(outcome.as_ref())
                 }
@@ -1508,26 +1570,18 @@ async fn run_slash_command_with_budget(
         // prompt AS a turn through the orchestrator (claude-code `type: "prompt"`)
         // instead of just printing it, so a `/loop` invocation actually schedules
         // + executes.
-        SlashDispatchResult::RunAsTurn { prompt } => {
-            sink.turn_start().await;
-            let turn_result = runtime.orchestrator.run_turn(&prompt).await;
-            stop_background_agents_at_budget(
-                max_budget_usd,
-                runtime.orchestrator.as_ref(),
-                runtime.task_registry.as_ref(),
-            )
-            .await;
-            match turn_result {
-                Ok(_outcome) => exit_codes::SUCCESS,
-                Err(e) => {
-                    sink.error("runtime", &e.to_string()).await;
-                    exit_codes::RUNTIME_ERROR
-                }
-            }
+        SlashDispatchResult::RunAsTurn { prompt }
+        | SlashDispatchResult::ParseFailure { input: prompt } => {
+            run_slash_prompt_turn(prompt, max_budget_usd, runtime, sink).await
         }
-        SlashDispatchResult::Unknown { name: _, display } => {
-            sink.command_output("", &display).await;
-            exit_codes::RUNTIME_ERROR
+        SlashDispatchResult::Unknown { .. } => {
+            run_slash_prompt_turn(
+                core::types::utf16_json::Utf16JsonProjection::from(input),
+                max_budget_usd,
+                runtime,
+                sink,
+            )
+            .await
         }
         SlashDispatchResult::NotASlashCommand => {
             // Defensive: only reached when caller violated the slash-prefix

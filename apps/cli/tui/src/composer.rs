@@ -24,6 +24,49 @@ use ratatui::widgets::Widget;
 
 use crate::renderable::Renderable;
 
+fn source_segments_from_text(text: &str) -> Vec<Vec<u16>> {
+    text.chars()
+        .map(|character| {
+            let mut buffer = [0; 2];
+            character.encode_utf16(&mut buffer).to_vec()
+        })
+        .collect()
+}
+
+fn display_segments_from_units(units: &[u16]) -> (Vec<char>, Vec<Vec<u16>>) {
+    let mut chars = Vec::new();
+    let mut segments = Vec::new();
+    let mut index = 0;
+    while index < units.len() {
+        let unit = units[index];
+        if (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            let low = units[index + 1];
+            let scalar = 0x10000
+                + ((u32::from(unit) - 0xd800) << 10)
+                + u32::from(low)
+                - 0xdc00;
+            chars.push(char::from_u32(scalar).expect("paired UTF-16 is a scalar"));
+            segments.push(vec![unit, low]);
+            index += 2;
+        } else {
+            chars.push(
+                char::from_u32(u32::from(unit)).unwrap_or('\u{fffd}'),
+            );
+            segments.push(vec![unit]);
+            index += 1;
+        }
+    }
+    (chars, segments)
+}
+
+fn flatten_source_segments(segments: &[Vec<u16>]) -> Vec<u16> {
+    segments.iter().flatten().copied().collect()
+}
+
 /// Maximum composer content lines shown before the box stops growing and the
 /// content scrolls to follow the cursor.
 pub const MAX_VISIBLE_LINES: usize = 6;
@@ -106,15 +149,19 @@ impl EditDelta {
 #[derive(Debug, Default)]
 pub struct Composer {
     chars: Vec<char>,
+    /// Exact UTF-16 units for each corresponding display character. Valid
+    /// surrogate pairs occupy one display slot; isolated units display as
+    /// U+FFFD while remaining unchanged here.
+    source_segments: Vec<Vec<u16>>,
     /// Cursor position as a char index in `0..=chars.len()`.
     cursor: usize,
     /// Submitted prompts, oldest first.
-    history: Vec<String>,
+    history: Vec<Vec<u16>>,
     /// `None` while editing the live buffer; `Some(i)` while browsing
     /// `history[i]`.
     browse: Option<usize>,
     /// The live buffer saved while browsing history (restored on return).
-    stash: Vec<char>,
+    stash: Vec<u16>,
     /// Visual-selection anchor (char index); `Some` while a selection is active.
     anchor: Option<usize>,
     /// The inner width the view last wrapped at (0 = never rendered). Written
@@ -248,6 +295,20 @@ impl Composer {
         self.chars.iter().collect()
     }
 
+    /// The exact source projection for the current logical buffer.
+    #[must_use]
+    pub fn source_projection(&self) -> core::types::utf16_json::Utf16JsonProjection {
+        let units = flatten_source_segments(&self.source_segments);
+        core::types::utf16_json::Utf16JsonProjection::root_string(self.text(), units)
+            .expect("composer display is derived from its exact source units")
+    }
+
+    /// Exact UTF-16 units for command routing and source-preserving completion.
+    #[must_use]
+    pub fn source_units(&self) -> Vec<u16> {
+        flatten_source_segments(&self.source_segments)
+    }
+
     /// Whether the buffer holds no characters at all.
     ///
     /// O(1) and allocation-free, unlike [`Self::text`], which collects the
@@ -292,6 +353,9 @@ impl Composer {
     pub fn insert(&mut self, c: char) -> EditDelta {
         self.detach_history();
         self.chars.insert(self.cursor, c);
+        let mut buffer = [0; 2];
+        self.source_segments
+            .insert(self.cursor, c.encode_utf16(&mut buffer).to_vec());
         self.cursor += 1;
         EditDelta::inserted(c.to_string())
     }
@@ -306,6 +370,15 @@ impl Composer {
     pub fn replace_all(&mut self, text: &str) {
         self.detach_history();
         self.chars = text.chars().collect();
+        self.source_segments = source_segments_from_text(text);
+        self.cursor = self.chars.len();
+    }
+
+    /// Replace the buffer from exact UTF-16 source units, preserving isolated
+    /// surrogates while the cursor and renderer use display characters.
+    pub fn replace_all_source_units(&mut self, units: &[u16]) {
+        self.detach_history();
+        (self.chars, self.source_segments) = display_segments_from_units(units);
         self.cursor = self.chars.len();
     }
 
@@ -358,6 +431,10 @@ impl Composer {
         let end = self.cursor.min(self.chars.len());
         if start <= end {
             self.chars.splice(start..end, insert.chars());
+            self.source_segments.splice(
+                start..end,
+                source_segments_from_text(insert),
+            );
             self.cursor = start + insert.chars().count();
         }
     }
@@ -370,6 +447,10 @@ impl Composer {
         let end = self.cursor.min(self.chars.len());
         if start <= end {
             self.chars.splice(start..end, insert.chars());
+            self.source_segments.splice(
+                start..end,
+                source_segments_from_text(insert),
+            );
             self.cursor = start + insert.chars().count();
         }
     }
@@ -379,6 +460,7 @@ impl Composer {
         self.detach_history();
         if self.cursor > 0 {
             self.cursor -= 1;
+            self.source_segments.remove(self.cursor);
             return EditDelta::deleted(self.chars.remove(self.cursor).to_string());
         }
         EditDelta::default()
@@ -388,6 +470,7 @@ impl Composer {
     pub fn delete(&mut self) -> EditDelta {
         self.detach_history();
         if self.cursor < self.chars.len() {
+            self.source_segments.remove(self.cursor);
             return EditDelta::deleted(self.chars.remove(self.cursor).to_string());
         }
         EditDelta::default()
@@ -507,6 +590,7 @@ impl Composer {
         let (lo, hi) = self.selection_range()?;
         self.detach_history();
         let removed: String = self.chars.drain(lo..hi).collect();
+        self.source_segments.drain(lo..hi);
         self.cursor = lo;
         self.anchor = None;
         Some(removed)
@@ -528,6 +612,7 @@ impl Composer {
         self.detach_history();
         let start = self.cursor.saturating_sub(n);
         self.chars.drain(start..self.cursor);
+        self.source_segments.drain(start..self.cursor);
         self.cursor = start;
     }
 
@@ -537,6 +622,10 @@ impl Composer {
         let chars: Vec<char> = s.chars().collect();
         let n = chars.len();
         self.chars.splice(self.cursor..self.cursor, chars);
+        self.source_segments.splice(
+            self.cursor..self.cursor,
+            source_segments_from_text(s),
+        );
         self.cursor += n;
         EditDelta::inserted(s)
     }
@@ -547,6 +636,7 @@ impl Composer {
         let target = self.word_left_from(self.cursor);
         let deleted = self.chars[target..self.cursor].iter().collect::<String>();
         self.chars.drain(target..self.cursor);
+        self.source_segments.drain(target..self.cursor);
         self.cursor = target;
         EditDelta::deleted(deleted)
     }
@@ -557,6 +647,7 @@ impl Composer {
         let start = self.line_start(self.cursor);
         let deleted = self.chars[start..self.cursor].iter().collect::<String>();
         self.chars.drain(start..self.cursor);
+        self.source_segments.drain(start..self.cursor);
         self.cursor = start;
         EditDelta::deleted(deleted)
     }
@@ -567,6 +658,7 @@ impl Composer {
         let end = self.line_end(self.cursor);
         let deleted = self.chars[self.cursor..end].iter().collect::<String>();
         self.chars.drain(self.cursor..end);
+        self.source_segments.drain(self.cursor..end);
         EditDelta::deleted(deleted)
     }
 
@@ -580,6 +672,7 @@ impl Composer {
         }
         let deleted = self.chars[start..end].iter().collect::<String>();
         self.chars.drain(start..end);
+        self.source_segments.drain(start..end);
         self.cursor = start.min(self.chars.len());
         EditDelta::deleted(deleted)
     }
@@ -755,24 +848,30 @@ impl Composer {
 
     /// Replace recall candidates after an acknowledged session switch.
     pub(crate) fn replace_history(&mut self, entries: Vec<String>) {
-        self.history = entries;
+        self.history = entries
+            .into_iter()
+            .map(|entry| entry.encode_utf16().collect())
+            .collect();
         self.browse = None;
     }
 
     /// Take the current text, pushing it to history (when non-blank) and
     /// resetting the buffer. Returns the raw (untrimmed) text.
-    pub fn take(&mut self) -> String {
+    pub fn take(&mut self) -> core::types::utf16_json::Utf16JsonProjection {
         let text = self.text();
+        let units = flatten_source_segments(&self.source_segments);
         if !text.trim().is_empty() {
-            self.history.push(text.clone());
+            self.history.push(units.clone());
         }
         self.chars.clear();
+        self.source_segments.clear();
         self.cursor = 0;
         self.browse = None;
         self.stash.clear();
         self.preferred_col = None;
         self.revision = self.revision.wrapping_add(1);
-        text
+        core::types::utf16_json::Utf16JsonProjection::root_string(text, units)
+            .expect("composer display is derived from its exact source units")
     }
 
     /// Recall the previous (older) history entry.
@@ -782,7 +881,7 @@ impl Composer {
         }
         let next = match self.browse {
             None => {
-                self.stash = self.chars.clone();
+                self.stash = flatten_source_segments(&self.source_segments);
                 self.history.len() - 1
             }
             Some(0) => return,
@@ -797,7 +896,8 @@ impl Composer {
             None => {}
             Some(i) if i + 1 < self.history.len() => self.load_history(i + 1),
             Some(_) => {
-                self.chars = std::mem::take(&mut self.stash);
+                let units = std::mem::take(&mut self.stash);
+                (self.chars, self.source_segments) = display_segments_from_units(&units);
                 self.cursor = self.chars.len();
                 self.browse = None;
                 self.preferred_col = None;
@@ -807,7 +907,7 @@ impl Composer {
     }
 
     fn load_history(&mut self, i: usize) {
-        self.chars = self.history[i].chars().collect();
+        (self.chars, self.source_segments) = display_segments_from_units(&self.history[i]);
         self.cursor = self.chars.len();
         self.browse = Some(i);
         self.preferred_col = None;
@@ -861,6 +961,8 @@ impl Composer {
 /// [`crate::terminal::Frame`].
 pub struct ComposerView<'a> {
     composer: &'a Composer,
+    /// Hint displayed after an exact slash command followed by one space.
+    argument_hint: Option<&'a str>,
     /// Session accent tint (`/color`): there is no border to tint since the
     /// borderless-composer rework (Task 3) — it now tints the `›` prompt.
     accent: Option<ratatui::style::Color>,
@@ -875,6 +977,7 @@ impl<'a> ComposerView<'a> {
     pub fn new(composer: &'a Composer) -> Self {
         Self {
             composer,
+            argument_hint: None,
             accent: None,
             attached_images: &[],
         }
@@ -885,6 +988,14 @@ impl<'a> ComposerView<'a> {
     #[must_use]
     pub fn with_accent(mut self, accent: Option<ratatui::style::Color>) -> Self {
         self.accent = accent;
+        self
+    }
+
+    /// Draw the command's argument hint as dim, non-editable text at the end
+    /// of the current input line.
+    #[must_use]
+    pub fn with_argument_hint(mut self, hint: Option<&'a str>) -> Self {
+        self.argument_hint = hint;
         self
     }
 
@@ -994,6 +1105,26 @@ impl Renderable for ComposerView<'_> {
                 usize::from(inner.width),
                 style,
             );
+        }
+        if let Some(hint) = self.argument_hint {
+            let display_col = self.composer.display_col_in(&rows[cursor_row]);
+            if self.composer.cursor == self.composer.chars.len()
+                && display_col < usize::from(inner.width)
+            {
+                let x = inner.x + u16::try_from(display_col).unwrap_or(0);
+                let y = inner.y + u16::try_from(cursor_row - first_row).unwrap_or(0);
+                let remaining = inner.x.saturating_add(inner.width).saturating_sub(x);
+                buf.set_span(
+                    x,
+                    y,
+                    &Span::styled(
+                        hint,
+                        ratatui::style::Style::default()
+                            .add_modifier(ratatui::style::Modifier::DIM),
+                    ),
+                    remaining,
+                );
+            }
         }
     }
 
@@ -1106,11 +1237,11 @@ mod tests {
         for ch in "first".chars() {
             c.insert(ch);
         }
-        assert_eq!(c.take(), "first");
+        assert_eq!(c.take().string_at(""), Some("first"));
         for ch in "second".chars() {
             c.insert(ch);
         }
-        assert_eq!(c.take(), "second");
+        assert_eq!(c.take().string_at(""), Some("second"));
         // Live buffer is empty; Up walks back newest → oldest.
         c.up();
         assert_eq!(c.text(), "second");
@@ -1153,7 +1284,7 @@ mod tests {
     #[test]
     fn take_pushes_history_and_clears() {
         let mut c = typed("hi");
-        assert_eq!(c.take(), "hi");
+        assert_eq!(c.take().string_at(""), Some("hi"));
         assert!(c.text().is_empty());
         assert_eq!(c.cursor_row_col(), (0, 0));
         // Blank input is not pushed to history.
@@ -1161,6 +1292,33 @@ mod tests {
         blank.take();
         blank.up();
         assert_eq!(blank.text(), "");
+    }
+
+    #[test]
+    fn exact_source_units_survive_completion_edit_submit_and_history_recall() {
+        let mut c = Composer::default();
+        let units = vec![b'/' as u16, b'x' as u16, 0xd800, b' ' as u16, b'a' as u16];
+        c.replace_all_source_units(&units);
+        assert_eq!(c.text(), "/x� a");
+        assert_eq!(c.source_units(), units);
+
+        c.move_left();
+        assert_eq!(c.backspace().deleted, "a");
+        assert_eq!(
+            c.source_units(),
+            vec![b'/' as u16, b'x' as u16, 0xd800, b' ' as u16]
+        );
+        c.insert('b');
+        assert_eq!(
+            c.source_units(),
+            vec![b'/' as u16, b'x' as u16, 0xd800, b'b' as u16, b' ' as u16]
+        );
+
+        let submitted = c.take();
+        assert_eq!(submitted.string_units(""), c.history.last().cloned());
+        c.up();
+        assert_eq!(c.source_units(), submitted.string_units("").unwrap());
+        assert_eq!(c.text(), submitted.string_at("").unwrap());
     }
 
     #[test]
@@ -1370,6 +1528,17 @@ mod tests {
         assert!(!row(0).contains('┌') && !row(2).contains('└'));
         // Row 1: gutter prompt + text at column 2.
         assert!(row(1).starts_with("› hi"), "row1: {:?}", row(1));
+    }
+
+    #[test]
+    fn view_renders_argument_hint_after_command_space() {
+        let composer = typed("/model ");
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        ComposerView::new(&composer)
+            .with_argument_hint(Some("<choice>"))
+            .render(area, &mut buf);
+        assert!(buffer_row(&buf, 1).contains("/model <choice>"));
     }
 
     #[test]

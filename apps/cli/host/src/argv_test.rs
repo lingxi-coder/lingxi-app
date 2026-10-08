@@ -500,7 +500,13 @@ mod tests {
             "hi",
         ])
         .unwrap();
-        assert_eq!(a.system_prompt.as_deref(), Some("You are helpful."));
+        assert_eq!(
+            a.system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
+            Some("You are helpful.")
+        );
     }
 
     #[test]
@@ -513,7 +519,13 @@ mod tests {
             "hi",
         ])
         .unwrap();
-        assert_eq!(a.append_system_prompt.as_deref(), Some("Also be concise."));
+        assert_eq!(
+            a.append_system_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
+            Some("Also be concise.")
+        );
     }
 
     #[test]
@@ -903,7 +915,9 @@ mod tests {
         assert_eq!(level, None);
         assert_eq!(
             warning.as_deref(),
-            Some("Warning: Unknown --effort value 'banana' \u{2014} ignoring it and using the default effort. Valid values: low, medium, high, xhigh, max.")
+            Some(
+                "Warning: Unknown --effort value 'banana' \u{2014} ignoring it and using the default effort. Valid values: low, medium, high, xhigh, max."
+            )
         );
         // Absent flag → no level, no warning.
         let d = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
@@ -1214,7 +1228,13 @@ mod tests {
     #[test]
     fn resolve_system_prompt_from_flag() {
         let a = Argv::from_iter(["lingxi-cli", "--system-prompt", "Be helpful.", "hi"]).unwrap();
-        assert_eq!(a.resolve_system_prompt().as_deref(), Some("Be helpful."));
+        assert_eq!(
+            a.resolve_system_prompt()
+                .as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
+            Some("Be helpful.")
+        );
     }
 
     #[test]
@@ -1228,7 +1248,10 @@ mod tests {
         let a =
             Argv::from_iter(["lingxi-cli", "--append-system-prompt", "Be concise.", "hi"]).unwrap();
         assert_eq!(
-            a.resolve_append_system_prompt().as_deref(),
+            a.resolve_append_system_prompt()
+                .as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
             Some("Be concise.")
         );
     }

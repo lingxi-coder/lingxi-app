@@ -15,7 +15,10 @@ impl crate::router::CommandRouter for AdmissionRouter {
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn dispatch_slash(&self, _: &str) -> Option<crate::router::SlashDispatchOutcome> {
+    async fn dispatch_slash(
+        &self,
+        _: Utf16JsonProjection,
+    ) -> Option<crate::router::SlashDispatchOutcome> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Some(crate::router::SlashDispatchOutcome {
             result: if self.run_as_turn {
@@ -36,8 +39,8 @@ struct AdmissionDriver(tokio::sync::Notify);
 
 #[async_trait]
 impl TurnDriver for AdmissionDriver {
-    async fn run_turn(&self, prompt: String) {
-        assert_eq!(prompt, "custom compact prompt");
+    async fn run_turn(&self, prompt: Utf16JsonProjection) {
+        assert_eq!(prompt.string_at(""), Some("custom compact prompt"));
         self.0.notify_one();
     }
 }

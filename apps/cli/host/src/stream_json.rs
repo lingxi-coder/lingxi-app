@@ -34,7 +34,9 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::{CostSnapshot, OutputStream};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use llm_runtime::model::context_window::{context_window_for_model, max_output_tokens_for_model};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -58,6 +60,54 @@ pub fn serialize_ndjson_line(v: &Value) -> String {
     let mut line = escape_line_terminators(&s);
     line.push('\n');
     line
+}
+
+fn serialize_source_ndjson_line<T: Serialize>(value: &T) -> String {
+    let serialized = serde_json::to_string(value).expect("source output frame serializes");
+    let mut line = escape_line_terminators(&serialized);
+    line.push('\n');
+    line
+}
+
+#[derive(Serialize)]
+struct UiLogFrame<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    subtype: &'static str,
+    plugin: &'a str,
+    text: client::protocol::text::ClientTextDto,
+    uuid: String,
+    session_id: String,
+}
+
+#[derive(Serialize)]
+struct UiToastFrame<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    subtype: &'static str,
+    plugin: &'a str,
+    text: client::protocol::text::ClientTextDto,
+    timeout_ms: u64,
+    uuid: String,
+    session_id: String,
+}
+
+#[derive(Serialize)]
+struct UiStatusFrame<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    subtype: &'static str,
+    plugin: &'a str,
+    text: Option<client::protocol::text::ClientTextDto>,
+    uuid: String,
+    session_id: String,
+}
+
+fn client_text_from_source(text: &Utf16JsonProjection) -> client::protocol::text::ClientTextDto {
+    client::protocol::text::ClientTextDto::from_code_units(
+        text.string_units("")
+            .expect("mod output text is a root-string projection"),
+    )
 }
 
 /// Emit a compact JSON line, escaped, to the locked stdout.
@@ -184,9 +234,13 @@ fn spawn_drain_task(
 // ── Content block accumulator ────────────────────────────────────────────────
 
 /// A single accumulated content block for the current assistant message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum AccBlock {
-    Text(String),
+    Text {
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        text: Utf16JsonProjection,
+    },
     Thinking {
         thinking: String,
         signature: Option<String>,
@@ -194,42 +248,137 @@ enum AccBlock {
     ToolUse {
         id: String,
         name: String,
-        input: Value,
+        #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+        input: Utf16JsonProjection,
     },
 }
 
 impl AccBlock {
-    fn to_json(&self) -> Value {
-        match self {
-            AccBlock::Text(t) => json!({"type": "text", "text": t}),
-            AccBlock::Thinking {
-                thinking,
-                signature,
-            } => {
-                let mut m = serde_json::Map::new();
-                m.insert("type".into(), json!("thinking"));
-                m.insert("thinking".into(), json!(thinking));
-                if let Some(sig) = signature {
-                    m.insert("signature".into(), json!(sig));
-                } else {
-                    m.insert("signature".into(), Value::Null);
-                }
-                Value::Object(m)
-            }
-            AccBlock::ToolUse { id, name, input } => {
-                json!({"type": "tool_use", "id": id, "name": name, "input": input})
-            }
-        }
-    }
-
     /// Extract text content, if this is a Text block.
-    fn as_text(&self) -> Option<&str> {
-        if let AccBlock::Text(t) = self {
-            Some(t.as_str())
-        } else {
-            None
+    fn as_text(&self) -> Option<&Utf16JsonProjection> {
+        match self {
+            AccBlock::Text { text } => Some(text),
+            _ => None,
         }
     }
+}
+
+fn source_text_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text derives from the exact UTF-16 units")
+}
+
+#[derive(Serialize)]
+struct AssistantUsageSource {
+    input_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation: AssistantCacheCreationSource,
+    output_tokens: u64,
+    output_tokens_details: AssistantOutputTokenDetailsSource,
+    service_tier: &'static str,
+    inference_geo: &'static str,
+}
+
+#[derive(Serialize)]
+struct AssistantCacheCreationSource {
+    ephemeral_5m_input_tokens: u64,
+    ephemeral_1h_input_tokens: u64,
+}
+
+#[derive(Serialize)]
+struct AssistantOutputTokenDetailsSource {
+    thinking_tokens: u64,
+}
+
+#[derive(Serialize)]
+struct AssistantMessageSource<'a> {
+    model: &'a str,
+    id: &'a str,
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    role: &'static str,
+    content: &'a [AccBlock],
+    stop_reason: Option<&'a str>,
+    stop_sequence: Option<&'static str>,
+    stop_details: Option<&'static str>,
+    usage: AssistantUsageSource,
+    diagnostics: Option<&'static str>,
+    context_management: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct AssistantFrameSource<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    message: AssistantMessageSource<'a>,
+    parent_tool_use_id: Option<&'static str>,
+    session_id: String,
+    uuid: String,
+    request_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ToolResultBlockSource<'a> {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    tool_use_id: &'a str,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    content: &'a Utf16JsonProjection,
+    is_error: bool,
+}
+
+#[derive(Serialize)]
+struct ToolResultMessageSource<'a> {
+    role: &'static str,
+    content: [ToolResultBlockSource<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct ToolResultFrameSource<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    message: ToolResultMessageSource<'a>,
+    session_id: String,
+    parent_tool_use_id: Option<&'static str>,
+    #[serde(
+        rename = "toolUseResult",
+        with = "lingxi_core::types::utf16_json::raw_json_serde"
+    )]
+    result: &'a Utf16JsonProjection,
+    uuid: String,
+    timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_result_meta: Option<Vec<Value>>,
+}
+
+#[derive(Serialize)]
+struct ResultSuccessFrameSource<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    subtype: &'static str,
+    is_error: bool,
+    api_error_status: Option<u16>,
+    duration_ms: u64,
+    duration_api_ms: Option<u64>,
+    ttft_ms: Option<u64>,
+    ttft_stream_ms: Option<u64>,
+    time_to_request_ms: Option<u64>,
+    num_turns: u64,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    result: &'a Utf16JsonProjection,
+    stop_reason: &'a str,
+    session_id: String,
+    total_cost_usd: f64,
+    usage: Value,
+    #[serde(rename = "modelUsage")]
+    model_usage: Value,
+    permission_denials: Value,
+    terminal_reason: &'a str,
+    fast_mode_state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fast_mode_disabled_reason: Option<&'a str>,
+    uuid: String,
 }
 
 // ── Per-message accumulator ──────────────────────────────────────────────────
@@ -254,63 +403,44 @@ impl MessageAccum {
         *self = MessageAccum::default();
     }
 
-    fn to_content_json(&self) -> Value {
-        Value::Array(self.blocks.iter().map(AccBlock::to_json).collect())
-    }
-
     /// Build the `message` sub-object (exact key order per GROUND-TRUTH).
-    fn to_message_json(&self, stop_reason: Option<&str>) -> Value {
-        // GROUND-TRUTH key order for `message`:
-        // model, id, type, role, content, stop_reason, stop_sequence,
-        // stop_details, usage, diagnostics, context_management
-        json!({
-            "model": self.model,
-            "id": self.message_id,
-            "type": "message",
-            "role": "assistant",
-            "content": self.to_content_json(),
-            "stop_reason": stop_reason,
-            "stop_sequence": null,
-            "stop_details": null,
-            "usage": {
-                "input_tokens": self.usage_input,
-                "cache_creation_input_tokens": self.usage_cache_creation,
-                "cache_read_input_tokens": self.usage_cache_read,
-                "cache_creation": {
-                    "ephemeral_5m_input_tokens": 0_u64,
-                    "ephemeral_1h_input_tokens": self.usage_cache_creation
+    fn to_message_json(&self, stop_reason: Option<&str>) -> AssistantMessageSource<'_> {
+        AssistantMessageSource {
+            model: &self.model,
+            id: &self.message_id,
+            message_type: "message",
+            role: "assistant",
+            content: &self.blocks,
+            stop_reason,
+            stop_sequence: None,
+            stop_details: None,
+            usage: AssistantUsageSource {
+                input_tokens: self.usage_input,
+                cache_creation_input_tokens: self.usage_cache_creation,
+                cache_read_input_tokens: self.usage_cache_read,
+                cache_creation: AssistantCacheCreationSource {
+                    ephemeral_5m_input_tokens: 0,
+                    ephemeral_1h_input_tokens: self.usage_cache_creation,
                 },
-                "output_tokens": self.usage_output,
-                // SC-01 (2.1.238): the canonical usage object gained
-                // `output_tokens_details`. `nTe` — the `message_start` /
-                // `message_delta` usage merge that produces the assistant
-                // frame's `usage` (cc-238.js @297183459) — places it directly
-                // after `output_tokens`:
-                //   output_tokens_details:{thinking_tokens:
-                //     t.output_tokens_details?.thinking_tokens
-                //       ?? e.output_tokens_details.thinking_tokens}
-                // and the seed `e` is `DR` (@283631657), whose
-                // `output_tokens_details` is `{thinking_tokens:0}`. `emit_usage`
-                // is fed by a fixed four-token trait signature with no
-                // thinking-token channel, so the merge always lands on the
-                // seed's `0` here; the KEY and its position are the parity fix.
-                // (`output_tokens_details` has 0 hits in the 2.1.220 binary.)
-                "output_tokens_details": {"thinking_tokens": 0_u64},
-                "service_tier": "standard",
-                "inference_geo": "not_available"
+                output_tokens: self.usage_output,
+                output_tokens_details: AssistantOutputTokenDetailsSource { thinking_tokens: 0 },
+                service_tier: "standard",
+                inference_geo: "not_available",
             },
-            "diagnostics": null,
-            "context_management": null
-        })
+            diagnostics: None,
+            context_management: None,
+        }
     }
 
-    /// Collect all text from Text blocks (joined, no separator).
-    fn collect_text(&self) -> String {
-        self.blocks
+    /// Collect all text from Text blocks without changing UTF-16 source units.
+    fn collect_text(&self) -> Utf16JsonProjection {
+        let units = self
+            .blocks
             .iter()
-            .filter_map(|b| b.as_text())
-            .collect::<Vec<_>>()
-            .join("")
+            .filter_map(AccBlock::as_text)
+            .flat_map(|text| text.string_units("").unwrap_or_default())
+            .collect();
+        source_text_from_units(units)
     }
 }
 
@@ -451,9 +581,14 @@ pub struct StreamJsonStream {
     /// Set by `new_json_mode_placeholder()` / `new_json_mode()` for
     /// `--output-format json` / `--json` output paths.
     suppress_frames: bool,
+    /// A graceful provider failure still uses Native's success result
+    /// envelope. The outer option records an error; the inner status preserves
+    /// statusless cases, and the explicit reason distinguishes `api_error`
+    /// from terminal conditions such as `image_error`.
+    terminal_api_error: Mutex<Option<(Option<u16>, String)>>,
     /// The last completed assistant text (collected just before boundary reset).
     /// Used by `run_stream_json_print` to populate the result frame's `result` field.
-    last_result_text: Mutex<String>,
+    last_result_text: Mutex<Utf16JsonProjection>,
     /// `--include-partial-messages`: emit `stream_event` frames for each SSE
     /// event received from the API. Reconstructed from parsed `LlmEvent`
     /// (semantically equivalent, not byte-for-byte identical — G5 fidelity gap).
@@ -502,7 +637,8 @@ impl StreamJsonStream {
             init_params: Mutex::new(init_params),
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames,
-            last_result_text: Mutex::new(String::new()),
+            terminal_api_error: Mutex::new(None),
+            last_result_text: Mutex::new(Utf16JsonProjection::from("")),
             permission_denials: std::sync::OnceLock::new(),
             include_partial_messages: AtomicBool::new(false),
             include_hook_events: AtomicBool::new(false),
@@ -592,6 +728,10 @@ impl StreamJsonStream {
         let line = serialize_ndjson_line(v);
         let is_stream_event = v.get("type").and_then(Value::as_str) == Some("stream_event");
         self.enqueue_line(line, is_stream_event);
+    }
+
+    fn enqueue_source(&self, frame: &impl Serialize) {
+        self.enqueue_line(serialize_source_ndjson_line(frame), false);
     }
 
     /// Build the client-protocol heartbeat frame used by stream-json. Keeping
@@ -939,7 +1079,9 @@ impl StreamJsonStream {
             ));
         }
         if replay_user_messages {
-            let markup = format!("<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>{instructions}</command-args>");
+            let markup = format!(
+                "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>{instructions}</command-args>"
+            );
             self.enqueue(&Self::build_compact_user_frame(
                 &session_id,
                 command_uuid,
@@ -1007,7 +1149,7 @@ impl StreamJsonStream {
         self.enqueue(&Value::Object(result));
     }
 
-    /// Build the `user` tool_result frame Value.
+    /// Build the source-backed `user` tool_result frame.
     ///
     /// claude-code's stream-json (SDK V2) tool_result block carries the
     /// MODEL-FACING STRING in `content` (what the model/API sees), with the full
@@ -1024,6 +1166,48 @@ impl StreamJsonStream {
     ///
     /// Pure builder (modulo the fresh `uuid`/`timestamp`) — does not write to
     /// stdout. Call `emit_tool_result` to build + emit.
+    async fn build_tool_result_source_frame<'a>(
+        &'a self,
+        tool_use_id: &'a str,
+        model_text: &'a Utf16JsonProjection,
+        result: &'a Utf16JsonProjection,
+        denial_kind: Option<&str>,
+        user_feedback: Option<&str>,
+    ) -> ToolResultFrameSource<'a> {
+        let is_error = result.contains_property("error");
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let session_id = self.session_id.lock().await.clone();
+        let tool_result_meta = denial_kind.map(|kind| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("id".into(), json!(tool_use_id));
+            entry.insert("non_execution_kind".into(), json!(kind));
+            if let Some(feedback) = user_feedback {
+                entry.insert("user_feedback".into(), json!(feedback));
+            }
+            vec![Value::Object(entry)]
+        });
+        ToolResultFrameSource {
+            frame_type: "user",
+            message: ToolResultMessageSource {
+                role: "user",
+                content: [ToolResultBlockSource {
+                    block_type: "tool_result",
+                    tool_use_id,
+                    content: model_text,
+                    is_error,
+                }],
+            },
+            session_id,
+            parent_tool_use_id: None,
+            result,
+            uuid,
+            timestamp,
+            tool_result_meta,
+        }
+    }
+
+    /// Build the `user` tool_result frame Value for ordinary generated fixtures.
     async fn build_tool_result_frame(
         &self,
         tool_use_id: &str,
@@ -1202,27 +1386,52 @@ impl StreamJsonStream {
     /// Emit the success result frame and return the Value.
     pub async fn emit_result_success(
         &self,
-        result_text: &str,
+        result_text: &Utf16JsonProjection,
         stop_reason: &str,
         cost: &CostSnapshot,
         model_id: &str,
         fast_mode_state: &str,
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
-    ) -> Value {
-        let frame = self
-            .build_result_success_frame(
-                result_text,
-                stop_reason,
-                cost,
-                model_id,
-                fast_mode_state,
-                fast_mode_disabled_reason,
-                betas,
-            )
-            .await;
-        self.enqueue(&frame);
-        frame
+    ) {
+        let terminal_api_error = {
+            let mut terminal_error = self.terminal_api_error.lock().await;
+            terminal_error.take()
+        };
+        let is_api_error = terminal_api_error.is_some();
+        let api_error_status = terminal_api_error.as_ref().and_then(|(status, _)| *status);
+        let terminal_reason = terminal_api_error
+            .as_ref()
+            .map_or("completed", |(_, reason)| reason.as_str());
+        let duration_ms = cost
+            .session_duration
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let frame = ResultSuccessFrameSource {
+            frame_type: "result",
+            subtype: "success",
+            is_error: is_api_error,
+            api_error_status,
+            duration_ms,
+            duration_api_ms: None,
+            ttft_ms: None,
+            ttft_stream_ms: None,
+            time_to_request_ms: None,
+            num_turns: cost.api_calls,
+            result: result_text,
+            stop_reason,
+            session_id: self.session_id.lock().await.clone(),
+            total_cost_usd: cost.total_usd,
+            usage: Self::build_usage_block(cost),
+            model_usage: Value::Object(Self::build_model_usage_block(cost, model_id, betas)),
+            permission_denials: self.permission_denials_value().await,
+            terminal_reason,
+            fast_mode_state,
+            fast_mode_disabled_reason,
+            uuid: uuid::Uuid::new_v4().to_string(),
+        };
+        self.enqueue_source(&frame);
     }
 
     /// Build the error result frame Value (exact 20-key golden order, with
@@ -1323,7 +1532,7 @@ impl StreamJsonStream {
 
     /// Return the last completed assistant text (populated just before
     /// accumulator reset in `emit_message_boundary`).
-    pub async fn get_last_result_text(&self) -> String {
+    pub async fn get_last_result_text(&self) -> Utf16JsonProjection {
         self.last_result_text.lock().await.clone()
     }
 
@@ -1572,20 +1781,29 @@ impl StreamJsonStream {
 
 #[async_trait]
 impl OutputStream for StreamJsonStream {
-    async fn emit_task_lifecycle(&self, event: &Value) {
+    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
+        *self.terminal_api_error.lock().await =
+            Some((api_error_status, terminal_reason.to_owned()));
+    }
+
+    async fn emit_task_lifecycle(&self, event: &Utf16JsonProjection) {
         if self.suppress_frames {
             return;
         }
         let mut frame = event.clone();
-        let Some(frame_object) = frame.as_object_mut() else {
+        if frame
+            .set_field("session_id", self.session_id.lock().await.clone().into())
+            .is_err()
+        {
             return;
-        };
-        frame_object.insert(
-            "session_id".into(),
-            json!(self.session_id.lock().await.clone()),
-        );
-        frame_object.insert("uuid".into(), json!(uuid::Uuid::new_v4().to_string()));
-        self.enqueue(&frame);
+        }
+        if frame
+            .set_field("uuid", uuid::Uuid::new_v4().to_string().into())
+            .is_err()
+        {
+            return;
+        }
+        self.enqueue_source(&frame);
     }
 
     async fn emit_compaction_started(&self) {
@@ -1675,13 +1893,22 @@ impl OutputStream for StreamJsonStream {
         }
     }
 
-    async fn emit_text(&self, text: &str) {
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
+        let incoming = text
+            .string_units("")
+            .expect("assistant OutputStream text is a root string");
         let mut acc = self.accum.lock().await;
         // Append to last text block if present; else push a new one.
-        if let Some(AccBlock::Text(last)) = acc.blocks.last_mut() {
-            last.push_str(text);
+        if let Some(AccBlock::Text { text: last }) = acc.blocks.last_mut() {
+            let mut units = last
+                .string_units("")
+                .expect("accumulated assistant text is a root string");
+            units.extend(incoming);
+            *last = source_text_from_units(units);
         } else {
-            acc.blocks.push(AccBlock::Text(text.to_string()));
+            acc.blocks.push(AccBlock::Text {
+                text: source_text_from_units(incoming),
+            });
         }
     }
 
@@ -1700,11 +1927,57 @@ impl OutputStream for StreamJsonStream {
         }));
     }
 
+    async fn emit_mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue_source(&UiLogFrame {
+            frame_type: "system",
+            subtype: "ui_log",
+            plugin,
+            text: client_text_from_source(text),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            session_id,
+        });
+    }
+
+    async fn emit_mod_toast(&self, plugin: &str, text: &Utf16JsonProjection, timeout_ms: u64) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue_source(&UiToastFrame {
+            frame_type: "system",
+            subtype: "ui_toast",
+            plugin,
+            text: client_text_from_source(text),
+            timeout_ms,
+            uuid: uuid::Uuid::new_v4().to_string(),
+            session_id,
+        });
+    }
+
+    async fn emit_mod_status(&self, plugin: &str, text: Option<&Utf16JsonProjection>) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue_source(&UiStatusFrame {
+            frame_type: "system",
+            subtype: "ui_status",
+            plugin,
+            text: text.map(client_text_from_source),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            session_id,
+        });
+    }
+
     async fn emit_tool_call(
         &self,
         id: &lingxi_core::types::ToolUseId,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
     ) {
         if self.suppress_frames {
             return;
@@ -1721,31 +1994,31 @@ impl OutputStream for StreamJsonStream {
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        model_text: &str,
-        result: &serde_json::Value,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
     ) {
         if self.suppress_frames {
             return;
         }
         let frame = self
-            .build_tool_result_frame(_id.as_str(), model_text, result)
+            .build_tool_result_source_frame(_id.as_str(), model_text, result, None, None)
             .await;
-        self.enqueue(&frame);
+        self.enqueue_source(&frame);
     }
 
     async fn emit_tool_result_denied(
         &self,
         id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        model_text: &str,
-        result: &serde_json::Value,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
         denial_kind: &str,
     ) {
         if self.suppress_frames {
             return;
         }
         let frame = self
-            .build_tool_result_frame_with_denial(
+            .build_tool_result_source_frame(
                 id.as_str(),
                 model_text,
                 result,
@@ -1753,7 +2026,7 @@ impl OutputStream for StreamJsonStream {
                 None,
             )
             .await;
-        self.enqueue(&frame);
+        self.enqueue_source(&frame);
     }
 
     async fn emit_tool_heartbeat(
@@ -1906,21 +2179,21 @@ impl OutputStream for StreamJsonStream {
         let uuid = uuid::Uuid::new_v4().to_string();
         let session_id = self.session_id.lock().await.clone();
         let message = acc.to_message_json(stop_reason);
-        let frame = json!({
-            "type": "assistant",
-            "message": message,
-            "parent_tool_use_id": null,
-            "session_id": session_id,
-            "uuid": uuid,
-            "request_id": request_id
-        });
+        let frame = AssistantFrameSource {
+            frame_type: "assistant",
+            message,
+            parent_tool_use_id: None,
+            session_id,
+            uuid,
+            request_id: request_id.map(str::to_owned),
+        };
+        self.enqueue_source(&frame);
         drop(acc);
         // Reset the accumulator after flushing.
         {
             let mut acc = self.accum.lock().await;
             acc.reset();
         }
-        self.enqueue(&frame);
     }
 
     /// Emit a `stream_event` NDJSON frame for `--include-partial-messages`.
@@ -2450,6 +2723,122 @@ fn build_tool_result_meta(
 mod tests {
     use super::*;
 
+    fn source_text(text: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(text.to_string(), text.encode_utf16().collect()).unwrap()
+    }
+
+    fn source_lone_surrogate() -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string("�".to_owned(), vec![0xd800]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn machine_text_and_tool_result_frames_keep_source_units() {
+        let stream = StreamJsonStream::new(make_params("source-output"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+
+        stream.emit_message_start("msg_source", "model").await;
+        stream.emit_text(&source_lone_surrogate()).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let assistant_line = match rx.try_recv().unwrap() {
+            OutboundMsg::Line(line) => line,
+            _ => panic!("expected an ordinary assistant frame"),
+        };
+        assert!(assistant_line.contains(r#""text":"\ud800""#));
+
+        let result = Utf16JsonProjection::parse(r#"{"payload":"\ud800"}"#).unwrap();
+        let id = lingxi_core::types::ToolUseId::new();
+        let model_text = source_lone_surrogate();
+        let frame = stream
+            .build_tool_result_source_frame(id.as_str(), &model_text, &result, None, None)
+            .await;
+        let tool_line = serialize_source_ndjson_line(&frame);
+        assert!(tool_line.contains(r#""toolUseResult":{"payload":"\ud800"}"#));
+        assert!(tool_line.contains(r#""content":"\ud800""#));
+
+        stream
+            .emit_result_success(
+                &model_text,
+                "end_turn",
+                &CostSnapshot::default(),
+                "model",
+                "off",
+                None,
+                &[],
+            )
+            .await;
+        let result_line = match rx.try_recv().unwrap() {
+            OutboundMsg::Line(line) => line,
+            _ => panic!("expected an ordinary result frame"),
+        };
+        assert!(result_line.contains(r#""result":"\ud800""#));
+    }
+
+    #[tokio::test]
+    async fn terminal_model_errors_use_the_native_success_result_envelope() {
+        for (status, reason, expected_status) in [
+            (Some(400), "api_error", json!(400)),
+            (None, "api_error", Value::Null),
+            (Some(413), "image_error", json!(413)),
+        ] {
+            let stream = StreamJsonStream::new_json_mode(make_params("api-error-result"));
+            let mut rx = stream.drain_rx.lock().await.take().unwrap();
+            stream.emit_terminal_api_error(status, reason).await;
+            stream
+                .emit_result_success(
+                    &source_text("terminal failure"),
+                    "end_turn",
+                    &CostSnapshot {
+                        api_calls: 1,
+                        ..Default::default()
+                    },
+                    "model",
+                    "off",
+                    None,
+                    &[],
+                )
+                .await;
+
+            let line = match rx.try_recv().unwrap() {
+                OutboundMsg::Line(line) => line,
+                _ => panic!("expected only the terminal result frame"),
+            };
+            assert!(rx.try_recv().is_err(), "the terminal marker adds no frame");
+            let frame: Value = serde_json::from_str(line.trim_end()).unwrap();
+            assert_eq!(frame["type"], "result");
+            assert_eq!(frame["subtype"], "success");
+            assert_eq!(frame["is_error"], true);
+            assert_eq!(frame["api_error_status"], expected_status);
+            assert_eq!(frame["terminal_reason"], reason);
+            assert_eq!(frame["num_turns"], 1);
+            assert_eq!(frame["result"], "terminal failure");
+
+            stream
+                .emit_result_success(
+                    &source_text("ordinary response"),
+                    "end_turn",
+                    &CostSnapshot::default(),
+                    "model",
+                    "off",
+                    None,
+                    &[],
+                )
+                .await;
+            let next_line = match rx.try_recv().unwrap() {
+                OutboundMsg::Line(line) => line,
+                _ => panic!("expected the next ordinary result frame"),
+            };
+            let next_frame: Value = serde_json::from_str(next_line.trim_end()).unwrap();
+            assert_eq!(next_frame["is_error"], false);
+            assert_eq!(next_frame["api_error_status"], Value::Null);
+            assert_eq!(next_frame["terminal_reason"], "completed");
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CapturedSourceText {
+        text: client::protocol::text::ClientTextDto,
+    }
+
     // Claude Code 2.1.261: $Ke @164270142 and live manual /compact boundary.
     // Fixed UUIDs make field order, omission, and Unicode escaping byte-testable.
     #[test]
@@ -2586,7 +2975,10 @@ mod tests {
                 if replay {
                     assert_eq!(frames[1]["uuid"], "command");
                     assert_eq!(frames[1]["timestamp"], "before");
-                    assert_eq!(frames[1]["message"]["content"], "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>keep APIs</command-args>");
+                    assert_eq!(
+                        frames[1]["message"]["content"],
+                        "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>keep APIs</command-args>"
+                    );
                 }
             }
         }
@@ -2837,13 +3229,13 @@ mod tests {
         stream
             .emit_message_start("msg_test", "claude-opus-4-8")
             .await;
-        stream.emit_text("he").await;
-        stream.emit_text("llo").await;
-        stream.emit_text(" world").await;
+        stream.emit_text(&source_text("he")).await;
+        stream.emit_text(&source_text("llo")).await;
+        stream.emit_text(&source_text(" world")).await;
         let acc = stream.accum.lock().await;
         assert_eq!(acc.blocks.len(), 1);
-        if let AccBlock::Text(t) = &acc.blocks[0] {
-            assert_eq!(t, "hello world");
+        if let AccBlock::Text { text } = &acc.blocks[0] {
+            assert_eq!(text.string_at(""), Some("hello world"));
         } else {
             panic!("expected Text block");
         }
@@ -2857,7 +3249,7 @@ mod tests {
         stream
             .emit_message_start("msg_001", "claude-opus-4-8")
             .await;
-        stream.emit_text("pong").await;
+        stream.emit_text(&source_text("pong")).await;
         // Boundary flush (output goes to real stdout in tests — that's OK).
         stream
             .emit_message_boundary(Some("end_turn"), Some("req_test"))
@@ -3015,7 +3407,11 @@ mod tests {
     async fn task_lifecycle_reaches_stream_json_with_session_envelope() {
         let stream = StreamJsonStream::new(make_params("sess-task"));
         let mut rx = stream.drain_rx.lock().await.take().unwrap();
-        stream.emit_task_lifecycle(&json!({"type":"system", "subtype":"task_started", "task_id":"b12345678", "description":"build", "task_type":"local_bash"})).await;
+        let event = Utf16JsonProjection::parse(
+            r#"{"type":"system", "subtype":"task_started", "task_id":"b12345678", "description":"build", "task_type":"local_bash"}"#,
+        )
+        .unwrap();
+        stream.emit_task_lifecycle(&event).await;
         let OutboundMsg::Line(line) = rx.try_recv().unwrap() else {
             panic!("expected SDK frame");
         };
@@ -3024,6 +3420,24 @@ mod tests {
         assert_eq!(frame["task_id"], "b12345678");
         assert_eq!(frame["session_id"], "sess-task");
         assert!(frame["uuid"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn task_lifecycle_preserves_exact_source_strings() {
+        let stream = StreamJsonStream::new(make_params("sess-task"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        let event = Utf16JsonProjection::parse(
+            r#"{"type":"system","subtype":"task_started","description":"\ud800"}"#,
+        )
+        .unwrap();
+
+        stream.emit_task_lifecycle(&event).await;
+        let OutboundMsg::Line(line) = rx.try_recv().unwrap() else {
+            panic!("expected SDK frame");
+        };
+        assert!(line.contains(r#""description":"\ud800""#), "{line}");
+        assert!(line.contains(r#""session_id":"sess-task""#), "{line}");
+        assert!(line.contains(r#""uuid":""#), "{line}");
     }
 
     #[tokio::test]
@@ -3049,6 +3463,108 @@ mod tests {
         assert_eq!(frame["message"], "transcript persistence failed");
         assert_eq!(frame["is_error"], true);
         assert_eq!(frame["session_id"], "sess-notice");
+    }
+
+    #[tokio::test]
+    async fn mod_log_matches_claude_stream_json_system_frame() {
+        let stream = StreamJsonStream::new(make_params("sess-mod"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream
+            .emit_mod_log("review", &source_text("Found a mismatch"))
+            .await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().expect("ui_log frame") else {
+            panic!("expected a Line frame");
+        };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "ui_log");
+        assert_eq!(frame["plugin"], "review");
+        assert_eq!(frame["text"], "Found a mismatch");
+        assert_eq!(frame["session_id"], "sess-mod");
+        let uuid = frame["uuid"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(uuid).is_ok());
+        assert_eq!(frame.as_object().unwrap().len(), 6);
+        assert_eq!(
+            line,
+            format!(
+                "{{\"type\":\"system\",\"subtype\":\"ui_log\",\"plugin\":\"review\",\"text\":\"Found a mismatch\",\"uuid\":\"{uuid}\",\"session_id\":\"sess-mod\"}}\n"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_log_ndjson_preserves_lone_utf16_units_in_the_string_field() {
+        let stream = StreamJsonStream::new(make_params("sess-mod-source"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        let units = vec![b'Q' as u16, 0xd800, b'!' as u16];
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+
+        stream.emit_mod_log("review", &source).await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().expect("ui_log frame") else {
+            panic!("expected a Line frame");
+        };
+        assert!(line.contains(r#""text":"Q\ud800!""#));
+        let captured: CapturedSourceText = serde_json::from_str(&line).unwrap();
+        assert_eq!(captured.text.code_units, units);
+    }
+
+    #[tokio::test]
+    async fn mod_toast_matches_claude_stream_json_system_frame() {
+        let stream = StreamJsonStream::new(make_params("sess-mod"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream
+            .emit_mod_toast("review", &source_text("Done"), 4000)
+            .await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().expect("ui_toast frame") else {
+            panic!("expected a Line frame");
+        };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "ui_toast");
+        assert_eq!(frame["plugin"], "review");
+        assert_eq!(frame["text"], "Done");
+        assert_eq!(frame["timeout_ms"], 4000);
+        assert_eq!(frame["session_id"], "sess-mod");
+        let uuid = frame["uuid"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(uuid).is_ok());
+        assert_eq!(frame.as_object().unwrap().len(), 7);
+        assert_eq!(
+            line,
+            format!(
+                "{{\"type\":\"system\",\"subtype\":\"ui_toast\",\"plugin\":\"review\",\"text\":\"Done\",\"timeout_ms\":4000,\"uuid\":\"{uuid}\",\"session_id\":\"sess-mod\"}}\n"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_status_uses_null_to_clear_claude_stream_json_frame() {
+        let stream = StreamJsonStream::new(make_params("sess-mod"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream.emit_mod_status("review", None).await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().expect("ui_status frame") else {
+            panic!("expected a Line frame");
+        };
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "ui_status");
+        assert_eq!(frame["plugin"], "review");
+        assert!(frame["text"].is_null());
+        assert_eq!(frame["session_id"], "sess-mod");
+        let uuid = frame["uuid"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(uuid).is_ok());
+        assert_eq!(frame.as_object().unwrap().len(), 6);
+        assert_eq!(
+            line,
+            format!(
+                "{{\"type\":\"system\",\"subtype\":\"ui_status\",\"plugin\":\"review\",\"text\":null,\"uuid\":\"{uuid}\",\"session_id\":\"sess-mod\"}}\n"
+            )
+        );
     }
 
     #[tokio::test]
@@ -3091,12 +3607,16 @@ mod tests {
         stream
             .emit_message_start("msg_001", "claude-opus-4-8")
             .await;
-        stream.emit_text("pong").await;
+        stream.emit_text(&source_text("pong")).await;
         stream
             .emit_message_boundary(Some("end_turn"), Some("req_test"))
             .await;
         let text = stream.get_last_result_text().await;
-        assert_eq!(text, "pong", "last_result_text should be 'pong'");
+        assert_eq!(
+            text.string_at(""),
+            Some("pong"),
+            "last_result_text should be 'pong'"
+        );
     }
 
     /// SC-01 (2.1.238): both usage objects the stream-json surface emits carry
@@ -3155,10 +3675,11 @@ mod tests {
         stream
             .emit_message_start("msg_otd", "claude-opus-4-8")
             .await;
-        stream.emit_text("hi").await;
+        stream.emit_text(&source_text("hi")).await;
         let acc = stream.accum.lock().await;
         let message = acc.to_message_json(Some("end_turn"));
         drop(acc);
+        let message = serde_json::to_value(message).unwrap();
         let usage = message["usage"].as_object().unwrap();
         let keys: Vec<&str> = usage.keys().map(String::as_str).collect();
         let idx = |k: &str| keys.iter().position(|&x| x == k).unwrap();
@@ -3424,11 +3945,11 @@ mod tests {
         let stream = StreamJsonStream::new_json_mode(params);
         // These should be no-ops (no panic, no output that we can detect in tests)
         stream.emit_message_start("msg_001", "model").await;
-        stream.emit_text("hello from json mode").await;
+        stream.emit_text(&source_text("hello from json mode")).await;
         // emit_message_boundary in suppressed mode should still store last_result_text
         stream.emit_message_boundary(Some("end_turn"), None).await;
         let text = stream.get_last_result_text().await;
-        assert_eq!(text, "hello from json mode");
+        assert_eq!(text.string_at(""), Some("hello from json mode"));
         // Accumulator reset
         let acc = stream.accum.lock().await;
         assert!(acc.blocks.is_empty());
@@ -4306,13 +4827,14 @@ mod tests {
         stream
             .emit_message_start("msg_golden", "claude-opus-4-8")
             .await;
-        stream.emit_text("pong").await;
+        stream.emit_text(&source_text("pong")).await;
         stream
             .emit_message_boundary(Some("end_turn"), Some("req_golden"))
             .await;
         let last_text = stream.get_last_result_text().await;
         assert_eq!(
-            last_text, "pong",
+            last_text.string_at(""),
+            Some("pong"),
             "last_result_text propagates from boundary"
         );
 

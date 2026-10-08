@@ -64,25 +64,25 @@ impl ClientEventSink for GateDrainBarrier {
 }
 
 struct CancelBoundaryDriver {
-    entries: mpsc::UnboundedSender<(String, CancellationToken)>,
+    entries: mpsc::UnboundedSender<(Utf16JsonProjection, CancellationToken)>,
     seed_returned: Notify,
     question_tx: mpsc::Sender<AskUserQuestionExchange>,
 }
 
 #[async_trait]
 impl TurnDriver for CancelBoundaryDriver {
-    async fn run_turn(&self, _: String) {
+    async fn run_turn(&self, _: Utf16JsonProjection) {
         panic!("connection must use cancellation-aware input");
     }
 
     async fn run_turn_with_images_and_cancel(
         &self,
-        text: String,
+        text: Utf16JsonProjection,
         _: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
         self.entries.send((text.clone(), cancel.clone())).unwrap();
-        if text == "seed" {
+        if text.string_units("") == Some("seed".encode_utf16().collect()) {
             cancel.cancelled().await;
             self.seed_returned.notify_one();
         } else {
@@ -158,7 +158,10 @@ async fn cancellation_cleanup_fences_successor_question_admission() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(text, "successor");
+    assert_eq!(
+        text.string_units(""),
+        Some("successor".encode_utf16().collect())
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         while broker.pending_count().await == 0 {
             tokio::task::yield_now().await;
@@ -305,7 +308,7 @@ async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
         let queued_output = events
             .iter()
             .position(
-                |event| matches!(event, ClientEvent::TextDelta { text } if text == "queued output"),
+                |event| matches!(event, ClientEvent::TextDelta { text } if text.display() == "queued output"),
             )
             .unwrap();
         assert!(starts[0].0 < queued_output);
@@ -338,7 +341,10 @@ impl CommandRouter for ReplacementRouter {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::future::pending::<()>().await;
     }
-    async fn dispatch_slash(&self, _: &str) -> Option<crate::router::SlashDispatchOutcome> {
+    async fn dispatch_slash(
+        &self,
+        _: Utf16JsonProjection,
+    ) -> Option<crate::router::SlashDispatchOutcome> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         std::future::pending().await
     }
@@ -351,7 +357,7 @@ struct WaitingQuestionDriver {
 
 #[async_trait]
 impl TurnDriver for WaitingQuestionDriver {
-    async fn run_turn(&self, _: String) {
+    async fn run_turn(&self, _: Utf16JsonProjection) {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.question_tx
             .send(AskUserQuestionExchange {

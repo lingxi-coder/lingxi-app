@@ -443,6 +443,29 @@ test('resumed usage and cumulative status reach the renderer and survive replay 
   assert.ok(runtime.replaySnapshot().some(({ event }) => event.type === 'compaction_status'));
 });
 
+test('Mod pinned statuses replay only the latest value per plugin', () => {
+  const sessionId = '12121212-3434-4567-8899-bbbbbbbbbbbb';
+  const client = new EventEmitter();
+  const runtime = new SessionRuntime({
+    sessionId,
+    projectPath: '/workspace',
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+  });
+  (runtime as any).broadcast = () => {};
+  (runtime as any).wireClient(client, 0);
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  client.emit('event', { type: 'ui_status', plugin: 'one', text: 'First' });
+  client.emit('event', { type: 'ui_status', plugin: 'two', text: 'Second' });
+  client.emit('event', { type: 'ui_status', plugin: 'one', text: null });
+  const statuses = runtime.replaySnapshot().filter(({ event }) => event.type === 'ui_status');
+  assert.deepEqual(statuses.map(({ event }) => event), [
+    { type: 'ui_status', plugin: 'two', text: 'Second' },
+    { type: 'ui_status', plugin: 'one', text: null },
+  ]);
+  const restored = runtime.replaySnapshot().reduce((state, { event }) => reduceEvent(state, event), emptyConversation());
+  assert.deepEqual(restored.modStatuses, [{ plugin: 'two', text: 'Second' }]);
+});
+
 test('restored snapshots survive interleaved events but late live usage is rejected', () => {
   const sessionId = '12121212-3434-4567-8899-aaaaaaaaaaaa';
   const client = new EventEmitter();

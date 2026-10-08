@@ -13,8 +13,14 @@ struct CompactDispatcher(AtomicUsize);
 
 #[async_trait]
 impl SlashCommandDispatcher for CompactDispatcher {
-    async fn dispatch(&self, raw: &str) -> SlashDispatchResult {
-        assert!(raw.starts_with("/compact"));
+    async fn dispatch(
+        &self,
+        raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> SlashDispatchResult {
+        assert!(raw
+            .string_at("")
+            .unwrap_or_default()
+            .starts_with("/compact"));
         self.0.fetch_add(1, Ordering::SeqCst);
         SlashDispatchResult::Handled {
             display: "idle compact dispatched".into(),
@@ -30,13 +36,13 @@ struct PermissionTurn {
 
 #[async_trait]
 impl TurnDriver for PermissionTurn {
-    async fn run_turn(&self, _: String) {
+    async fn run_turn(&self, _: lingxi_core::types::utf16_json::Utf16JsonProjection) {
         panic!("must use cancel-aware turn entry");
     }
 
     async fn run_turn_with_images_and_cancel(
         &self,
-        _: String,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
@@ -110,7 +116,7 @@ async fn active_compact_refusals_keep_ws_permission_and_cancel_processing_live()
         .await;
         assert!(matches!(next_frame(&mut ws).await,
             Frame::Event(ClientEvent::SlashCommandResult { turn_id: Some(92), is_error: true, display })
-                if display.contains("compact") && display.contains("turn")));
+                if display.display().contains("compact") && display.display().contains("turn")));
     }
     assert_eq!(dispatcher.0.load(Ordering::SeqCst), 0);
     assert!(

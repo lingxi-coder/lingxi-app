@@ -102,6 +102,22 @@ pub fn rebuild_messages(history: &[ConversationMessage]) -> Vec<RenderedMessage>
 /// any non-user/assistant entry types are skipped (reconstructed at runtime).
 #[must_use]
 pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<RenderedMessage> {
+    rebuild_from_jsonl_impl(messages, false)
+}
+
+/// Seed fullscreen selection with the persisted transcript UUID of ordinary
+/// user and assistant text rows. Tool rows use their tool-use ID instead.
+#[must_use]
+pub fn rebuild_from_jsonl_with_request_ids(
+    messages: &[session::jsonl::JsonlMessage],
+) -> Vec<RenderedMessage> {
+    rebuild_from_jsonl_impl(messages, true)
+}
+
+fn rebuild_from_jsonl_impl(
+    messages: &[session::jsonl::JsonlMessage],
+    with_request_ids: bool,
+) -> Vec<RenderedMessage> {
     let mut acc = ReplayAcc::default();
     for m in messages {
         // The full routed transcript also contains subagent/sidechain rows.
@@ -111,6 +127,7 @@ pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<Rend
             continue;
         }
         let blocks = decode_content_blocks(&m.message);
+        let first_row = acc.out.len();
         match m.message_type.as_str() {
             "user" => {
                 let compact_summary = m
@@ -145,6 +162,19 @@ pub fn rebuild_from_jsonl(messages: &[session::jsonl::JsonlMessage]) -> Vec<Rend
             }
             // ordinary system / attachment / summary / sidechain — not replayed.
             _ => {}
+        }
+        if with_request_ids && !m.uuid.is_empty() {
+            for row in &mut acc.out[first_row..] {
+                if matches!(
+                    row,
+                    RenderedMessage::UserText { .. } | RenderedMessage::AssistantText { .. }
+                ) {
+                    *row = RenderedMessage::IdentifiedTranscriptRow {
+                        message: Box::new(row.clone()),
+                        request_id: m.uuid.clone(),
+                    };
+                }
+            }
         }
     }
     acc.out
@@ -623,6 +653,27 @@ mod tests {
     }
 
     #[test]
+    fn jsonl_selection_uses_top_level_uuid_only_for_prose_rows() {
+        let user = jsonl("user", &serde_json::json!("hello"));
+        let user_uuid = user.uuid.clone();
+        let assistant = jsonl("assistant", &serde_json::json!("answer"));
+        let assistant_uuid = assistant.uuid.clone();
+        let out = rebuild_from_jsonl_with_request_ids(&[user, assistant]);
+        assert!(matches!(
+            &out[0],
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &user_uuid
+                    && matches!(message.as_ref(), RenderedMessage::UserText { body, .. } if body == "hello")
+        ));
+        assert!(matches!(
+            &out[1],
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &assistant_uuid
+                    && matches!(message.as_ref(), RenderedMessage::AssistantText { body, .. } if body == "answer")
+        ));
+    }
+
+    #[test]
     fn jsonl_sidechain_rows_are_not_replayed_into_main_scrollback() {
         let mut sidechain_user = jsonl("user", &serde_json::json!("subagent prompt"));
         sidechain_user.is_sidechain = true;
@@ -742,6 +793,21 @@ mod tests {
                 ]),
             ),
         ];
+        let identified = rebuild_from_jsonl_with_request_ids(&msgs);
+        assert!(matches!(
+            &identified[0],
+            RenderedMessage::IdentifiedTranscriptRow { message, request_id }
+                if request_id == &msgs[0].uuid
+                    && matches!(message.as_ref(), RenderedMessage::AssistantText { .. })
+        ));
+        assert!(matches!(
+            &identified[1],
+            RenderedMessage::AssistantToolUse { .. }
+        ));
+        assert!(matches!(
+            &identified[2],
+            RenderedMessage::UserToolResult { .. }
+        ));
         let out = rebuild_from_jsonl(&msgs);
         assert_eq!(out.len(), 3);
         assert!(

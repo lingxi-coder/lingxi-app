@@ -78,7 +78,7 @@ struct OrchestratorTurnDriver {
 
 #[async_trait]
 impl TurnDriver for OrchestratorTurnDriver {
-    async fn run_turn(&self, prompt: String) {
+    async fn run_turn(&self, prompt: lingxi_core::types::utf16_json::Utf16JsonProjection) {
         let _ = self.orchestrator.run_turn_streaming(&prompt).await;
     }
 }
@@ -265,7 +265,7 @@ async fn computer_access_request_event_then_approve_resolves_resolver() {
     let request_id = loop {
         match next_frame(&mut ws).await {
             Frame::Event(ClientEvent::TextDelta { text }) => {
-                assert_eq!(text, "let me get access");
+                assert_eq!(text.display(), "let me get access");
                 saw_text = true;
             }
             Frame::Event(ClientEvent::ToolUseStarted { tool, .. }) => {

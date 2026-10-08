@@ -11,6 +11,12 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+fn parse_prompt_source(
+    value: &str,
+) -> Result<core::types::utf16_json::Utf16JsonProjection, String> {
+    Ok(value.into())
+}
+
 /// clap value-parser for `--system-prompt-snapshot <on|off>`.
 ///
 /// Oracle: `.choices(["on","off"]).argParser((F)=>{ if(F!=="on"&&F!=="off")
@@ -465,15 +471,15 @@ pub struct Argv {
     ///
     /// When set, replaces the default assembled system prompt for the session.
     /// Only works with --print (non-interactive mode).
-    #[arg(long = "system-prompt", value_name = "prompt")]
-    pub system_prompt: Option<String>,
+    #[arg(long = "system-prompt", value_name = "prompt", value_parser = parse_prompt_source)]
+    pub system_prompt: Option<core::types::utf16_json::Utf16JsonProjection>,
 
     /// Append a system prompt to the default system prompt
     ///
     /// When set, appended to the end of the default system prompt for the session.
     /// Only works with --print (non-interactive mode).
-    #[arg(long = "append-system-prompt", value_name = "prompt")]
-    pub append_system_prompt: Option<String>,
+    #[arg(long = "append-system-prompt", value_name = "prompt", value_parser = parse_prompt_source)]
+    pub append_system_prompt: Option<core::types::utf16_json::Utf16JsonProjection>,
 
     /// System prompt file to use for the session (hidden flag)
     ///
@@ -1375,10 +1381,10 @@ impl Argv {
     /// Returns `None` when neither flag is set. File read failures are silently
     /// ignored (same as TS `fs.readFileSync` error → fall back to None).
     #[must_use]
-    pub fn resolve_system_prompt(&self) -> Option<String> {
+    pub fn resolve_system_prompt(&self) -> Option<core::types::utf16_json::Utf16JsonProjection> {
         if let Some(ref path) = self.system_prompt_file {
             if let Ok(content) = std::fs::read_to_string(path) {
-                return Some(content);
+                return Some(content.into());
             }
         }
         self.system_prompt.clone()
@@ -1469,10 +1475,12 @@ impl Argv {
     /// `--append-system-prompt-file` (with file taking precedence when both are
     /// set). Returns `None` when neither flag is set.
     #[must_use]
-    pub fn resolve_append_system_prompt(&self) -> Option<String> {
+    pub fn resolve_append_system_prompt(
+        &self,
+    ) -> Option<core::types::utf16_json::Utf16JsonProjection> {
         if let Some(ref path) = self.append_system_prompt_file {
             if let Ok(content) = std::fs::read_to_string(path) {
-                return Some(content);
+                return Some(content.into());
             }
         }
         self.append_system_prompt.clone()

@@ -29,6 +29,8 @@ pub struct Transcript {
     turn_start: usize,
     response_start: usize,
     assistant_message_ids: std::collections::HashMap<usize, lingxi_core::types::MessageId>,
+    request_ids: std::collections::HashMap<usize, String>,
+    row_tokens: std::collections::HashMap<usize, String>,
     terminal_replay_required: bool,
     /// Finalized cells, in commit order.
     committed: Vec<Box<dyn HistoryCell>>,
@@ -85,6 +87,8 @@ impl Transcript {
     /// Remove one identified response, preserving unrelated timeline cells.
     pub fn retract_assistant_response(&mut self, id: lingxi_core::types::MessageId) {
         let old_ids = std::mem::take(&mut self.assistant_message_ids);
+        let old_request_ids = std::mem::take(&mut self.request_ids);
+        let old_row_tokens = std::mem::take(&mut self.row_tokens);
         let mut old_index = 0;
         let mut new_index = 0;
         let mut removed_before_start = 0;
@@ -96,6 +100,12 @@ impl Transcript {
             if keep {
                 if let Some(message_id) = message_id {
                     self.assistant_message_ids.insert(new_index, *message_id);
+                }
+                if let Some(request_id) = old_request_ids.get(&old_index) {
+                    self.request_ids.insert(new_index, request_id.clone());
+                }
+                if let Some(row_token) = old_row_tokens.get(&old_index) {
+                    self.row_tokens.insert(new_index, row_token.clone());
                 }
                 new_index += 1;
             } else {
@@ -142,10 +152,11 @@ impl Transcript {
     /// committed (nothing is streaming yet).
     #[must_use]
     pub fn from_messages(messages: Vec<RenderedMessage>) -> Self {
-        Self {
-            committed: messages.into_iter().map(cell_for_message).collect(),
-            ..Self::default()
+        let mut transcript = Self::default();
+        for message in messages {
+            transcript.push_message(message);
         }
+        transcript
     }
 
     /// Append a finalized cell to the committed history.
@@ -158,7 +169,86 @@ impl Transcript {
     /// owns the `RenderedMessage` → [`HistoryCell`] conversion (per-variant
     /// cells for the ported core variants, the adapter cell otherwise).
     pub fn push_message(&mut self, message: RenderedMessage) {
+        if let RenderedMessage::IdentifiedTranscriptRow {
+            message: inner,
+            request_id,
+        } = message
+        {
+            if matches!(
+                inner.as_ref(),
+                RenderedMessage::UserText { .. } | RenderedMessage::AssistantText { .. }
+            ) {
+                self.request_ids.insert(self.committed.len(), request_id);
+            }
+            self.push_message(*inner);
+            return;
+        }
+        if let RenderedMessage::AssistantToolUse { id, .. }
+        | RenderedMessage::UserToolResult { id, .. } = &message
+        {
+            self.request_ids
+                .insert(self.committed.len(), id.as_str().to_owned());
+        }
         self.push_committed(cell_for_message(message));
+    }
+
+    /// Associate the most recently committed ordinary user row with a TUI
+    /// correlation token. The token is not exposed as a Mods request id; only
+    /// a later successful persistence event can attach the actual JSONL uuid.
+    pub fn track_latest_user_row(&mut self, row_token: String) -> bool {
+        use crate::history_cell::message::UserTextCell;
+        let Some(index) = self.committed.len().checked_sub(1) else {
+            return false;
+        };
+        if !self.committed[index].as_any().is::<UserTextCell>() {
+            return false;
+        }
+        self.row_tokens.insert(index, row_token);
+        true
+    }
+
+    /// Attach the UUID reported by the successful JSONL append to its source
+    /// user row. A token that no longer has a visible row is ignored.
+    pub fn identify_user_row(&mut self, row_token: &str, uuid: String) -> bool {
+        let Some(index) = self
+            .row_tokens
+            .iter()
+            .find_map(|(index, token)| (token == row_token).then_some(*index))
+        else {
+            return false;
+        };
+        self.request_ids.insert(index, uuid);
+        true
+    }
+
+    /// Attach successful per-block JSONL UUIDs to the ordinary assistant
+    /// text rows from a response. The internal MessageId is only a grouping
+    /// key; it is never exposed to selection as a request id. If the rendered
+    /// row topology cannot be matched one-to-one, leave those rows unidentified.
+    pub fn identify_assistant_text_rows(
+        &mut self,
+        message_id: lingxi_core::types::MessageId,
+        uuids: &[Option<String>],
+    ) -> bool {
+        use crate::history_cell::message::AssistantTextCell;
+        let mut indices = self
+            .assistant_message_ids
+            .iter()
+            .filter_map(|(index, id)| {
+                (*id == message_id && self.committed[*index].as_any().is::<AssistantTextCell>())
+                    .then_some(*index)
+            })
+            .collect::<Vec<_>>();
+        indices.sort_unstable();
+        if indices.len() != uuids.len() {
+            return false;
+        }
+        for (index, uuid) in indices.into_iter().zip(uuids) {
+            if let Some(uuid) = uuid {
+                self.request_ids.insert(index, uuid.clone());
+            }
+        }
+        true
     }
 
     /// Replace the active in-flight cell. Callers that must not lose a
@@ -369,12 +459,67 @@ impl Transcript {
         lines
     }
 
+    /// Identify a rendered transcript entry only when it contains the whole
+    /// selection. The caller supplies rows relative to the visible history
+    /// viewport, after the same tail clipping used by fullscreen rendering.
+    #[must_use]
+    pub fn request_id_for_fullscreen_rows(
+        &self,
+        start_row: usize,
+        end_row: usize,
+        viewport_height: usize,
+        width: u16,
+        theme: &Theme,
+        hyperlinks_enabled: bool,
+        hyperlink_cwd: Option<&Path>,
+    ) -> Option<&str> {
+        if start_row > end_row || end_row >= viewport_height {
+            return None;
+        }
+        let width = width.max(1);
+        let heights = self
+            .committed
+            .iter()
+            .map(|cell| {
+                let lines = if hyperlinks_enabled {
+                    cell.scrollback_lines(width, theme, self.render_mode, true, hyperlink_cwd)
+                } else {
+                    cell.display_lines(width, theme, self.render_mode)
+                };
+                wrap_to_width(lines, width).len()
+            })
+            .collect::<Vec<_>>();
+        let active_height = self.active.as_ref().map_or(0, |cell| {
+            let lines = if hyperlinks_enabled {
+                cell.scrollback_lines(width, theme, self.render_mode, true, hyperlink_cwd)
+            } else {
+                cell.display_lines(width, theme, self.render_mode)
+            };
+            wrap_to_width(lines, width).len()
+        });
+        let total = heights.iter().sum::<usize>() + active_height;
+        let skip = total.saturating_sub(viewport_height);
+        let absolute_start = skip + start_row;
+        let absolute_end = skip + end_row;
+        let mut first = 0;
+        for (index, height) in heights.into_iter().enumerate() {
+            let last = first + height;
+            if height > 0 && first <= absolute_start && absolute_end < last {
+                return self.request_ids.get(&index).map(String::as_str);
+            }
+            first = last;
+        }
+        None
+    }
+
     /// Drop all transcript state: committed cells, the active cell, and the
     /// native-scrollback commit cursor (`/clear`).
     pub fn clear(&mut self) {
         self.turn_start = 0;
         self.response_start = 0;
         self.assistant_message_ids.clear();
+        self.request_ids.clear();
+        self.row_tokens.clear();
         self.committed.clear();
         self.active = None;
         self.committed_to_terminal = 0;
@@ -559,6 +704,127 @@ mod tests {
 
     fn assistant_cell(body: &str) -> Box<dyn HistoryCell> {
         Box::new(AssistantTextCell::new(body.to_string()))
+    }
+
+    #[test]
+    fn fullscreen_selection_request_id_requires_one_identified_entry() {
+        let mut transcript = Transcript::new();
+        let tool_id = lingxi_core::types::ToolUseId::from("toolu_selection");
+        transcript.push_message(system("header"));
+        transcript.push_message(RenderedMessage::AssistantToolUse {
+            id: tool_id.clone(),
+            tool: "Read".into(),
+            input: serde_json::json!({"file_path":"/tmp/example"}),
+        });
+        transcript.push_message(system("footer"));
+        let theme = Theme::dark();
+        let heights = transcript
+            .committed_cells()
+            .iter()
+            .map(|cell| {
+                wrap_to_width(cell.display_lines(80, &theme, transcript.render_mode()), 80).len()
+            })
+            .collect::<Vec<_>>();
+        let total = heights.iter().sum::<usize>();
+        let request = |first, last, viewport| {
+            transcript
+                .request_id_for_fullscreen_rows(first, last, viewport, 80, &theme, false, None)
+        };
+        assert_eq!(
+            request(heights[0], heights[0] + heights[1] - 1, total),
+            Some(tool_id.as_str())
+        );
+        assert_eq!(request(heights[0] - 1, heights[0], total), None);
+        assert_eq!(request(heights[0], heights[0] + heights[1], total), None);
+        assert_eq!(request(0, 0, total), None);
+        assert_eq!(request(0, 0, total - heights[0]), Some(tool_id.as_str()));
+    }
+
+    #[test]
+    fn fullscreen_selection_uses_replayed_message_uuid_and_drops_it_on_clear() {
+        let mut transcript = Transcript::new();
+        transcript.push_message(RenderedMessage::IdentifiedTranscriptRow {
+            message: Box::new(RenderedMessage::UserText {
+                body: "replayed prompt".into(),
+                timestamp: 0,
+            }),
+            request_id: "transcript-uuid".into(),
+        });
+        let theme = Theme::dark();
+        assert_eq!(
+            transcript.request_id_for_fullscreen_rows(0, 0, 20, 80, &theme, false, None),
+            Some("transcript-uuid")
+        );
+        transcript.clear();
+        assert_eq!(
+            transcript.request_id_for_fullscreen_rows(0, 0, 20, 80, &theme, false, None),
+            None
+        );
+    }
+
+    #[test]
+    fn fullscreen_selection_uses_persisted_user_uuid_after_row_token_resolution() {
+        let mut transcript = Transcript::new();
+        transcript.push_message(RenderedMessage::UserText {
+            body: "live prompt".into(),
+            timestamp: 0,
+        });
+        assert!(transcript.track_latest_user_row("ui-row-token".into()));
+        let theme = Theme::dark();
+        let selection_id = |transcript: &Transcript| {
+            transcript
+                .request_id_for_fullscreen_rows(0, 0, 20, 80, &theme, false, None)
+                .map(str::to_owned)
+        };
+        assert_eq!(selection_id(&transcript), None);
+
+        let persisted_uuid = "83f67a72-a806-49b7-9a18-e57307177a86";
+        assert!(transcript.identify_user_row("ui-row-token", persisted_uuid.into()));
+        assert_eq!(selection_id(&transcript).as_deref(), Some(persisted_uuid));
+        assert_ne!(selection_id(&transcript).as_deref(), Some("ui-row-token"));
+    }
+
+    #[test]
+    fn fullscreen_selection_uses_persisted_assistant_uuid_not_message_id() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant_response();
+        transcript.set_active(assistant_cell("live answer"));
+        transcript.flush_active();
+        let message_id = lingxi_core::types::MessageId::new();
+        transcript.identify_assistant_response(message_id);
+
+        let persisted_uuid = "a3566d96-b8e6-4a19-a063-6c9539c9e26d".to_string();
+        assert!(
+            transcript.identify_assistant_text_rows(message_id, &[Some(persisted_uuid.clone())])
+        );
+        let theme = Theme::dark();
+        assert_eq!(
+            transcript.request_id_for_fullscreen_rows(0, 0, 20, 80, &theme, false, None),
+            Some(persisted_uuid.as_str())
+        );
+        assert_ne!(persisted_uuid, message_id.to_string());
+    }
+
+    #[test]
+    fn assistant_uuid_assignment_requires_matching_text_row_count() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant_response();
+        transcript.set_active(assistant_cell("first"));
+        transcript.flush_active();
+        transcript.set_active(assistant_cell("second"));
+        transcript.flush_active();
+        let message_id = lingxi_core::types::MessageId::new();
+        transcript.identify_assistant_response(message_id);
+
+        assert!(!transcript.identify_assistant_text_rows(
+            message_id,
+            &[Some("83f67a72-a806-49b7-9a18-e57307177a86".into())]
+        ));
+        let theme = Theme::dark();
+        assert_eq!(
+            transcript.request_id_for_fullscreen_rows(0, 0, 20, 80, &theme, false, None),
+            None
+        );
     }
 
     #[test]

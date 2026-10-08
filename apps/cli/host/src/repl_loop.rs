@@ -8,7 +8,9 @@ use crate::output::OutputSink;
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
 use lingxi_core::host::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::{OrchestratorError, TurnOutcome};
+use std::io::IsTerminal;
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -44,7 +46,11 @@ pub trait TaskNotificationWake: Send + Sync {
     /// Cancel pending session wakeups when the user interrupts an idle prompt.
     async fn user_interrupt(&self) {}
     /// Only called after a real stdin line selects `/tasks message`.
-    async fn send_human_task_message(&self, _task_id: &str, _message: &str) -> Result<(), String> {
+    async fn send_human_task_message(
+        &self,
+        _task_id: &str,
+        _message: &Utf16JsonProjection,
+    ) -> Result<(), String> {
         Err("task messaging is unavailable".into())
     }
     async fn wait(&self);
@@ -82,7 +88,7 @@ pub async fn step<W>(
     sigint: &SigintSource,
     idle: Option<&dyn IdleNotifier>,
     run_turn_fn: impl Fn(
-        String,
+        Utf16JsonProjection,
         CancellationToken,
     ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>,
 ) -> StepOutcome
@@ -114,7 +120,7 @@ pub async fn step_with_notifications<W>(
     idle: Option<&dyn IdleNotifier>,
     notifications: Option<&dyn TaskNotificationWake>,
     run_turn_fn: impl Fn(
-        String,
+        Utf16JsonProjection,
         CancellationToken,
     ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>,
 ) -> StepOutcome
@@ -215,10 +221,12 @@ where
             notifications,
         ) {
             let result = match parsed {
-                Ok((task_id, message)) => host
-                    .send_human_task_message(task_id, message)
-                    .await
-                    .map(|()| format!("Message accepted for task {task_id}")),
+                Ok((task_id, message)) => {
+                    let message = Utf16JsonProjection::from(message);
+                    host.send_human_task_message(task_id, &message)
+                        .await
+                        .map(|()| format!("Message accepted for task {task_id}"))
+                }
                 Err(error) => Err(error.into()),
             };
             match result {
@@ -238,42 +246,66 @@ where
 
     // 3. Dispatch: slash command vs plain text.
     if input.starts_with('/') {
-        let res = dispatcher.dispatch(input).await;
-        match res {
-            SlashDispatchResult::Handled { display }
-            | SlashDispatchResult::Unknown { display, .. } => {
-                sink.command_output(input, &display).await;
+        let columns = if std::io::stdout().is_terminal() {
+            crossterm::terminal::size()
+                .map(|(columns, _)| columns.max(1))
+                .unwrap_or(80)
+        } else {
+            80
+        };
+        let context = command_api::ModCommandRunContext {
+            origin: serde_json::json!({"kind":"composer"}),
+            is_fullscreen: false,
+            columns,
+        };
+        let source_input = Utf16JsonProjection::from(input);
+        let res = command_api::with_mod_command_context(
+            context,
+            dispatcher.dispatch(source_input.clone()),
+        )
+        .await;
+        let prompt = match res {
+            SlashDispatchResult::Handled { display } => {
+                sink.command_output_source(input, &display).await;
+                None
             }
             // A prompt-expanding command (`/loop`, Markdown/Plugin) runs AS a
             // turn: feed the expanded prompt to the model instead of printing it
             // (claude-code `type: "prompt"`). This makes a typed `/loop 5m /foo`
             // actually schedule the cron + execute now.
-            SlashDispatchResult::RunAsTurn { prompt } => {
-                let token = CancellationToken::new();
-                let _sigint_guard = sigint.arm_for_turn(token.clone());
-                sink.turn_start().await;
-                let outcome = run_turn_fn(prompt, token).await;
-                _sigint_guard.abort();
-                match outcome {
-                    Ok(TurnOutcome::EndTurn) => {}
-                    Ok(TurnOutcome::MaxTurns) => {
-                        sink.text("[turn ended: reached MAX_TURNS_PER_CONVERSATION]\n")
-                            .await;
-                    }
-                    Ok(TurnOutcome::Cancelled) => {
-                        let _ = stderr
-                            .write_all(
-                                b"^C (turn cancelled; press Ctrl+C again or Ctrl+D to exit)\n",
-                            )
-                            .await;
-                    }
-                    Err(e) => {
-                        sink.error("runtime", &e.to_string()).await;
-                    }
-                }
+            SlashDispatchResult::RunAsTurn { prompt } => Some(prompt),
+            // Native CLI falls through to a normal model turn for malformed
+            // slash-only input and unknown slash commands. Keep the exact input
+            // line as the user prompt; the dispatcher’s display string is a
+            // local suggestion, not the model-visible content.
+            SlashDispatchResult::ParseFailure { .. } | SlashDispatchResult::Unknown { .. } => {
+                Some(source_input)
             }
             SlashDispatchResult::NotASlashCommand => {
                 // Dispatcher contract: won't happen for "/" prefixed input.
+                None
+            }
+        };
+        if let Some(prompt) = prompt {
+            let token = CancellationToken::new();
+            let _sigint_guard = sigint.arm_for_turn(token.clone());
+            sink.turn_start().await;
+            let outcome = run_turn_fn(prompt, token).await;
+            _sigint_guard.abort();
+            match outcome {
+                Ok(TurnOutcome::EndTurn) => {}
+                Ok(TurnOutcome::MaxTurns) => {
+                    sink.text("[turn ended: reached MAX_TURNS_PER_CONVERSATION]\n")
+                        .await;
+                }
+                Ok(TurnOutcome::Cancelled) => {
+                    let _ = stderr
+                        .write_all(b"^C (turn cancelled; press Ctrl+C again or Ctrl+D to exit)\n")
+                        .await;
+                }
+                Err(e) => {
+                    sink.error("runtime", &e.to_string()).await;
+                }
             }
         }
         if handle.current_should_exit().await {
@@ -288,7 +320,7 @@ where
     // when this scope exits, ensuring the next iteration gets a fresh one.
     let _sigint_guard = sigint.arm_for_turn(token.clone());
     sink.turn_start().await;
-    let outcome = run_turn_fn(input.to_string(), token).await;
+    let outcome = run_turn_fn(Utf16JsonProjection::from(input), token).await;
     _sigint_guard.abort();
     match outcome {
         Ok(TurnOutcome::EndTurn) => {}
@@ -381,7 +413,7 @@ mod tests {
     struct NoopDispatcher;
     #[async_trait::async_trait]
     impl SlashCommandDispatcher for NoopDispatcher {
-        async fn dispatch(&self, _raw: &str) -> SlashDispatchResult {
+        async fn dispatch(&self, _raw: Utf16JsonProjection) -> SlashDispatchResult {
             SlashDispatchResult::NotASlashCommand
         }
     }
@@ -414,9 +446,10 @@ mod tests {
     }
 
     /// `run_turn_fn` that records nothing and returns `EndTurn` immediately.
-    fn end_turn_fn(
-    ) -> impl Fn(String, CancellationToken) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>
-    {
+    fn end_turn_fn() -> impl Fn(
+        Utf16JsonProjection,
+        CancellationToken,
+    ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>> {
         |_prompt, _token| Box::pin(async { Ok(TurnOutcome::EndTurn) })
     }
 
@@ -586,7 +619,7 @@ mod tests {
         let answered = Arc::new(AtomicUsize::new(0));
         let stdin_for_turn = shared.clone();
         let answered_for_turn = answered.clone();
-        let run_turn_fn = move |_prompt: String, _token: CancellationToken| {
+        let run_turn_fn = move |_prompt: Utf16JsonProjection, _token: CancellationToken| {
             let r = stdin_for_turn.clone();
             let a = answered_for_turn.clone();
             Box::pin(async move {
@@ -627,7 +660,7 @@ mod tests {
     struct FixedDispatcher(SlashDispatchResult);
     #[async_trait::async_trait]
     impl SlashCommandDispatcher for FixedDispatcher {
-        async fn dispatch(&self, _raw: &str) -> SlashDispatchResult {
+        async fn dispatch(&self, _raw: Utf16JsonProjection) -> SlashDispatchResult {
             self.0.clone()
         }
     }
@@ -637,7 +670,7 @@ mod tests {
     async fn run_step_slash(
         dispatcher: &dyn SlashCommandDispatcher,
         line: &str,
-    ) -> (StepOutcome, Arc<Mutex<Vec<String>>>) {
+    ) -> (StepOutcome, Arc<Mutex<Vec<Utf16JsonProjection>>>) {
         let (mut writer, client) = duplex(64);
         let stdin = shared_stdin(client);
         let mut stderr = Vec::new();
@@ -645,9 +678,9 @@ mod tests {
         let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
         let sigint = SigintSource::spawn();
 
-        let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let prompts = Arc::new(Mutex::new(Vec::<Utf16JsonProjection>::new()));
         let prompts_for_turn = prompts.clone();
-        let run_turn_fn = move |prompt: String, _token: CancellationToken| {
+        let run_turn_fn = move |prompt: Utf16JsonProjection, _token: CancellationToken| {
             let p = prompts_for_turn.clone();
             Box::pin(async move {
                 p.lock().await.push(prompt);
@@ -683,16 +716,39 @@ mod tests {
     #[tokio::test]
     async fn run_as_turn_feeds_expanded_prompt_to_run_turn() {
         let dispatcher = FixedDispatcher(SlashDispatchResult::RunAsTurn {
-            prompt: "EXPANDED /loop body".to_string(),
+            prompt: "EXPANDED /loop body".into(),
         });
         let (outcome, prompts) = run_step_slash(&dispatcher, "/loop 5m /foo").await;
         assert_eq!(outcome, StepOutcome::Continue);
         let recorded = prompts.lock().await.clone();
-        assert_eq!(
-            recorded,
-            vec!["EXPANDED /loop body".to_string()],
-            "RunAsTurn must invoke run_turn_fn with the expanded prompt exactly once"
-        );
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].string_at(""), Some("EXPANDED /loop body"));
+    }
+
+    #[tokio::test]
+    async fn malformed_and_unknown_slash_inputs_fall_through_as_user_turns() {
+        for (dispatch, input) in [
+            (
+                SlashDispatchResult::ParseFailure {
+                    input: Utf16JsonProjection::from("/"),
+                },
+                "/",
+            ),
+            (
+                SlashDispatchResult::Unknown {
+                    name: "native-unknown".into(),
+                    display: "Unknown command".into(),
+                },
+                "/native-unknown fixed-argument",
+            ),
+        ] {
+            let dispatcher = FixedDispatcher(dispatch);
+            let (outcome, prompts) = run_step_slash(&dispatcher, input).await;
+            assert_eq!(outcome, StepOutcome::Continue);
+            let recorded = prompts.lock().await;
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].string_at(""), Some(input));
+        }
     }
 
     /// A display-only builtin (`/help`, `/model`) stays display-only — it must
@@ -700,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn handled_builtin_stays_display_only() {
         let dispatcher = FixedDispatcher(SlashDispatchResult::Handled {
-            display: "Available commands: ...".to_string(),
+            display: "Available commands: ...".into(),
         });
         let (outcome, prompts) = run_step_slash(&dispatcher, "/help").await;
         assert_eq!(outcome, StepOutcome::Continue);
@@ -782,7 +838,7 @@ mod tests {
         assert_eq!(wake.calls.load(Ordering::SeqCst), 1);
         let _ = writing.await.unwrap();
     }
-    struct HumanTaskHost(std::sync::Mutex<Vec<(String, String)>>);
+    struct HumanTaskHost(std::sync::Mutex<Vec<(String, Utf16JsonProjection)>>);
     #[async_trait::async_trait]
     impl TaskNotificationWake for HumanTaskHost {
         async fn wait(&self) {
@@ -794,7 +850,7 @@ mod tests {
         async fn send_human_task_message(
             &self,
             task_id: &str,
-            message: &str,
+            message: &Utf16JsonProjection,
         ) -> Result<(), String> {
             self.0
                 .lock()
@@ -826,7 +882,7 @@ mod tests {
         assert_eq!(result, StepOutcome::Continue);
         assert_eq!(
             *host.0.lock().unwrap(),
-            vec![("a123".into(), " continue  ".into())]
+            vec![("a123".into(), Utf16JsonProjection::from(" continue  "))]
         );
     }
 }

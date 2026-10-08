@@ -1,6 +1,7 @@
 use crate::exit_codes;
 use crate::output::OutputSink;
 use lingxi_core::host::FusionPublicationStatus;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Extract a `local_fusion` task id from `/fusion`'s `Handled` display text
 /// (`"{task_id}  {preset}  {scope}"`, `harness-runtime/src/desktop/
@@ -40,10 +41,17 @@ pub(super) fn dispatches_to_fusion_command(input: &str) -> bool {
 /// with that shape triggered a registry lookup for a task that never
 /// existed, silently exiting print mode non-zero for a command that
 /// actually succeeded.
-pub(super) fn local_fusion_task_id_to_await<'a>(input: &str, display: &'a str) -> Option<&'a str> {
-    dispatches_to_fusion_command(input)
-        .then(|| pending_local_fusion_task_id(display))
-        .flatten()
+pub(super) fn local_fusion_task_id_to_await(
+    input: &str,
+    display: impl Into<Utf16JsonProjection>,
+) -> Option<String> {
+    if !dispatches_to_fusion_command(input) {
+        return None;
+    }
+    let display = display.into();
+    let units = display.string_units("")?;
+    let display = String::from_utf16(&units).ok()?;
+    pending_local_fusion_task_id(&display).map(str::to_owned)
 }
 
 /// Exit code for a dispatched `/fusion` that produced a `Handled` display
@@ -61,10 +69,16 @@ pub(super) fn local_fusion_task_id_to_await<'a>(input: &str, display: &'a str) -
 /// CLI-wide convention for every `Handled` command's argument errors
 /// (`CommandResult::Done` carries no error channel), and special-casing
 /// `/fusion` alone there would be a new inconsistency, not a fix.
-pub(super) fn fusion_spawn_failure_exit_code(input: &str, display: &str) -> i32 {
+pub(super) fn fusion_spawn_failure_exit_code(
+    input: &str,
+    display: impl Into<Utf16JsonProjection>,
+) -> i32 {
+    let display = display.into();
+    let units = display.string_units("").unwrap_or_default();
+    let starts_with = |prefix: &str| units.starts_with(&prefix.encode_utf16().collect::<Vec<_>>());
     if dispatches_to_fusion_command(input)
-        && (display.starts_with("fusion failed to start: ")
-            || display.starts_with("fusion publication retry failed: "))
+        && (starts_with("fusion failed to start: ")
+            || starts_with("fusion publication retry failed: "))
     {
         exit_codes::RUNTIME_ERROR
     } else {

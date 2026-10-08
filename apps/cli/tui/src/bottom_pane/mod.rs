@@ -81,6 +81,24 @@ pub use view::{
     PluginAction, RewindScope, TaskAction, ViewAction, ViewOutcome, WebAction,
 };
 
+fn utf16_unit_offset_for_display_char(units: &[u16], target: usize) -> usize {
+    let mut unit = 0;
+    let mut character = 0;
+    while unit < units.len() && character < target {
+        if (0xd800..=0xdbff).contains(&units[unit])
+            && units
+                .get(unit + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+        {
+            unit += 2;
+        } else {
+            unit += 1;
+        }
+        character += 1;
+    }
+    unit
+}
+
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
 const CTRL_C_EXIT_WINDOW: Duration = Duration::from_secs(2);
 /// The idle `Esc` double-press window that opens `/rewind`.
@@ -132,9 +150,9 @@ enum LeftArrowOutcome {
 pub enum BottomPaneOutcome {
     /// The pane consumed the input; nothing for the owner to do.
     Consumed,
-    /// The composer submitted this (trimmed) buffer text. Slash-command
-    /// routing versus prompt submission is the owner's decision.
-    Submitted(String),
+    /// The composer submitted this trimmed source text. Display conversion is
+    /// deferred to the UI boundary; command routing uses the original units.
+    Submitted(core::types::utf16_json::Utf16JsonProjection),
     /// Idle `Esc Esc` on an empty prompt: open the `/rewind` picker.
     OpenRewindPicker,
     /// A stacked view asks the owner to submit `String` as a user prompt.
@@ -330,6 +348,12 @@ pub struct BottomPane {
     view_stack: ViewStack,
     /// Owner-fed task status (spinner text + running flag).
     status: BottomPaneStatus,
+    /// Most recent Mod toast, held only until its timeout expires.
+    mod_toast: Option<(client::protocol::text::ClientTextDto, Instant)>,
+    /// Insertion-ordered pinned lines, one per plugin.
+    mod_statuses: Vec<(String, client::protocol::text::ClientTextDto)>,
+    /// Current terminal `AbovePrompt` Mod tree, flattened to its measured row budget.
+    mod_render_lines: Vec<String>,
     /// Mirror of the transcript's verbose mode, for the status hint text.
     verbose: bool,
     /// Preview of queued inputs (empty seam until a queue source exists).
@@ -411,6 +435,9 @@ impl BottomPane {
             pending_pastes: Vec::new(),
             view_stack: ViewStack::new(),
             status: BottomPaneStatus::default(),
+            mod_toast: None,
+            mod_statuses: Vec::new(),
+            mod_render_lines: Vec::new(),
             verbose: false,
             pending_input_preview: PendingInputPreview::new(),
             planned_tasks: Vec::new(),
@@ -451,8 +478,75 @@ impl BottomPane {
     /// completion popup (user commands, skills, plugin/bundled commands). Called
     /// when the command registry is wired and after `/reload-skills`.
     pub fn set_registry_commands(&mut self, rows: Vec<RegistrySlashRow>) {
+        self.view_stack
+            .apply_owner_update(OwnerViewUpdate::Commands(rows.clone()));
         self.registry_commands = rows;
         self.sync_completion();
+    }
+
+    pub(crate) fn registry_commands(&self) -> &[RegistrySlashRow] {
+        &self.registry_commands
+    }
+
+    /// Native typeahead uses `argumentHint` for an exact `/command `, then
+    /// shows the remaining declared argument names after each completed arg.
+    fn command_argument_hint(&self) -> Option<String> {
+        let source = self.composer.source_units();
+        let separator = source.iter().position(|unit| *unit == b' ' as u16)?;
+        if source.last().copied() != Some(b' ' as u16) {
+            return None;
+        }
+        let name_units = &source[..separator];
+        if name_units.first().copied() != Some(b'/' as u16) || name_units.len() < 2 {
+            return None;
+        }
+        let args = String::from_utf16_lossy(&source[separator + 1..]);
+        if let Some(row) = self.registry_commands.iter().find(|row| {
+            row.name.code_units == name_units
+                || row
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.code_units == name_units)
+        }) {
+            if args.is_empty() {
+                if let Some(hint) = row
+                    .argument_hint
+                    .as_ref()
+                    .map(client::protocol::text::ClientTextDto::display)
+                    .filter(|hint| !hint.is_empty())
+                {
+                    return Some(hint);
+                }
+            }
+            if row.argument_names.is_empty() {
+                return None;
+            }
+            let parsed = command_api::argument_substitution::parse_arguments(&args);
+            let typed = if parsed.is_empty() && !args.trim().is_empty() {
+                args.split_whitespace().map(str::to_owned).collect()
+            } else {
+                parsed
+            };
+            let argument_names = row
+                .argument_names
+                .iter()
+                .map(client::protocol::text::ClientTextDto::display)
+                .collect::<Vec<_>>();
+            return command_api::argument_substitution::generate_progressive_argument_hint(
+                &argument_names,
+                &typed,
+            );
+        }
+        if !args.is_empty() {
+            return None;
+        }
+        let name = String::from_utf16(name_units).ok()?;
+        crate::command::BUILTIN
+            .iter()
+            .find(|command| command.name == name || command.aliases.contains(&name.as_str()))
+            .map(|command| command.hint)
+            .filter(|hint| !hint.is_empty())
+            .map(str::to_owned)
     }
 
     /// Enable/disable emoji shortcode completion for this mounted session.
@@ -492,17 +586,25 @@ impl BottomPane {
         self.completion.is_some()
     }
 
-    /// Whether `name` (WITH the leading `/`) resolves to a registry-backed
-    /// command — by name or alias. Used by
+    /// Whether the exact command name (without `/`) resolves to a
+    /// registry-backed command — by name or alias. Used by
     /// [`ChatWidget::handle_slash`] to route a BUILTIN-miss to the async
     /// dispatcher instead of submitting the text as a literal prompt.
     ///
     /// [`ChatWidget::handle_slash`]: crate::chat_widget::ChatWidget::handle_slash
     #[must_use]
-    pub fn is_registry_command(&self, name: &str) -> bool {
+    pub fn is_registry_command(
+        &self,
+        name: &core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
+        let mut name_units = vec![b'/' as u16];
+        name_units.extend(name.string_units("").unwrap_or_default());
         self.registry_commands
             .iter()
-            .any(|r| r.name == name || r.aliases.iter().any(|a| a == name))
+            .any(|r| {
+                r.name.code_units == name_units
+                    || r.aliases.iter().any(|alias| alias.code_units == name_units)
+            })
     }
 
     /// Route one key press. Layered: the active view owns the keyboard until
@@ -679,6 +781,13 @@ impl BottomPane {
     /// input routing so an idle questionnaire can auto-continue when its
     /// countdown expires.
     pub fn handle_view_tick(&mut self, now: Instant) -> BottomPaneOutcome {
+        if self
+            .mod_toast
+            .as_ref()
+            .is_some_and(|(_, until)| now >= *until)
+        {
+            self.mod_toast = None;
+        }
         self.view_stack
             .route_tick(now)
             .map_or(BottomPaneOutcome::Consumed, Self::map_view_outcome)
@@ -1034,6 +1143,64 @@ impl BottomPane {
         self.status = status;
     }
 
+    /// Show a transient Mod notification below the composer.
+    pub fn set_mod_toast(
+        &mut self,
+        text: client::protocol::text::ClientTextDto,
+        timeout_ms: u64,
+    ) {
+        self.mod_toast = Some((text, Instant::now() + Duration::from_millis(timeout_ms)));
+    }
+
+    /// Replace or clear one plugin's pinned status without affecting others.
+    pub fn set_mod_status(
+        &mut self,
+        plugin: String,
+        text: Option<client::protocol::text::ClientTextDto>,
+    ) {
+        if let Some(index) = self
+            .mod_statuses
+            .iter()
+            .position(|(name, _)| name == &plugin)
+        {
+            if let Some(text) = text {
+                self.mod_statuses[index].1 = text;
+            } else {
+                self.mod_statuses.remove(index);
+            }
+        } else if let Some(text) = text {
+            self.mod_statuses.push((plugin, text));
+        }
+    }
+
+    /// Replace the current Mod `AbovePrompt` tree's terminal rows.
+    pub fn set_mod_render_lines(&mut self, lines: Vec<String>, max_rows: u16) {
+        self.mod_render_lines = lines.into_iter().take(usize::from(max_rows)).collect();
+    }
+
+    pub fn clear_mod_render_lines(&mut self) {
+        self.mod_render_lines.clear();
+    }
+
+    /// Remaining rows for the `AbovePrompt` site after the pane's other
+    /// current contents are accounted for, bounded by the app's viewport.
+    #[must_use]
+    pub fn mod_ui_row_budget_for(&self, width: u16, running: bool, height_limit: u16) -> u16 {
+        if self.full_frame_view().is_some() {
+            return 0;
+        }
+        let rendered_rows = u16::try_from(self.mod_render_lines.len()).unwrap_or(u16::MAX);
+        let baseline = self.desired_height_for(width, running).saturating_sub(rendered_rows);
+        height_limit.saturating_sub(baseline)
+    }
+
+    /// Drop transient and pinned Mod UI when the owning session is cleared.
+    pub fn clear_mod_ui(&mut self) {
+        self.mod_toast = None;
+        self.mod_statuses.clear();
+        self.mod_render_lines.clear();
+    }
+
     /// Supply the full terminal row count for Claude-compatible task capping.
     pub fn set_terminal_rows(&mut self, rows: u16) {
         self.terminal_rows = Some(rows);
@@ -1169,11 +1336,14 @@ impl BottomPane {
     /// Take the composer's submission: pushes non-blank text to history,
     /// clears the buffer, and returns the trimmed text. `None` (buffer
     /// untouched) when the composer is blank.
-    pub fn take_submission_state(&mut self) -> Option<String> {
+    pub fn take_submission_state(
+        &mut self,
+    ) -> Option<core::types::utf16_json::Utf16JsonProjection> {
         if self.composer.is_blank() {
             return None;
         }
-        let mut text = self.composer.take();
+        let mut source = self.composer.take();
+        let mut text = source.string_at("").unwrap_or_default().to_owned();
         // Persist the typed prompt (claude-code `cgr` → queue + background
         // flush). The PRE-expansion text is stored — CC's `display` field also
         // carries the paste placeholders, with contents externalised into
@@ -1213,9 +1383,37 @@ impl BottomPane {
         }
         matches.sort_by_key(|&(start, _, _)| std::cmp::Reverse(start));
         for (start, end, actual) in matches {
+            let start_character = text[..start].chars().count();
+            let end_character = text[..end].chars().count();
+            let mut units = source.string_units("").unwrap_or_default();
+            let start_unit = utf16_unit_offset_for_display_char(&units, start_character);
+            let end_unit = utf16_unit_offset_for_display_char(&units, end_character);
+            units.splice(start_unit..end_unit, actual.encode_utf16());
             text.replace_range(start..end, actual);
+            source = core::types::utf16_json::Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&units),
+                units,
+            )
+            .expect("display is derived from the exact UTF-16 units");
         }
-        Some(text.trim().to_string())
+        let trimmed_start = text.trim_start();
+        let leading_characters = text.chars().count() - trimmed_start.chars().count();
+        let trimmed = trimmed_start.trim_end();
+        let trailing_characters = trimmed_start.chars().count() - trimmed.chars().count();
+        let units = source.string_units("").unwrap_or_default();
+        let start_unit = utf16_unit_offset_for_display_char(&units, leading_characters);
+        let end_unit = utf16_unit_offset_for_display_char(
+            &units,
+            text.chars().count().saturating_sub(trailing_characters),
+        );
+        let units = units[start_unit..end_unit].to_vec();
+        Some(
+            core::types::utf16_json::Utf16JsonProjection::root_string(
+                trimmed.to_owned(),
+                units,
+            )
+            .expect("trimmed display matches the exact source units"),
+        )
     }
 
     /// Toggle vim editing mode; returns whether vim is now enabled.
@@ -1558,7 +1756,8 @@ impl BottomPane {
                 Some(BottomPaneOutcome::Consumed)
             }
             KeyCode::Tab => {
-                let insert = self.completion.as_ref()?.selected_insert().to_string();
+                let source_insert = self.completion.as_ref()?.selected_source_insert().code_units.clone();
+                let insert = String::from_utf16_lossy(&source_insert);
                 // Emoji and `@file` tokens complete in place; a `/command`
                 // replaces the whole buffer.
                 if let Some((start, _)) = self
@@ -1570,7 +1769,7 @@ impl BottomPane {
                 } else if let Some((at, _)) = self.composer.at_fragment() {
                     self.composer.complete_at(at, &insert);
                 } else {
-                    self.composer.replace_all(&insert);
+                    self.composer.replace_all_source_units(&source_insert);
                 }
                 self.sync_completion();
                 Some(BottomPaneOutcome::Consumed)
@@ -1593,7 +1792,8 @@ impl BottomPane {
                 {
                     return None;
                 }
-                let insert = self.completion.as_ref()?.selected_insert().to_string();
+                let source_insert = self.completion.as_ref()?.selected_source_insert().code_units.clone();
+                let insert = String::from_utf16_lossy(&source_insert);
                 if let Some((start, _)) = self
                     .emoji_completion_enabled
                     .then(|| self.composer.emoji_fragment())
@@ -1607,8 +1807,10 @@ impl BottomPane {
                     self.composer.complete_at(at, &insert);
                     self.completion = None;
                     Some(BottomPaneOutcome::Consumed)
-                } else if self.composer.text() == insert
-                    || crate::command::resolve(&self.composer.text())
+                } else if self.composer.source_units() == source_insert
+                    || String::from_utf16(&self.composer.source_units())
+                        .ok()
+                        .and_then(|text| crate::command::resolve(&text))
                         .is_some_and(|(cmd, _)| cmd.name == insert)
                 {
                     // Buffer already IS the highlighted command — by name or in
@@ -1618,7 +1820,7 @@ impl BottomPane {
                     None
                 } else {
                     // Partial/different `/command` → commit it + close the popup.
-                    self.composer.replace_all(&insert);
+                    self.composer.replace_all_source_units(&source_insert);
                     self.completion = None;
                     Some(BottomPaneOutcome::Consumed)
                 }
@@ -1646,11 +1848,12 @@ impl BottomPane {
             }
         }
         let text = self.composer.text();
+        let source = self.composer.source_projection();
         let is_command =
             text.starts_with('/') && !text.contains('\n') && !text.contains(char::is_whitespace);
         if is_command {
             self.completion =
-                CompletionView::new(command_items_merged(&text, &self.registry_commands));
+                CompletionView::new(command_items_merged(&source, &self.registry_commands));
             return;
         }
         if self.emoji_completion_enabled {
@@ -2078,12 +2281,39 @@ impl BottomPane {
             input_status::task_lines(&self.planned_tasks, &self.theme)
         };
         lines.extend(tasks);
+        lines.extend(self.mod_render_lines.iter().map(|text| {
+            Line::from(Span::styled(
+                text.display(),
+                Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
+            ))
+        }));
+        lines
+    }
+
+    fn mod_toast_line(&self) -> Option<Line<'static>> {
+        let (text, until) = self.mod_toast.as_ref()?;
+        (Instant::now() < *until).then(|| {
+            Line::from(Span::styled(
+                text.display(),
+                Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
+            ))
+        })
+    }
+
+    fn mod_notification_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = self.mod_toast_line().into_iter().collect::<Vec<_>>();
+        lines.extend(self.mod_statuses.iter().map(|(_, text)| {
+            Line::from(Span::styled(
+                text.display(),
+                Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
+            ))
+        }));
         lines
     }
 
     /// The pane's vertical zones within `area`: running status, context banner,
-    /// queued-input preview, planned tasks, composer, live agents, permission
-    /// mode, then the completion/footer slot.
+    /// queued-input preview, planned tasks, composer, Mod toast, live agents,
+    /// permission mode, then the completion/footer slot.
     fn zones(&self, area: Rect) -> std::rc::Rc<[Rect]> {
         let below = if self.accessibility_announcement.is_some() {
             footer::footer_height(&self.footer_props())
@@ -2106,6 +2336,9 @@ impl BottomPane {
                 Constraint::Length(self.pending_input_preview.desired_height(area.width)),
                 Constraint::Length(task_rows),
                 Constraint::Min(3),
+                Constraint::Length(
+                    u16::try_from(self.mod_notification_lines().len()).unwrap_or(u16::MAX),
+                ),
                 Constraint::Length(agent_rows),
                 Constraint::Length(mode_row),
                 Constraint::Length(below),
@@ -2165,7 +2398,16 @@ impl BottomPane {
         };
         let mode_row =
             permission_mode_indicator::indicator_height(self.permission_mode, &self.theme);
-        let base = status + banner + preview + task_rows + composer + agent_rows + mode_row + below;
+        let notifications = u16::try_from(self.mod_notification_lines().len()).unwrap_or(u16::MAX);
+        let base = status
+            + banner
+            + preview
+            + task_rows
+            + composer
+            + notifications
+            + agent_rows
+            + mode_row
+            + below;
         let overlay = if let Some(view) = self.view_stack.active() {
             view.desired_height(width)
         } else {
@@ -2215,20 +2457,23 @@ impl Renderable for BottomPane {
         }
         self.pending_input_preview.render(zones[2], buf);
         Paragraph::new(self.planned_task_lines()).render(zones[3], buf);
+        let argument_hint = self.command_argument_hint();
         ComposerView::new(&self.composer)
             .with_attached_images(&self.attached_image_labels)
+            .with_argument_hint(argument_hint.as_deref())
             .with_accent(self.accent.map(crate::style_adapter::to_ratatui))
             .render(zones[4], buf);
+        Paragraph::new(self.mod_notification_lines()).render(zones[5], buf);
         Paragraph::new(input_status::agent_lines(&self.running_agents, &self.theme))
-            .render(zones[5], buf);
+            .render(zones[6], buf);
         // Permission-mode indicator (below the composer, above the footer);
         // empty for `Default` mode (zero-height zone → nothing drawn).
         if let Some(line) =
             permission_mode_indicator::indicator_line(self.permission_mode, &self.theme)
         {
-            Paragraph::new(line).render(zones[6], buf);
+            Paragraph::new(line).render(zones[7], buf);
         }
-        let below = zones[7];
+        let below = zones[8];
         if self.accessibility_announcement.is_some() {
             footer::render_footer(below, buf, &self.footer_props(), &self.theme);
         } else if let Some(popup) = &self.completion {
@@ -2602,6 +2847,83 @@ mod tests {
     use super::*;
     use crate::bottom_pane::view::AgentsPaneRow;
     use crate::renderable::Renderable;
+
+    #[test]
+    fn mod_toast_is_visible_below_composer_then_expires() {
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_mod_toast("Done".into(), 10);
+        assert_eq!(pane.mod_toast_line().unwrap().spans[0].content, "Done");
+        assert!(pane.planned_task_lines().is_empty());
+        let zones = pane.zones(Rect::new(0, 0, 80, 20));
+        assert_eq!(zones[5].y, zones[4].y + zones[4].height);
+        assert_eq!(zones[5].height, 1);
+        assert!(pane.mod_toast.is_some());
+        pane.handle_view_tick(Instant::now() + Duration::from_millis(11));
+        assert!(pane.mod_toast.is_none());
+        assert!(pane.mod_toast_line().is_none());
+    }
+
+    #[test]
+    fn mod_status_is_pinned_per_plugin_until_cleared() {
+        let mut pane = BottomPane::new(Theme::dark());
+        pane.set_mod_status("one".into(), Some("First".into()));
+        pane.set_mod_status("two".into(), Some("Second".into()));
+        pane.set_mod_status("one".into(), Some("Updated".into()));
+        assert_eq!(pane.mod_notification_lines().len(), 2);
+        assert_eq!(
+            pane.mod_statuses
+                .iter()
+                .map(|(plugin, text)| (plugin.as_str(), text.display()))
+                .collect::<Vec<_>>(),
+            vec![("one", "Updated".into()), ("two", "Second".into())]
+        );
+        pane.set_mod_status("one".into(), None);
+        assert_eq!(
+            pane.mod_statuses
+                .iter()
+                .map(|(plugin, text)| (plugin.as_str(), text.display()))
+                .collect::<Vec<_>>(),
+            vec![("two", "Second".into())]
+        );
+        assert!(pane.planned_task_lines().is_empty());
+        pane.clear_mod_ui();
+        assert!(pane.mod_notification_lines().is_empty());
+    }
+
+    #[test]
+    fn mod_status_keeps_exact_units_until_rendering() {
+        let mut pane = BottomPane::new(Theme::dark());
+        let units = vec![b's' as u16, b't' as u16, 0xd800, b'x' as u16];
+        pane.set_mod_status(
+            "plugin".into(),
+            Some(client::protocol::text::ClientTextDto::from_code_units(units.clone())),
+        );
+        assert_eq!(pane.mod_statuses[0].1.code_units, units);
+        assert_eq!(pane.mod_notification_lines()[0].spans[0].content, "st�x");
+    }
+
+    #[test]
+    fn mod_above_prompt_rows_follow_the_budget_and_clear_with_the_session_ui() {
+        let mut pane = BottomPane::new(Theme::dark());
+        let baseline = pane.desired_height_for(80, false);
+        assert_eq!(pane.mod_ui_row_budget_for(80, false, baseline + 5), 5);
+        pane.set_mod_render_lines(
+            vec!["First row".into(), "Second row".into(), "Third row".into()],
+            2,
+        );
+        assert_eq!(
+            pane.mod_ui_row_budget_for(80, false, baseline + 5),
+            5,
+            "the measured budget excludes the current tree's rows"
+        );
+        let lines = pane.planned_task_lines();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].content, "First row");
+        assert_eq!(lines[1].spans[0].content, "Second row");
+        pane.clear_mod_ui();
+        assert!(pane.planned_task_lines().is_empty());
+        assert_eq!(pane.mod_ui_row_budget_for(80, false, baseline + 5), 5);
+    }
 
     /// A scripted view: returns the next queued outcome per key/paste.
     struct StubView {
@@ -3021,7 +3343,7 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text, big, "submit expands the placeholder to the paste");
+        assert_eq!(text.string_at(""), Some(big.as_str()), "submit expands the placeholder to the paste");
     }
 
     #[test]
@@ -3037,7 +3359,7 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text, format!("{big}{big}"), "both placeholders expand");
+        assert_eq!(text.string_at(""), Some(format!("{big}{big}").as_str()), "both placeholders expand");
     }
 
     #[test]
@@ -3048,7 +3370,7 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text, "keep this", "deleted placeholder drops the paste");
+        assert_eq!(text.string_at(""), Some("keep this"), "deleted placeholder drops the paste");
     }
 
     #[test]
@@ -3063,13 +3385,13 @@ mod tests {
         let BottomPaneOutcome::Submitted(first) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected first submit");
         };
-        assert_eq!(first, big);
+        assert_eq!(first.string_at(""), Some(big.as_str()));
         let _ = pane.handle_key(key(KeyCode::Up)); // recall from history
         assert_eq!(pane.composer().text(), "[Pasted Content 1500 chars]");
         let BottomPaneOutcome::Submitted(second) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected resubmit");
         };
-        assert_eq!(second, big, "recalled placeholder re-expands to the paste");
+        assert_eq!(second.string_at(""), Some(big.as_str()), "recalled placeholder re-expands to the paste");
     }
 
     #[test]
@@ -3492,10 +3814,14 @@ mod tests {
             .selected_insert()
             .to_string();
         pane.set_registry_commands(vec![RegistrySlashRow {
-            name: "/plan-z".to_string(),
-            description: "dynamic".to_string(),
-            menu_description: Some("dynamic".to_string()),
-            aliases: vec!["/pz".to_string()],
+            name: "/plan-z".into(),
+            description: "dynamic".into(),
+            menu_description: Some("dynamic".into()),
+            aliases: vec!["/pz".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
         }]);
         let after = pane
             .completion()
@@ -3512,6 +3838,123 @@ mod tests {
     }
 
     #[test]
+    fn described_command_argument_hint_appears_only_before_args() {
+        let mut builtin_pane = pane();
+        typ(&mut builtin_pane, "/model ");
+        assert_eq!(
+            builtin_pane.command_argument_hint().as_deref(),
+            Some("<model>")
+        );
+
+        let mut described_pane = pane();
+        described_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/model".into(),
+            description: "Choose a model".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: true,
+            argument_hint: Some("<choice>".into()),
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut described_pane, "/model ");
+        assert_eq!(
+            described_pane.command_argument_hint().as_deref(),
+            Some("<choice>")
+        );
+        typ(&mut described_pane, "opus");
+        assert_eq!(described_pane.command_argument_hint(), None);
+
+        let mut removed_hint_pane = pane();
+        removed_hint_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/model".into(),
+            description: "Choose a model".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: true,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut removed_hint_pane, "/model ");
+        assert_eq!(removed_hint_pane.command_argument_hint(), None);
+
+        let mut malformed_source_pane = pane();
+        malformed_source_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: client::protocol::text::ClientTextDto::from_code_units(vec![
+                b'/' as u16,
+                b'm' as u16,
+                b'o' as u16,
+                b'd' as u16,
+                b'e' as u16,
+                0xd800,
+            ]),
+            description: "source command".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: Some("must not match by replacement".into()),
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut malformed_source_pane, "/mode� ");
+        assert_eq!(malformed_source_pane.command_argument_hint(), None);
+        assert!(!malformed_source_pane.is_registry_command(&core::types::utf16_json::Utf16JsonProjection::from("mode�")));
+        assert!(malformed_source_pane.is_registry_command(
+            &core::types::utf16_json::Utf16JsonProjection::parse(r#""mode\ud800""#).unwrap()
+        ));
+    }
+
+    #[test]
+    fn prompt_argument_hint_advances_after_completed_arguments() {
+        let mut prompt_pane = pane();
+        prompt_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/deploy".into(),
+            description: "Deploy a target".into(),
+            menu_description: None,
+            aliases: vec!["/ship".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: Some("<target>".into()),
+            argument_names: vec!["target".into(), "message".into(), "mode".into()],
+        }]);
+        typ(&mut prompt_pane, "/deploy ");
+        assert_eq!(
+            prompt_pane.command_argument_hint().as_deref(),
+            Some("<target>")
+        );
+        typ(&mut prompt_pane, "prod ");
+        assert_eq!(
+            prompt_pane.command_argument_hint().as_deref(),
+            Some("[message] [mode]")
+        );
+        typ(&mut prompt_pane, "\"two words\" ");
+        assert_eq!(
+            prompt_pane.command_argument_hint().as_deref(),
+            Some("[mode]")
+        );
+        typ(&mut prompt_pane, "fast ");
+        assert_eq!(prompt_pane.command_argument_hint(), None);
+
+        let mut alias_pane = pane();
+        alias_pane.set_registry_commands(vec![RegistrySlashRow {
+            name: "/deploy".into(),
+            description: "Deploy a target".into(),
+            menu_description: None,
+            aliases: vec!["/ship".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: vec!["target".into(), "mode".into()],
+        }]);
+        typ(&mut alias_pane, "/ship ");
+        assert_eq!(
+            alias_pane.command_argument_hint().as_deref(),
+            Some("[target] [mode]")
+        );
+    }
+
+    #[test]
     fn unknown_command_and_empty_file_results_close_the_popup() {
         // Empty results close the popup (BottomPane owns open/close): an
         // unknown /command fragment…
@@ -3524,7 +3967,7 @@ mod tests {
         // submission (the unknown command is the owner's routing decision).
         assert!(matches!(
             pane.handle_key(key(KeyCode::Enter)),
-            BottomPaneOutcome::Submitted(ref p) if p == "/mz"
+            BottomPaneOutcome::Submitted(ref p) if p.string_at("") == Some("/mz")
         ));
         // …and an @file fragment with no matching entries.
         let mut pane = super::BottomPane::new(Theme::dark());
@@ -3558,7 +4001,7 @@ mod tests {
         typ(&mut pane, "first");
         assert!(matches!(
             pane.handle_key(key(KeyCode::Enter)),
-            BottomPaneOutcome::Submitted(ref p) if p == "first"
+            BottomPaneOutcome::Submitted(ref p) if p.string_at("") == Some("first")
         ));
         typ(&mut pane, "second");
         let _ = pane.handle_key(key(KeyCode::Enter));
@@ -3580,11 +4023,56 @@ mod tests {
         assert_eq!(pane.composer().text(), "   ", "blank buffer untouched");
         let mut pane = super::BottomPane::new(Theme::dark());
         typ(&mut pane, "  hi there  ");
-        assert_eq!(pane.take_submission_state().as_deref(), Some("hi there"));
+        assert_eq!(pane.take_submission_state().and_then(|value| value.string_at("").map(str::to_owned)).as_deref(), Some("hi there"));
         assert!(pane.composer_is_empty());
         // The submission was pushed to history.
         let _ = pane.handle_key(key(KeyCode::Up));
         assert_eq!(pane.composer().text(), "  hi there  ");
+    }
+
+    #[test]
+    fn submitted_source_retains_isolated_surrogate_units() {
+        let mut pane = pane();
+        let units = vec![
+            b'/' as u16,
+            b'c' as u16,
+            b'm' as u16,
+            b'd' as u16,
+            0xd800,
+            b' ' as u16,
+            b'x' as u16,
+            0xdfff,
+        ];
+        pane.composer.replace_all_source_units(&units);
+        let Some(submitted) = pane.take_submission_state() else {
+            panic!("expected source submission");
+        };
+        assert_eq!(submitted.string_units(""), Some(units));
+    }
+
+    #[test]
+    fn registry_completion_inserts_and_submits_the_exact_source_name() {
+        let mut pane = pane();
+        let name = vec![b'/' as u16, b'c' as u16, b'm' as u16, b'd' as u16, 0xd800];
+        pane.set_registry_commands(vec![RegistrySlashRow {
+            name: client::protocol::text::ClientTextDto::from_code_units(name.clone()),
+            description: "source command".into(),
+            menu_description: None,
+            aliases: Vec::new(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        }]);
+        typ(&mut pane, "/c");
+
+        assert!(matches!(pane.handle_key(key(KeyCode::Tab)), BottomPaneOutcome::Consumed));
+        assert_eq!(pane.composer().source_units(), name);
+
+        let BottomPaneOutcome::Submitted(submitted) = pane.handle_key(key(KeyCode::Enter)) else {
+            panic!("the exact highlighted source command should submit");
+        };
+        assert_eq!(submitted.string_units(""), Some(name));
     }
 
     #[test]
@@ -3599,7 +4087,7 @@ mod tests {
         let mut pane = super::BottomPane::new(Theme::dark());
         pane.set_prompt_history_store(old.clone());
         typ(&mut pane, "old prompt");
-        assert_eq!(pane.take_submission_state().as_deref(), Some("old prompt"));
+        assert_eq!(pane.take_submission_state().and_then(|value| value.string_at("").map(str::to_owned)).as_deref(), Some("old prompt"));
         assert!(old.flush());
         let new = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
             home.path(),
@@ -3608,7 +4096,7 @@ mod tests {
         ));
         pane.reset_prompt_history_store(new.clone());
         typ(&mut pane, "new prompt");
-        assert_eq!(pane.take_submission_state().as_deref(), Some("new prompt"));
+        assert_eq!(pane.take_submission_state().and_then(|value| value.string_at("").map(str::to_owned)).as_deref(), Some("new prompt"));
         assert!(new.flush());
         let rows: Vec<serde_json::Value> =
             std::fs::read_to_string(home.path().join("history.jsonl"))
@@ -3635,7 +4123,7 @@ mod tests {
         pane.set_prompt_history_store(store.clone());
         typ(&mut pane, "persisted prompt");
         assert_eq!(
-            pane.take_submission_state().as_deref(),
+            pane.take_submission_state().and_then(|value| value.string_at("").map(str::to_owned)).as_deref(),
             Some("persisted prompt")
         );
         // The submit spawned a background flush; a direct flush serializes
@@ -3676,7 +4164,7 @@ mod tests {
         // Normal-mode Enter submits through the same take path.
         assert!(matches!(
             pane.handle_key(key(KeyCode::Enter)),
-            BottomPaneOutcome::Submitted(ref p) if p == "ello"
+            BottomPaneOutcome::Submitted(ref p) if p.string_at("") == Some("ello")
         ));
         assert!(!pane.toggle_vim(), "second toggle disables vim");
     }

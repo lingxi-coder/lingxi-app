@@ -3,6 +3,13 @@
 /// A rendered message in the scrollback buffer.
 #[derive(Debug, Clone)]
 pub enum RenderedMessage {
+    /// A replayed transcript row with its top-level JSONL UUID. The wrapper
+    /// belongs to the terminal seed path; the transcript consumes it before
+    /// building the normal history cell.
+    IdentifiedTranscriptRow {
+        message: Box<RenderedMessage>,
+        request_id: String,
+    },
     /// User-submitted prompt (rendered with `> ` prefix, default fg color).
     UserText {
         /// The text body the user submitted.
@@ -487,6 +494,7 @@ pub struct CurrentTodo {
 impl RenderedMessage {
     pub fn tool_id(&self) -> Option<&lingxi_core::types::ToolUseId> {
         match self {
+            RenderedMessage::IdentifiedTranscriptRow { message, .. } => message.tool_id(),
             RenderedMessage::AssistantToolUse { id, .. }
             | RenderedMessage::UserToolResult { id, .. } => Some(id),
             _ => None,
@@ -500,6 +508,9 @@ impl RenderedMessage {
     #[must_use]
     pub fn native_scrollback_safe(&self) -> bool {
         match self {
+            RenderedMessage::IdentifiedTranscriptRow { message, .. } => {
+                message.native_scrollback_safe()
+            }
             RenderedMessage::AssistantToolUse { .. }
             | RenderedMessage::UserToolResult { .. }
             | RenderedMessage::AssistantThinking { .. }

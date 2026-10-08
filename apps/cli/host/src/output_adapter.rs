@@ -9,6 +9,7 @@
 use crate::output::OutputSink;
 use async_trait::async_trait;
 use lingxi_core::host::{CostSnapshot, OutputStream};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 /// Concrete adapter — owns an `Arc<dyn OutputSink>` and projects every
@@ -27,8 +28,8 @@ impl SinkAdapter {
 
 #[async_trait]
 impl OutputStream for SinkAdapter {
-    async fn emit_text(&self, text: &str) {
-        self.sink.text(text).await;
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
+        self.sink.source_text(text).await;
     }
     async fn emit_system_notice(&self, body: &str, is_error: bool) {
         if is_error {
@@ -37,11 +38,20 @@ impl OutputStream for SinkAdapter {
             self.sink.command_output("system", body).await;
         }
     }
+    async fn emit_mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
+        self.sink.mod_log(plugin, text).await;
+    }
+    async fn emit_mod_toast(&self, plugin: &str, text: &Utf16JsonProjection, timeout_ms: u64) {
+        self.sink.mod_toast(plugin, text, timeout_ms).await;
+    }
+    async fn emit_mod_status(&self, plugin: &str, text: Option<&Utf16JsonProjection>) {
+        self.sink.mod_status(plugin, text).await;
+    }
     async fn emit_tool_call(
         &self,
         _id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
     ) {
         // CLI sinks (plain stdout + NDJSON) do not surface the tool_use_id
         // today — they're orientated on the wire-level event stream where
@@ -53,8 +63,8 @@ impl OutputStream for SinkAdapter {
         &self,
         _id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        _model_text: &str,
-        result: &serde_json::Value,
+        _model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
     ) {
         self.sink.tool_result(tool, result).await;
     }
@@ -88,6 +98,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         errors: Mutex<Vec<(String, String)>>,
+        mod_logs: Mutex<Vec<(String, Vec<u16>)>>,
     }
 
     #[async_trait]
@@ -95,10 +106,16 @@ mod tests {
         async fn text(&self, _s: &str) {}
         async fn turn_start(&self) {}
         async fn turn_end(&self, _stop_reason: &str, _usd: f64, _input: u64, _output: u64) {}
-        async fn tool_call(&self, _tool: &str, _input: &serde_json::Value) {}
-        async fn tool_result(&self, _tool: &str, _result: &serde_json::Value) {}
+        async fn tool_call(&self, _tool: &str, _input: &Utf16JsonProjection) {}
+        async fn tool_result(&self, _tool: &str, _result: &Utf16JsonProjection) {}
         async fn tool_heartbeat(&self, _id: &str, _tool: &str, _elapsed_ms: u64) {}
         async fn command_output(&self, _name: &str, _display: &str) {}
+        async fn mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
+            self.mod_logs.lock().await.push((
+                plugin.to_string(),
+                text.string_units("").expect("root-string text"),
+            ));
+        }
         async fn error(&self, code: &str, message: &str) {
             self.errors
                 .lock()
@@ -121,6 +138,22 @@ mod tests {
                 "transcript_persistence_failed".to_string(),
                 "transcript persistence failed".to_string(),
             )]
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_log_keeps_the_plugin_and_exact_utf16_units() {
+        let sink = Arc::new(RecordingSink::default());
+        let units = vec![b'Q' as u16, 0xd800, b'!' as u16];
+        let text =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        SinkAdapter::new(sink.clone())
+            .emit_mod_log("review", &text)
+            .await;
+        assert_eq!(
+            sink.mod_logs.lock().await.as_slice(),
+            &[("review".to_string(), units)]
         );
     }
 }

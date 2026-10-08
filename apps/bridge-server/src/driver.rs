@@ -33,9 +33,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use client::adapter::{lowering::lower_cost_snapshot, ClientEventSink};
-use client::protocol::commands::ImageRefDto;
+use client::protocol::commands::{ImageRefDto, UiSurfaceDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
 use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 // `ImageSource` is re-exported from the orchestrator (the canonical, FROZEN
 // `protocol` shape) so this library code can name it without taking a direct
 // `protocol` dependency.
@@ -115,6 +116,30 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         taken
+    }
+
+    async fn take_mid_turn_batch(
+        &self,
+    ) -> Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>> {
+        let batch = self.queue.take_mid_turn_commands().await?;
+        self.foreign_inputs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(
+            batch
+                .into_iter()
+                .filter_map(|command| {
+                    Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
+                        text: command.text()?.to_owned(),
+                        origin_kind: match command.source {
+                            msgqueue::QueueSource::AgentSendMessage => Some("peer"),
+                            msgqueue::QueueSource::TaskCompletion => Some("task-notification"),
+                            msgqueue::QueueSource::Cron => Some("scheduled-trigger"),
+                            _ => None,
+                        },
+                    })
+                })
+                .collect(),
+        )
     }
 }
 
@@ -686,7 +711,7 @@ impl OrchestratorTurnDriver {
     /// byte-identical to the pre-MULTIMODAL.1 text-only turn.
     async fn drive_turn(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
         notification_registry: Option<
@@ -707,7 +732,7 @@ impl OrchestratorTurnDriver {
 
     async fn drive_turn_with_inputs(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         sources: Vec<ImageSource>,
         cancel: CancellationToken,
         notification_registry: Option<
@@ -749,7 +774,7 @@ impl OrchestratorTurnDriver {
                 .await
         } else {
             self.orchestrator
-                .run_turn_streaming_with_origin(&prompt, sources, cancel, None, in_human_turn)
+                .run_turn_streaming_with_origin(prompt, sources, cancel, None, in_human_turn)
                 .await
         };
         // USER ABORT (binary `t3t`): the user interrupted this turn, so every
@@ -891,6 +916,24 @@ impl TurnDriver for OrchestratorTurnDriver {
         )
     }
 
+    async fn ui_attach(&self, client_id: &str, surface: UiSurfaceDto) -> bool {
+        let surface = match surface {
+            UiSurfaceDto::Desktop => orchestrator::config::ModRenderSurface::Desktop,
+            UiSurfaceDto::Mobile => orchestrator::config::ModRenderSurface::Mobile,
+            UiSurfaceDto::Vscode => orchestrator::config::ModRenderSurface::Vscode,
+        };
+        self.orchestrator.mod_ui_attach(client_id, surface).await
+    }
+
+    async fn ui_detach(&self, client_id: &str) -> bool {
+        self.orchestrator
+            .mod_ui_detach(
+                client_id,
+                orchestrator::mod_surface_roster::ModSurfaceDetachReason::Detach,
+            )
+            .await
+    }
+
     async fn stop_dynamic_loop(&self) {
         tool_cron::stop_dynamic_loop(self.wakeup_scheduler.as_ref()).await;
         if let Some(runtime) = &self.loop_runtime {
@@ -921,7 +964,7 @@ impl TurnDriver for OrchestratorTurnDriver {
 
     async fn run_scheduled_turn(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         model: String,
         reasoning: client::protocol::controls::ReasoningSelectionDto,
         cancel: CancellationToken,
@@ -940,7 +983,7 @@ impl TurnDriver for OrchestratorTurnDriver {
         let cancel_probe = cancel.clone();
         let result = self
             .orchestrator
-            .run_scheduled_turn(&prompt, &model, reasoning, cancel)
+            .run_scheduled_turn(prompt, &model, reasoning, cancel)
             .await;
         if let Some(queue) = &self.queue {
             queue.clear_active_turn().await;
@@ -997,13 +1040,20 @@ impl TurnDriver for OrchestratorTurnDriver {
     ) {
         let human = inputs.iter().any(|input| !input.is_meta);
         self.announce_engine_initiated_turn().await;
-        self.drive_turn_with_inputs(String::new(), Vec::new(), cancel, None, human, Some(inputs))
-            .await;
+        self.drive_turn_with_inputs(
+            Utf16JsonProjection::from(""),
+            Vec::new(),
+            cancel,
+            None,
+            human,
+            Some(inputs),
+        )
+        .await;
     }
 
     async fn run_queued_turn(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         in_human_turn: bool,
         cancel: CancellationToken,
     ) {
@@ -1014,7 +1064,7 @@ impl TurnDriver for OrchestratorTurnDriver {
 
     async fn run_queued_turn_with_images(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
@@ -1028,11 +1078,17 @@ impl TurnDriver for OrchestratorTurnDriver {
         registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
         cancel: CancellationToken,
     ) {
-        self.drive_turn(String::new(), Vec::new(), cancel, Some(registry), false)
-            .await;
+        self.drive_turn(
+            Utf16JsonProjection::from(""),
+            Vec::new(),
+            cancel,
+            Some(registry),
+            false,
+        )
+        .await;
     }
 
-    async fn run_turn(&self, prompt: String) {
+    async fn run_turn(&self, prompt: Utf16JsonProjection) {
         // No images: drive with an empty source set — identical to routing through
         // `run_turn_streaming_with_cancel` (which decodes `&[]` to an empty vec).
         self.drive_turn(prompt, Vec::new(), CancellationToken::new(), None, true)
@@ -1043,20 +1099,20 @@ impl TurnDriver for OrchestratorTurnDriver {
     /// dropping them. Each inline `ImageRefDto` becomes an
     /// [`ImageSource::Base64`], which the orchestrator appends to the outgoing
     /// user message via `ConversationMessage::user_with_images`.
-    async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
+    async fn run_turn_with_images(&self, prompt: Utf16JsonProjection, images: Vec<ImageRefDto>) {
         let sources = Self::to_image_sources(images);
         self.drive_turn(prompt, sources, CancellationToken::new(), None, true)
             .await;
     }
 
-    async fn run_turn_with_cancel(&self, prompt: String, cancel: CancellationToken) {
+    async fn run_turn_with_cancel(&self, prompt: Utf16JsonProjection, cancel: CancellationToken) {
         self.drive_turn(prompt, Vec::new(), cancel, None, true)
             .await;
     }
 
     async fn run_turn_with_images_and_cancel(
         &self,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
@@ -1266,7 +1322,7 @@ mod tests {
             base64: "iVBORw0KGgoAAAA".to_string(),
         };
         driver
-            .run_turn_with_images("describe this".to_string(), vec![dto])
+            .run_turn_with_images("describe this".into(), vec![dto])
             .await;
 
         let calls = streaming.captured_calls().await;
@@ -1303,12 +1359,12 @@ mod tests {
     async fn empty_images_matches_text_only_run_turn() {
         let streaming_plain = streaming_one_turn();
         build_driver(streaming_plain.clone())
-            .run_turn("hello".to_string())
+            .run_turn("hello".into())
             .await;
 
         let streaming_empty = streaming_one_turn();
         build_driver(streaming_empty.clone())
-            .run_turn_with_images("hello".to_string(), Vec::new())
+            .run_turn_with_images("hello".into(), Vec::new())
             .await;
 
         let plain = first_user_content(&streaming_plain.captured_calls().await[0].messages);
@@ -1375,7 +1431,7 @@ mod tests {
 
         driver
             .run_queued_turn(
-                "drained from the queue".to_string(),
+                "drained from the queue".into(),
                 false,
                 CancellationToken::new(),
             )
@@ -1437,7 +1493,9 @@ mod tests {
                         goal_retry_id: None,
                         text: "first".to_string(),
                         is_meta: false,
+                        mod_origin: Some(serde_json::json!({"kind":"bridge"})),
                         message_id: None,
+                        transcript_row_token: None,
                         queue_priority: None,
                         scheduled_task_id: None,
                         scheduled_fire_id: None,
@@ -1446,7 +1504,9 @@ mod tests {
                         goal_retry_id: None,
                         text: "second".to_string(),
                         is_meta: false,
+                        mod_origin: Some(serde_json::json!({"kind":"bridge"})),
                         message_id: None,
+                        transcript_row_token: None,
                         queue_priority: None,
                         scheduled_task_id: None,
                         scheduled_fire_id: None,
@@ -1856,7 +1916,7 @@ mod tests {
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
         // The scripted turn emits text + end_turn — NO ScheduleWakeup call.
-        driver.run_turn("loop tick".to_string()).await;
+        driver.run_turn("loop tick".into()).await;
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(
@@ -1904,7 +1964,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         driver
-            .run_turn_with_cancel("loop tick".to_string(), cancel)
+            .run_turn_with_cancel("loop tick".into(), cancel)
             .await;
 
         assert!(
@@ -1936,7 +1996,7 @@ mod tests {
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver_with_rejected_output_scope().with_wakeup_scheduler(sched);
 
-        driver.run_turn("loop tick".to_string()).await;
+        driver.run_turn("loop tick".into()).await;
 
         assert!(
             rec.calls.lock().unwrap().is_empty(),
@@ -1967,7 +2027,7 @@ mod tests {
             orchestrator::turn_span::TurnSpanCounts::default(),
             "a fresh orchestrator starts at zero",
         );
-        driver.run_turn("hello".to_string()).await;
+        driver.run_turn("hello".into()).await;
         let span = orchestrator.turn_span().snapshot();
         assert_eq!(
             span.messages, 1,
@@ -1997,7 +2057,7 @@ mod tests {
             "the leftovers are really there"
         );
 
-        driver.run_turn("hello".to_string()).await;
+        driver.run_turn("hello".into()).await;
 
         let span = orchestrator.turn_span().snapshot();
         assert_eq!(
@@ -2029,7 +2089,7 @@ mod tests {
         });
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
-        driver.run_turn("loop tick".to_string()).await;
+        driver.run_turn("loop tick".into()).await;
 
         let (streak, _) = loop_runtime
             .noop_streak()
@@ -2061,7 +2121,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         driver
-            .run_turn_with_cancel("loop tick".to_string(), cancel)
+            .run_turn_with_cancel("loop tick".into(), cancel)
             .await;
 
         assert_eq!(
@@ -2121,7 +2181,7 @@ mod tests {
         });
         let sched: Arc<dyn tool_cron::WakeupScheduler> = rec.clone();
         let driver = build_driver(streaming_one_turn()).with_wakeup_scheduler(sched);
-        driver.run_turn("just a normal user turn".to_string()).await;
+        driver.run_turn("just a normal user turn".into()).await;
 
         assert!(
             rec.calls.lock().unwrap().is_empty(),

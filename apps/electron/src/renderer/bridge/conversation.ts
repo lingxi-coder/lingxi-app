@@ -23,6 +23,7 @@ import { spawnResultAgentId } from '../components/transcriptAgentPlacement';
  *                           snapshot's formatted duration/token summary.
  *  - `error`              → a strong, danger-toned `narration` line.
  *  - `system_notice`      → a non-terminal diagnostic narration line.
+ *  - `ui_log`             → a dim Mod log row, outside assistant/model text.
  *  - `thinking_delta`     → a dim/italic collapsible `thinking` block, streamed
  *                           (deltas accumulate like text); closed on
  *                           `message_complete` / `turn_ended`.
@@ -152,6 +153,10 @@ export interface ConversationState {
   readonly pendingSlashWasRunning: boolean;
   /** Ephemeral utility output, never part of the task transcript. */
   readonly commandResult: CommandRunItem | null;
+  /** Current transient Mod notification; never added to transcript items. */
+  readonly modToast: { readonly plugin: string; readonly text: string; readonly timeoutMs: number; readonly sequence: number } | null;
+  /** Insertion-ordered pinned Mod status lines, one per plugin. */
+  readonly modStatuses: readonly { readonly plugin: string; readonly text: string }[];
   /** Stable id of the optimistic `/compact` status row awaiting a terminal event. */
   readonly activeCompactionId: string | null;
 }
@@ -175,6 +180,8 @@ export function emptyConversation(): ConversationState {
     pendingSlashPrompt: null,
     pendingSlashWasRunning: false,
     commandResult: null,
+    modToast: null,
+    modStatuses: [],
     activeCompactionId: null,
   };
 }
@@ -745,6 +752,26 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       if (event.is_error) return pushError(state, event.message);
       return pushNotice(state, event.message);
 
+    case 'ui_log':
+      return pushModLog(state, event.plugin, event.text);
+
+    case 'ui_toast':
+      return { ...state, modToast: { plugin: event.plugin, text: event.text,
+        timeoutMs: event.timeout_ms, sequence: (state.modToast?.sequence ?? 0) + 1 } };
+
+    case 'ui_status': {
+      const existing = state.modStatuses.findIndex((entry) => entry.plugin === event.plugin);
+      if (event.text === null) {
+        if (existing < 0) return state;
+        return { ...state, modStatuses: state.modStatuses.filter((entry) => entry.plugin !== event.plugin) };
+      }
+      if (existing < 0) return { ...state, modStatuses: [...state.modStatuses, { plugin: event.plugin, text: event.text }] };
+      if (state.modStatuses[existing]?.text === event.text) return state;
+      const modStatuses = state.modStatuses.slice();
+      modStatuses[existing] = { plugin: event.plugin, text: event.text };
+      return { ...state, modStatuses };
+    }
+
     // Oracle 2.1.270 folds the slice since the most recent fire and unions
     // those UUIDs with earlier folds. Streak is a label, not a required count
     // of boundaries in local history (which may start after a reconnect).
@@ -1136,6 +1163,19 @@ function pushNotice(state: ConversationState, message: string): ConversationStat
   const items = state.items.slice();
   closeThinking(items, state.openThinkingIndex);
   items.push({ type: 'narration', id: itemId(state.nextId), text: message, role: 'assistant' });
+  return {
+    ...state,
+    items,
+    openAssistantIndex: -1,
+    openThinkingIndex: -1,
+    nextId: state.nextId + 1,
+  };
+}
+
+function pushModLog(state: ConversationState, plugin: string, text: string): ConversationState {
+  const items = state.items.slice();
+  closeThinking(items, state.openThinkingIndex);
+  items.push({ type: 'mod-log', id: itemId(state.nextId), plugin, text });
   return {
     ...state,
     items,

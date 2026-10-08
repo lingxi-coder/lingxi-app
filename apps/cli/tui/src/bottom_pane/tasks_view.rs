@@ -230,9 +230,9 @@ impl TasksView {
                 "  "
             };
             let label = if self.monitors.contains(&r.task_id) {
-                r.description.clone()
+                r.description.display()
             } else {
-                r.command.clone().unwrap_or_else(|| r.description.clone())
+                r.command.as_ref().unwrap_or(&r.description).display()
             };
             let status = if r.awaiting_plan_approval {
                 "awaiting approval"
@@ -461,7 +461,7 @@ mod tests {
             task_id: id.to_string(),
             task_type: "local_bash".to_string(),
             status: status.to_string(),
-            description: desc.to_string(),
+            description: desc.into(),
             command: None,
             stage: None,
             error: None,
@@ -670,7 +670,19 @@ mod tests {
             .and_then(|view| view.as_any().downcast_ref::<TasksView>())
             .expect("tasks view remains mounted");
         assert_eq!(mounted.rows()[0].status, "completed");
-        assert_eq!(mounted.rows()[0].description, "new");
+        assert_eq!(mounted.rows()[0].description.display(), "new");
+    }
+
+    #[test]
+    fn source_task_description_is_displayed_without_losing_its_units() {
+        let units = [u16::from(b'd'), 0xD800, u16::from(b'c')];
+        let mut task = row("b00000001", "running", "");
+        task.description = client::protocol::text::ClientTextDto::from_code_units(units.to_vec());
+        let view = view(vec![task]);
+        let rendered = rendered_buffer(&view, 60, view.desired_height(60));
+
+        assert!(rendered.contains("d�c"), "{rendered}");
+        assert_eq!(view.rows()[0].description.code_units, units);
     }
 
     #[test]

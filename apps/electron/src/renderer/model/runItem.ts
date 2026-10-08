@@ -126,6 +126,14 @@ export interface MetaRunItem {
   readonly files?: TurnFileChange[];
 }
 
+/** A Mod log line shown as a dim transcript row, separate from model text. */
+export interface ModLogRunItem {
+  readonly type: 'mod-log';
+  readonly id: string;
+  readonly plugin: string;
+  readonly text: string;
+}
+
 /** Output from a slash command — the engine's text, or a local command's own reply. */
 export interface CommandRunItem {
   readonly type: 'command';
@@ -207,6 +215,7 @@ export type RunItem =
   | NarrationRunItem
   | ToolRunItem
   | MetaRunItem
+  | ModLogRunItem
   | AudioRunItem
   | ThinkingRunItem
   | CommandRunItem

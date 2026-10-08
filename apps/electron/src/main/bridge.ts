@@ -738,7 +738,10 @@ export class SessionRuntime {
       // buffer without bound or replay stale cumulative totals on reload.
       const replay = event.type === 'status_snapshot'
         ? this.replayEvents.filter(({ event: retained }) => retained.type !== 'status_snapshot')
-        : this.replayEvents;
+        : event.type === 'ui_status'
+          ? this.replayEvents.filter(({ event: retained }) =>
+              retained.type !== 'ui_status' || retained.plugin !== event.plugin)
+          : this.replayEvents;
       this.replayEvents = [...replay, envelope];
     }
     return envelope;
@@ -1290,9 +1293,13 @@ export class SessionRuntime {
       packagedCredentialBoundary: Boolean(this.opts.isPackaged),
     });
 
+    const environment = buildBridgeEnvironment(process.env, launch.apiBaseUrl);
+    // The packaged Electron executable has Node mode, so Mod workers do not
+    // depend on a separate system Node installation.
+    environment.LINGXI_MOD_NODE_EXECUTABLE = process.execPath;
     const child = spawn(bin, args, {
       cwd: launch.workspace,
-      env: buildBridgeEnvironment(process.env, launch.apiBaseUrl),
+      env: environment,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       detached: process.platform !== 'win32',

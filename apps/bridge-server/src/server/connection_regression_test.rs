@@ -324,24 +324,24 @@ async fn cancelled_cron_request_is_removed_from_the_replay_buffer() {
 }
 
 struct InputDriver {
-    entries: mpsc::UnboundedSender<(String, Vec<ImageRefDto>, CancellationToken)>,
+    entries: mpsc::UnboundedSender<(Utf16JsonProjection, Vec<ImageRefDto>, CancellationToken)>,
     release_seed: Notify,
 }
 #[async_trait]
 impl TurnDriver for InputDriver {
-    async fn run_turn(&self, _: String) {
+    async fn run_turn(&self, _: Utf16JsonProjection) {
         panic!("metadata input must keep its complete entrypoint");
     }
     async fn run_turn_with_images_and_cancel(
         &self,
-        text: String,
+        text: Utf16JsonProjection,
         images: Vec<ImageRefDto>,
         cancel: CancellationToken,
     ) {
         self.entries
             .send((text.clone(), images, cancel.clone()))
             .unwrap();
-        if text == "seed" {
+        if text.string_units("") == Some("seed".encode_utf16().collect()) {
             self.release_seed.notified().await;
         } else {
             cancel.cancelled().await;
@@ -352,7 +352,7 @@ impl TurnDriver for InputDriver {
 fn input_connection() -> (
     BridgeConnection,
     Arc<InputDriver>,
-    mpsc::UnboundedReceiver<(String, Vec<ImageRefDto>, CancellationToken)>,
+    mpsc::UnboundedReceiver<(Utf16JsonProjection, Vec<ImageRefDto>, CancellationToken)>,
 ) {
     let (entries, receiver) = mpsc::unbounded_channel();
     let driver = Arc::new(InputDriver {
@@ -364,8 +364,12 @@ fn input_connection() -> (
     (connection, driver, receiver)
 }
 async fn input_started(
-    receiver: &mut mpsc::UnboundedReceiver<(String, Vec<ImageRefDto>, CancellationToken)>,
-) -> (String, Vec<ImageRefDto>, CancellationToken) {
+    receiver: &mut mpsc::UnboundedReceiver<(
+        Utf16JsonProjection,
+        Vec<ImageRefDto>,
+        CancellationToken,
+    )>,
+) -> (Utf16JsonProjection, Vec<ImageRefDto>, CancellationToken) {
     tokio::time::timeout(Duration::from_secs(2), receiver.recv())
         .await
         .unwrap()
@@ -402,7 +406,10 @@ async fn queued_images_and_turn_id_survive_mid_turn_drain_and_targeted_cancel() 
     );
     driver.release_seed.notify_one();
     let (text, attachments, follow_cancel) = input_started(&mut entries).await;
-    assert_eq!(text, "follow-up");
+    assert_eq!(
+        text.string_units(""),
+        Some("follow-up".encode_utf16().collect())
+    );
     assert_eq!(attachments, images());
     assert_eq!(connection.active_turn.turn_id(), Some(2));
     assert!(

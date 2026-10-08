@@ -355,6 +355,9 @@ export type ClientCommand =
   | { type: 'resume_session'; session_id: string; cwd?: string }
   | { type: 'list_sessions'; limit?: number }
   | { type: 'fork_session'; session_id: string; target_mode: SessionModeDto }
+  // Explicit UI mount lifecycle; transport hello/close does not imply an attach.
+  | { type: 'ui_attach'; surface: 'desktop' | 'mobile' | 'vscode'; client_id: string }
+  | { type: 'ui_detach'; client_id: string }
   // ── Auth + session control ────────────────────────────────────────────────
   | { type: 'login' }
   | { type: 'logout' }
@@ -2053,6 +2056,9 @@ export type ClientEvent =
   | { type: 'message_identity'; message_id: string }
   | { type: 'message_retracted'; message_id: string }
   | { type: 'system_notice'; message: string; is_error: boolean }
+  | { type: 'ui_log'; plugin: string; text: string }
+  | { type: 'ui_toast'; plugin: string; text: string; timeout_ms: number }
+  | { type: 'ui_status'; plugin: string; text: string | null }
   | { type: 'scheduled_task_fire'; message: string }
   | {
       type: 'loop_wakeup';

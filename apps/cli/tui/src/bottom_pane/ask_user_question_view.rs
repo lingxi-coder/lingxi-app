@@ -19,9 +19,9 @@
 //!   option's checkmark; `Enter` confirms the whole set and advances. An empty
 //!   set falls back to the highlighted option so a question is never answered
 //!   blank.
-//! - On the LAST question, confirm resolves the whole answer map (question text
-//!   → chosen label, multi-select labels `", "`-joined) through `resp_tx` and
-//!   reports [`ViewOutcome::Accepted`].
+//! - On the LAST question, confirm resolves ordered source-string pairs through
+//!   `resp_tx` (multi-select labels are `", "`-joined) and reports
+//!   [`ViewOutcome::Accepted`].
 //! - `Esc` cancels: `resp_tx` is dropped unsent, which the host resolver maps
 //!   to a skip/error the way a dropped permission channel maps to `Deny`.
 //!
@@ -34,11 +34,12 @@
 //! (`tengu_ask_user_question_afk_*`) is the remaining step.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use client::protocol::text::ClientTextDto;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -46,13 +47,61 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use tokio::sync::oneshot;
 use tool_api::ask_user_question::{
-    join_answer_labels, AskQuestion, AskUserQuestionExchange, ASK_MIDDOT,
+    join_answer_labels as join_answer_projections, AskQuestion, AskUserQuestionExchange, ASK_MIDDOT,
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::bottom_pane::dialog_view::centered_rect;
 use crate::bottom_pane::view::{BottomPaneView, ViewAction, ViewOutcome};
 use crate::renderable::Renderable;
+
+/// Exact text carried by this presentation widget. Display strings are made
+/// only by the rendering methods; answer identity remains the original units.
+fn client_text_from_projection(value: &Utf16JsonProjection) -> ClientTextDto {
+    ClientTextDto::from_code_units(
+        value
+            .string_units("")
+            .expect("AskUserQuestion text is a root-string projection"),
+    )
+}
+
+fn projection_from_client_text(value: &ClientTextDto) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&value.code_units),
+        value.code_units.clone(),
+    )
+    .expect("display is derived from exact AskUserQuestion UTF-16 units")
+}
+
+#[derive(Clone)]
+struct TuiAskOption {
+    label: ClientTextDto,
+}
+
+#[derive(Clone)]
+struct TuiAskQuestion {
+    question: ClientTextDto,
+    header: ClientTextDto,
+    options: Vec<TuiAskOption>,
+    multi_select: bool,
+}
+
+impl From<AskQuestion> for TuiAskQuestion {
+    fn from(question: AskQuestion) -> Self {
+        Self {
+            question: client_text_from_projection(&question.question),
+            header: client_text_from_projection(&question.header),
+            options: question
+                .options
+                .into_iter()
+                .map(|option| TuiAskOption {
+                    label: client_text_from_projection(&option.label),
+                })
+                .collect(),
+            multi_select: question.multi_select,
+        }
+    }
+}
 
 /// Per-question selection state.
 struct QuestionState {
@@ -87,15 +136,15 @@ impl QuestionState {
 /// The live `AskUserQuestion` selection widget.
 pub struct AskUserQuestionView {
     /// The questions being walked (immutable prompt data).
-    questions: Vec<AskQuestion>,
+    questions: Vec<TuiAskQuestion>,
     /// Per-question selection state (parallel to `questions`).
     states: Vec<QuestionState>,
     /// Which question is active.
     current: usize,
-    /// Answers committed for already-confirmed questions (question → label(s)).
-    answers: HashMap<String, String>,
+    /// Exact question/answer projections for already-confirmed questions.
+    answers: Vec<(ClientTextDto, ClientTextDto)>,
     /// One-shot reply channel, consumed by the final submit.
-    resp_tx: Option<oneshot::Sender<HashMap<String, String>>>,
+    resp_tx: Option<oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>>,
     /// The auto-continue idle window; `None` ⇒ `never` (no countdown).
     timeout: Option<Duration>,
     /// When the prompt appeared, for the countdown remaining-time math.
@@ -129,6 +178,10 @@ impl AskUserQuestionView {
             timeout_secs,
             resp_tx,
         } = exchange;
+        let questions = questions
+            .into_iter()
+            .map(TuiAskQuestion::from)
+            .collect::<Vec<_>>();
         let states = questions
             .iter()
             .map(|q| QuestionState::new(q.options.len()))
@@ -138,7 +191,7 @@ impl AskUserQuestionView {
             questions,
             states,
             current: 0,
-            answers: HashMap::new(),
+            answers: Vec::new(),
             resp_tx: Some(resp_tx),
             timeout,
             started: Instant::now(),
@@ -147,7 +200,7 @@ impl AskUserQuestionView {
     }
 
     /// The active question.
-    fn question(&self) -> &AskQuestion {
+    fn question(&self) -> &TuiAskQuestion {
         &self.questions[self.current]
     }
 
@@ -171,9 +224,9 @@ impl AskUserQuestionView {
         self.state().editing_other
     }
 
-    fn other_answer_text(&self) -> Option<String> {
+    fn other_answer_text(&self) -> Option<ClientTextDto> {
         let trimmed = self.state().other_text.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
+        (!trimmed.is_empty()).then(|| ClientTextDto::from_utf8(trimmed))
     }
 
     fn open_other_editor(&mut self) -> ViewOutcome {
@@ -244,11 +297,11 @@ impl AskUserQuestionView {
     /// the highlighted label for single-select, or the `", "`-joined checked
     /// labels for multi-select (falling back to the highlighted label when
     /// nothing is checked, so a question is never answered blank).
-    fn active_answer(&self) -> String {
+    fn active_answer(&self) -> ClientTextDto {
         let q = self.question();
         let st = self.state();
         if q.multi_select {
-            let picked: Vec<String> = q
+            let picked: Vec<Utf16JsonProjection> = q
                 .options
                 .iter()
                 .zip(&st.checked)
@@ -257,7 +310,7 @@ impl AskUserQuestionView {
             let mut picked = picked;
             if st.other_selected {
                 if let Some(other) = self.other_answer_text() {
-                    picked.push(other);
+                    picked.push(projection_from_client_text(&other));
                 }
             }
             if picked.is_empty() {
@@ -268,7 +321,7 @@ impl AskUserQuestionView {
                     q.options[st.highlighted].label.clone()
                 }
             } else {
-                join_answer_labels(&picked)
+                client_text_from_projection(&join_answer_projections(&picked))
             }
         } else if st.highlighted == self.other_index() {
             self.other_answer_text()
@@ -284,7 +337,7 @@ impl AskUserQuestionView {
     fn confirm_and_advance(&mut self) -> ViewOutcome {
         let answer = self.active_answer();
         self.answers
-            .insert(self.question().question.clone(), answer);
+            .push((self.question().question.clone(), answer));
         if self.current + 1 < self.questions.len() {
             self.current += 1;
             ViewOutcome::Pending
@@ -293,11 +346,20 @@ impl AskUserQuestionView {
         }
     }
 
-    /// Deliver the collected answer map through the one-shot channel (first
+    /// Deliver the collected answer pairs through the one-shot channel (first
     /// resolution only) and report acceptance.
     fn submit(&mut self) -> ViewOutcome {
         if let Some(tx) = self.resp_tx.take() {
-            let _ = tx.send(std::mem::take(&mut self.answers));
+            let answers = std::mem::take(&mut self.answers)
+                .into_iter()
+                .map(|(question, answer)| {
+                    (
+                        projection_from_client_text(&question),
+                        projection_from_client_text(&answer),
+                    )
+                })
+                .collect();
+            let _ = tx.send(answers);
         }
         ViewOutcome::Accepted(ViewAction::Selected(self.current))
     }
@@ -347,10 +409,10 @@ impl AskUserQuestionView {
             String::new()
         };
         lines.push(Line::from(Span::styled(
-            format!("[{}]{progress}", q.header),
+            format!("[{}]{progress}", q.header.display()),
             Style::default().add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(q.question.clone()));
+        lines.push(Line::from(q.question.display()));
         lines.push(Line::from(""));
 
         if st.editing_other {
@@ -383,7 +445,7 @@ impl AskUserQuestionView {
                     Style::default()
                 };
                 lines.push(Line::from(Span::styled(
-                    format!("{marker} {checkbox}{}", opt.label),
+                    format!("{marker} {checkbox}{}", opt.label.display()),
                     style,
                 )));
             }
@@ -654,8 +716,8 @@ mod tests {
 
     fn q(question: &str, header: &str, labels: &[&str], multi: bool) -> AskQuestion {
         AskQuestion {
-            question: question.to_string(),
-            header: header.to_string(),
+            question: question.into(),
+            header: header.into(),
             options: labels
                 .iter()
                 .map(|l| AskOption::new(*l, format!("desc {l}")))
@@ -669,7 +731,7 @@ mod tests {
         timeout_secs: Option<u64>,
     ) -> (
         AskUserQuestionView,
-        oneshot::Receiver<HashMap<String, String>>,
+        oneshot::Receiver<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>,
     ) {
         let (resp_tx, resp_rx) = oneshot::channel();
         let view = AskUserQuestionView::new(AskUserQuestionExchange {
@@ -682,6 +744,17 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn answer_for<'a>(
+        answers: &'a [(Utf16JsonProjection, Utf16JsonProjection)],
+        question: &str,
+    ) -> Option<&'a Utf16JsonProjection> {
+        let question_units = question.encode_utf16().collect::<Vec<_>>();
+        answers
+            .iter()
+            .find(|(key, _)| key.string_units("").as_deref() == Some(question_units.as_slice()))
+            .map(|(_, answer)| answer)
     }
 
     fn buffer_text(view: &AskUserQuestionView, area: Rect) -> String {
@@ -766,7 +839,52 @@ mod tests {
             ViewOutcome::Accepted(ViewAction::Selected(_))
         ));
         let answers = rx.blocking_recv().expect("submitted");
-        assert_eq!(answers.get("Pick?").map(String::as_str), Some("Beta"));
+        assert_eq!(
+            answer_for(&answers, "Pick?").and_then(|answer| answer.string_at("")),
+            Some("Beta")
+        );
+    }
+
+    #[test]
+    fn rendered_replacement_text_never_becomes_the_answer_identity() {
+        let question_units = vec![b'Q' as u16, 0xd800, b'?' as u16];
+        let first_label_units = vec![b'A' as u16, 0xd800];
+        let selected_label_units = vec![b'A' as u16, 0xd801];
+        let projection = |units: Vec<u16>| {
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).unwrap()
+        };
+        let question = projection(question_units.clone());
+        let selected_label = projection(selected_label_units.clone());
+        let (mut view, rx) = exchange(
+            vec![AskQuestion {
+                question,
+                header: "Choice".into(),
+                options: vec![
+                    AskOption {
+                        label: projection(first_label_units),
+                        description: "first".into(),
+                        preview: None,
+                    },
+                    AskOption {
+                        label: selected_label,
+                        description: "second".into(),
+                        preview: None,
+                    },
+                ],
+                multi_select: false,
+            }],
+            None,
+        );
+
+        let rendered = buffer_text(&view, Rect::new(0, 0, 60, view.desired_height(60)));
+        assert!(rendered.contains('\u{fffd}'));
+        view.handle_key(press(KeyCode::Down));
+        view.handle_key(press(KeyCode::Enter));
+        let answers = rx.blocking_recv().expect("submitted");
+
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].0.string_units(""), Some(question_units));
+        assert_eq!(answers[0].1.string_units(""), Some(selected_label_units));
     }
 
     #[test]
@@ -781,7 +899,10 @@ mod tests {
             ViewOutcome::Accepted(ViewAction::Selected(_))
         ));
         let answers = rx.blocking_recv().expect("submitted");
-        assert_eq!(answers.get("Pick?").map(String::as_str), Some("Gamma"));
+        assert_eq!(
+            answer_for(&answers, "Pick?").and_then(|answer| answer.string_at("")),
+            Some("Gamma")
+        );
     }
 
     #[test]
@@ -810,7 +931,7 @@ mod tests {
         ));
         let answers = rx.blocking_recv().expect("submitted");
         assert_eq!(
-            answers.get("Pick?").map(String::as_str),
+            answer_for(&answers, "Pick?").and_then(|answer| answer.string_at("")),
             Some("自由输入 paste")
         );
     }
@@ -863,7 +984,10 @@ mod tests {
         assert!(matches!(outcome, ViewOutcome::Accepted(_)));
         let answers = rx.blocking_recv().expect("submitted");
         // Labels join in OPTION order (A then C), not selection order.
-        assert_eq!(answers.get("Which?").map(String::as_str), Some("A, C"));
+        assert_eq!(
+            answer_for(&answers, "Which?").and_then(|answer| answer.string_at("")),
+            Some("A, C")
+        );
     }
 
     #[test]
@@ -899,7 +1023,10 @@ mod tests {
             ViewOutcome::Accepted(_)
         ));
         let answers = rx.blocking_recv().expect("submitted");
-        assert_eq!(answers.get("Which?").map(String::as_str), Some("A, 自定义"));
+        assert_eq!(
+            answer_for(&answers, "Which?").and_then(|answer| answer.string_at("")),
+            Some("A, 自定义")
+        );
     }
 
     #[test]
@@ -921,7 +1048,10 @@ mod tests {
             ViewOutcome::Accepted(_)
         ));
         let answers = rx.blocking_recv().expect("submitted");
-        assert_eq!(answers.get("Which?").map(String::as_str), Some("A"));
+        assert_eq!(
+            answer_for(&answers, "Which?").and_then(|answer| answer.string_at("")),
+            Some("A")
+        );
     }
 
     #[test]
@@ -930,7 +1060,10 @@ mod tests {
         // No checkmarks; Enter falls back to the highlighted option.
         view.handle_key(press(KeyCode::Enter));
         let answers = rx.blocking_recv().expect("submitted");
-        assert_eq!(answers.get("Which?").map(String::as_str), Some("A"));
+        assert_eq!(
+            answer_for(&answers, "Which?").and_then(|answer| answer.string_at("")),
+            Some("A")
+        );
     }
 
     // ===== multi-question walk =====
@@ -958,8 +1091,14 @@ mod tests {
             ViewOutcome::Accepted(_)
         ));
         let answers = rx.blocking_recv().expect("submitted");
-        assert_eq!(answers.get("Q1?").map(String::as_str), Some("A1"));
-        assert_eq!(answers.get("Q2?").map(String::as_str), Some("B2"));
+        assert_eq!(
+            answer_for(&answers, "Q1?").and_then(|answer| answer.string_at("")),
+            Some("A1")
+        );
+        assert_eq!(
+            answer_for(&answers, "Q2?").and_then(|answer| answer.string_at("")),
+            Some("B2")
+        );
     }
 
     // ===== cancel =====
@@ -1084,7 +1223,10 @@ mod tests {
         assert!(matches!(outcome, ViewOutcome::Accepted(_)));
         let answers = rx.blocking_recv().expect("auto-submitted");
         // Only the confirmed Q1 is present; Q2 is NOT back-filled.
-        assert_eq!(answers.get("Q1?").map(String::as_str), Some("A1"));
-        assert_eq!(answers.get("Q2?"), None);
+        assert_eq!(
+            answer_for(&answers, "Q1?").and_then(|answer| answer.string_at("")),
+            Some("A1")
+        );
+        assert_eq!(answer_for(&answers, "Q2?"), None);
     }
 }

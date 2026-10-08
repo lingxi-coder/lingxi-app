@@ -36,8 +36,8 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
         ask_user_question_rx,
         computer_access_rx,
         AppCallbacks {
-            on_submit: Box::new(|_, _, _| {}),
-            on_queue_prompt: Box::new(|_, _, _| {}),
+            on_submit: Box::new(|_, _, _, _| {}),
+            on_queue_prompt: Box::new(|_, _, _, _| {}),
             on_switch_model: Box::new(|_, _| {}),
             on_web_action: Box::new(|_| {}),
             on_fusion_setup_action: Box::new(|_| {}),
@@ -45,6 +45,7 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
             on_permission_action: Box::new(|_| {}),
             on_plugin_action: Box::new(|_| {}),
             on_reload_plugins: Box::new(|| {}),
+            on_refresh_command_catalog: Box::new(|| {}),
             on_bash: Box::new(|_| {}),
             on_compact: Box::new(|_, _| {}),
             on_summarize: Box::new(|_, _, _, _| {}),
@@ -60,6 +61,20 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
         },
     );
     app
+}
+
+#[test]
+fn opening_command_popup_requests_a_fresh_described_catalog() {
+    let mut app = test_app(Vec::new());
+    let refreshes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = refreshes.clone();
+    app.callbacks.on_refresh_command_catalog = Box::new(move || {
+        observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    app.on_key(press(KeyCode::Char('/')));
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    app.on_key(press(KeyCode::Char('h')));
+    assert_eq!(refreshes.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 fn typ(app: &mut RataApp, s: &str) {
@@ -171,14 +186,14 @@ fn typing_then_submit_echoes_user_and_returns_prompt() {
 fn submit_while_running_returns_pending_prompt_without_replacing_turn() {
     let mut app = test_app(Vec::new());
     typ(&mut app, "first");
-    let ChatOutcome::Submit(_, _, active) = app.on_key(press(KeyCode::Enter)) else {
+    let ChatOutcome::Submit(_, _, _, active) = app.on_key(press(KeyCode::Enter)) else {
         panic!("first prompt starts the turn");
     };
     typ(&mut app, "pending");
 
     assert!(matches!(
         app.on_key(press(KeyCode::Enter)),
-        ChatOutcome::QueuePrompt(ref prompt, ref images, _)
+        ChatOutcome::QueuePrompt(ref prompt, _, ref images, _)
             if prompt == "pending" && images.is_empty()
     ));
     assert!(!active.is_cancelled());
@@ -216,7 +231,7 @@ fn streaming_deltas_grow_reply_and_turn_ended_clears_token() {
 fn ctrl_c_keeps_turn_owned_until_terminal_then_needs_two_presses_to_quit() {
     let mut app = test_app(Vec::new());
     app.on_key(press(KeyCode::Char('x')));
-    let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
+    let ChatOutcome::Submit(_, _, _, token) = app.on_key(press(KeyCode::Enter)) else {
         panic!("expected submit");
     };
     assert!(!token.is_cancelled());
@@ -481,7 +496,7 @@ fn idle_double_escape_routes_to_rewind() {
 fn esc_interrupts_running_turn_then_quits_when_idle() {
     let mut app = test_app(Vec::new());
     typ(&mut app, "go");
-    let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
+    let ChatOutcome::Submit(_, _, _, token) = app.on_key(press(KeyCode::Enter)) else {
         panic!("expected submit");
     };
     app.apply_turn_event(TurnEvent::TurnStarted);
@@ -520,7 +535,7 @@ fn esc_interrupts_running_turn_then_quits_when_idle() {
 fn esc_routes_to_active_view_before_the_interrupt_policy() {
     let mut app = test_app(Vec::new());
     typ(&mut app, "go");
-    let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
+    let ChatOutcome::Submit(_, _, _, token) = app.on_key(press(KeyCode::Enter)) else {
         panic!("expected submit");
     };
     let (exchange, resp_rx) = tool_exchange();
@@ -564,7 +579,7 @@ fn esc_routes_to_active_view_before_the_interrupt_policy() {
 fn esc_dismisses_completion_before_the_interrupt_policy() {
     let mut app = test_app(Vec::new());
     typ(&mut app, "go");
-    let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
+    let ChatOutcome::Submit(_, _, _, token) = app.on_key(press(KeyCode::Enter)) else {
         panic!("expected submit");
     };
     // Layer 2 — the completion popup owns Esc while open.
@@ -589,7 +604,7 @@ fn esc_dismisses_completion_before_the_interrupt_policy() {
 fn ctrl_c_cancels_turn_and_dismisses_active_view() {
     let mut app = test_app(Vec::new());
     typ(&mut app, "go");
-    let ChatOutcome::Submit(_, _, token) = app.on_key(press(KeyCode::Enter)) else {
+    let ChatOutcome::Submit(_, _, _, token) = app.on_key(press(KeyCode::Enter)) else {
         panic!("expected submit");
     };
     let (exchange, resp_rx) = tool_exchange();
@@ -692,13 +707,14 @@ fn slash_help_opens_screen_view_without_sending_a_prompt() {
     let outcome = app.on_key(press(KeyCode::Enter));
     // Recognized command: no Submit; a focused ScreenView opens instead
     // of dumping text into scrollback (plan Phase 4 view-stack routing).
-    assert!(matches!(outcome, ChatOutcome::Continue));
+    assert!(matches!(outcome, ChatOutcome::RefreshCommandCatalog));
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ScreenView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>()
+    );
     assert!(cells(&app).is_empty(), "no scrollback dump");
     assert!(!app.chat_widget.turn_running());
 }
@@ -707,11 +723,12 @@ fn slash_help_opens_screen_view_without_sending_a_prompt() {
 fn screen_view_owns_keys_scrolls_and_esc_closes_without_quitting() {
     let mut app = test_app(Vec::new());
     submit_command(&mut app, "/help");
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ScreenView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>()
+    );
     // Keys go to the view, not the composer.
     app.on_key(press(KeyCode::Char('x')));
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
@@ -783,6 +800,82 @@ fn slash_clear_empties_messages() {
 }
 
 #[test]
+fn session_clear_drops_render_tree_and_retries_the_same_ui_site_request() {
+    let mut app = test_app(Vec::new());
+    app.request_mod_ui_render(80, 24);
+    let original_request = app
+        .mod_ui_render_input
+        .clone()
+        .expect("initial site request");
+    let old_revision = app.mod_ui_render_revision;
+    let old_generation = app.mod_ui_generation_tracker.generation().unwrap_or(0);
+    let max_rows = original_request
+        .number_at("/props/maxRows")
+        .expect("measured row budget") as u16;
+    assert!(max_rows > 0, "test viewport leaves an AbovePrompt row");
+    let baseline_height = app.chat_widget.desired_height(80);
+    let old_tree_json = serde_json::json!({
+        "type":"Button",
+        "props":{"key":"stale","label":"Stale"},
+        "children":[],
+        "press":{"plugin":"test-mod","handle":1,"workerEpoch":"old-worker","renderRevision":1}
+    });
+    let old_tree =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&old_tree_json)
+            .expect("test tree is valid JSON");
+    app.chat_widget.set_mod_ui_render_tree(&old_tree, max_rows);
+    app.mod_ui_button_actions =
+        crate::mod_ui_render::tree_buttons(&old_tree, old_revision.saturating_add(1)).unwrap();
+    assert_eq!(app.mod_ui_button_actions.len(), 1);
+    let rendered_height = app.chat_widget.desired_height(80);
+    assert!(
+        rendered_height > baseline_height,
+        "the old tree occupied a row"
+    );
+    app.mod_ui_render_in_flight = true;
+
+    assert!(matches!(
+        submit_command(&mut app, "/clear"),
+        ChatOutcome::ClearSession(None)
+    ));
+    let home = tempfile::tempdir().unwrap();
+    app.apply_turn_event(TurnEvent::SessionCleared {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        home: home.path().to_owned(),
+        cwd: home.path().to_owned(),
+    });
+
+    assert!(
+        app.mod_ui_render_input.is_none(),
+        "clear invalidates the site cache"
+    );
+    assert_ne!(app.mod_ui_render_revision, old_revision);
+    assert!(app.mod_ui_button_actions.is_empty());
+    assert!(
+        app.chat_widget.desired_height(80) < rendered_height,
+        "the stale tree is removed before the next site request"
+    );
+    app.request_mod_ui_render(80, 24);
+    assert_eq!(app.mod_ui_render_input, Some(original_request.clone()));
+    app.mod_ui_render_tx
+        .send((
+            old_generation,
+            old_revision,
+            original_request,
+            Ok(serde_json::json!({
+                "type":"Text","props":{},"children":["stale old tree"]
+            })),
+        ))
+        .unwrap();
+    app.drain_mod_ui_render_results();
+    assert!(
+        app.chat_widget.desired_height(80) < rendered_height,
+        "a response from before SessionCleared cannot restore the old tree"
+    );
+    assert!(app.mod_ui_render_pending.is_none());
+}
+
+#[test]
 fn slash_exit_quits() {
     let mut app = test_app(Vec::new());
     assert!(matches!(
@@ -801,11 +894,12 @@ fn slash_doctor_and_mcp_open_screen_views() {
         submit_command(&mut app, "/mcp"),
         ChatOutcome::Continue
     ));
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ScreenView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>()
+    );
     // Focused views, not scrollback dumps; and no prompt turn started.
     assert!(cells(&app).is_empty());
     assert!(!app.chat_widget.turn_running());
@@ -862,11 +956,12 @@ fn slash_model_with_no_models_opens_picker_with_in_view_empty_message() {
         submit_command(&mut app, "/model"),
         ChatOutcome::Continue
     ));
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ModelPickerView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>()
+    );
     assert!(cells(&app).is_empty(), "no scrollback dump");
     let terminal = draw_viewport(&mut app);
     let all = buffer_rows(&terminal).join("\n");
@@ -889,11 +984,12 @@ fn slash_model_opens_picker_and_enter_switches() {
         submit_command(&mut app, "/model"),
         ChatOutcome::Continue
     ));
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ModelPickerView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>()
+    );
     // Picker owns the keyboard: move up to the first (Opus) row and confirm.
     app.on_key(press(KeyCode::Up));
     let outcome = app.on_key(press(KeyCode::Enter));
@@ -902,40 +998,44 @@ fn slash_model_opens_picker_and_enter_switches() {
         ChatOutcome::SwitchModel(ref m, ref p)
             if m == "claude-opus-4-8" && p.as_deref() == Some("anthropic")
     ));
-    assert!(!app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ModelPickerView>());
+    assert!(
+        !app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>()
+    );
 }
 
 #[test]
 fn model_picker_esc_cancels_without_switching() {
     let mut app = app_with_models();
     submit_command(&mut app, "/model");
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ModelPickerView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>()
+    );
     let outcome = app.on_key(press(KeyCode::Esc));
     assert!(matches!(outcome, ChatOutcome::Continue));
-    assert!(!app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ModelPickerView>());
+    assert!(
+        !app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>()
+    );
 }
 
 #[test]
 fn permission_stacks_over_picker_and_returns_keys_to_it() {
     let mut app = app_with_models();
     submit_command(&mut app, "/model");
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ModelPickerView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>()
+    );
     app.apply_turn_event(TurnEvent::TurnStarted);
     // A permission request arriving while the picker is open stacks on
     // top and owns the keyboard.
@@ -949,11 +1049,12 @@ fn permission_stacks_over_picker_and_returns_keys_to_it() {
         PermissionResponse::AllowOnce
     );
     // The picker beneath survives and gets the keyboard back.
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ModelPickerView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>()
+    );
     app.on_key(press(KeyCode::Up));
     let outcome = app.on_key(press(KeyCode::Enter));
     assert!(matches!(outcome, ChatOutcome::SwitchModel(ref m, _) if m == "claude-opus-4-8"));
@@ -972,8 +1073,8 @@ fn permission_stacks_over_picker_and_returns_keys_to_it() {
 use ratatui::buffer::Cell;
 use ratatui::layout::Position;
 
-use crate::terminal::test_support::TestWriteBackend;
 use crate::terminal::Terminal;
+use crate::terminal::test_support::TestWriteBackend;
 
 /// A bottom-anchored custom terminal over an 80x24 test backend with its
 /// viewport sized to `viewport` rows, mirroring the production runtime
@@ -1039,13 +1140,14 @@ fn slash_hooks_agents_and_quit_route_as_commands() {
         submit_command(&mut app, "/hooks"),
         ChatOutcome::Continue
     ));
-    assert!(app
-        .chat_widget
-        .bottom_pane()
-        .view_stack()
-        .contains::<ScreenView>());
+    assert!(
+        app.chat_widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ScreenView>()
+    );
     app.on_key(press(KeyCode::Esc)); // close /hooks
-                                     // `/agents` prints the 2.1.205 removed-notice (no picker view).
+    // `/agents` prints the 2.1.205 removed-notice (no picker view).
     assert!(matches!(
         submit_command(&mut app, "/agents"),
         ChatOutcome::Continue

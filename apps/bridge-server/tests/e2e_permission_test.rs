@@ -68,7 +68,7 @@ struct OrchestratorTurnDriver {
 
 #[async_trait]
 impl TurnDriver for OrchestratorTurnDriver {
-    async fn run_turn(&self, prompt: String) {
+    async fn run_turn(&self, prompt: lingxi_core::types::utf16_json::Utf16JsonProjection) {
         // Errors surface as adapter `Error` events in the full server; here a
         // turn against the scripted mock always succeeds.
         let _ = self.orchestrator.run_turn_streaming(&prompt).await;
@@ -88,8 +88,8 @@ struct ReconnectIsolationDriver {
 
 #[async_trait]
 impl TurnDriver for ReconnectIsolationDriver {
-    async fn run_turn(&self, prompt: String) {
-        match prompt.as_str() {
+    async fn run_turn(&self, prompt: lingxi_core::types::utf16_json::Utf16JsonProjection) {
+        match prompt.string_at("").unwrap_or_default() {
             "first blocked turn" => {
                 self.first_started.notify_one();
                 self.release_first.notified().await;
@@ -307,7 +307,7 @@ async fn permission_request_event_then_approve_resolves_check() {
     let request_id = loop {
         match next_frame(&mut ws).await {
             Frame::Event(ClientEvent::TextDelta { text }) => {
-                assert_eq!(text, "let me run a tool");
+                assert_eq!(text.display(), "let me run a tool");
                 saw_text = true;
             }
             Frame::Event(ClientEvent::ToolUseStarted { tool, .. }) => {
@@ -476,7 +476,7 @@ async fn reconnect_does_not_receive_stale_frames_from_aborted_first_turn() {
 
     match next_frame_with_timeout(&mut second, Duration::from_secs(2)).await {
         Some(Frame::Event(ClientEvent::TextDelta { text })) => {
-            assert_eq!(text, "fresh-second-event");
+            assert_eq!(text.display(), "fresh-second-event");
         }
         other => panic!("expected only the second turn's event after reconnect, got {other:?}"),
     }

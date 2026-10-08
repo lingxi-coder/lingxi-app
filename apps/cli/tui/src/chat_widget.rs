@@ -40,7 +40,7 @@ use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::{RunningAgentStatus, TurnEvent};
 use tui_core::permission_bridge::PermissionExchange;
-use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
+use tui_core::theme::{Theme, ThemeName, ThemeSetting, theme_for};
 
 use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
 use crate::bottom_pane::computer_access_view::ComputerAccessView;
@@ -109,12 +109,24 @@ pub enum ChatOutcome {
     /// honoring the paired [`CancellationToken`] (the widget cancels it on
     /// Ctrl-C). Carries the image files queued for this turn (pasted paths,
     /// clipboard images, `/image`) so every Submit consumer receives them
-    /// atomically with the prompt.
-    Submit(String, Vec<std::path::PathBuf>, CancellationToken),
+    /// atomically with the prompt. The second `String` is an opaque row token
+    /// used to connect the visible row to its eventual persisted JSONL UUID.
+    Submit(
+        core::types::utf16_json::Utf16JsonProjection,
+        String,
+        Vec<std::path::PathBuf>,
+        CancellationToken,
+    ),
     /// A prompt submitted while the current turn is active. The embedding host
     /// places it in Rust's canonical `Next` queue instead of starting another
-    /// turn or replacing the current cancellation owner.
-    QueuePrompt(String, Vec<std::path::PathBuf>, CancellationToken),
+    /// turn or replacing the current cancellation owner. The second `String`
+    /// is an opaque row token used for persisted transcript identity.
+    QueuePrompt(
+        core::types::utf16_json::Utf16JsonProjection,
+        String,
+        Vec<std::path::PathBuf>,
+        CancellationToken,
+    ),
     /// Ctrl+V/Alt+V: read an IMAGE from the system clipboard. The read + PNG
     /// encode can take hundreds of ms, so the caller runs it OFF the render
     /// thread and feeds the result back via
@@ -160,6 +172,9 @@ pub enum ChatOutcome {
     /// agents, MCP, LSP), reporting the component tallies via
     /// `TurnEvent::SystemNotice` — mirroring claude-code's `refreshActivePlugins`.
     ReloadPlugins,
+    /// `/reload-skills` changed the live command registry; recompute the Mod
+    /// description projection off the render thread.
+    RefreshCommandCatalog,
     /// The user submitted a `!`-prefixed bash-mode command. The caller runs it
     /// through the sandboxed [`tool_api::bash_runner::BashRunner`] (no LLM
     /// turn) and folds the captured output back through
@@ -266,7 +281,10 @@ pub enum ChatOutcome {
     /// The caller installs the token with `TurnStartedWithCancel` once a
     /// dispatched model prompt owns the turn. Local results only emit a notice
     /// and leave any active model turn untouched.
-    DispatchSlash(String, PendingSlashDispatch),
+    DispatchSlash(
+        core::types::utf16_json::Utf16JsonProjection,
+        PendingSlashDispatch,
+    ),
     /// A held cross-session message was delivered. The caller should drive
     /// `OrchestratorHandle::run_async_hook_rewake` so the released body is
     /// injected without appending a synthetic user prompt.
@@ -327,6 +345,8 @@ fn is_live_turn_event(event: &TurnEvent) -> bool {
         TurnEvent::TextDelta(_)
             | TurnEvent::MessageIdentity(_)
             | TurnEvent::MessageRetracted(_)
+            | TurnEvent::TranscriptRowIdentity { .. }
+            | TurnEvent::AssistantTranscriptRowUuids { .. }
             | TurnEvent::ThinkingDelta(_)
             | TurnEvent::ToolUseStart { .. }
             | TurnEvent::ToolHeartbeat { .. }
@@ -355,6 +375,11 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         TurnEvent::TextDelta(delta) => FocusRefreshKind::AppendText(delta.clone()),
         TurnEvent::Attachment { .. }
         | TurnEvent::SystemNotice { .. }
+        | TurnEvent::UiLog { .. }
+        | TurnEvent::UiToast { .. }
+        | TurnEvent::UiStatus { .. }
+        | TurnEvent::TranscriptRowIdentity { .. }
+        | TurnEvent::AssistantTranscriptRowUuids { .. }
         | TurnEvent::BashOutput { .. }
         | TurnEvent::CompactionCompleted { .. }
         | TurnEvent::MessageIdentity(_)
@@ -831,6 +856,106 @@ impl ChatWidget {
         self.orchestrator = Some(handle);
     }
 
+    pub(crate) fn set_mod_ui_selection(
+        &self,
+        selection: Option<lingxi_core::host::ModUiSelection>,
+    ) {
+        if let Some(handle) = self.orchestrator.as_ref() {
+            handle.set_mod_ui_selection(selection);
+        }
+    }
+
+    /// Replace the currently rendered terminal `AbovePrompt` Mod tree.
+    pub(crate) fn set_mod_ui_render_tree(
+        &mut self,
+        tree: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        max_rows: u16,
+    ) {
+        let lines = crate::mod_ui_render::tree_lines(tree, max_rows).unwrap_or_default();
+        self.bottom_pane.set_mod_render_lines(lines, max_rows);
+    }
+
+    pub(crate) fn clear_mod_ui_render_tree(&mut self) {
+        self.bottom_pane.clear_mod_render_lines();
+    }
+
+    /// A live AbovePrompt control may take an otherwise unused prompt key only
+    /// when no composer draft, completion popup, or modal view owns it.
+    pub(crate) fn mod_ui_button_press_allowed(&self) -> bool {
+        self.bottom_pane.composer_is_empty()
+            && !self.bottom_pane.completion_is_open()
+            && !self.bottom_pane.has_active_view()
+    }
+
+    /// Remaining AbovePrompt rows inside the viewport after the live tail and
+    /// all other bottom-pane content have settled.
+    pub(crate) fn mod_ui_row_budget(
+        &self,
+        width: u16,
+        terminal_rows: u16,
+        is_fullscreen: bool,
+    ) -> u16 {
+        let viewport_rows = if is_fullscreen {
+            terminal_rows
+        } else {
+            terminal_rows.min(20)
+        };
+        let running = self.pane_status().running;
+        let above_pane = self
+            .live_tail_height(width)
+            .saturating_add(self.status_line_height());
+        self.bottom_pane.mod_ui_row_budget_for(
+            width,
+            running,
+            viewport_rows.saturating_sub(above_pane),
+        )
+    }
+
+    /// The `AbovePrompt` render-site fact exposed to Mods.
+    pub(crate) fn mod_ui_is_working(&self) -> bool {
+        self.current_turn.is_some()
+    }
+
+    /// Attribute a selection to one rendered transcript entry, if possible.
+    pub(crate) fn fullscreen_selection_request_id(
+        &self,
+        first_row: u16,
+        last_row: u16,
+        area: Rect,
+    ) -> Option<String> {
+        if self.brief_transcript {
+            return None;
+        }
+        let status_height = u16::try_from(self.status_line_lines().len())
+            .unwrap_or(u16::MAX)
+            .min(area.height);
+        let pane_height = self
+            .bottom_pane
+            .desired_height(area.width)
+            .min(area.height.saturating_sub(status_height));
+        let history_height = area.height.saturating_sub(status_height + pane_height);
+        if first_row < area.y || last_row >= area.y.saturating_add(history_height) {
+            return None;
+        }
+        let live_cwd = self
+            .hyperlink_cwd_provider
+            .as_ref()
+            .map(|provider| provider());
+        let snapshot_cwd = (!self.session.doctor.cwd.is_empty())
+            .then(|| std::path::Path::new(self.session.doctor.cwd.as_str()));
+        self.transcript
+            .request_id_for_fullscreen_rows(
+                usize::from(first_row - area.y),
+                usize::from(last_row - area.y),
+                usize::from(history_height),
+                area.width,
+                &self.theme,
+                crate::terminal::hyperlinks_supported(),
+                live_cwd.as_deref().or(snapshot_cwd),
+            )
+            .map(str::to_owned)
+    }
+
     /// Seed the below-composer permission-mode indicator from the resolved boot
     /// mode (claude-code `initialPermissionModeFromCLI`), and whether bypass is
     /// an available Shift+Tab cycle target (`--dangerously-skip-permissions` /
@@ -902,6 +1027,10 @@ impl ChatWidget {
                 .set_registry_commands(registry_slash_rows(&reg));
         }
         self.command_registry = Some(registry);
+    }
+
+    pub(crate) fn command_completion_is_open(&self) -> bool {
+        self.bottom_pane.completion_is_open() && self.bottom_pane.composer().text().starts_with('/')
     }
 
     /// Wire the persistent prompt-history store (`~/.lingxi/history.jsonl`,
@@ -1924,10 +2053,34 @@ impl ChatWidget {
             // SystemText`'s existing severity mapping).
             TurnEvent::SystemNotice { body, is_error } => {
                 self.transcript.push_message(RenderedMessage::SystemText {
-                    body,
+                    body: body.display(),
                     timestamp: 0,
                     is_error,
                 });
+            }
+            TurnEvent::UiLog { plugin, text } => {
+                self.transcript.push_message(RenderedMessage::SystemText {
+                    body: format!("{plugin}: {}", text.display()),
+                    timestamp: 0,
+                    is_error: false,
+                });
+            }
+            TurnEvent::UiToast {
+                plugin: _,
+                text,
+                timeout_ms,
+            } => {
+                self.bottom_pane.set_mod_toast(text, timeout_ms);
+            }
+            TurnEvent::UiStatus { plugin, text } => {
+                self.bottom_pane.set_mod_status(plugin, text);
+            }
+            TurnEvent::TranscriptRowIdentity { row_token, uuid } => {
+                self.transcript.identify_user_row(&row_token, uuid);
+            }
+            TurnEvent::AssistantTranscriptRowUuids { message_id, uuids } => {
+                self.transcript
+                    .identify_assistant_text_rows(message_id, &uuids);
             }
             TurnEvent::CommandCatalogRefreshed { commands } => {
                 self.bottom_pane.set_registry_commands(
@@ -1939,6 +2092,10 @@ impl ChatWidget {
                                 description: command.description,
                                 menu_description: command.menu_description,
                                 aliases: command.aliases,
+                                hidden: command.hidden,
+                                replaces_builtin: command.replaces_builtin,
+                                argument_hint: command.argument_hint,
+                                argument_names: command.argument_names,
                             },
                         )
                         .collect(),
@@ -1977,7 +2134,9 @@ impl ChatWidget {
                 // an indented `⎿` line so its inner work is visible under the
                 // Task cell (otherwise a subagent's execution is invisible).
                 self.transcript
-                    .push_message(RenderedMessage::SubagentActivity { text });
+                    .push_message(RenderedMessage::SubagentActivity {
+                        text: text.display(),
+                    });
             }
         }
         self.apply_focus_refresh(focus_refresh);
@@ -2519,51 +2678,69 @@ impl ChatWidget {
     /// registry. Returns `Some(outcome)` when the input resolves to a
     /// registered command (screen open, clear, exit, …), or `None` to fall
     /// through and send the input as a normal prompt.
-    pub fn handle_slash(&mut self, input: &str) -> Option<ChatOutcome> {
+    pub fn handle_slash(
+        &mut self,
+        input: core::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<ChatOutcome> {
         if self.session_clear_pending {
             return Some(ChatOutcome::Continue);
         }
-        if let Some((command, args)) = crate::command::resolve(input) {
-            // Record the exact `/name` token typed so an alias-shared handler can
-            // branch on the invoked alias (e.g. `/stats` → Stats tab).
-            self.invoked_slash = input
-                .trim()
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
-            return Some((command.run)(self, args));
+        let input_units = input.string_units("")?;
+        if let Ok(display_input) = String::from_utf16(&input_units) {
+            if let Some((command, args)) = crate::command::resolve(&display_input) {
+                self.invoked_slash = display_input
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                return Some((command.run)(self, args));
+            }
         }
-        // BUILTIN miss: a registry-backed command (`/loop`, a user command, a
-        // skill, a plugin/bundled command)? Echo the invocation and hand the raw
-        // input to the off-loop dispatcher. Anything the registry doesn't know
-        // falls through as a normal prompt — unchanged behavior for plain text
-        // that merely happens to start with `/`.
-        let name = input.trim().split_whitespace().next().unwrap_or("");
-        if self.bottom_pane.is_registry_command(name) {
-            self.invoked_slash = name.to_string();
+        // Keep exact command identity for registry lookup even when arguments or
+        // the command name contain isolated UTF-16 units. The parser's result is
+        // used only to find the name; dispatch receives the original full input.
+        let parsed = command_api::parse_slash_command(&input);
+        let parsed = match parsed {
+            Some(parsed)
+                if parsed
+                    .name
+                    .string_units("")
+                    .is_some_and(|name| !name.is_empty()) =>
+            {
+                parsed
+            }
+            _ if input_units.first().copied() == Some(b'/' as u16) => {
+                return Some(
+                    self.show_system_text("Commands are in the form `/command [args]`", false),
+                );
+            }
+            _ => return None,
+        };
+        if self.bottom_pane.is_registry_command(&parsed.name) {
+            let mut invoked_units = vec![b'/' as u16];
+            invoked_units.extend(parsed.name.string_units("")?);
+            self.invoked_slash = String::from_utf16_lossy(&invoked_units);
             return Some(self.dispatch_registry_slash(input));
         }
         None
     }
 
-    /// Echo a registry-backed slash invocation as the user's turn message and
-    /// hand the raw input to the caller for OFF-LOOP dispatch through the live
-    /// `RegistrySlashDispatcher` ([`ChatOutcome::DispatchSlash`]). The expanded
-    /// prompt is what actually runs as the model turn (driven by the caller), so
-    /// this only records the invocation — it must NOT also submit a turn.
-    fn dispatch_registry_slash(&mut self, input: &str) -> ChatOutcome {
+    /// Echo the source invocation for display and hand the exact projection to
+    /// the off-loop registry dispatcher.
+    fn dispatch_registry_slash(
+        &mut self,
+        input: core::types::utf16_json::Utf16JsonProjection,
+    ) -> ChatOutcome {
         self.transcript.push_message(RenderedMessage::UserText {
-            body: input.to_string(),
+            body: input.string_at("").unwrap_or_default().to_owned(),
             timestamp: 0,
         });
-        // Dispatch may resolve to a local control while another turn runs.
-        // Only the host's eventual start event may install this pending token.
         self.pending_slash_dispatches
             .retain(PendingSlashDispatch::is_pending);
         let token = PendingSlashDispatch::new();
         self.pending_slash_dispatches.push(token.clone());
-        ChatOutcome::DispatchSlash(input.to_string(), token)
+        ChatOutcome::DispatchSlash(input, token)
     }
 
     /// Desired widget height at `width` columns: the streaming live tail (the
@@ -2862,8 +3039,9 @@ impl ChatWidget {
 
     /// `/help`: open the shortcuts + slash-commands screen.
     pub(crate) fn cmd_help(&mut self, _args: &str) -> ChatOutcome {
-        self.bottom_pane.show_view(Box::new(ScreenView::help()));
-        ChatOutcome::Continue
+        let view = ScreenView::help_with_commands(self.bottom_pane.registry_commands());
+        self.bottom_pane.show_view(Box::new(view));
+        ChatOutcome::RefreshCommandCatalog
     }
 
     /// Toggle the full-screen renderer.  The app owns terminal-mode changes so
@@ -3692,7 +3870,7 @@ impl ChatWidget {
         } else {
             format!("/worktree {args}")
         };
-        self.dispatch_registry_slash(&input)
+        self.dispatch_registry_slash(input.into())
     }
 
     /// LingXi's project-specific `/fusion` UI entry.
@@ -3725,7 +3903,7 @@ impl ChatWidget {
         } else {
             format!("/fusion {args}")
         };
-        self.dispatch_registry_slash(&input)
+        self.dispatch_registry_slash(input.into())
     }
 
     /// Whether every Fusion model role is configured. An unwired snapshot slot
@@ -3979,7 +4157,10 @@ impl ChatWidget {
                     }
                 }
                 self.pending_backgrounding = None;
-                self.show_system_text(&display, false);
+                let display = display
+                    .string_at("")
+                    .expect("background status is a root JSON string");
+                self.show_system_text(display, false);
                 self.open_agents_view()
             }
             Err(error) => {
@@ -4282,6 +4463,7 @@ impl ChatWidget {
         self.foreground_agents.clear();
         self.background_agents.clear();
         self.bottom_pane.set_planned_tasks(Vec::new());
+        self.bottom_pane.clear_mod_ui();
         self.bottom_pane.set_running_agents(Vec::new());
         // The queued-image cells just vanished from the screen; keeping the
         // paths would silently attach them to a later unrelated message.
@@ -4423,15 +4605,17 @@ impl ChatWidget {
         } else {
             format!("/{name} {args}")
         };
+        let row_token = uuid::Uuid::new_v4().to_string();
         self.transcript.push_message(RenderedMessage::UserText {
             body: invocation,
             timestamp: 0,
         });
+        self.transcript.track_latest_user_row(row_token.clone());
         self.sync_focus_projection();
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
         self.accepts_turn_events = true;
-        ChatOutcome::Submit(content, self.take_pending_images(), token)
+        ChatOutcome::Submit(content.into(), row_token, self.take_pending_images(), token)
     }
 
     /// Render read-only command output into the transcript as a `system`
@@ -4578,7 +4762,9 @@ impl ChatWidget {
             );
         };
         let handler = match registry.try_read() {
-            Ok(registry) => registry.get_handler("skill-doctor"),
+            Ok(registry) => registry.get_handler(
+                &core::types::utf16_json::Utf16JsonProjection::from("skill-doctor"),
+            ),
             Err(_) => None,
         };
         let Some(handler) = handler else {
@@ -4907,7 +5093,9 @@ impl ChatWidget {
             );
         };
         let handler = match registry.try_read() {
-            Ok(registry) => registry.get_handler("reload-skills"),
+            Ok(registry) => registry.get_handler(
+                &core::types::utf16_json::Utf16JsonProjection::from("reload-skills"),
+            ),
             Err(_) => None,
         };
         let Some(handler) = handler else {
@@ -4926,7 +5114,11 @@ impl ChatWidget {
                     .set_registry_commands(registry_slash_rows(&guard));
             }
         }
-        outcome
+        if matches!(outcome, ChatOutcome::Continue) {
+            ChatOutcome::RefreshCommandCatalog
+        } else {
+            outcome
+        }
     }
 
     /// `/stop`: stop the session. Shows "Session stopped." then returns
@@ -5623,7 +5815,7 @@ impl ChatWidget {
                 ChatOutcome::ForceRedraw
             }
             BottomPaneOutcome::Submitted(text) => self.dispatch_submission(text),
-            BottomPaneOutcome::SubmitPrompt(prompt) => self.submit_prompt(prompt),
+            BottomPaneOutcome::SubmitPrompt(prompt) => self.submit_prompt(prompt.into()),
             BottomPaneOutcome::CyclePermissionMode(mode) => self.cycle_permission_mode(mode),
             BottomPaneOutcome::SwitchModel {
                 request_model,
@@ -5678,39 +5870,50 @@ impl ChatWidget {
 
     /// Route a submitted composer buffer: a registered slash command
     /// dispatches through the registry; anything else is sent as a prompt.
-    fn dispatch_submission(&mut self, text: String) -> ChatOutcome {
-        // (`!` bash mode) A `!`-prefixed line runs sandboxed and renders its
-        // output inline — it is NOT sent to the model (no LLM turn). Echo the
-        // `! {command}` row now; the CLI `on_bash` closure runs it and folds
-        // stdout/stderr back as `TurnEvent::BashOutput`. 1:1 with claude-code
-        // bash mode / the old iocraft `pending_bash` path.
-        if let Some(rest) = text.strip_prefix('!') {
-            let command = rest.trim().to_string();
-            if !command.is_empty() {
-                self.transcript
-                    .push_message(RenderedMessage::UserBashInput {
-                        command: command.clone(),
-                    });
-                return ChatOutcome::RunBash(command);
+    fn dispatch_submission(
+        &mut self,
+        text: core::types::utf16_json::Utf16JsonProjection,
+    ) -> ChatOutcome {
+        let units = text.string_units("").unwrap_or_default();
+        let display = text.string_at("").unwrap_or_default().to_owned();
+        // Bash mode consumes a UTF-8 process command. It is entered only when
+        // the complete source line can be represented exactly as Rust text.
+        if let Ok(typed_line) = String::from_utf16(&units) {
+            if let Some(rest) = typed_line.strip_prefix('!') {
+                let command = rest.trim().to_string();
+                if !command.is_empty() {
+                    self.transcript
+                        .push_message(RenderedMessage::UserBashInput {
+                            command: command.clone(),
+                        });
+                    return ChatOutcome::RunBash(command);
+                }
             }
         }
-        if let Some(outcome) = self.handle_slash(&text) {
+        if let Some(outcome) = self.handle_slash(text.clone()) {
             return outcome;
         }
+        // Existing plain-prompt outcome is a UTF-8 UI/model boundary. Registry
+        // command dispatch above retains the original source projection.
         self.submit_prompt(text)
     }
 
     /// Record `text` as the user's prompt and hand it to the caller with a
     /// fresh per-turn cancellation token. Shared by the composer submit path
     /// and [`BottomPaneOutcome::SubmitPrompt`].
-    pub(crate) fn submit_prompt(&mut self, text: String) -> ChatOutcome {
+    pub(crate) fn submit_prompt(
+        &mut self,
+        text: core::types::utf16_json::Utf16JsonProjection,
+    ) -> ChatOutcome {
         if self.session_clear_pending {
             return ChatOutcome::Continue;
         }
+        let row_token = uuid::Uuid::new_v4().to_string();
         self.transcript.push_message(RenderedMessage::UserText {
-            body: text.clone(),
+            body: text.string_at("").unwrap_or_default().to_owned(),
             timestamp: 0,
         });
+        self.transcript.track_latest_user_row(row_token.clone());
         self.sync_focus_projection();
         self.pending_slash_dispatches
             .retain(PendingSlashDispatch::is_pending);
@@ -5726,12 +5929,12 @@ impl ChatWidget {
             self.queued_prompt_owners
                 .retain(|owner| !owner.is_cancelled());
             self.queued_prompt_owners.push(owner.clone());
-            return ChatOutcome::QueuePrompt(text, self.take_pending_images(), owner);
+            return ChatOutcome::QueuePrompt(text, row_token, self.take_pending_images(), owner);
         }
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
         self.accepts_turn_events = true;
-        ChatOutcome::Submit(text, self.take_pending_images(), token)
+        ChatOutcome::Submit(text, row_token, self.take_pending_images(), token)
     }
 
     /// Execute a command effect a view requested via
@@ -5754,9 +5957,14 @@ impl ChatWidget {
                 match runtime
                     .block_on(handle.background_conversation(self.backgrounding_snapshot()))
                 {
-                    Ok(display) => ChatOutcome::BackgroundedExit(format!(
-                        "{display}\nLocal tasks that could not be moved will be stopped."
-                    )),
+                    Ok(display) => {
+                        let display = display
+                            .string_at("")
+                            .expect("background status is a root JSON string");
+                        ChatOutcome::BackgroundedExit(format!(
+                            "{display}\nLocal tasks that could not be moved will be stopped."
+                        ))
+                    }
                     Err(error) => self
                         .show_system_text(&format!("Could not move to background: {error}"), true),
                 }
@@ -5951,30 +6159,44 @@ fn registry_slash_rows(
     reg: &command_api::CommandRegistry,
 ) -> Vec<crate::bottom_pane::completion_view::RegistrySlashRow> {
     use command_api::SlashCommandKind;
-    let with_slash = |name: &str| {
-        if name.starts_with('/') {
-            name.to_string()
-        } else {
-            format!("/{name}")
+    let to_text = |source: &core::types::utf16_json::Utf16JsonProjection| {
+        client::protocol::text::ClientTextDto::from_code_units(
+            source
+                .string_units("")
+                .expect("command catalog text is a root-string projection"),
+        )
+    };
+    let with_slash = |name: &core::types::utf16_json::Utf16JsonProjection| {
+        let mut units = name
+            .string_units("")
+            .expect("command names are root-string projections");
+        if units.first().copied() != Some(b'/' as u16) {
+            units.insert(0, b'/' as u16);
         }
+        client::protocol::text::ClientTextDto::from_code_units(units)
     };
     reg.list_all()
         .into_iter()
         .filter(|c| {
-            matches!(
-                c.kind,
-                SlashCommandKind::Markdown { .. }
-                    | SlashCommandKind::Plugin { .. }
-                    | SlashCommandKind::Bundled { .. }
-                    | SlashCommandKind::Mcp { .. }
-            )
+            reg.mod_owner_of(&c.name).is_some()
+                || matches!(
+                    c.kind,
+                    SlashCommandKind::Markdown { .. }
+                        | SlashCommandKind::Plugin { .. }
+                        | SlashCommandKind::Bundled { .. }
+                        | SlashCommandKind::Mcp { .. }
+                )
         })
         .filter(|c| c.user_invocable != Some(false))
         .map(|c| crate::bottom_pane::completion_view::RegistrySlashRow {
             name: with_slash(&c.name),
-            description: c.description.clone(),
-            menu_description: c.menu_description.clone(),
+            description: to_text(&c.description),
+            menu_description: c.menu_description.as_ref().map(to_text),
             aliases: c.aliases.iter().map(|a| with_slash(a)).collect(),
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: c.argument_hint.as_ref().map(to_text),
+            argument_names: c.argument_names.iter().map(to_text).collect(),
         })
         .collect()
 }
@@ -6309,11 +6531,11 @@ mod tests {
     use super::*;
     use crate::bottom_pane::model_picker_view::ModelPickerView;
     use crate::bottom_pane::{BottomPaneView, ViewOutcome};
-    use crate::history_cell::attachments::UserImageCell;
     use crate::history_cell::HistoryCell;
+    use crate::history_cell::attachments::UserImageCell;
     use crate::session::ModelRow;
-    use crate::terminal::test_support::TestWriteBackend;
     use crate::terminal::Terminal;
+    use crate::terminal::test_support::TestWriteBackend;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -6467,13 +6689,14 @@ mod tests {
         w.set_task_registry(registry);
         w.cmd_tasks("");
         assert!(cells(&w).is_empty());
-        assert!(w
-            .bottom_pane()
-            .view_stack()
-            .active()
-            .unwrap()
-            .as_any()
-            .is::<crate::bottom_pane::tasks_view::TasksView>());
+        assert!(
+            w.bottom_pane()
+                .view_stack()
+                .active()
+                .unwrap()
+                .as_any()
+                .is::<crate::bottom_pane::tasks_view::TasksView>()
+        );
     }
 
     /// claude-code `mie`: Ctrl+B runs `zM` only when `H_t` says there is
@@ -6488,13 +6711,14 @@ mod tests {
         let mut w = widget();
         w.set_task_registry(registry);
         assert!(matches!(w.cmd_stop(""), ChatOutcome::Continue));
-        assert!(w
-            .bottom_pane()
-            .view_stack()
-            .active()
-            .unwrap()
-            .as_any()
-            .is::<crate::bottom_pane::exit_background_view::ExitBackgroundView>());
+        assert!(
+            w.bottom_pane()
+                .view_stack()
+                .active()
+                .unwrap()
+                .as_any()
+                .is::<crate::bottom_pane::exit_background_view::ExitBackgroundView>()
+        );
         assert!(matches!(
             w.handle_key(press(KeyCode::Esc)),
             ChatOutcome::Continue
@@ -6562,6 +6786,46 @@ mod tests {
 
     fn widget() -> ChatWidget {
         ChatWidget::new(Vec::new(), SessionInfo::default())
+    }
+
+    #[test]
+    fn fullscreen_selection_attributes_only_history_rows() {
+        let mut widget = widget();
+        let id = lingxi_core::types::ToolUseId::from("toolu_selection");
+        widget
+            .transcript
+            .push_message(RenderedMessage::AssistantToolUse {
+                id: id.clone(),
+                tool: "Read".into(),
+                input: serde_json::json!({"file_path":"/tmp/example"}),
+            });
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            widget.fullscreen_selection_request_id(0, 0, area),
+            Some(id.as_str().to_owned())
+        );
+        assert_eq!(widget.fullscreen_selection_request_id(0, 23, area), None);
+        widget.brief_transcript = true;
+        assert_eq!(widget.fullscreen_selection_request_id(0, 0, area), None);
+    }
+
+    #[test]
+    fn live_user_selection_uses_uuid_from_persistence_event() {
+        let mut widget = widget();
+        let ChatOutcome::Submit(_, row_token, _, _) = widget.submit_prompt("live prompt".into())
+        else {
+            panic!("expected submit");
+        };
+        let persisted_uuid = "83f67a72-a806-49b7-9a18-e57307177a86";
+        widget.apply_turn_event(TurnEvent::TranscriptRowIdentity {
+            row_token,
+            uuid: persisted_uuid.into(),
+        });
+
+        assert_eq!(
+            widget.fullscreen_selection_request_id(0, 0, Rect::new(0, 0, 80, 24)),
+            Some(persisted_uuid.into())
+        );
     }
 
     fn widget_with_agents_snapshot(
@@ -6949,7 +7213,7 @@ mod tests {
         let mut w = widget();
         w.handle_paste(&path.display().to_string());
         typ(&mut w, "hi");
-        let ChatOutcome::Submit(_, images, _) = w.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, images, _) = w.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert_eq!(images, vec![path.clone()], "image rides the Submit payload");
@@ -7847,7 +8111,7 @@ mod tests {
     #[test]
     fn streaming_left_arrow_persists_partial_reply_before_cancelling() {
         let (mut widget, _mock) = widget_with_orchestrator();
-        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+        let ChatOutcome::Submit(_, _, _, token) = widget.submit_prompt("work".into()) else {
             panic!("turn submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -7919,10 +8183,12 @@ mod tests {
             notice.body(),
             "Moved conversation into a background session (mock-bg-abcd)."
         );
-        assert!(widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<crate::bottom_pane::agents_view::AgentsView>());
+        assert!(
+            widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<crate::bottom_pane::agents_view::AgentsView>()
+        );
         match widget.handle_key(press(KeyCode::Enter)) {
             ChatOutcome::OpenAgentSession(target) => {
                 assert_eq!(target.session_id, want);
@@ -7960,7 +8226,7 @@ mod tests {
     #[test]
     fn between_tools_defers_then_second_confirm_restarts_agent_work() {
         let (mut widget, _mock) = widget_with_orchestrator();
-        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+        let ChatOutcome::Submit(_, _, _, token) = widget.submit_prompt("work".into()) else {
             panic!("turn submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -7997,7 +8263,7 @@ mod tests {
     #[test]
     fn non_restartable_tool_fails_closed_at_defer_cap() {
         let (mut widget, _mock) = widget_with_orchestrator();
-        let ChatOutcome::Submit(_, _, token) = widget.submit_prompt("work".into()) else {
+        let ChatOutcome::Submit(_, _, _, token) = widget.submit_prompt("work".into()) else {
             panic!("turn submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -8044,8 +8310,8 @@ mod tests {
     /// path — the CLI then swaps the shared `SessionCwd` there.
     #[test]
     fn cmd_cd_usage_error_and_confirm_flow() {
-        use crate::bottom_pane::cd_confirm_view::CdConfirmView;
         use crate::bottom_pane::PermissionAction;
+        use crate::bottom_pane::cd_confirm_view::CdConfirmView;
 
         // Bare `/cd` → usage line (not an error, not a prompt fall-through).
         let mut w = widget();
@@ -8178,9 +8444,11 @@ mod tests {
         // `reconnect` without a wired handle → graceful "unavailable".
         let mut w = widget();
         assert!(matches!(w.cmd_mcp("reconnect"), ChatOutcome::Continue));
-        assert!(cell::<crate::history_cell::system::SystemTextCell>(&w, 0)
-            .body()
-            .contains("unavailable"));
+        assert!(
+            cell::<crate::history_cell::system::SystemTextCell>(&w, 0)
+                .body()
+                .contains("unavailable")
+        );
 
         // `enable`/`disable` are RECOGNIZED (route to the engine seam, not the
         // usage-line fallback) — without a wired handle they report "unavailable"
@@ -8258,7 +8526,7 @@ mod tests {
     fn core_bridge_inject_message_submits_template_but_displays_invocation() {
         let mut widget = widget();
         let outcome = widget.cmd_commit_push_pr("");
-        let ChatOutcome::Submit(payload, _, _token) = outcome else {
+        let ChatOutcome::Submit(payload, _, _, _token) = outcome else {
             panic!("prompt-type command must queue a turn");
         };
         // The model payload is the full expanded handler template …
@@ -8308,7 +8576,7 @@ mod tests {
 
         let mut brief_widget = widget();
         assert!(matches!(
-            brief_widget.handle_slash("/brief"),
+            brief_widget.handle_slash("/brief".into()),
             Some(ChatOutcome::Continue)
         ));
         assert!(lingxi_core::host::session_flags::brief_mode_enabled());
@@ -8321,7 +8589,7 @@ mod tests {
 
         let mut powerup = widget();
         assert!(matches!(
-            powerup.handle_slash("/powerup"),
+            powerup.handle_slash("/powerup".into()),
             Some(ChatOutcome::Continue)
         ));
         let powerup_output = cell::<crate::history_cell::system::SystemTextCell>(&powerup, 0);
@@ -8498,7 +8766,7 @@ mod tests {
         let (mut widget, _mock) = widget_with_orchestrator();
         // Route through handle_slash so the invoked alias (`/stats`) is recorded.
         assert!(matches!(
-            widget.handle_slash("/stats"),
+            widget.handle_slash("/stats".into()),
             Some(ChatOutcome::Continue)
         ));
         let stats_body = widget
@@ -8660,7 +8928,7 @@ mod tests {
         widget.apply_turn_event(TurnEvent::CompactEnded);
         assert!(matches!(
             widget.submit_prompt("running".into()),
-            ChatOutcome::Submit(_, _, _)
+            ChatOutcome::Submit(_, _, _, _)
         ));
         assert!(matches!(widget.cmd_compact(""), ChatOutcome::Continue));
         assert!(widget.queued_compact.is_some());
@@ -8967,7 +9235,7 @@ mod tests {
         }
         widget.set_command_registry(registry);
         let outcome = widget.cmd_reload_skills("");
-        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::RefreshCommandCatalog));
         let systext = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0);
         assert!(
             systext.body().contains("Reloaded skills:"),
@@ -8985,10 +9253,14 @@ mod tests {
         }
         widget.apply_turn_event(TurnEvent::CommandCatalogRefreshed {
             commands: vec![tui_core::orchestrator_bridge::CommandCatalogEntry {
-                name: "/plan-plugin".to_string(),
-                description: "plugin plan command".to_string(),
-                menu_description: Some("plugin command".to_string()),
-                aliases: vec!["/pp".to_string()],
+                name: "/plan-plugin".into(),
+                description: "plugin plan command".into(),
+                menu_description: Some("plugin command".into()),
+                aliases: vec!["/pp".into()],
+                hidden: false,
+                replaces_builtin: false,
+                argument_hint: None,
+                argument_names: Vec::new(),
             }],
         });
 
@@ -9027,11 +9299,12 @@ mod tests {
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(reg));
         widget.set_command_registry(registry);
 
-        let Some(ChatOutcome::DispatchSlash(input, _token)) = widget.handle_slash("/loop 5m go")
+        let Some(ChatOutcome::DispatchSlash(input, _token)) =
+            widget.handle_slash("/loop 5m go".into())
         else {
             panic!("a registry-backed command must route to DispatchSlash");
         };
-        assert_eq!(input, "/loop 5m go");
+        assert_eq!(input.string_at(""), Some("/loop 5m go"));
         // Dispatch alone does not start a model turn.
         assert!(!widget.turn_running());
         // The raw invocation is echoed as the user's turn message.
@@ -9039,7 +9312,63 @@ mod tests {
         assert_eq!(shown, "/loop 5m go");
 
         // An unregistered slash command still falls through as a normal prompt.
-        assert!(widget.handle_slash("/totally-unknown").is_none());
+        assert!(widget.handle_slash("/totally-unknown".into()).is_none());
+    }
+
+    #[test]
+    fn slash_parse_failure_shows_native_hint_without_model_turn() {
+        let mut w = widget();
+        let outcome = w.handle_slash("/   ".into());
+        assert!(matches!(outcome, Some(ChatOutcome::Continue)));
+        assert!(!w.turn_running());
+        assert_eq!(
+            cell::<crate::history_cell::system::SystemTextCell>(&w, 0).body(),
+            "Commands are in the form `/command [args]`"
+        );
+
+        let mut leading_space = widget();
+        assert!(leading_space.handle_slash(" /   ".into()).is_none());
+    }
+
+    #[test]
+    fn registry_slash_route_keeps_exact_source_name_and_arguments() {
+        use command_api::{CommandSource, SlashCommand, SlashCommandKind};
+        use core::types::utf16_json::Utf16JsonProjection;
+
+        let mut widget = widget();
+        let mut registry = command_api::CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: Utf16JsonProjection::parse(r#""plug\ud800""#).unwrap(),
+            description: "Source command".into(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Markdown {
+                file_path: "/tmp/source-command.md".into(),
+                frontmatter: command_api::CommandFrontmatter::default(),
+                prompt_template: "source".into(),
+            },
+            ..SlashCommand::default()
+        });
+        widget.set_command_registry(std::sync::Arc::new(tokio::sync::RwLock::new(registry)));
+
+        let input = Utf16JsonProjection::parse(r#""/plug\ud800 arg\udfff""#).unwrap();
+        let expected_units = input.string_units("").unwrap();
+        let Some(ChatOutcome::DispatchSlash(dispatched, _)) = widget.handle_slash(input) else {
+            panic!("source registry command should dispatch");
+        };
+        assert_eq!(dispatched.string_units(""), Some(expected_units));
+    }
+
+    #[test]
+    fn submitted_model_prompt_keeps_exact_source_units() {
+        use core::types::utf16_json::Utf16JsonProjection;
+
+        let mut widget = widget();
+        let input = Utf16JsonProjection::parse(r#""prompt\ud800""#).unwrap();
+        let expected_units = input.string_units("").unwrap();
+        let ChatOutcome::Submit(prompt, _, _, _) = widget.dispatch_submission(input) else {
+            panic!("ordinary input should submit as a model prompt");
+        };
+        assert_eq!(prompt.string_units(""), Some(expected_units));
     }
 
     #[test]
@@ -9047,7 +9376,8 @@ mod tests {
         let mut widget = widget();
         let active = CancellationToken::new();
         widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
-        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/stop") else {
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/stop".into())
+        else {
             panic!("local command must be dispatched");
         };
         widget.apply_turn_event(TurnEvent::SystemNotice {
@@ -9064,7 +9394,8 @@ mod tests {
     #[test]
     fn pending_slash_queues_followup_and_session_switch_cancels_dispatch() {
         let mut widget = widget();
-        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow-skill")
+        let ChatOutcome::DispatchSlash(_, pending) =
+            widget.dispatch_registry_slash("/slow-skill".into())
         else {
             panic!("dispatch")
         };
@@ -9083,7 +9414,8 @@ mod tests {
         let mut widget = widget();
         let active = CancellationToken::new();
         widget.apply_turn_event(TurnEvent::TurnStartedWithCancel(active.clone()));
-        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow-skill")
+        let ChatOutcome::DispatchSlash(_, pending) =
+            widget.dispatch_registry_slash("/slow-skill".into())
         else {
             panic!("dispatch")
         };
@@ -9099,16 +9431,18 @@ mod tests {
     #[test]
     fn cancelling_pending_slash_does_not_cancel_later_new_input() {
         let mut widget = widget();
-        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow") else {
+        let ChatOutcome::DispatchSlash(_, pending) = widget.dispatch_registry_slash("/slow".into())
+        else {
             panic!("dispatch")
         };
-        let ChatOutcome::QueuePrompt(_, _, old_owner) = widget.submit_prompt("old".into()) else {
+        let ChatOutcome::QueuePrompt(_, _, _, old_owner) = widget.submit_prompt("old".into())
+        else {
             panic!("queue")
         };
         widget.on_pane_outcome(BottomPaneOutcome::Interrupt);
         assert!(pending.is_cancelled());
         assert!(old_owner.is_cancelled());
-        let ChatOutcome::Submit(_, _, new_owner) = widget.submit_prompt("new".into()) else {
+        let ChatOutcome::Submit(_, _, _, new_owner) = widget.submit_prompt("new".into()) else {
             panic!("new turn")
         };
         assert!(!new_owner.is_cancelled());
@@ -9117,7 +9451,8 @@ mod tests {
     #[test]
     fn completed_local_dispatch_does_not_leave_followup_queued() {
         let mut widget = widget();
-        let ChatOutcome::DispatchSlash(_, completed) = widget.dispatch_registry_slash("/local")
+        let ChatOutcome::DispatchSlash(_, completed) =
+            widget.dispatch_registry_slash("/local".into())
         else {
             panic!("dispatch")
         };
@@ -9135,11 +9470,11 @@ mod tests {
     fn handle_slash_routes_worktree_builtin_to_registry_dispatch() {
         let mut widget = widget();
         let Some(ChatOutcome::DispatchSlash(input, _token)) =
-            widget.handle_slash("/worktree remove --discard")
+            widget.handle_slash("/worktree remove --discard".into())
         else {
             panic!("/worktree must route to DispatchSlash");
         };
-        assert_eq!(input, "/worktree remove --discard");
+        assert_eq!(input.string_at(""), Some("/worktree remove --discard"));
         assert!(!widget.turn_running());
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/worktree remove --discard");
@@ -9152,11 +9487,11 @@ mod tests {
     fn handle_slash_routes_fusion_builtin_to_registry_dispatch() {
         let mut widget = widget();
         let Some(ChatOutcome::DispatchSlash(input, _token)) =
-            widget.handle_slash("/fusion --fast review locking")
+            widget.handle_slash("/fusion --fast review locking".into())
         else {
             panic!("/fusion must route to DispatchSlash");
         };
-        assert_eq!(input, "/fusion --fast review locking");
+        assert_eq!(input.string_at(""), Some("/fusion --fast review locking"));
         assert!(!widget.turn_running());
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/fusion --fast review locking");
@@ -9200,7 +9535,7 @@ mod tests {
         let mut widget = widget();
         widget.set_fusion_settings(fusion_settings(true));
         assert!(matches!(
-            widget.handle_slash("/fusion setup"),
+            widget.handle_slash("/fusion setup".into()),
             Some(ChatOutcome::Continue)
         ));
         assert!(setup_view_is_open(&widget));
@@ -9219,7 +9554,7 @@ mod tests {
         let mut widget = widget();
         widget.set_fusion_settings(fusion_settings(false));
         assert!(matches!(
-            widget.handle_slash("/fusion review the locking"),
+            widget.handle_slash("/fusion review the locking".into()),
             Some(ChatOutcome::Continue)
         ));
         assert!(setup_view_is_open(&widget));
@@ -9232,7 +9567,7 @@ mod tests {
         let mut widget = widget();
         widget.set_fusion_settings(fusion_settings(true));
         let Some(ChatOutcome::DispatchSlash(input, _)) =
-            widget.handle_slash("/fusion review the locking")
+            widget.handle_slash("/fusion review the locking".into())
         else {
             panic!("a configured session must dispatch, not open the wizard");
         };
@@ -9247,7 +9582,7 @@ mod tests {
     fn an_unwired_settings_slot_never_hijacks_a_dispatch() {
         let mut widget = widget();
         assert!(matches!(
-            widget.handle_slash("/fusion review the locking"),
+            widget.handle_slash("/fusion review the locking".into()),
             Some(ChatOutcome::DispatchSlash(..))
         ));
     }
@@ -9319,7 +9654,7 @@ mod tests {
     fn tui_prompt_command_expands_embedded_shell_before_submit() {
         let mut widget = widget();
         widget.set_shell_expansion(std::sync::Arc::new(FakeExpansionProvider { deny: false }));
-        let ChatOutcome::Submit(payload, _, _token) = widget.cmd_commit_push_pr("") else {
+        let ChatOutcome::Submit(payload, _, _, _token) = widget.cmd_commit_push_pr("") else {
             panic!("/commit-push-pr must submit a turn");
         };
         assert!(
@@ -9426,8 +9761,8 @@ mod tests {
     /// included — and `true` only for an in-process teammate. A test that
     /// hand-sets `worker: Some(..)` here would pin a shape no Fusion panel
     /// ever produces.
-    fn background_owned_tool_exchange(
-    ) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
+    fn background_owned_tool_exchange()
+    -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (resp_tx, resp_rx) = oneshot::channel();
         let request = PermissionRequest::ToolUseConfirm {
             tool_name: "WebFetch".to_string(),
@@ -9451,14 +9786,19 @@ mod tests {
 
     fn ask_exchange() -> (
         AskUserQuestionExchange,
-        oneshot::Receiver<std::collections::HashMap<String, String>>,
+        oneshot::Receiver<
+            Vec<(
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            )>,
+        >,
     ) {
         let (resp_tx, resp_rx) = oneshot::channel();
         (
             AskUserQuestionExchange {
                 questions: vec![tool_api::ask_user_question::AskQuestion {
-                    question: "Pick one?".to_string(),
-                    header: "Choice".to_string(),
+                    question: "Pick one?".into(),
+                    header: "Choice".into(),
                     options: vec![
                         tool_api::ask_user_question::AskOption::new("Alpha", "first"),
                         tool_api::ask_user_question::AskOption::new("Beta", "second"),
@@ -9574,14 +9914,18 @@ mod tests {
         // Exactly: user "run it" · ● Bash · ⎿ result — NO empty assistant cell.
         assert_eq!(widget.transcript.committed_cells().len(), 3);
         assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Bash");
-        assert!(cells(&widget)[2]
-            .as_any()
-            .downcast_ref::<ToolResultCell>()
-            .is_some());
+        assert!(
+            cells(&widget)[2]
+                .as_any()
+                .downcast_ref::<ToolResultCell>()
+                .is_some()
+        );
         // The (empty) placeholder must not survive as an assistant cell.
-        assert!(cells(&widget)
-            .iter()
-            .all(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_none()));
+        assert!(
+            cells(&widget)
+                .iter()
+                .all(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_none())
+        );
     }
 
     /// Consecutive read/search tool uses FOLD into a single collapsed cell
@@ -9614,13 +9958,17 @@ mod tests {
         ));
         // user "look" + ONE folded cell — no per-tool ●/⎿ cells.
         assert_eq!(widget.transcript.committed_cells().len(), 2);
-        assert!(cells(&widget)[1]
-            .as_any()
-            .downcast_ref::<CollapsedReadSearchCell>()
-            .is_some());
-        assert!(cells(&widget)
-            .iter()
-            .all(|c| c.as_any().downcast_ref::<ToolUseCell>().is_none()));
+        assert!(
+            cells(&widget)[1]
+                .as_any()
+                .downcast_ref::<CollapsedReadSearchCell>()
+                .is_some()
+        );
+        assert!(
+            cells(&widget)
+                .iter()
+                .all(|c| c.as_any().downcast_ref::<ToolUseCell>().is_none())
+        );
     }
 
     #[test]
@@ -9680,10 +10028,12 @@ mod tests {
         ));
 
         assert_eq!(widget.transcript.committed_cells().len(), 2);
-        assert!(cells(&widget)[1]
-            .as_any()
-            .downcast_ref::<CollapsedReadSearchCell>()
-            .is_some());
+        assert!(
+            cells(&widget)[1]
+                .as_any()
+                .downcast_ref::<CollapsedReadSearchCell>()
+                .is_some()
+        );
         let summary = cells(&widget)[1]
             .display_lines(
                 80,
@@ -9724,13 +10074,14 @@ mod tests {
             .as_any()
             .downcast_ref::<CollapsedReadSearchCell>()
             .expect("finalized silent group must stay in transcript for verbose replay");
-        assert!(cell
-            .display_lines(
+        assert!(
+            cell.display_lines(
                 80,
                 &Theme::dark(),
                 crate::history_cell::RenderMode::default()
             )
-            .is_empty());
+            .is_empty()
+        );
         let verbose = cell
             .display_lines(
                 80,
@@ -9951,7 +10302,7 @@ mod tests {
     fn event_lifecycle_started_deltas_tools_ended() {
         let mut widget = widget();
         let outcome = submit_command(&mut widget, "go");
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "go"));
+        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p.string_at("") == Some("go")));
         assert!(widget.turn_running());
 
         // TurnStarted opens an empty active assistant cell and starts the clock.
@@ -10062,13 +10413,15 @@ mod tests {
             },
         );
         assert!(matches!(
-            widget.handle_slash("/diff"),
+            widget.handle_slash("/diff".into()),
             Some(ChatOutcome::Continue)
         ));
-        assert!(widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<crate::diff::DiffView>());
+        assert!(
+            widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<crate::diff::DiffView>()
+        );
         {
             let view = widget
                 .bottom_pane()
@@ -10210,7 +10563,7 @@ mod tests {
     fn ctrl_c_keeps_turn_owned_until_terminal_and_heartbeats_continue() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, token) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, token) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10275,17 +10628,19 @@ mod tests {
             cancel.is_cancelled(),
             "Ctrl-C must cancel the actual host-started turn"
         );
-        assert!(widget
-            .current_turn
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled));
+        assert!(
+            widget
+                .current_turn
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+        );
     }
 
     #[test]
     fn cancellation_drops_open_queued_and_late_interactive_prompts() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10353,7 +10708,7 @@ mod tests {
     fn cancellation_preserves_a_background_owned_permission_prompt() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10407,7 +10762,7 @@ mod tests {
     fn cancellation_preserves_a_queued_background_owned_permission_prompt() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10553,7 +10908,7 @@ mod tests {
         // the cancelled-current_turn check stays.
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10575,7 +10930,7 @@ mod tests {
         let mut widget = widget();
         // Registered command: focused view opens, no prompt turn starts.
         let outcome = submit_command(&mut widget, "/help");
-        assert!(matches!(outcome, ChatOutcome::Continue));
+        assert!(matches!(outcome, ChatOutcome::RefreshCommandCatalog));
         assert!(widget.bottom_pane().view_stack().contains::<ScreenView>());
         assert!(widget.transcript().is_empty(), "no scrollback dump");
         assert!(!widget.turn_running());
@@ -10589,12 +10944,14 @@ mod tests {
 
         // Unregistered input falls through as a normal prompt.
         let outcome = submit_command(&mut widget, "/frobnicate");
-        assert!(matches!(outcome, ChatOutcome::Submit(ref p, ..) if p == "/frobnicate"));
+        assert!(
+            matches!(outcome, ChatOutcome::Submit(ref p, ..) if p.string_at("") == Some("/frobnicate"))
+        );
 
         // Argument gating mirrors the registry: no-arg commands reject
         // trailing args, arg-taking commands require them.
-        assert!(widget.handle_slash("/help extra").is_none());
-        assert!(widget.handle_slash("/image").is_none());
+        assert!(widget.handle_slash("/help extra".into()).is_none());
+        assert!(widget.handle_slash("/image".into()).is_none());
     }
 
     #[test]
@@ -10623,7 +10980,7 @@ mod tests {
         let outcome = submit_command(&mut widget, "/image /nonexistent/typo.png");
         assert!(matches!(outcome, ChatOutcome::Continue));
         typ(&mut widget, "hi");
-        let ChatOutcome::Submit(_, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert!(images.is_empty(), "bad path must not ride the next turn");
@@ -10641,7 +10998,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
         widget.clear_transcript();
         typ(&mut widget, "hi");
-        let ChatOutcome::Submit(_, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, images, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         assert!(
@@ -10748,7 +11105,7 @@ mod tests {
     fn interrupt_drops_a_queued_background_ask_whose_panel_already_died() {
         let mut widget = widget();
         typ(&mut widget, "x");
-        let ChatOutcome::Submit(_, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
+        let ChatOutcome::Submit(_, _, _, _) = widget.handle_key(press(KeyCode::Enter)) else {
             panic!("expected submit");
         };
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -10873,7 +11230,16 @@ mod tests {
 
         widget.handle_key(press(KeyCode::Char('1')));
         let answers = ask_rx.blocking_recv().expect("answers returned");
-        assert_eq!(answers.get("Pick one?").map(String::as_str), Some("Alpha"));
+        let question_units = "Pick one?".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            answers
+                .iter()
+                .find(|(question, _)| {
+                    question.string_units("").as_deref() == Some(question_units.as_slice())
+                })
+                .and_then(|(_, answer)| answer.string_at("")),
+            Some("Alpha")
+        );
         assert!(!widget.has_open_ask_user_question());
         assert!(widget.pending_prompts.is_empty());
     }
@@ -10891,8 +11257,8 @@ mod tests {
 
         let answers = ask_rx.blocking_recv().expect("timeout answers returned");
         // The afk timeout must NOT fabricate an answer for an unconfirmed
-        // question — the map is empty rather than defaulting to the first option.
-        assert_eq!(answers.get("Pick one?"), None);
+        // question — the answer list is empty rather than defaulting to the first option.
+        assert!(answers.is_empty());
         assert!(
             !widget.has_open_ask_user_question(),
             "expired questionnaire must be popped without keyboard input"
@@ -11033,20 +11399,24 @@ mod tests {
             "expected a switch to claude-sonnet-5"
         );
         // A pending or failed switch must retain the actual current model.
-        assert!(widget
-            .session
-            .models
-            .iter()
-            .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" }));
+        assert!(
+            widget
+                .session
+                .models
+                .iter()
+                .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" })
+        );
         widget.apply_turn_event(TurnEvent::SystemNotice {
             body: "Could not change model".into(),
             is_error: true,
         });
-        assert!(widget
-            .session
-            .models
-            .iter()
-            .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" }));
+        assert!(
+            widget
+                .session
+                .models
+                .iter()
+                .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" })
+        );
         widget.apply_turn_event(TurnEvent::ModelChanged {
             model: "claude-sonnet-5".into(),
             profile: Some("anthropic".into()),
@@ -11175,10 +11545,12 @@ mod tests {
             submit_command(&mut widget, "/model"),
             ChatOutcome::Continue
         ));
-        assert!(widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>());
+        assert!(
+            widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<ModelPickerView>()
+        );
         // Picker owns the keyboard: move up to the first (Opus) row and confirm.
         widget.handle_key(press(KeyCode::Up));
         let outcome = widget.handle_key(press(KeyCode::Enter));
@@ -11187,10 +11559,12 @@ mod tests {
             ChatOutcome::SwitchModel(ref m, ref p)
                 if m == "claude-opus-4-8" && p.as_deref() == Some("anthropic")
         ));
-        assert!(!widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>());
+        assert!(
+            !widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<ModelPickerView>()
+        );
         // The switch is echoed as a system message.
         let body = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
         assert!(
@@ -11247,10 +11621,12 @@ mod tests {
             submit_command(&mut widget, "/theme"),
             ChatOutcome::Continue
         ));
-        assert!(widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ThemePickerView>());
+        assert!(
+            widget
+                .bottom_pane()
+                .view_stack()
+                .contains::<ThemePickerView>()
+        );
         // Move from "Dark mode" (index 1) to "Light mode" (index 2), commit.
         widget.handle_key(press(KeyCode::Down));
         let outcome = widget.handle_key(press(KeyCode::Enter));
@@ -11283,8 +11659,8 @@ mod tests {
     /// while KEEPING the editor open (edit-in-place, like a `/web` test).
     #[test]
     fn permissions_command_opens_editor_and_add_round_trips_to_chat_outcome() {
-        use crate::bottom_pane::permissions_editor_view::PermissionsEditorView;
         use crate::bottom_pane::PermissionAction;
+        use crate::bottom_pane::permissions_editor_view::PermissionsEditorView;
 
         let mut widget = widget();
         assert!(matches!(
@@ -11608,7 +11984,7 @@ mod tests {
             assert!(widget.transcript().is_empty());
             assert!(matches!(
                 widget.submit_prompt("fresh prompt".into()),
-                ChatOutcome::Submit(_, _, _)
+                ChatOutcome::Submit(_, _, _, _)
             ));
         }
         let mut widget = widget();
@@ -11650,13 +12026,15 @@ mod tests {
             "failed clear cannot retain the canceled busy token"
         );
         assert!(widget.current_turn.is_none());
-        assert!(widget
-            .transcript()
-            .current_turn_assistant_text()
-            .contains("old partial reply"));
+        assert!(
+            widget
+                .transcript()
+                .current_turn_assistant_text()
+                .contains("old partial reply")
+        );
         assert!(matches!(
             widget.submit_prompt("next prompt after failure".into()),
-            ChatOutcome::Submit(_, _, _)
+            ChatOutcome::Submit(_, _, _, _)
         ));
         assert!(matches!(
             widget.cmd_clear(""),
@@ -11708,7 +12086,7 @@ mod tests {
         assert_eq!(widget.cost, None);
         assert!(matches!(
             widget.submit_prompt("new prompt".into()),
-            ChatOutcome::Submit(_, _, _)
+            ChatOutcome::Submit(_, _, _, _)
         ));
         widget.apply_turn_event(TurnEvent::TurnStarted);
         widget.apply_turn_event(TurnEvent::TextDelta("fresh reply".into()));
@@ -12467,10 +12845,12 @@ mod tests {
         });
         let state = slot.lock().unwrap();
         assert_eq!(state.data.session_id, session_id);
-        assert!(state
-            .data
-            .transcript_path
-            .ends_with(&format!("{session_id}.jsonl")));
+        assert!(
+            state
+                .data
+                .transcript_path
+                .ends_with(&format!("{session_id}.jsonl"))
+        );
         assert_eq!(state.data.cwd, home.path());
         assert_eq!(state.data.total_api_duration_ms, 0);
         assert_eq!(state.data.total_lines_added, 0);

@@ -253,6 +253,7 @@ impl<T: StyledCell> HistoryCell for T {
 pub fn cell_for_message(message: RenderedMessage) -> Box<dyn HistoryCell> {
     use RenderedMessage as M;
     match message {
+        M::IdentifiedTranscriptRow { message, .. } => cell_for_message(*message),
         M::UserText { body, .. } => Box::new(message::UserTextCell::new(body)),
         M::AssistantText { body, .. } => Box::new(message::AssistantTextCell::new(body)),
         M::UserPrompt { text } => Box::new(message::UserPromptCell::new(text)),

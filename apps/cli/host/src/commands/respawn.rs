@@ -653,7 +653,7 @@ mod tests {
                 origin_cwd: cwd.display().to_string(),
                 worktree_path: None,
                 worktree_ownership_token: None,
-                initial_prompt: Some(prompt.to_string()),
+                initial_prompt: Some(prompt.to_string().into()),
                 shell_handoff: Vec::new(),
                 handoff: None,
                 options: BackgroundLaunchOptions::default(),
@@ -765,7 +765,7 @@ mod tests {
                 origin_cwd: cwd.display().to_string(),
                 worktree_path: None,
                 worktree_ownership_token: None,
-                initial_prompt: Some("do the thing".to_string()),
+                initial_prompt: Some("do the thing".into()),
                 shell_handoff: Vec::new(),
                 handoff: None,
                 options: BackgroundLaunchOptions::default(),
@@ -779,7 +779,13 @@ mod tests {
         assert!(err.contains("no resumable conversation"));
         let spec = read_launch_spec(home.path(), short);
         assert_eq!(spec.launch, BackgroundLaunchKind::Fresh);
-        assert_eq!(spec.initial_prompt.as_deref(), Some("do the thing"));
+        assert_eq!(
+            spec.initial_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
+            Some("do the thing")
+        );
     }
 
     #[test]
@@ -800,6 +806,13 @@ mod tests {
         assert_eq!(first.launch, BackgroundLaunchKind::Resume);
         assert_eq!(first.initial_prompt, None);
         assert_eq!(second.launch, BackgroundLaunchKind::Fresh);
-        assert_eq!(second.initial_prompt.as_deref(), Some("second prompt"));
+        assert_eq!(
+            second
+                .initial_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.string_at(""))
+                .as_deref(),
+            Some("second prompt")
+        );
     }
 }

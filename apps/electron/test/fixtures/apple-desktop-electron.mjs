@@ -28,6 +28,21 @@ try {
     window.webContents.sendInputEvent({ type: 'mouseMove', x: 900, y: 120 });
     await delay(250);
     writeFileSync(join(output, `desktop-${theme}.png`), (await window.webContents.capturePage()).toPNG());
+    const actionCheck = await run(`(() => {
+      const row = document.querySelector('.sidebar-session-row');
+      const rect = row.getBoundingClientRect();
+      return [...row.querySelectorAll('.sidebar-row-action')].map(button => {
+        button.dataset.visible = 'true';
+        const action = button.getBoundingClientRect();
+        const icon = button.querySelector('svg').getBoundingClientRect();
+        return { rowCenterDelta: Math.abs((action.top + action.bottom - rect.top - rect.bottom) / 2), iconCenterDelta: Math.max(Math.abs((action.top + action.bottom - icon.top - icon.bottom) / 2), Math.abs((action.left + action.right - icon.left - icon.right) / 2)) };
+      });
+    })()`);
+    const actionsPassed = actionCheck.length === 2 && actionCheck.every(check => check.rowCenterDelta <= .5 && check.iconCenterDelta <= .5);
+    accessibility.push({ theme, name: 'sidebar-action-centering', passed: actionsPassed, actions: actionCheck });
+    checksPassed &&= actionsPassed;
+    await delay(150);
+    writeFileSync(join(output, `sidebar-actions-${theme}.png`), (await window.webContents.capturePage()).toPNG());
     window.webContents.debugger.attach('1.3');
     for (const [name, value] of [['prefers-reduced-motion', 'reduce'], ['prefers-reduced-transparency', 'reduce'], ['prefers-contrast', 'more']]) {
       await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name, value }] });
@@ -50,6 +65,22 @@ try {
     })()`);
     await delay(200);
     writeFileSync(join(output, `composer-${theme}.png`), (await window.webContents.capturePage()).toPNG());
+    await run(`(() => {
+      const editor = document.querySelector('[contenteditable="true"]');
+      editor.textContent = 'A long draft that needs a contained scrollbar.\\n'.repeat(30);
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+    })()`);
+    await delay(200);
+    const inputCheck = await run(`(() => {
+      const editor = document.querySelector('.beta-rich-prompt');
+      const input = document.querySelector('.composer-input-view');
+      const frame = document.querySelector('.beta-composer').getBoundingClientRect();
+      const rect = editor.getBoundingClientRect();
+      return { scrollable: editor.scrollHeight > editor.clientHeight, insetRight: frame.right - rect.right, insetTop: rect.top - frame.top, clipped: getComputedStyle(input).overflow === 'hidden' };
+    })()`);
+    checksPassed &&= inputCheck.scrollable && inputCheck.insetRight >= 6 && inputCheck.insetTop >= 6 && inputCheck.clipped;
+    accessibility.push({ theme, name: 'composer-scrollbar-contained', ...inputCheck });
+    writeFileSync(join(output, `composer-scroll-${theme}.png`), (await window.webContents.capturePage()).toPNG());
     window.webContents.debugger.attach('1.3');
     await window.webContents.debugger.sendCommand('DOM.enable');
     await window.webContents.debugger.sendCommand('CSS.enable');
@@ -83,7 +114,7 @@ try {
     await delay(250);
     writeFileSync(join(output, `archive-${theme}.png`), (await window.webContents.capturePage()).toPNG());
     await run(`document.querySelector('button[aria-label="Close archive dialog"]').click()`);
-    await run(`Array.from(document.querySelectorAll('button')).find(b => /^(Settings|设置)/.test(b.textContent.trim())).click()`);
+    await run(`document.querySelector('.desktop-rail-settings').click()`);
     await wait(`document.querySelector('[data-nav-page="general"]')`);
     await delay(250);
     writeFileSync(join(output, `settings-${theme}.png`), (await window.webContents.capturePage()).toPNG());

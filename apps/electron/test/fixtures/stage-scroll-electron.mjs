@@ -1,5 +1,6 @@
 import { configureFixtureWindow, waitForFixture } from './electron-test-environment.mjs';
 import { app, BrowserWindow } from 'electron';
+import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 const url = process.argv.find((argument) => argument.startsWith('http://'));
 if (!url || !process.env.LINGXI_TEST_USER_DATA) throw new Error('fixture URL and isolated user data required');
@@ -66,6 +67,13 @@ async function main() {
       for (const status of ['pending', undefined, 'failed', undefined]) {
         await run(`window.stageScrollFixture.delivery(${JSON.stringify(status)}, ${long})`);
         await settle();
+        const alignment = await run(`(() => {
+          const bubble = document.querySelector('.user-message-bubble').getBoundingClientRect();
+          const row = document.querySelector('.transcript-user-message').getBoundingClientRect();
+          return { rightGap: row.right - bubble.right, width: bubble.width, rowWidth: row.width };
+        })()`);
+        assert.ok(Math.abs(alignment.rightGap) <= 1, 'user bubble shares the right edge of its row');
+        assert.ok(alignment.width < alignment.rowWidth, 'user bubble remains narrower than its row');
         result.deliveryLayouts.push(await run(`(() => {
           const bubble = document.querySelector('.user-message-bubble');
           const rect = bubble.getBoundingClientRect();

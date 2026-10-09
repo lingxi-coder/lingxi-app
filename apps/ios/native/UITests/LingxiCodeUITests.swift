@@ -672,24 +672,6 @@ final class LingxiCodeUITests: XCTestCase {
     /// coupling and the deferral went with it, so every presentation shape the
     /// sidebar can still reach under this fixture is pinned here: a sheet and a
     /// push. Each must arrive AND leave the sidebar behind.
-    ///
-    /// The full-screen cover is no longer among them, and the apps leg says so
-    /// with an assertion rather than a comment. The drawer no longer has an
-    /// "apps" tab at all — `DrawerSection` is only `.chat`/`.code`/`.cron`
-    /// (`Drawer.swift`) — and its two local-apps affordances,
-    /// `drawer.apps.create` and `drawer.apps.library`, sit in
-    /// `conversationActions`, rendered unconditionally whenever the drawer is
-    /// not on the cron section; neither depends on the catalog being
-    /// non-empty any more. `drawer.apps.create` creates an app directly
-    /// instead of opening the library cover, so this leg pins THAT contract:
-    /// the affordance is reachable with no tab to switch to, and tapping it
-    /// leaves the sidebar behind without presenting anything.
-    ///
-    /// The cover itself is not left uncovered: it is mounted and asserted by
-    /// `testTheDrawersViewAllMountsTheLocalAppsCover` below via
-    /// `drawer.apps.library`, seeding the catalog
-    /// (`LINGXI_UI_TEST_LOCAL_APPS=1`) only to have a row to assert inside the
-    /// cover once it opens — the affordance itself would render either way.
     func testEverySidebarRoutePresentsAndLeavesTheSidebar() {
         // Settings — a sheet.
         openDrawer()
@@ -710,85 +692,6 @@ final class LingxiCodeUITests: XCTestCase {
         )
         app.navigationBars.firstMatch.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
-
-        // Local apps — the drawer's create affordance. It does not open the
-        // library cover any more: it creates an app and hands the conversation
-        // over (`RootView.createLocalAppFromDrawer`), so what this leg pins is
-        // the NEW contract — the sidebar is left behind and nothing is
-        // presented over the chat. There is no tab to switch to first:
-        // `drawer.apps.create` lives in `conversationActions`, rendered on the
-        // default (chat) section like every other route above.
-        openDrawer()
-        app.buttons["drawer.tab.apps"].tap()
-        let createApp = app.buttons["drawer.apps.create"]
-        XCTAssertTrue(createApp.waitForExistence(timeout: 8), app.debugDescription)
-        createApp.tap()
-
-        // Leaves the sidebar behind, exactly like the two routes above: the row
-        // that was just tapped goes away with the sidebar, and the chat returns.
-        XCTAssertTrue(waitUntilGone(createApp, timeout: 10), app.debugDescription)
-        XCTAssertTrue(chatSurface.waitForExistence(timeout: 10), app.debugDescription)
-
-        // …and presents nothing. A bounded wait rather than a bare `exists`:
-        // the regression this guards against is a PRESENTATION, which takes time
-        // to arrive, so the negative has to give it that time to mean anything.
-        // `navigationBars["应用"]` (`local_apps_title`) is the very probe the
-        // old assertion used POSITIVELY against this cover, which is why it is
-        // known to fire when the cover mounts; `local-apps.create` is the
-        // cover's toolbar button and `local-apps.create.empty-state` its
-        // `ContentUnavailableView` action — the one an empty library shows — so
-        // between them no state of that cover goes unnoticed.
-        XCTAssertFalse(
-            app.navigationBars["应用"].waitForExistence(timeout: 5),
-            app.debugDescription
-        )
-        XCTAssertFalse(app.buttons["local-apps.create"].exists, app.debugDescription)
-        XCTAssertFalse(
-            app.buttons["local-apps.create.empty-state"].exists,
-            app.debugDescription
-        )
-    }
-
-    /// The local-apps cover, mounted through the drawer's `drawer.apps.library`
-    /// affordance.
-    ///
-    /// `testEverySidebarRoutePresentsAndLeavesTheSidebar` above pins the
-    /// SIBLING fact — that the drawer's create affordance creates an app
-    /// directly rather than opening this cover. `drawer.apps.library` (in
-    /// `conversationActions`, `Drawer.swift`) is rendered unconditionally, not
-    /// gated on a non-empty catalog, so reaching the cover needs no seed at
-    /// all; the seed below exists only so the cover has a row to assert once
-    /// it is open. Under `LINGXI_UI_TESTING=1` the conversation source is
-    /// `MockConversationSource`, whose `submitEngineCommand` is the no-op
-    /// protocol-extension default, so `.listApps` never reaches an engine and
-    /// the catalog cannot fill on its own — hence the launch below.
-    ///
-    /// `LINGXI_UI_TEST_LOCAL_APPS=1` is `LocalAppsStore.uiTestSeedEnvironmentKey`;
-    /// `RootView.init` answers it by calling `LocalAppsStore.seedForUITesting()`,
-    /// which plants exactly one app.
-    ///
-    /// `"ui-test-seeded-app"` below is the literal value of
-    /// `LocalAppsStore.uiTestSeedAppID`. A UI test is a black box and cannot
-    /// import the app module, so the constant is duplicated on purpose — and
-    /// renaming it on the app side makes this test go red at the row probe
-    /// rather than silently stop proving anything.
-    func testAppsTabShowsTheSeededLocalAppLibrary() {
-        app.terminate()
-        app.launchEnvironment["LINGXI_UI_TEST_LOCAL_APPS"] = "1"
-        app.launch()
-        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
-
-        openDrawer()
-        let appsTab = app.buttons["drawer.tab.apps"]
-        XCTAssertTrue(appsTab.waitForExistence(timeout: 8), app.debugDescription)
-        appsTab.tap()
-
-        let appRow = app.buttons["drawer.apps.row.ui-test-seeded-app"]
-        XCTAssertTrue(appRow.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(
-            app.buttons["drawer.apps.create"].exists,
-            app.debugDescription
-        )
     }
 
     /// The name is now WIDER than what the test asserts, and the name is kept

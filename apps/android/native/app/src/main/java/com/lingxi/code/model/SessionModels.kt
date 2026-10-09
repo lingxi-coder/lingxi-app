@@ -127,14 +127,6 @@ data class SessionRow(
     val relativeTime: String,
     val mode: SessionMode = SessionMode.Code,
     val modifiedAtEpochSeconds: Long? = null,
-    /**
-     * Whether this is the app's pinned create-interview conversation
-     * (`AppSessionKindDto.INIT` on the wire — see
-     * `LocalAppsViewModel.AppSessionRowDto.toUiRow`). Defaults false for every
-     * session that isn't a local-app session, where the concept does not
-     * apply.
-     */
-    val isInit: Boolean = false,
 )
 
 /**

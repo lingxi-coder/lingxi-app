@@ -150,8 +150,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                             mode: .code,
                             modifiedAt: now.addingTimeInterval(-400),
                             relativeTime: "earlier",
-                            messageCount: 1,
-                            isInit: false
+                            messageCount: 1
                         )
                     ]
                 ),
@@ -176,26 +175,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                             mode: .code,
                             modifiedAt: now.addingTimeInterval(-800),
                             relativeTime: "old",
-                            messageCount: 1,
-                            isInit: false
-                        )
-                    ]
-                ),
-                WorkspaceGroupSeed(
-                    scope: .localApp("app"),
-                    kind: .localApp,
-                    title: "App",
-                    subtitle: nil,
-                    updatedAt: now.addingTimeInterval(-100),
-                    sessions: [
-                        WorkspaceSessionRow(
-                            id: "app-code",
-                            title: "App code",
-                            mode: .code,
-                            modifiedAt: now.addingTimeInterval(-50),
-                            relativeTime: "now",
-                            messageCount: 2,
-                            isInit: false
+                            messageCount: 1
                         )
                     ]
                 )
@@ -203,7 +183,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
             pinnedAt: ["project.pinned": now.addingTimeInterval(-10)]
         )
 
-        XCTAssertEqual(groups.map(\.key), ["global", "project.pinned", "app.app", "project.older"])
+        XCTAssertEqual(groups.map(\.key), ["global", "project.pinned", "project.older"])
     }
 
     func testWorkspaceGroupBuilderFiltersByModeAndSearch() {
@@ -225,8 +205,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                             mode: .code,
                             modifiedAt: now,
                             relativeTime: "now",
-                            messageCount: 2,
-                            isInit: false
+                            messageCount: 2
                         ),
                         WorkspaceSessionRow(
                             id: "chat-1",
@@ -234,8 +213,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                             mode: .chat,
                             modifiedAt: now.addingTimeInterval(-5),
                             relativeTime: "now",
-                            messageCount: 3,
-                            isInit: false
+                            messageCount: 3
                         ),
                         WorkspaceSessionRow(
                             id: "chat-2",
@@ -243,8 +221,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                             mode: .chat,
                             modifiedAt: now.addingTimeInterval(-6),
                             relativeTime: "now",
-                            messageCount: 1,
-                            isInit: false
+                            messageCount: 1
                         )
                     ]
                 ),
@@ -261,8 +238,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                             mode: .chat,
                             modifiedAt: now.addingTimeInterval(-10),
                             relativeTime: "now",
-                            messageCount: 1,
-                            isInit: false
+                            messageCount: 1
                         )
                     ]
                 )
@@ -289,8 +265,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                             mode: .chat,
                             modifiedAt: now,
                             relativeTime: "now",
-                            messageCount: 3,
-                            isInit: false
+                            messageCount: 3
                         ),
                         WorkspaceSessionRow(
                             id: "chat-2",
@@ -298,8 +273,7 @@ final class ProjectScopedPreferencesTests: XCTestCase {
                             mode: .chat,
                             modifiedAt: now.addingTimeInterval(-1),
                             relativeTime: "now",
-                            messageCount: 1,
-                            isInit: false
+                            messageCount: 1
                         )
                     ]
                 )

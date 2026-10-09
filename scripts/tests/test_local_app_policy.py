@@ -214,7 +214,7 @@ class MobileStorePolicyFixture(unittest.TestCase):
         for path in (self.MAIN, self.DIRECT):
             self.write(path, (HOST / path).read_text())
         self.write("apps/ios/native/Info.plist", (HOST / "apps/ios/native/Info.plist").read_text())
-        for source in ("Cron/CronModels.swift", "Cron/CronSystemAdapters.swift", "LocalApps/LocalAppsStore.swift",
+        for source in ("Cron/CronModels.swift", "Cron/CronSystemAdapters.swift", "App/LocalAppBackgroundTaskBridge.swift",
                        "App/AppNotificationDelegate.swift", "App/ConversationBackgroundActivity.swift",
                        "Voice/VoiceAudioSessionCoordinator.swift", "App/RootView.swift"):
             path = f"apps/ios/native/Sources/{source}"
@@ -523,7 +523,7 @@ let endpoint = "silence detected"
         for relative, token in (
             ("App/AppNotificationDelegate.swift", "LocalAppBackgroundTaskBridge.shared.registerAtLaunch()"),
             ("Cron/CronSystemAdapters.swift", "processingTask.expirationHandler"),
-            ("LocalApps/LocalAppsStore.swift", "processing.setTaskCompleted"),
+            ("App/LocalAppBackgroundTaskBridge.swift", "processing.setTaskCompleted"),
             ("App/ConversationBackgroundActivity.swift", "BGContinuedProcessingTaskRequest("),
             ("Voice/VoiceAudioSessionCoordinator.swift", "sessionDriver.deactivate()"),
             ("App/RootView.swift", "VoiceAudioSessionCoordinator.shared.suspendForBackground()"),

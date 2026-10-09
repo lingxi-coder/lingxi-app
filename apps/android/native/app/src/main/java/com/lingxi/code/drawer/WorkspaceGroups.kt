@@ -1,7 +1,6 @@
 package com.lingxi.code.drawer
 
 import androidx.compose.runtime.Immutable
-import com.lingxi.code.localapps.LocalAppSessionRow
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.Project
@@ -11,17 +10,7 @@ import com.lingxi.code.model.SessionRow
 enum class WorkspaceGroupKind {
     Global,
     Project,
-    LocalApp,
 }
-
-@Immutable
-data class DrawerLocalAppWorkspace(
-    val appId: String,
-    val name: String,
-    val status: String? = null,
-    val updatedAtEpochSeconds: Long = 0L,
-    val sessions: List<LocalAppSessionRow> = emptyList(),
-)
 
 @Immutable
 data class WorkspaceGroup(
@@ -53,7 +42,6 @@ internal fun buildWorkspaceGroups(
     globalName: String,
     globalSessions: List<SessionRow>,
     projects: List<Project>,
-    localApps: List<DrawerLocalAppWorkspace>,
     pinnedAtEpochMillis: (String) -> Long? = { null },
 ): List<WorkspaceGroup> = sortWorkspaceGroups(
     buildList {
@@ -88,39 +76,6 @@ internal fun buildWorkspaceGroups(
                             relativeTime = session.activity,
                         )
                     }.filter { it.mode == mode },
-                ),
-            )
-        }
-        localApps.forEach { app ->
-            val stableKey = "app.${app.appId}"
-            add(
-                WorkspaceGroup(
-                    stableKey = stableKey,
-                    scope = ConversationScope.LocalApp(app.appId),
-                    kind = WorkspaceGroupKind.LocalApp,
-                    name = app.name,
-                    status = app.status,
-                    pinnedAtEpochSeconds = pinnedAtEpochMillis(stableKey),
-                    workspaceUpdatedAtEpochSeconds = app.updatedAtEpochSeconds,
-                    sessions = app.sessions.map { session ->
-                        SessionRow(
-                            uuid = session.uuid,
-                            title = session.title,
-                            messageCount = session.messageCount,
-                            mode = session.mode,
-                            modifiedAtEpochSeconds = session.modifiedAtEpochSeconds,
-                            relativeTime = session.relativeTime,
-                            isInit = session.isInit,
-                        )
-                    }.filter { it.mode == mode }
-                        // The pinned create-interview session sorts first,
-                        // regardless of recency — it is the conversation that
-                        // defines the app, and a user re-opening a half-finished
-                        // interview should not have to hunt for it below newer
-                        // sessions. `sortedByDescending` is stable, so relative
-                        // order within each group (init / not-init) is
-                        // unchanged.
-                        .sortedByDescending { it.isInit },
                 ),
             )
         }

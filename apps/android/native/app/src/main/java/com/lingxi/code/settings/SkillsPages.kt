@@ -71,71 +71,12 @@ private fun authorLabel(author: String): String = when (author) {
 fun SkillsPage(
     state: SettingsUiState,
     store: SettingsStore,
-    onSetLocalAppPluginEnabled: (pluginId: String, enabled: Boolean) -> Unit,
     onDetail: (id: String) -> Unit,
 ) {
     val t = LingXiTheme.palette
 
     Column(Modifier.fillMaxWidth()) {
         Blurb(stringResource(R.string.skills_description_blurb))
-
-        SettingsSection(label = stringResource(R.string.local_apps_plugin_title)) {
-            SettingsRow(
-                icon = LXIconName.Skill,
-                iconColor = SkillSky,
-                label = state.localAppPlugin.displayName,
-                sub = buildString {
-                    append(stringResource(R.string.local_apps_plugin_source_builtin))
-                    append(" · ")
-                    append(stringResource(R.string.local_apps_plugin_version_fmt, state.localAppPlugin.version))
-                },
-                value = if (state.localAppPlugin.enabled) {
-                    stringResource(R.string.local_apps_plugin_state_enabled)
-                } else {
-                    stringResource(R.string.local_apps_plugin_state_disabled)
-                },
-                chevron = false,
-                trailing = {
-                    LXToggle(
-                        checked = state.localAppPlugin.enabled,
-                        onCheckedChange = { enabled ->
-                            onSetLocalAppPluginEnabled(state.localAppPlugin.pluginId, enabled)
-                        },
-                    )
-                },
-            )
-            SettingsRow(
-                label = stringResource(R.string.local_apps_plugin_bundle_digest),
-                sub = buildString {
-                    append(state.localAppPlugin.bundleDigest)
-                },
-                value = buildString {
-                    append(stringResource(R.string.local_apps_plugin_skills_count_fmt, state.localAppPlugin.skillsCount))
-                    append(" · ")
-                    append(stringResource(R.string.local_apps_plugin_agents_count_fmt, state.localAppPlugin.agentsCount))
-                    append(" · ")
-                    append(stringResource(R.string.local_apps_plugin_workflows_count_fmt, state.localAppPlugin.workflowsCount))
-                    append(" · ")
-                    append(stringResource(R.string.local_apps_plugin_templates_count_fmt, state.localAppPlugin.templatesCount))
-                },
-                chevron = false,
-                isLast = true,
-            )
-        }
-        state.localAppPlugin.validationError?.let { message ->
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.padding(bottom = 12.dp)) {
-                Text(
-                    stringResource(R.string.local_apps_plugin_validation_error),
-                    color = t.text4,
-                    fontSize = 12.sp,
-                )
-                Text(
-                    message,
-                    color = t.danger,
-                    fontSize = 12.sp,
-                )
-            }
-        }
 
         AuthorOrder.forEach { author ->
             val arr = state.skills.filter { it.author == author }

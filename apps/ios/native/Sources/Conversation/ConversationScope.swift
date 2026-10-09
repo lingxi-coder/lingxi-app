@@ -23,18 +23,14 @@ enum SessionMode: String, CaseIterable, Codable, Hashable, Sendable {
     }
 #endif
 
-/// The workspace a conversation runs in. Global and managed projects predate
-/// this type; `.localApp` is v3's third scope — each local app is a
-/// conversation scope of its own whose workspace directory is the session cwd.
+/// The workspace a conversation runs in: the global shell workspace, the
+/// managed no-project scheduled workspace, or a managed project.
 enum ConversationScope: Equatable, Hashable, Sendable {
     case global
     case scheduled
     case project(String)
-    case localApp(String)
 
-    /// The legacy optional-projectID spelling (`nil` == global). `.localApp`
-    /// deliberately has no projectID: an app conversation must never write
-    /// into a project's session index or preferences.
+    /// The legacy optional-projectID spelling (`nil` == global).
     init(projectID: String?) {
         self = projectID.map(ConversationScope.project) ?? .global
     }
@@ -48,10 +44,6 @@ enum ConversationScope: Equatable, Hashable, Sendable {
             let id = String(workspaceKey.dropFirst("project.".count))
             guard !id.isEmpty else { return nil }
             self = .project(id)
-        } else if workspaceKey.hasPrefix("app.") {
-            let id = String(workspaceKey.dropFirst("app.".count))
-            guard !id.isEmpty else { return nil }
-            self = .localApp(id)
         } else {
             return nil
         }
@@ -62,32 +54,23 @@ enum ConversationScope: Equatable, Hashable, Sendable {
         return nil
     }
 
-    var appID: String? {
-        if case let .localApp(id) = self { return id }
-        return nil
-    }
-
-    var isLocalApp: Bool { appID != nil }
-
     var workspaceKey: String {
         switch self {
         case .global: "global"
         case .scheduled: "scheduled"
         case let .project(id): "project.\(id)"
-        case let .localApp(id): "app.\(id)"
         }
     }
 
     /// The middle segment of a `ProjectScopedPreferences` key. `.global` and
     /// `.project` MUST keep producing exactly the strings the pre-scope code
     /// produced ("global" / the lowercased project id) so existing user state
-    /// survives; `.localApp` only ADDS the `app.<id>` namespace.
+    /// survives.
     var preferenceScope: String {
         switch self {
         case .global: "global"
         case .scheduled: "scheduled"
         case let .project(id): id.lowercased()
-        case let .localApp(id): "app.\(id.lowercased())"
         }
     }
 }

@@ -2,7 +2,7 @@ import Foundation
 
 /// Persists user-editable conversation state under an explicit conversation
 /// scope. The global scope is a real scope of its own; it never shares keys
-/// with a managed project or a local app, so switching workspaces cannot leak
+/// with a managed project, so switching workspaces cannot leak
 /// drafts or sessions.
 struct ProjectScopedPreferences {
     private let defaults: UserDefaults
@@ -120,7 +120,7 @@ struct ProjectScopedPreferences {
 
     /// `ConversationScope.preferenceScope` keeps the historical key strings
     /// for global/project scopes byte-identical (existing user state must
-    /// survive) and only adds the `app.<id>` namespace for local apps.
+    /// survive).
     private func key(_ field: String, scope: ConversationScope) -> String {
         "conversation.\(scope.preferenceScope).\(field)"
     }

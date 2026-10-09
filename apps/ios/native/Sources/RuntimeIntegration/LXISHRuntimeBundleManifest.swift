@@ -3,12 +3,10 @@ import Foundation
 struct LXISHRuntimeBundleManifest: Equatable {
     var rootfsVersion: String
     var archiveSha256: String?
-    var localAppRuntime: Bool
 
     static let fallback = LXISHRuntimeBundleManifest(
         rootfsVersion: "1.0.0",
-        archiveSha256: nil,
-        localAppRuntime: false
+        archiveSha256: nil
     )
 }
 
@@ -84,14 +82,9 @@ enum LXISHRuntimeBundleMetadata {
             in: json,
             keys: ["archive_sha256", "archiveSha256", "rootfs_zip_sha256", "rootfsZipSha256"]
         )
-        let localAppRuntime = boolean(
-            in: json,
-            keys: ["local_app_runtime", "localAppRuntime"]
-        ) ?? false
         return LXISHRuntimeBundleManifest(
             rootfsVersion: version,
-            archiveSha256: archiveSha256,
-            localAppRuntime: localAppRuntime
+            archiveSha256: archiveSha256
         )
     }
 

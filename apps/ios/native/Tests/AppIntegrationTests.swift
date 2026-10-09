@@ -97,19 +97,6 @@ final class AppIntegrationTests: XCTestCase {
         )
     }
 
-    func testLocalAppDeepLinkRejectsInvalidIDsAndUnknownQueries() {
-        XCTAssertNil(
-            LingxiDeepLink.action(
-                from: URL(string: "lingxi://open_local_app?appId=Tracker&destination=preview&autostart=1")!
-            )
-        )
-        XCTAssertNil(
-            LingxiDeepLink.action(
-                from: URL(string: "lingxi://open_local_app?appId=tracker&destination=preview&autostart=1&extra=1")!
-            )
-        )
-    }
-
     func testMarkdownTerminalLinkKeepsAndroidCompatibleURL() {
         let expected = URL(string: "lingxi://open_terminal?sessionId=shell-8&initCommand=pwd")!
         let rendered = AIText.parseInline(

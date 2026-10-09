@@ -176,39 +176,6 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
         return await handle.runCronTaskIfDue(taskId: task.id, scheduledAtMs: scheduledAtMs).map(Self.map)
     }
 
-    func runLocalAppBackgroundTasks() async {
-        do {
-            let handle = try await makeHandle(scope: .global(appSandboxRoot: appSandboxRoot))
-            let now = UInt64(Date().timeIntervalSince1970 * 1000)
-            _ = await handle.runDueLocalAppBackgroundTasks(nowMs: now)
-            await scheduleNextLocalAppBackgroundWake(handle: handle, nowMs: now)
-        } catch {
-            LocalAppBackgroundTaskBridge.shared.schedule(
-                earliestAtMs: UInt64(Date().timeIntervalSince1970 * 1000) + 15 * 60 * 1_000
-            )
-        }
-    }
-
-    func rescheduleLocalAppBackgroundWake() async {
-        do {
-            let handle = try await makeHandle(scope: .global(appSandboxRoot: appSandboxRoot))
-            let now = UInt64(Date().timeIntervalSince1970 * 1000)
-            await scheduleNextLocalAppBackgroundWake(handle: handle, nowMs: now)
-        } catch {
-            LocalAppBackgroundTaskBridge.shared.schedule(
-                earliestAtMs: UInt64(Date().timeIntervalSince1970 * 1000) + 15 * 60 * 1_000
-            )
-        }
-    }
-
-    private func scheduleNextLocalAppBackgroundWake(
-        handle: MobileEngineHandle,
-        nowMs: UInt64
-    ) async {
-        let next = await handle.nextLocalAppBackgroundWakeMs(nowMs: nowMs)
-        LocalAppBackgroundTaskBridge.shared.schedule(earliestAtMs: next)
-    }
-
     private func makeHandle(scope: CronScope, task: CronTaskRecord? = nil) async throws -> MobileEngineHandle {
         let (snapshot, runtime) = await MainActor.run {
             (launchSnapshot(), terminalConfig(scope))
@@ -236,8 +203,6 @@ final class FfiCronExecutor: CronTaskExecuting, @unchecked Sendable {
             mobileLinux: cronRuntime.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: appSandboxRoot)
             },
-            localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
-            localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
             hostEnvironment: await MainActor.run {
                 makeIosHostEnvironment(launchMode: .scheduledHeadless)
@@ -336,11 +301,10 @@ private final class CronPermissionSink: IosPermissionSink, @unchecked Sendable {
 
 /// `appSandboxRoot` is a parameter rather than something this function looks
 /// up, so that both callers pass the SAME value they hand the engine in the
-/// launch config beside it. The runtime validates local-app build mounts
-/// against this root; when it disagreed with the engine's by even one
-/// component, every local-app build failed its mount check. Passing one
-/// expression to both fields makes them agree by construction instead of by
-/// two lookups that happen to match.
+/// launch config beside it. The runtime validates mounts against this root;
+/// when it disagreed with the engine's by even one component, the mount check
+/// guarded the wrong directory. Passing one expression to both fields makes
+/// them agree by construction instead of by two lookups that happen to match.
 func makeIosMobileLinuxConfig(
     _ config: TerminalRuntimeConfig,
     appSandboxRoot: String

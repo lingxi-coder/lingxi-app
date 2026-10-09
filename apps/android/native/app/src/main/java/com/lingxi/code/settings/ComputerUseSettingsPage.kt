@@ -485,7 +485,7 @@ private fun voiceLanguageLabel(language: String): String = when (language) {
 @Composable
 private fun ComputerUseTier.label(): String = when (this) {
     ComputerUseTier.Read -> stringResource(R.string.settings_linux_read_only)
-    ComputerUseTier.Click -> stringResource(R.string.local_apps_ui_action_click)
+    ComputerUseTier.Click -> stringResource(R.string.computer_use_tier_click)
     ComputerUseTier.Full -> stringResource(R.string.settings_cu_tier_full)
 }
 

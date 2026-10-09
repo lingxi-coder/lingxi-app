@@ -33,7 +33,7 @@ visionDelegationEnabled: true
         private func row(
             id: String,
             status: TaskStatusDto,
-            description: String = "local-app-build workflow",
+            description: String = "build workflow",
             error: String? = nil,
             canResume: Bool = false
         ) -> TaskRowDto {
@@ -114,7 +114,7 @@ visionDelegationEnabled: true
             XCTAssertEqual(source.model.backgroundTasks.first?.status, .running)
             XCTAssertEqual(
                 source.model.backgroundTasks.first?.descriptionText,
-                "local-app-build workflow"
+                "build workflow"
             )
         }
 
@@ -342,7 +342,7 @@ visionDelegationEnabled: true
             XCTAssertEqual(source.model.backgroundTasks.count, 1, "row upserts, never duplicates")
             XCTAssertEqual(
                 source.model.backgroundTasks.first?.descriptionText,
-                "local-app-build workflow"
+                "build workflow"
             )
         }
 
@@ -447,7 +447,7 @@ visionDelegationEnabled: true
                     // The notice now names the task by its human description
                     // (the `TaskRow` above supplied one), not by the bare id.
                     if case let .notice(notice) = item {
-                        return notice.text.contains("local-app-build workflow")
+                        return notice.text.contains("build workflow")
                     }
                     return false
                 },

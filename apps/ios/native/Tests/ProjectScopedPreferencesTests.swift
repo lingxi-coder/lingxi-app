@@ -69,9 +69,8 @@ final class ProjectScopedPreferencesTests: XCTestCase {
 
     /// Back-compat pin: `.project(id)` / `.global` MUST produce the SAME key
     /// strings the pre-scope `projectID:` path wrote, so existing user state
-    /// survives the ConversationScope refactor. `.localApp` only ADDS the
-    /// `app.<id>` namespace.
-    func testScopeKeysPreserveLegacyProjectKeysAndAddTheAppNamespace() {
+    /// survives the ConversationScope refactor.
+    func testScopeKeysPreserveLegacyProjectKeys() {
         let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -87,29 +86,9 @@ final class ProjectScopedPreferencesTests: XCTestCase {
         XCTAssertEqual(preferences.storedActiveSessionID(scope: .project("proj-a")), "legacy-session")
         XCTAssertEqual(preferences.draft(scope: .global), "global-draft")
 
-        // The app namespace is additive and isolated from a same-named project.
-        preferences.setDraft("app-draft", scope: .localApp("proj-a"))
-        preferences.setActiveSessionID("app-session", scope: .localApp("Proj-A"))
-        XCTAssertEqual(defaults.string(forKey: "conversation.app.proj-a.draft"), "app-draft")
-        XCTAssertEqual(defaults.string(forKey: "conversation.app.proj-a.active-session"), "app-session")
-        XCTAssertEqual(preferences.draft(scope: .localApp("proj-a")), "app-draft")
+        preferences.setDraft("scheduled-draft", scope: .scheduled)
+        XCTAssertEqual(defaults.string(forKey: "conversation.scheduled.draft"), "scheduled-draft")
         XCTAssertEqual(preferences.draft(scope: .project("proj-a")), "legacy-draft", "the project key is untouched")
-    }
-
-    func testAppScopeIsolatesDraftsAndSessionsPerApp() {
-        let suite = "ProjectScopedPreferencesTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let preferences = ProjectScopedPreferences(defaults: defaults)
-
-        preferences.setDraft("tracker-draft", scope: .localApp("tracker"))
-        preferences.setDraft("notes-draft", scope: .localApp("notes"))
-        preferences.setActiveSessionID("tracker-session", scope: .localApp("tracker"))
-
-        XCTAssertEqual(preferences.draft(scope: .localApp("tracker")), "tracker-draft")
-        XCTAssertEqual(preferences.draft(scope: .localApp("notes")), "notes-draft")
-        XCTAssertEqual(preferences.activeSessionID(scope: .localApp("tracker")), "tracker-session")
-        XCTAssertNil(preferences.storedActiveSessionID(scope: .localApp("notes")))
     }
 
     func testModeScopedKeysKeepChatAndCodeStateSeparate() {

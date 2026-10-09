@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Korean for values/strings_local_apps_v3.xml (see that file's header). -->
+<!-- Korean for values/strings_conversation_extra.xml (see that file's header). -->
 <resources>
     <string name="chat_question_card_title">어시스턴트가 몇 가지 확인하고 싶은 것이 있습니다</string>
     <string name="chat_question_progress">%1$d/%2$d번째 질문</string>

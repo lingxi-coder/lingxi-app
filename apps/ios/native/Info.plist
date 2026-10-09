@@ -5,7 +5,6 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.lingxi.code.cron.reconcile</string>
-		<string>com.lingxi.code.localapps.background</string>
 		<string>com.lingxi.code.conversation.continued.*</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>

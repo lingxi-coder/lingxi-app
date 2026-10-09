@@ -102,13 +102,6 @@ if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
   "${LINUX_RUNTIME_BUILD}" --simulator-only
 elif [[ "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
   "${SCRIPT_DIR}/verify-linux-runtime.sh"
-  if [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
-    "${SCRIPT_DIR}/validate-local-app-build-assets.sh" \
-      --configuration FullDebug --platform iphoneos --rootfs-only \
-      --rootfs-manifest "${IOS_DIR}/build/linux-runtime/openminis/manifest.json"
-  fi
-elif [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
-  "${LINUX_RUNTIME_BUILD}" --local-app-runtime
 else
   "${LINUX_RUNTIME_BUILD}"
 fi

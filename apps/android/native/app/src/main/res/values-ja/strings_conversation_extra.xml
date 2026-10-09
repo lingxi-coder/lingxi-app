@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Japanese for values/strings_local_apps_v3.xml (see that file's header). -->
+<!-- Japanese for values/strings_conversation_extra.xml (see that file's header). -->
 <resources>
     <string name="chat_question_card_title">アシスタントがいくつか確認したいことがあります</string>
     <string name="chat_question_progress">第 %1$d/%2$d 問</string>

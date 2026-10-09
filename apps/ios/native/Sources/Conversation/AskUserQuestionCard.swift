@@ -296,7 +296,7 @@ struct AskUserQuestionCard: View {
         } label: {
             HStack(spacing: 8) {
                 if submitting { ProgressView().controlSize(.small) }
-                Text("local_apps_submit")
+                Text("common_submit")
             }
             .frame(maxWidth: .infinity)
         }

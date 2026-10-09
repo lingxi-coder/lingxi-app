@@ -855,9 +855,6 @@ struct Drawer: View {
             onSelectProject(nil)
         case let .project(id):
             onSelectProject(id)
-        case .localApp:
-            // Local App workspaces are not listed by this client.
-            break
         }
     }
 
@@ -869,8 +866,6 @@ struct Drawer: View {
         case let .project(id):
             if let mode = section.sessionMode { onModeChanged?(mode) }
             onSelectSession(id, sessionID)
-        case .localApp:
-            break
         }
     }
 
@@ -883,8 +878,6 @@ struct Drawer: View {
             onNewChat(nil)
         case let .project(id):
             onNewChat(id)
-        case .localApp:
-            break
         }
     }
 

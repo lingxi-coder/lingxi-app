@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- English for values/strings_local_apps_v3.xml (see that file's header). -->
+<!-- English for values/strings_conversation_extra.xml (see that file's header). -->
 <resources>
     <string name="chat_question_card_title">The assistant wants to confirm a few things</string>
     <string name="chat_question_progress">Question %1$d/%2$d</string>

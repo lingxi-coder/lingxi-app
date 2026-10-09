@@ -337,7 +337,7 @@ private struct CronRunDetailView: View {
     var body: some View {
         Form {
             if let run = repository.state.history.first(where: { $0.runID == runID }) {
-                Section("local_apps_section_overview") {
+                Section("cron_run_section_overview") {
                     LabeledContent("cron_run_project_label", value: run.projectName)
                     LabeledContent("settings_linux_section_status", value: run.resultCategory.label)
                     LabeledContent("cron_scheduled_at_label", value: formatCronEpoch(run.scheduledAtMs))

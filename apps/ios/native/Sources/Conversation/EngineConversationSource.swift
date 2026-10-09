@@ -1572,8 +1572,6 @@ final class EngineConversationSource: ConversationSource {
             mobileLinux: config.mobileLinux.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: config.appSandboxRoot)
             },
-            localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
-            localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
             hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
         )
@@ -1647,7 +1645,7 @@ final class EngineConversationSource: ConversationSource {
             permissions: permissions,
             // Native Keychain secure store enables OAuth token persistence.
             secureStorage: SecureStorageImpl(),
-            // One-shot location for local apps that declared it. The cron
+            // One-shot device location. The cron
             // bridge passes nothing here (the FFI defaults it to nil):
             // a background wake has no user present to answer an
             // authorization sheet.
@@ -3844,9 +3842,8 @@ final class EngineConversationSource: ConversationSource {
             // Out-of-band MCP listing → the UI `MCPServer` model. The wire
             // intentionally carries health/name/transport only; endpoint
             // and command details are merged from the real config file by
-            // the settings host, never fabricated here. `local_apps` is an
-            // engine-owned provider, not a user-editable MCP configuration.
-            model.mcpServers = servers.filter { $0.name != "local_apps" }.map { dto in
+            // the settings host, never fabricated here.
+            model.mcpServers = servers.map { dto in
                 let status: ConnStatus
                 switch dto.status {
                 case .connected: status = .connected

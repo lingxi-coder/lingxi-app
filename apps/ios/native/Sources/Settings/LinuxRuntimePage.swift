@@ -80,8 +80,8 @@ private enum LinuxRuntimeBridge {
             // The engine's own data root, from the same function the engine
             // launch config reads — NOT re-derived from `managedRoot`, which
             // lives beside it under Application Support and does not contain
-            // it. The runtime enforces `.lingxi` protection and local-app
-            // build mount paths against this value.
+            // it. The runtime enforces `.lingxi` protection and mount
+            // paths against this value.
             appSandboxRoot: ConversationSourceFactory.appSandboxRoot()
         )
     }

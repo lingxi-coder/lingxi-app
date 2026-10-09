@@ -55,7 +55,7 @@
 key 本身**——用户会在界面上看到 `settings_provider_login` 这种裸标识符。
 Android 同理：`R.string.foo`（排除 `android.R.string.*` / `androidx.R.string.*`
 框架资源）如果既不在 `zh-Hans.json` 的合法 key 集里、也不在
-`values/strings_local_apps_v3.xml`（`local_app_runtime_profiles.rs` 之外，本仓库
+`values/strings_conversation_extra.xml`（`local_app_runtime_profiles.rs` 之外，本仓库
 唯一一份手工维护、由自己的重名冲突当 tripwire 的姊妹目录）里，资源合并会直接
 报错——但只有在真的构建那个 flavor 时才会被发现。
 
@@ -94,10 +94,10 @@ ANDROID_SOURCE_ROOT = "apps/android/native/app/src/main/java"
 # 手工维护、不经 generate.py 的姊妹资源文件——它们的 key 也算「已知」，
 # 否则每一条被这份文件 RESTORE 回来的 key 都会被误报成 orphan。
 ANDROID_COMPANION_STRINGS_FILES = (
-    "apps/android/native/app/src/main/res/values/strings_local_apps_v3.xml",
+    "apps/android/native/app/src/main/res/values/strings_conversation_extra.xml",
 )
 
-# strings_local_apps_v3.xml 是手工维护的姊妹文件，不经 generate.py 生成，所以
+# strings_conversation_extra.xml 是手工维护的姊妹文件，不经 generate.py 生成，所以
 # 不会像 values*/strings.xml 那样自动铺到每个 locale 目录——加一个 key 只加进
 # values/ 很容易忘记其它 locale。ANDROID_LOCALE_DIR 把每个 LOCALES 条目映射到
 # 它在 Android res 下应该有的 qualifier，这样才能查出「哪个 locale 的副本缺了
@@ -112,7 +112,7 @@ ANDROID_LOCALE_DIR = {
     "ja": "values-ja",
     "ko": "values-ko",
 }
-ANDROID_COMPANION_STRINGS_BASENAME = "strings_local_apps_v3.xml"
+ANDROID_COMPANION_STRINGS_BASENAME = "strings_conversation_extra.xml"
 ANDROID_RES_ROOT = "apps/android/native/app/src/main/res"
 
 # 只匹配字面量 key（无 `\(...)` 插值）。插值调用会被 Swift 编译成复合 key
@@ -164,7 +164,7 @@ def _android_source_refs(repo_root):
 
 
 def _android_companion_names(repo_root):
-    """`values/strings_local_apps_v3.xml` 等手工维护姊妹文件里定义的 key 名。"""
+    """`values/strings_conversation_extra.xml` 等手工维护姊妹文件里定义的 key 名。"""
     names = set()
     for rel in ANDROID_COMPANION_STRINGS_FILES:
         path = Path(repo_root) / rel
@@ -174,7 +174,7 @@ def _android_companion_names(repo_root):
 
 
 def _android_companion_locale_gaps(repo_root):
-    """locale -> sorted missing key list: keys `values/strings_local_apps_v3.xml`
+    """locale -> sorted missing key list: keys `values/strings_conversation_extra.xml`
     defines that this locale's own ANDROID_LOCALE_DIR copy does not have (a
     missing file counts every base key as missing). Base locale excluded —
     it can't be missing from itself."""
@@ -334,7 +334,7 @@ def compare(base, now):
             for loc, keys in sorted(now.get("androidCompanionLocaleGaps", {}).items())
         )
         problems.append(
-            "%d strings_local_apps_v3.xml key(s) missing from a non-base Android locale copy "
+            "%d strings_conversation_extra.xml key(s) missing from a non-base Android locale copy "
             "under %s, baseline was %d — that locale's resource resolution silently falls back to "
             "values/ (%s) for these keys, e.g. the AskUserQuestion card copy shows %s instead of the "
             "device language. %s"

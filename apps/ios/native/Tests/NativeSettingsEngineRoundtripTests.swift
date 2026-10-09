@@ -53,7 +53,7 @@ final class NativeSettingsEngineRoundtripTests: XCTestCase {
             apiBase: "https://invalid.example", apiKey: "", model: "", sessionMode: .code,
             visionDelegationEnabled: false, appSandboxRoot: root.path, projectCwd: workspace.path,
             providerConfig: IosProviderConfigFfi(providerProfilesJson: "{}", routingJson: #"{"mobileEnabledProfiles":[]}"#),
-            mobileLinux: nil, localAppsFullRuntime: false, localAppsRuntimeRoot: nil,
+            mobileLinux: nil,
             physicalMemoryBytes: 0, hostEnvironment: nil),
             listener: listener, audio: audio, camera: CameraImpl(), share: ShareImpl(),
             notifications: NotificationImpl(), clipboard: ClipboardImpl(),

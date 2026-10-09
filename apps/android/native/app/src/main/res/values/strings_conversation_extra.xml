@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Conversation copy kept outside the generated strings.xml (the AskUserQuestion
+  card and background-task status notices). Keys must stay unique against
+  values/strings.xml — the resource merger fails on duplicates, which is the
+  tripwire that tells us the cross-platform localization sync learned one of
+  these keys.
+-->
+<resources>
+    <!-- New: interactive AskUserQuestion card. -->
+    <string name="chat_question_card_title">助手想确认几个问题</string>
+    <string name="chat_question_progress">第 %1$d/%2$d 题</string>
+    <string name="chat_question_answered_progress">已回答 %1$d/%2$d</string>
+    <string name="chat_question_tap_to_answer">选择一个答案</string>
+    <string name="chat_question_previous">上一题</string>
+    <string name="chat_question_next">下一题</string>
+    <string name="chat_question_other_placeholder">其他</string>
+    <string name="chat_question_submit">提交</string>
+    <!-- New: background task transition notices. -->
+    <string name="chat_task_status_pending">后台任务 %1$s 已排队</string>
+    <string name="chat_task_status_running">后台任务 %1$s 运行中</string>
+    <string name="chat_task_status_paused">后台任务 %1$s 已暂停</string>
+    <string name="chat_task_status_completed">后台任务 %1$s 已完成</string>
+    <string name="chat_task_status_failed">后台任务 %1$s 已失败</string>
+    <string name="chat_task_status_failed_reason">后台任务 %1$s 已失败：%2$s</string>
+    <string name="chat_task_status_cancelled">后台任务 %1$s 已取消</string>
+</resources>

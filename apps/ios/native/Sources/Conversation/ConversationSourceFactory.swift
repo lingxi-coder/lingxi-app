@@ -106,8 +106,8 @@ enum ConversationSourceFactory {
     /// pure path computation. The mobile-linux FFI bridges — Settings, the
     /// terminal, cron — must reach this from synchronous nonisolated code,
     /// because it is the single authority for the root the ios-ish runtime
-    /// validates local-app mounts against, and a second copy for their benefit
-    /// is exactly the divergence that broke every local-app build.
+    /// validates mounts against, and a second copy for their benefit
+    /// is exactly the divergence that left the wrong directory guarded.
     nonisolated static func appSandboxRoot() -> String {
         let fm = FileManager.default
         let base = (try? fm.url(for: .applicationSupportDirectory,

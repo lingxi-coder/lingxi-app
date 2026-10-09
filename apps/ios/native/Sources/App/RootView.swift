@@ -141,9 +141,8 @@ struct RootView: View {
     @State private var openTerminalAfterSessionDetails = false
     @State private var selectedPlanDocument: PlanDocument?
     @State private var providerCatalogBootstrapped = false
-    /// The workspace the conversation currently runs in: global, a managed
-    /// project, or a local app (v3 — each app is a conversation scope whose
-    /// workspace directory is the session cwd).
+    /// The workspace the conversation currently runs in: global, the managed
+    /// scheduled workspace, or a managed project.
     @State private var activeScope: ConversationScope
     @State private var activeMode: SessionMode
     @State private var activeSession: String
@@ -242,10 +241,6 @@ struct RootView: View {
                     scheduler: BestEffortBackgroundCronScheduler()
                 )
             }
-            LocalAppBackgroundTaskBridge.shared.bind(
-                { await executor.runLocalAppBackgroundTasks() },
-                rescheduler: { await executor.rescheduleLocalAppBackgroundWake() }
-            )
         #else
             let cron = CronRepository(
                 appSandboxRoot: root,
@@ -281,12 +276,8 @@ struct RootView: View {
         let storedSessionID = ConversationModeRestorePolicy.sessionID(
             mode: initialMode,
             scoped: preferences.storedActiveSessionID(scope: initialScope, mode: initialMode),
-            legacyScoped: initialScope.isLocalApp
-                ? nil
-                : preferences.storedActiveSessionID(projectID: projectID),
-            projectLastActive: initialScope.isLocalApp
-                ? nil
-                : projects.activeProject?.record.lastActiveSessionId
+            legacyScoped: preferences.storedActiveSessionID(projectID: projectID),
+            projectLastActive: projects.activeProject?.record.lastActiveSessionId
         )
         _activeSession = State(initialValue: storedSessionID)
         _confirmedSession = State(initialValue: storedSessionID)
@@ -599,7 +590,6 @@ struct RootView: View {
                         )
                     }
                     await providerRepository.refreshCredentialStatus()
-                    await LocalAppPlugin.disable(on: current)
                 } catch {
                     guard generation == sourceGeneration else { return }
                     current.warmUp()
@@ -892,14 +882,6 @@ struct RootView: View {
     }
 
     private func openCurrentWorkspaceTerminal() {
-        // The app-scoped conversation owns a dedicated Mobile Linux mount, but
-        // the terminal route constructs a separate runtime descriptor. Keep
-        // opening the default shell until that route accepts app scope/mount
-        // metadata instead of forwarding a guest path into another workspace.
-        if activeScope.isLocalApp {
-            navigation.openTerminal(projectID: nil, requestedCwd: nil)
-            return
-        }
         navigation.openTerminal(
             projectID: projectStore.activeProjectId,
             requestedCwd: .guestPath(currentWorkspaceGuestPath)
@@ -1030,11 +1012,6 @@ struct RootView: View {
         case .scheduled:
             project = nil
             projectCwd = appSandboxRoot + "/scheduled/workspace"
-        case .localApp:
-            // No Local App scope can be entered from this client any more (it has no Local App UI),
-            // so there is no app workspace to bind: this is the global workspace.
-            project = nil
-            projectCwd = nil
         }
         var runtime: TerminalRuntimeConfig? = TerminalRuntimeDescriptor.make(
             appSandboxRoot: appSandboxRoot,
@@ -1206,25 +1183,7 @@ struct RootView: View {
         startNew: Bool = false,
         allowRecoveryRouting: Bool = false
     ) -> Bool {
-        // MINTING a conversation in a local-app scope is pinned to Code: the
-        // app's `LINGXI.md` contract requires the create-local-app skill and
-        // the `Workflow`/`LocalApp*`/`Write` tools, all of which
-        // `apply_mobile_session_tool_policy` strips in Chat mode. Pinned HERE
-        // so `onNewAppChat` (Drawer.swift), which passes whatever the global
-        // `activeMode` happens to be at tap time, cannot mint an app-scoped
-        // Chat conversation by omission.
-        //
-        // ONLY `startNew`. An explicit resume must keep the session's own
-        // recorded mode — `host.rs` rejects a cross-mode resume outright
-        // ("session … belongs to chat mode, but this source runs code mode"),
-        // and the app's session catalog lists every row regardless of mode, so
-        // pinning a resume made every pre-existing Chat-mode app session
-        // un-openable. A bare same-scope mode toggle (`switchMode`, the
-        // drawer's Chat/Code tabs) is likewise left alone: pinning it made the
-        // tap a silent no-op that collapsed the sidebar and desynced the tab
-        // from `activeMode`, and that tab is also the only route from inside an
-        // app scope to a project's Chat sessions.
-        let targetMode = (scope.isLocalApp && startNew) ? .code : (mode ?? activeMode)
+        let targetMode = mode ?? activeMode
         guard !projectSwitching,
               allowRecoveryRouting || ConversationSessionMutationPolicy.allowsCallerMutation(
                   hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
@@ -1276,10 +1235,7 @@ struct RootView: View {
                     try await previousSource.cancelAndWait()
                 }
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
-                // Only a project/global switch moves the durable active-project
-                // selection. Entering a local-app scope leaves the project
-                // selection untouched — leaving the app returns to it.
-                if scope != activeScope, !scope.isLocalApp {
+                if scope != activeScope {
                     rollback = try await projectStore.persistActiveForSwitch(projectId: scope.projectID)
                 }
                 try requireSourceReplacementAllowed(previousSource, allowInactiveRecovery: allowRecoveryRouting)
@@ -1608,11 +1564,6 @@ struct RootView: View {
         let emptyTitle: String?
         if let live = conversation.model.engineSessions.first(where: { $0.id == sessionID }) {
             emptyTitle = live.messageCount == 0 ? live.title : nil
-        } else if scope.isLocalApp {
-            // App sessions have no cached project index to consult; the app's
-            // own catalog rows are engine-listed and need no legacy-empty
-            // migration hint.
-            emptyTitle = nil
         } else {
             let cachedRows = scope.projectID.flatMap { id in
                 projectStore.projects.first(where: { $0.record.id == id })?.sessions
@@ -1743,9 +1694,6 @@ struct RootView: View {
                 guard projectStore.projects.contains(where: { $0.record.id == projectID }) else {
                     return true
                 }
-            case .localApp:
-                // This client no longer opens Local App workspaces; a link to one is ignored.
-                return true
             }
             if targetScope == activeScope, mode == activeMode {
                 let currentSessionID = source.model.activeSessionId.isEmpty
@@ -1799,26 +1747,6 @@ struct RootView: View {
             hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
             isCancelling: source.model.isCancelling
         ) else { return false }
-        // A Local App's own `LINGXI.md` contract requires the
-        // create-local-app skill and the `Workflow`/`LocalApp*`/`Write`
-        // tools, all of which `apply_mobile_session_tool_policy` strips in
-        // Chat mode (see `switchScope`'s own pin, just below). `switchMode`
-        // deliberately leaves an app scope free to sit in Chat, so a
-        // `lingxi://` new-conversation/ask action reached while it does must
-        // still pin here — otherwise it mints an app-scoped Chat
-        // conversation whose interview cannot run.
-        if activeScope.isLocalApp, activeMode != .code {
-            pendingBeginActionDraft = draftText
-            // `switchScope` refuses SYNCHRONOUSLY (`projectSwitching`, or the
-            // mutation policy) BEFORE reaching either of the two sites that
-            // drain this latch — the `startNew` branch of its async Task and
-            // that Task's `catch`. Leaving the draft armed on a refusal lets
-            // the NEXT unrelated `startNew` scope switch overwrite the
-            // composer it restores, so clear it here.
-            let switched = switchScope(to: activeScope, mode: .code, startNew: true)
-            if !switched { pendingBeginActionDraft = nil }
-            return switched
-        }
         voiceInteraction.handleContextChange()
         pendingSessionRestoreID = nil
         activeSession = ""
@@ -2029,9 +1957,8 @@ enum ConversationSessionRestorePolicy {
 private struct ConversationProjectBridge: View {
     @ObservedObject var model: ConversationModel
     @Bindable var projectStore: ProjectStore
-    /// A `.localApp` scope still adopts/persists the engine session id via the
-    /// callbacks, but never writes into the PROJECT session index — an app's
-    /// catalog is engine-owned (`ListAppSessions`), not project state.
+    /// The scheduled scope still adopts/persists the engine session id via the
+    /// callbacks, but never writes into the PROJECT session index.
     let scope: ConversationScope
     let sessionMode: SessionMode
     let pendingRestoreID: String?
@@ -2099,9 +2026,9 @@ private struct ConversationProjectBridge: View {
               !sessionID.isEmpty,
               onSessionChanged(sessionID)
         else { return }
-        // App-scope sessions are adopted (above) but never recorded into the
+        // Scheduled sessions are adopted (above) but never recorded into the
         // project session index.
-        guard !scope.isLocalApp && scope != .scheduled else { return }
+        guard scope != .scheduled else { return }
         let indexedRow: ProjectSessionSummary?
         if let projectID {
             indexedRow = projectStore.projects.first(where: { $0.record.id == projectID })?
@@ -2150,9 +2077,9 @@ private struct ConversationProjectBridge: View {
     }
 
     private func synchronizeSessions(_ rows: [EngineSession]) {
-        // An app scope's engine catalog must never replace a project's cached
-        // session index.
-        guard !scope.isLocalApp && scope != .scheduled else { return }
+        // The scheduled scope's engine catalog must never replace a project's
+        // cached session index.
+        guard scope != .scheduled else { return }
         guard ConversationSessionIndexPolicy.shouldSynchronize(
             transitionPending: model.sessionTransitionPending,
             restorePending: pendingRestoreID != nil,

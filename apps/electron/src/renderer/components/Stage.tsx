@@ -57,9 +57,11 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
     <div className={user ? 'user-message-bubble' : undefined} data-goal={Boolean(goalObjective) || undefined} data-delivery={delivery} data-tone={item.tone} style={{
       maxWidth: user ? images.length ? 'min(430px, 100%)' : 'min(700px, 90%)' : '100%',
       minWidth: 0,
+      width: user ? 'fit-content' : undefined,
+      marginLeft: user ? 'auto' : undefined,
       position: user ? 'relative' : undefined,
-      padding: user ? '10px 16px' : 0,
-      borderRadius: user ? 18 : 0,
+      padding: user ? '12px 18px' : 0,
+      borderRadius: user ? 16 : 0,
       border: user ? `1px ${delivery ? 'dashed' : 'solid'} ${delivery ? t.text3 : 'transparent'}` : 0,
       background: goalObjective && !delivery ? (t.dark ? '#ededee' : '#18181a') : delivery ? t.surface : user ? t.surfaceHover : 'transparent',
       fontSize: 14, lineHeight: 1.65, letterSpacing: 0,
@@ -619,7 +621,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
         className="desktop-stage-feed"
         style={{
           width: '100%', maxWidth: 'var(--conversation-width, 860px)', margin: '0 auto',
-          padding: '28px 0 16px',
+          padding: '36px 0 20px',
           display: 'flex', flexDirection: 'column', gap: 0,
         }}
       >

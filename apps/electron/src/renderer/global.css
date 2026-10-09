@@ -10,8 +10,8 @@
 @import './components/settings/pages/Notifications.css';
 
 :root {
-  --conversation-width: 860px;
-  --conversation-gutter: 24px;
+  --conversation-width: 820px;
+  --conversation-gutter: 32px;
   --font-sans-default: -apple-system, BlinkMacSystemFont, "SF Pro Text",
     "Segoe UI", Helvetica, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", Arial, sans-serif;
   --font-mono-default: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Monaco,
@@ -43,7 +43,7 @@ body {
 }
 .desktop-window-drag-strip {
   position: absolute;
-  z-index: 4;
+  z-index: 1;
   top: 0;
   right: 0;
   left: 116px;
@@ -51,8 +51,8 @@ body {
 }
 .desktop-main {
   overflow: hidden;
-  border-top: 1px solid var(--nav-panel-border);
-  border-radius: 16px 0 0 0;
+  border-radius: 0;
+  box-shadow: -1px 0 0 var(--nav-panel-border);
 }
 .desktop-navigation {
   z-index: 2;
@@ -82,7 +82,7 @@ body {
   background: transparent;
   color: var(--text3);
   cursor: pointer;
-  transition: background-color 130ms ease, color 130ms ease;
+  transition: background-color 130ms ease, color 130ms ease, scale 130ms ease;
 }
 .desktop-rail-button:hover,
 .desktop-rail-button:focus-visible,
@@ -92,10 +92,24 @@ body {
 }
 .desktop-rail-toggle {
   position: absolute;
-  top: 2px;
+  z-index: 3;
+  top: 12px;
   left: 78px;
   width: 32px;
   height: 32px;
+}
+.desktop-rail-button[data-active='true'] {
+  color: var(--desktop-accent);
+  background: color-mix(in srgb, var(--desktop-accent) 10%, transparent);
+}
+.desktop-rail-button:active { scale: .94; }
+.desktop-rail-settings { margin-top: auto; }
+.desktop-rail-button:focus-visible,
+.sidebar-header-icon:focus-visible,
+.sidebar-primary-action:focus-visible,
+.sidebar-tree-row > button:first-child:focus-visible {
+  outline: 2px solid var(--desktop-accent);
+  outline-offset: -2px;
 }
 .desktop-rail-divider {
   width: 26px;
@@ -106,8 +120,9 @@ body {
 .desktop-sidebar {
   min-width: 0;
   overflow: hidden;
-  border-radius: 16px 0 0 0;
+  border-radius: 0;
   background: var(--sidebar-material);
+  backdrop-filter: blur(24px) saturate(1.15);
   transition: width 170ms cubic-bezier(.2, 0, 0, 1), border-color 170ms ease;
 }
 .desktop-sidebar[data-resizing='true'] { transition: none; }
@@ -148,37 +163,49 @@ body {
 .sidebar-section-heading { padding: 0 8px 6px; font-size: 12px; font-weight: 500; }
 .sidebar-section-heading button { display: flex; align-items: center; gap: 5px; padding: 4px 0; border: 0; background: transparent; font: inherit; cursor: pointer; }
 .sidebar-session-metadata { display: none; }
+.desktop-sidebar .sidebar-tree-row > button[aria-current='page'] {
+  background: color-mix(in srgb, var(--desktop-accent) 10%, var(--sidebar-material)) !important;
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--desktop-accent) 75%, transparent);
+}
+.sidebar-new-chat {
+  background: color-mix(in srgb, var(--sidebar-material) 50%, var(--sidebar-button-surface)) !important;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 4%), inset 0 0 0 1px var(--nav-panel-border);
+}
 .desktop-sidebar-list { scrollbar-gutter: stable; }
-.desktop-workspace { padding-top: 38px; background: var(--rail-material); }
+.desktop-workspace { background: var(--rail-material); }
 @media (prefers-reduced-motion: reduce) {
   .desktop-sidebar, .desktop-rail-button { transition: none; }
 }
 .desktop-sidebar-brand { font-family: var(--font-sans-default); user-select: none; }
-.desktop-sidebar-footer {
-  background: transparent;
-}
-.desktop-sidebar-footer button,
+.desktop-sidebar-brand button { -webkit-app-region: no-drag; }
 .desktop-topbar-action,
 .sidebar-primary-action {
   transition-property: background-color, color, box-shadow, scale;
   transition-duration: 150ms;
   transition-timing-function: cubic-bezier(.2, 0, 0, 1);
 }
-.desktop-sidebar-footer button:hover:not(:disabled) {
-  background: color-mix(in oklab, currentColor 7%, transparent) !important;
-}
-.desktop-sidebar-footer button:active:not(:disabled),
 .desktop-topbar-action:active:not(:disabled),
 .sidebar-primary-action:active:not(:disabled) {
   scale: .96;
 }
 .desktop-topbar {
   z-index: 45;
-  background: color-mix(in srgb, var(--toolbar-material) 92%, transparent);
+  background: var(--toolbar-material);
   backdrop-filter: blur(20px) saturate(1.15);
 }
 .desktop-topbar .mono {
   font-variant-numeric: tabular-nums;
+}
+.desktop-topbar-project { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.desktop-topbar-project-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  color: var(--topbar-project-color);
+  background: var(--topbar-project-surface);
 }
 .desktop-topbar-action {
   width: 36px;
@@ -930,6 +957,15 @@ body {
   transition-timing-function: cubic-bezier(.2, 0, 0, 1) !important;
 }
 .composer-model-control { max-width: 340px; }
+.beta-composer .composer-input-view {
+  margin: 6px 6px 0;
+  border-radius: 14px 14px 0 0;
+  overflow: hidden;
+}
+.beta-composer .composer-command-marker { top: 7px; left: 12px; }
+.beta-composer:has(.beta-rich-prompt:focus) {
+  box-shadow: 0 8px 28px rgb(0 0 0 / 7%), 0 1px 4px rgb(0 0 0 / 4%) !important;
+}
 .composer-toolbar > button,
 .composer-toolbar > div > button {
   flex-shrink: 0;
@@ -1648,9 +1684,9 @@ body {
 .beta-rich-prompt { position: relative; }
 .beta-rich-prompt[data-empty='true']::before {
   position: absolute;
-  top: 16px;
-  left: 18px;
-  right: 18px;
+  top: 10px;
+  left: 12px;
+  right: 12px;
   content: attr(data-placeholder);
   color: color-mix(in srgb, currentColor 42%, transparent);
   pointer-events: none;
@@ -2314,7 +2350,6 @@ textarea, input { font-family: inherit; }
 
 @media (prefers-reduced-motion: reduce) {
   .desktop-empty-state { animation: none; }
-  .desktop-sidebar-footer button,
   .desktop-topbar-action,
   .context-summary-item,
   .context-summary-close,

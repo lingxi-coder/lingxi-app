@@ -728,16 +728,16 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
 
   return (
     <>
-    <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} style={{ '--rail-material': t.appBg, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
+    <div className="desktop-navigation" data-collapsed={sidebarCollapsed || undefined} style={{ '--rail-material': t.appBg, '--sidebar-material': t.sidebarBg, '--sidebar-button-surface': t.surface, '--desktop-accent': t.accent, '--text': t.text, '--text3': t.text3, '--nav-panel-border': t.border } as CSSProperties}>
       <nav className="desktop-nav-rail no-drag" aria-label="Main navigation">
         <button type="button" className="desktop-rail-button desktop-rail-toggle" aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} aria-controls="desktop-session-sidebar" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'} onClick={() => setSidebarCollapsed((value) => !value)}><Icon name="sidebar" size={19} stroke={1.65} /></button>
         <button type="button" className="desktop-rail-button" data-active={!scheduled || undefined} aria-label="Home" title="Home" onClick={onOpenChat}><Icon name="home" size={21} stroke={1.8} /></button>
         <button type="button" className="desktop-rail-button" aria-label="Projects" title="Projects" onClick={() => { setSidebarCollapsed(false); window.requestAnimationFrame(() => projectsHeadingRef.current?.scrollIntoView({ block: 'start' })); }}><Icon name="copy" size={20} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-label="Scheduled tasks" title="Scheduled tasks" onClick={onOpenScheduled}><Icon name="clock" size={21} stroke={1.7} /></button>
         <button type="button" className="desktop-rail-button" aria-label="Activity" title="Activity" onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }}><Icon name="goal" size={21} stroke={1.7} /></button>
-        <button type="button" className="desktop-rail-button" aria-label="Settings" title="Settings" onClick={onOpenSettings}><Icon name="more" size={21} stroke={1.8} /></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
         <button type="button" className="desktop-rail-button" aria-label="Review changes" title="Review changes" onClick={() => { onOpenChat?.(); bridge.openRuntimeItem({ kind: 'section', id: 'review' }); }}><Icon name="branch" size={21} stroke={1.7} /></button>
+        <button type="button" className="desktop-rail-button desktop-rail-settings" aria-label={settingsLabel()} title={settingsLabel()} onClick={onOpenSettings}><Icon name="cog" size={20} stroke={1.7} /></button>
       </nav>
     <aside
       id="desktop-session-sidebar"
@@ -745,9 +745,9 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       ref={asideRef}
       aria-hidden={sidebarCollapsed || undefined}
       data-resizing={resizingSidebar || undefined}
-      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', border: `0.5px solid ${t.border}`, borderBottom: 0, marginTop: 38, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
+      style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', borderWidth: '0 0.5px', borderStyle: 'solid', borderColor: t.border, '--sidebar-material': t.sidebarBg, '--desktop-accent': t.accent } as CSSProperties}
     >
-      <div className="desktop-sidebar-brand" style={{ minHeight: 48, padding: '5px 16px 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
+      <div className="drag-region desktop-sidebar-brand" style={{ height: 56, flexShrink: 0, padding: '5px 12px 4px 64px', borderBottom: `0.5px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 6 }}>
         <strong style={{ color: t.text, fontSize: 17, fontWeight: 650, letterSpacing: '-.035em', flex: 1 }}>LingXi</strong>
         <button type="button" className="sidebar-header-icon" aria-label="Activity" title="Activity" onClick={() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); }} style={{ color: t.text3 }}><Icon name="bell" size={18} stroke={1.65} /></button>
         <button type="button" className="sidebar-header-icon" aria-label="Search chats" title="Search chats" aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><Icon name="search" size={18} stroke={1.65} /></button>
@@ -755,22 +755,22 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
 
       {searchOpen && <div className="sidebar-search"><Icon name="search" size={15} stroke={1.7} /><input ref={searchInputRef} type="search" aria-label="Search chats and projects" placeholder="Search chats and projects" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label="Close search" onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
-      <div style={{ padding: '0 8px 8px' }}>
+      <div style={{ padding: '2px 12px 14px' }}>
         <button
-          className="sidebar-primary-action"
+          className="sidebar-primary-action sidebar-new-chat"
           type="button"
           disabled={bridge.sessionLoading || editingProject !== null}
           onClick={() => { onOpenChat?.(); selectedProject ? editProject(selectedProject) : invoke(bridge.addProject); }}
           style={{
             width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
-            padding: '6px 5px', borderRadius: 10, border: 0, background: 'transparent',
+            padding: '8px 10px', borderRadius: 10, border: 0, background: 'transparent',
             color: t.text, cursor: bridge.sessionLoading || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.sessionLoading || editingProject !== null ? .5 : 1,
             textAlign: 'left', fontSize: 14, fontWeight: 500,
           }}
         >
           {editingProject
             ? <span className="beta-spinner" role="status" aria-label="Opening project draft" />
-            : <Icon name="compose" size={18} color={t.text2} stroke={1.8} />}
+            : <Icon name="compose" size={18} color={t.accent} stroke={1.8} />}
           <span>{editingProject ? 'Opening draft…' : 'New chat'}</span>
         </button>
         <button
@@ -779,7 +779,7 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
           aria-current={scheduled ? 'page' : undefined}
           onClick={onOpenScheduled}
           style={{ width: '100%', minHeight: 36, marginTop: 0, display: 'flex', alignItems: 'center', gap: 9,
-            padding: '6px 5px', borderRadius: 10, border: 0, background: scheduled ? t.surfaceActive : 'transparent',
+            padding: '8px 10px', borderRadius: 10, border: 0, background: scheduled ? t.surfaceActive : 'transparent',
             color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 14, fontWeight: 500 }}
         >
           <Icon name="clock" size={18} stroke={1.8} />
@@ -1103,16 +1103,6 @@ export function BetaSidebar({ bridge, onOpenSettings, scheduled = false, onOpenS
       </DragOverlay>
       </DragDropProvider>
 
-      <div className="desktop-sidebar-footer" style={{ padding: 10, borderTop: `0.5px solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: 5 }}>
-        <button
-          type="button"
-          onClick={onOpenSettings}
-          style={{ minHeight: 40, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 5px', border: 0, borderRadius: 8, background: 'transparent', color: t.text2, cursor: 'pointer', fontSize: 12.5 }}
-        >
-          <Icon name="cog" size={15} /> {settingsLabel()}
-        </button>
-      </div>
-
       <div
         className="sidebar-resize-handle no-drag"
         role="separator"
@@ -1339,10 +1329,13 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
     '--topbar-action-active-color': t.text,
   } as CSSProperties;
   return (
-    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 12px 0 18px', borderBottom: `0.5px solid ${t.border}`, '--toolbar-material': t.windowBg } as CSSProperties}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
-        <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
+    <header className="drag-region desktop-topbar" style={{ height: 56, position: 'relative', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4, padding: '0 16px 0 22px', borderBottom: `0.5px solid ${t.border}`, '--toolbar-material': t.sidebarBg, '--topbar-project-color': t.text2, '--topbar-project-surface': t.surfaceHover } as CSSProperties}>
+      <div className="desktop-topbar-project">
+        <span className="desktop-topbar-project-icon" aria-hidden="true"><Icon name="folder" size={17} stroke={1.65} /></span>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ color: t.text, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
+          <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
+        </div>
       </div>
       {sessionTokens !== null && (
         <span className="mono desktop-topbar-usage" style={{ color: t.text4, fontSize: 9.5 }} title="Session total: input + output tokens">
@@ -2960,9 +2953,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const hasMentionTokens = selectedFiles.length > 0 || Boolean(input.current?.querySelector('[data-context-mention]'));
   const decorateCommand = Boolean(draftCommand && !promptComposing && !hasMentionTokens);
   const promptTextStyle: CSSProperties = {
-    display: 'block', width: '100%', minHeight: 56, maxHeight: 160, overflowY: 'auto',
-    border: 0, outline: 0, background: 'transparent', lineHeight: 1.5, fontSize: 15,
-    padding: draftCommand ? '16px 18px 8px 56px' : '16px 18px 8px',
+    display: 'block', width: '100%', minHeight: 56, maxHeight: 'min(144px, 24vh)', overflowY: 'auto',
+    border: 0, outline: 0, background: 'transparent', lineHeight: 1.6, fontSize: 14,
+    padding: draftCommand ? '10px 12px 8px 50px' : '10px 12px 8px',
     fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
   };
   const copyDecoratedPrompt = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -3022,7 +3015,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           setImageDragActive(false);
           void addFiles([...event.dataTransfer.files]);
         }}
-        style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 16, border: `1px solid ${imageDragActive ? t.accent : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: '0 2px 8px rgba(0,0,0,.06)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
+        style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 20, border: `1px solid ${imageDragActive ? t.accent : t.borderStrong}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: '0 4px 20px rgba(0,0,0,.05), 0 1px 3px rgba(0,0,0,.03)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
       >
         {imageAttachments.length > 0 && (
           <div aria-label="Image attachments" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>

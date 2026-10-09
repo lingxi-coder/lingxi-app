@@ -584,16 +584,25 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     };
     let trusted = args.trusted_workspace;
 
+    let build_info = harness_runtime::desktop::BuildInfo::new(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
+    );
+    let api_base = resolve_api_base();
+    let anthropic_client_metadata = cli::init::native_anthropic_client_metadata_for_host(
+        &api_base,
+        "lingxi-desktop",
+        build_info.version,
+    );
+
     DesktopConfig {
-        build_info: harness_runtime::desktop::BuildInfo::new(
-            env!("CARGO_PKG_VERSION"),
-            option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
-        ),
+        build_info,
         host_workspace_trusted: Some(trusted),
         mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
         enable_automation_scheduler: args.scheduled_controller,
         initial_teammate_team_name: None,
-        api_base: resolve_api_base(),
+        api_base,
+        anthropic_client_metadata,
         // Credentials are supplied explicitly by the parent over stdin and
         // assigned by `main` immediately before assembly. Never inherit them
         // from environment or argv.

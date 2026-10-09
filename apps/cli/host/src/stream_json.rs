@@ -103,6 +103,17 @@ struct UiStatusFrame<'a> {
     session_id: String,
 }
 
+#[derive(Serialize)]
+struct UiNotifyFrame<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    subtype: &'static str,
+    plugin: &'a str,
+    text: client::protocol::text::ClientTextDto,
+    uuid: String,
+    session_id: String,
+}
+
 fn client_text_from_source(text: &Utf16JsonProjection) -> client::protocol::text::ClientTextDto {
     client::protocol::text::ClientTextDto::from_code_units(
         text.string_units("")
@@ -354,19 +365,7 @@ struct ToolResultFrameSource<'a> {
 
 #[derive(Serialize)]
 struct ResultSuccessFrameSource<'a> {
-    #[serde(rename = "type")]
-    frame_type: &'static str,
-    subtype: &'static str,
-    is_error: bool,
-    api_error_status: Option<u16>,
-    duration_ms: u64,
-    duration_api_ms: Option<u64>,
-    ttft_ms: Option<u64>,
-    ttft_stream_ms: Option<u64>,
-    time_to_request_ms: Option<u64>,
-    num_turns: u64,
-    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
-    result: &'a Utf16JsonProjection,
+    duration_api_ms: u64,
     stop_reason: &'a str,
     session_id: String,
     total_cost_usd: f64,
@@ -378,7 +377,126 @@ struct ResultSuccessFrameSource<'a> {
     fast_mode_state: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     fast_mode_disabled_reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_stats: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safety_stops: Option<u64>,
+    is_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_turns: Option<u64>,
+    subtype: &'static str,
+    api_error_status: Option<u16>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    result: &'a Utf16JsonProjection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttft_ms: Option<u64>,
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    duration_ms: u64,
     uuid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttft_stream_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time_to_request_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_content_frame_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queued_turn_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_index: Option<u64>,
+}
+
+/// Native's zero-request success envelope is built before a response exists:
+/// it has a nullable stop reason and omits response-only timing/error fields.
+/// This is selected from the admitted turn owner's `num_turns` fact, not from
+/// result text or a special hook path.
+#[derive(Serialize)]
+struct ResultNoRequestSuccessFrameSource<'a> {
+    is_error: bool,
+    duration_api_ms: u64,
+    num_turns: u64,
+    stop_reason: Option<&'a str>,
+    session_id: String,
+    total_cost_usd: f64,
+    usage: Value,
+    #[serde(rename = "modelUsage")]
+    model_usage: Value,
+    permission_denials: Value,
+    fast_mode_state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fast_mode_disabled_reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_stats: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safety_stops: Option<u64>,
+    subtype: &'static str,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    result: &'a Utf16JsonProjection,
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    duration_ms: u64,
+    uuid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queued_turn_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_index: Option<u64>,
+}
+
+/// The Native 2.1.293 `--print --output-format json` envelope for an
+/// orchestrator-reported terminal API error. Keep this separate from the
+/// ordinary success source so error-only optional timing fields stay omitted
+/// and the Native result key order remains explicit.
+#[derive(Serialize)]
+struct ResultTerminalApiErrorFrameSource<'a> {
+    duration_api_ms: u64,
+    stop_reason: &'a str,
+    session_id: String,
+    total_cost_usd: f64,
+    usage: Value,
+    #[serde(rename = "modelUsage")]
+    model_usage: Value,
+    permission_denials: Value,
+    terminal_reason: &'a str,
+    fast_mode_state: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fast_mode_disabled_reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent_stats: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safety_stops: Option<u64>,
+    is_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_turns: Option<u64>,
+    subtype: &'static str,
+    api_error_status: Option<u16>,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    result: &'a Utf16JsonProjection,
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    duration_ms: u64,
+    uuid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queued_turn_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_index: Option<u64>,
+}
+
+/// Host-owned counters attached to the next final result envelope. The one-shot
+/// CLI supplies a real snapshot after the orchestrator completes the turn.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TerminalResultMetadata {
+    pub(crate) num_turns: Option<u64>,
+    /// Outer `None` means the turn owner had no terminal snapshot; inner
+    /// `None` is a known Native `stop_reason: null` (e.g. a zero-request turn).
+    pub(crate) stop_reason: Option<Option<String>>,
+    pub(crate) ttft_ms: Option<u64>,
+    pub(crate) ttft_stream_ms: Option<u64>,
+    pub(crate) time_to_request_ms: Option<u64>,
+    pub(crate) first_content_frame_ms: Option<u64>,
+    pub(crate) subagent_stats: Option<Value>,
+    pub(crate) safety_stops: Option<u64>,
+    pub(crate) queued_turn_count: Option<u64>,
+    pub(crate) result_index: Option<u64>,
 }
 
 // ── Per-message accumulator ──────────────────────────────────────────────────
@@ -585,7 +703,8 @@ pub struct StreamJsonStream {
     /// envelope. The outer option records an error; the inner status preserves
     /// statusless cases, and the explicit reason distinguishes `api_error`
     /// from terminal conditions such as `image_error`.
-    terminal_api_error: Mutex<Option<(Option<u16>, String)>>,
+    terminal_api_error: Mutex<Option<(Option<u16>, String, String)>>,
+    terminal_result_metadata: Mutex<Option<TerminalResultMetadata>>,
     /// The last completed assistant text (collected just before boundary reset).
     /// Used by `run_stream_json_print` to populate the result frame's `result` field.
     last_result_text: Mutex<Utf16JsonProjection>,
@@ -638,6 +757,7 @@ impl StreamJsonStream {
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames,
             terminal_api_error: Mutex::new(None),
+            terminal_result_metadata: Mutex::new(None),
             last_result_text: Mutex::new(Utf16JsonProjection::from("")),
             permission_denials: std::sync::OnceLock::new(),
             include_partial_messages: AtomicBool::new(false),
@@ -1393,45 +1513,152 @@ impl StreamJsonStream {
         fast_mode_state: &str,
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
-    ) {
+    ) -> bool {
         let terminal_api_error = {
             let mut terminal_error = self.terminal_api_error.lock().await;
             terminal_error.take()
         };
+        let terminal_result_metadata = self
+            .terminal_result_metadata
+            .lock()
+            .await
+            .take()
+            .unwrap_or_default();
         let is_api_error = terminal_api_error.is_some();
-        let api_error_status = terminal_api_error.as_ref().and_then(|(status, _)| *status);
-        let terminal_reason = terminal_api_error
-            .as_ref()
-            .map_or("completed", |(_, reason)| reason.as_str());
         let duration_ms = cost
             .session_duration
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
+        let session_id = self.session_id.lock().await.clone();
+        let usage = Self::build_usage_block(cost);
+        let model_usage = Value::Object(Self::build_model_usage_block(cost, model_id, betas));
+        let permission_denials = self.permission_denials_value().await;
+
+        if let Some((api_error_status, terminal_reason, result_stop_reason)) =
+            terminal_api_error.as_ref()
+        {
+            if self.suppress_frames {
+                let terminal_usage = Self::build_terminal_api_error_usage_block(cost);
+                let frame = ResultTerminalApiErrorFrameSource {
+                    duration_api_ms: u64::try_from(cost.api_duration.as_millis())
+                        .unwrap_or(u64::MAX),
+                    stop_reason: result_stop_reason,
+                    session_id,
+                    total_cost_usd: cost.total_usd,
+                    usage: terminal_usage,
+                    model_usage,
+                    permission_denials,
+                    terminal_reason,
+                    fast_mode_state,
+                    fast_mode_disabled_reason,
+                    subagent_stats: terminal_result_metadata.subagent_stats,
+                    safety_stops: cost.safety_stops.or(terminal_result_metadata.safety_stops),
+                    is_error: true,
+                    num_turns: terminal_result_metadata.num_turns,
+                    subtype: "success",
+                    api_error_status: *api_error_status,
+                    result: result_text,
+                    frame_type: "result",
+                    duration_ms,
+                    uuid: uuid::Uuid::new_v4().to_string(),
+                    queued_turn_count: terminal_result_metadata.queued_turn_count,
+                    result_index: terminal_result_metadata.result_index,
+                };
+                self.enqueue_source(&frame);
+                return true;
+            }
+        }
+
+        let api_error_status = terminal_api_error
+            .as_ref()
+            .and_then(|(status, _, _)| *status);
+        let terminal_reason = terminal_api_error
+            .as_ref()
+            .map_or("completed", |(_, reason, _)| reason.as_str());
+        let result_stop_reason = terminal_api_error
+            .as_ref()
+            .map(|(_, _, reason)| Some(reason.as_str()))
+            .unwrap_or_else(|| {
+                terminal_result_metadata
+                    .stop_reason
+                    .as_ref()
+                    .map(Option::as_deref)
+                    .or_else(|| {
+                        (terminal_result_metadata.num_turns != Some(0)).then_some(Some(stop_reason))
+                    })
+            });
+        let include_timing_fields =
+            !is_api_error && result_stop_reason.flatten() != Some("tool_deferred");
+        let uuid = uuid::Uuid::new_v4().to_string();
+
+        if !is_api_error && terminal_result_metadata.num_turns == Some(0) {
+            let frame = ResultNoRequestSuccessFrameSource {
+                is_error: false,
+                duration_api_ms: u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX),
+                num_turns: terminal_result_metadata
+                    .num_turns
+                    .expect("zero-request result has an owner turn count"),
+                stop_reason: result_stop_reason.flatten(),
+                session_id,
+                total_cost_usd: cost.total_usd,
+                usage,
+                model_usage,
+                permission_denials,
+                fast_mode_state,
+                fast_mode_disabled_reason,
+                subagent_stats: terminal_result_metadata.subagent_stats,
+                safety_stops: cost.safety_stops.or(terminal_result_metadata.safety_stops),
+                subtype: "success",
+                result: result_text,
+                frame_type: "result",
+                duration_ms,
+                uuid,
+                queued_turn_count: terminal_result_metadata.queued_turn_count,
+                result_index: terminal_result_metadata.result_index,
+            };
+            self.enqueue_source(&frame);
+            return false;
+        }
+
         let frame = ResultSuccessFrameSource {
-            frame_type: "result",
-            subtype: "success",
-            is_error: is_api_error,
-            api_error_status,
-            duration_ms,
-            duration_api_ms: None,
-            ttft_ms: None,
-            ttft_stream_ms: None,
-            time_to_request_ms: None,
-            num_turns: cost.api_calls,
-            result: result_text,
-            stop_reason,
-            session_id: self.session_id.lock().await.clone(),
+            duration_api_ms: u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX),
+            stop_reason: result_stop_reason.flatten().unwrap_or(stop_reason),
+            session_id,
             total_cost_usd: cost.total_usd,
-            usage: Self::build_usage_block(cost),
-            model_usage: Value::Object(Self::build_model_usage_block(cost, model_id, betas)),
-            permission_denials: self.permission_denials_value().await,
+            usage,
+            model_usage,
+            permission_denials,
             terminal_reason,
             fast_mode_state,
             fast_mode_disabled_reason,
-            uuid: uuid::Uuid::new_v4().to_string(),
+            subagent_stats: terminal_result_metadata.subagent_stats,
+            safety_stops: cost.safety_stops.or(terminal_result_metadata.safety_stops),
+            is_error: is_api_error,
+            num_turns: terminal_result_metadata.num_turns,
+            subtype: "success",
+            api_error_status,
+            result: result_text,
+            ttft_ms: include_timing_fields
+                .then_some(terminal_result_metadata.ttft_ms)
+                .flatten(),
+            frame_type: "result",
+            duration_ms,
+            uuid,
+            ttft_stream_ms: include_timing_fields
+                .then_some(terminal_result_metadata.ttft_stream_ms)
+                .flatten(),
+            time_to_request_ms: include_timing_fields
+                .then_some(terminal_result_metadata.time_to_request_ms)
+                .flatten(),
+            first_content_frame_ms: include_timing_fields
+                .then_some(terminal_result_metadata.first_content_frame_ms)
+                .flatten(),
+            queued_turn_count: terminal_result_metadata.queued_turn_count,
+            result_index: terminal_result_metadata.result_index,
         };
         self.enqueue_source(&frame);
+        is_api_error
     }
 
     /// Build the error result frame Value (exact 20-key golden order, with
@@ -1533,7 +1760,26 @@ impl StreamJsonStream {
     /// Return the last completed assistant text (populated just before
     /// accumulator reset in `emit_message_boundary`).
     pub async fn get_last_result_text(&self) -> Utf16JsonProjection {
+        // Graceful model errors are surfaced by the orchestrator as assistant
+        // text plus terminal metadata; that path has no streaming message
+        // boundary. Prefer the live accumulator when it contains text so the
+        // final print result includes that error message. This mirrors the
+        // Headless stream's result-text selection while retaining source units.
+        let acc = self.accum.lock().await;
+        if acc
+            .blocks
+            .iter()
+            .any(|block| matches!(block, AccBlock::Text { .. }))
+        {
+            return acc.collect_text();
+        }
+        drop(acc);
         self.last_result_text.lock().await.clone()
+    }
+
+    /// Attach Host-owned cumulative counters to the next terminal result.
+    pub(crate) async fn set_terminal_result_metadata(&self, metadata: TerminalResultMetadata) {
+        *self.terminal_result_metadata.lock().await = Some(metadata);
     }
 
     /// Emit a `rate_limit_event` frame.
@@ -1619,6 +1865,78 @@ impl StreamJsonStream {
             "iterations": [],
             "speed": "standard"
         })
+    }
+
+    /// Build the result-frame usage from the most recent provider response,
+    /// matching the Native CLI's `context_window.current_usage` projection.
+    /// An API-error turn has no successful response of its own, so the default
+    /// snapshot remains the Native zero-usage object while preserving any
+    /// latest settled response details the Host actually recorded.
+    fn build_terminal_api_error_usage_block(cost: &CostSnapshot) -> Value {
+        let current = cost.current_usage.unwrap_or_default();
+        let details = cost.current_usage_details.unwrap_or_default();
+        let mut usage = serde_json::Map::new();
+        if cost.current_usage.is_none() {
+            usage.insert(
+                "output_tokens_details".into(),
+                json!({"thinking_tokens": 0_u64}),
+            );
+        }
+        usage.insert("input_tokens".into(), json!(current.input_tokens));
+        usage.insert(
+            "cache_creation_input_tokens".into(),
+            json!(current.cache_creation_input_tokens),
+        );
+        usage.insert(
+            "cache_read_input_tokens".into(),
+            json!(current.cache_read_input_tokens),
+        );
+        usage.insert(
+            "output_tokens".into(),
+            json!(current
+                .output_tokens
+                .saturating_add(details.reasoning_tokens)),
+        );
+        if cost.current_usage.is_some() {
+            usage.insert(
+                "output_tokens_details".into(),
+                json!({"thinking_tokens": details.reasoning_tokens}),
+            );
+        }
+        usage.insert(
+            "server_tool_use".into(),
+            json!({
+                "web_search_requests": details.web_search_requests,
+                "web_fetch_requests": 0_u64
+            }),
+        );
+        usage.insert(
+            "service_tier".into(),
+            json!(if details.fast_mode {
+                "fast"
+            } else {
+                "standard"
+            }),
+        );
+        usage.insert(
+            "cache_creation".into(),
+            json!({
+                "ephemeral_1h_input_tokens": details.cache_creation_1h_input_tokens,
+                "ephemeral_5m_input_tokens": details.cache_creation_5m_input_tokens
+            }),
+        );
+        usage.insert("inference_geo".into(), json!(""));
+        usage.insert("iterations".into(), json!([]));
+        usage.insert(
+            "speed".into(),
+            json!(if details.fast_mode {
+                "fast"
+            } else {
+                "standard"
+            }),
+        );
+        usage.insert("fallback_credit".into(), Value::Null);
+        Value::Object(usage)
     }
 
     /// Build the `modelUsage` sub-map keyed by `model_id` (camelCase per
@@ -1781,9 +2099,17 @@ impl StreamJsonStream {
 
 #[async_trait]
 impl OutputStream for StreamJsonStream {
-    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
-        *self.terminal_api_error.lock().await =
-            Some((api_error_status, terminal_reason.to_owned()));
+    async fn emit_terminal_api_error(
+        &self,
+        api_error_status: Option<u16>,
+        terminal_reason: &str,
+        stop_reason: &str,
+    ) {
+        *self.terminal_api_error.lock().await = Some((
+            api_error_status,
+            terminal_reason.to_owned(),
+            stop_reason.to_owned(),
+        ));
     }
 
     async fn emit_task_lifecycle(&self, event: &Utf16JsonProjection) {
@@ -1968,6 +2294,21 @@ impl OutputStream for StreamJsonStream {
             subtype: "ui_status",
             plugin,
             text: text.map(client_text_from_source),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            session_id,
+        });
+    }
+
+    async fn emit_mod_notify(&self, plugin: &str, text: &Utf16JsonProjection) {
+        if self.suppress_frames {
+            return;
+        }
+        let session_id = self.session_id.lock().await.clone();
+        self.enqueue_source(&UiNotifyFrame {
+            frame_type: "system",
+            subtype: "ui_notify",
+            plugin,
+            text: client_text_from_source(text),
             uuid: uuid::Uuid::new_v4().to_string(),
             session_id,
         });
@@ -2731,10 +3072,290 @@ mod tests {
         Utf16JsonProjection::root_string("�".to_owned(), vec![0xd800]).unwrap()
     }
 
+    fn ordered_top_level_keys(raw_json: &str) -> Vec<String> {
+        use serde::de::DeserializeSeed as _;
+
+        struct TopLevelKeys;
+
+        impl<'de> serde::de::DeserializeSeed<'de> for TopLevelKeys {
+            type Value = Vec<String>;
+
+            fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct KeysVisitor;
+
+                impl<'de> serde::de::Visitor<'de> for KeysVisitor {
+                    type Value = Vec<String>;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str("a top-level JSON object")
+                    }
+
+                    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+                    where
+                        M: serde::de::MapAccess<'de>,
+                    {
+                        let mut keys = Vec::new();
+                        while let Some(key) = map.next_key::<String>()? {
+                            keys.push(key);
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                        Ok(keys)
+                    }
+                }
+
+                deserializer.deserialize_map(KeysVisitor)
+            }
+        }
+
+        let mut deserializer = serde_json::Deserializer::from_str(raw_json);
+        let keys = TopLevelKeys
+            .deserialize(&mut deserializer)
+            .expect("top-level object");
+        deserializer.end().expect("one JSON value");
+        keys
+    }
+
+    fn native_zero_subagent_stats() -> Value {
+        json!({
+            "spawned": 0,
+            "requested": {"background": 0, "foreground": 0, "unset": 0},
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {"parent": 0, "user": 0, "system": 0},
+            "refused": {"depth_limit": 0, "concurrency_limit": 0, "budget": 0},
+            "by_type": {}
+        })
+    }
+
+    #[tokio::test]
+    async fn zero_request_success_matches_native_295_raw_result_line() {
+        use sha2::Digest as _;
+
+        const NATIVE_RAW: &str =
+            include_str!("../tests/fixtures/result-native-295/on-failure-block/native.stdout.raw");
+        const NATIVE_RECEIPT: &str =
+            include_str!("../tests/fixtures/result-native-295/on-failure-block/receipt.json");
+
+        let receipt: Value = serde_json::from_str(NATIVE_RECEIPT).unwrap();
+        assert_eq!(receipt["native_version"], "2.1.295 (Claude Code)");
+        assert_eq!(
+            receipt["native_sha256"],
+            "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+        );
+        assert_eq!(receipt["anthropic_messages_request_count"], 0);
+        let stdout_sha256 = format!("{:x}", sha2::Sha256::digest(NATIVE_RAW.as_bytes()));
+        assert_eq!(stdout_sha256, receipt["stdout"]["sha256"]);
+
+        let expected_line = NATIVE_RAW.trim_end_matches('\n');
+        let expected: Value = serde_json::from_str(expected_line).unwrap();
+        let session_id = expected["session_id"].as_str().unwrap();
+        let stream = StreamJsonStream::new_json_mode(make_params(session_id));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream
+            .set_terminal_result_metadata(TerminalResultMetadata {
+                num_turns: Some(0),
+                stop_reason: Some(None),
+                subagent_stats: Some(expected["subagent_stats"].clone()),
+                safety_stops: expected["safety_stops"].as_u64(),
+                queued_turn_count: expected["queued_turn_count"].as_u64(),
+                result_index: expected["result_index"].as_u64(),
+                ..TerminalResultMetadata::default()
+            })
+            .await;
+
+        let cost = CostSnapshot {
+            session_duration: std::time::Duration::from_millis(
+                expected["duration_ms"].as_u64().unwrap(),
+            ),
+            ..CostSnapshot::default()
+        };
+        let result = source_text(expected["result"].as_str().unwrap());
+        let is_error = stream
+            .emit_result_success(
+                &result,
+                "end_turn",
+                &cost,
+                "model",
+                expected["fast_mode_state"].as_str().unwrap(),
+                expected["fast_mode_disabled_reason"].as_str(),
+                &[],
+            )
+            .await;
+        assert!(!is_error);
+
+        let OutboundMsg::Line(actual_line) = rx.try_recv().unwrap() else {
+            panic!("expected one result line");
+        };
+        assert!(
+            rx.try_recv().is_err(),
+            "zero-request success has one result"
+        );
+        let actual: Value = serde_json::from_str(actual_line.trim_end()).unwrap();
+        let actual_uuid = actual["uuid"].as_str().unwrap();
+        let expected_uuid = expected["uuid"].as_str().unwrap();
+        let actual_uuid_token = format!("\"uuid\":\"{actual_uuid}\"");
+        let expected_uuid_token = format!("\"uuid\":\"{expected_uuid}\"");
+        assert_eq!(actual_line.matches(&actual_uuid_token).count(), 1);
+        assert_eq!(
+            actual_line.replacen(&actual_uuid_token, &expected_uuid_token, 1),
+            NATIVE_RAW,
+            "only the generated UUID may differ from captured Native stdout"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_success_result_keeps_native_295_raw_key_order_and_observed_values() {
+        use sha2::Digest as _;
+
+        const NATIVE_RAW: &str =
+            include_str!("../tests/fixtures/result-native-295/timed-sse/native.stdout.raw.json");
+        const NATIVE_RECEIPT: &str =
+            include_str!("../tests/fixtures/result-native-295/timed-sse/receipt.json");
+
+        let receipt: Value = serde_json::from_str(NATIVE_RECEIPT).unwrap();
+        assert_eq!(receipt["native_version"], "2.1.295 (Claude Code)");
+        assert_eq!(
+            receipt["native_sha256"],
+            "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+        );
+        assert_eq!(
+            format!("{:x}", sha2::Sha256::digest(NATIVE_RAW.as_bytes())),
+            receipt["capture_artifacts"]["native.stdout.raw.json"]["sha256"]
+        );
+
+        let expected: Value = serde_json::from_str(NATIVE_RAW.trim_end()).unwrap();
+        let stream = StreamJsonStream::new_json_mode(make_params("timed-native-order"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        stream
+            .set_terminal_result_metadata(TerminalResultMetadata {
+                num_turns: Some(1),
+                stop_reason: Some(Some("end_turn".into())),
+                ttft_ms: expected["ttft_ms"].as_u64(),
+                ttft_stream_ms: expected["ttft_stream_ms"].as_u64(),
+                time_to_request_ms: expected["time_to_request_ms"].as_u64(),
+                first_content_frame_ms: expected["first_content_frame_ms"].as_u64(),
+                subagent_stats: Some(expected["subagent_stats"].clone()),
+                safety_stops: expected["safety_stops"].as_u64(),
+                queued_turn_count: expected["queued_turn_count"].as_u64(),
+                result_index: expected["result_index"].as_u64(),
+            })
+            .await;
+
+        let is_error = stream
+            .emit_result_success(
+                &source_text(expected["result"].as_str().unwrap()),
+                "end_turn",
+                &CostSnapshot::default(),
+                "claude-sonnet-4-5",
+                expected["fast_mode_state"].as_str().unwrap(),
+                expected["fast_mode_disabled_reason"].as_str(),
+                &[],
+            )
+            .await;
+        assert!(!is_error);
+
+        let OutboundMsg::Line(actual_line) = rx.try_recv().unwrap() else {
+            panic!("expected one timed result line");
+        };
+        assert!(rx.try_recv().is_err(), "one completed turn has one result");
+        let actual: Value = serde_json::from_str(actual_line.trim_end()).unwrap();
+        assert_eq!(
+            ordered_top_level_keys(&actual_line),
+            ordered_top_level_keys(NATIVE_RAW),
+            "timed result fields must retain the captured Native order"
+        );
+        assert_eq!(actual["is_error"], false);
+        assert_eq!(actual["num_turns"], 1);
+        for key in [
+            "ttft_ms",
+            "ttft_stream_ms",
+            "time_to_request_ms",
+            "first_content_frame_ms",
+        ] {
+            assert_eq!(actual[key], expected[key], "observed {key} is serialized");
+        }
+    }
+
+    #[tokio::test]
+    async fn result_timing_fields_are_omitted_for_api_errors_and_deferred_tools() {
+        for (session_id, terminal_error, result_stop_reason, expected_is_error) in [
+            (
+                "timing-api-error",
+                Some((Some(400), "api_error", "stop_sequence")),
+                "stop_sequence",
+                true,
+            ),
+            ("timing-deferred", None, "tool_deferred", false),
+        ] {
+            let stream = StreamJsonStream::new(make_params(session_id));
+            let mut rx = stream.drain_rx.lock().await.take().unwrap();
+            stream
+                .set_terminal_result_metadata(TerminalResultMetadata {
+                    num_turns: Some(1),
+                    stop_reason: Some(Some(result_stop_reason.into())),
+                    ttft_ms: Some(401),
+                    ttft_stream_ms: Some(202),
+                    time_to_request_ms: Some(101),
+                    first_content_frame_ms: Some(303),
+                    ..TerminalResultMetadata::default()
+                })
+                .await;
+            if let Some((status, terminal_reason, stop_reason)) = terminal_error {
+                stream
+                    .emit_terminal_api_error(status, terminal_reason, stop_reason)
+                    .await;
+            }
+
+            let is_error = stream
+                .emit_result_success(
+                    &source_text("terminal result"),
+                    "end_turn",
+                    &CostSnapshot::default(),
+                    "model",
+                    "off",
+                    None,
+                    &[],
+                )
+                .await;
+            assert_eq!(is_error, expected_is_error);
+
+            let OutboundMsg::Line(line) = rx.try_recv().unwrap() else {
+                panic!("expected a terminal result frame");
+            };
+            let frame: Value = serde_json::from_str(line.trim_end()).unwrap();
+            assert_eq!(frame["is_error"], expected_is_error);
+            assert_eq!(frame["stop_reason"], result_stop_reason);
+            for key in [
+                "ttft_ms",
+                "ttft_stream_ms",
+                "time_to_request_ms",
+                "first_content_frame_ms",
+            ] {
+                assert!(frame.get(key).is_none(), "{key} is omitted");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn machine_text_and_tool_result_frames_keep_source_units() {
         let stream = StreamJsonStream::new(make_params("source-output"));
         let mut rx = stream.drain_rx.lock().await.take().unwrap();
+
+        stream
+            .set_terminal_result_metadata(TerminalResultMetadata {
+                num_turns: Some(1),
+                ..TerminalResultMetadata::default()
+            })
+            .await;
 
         stream.emit_message_start("msg_source", "model").await;
         stream.emit_text(&source_lone_surrogate()).await;
@@ -2756,6 +3377,12 @@ mod tests {
         assert!(tool_line.contains(r#""content":"\ud800""#));
 
         stream
+            .set_terminal_result_metadata(TerminalResultMetadata {
+                num_turns: Some(1),
+                ..TerminalResultMetadata::default()
+            })
+            .await;
+        stream
             .emit_result_success(
                 &model_text,
                 "end_turn",
@@ -2774,29 +3401,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mod_notify_uses_source_text_in_the_system_ui_notify_frame() {
+        let stream = StreamJsonStream::new(make_params("mod-notify"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+
+        stream
+            .emit_mod_notify("native-plugin", &source_lone_surrogate())
+            .await;
+
+        let OutboundMsg::Line(line) = rx.try_recv().unwrap() else {
+            panic!("expected a ui_notify frame");
+        };
+        let frame: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(frame["type"], "system");
+        assert_eq!(frame["subtype"], "ui_notify");
+        assert_eq!(frame["plugin"], "native-plugin");
+        assert_eq!(frame["text"], "�");
+        assert!(line.contains(r#""text":"\ud800""#));
+        assert!(frame["uuid"].is_string());
+        assert_eq!(frame["session_id"], "mod-notify");
+    }
+
+    #[tokio::test]
     async fn terminal_model_errors_use_the_native_success_result_envelope() {
-        for (status, reason, expected_status) in [
-            (Some(400), "api_error", json!(400)),
-            (None, "api_error", Value::Null),
-            (Some(413), "image_error", json!(413)),
+        for (status, reason, stop_reason, expected_status, api_calls, expected_turns) in [
+            (Some(400), "api_error", "stop_sequence", json!(400), 0, 1),
+            (None, "api_error", "refusal", Value::Null, 2, 2),
+            (Some(413), "image_error", "stop_sequence", json!(413), 0, 1),
         ] {
             let stream = StreamJsonStream::new_json_mode(make_params("api-error-result"));
             let mut rx = stream.drain_rx.lock().await.take().unwrap();
-            stream.emit_terminal_api_error(status, reason).await;
             stream
+                .set_terminal_result_metadata(TerminalResultMetadata {
+                    num_turns: Some(expected_turns),
+                    subagent_stats: Some(native_zero_subagent_stats()),
+                    safety_stops: Some(0),
+                    queued_turn_count: Some(0),
+                    result_index: Some(0),
+                    ..TerminalResultMetadata::default()
+                })
+                .await;
+            stream
+                .emit_terminal_api_error(status, reason, stop_reason)
+                .await;
+            let was_api_error = stream
                 .emit_result_success(
                     &source_text("terminal failure"),
                     "end_turn",
                     &CostSnapshot {
-                        api_calls: 1,
+                        api_calls,
                         ..Default::default()
                     },
                     "model",
                     "off",
-                    None,
+                    Some("sdk_opt_in_required"),
                     &[],
                 )
                 .await;
+            assert!(was_api_error);
 
             let line = match rx.try_recv().unwrap() {
                 OutboundMsg::Line(line) => line,
@@ -2809,9 +3471,61 @@ mod tests {
             assert_eq!(frame["is_error"], true);
             assert_eq!(frame["api_error_status"], expected_status);
             assert_eq!(frame["terminal_reason"], reason);
-            assert_eq!(frame["num_turns"], 1);
+            assert_eq!(frame["stop_reason"], stop_reason);
+            assert_eq!(frame["duration_api_ms"], 0);
+            assert_eq!(frame["num_turns"], expected_turns);
             assert_eq!(frame["result"], "terminal failure");
+            assert_eq!(frame["subagent_stats"]["spawned"], 0);
+            assert_eq!(frame["safety_stops"], 0);
+            assert_eq!(frame["queued_turn_count"], 0);
+            assert_eq!(frame["result_index"], 0);
+            assert_eq!(frame["fast_mode_disabled_reason"], "sdk_opt_in_required");
+            assert_eq!(frame["usage"]["fallback_credit"], Value::Null);
+            assert_eq!(frame["usage"]["inference_geo"], "");
+            assert_eq!(frame["usage"]["server_tool_use"]["web_search_requests"], 0);
+            assert_eq!(frame["usage"]["server_tool_use"]["web_fetch_requests"], 0);
+            assert!(frame.get("ttft_ms").is_none());
+            assert!(frame.get("ttft_stream_ms").is_none());
+            assert!(frame.get("time_to_request_ms").is_none());
+            assert_eq!(
+                frame
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                [
+                    "duration_api_ms",
+                    "stop_reason",
+                    "session_id",
+                    "total_cost_usd",
+                    "usage",
+                    "modelUsage",
+                    "permission_denials",
+                    "terminal_reason",
+                    "fast_mode_state",
+                    "fast_mode_disabled_reason",
+                    "subagent_stats",
+                    "safety_stops",
+                    "is_error",
+                    "num_turns",
+                    "subtype",
+                    "api_error_status",
+                    "result",
+                    "type",
+                    "duration_ms",
+                    "uuid",
+                    "queued_turn_count",
+                    "result_index",
+                ]
+            );
 
+            stream
+                .set_terminal_result_metadata(TerminalResultMetadata {
+                    num_turns: Some(1),
+                    ..TerminalResultMetadata::default()
+                })
+                .await;
             stream
                 .emit_result_success(
                     &source_text("ordinary response"),
@@ -2832,6 +3546,83 @@ mod tests {
             assert_eq!(next_frame["api_error_status"], Value::Null);
             assert_eq!(next_frame["terminal_reason"], "completed");
         }
+    }
+
+    #[tokio::test]
+    async fn provider_error_result_uses_live_source_text_without_message_boundary() {
+        let stream = StreamJsonStream::new_json_mode(make_params("api-error-source-result"));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        let expected_units = "API Error: 400 fixture provider error "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain(" tail".encode_utf16())
+            .collect::<Vec<_>>();
+        let error_text = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&expected_units),
+            expected_units.clone(),
+        )
+        .unwrap();
+
+        // The production provider-error path emits text and terminal metadata,
+        // but does not emit a message boundary before the one-shot result.
+        stream
+            .set_terminal_result_metadata(TerminalResultMetadata {
+                num_turns: Some(1),
+                subagent_stats: Some(native_zero_subagent_stats()),
+                safety_stops: Some(0),
+                queued_turn_count: Some(0),
+                result_index: Some(0),
+                ..TerminalResultMetadata::default()
+            })
+            .await;
+        stream.emit_text(&error_text).await;
+        stream
+            .emit_terminal_api_error(Some(400), "api_error", "stop_sequence")
+            .await;
+        let result_text = stream.get_last_result_text().await;
+        assert_eq!(result_text.string_units(""), Some(expected_units.clone()));
+        let is_error = stream
+            .emit_result_success(
+                &result_text,
+                "end_turn",
+                &CostSnapshot::default(),
+                "model",
+                "off",
+                Some("sdk_opt_in_required"),
+                &[],
+            )
+            .await;
+        assert!(is_error);
+
+        let line = match rx.try_recv().unwrap() {
+            OutboundMsg::Line(line) => line,
+            _ => panic!("expected the terminal result frame"),
+        };
+        assert!(rx.try_recv().is_err(), "provider errors add no extra frame");
+        assert!(line.contains(r#""result":"API Error: 400 fixture provider error \ud800 tail""#));
+        let frame = Utf16JsonProjection::parse(line.trim_end()).unwrap();
+        assert_eq!(frame.string_at("/type"), Some("result"));
+        assert_eq!(frame.string_at("/subtype"), Some("success"));
+        assert_eq!(frame.bool_at("/is_error"), Some(true));
+        assert_eq!(frame.string_at("/stop_reason"), Some("stop_sequence"));
+        assert_eq!(frame.unsigned_integer_at("/api_error_status"), Some(400));
+        assert_eq!(frame.string_at("/terminal_reason"), Some("api_error"));
+        assert_eq!(
+            frame.string_at("/fast_mode_disabled_reason"),
+            Some("sdk_opt_in_required")
+        );
+        assert_eq!(frame.unsigned_integer_at("/num_turns"), Some(1));
+        assert_eq!(frame.unsigned_integer_at("/duration_api_ms"), Some(0));
+        assert_eq!(frame.unsigned_integer_at("/queued_turn_count"), Some(0));
+        assert_eq!(frame.unsigned_integer_at("/result_index"), Some(0));
+        assert_eq!(frame.unsigned_integer_at("/safety_stops"), Some(0));
+        assert_eq!(
+            frame
+                .at_pointer("/usage/fallback_credit")
+                .map(|value| value.is_null()),
+            Some(true)
+        );
+        assert_eq!(frame.string_units("/result"), Some(expected_units));
     }
 
     #[derive(serde::Deserialize)]
@@ -3686,6 +4477,60 @@ mod tests {
         assert_eq!(idx("output_tokens_details"), idx("output_tokens") + 1);
         assert_eq!(idx("service_tier"), idx("output_tokens_details") + 1);
         assert_eq!(usage["output_tokens_details"]["thinking_tokens"], 0_u64);
+    }
+
+    #[test]
+    fn terminal_result_usage_projects_current_provider_details() {
+        let cost = CostSnapshot {
+            current_usage: Some(lingxi_core::host::orchestrator::CurrentUsageSnapshot {
+                input_tokens: 5,
+                output_tokens: 7,
+                cache_read_input_tokens: 2,
+                cache_creation_input_tokens: 3,
+            }),
+            current_usage_details: Some(
+                lingxi_core::host::orchestrator::ResponseUsageDetailsSnapshot {
+                    reasoning_tokens: 4,
+                    web_search_requests: 6,
+                    cache_creation_1h_input_tokens: 8,
+                    cache_creation_5m_input_tokens: 9,
+                    fast_mode: true,
+                },
+            ),
+            ..Default::default()
+        };
+        let usage = StreamJsonStream::build_terminal_api_error_usage_block(&cost);
+        let object = usage.as_object().unwrap();
+
+        assert_eq!(
+            object.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "input_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "output_tokens",
+                "output_tokens_details",
+                "server_tool_use",
+                "service_tier",
+                "cache_creation",
+                "inference_geo",
+                "iterations",
+                "speed",
+                "fallback_credit",
+            ]
+        );
+        assert_eq!(usage["input_tokens"], 5);
+        assert_eq!(usage["cache_creation_input_tokens"], 3);
+        assert_eq!(usage["cache_read_input_tokens"], 2);
+        assert_eq!(usage["output_tokens"], 11);
+        assert_eq!(usage["output_tokens_details"]["thinking_tokens"], 4);
+        assert_eq!(usage["server_tool_use"]["web_search_requests"], 6);
+        assert_eq!(usage["service_tier"], "fast");
+        assert_eq!(usage["cache_creation"]["ephemeral_1h_input_tokens"], 8);
+        assert_eq!(usage["cache_creation"]["ephemeral_5m_input_tokens"], 9);
+        assert_eq!(usage["inference_geo"], "");
+        assert_eq!(usage["speed"], "fast");
+        assert!(usage["fallback_credit"].is_null());
     }
 
     /// OR-1 — `permission_denials` was a hardcoded `json!([])` in all three

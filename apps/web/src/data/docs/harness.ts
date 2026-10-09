@@ -625,7 +625,7 @@ export const harnessPages: DocPage[] = [
         apis: [
           {
             name: 'CLIENT_PROTOCOL_VERSION',
-            signature: 'pub const CLIENT_PROTOCOL_VERSION: &str = "17.0.0";',
+            signature: 'pub const CLIENT_PROTOCOL_VERSION: &str = "21.0.0";',
             description: t('Protocol version at this source revision. Native clients must version-lock generated binding layouts with their host.', '此源码版本的协议号。原生客户端生成绑定的布局需要与宿主版本一致。'),
           },
         ],

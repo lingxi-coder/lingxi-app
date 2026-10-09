@@ -70,7 +70,10 @@ import type { RuntimeState, SharedDesktopCache } from './bridgeRuntimeState.js';
 import type {
   ConfigurationOperationEvent,
   DesktopTurnToken,
+  ModUiClientFrameSnapshot,
   McpConfigurationSnapshotEvent,
+  ModUiControlRequest,
+  ModUiControlResponse,
   McpServersEvent,
   PluginCatalogEvent,
   SessionRuntimeStatus,
@@ -112,6 +115,7 @@ import type {
 } from './lingxi.js';
 import { saveProviderSettings } from './providerSettingsSave.js';
 import { createUiSurfaceClientId, UiSurfaceLifecycleQueue } from './uiSurfaceLifecycle.js';
+import type { AllowedClientCommand } from '../../shared/clientCommands.js';
 import {
   interruptConfigurationOperations,
   requestConfigurationOperation,
@@ -164,6 +168,110 @@ import {
 } from './trackedTurns.js';
 import type { ActiveTrackedTurn, TrackedSpeechListener } from './trackedTurns.js';
 
+interface PendingModUiControl {
+  readonly sessionId: string;
+  readonly resolve: (value: ModUiControlResponse) => void;
+  readonly reject: (error: Error) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
+function rejectModUiControls(
+  pending: Map<string, PendingModUiControl>,
+  error: Error,
+  sessionId?: string,
+): void {
+  for (const [requestId, entry] of pending) {
+    if (sessionId !== undefined && entry.sessionId !== sessionId) continue;
+    pending.delete(requestId);
+    clearTimeout(entry.timer);
+    entry.reject(error);
+  }
+}
+
+function parseModUiControlJson(value: string | undefined, name: string): unknown {
+  if (value === undefined) return undefined;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new Error(`The host returned invalid Mod UI ${name} JSON`);
+  }
+}
+
+function isModUiRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function modUiClientIdentity(plugin: unknown, key: unknown, module: unknown): string | null {
+  if (typeof plugin !== 'string' || typeof key !== 'string' || typeof module !== 'string') return null;
+  return JSON.stringify([plugin, key, module]);
+}
+
+function isAbovePromptClientFrame(frame: unknown): frame is Record<string, unknown> {
+  if (!isModUiRecord(frame) || !isModUiRecord(frame['parent'])) return false;
+  return frame['parent']['surface'] === 'desktop'
+    && frame['parent']['component'] === 'AbovePrompt'
+    && frame['parent']['instance_id'] === 'electron-above-prompt';
+}
+
+interface CurrentModUiParentTree {
+  readonly renderRevision: number;
+  readonly clientIdentities: ReadonlySet<string>;
+}
+
+function matchesCurrentModUiParentTree(frame: unknown, current: CurrentModUiParentTree): boolean {
+  if (!isAbovePromptClientFrame(frame) || frame['renderRevision'] !== current.renderRevision
+    || !isModUiRecord(frame['client'])) return false;
+  const identity = modUiClientIdentity(
+    frame['client']['plugin'], frame['client']['key'], frame['client']['module'],
+  );
+  return identity !== null && current.clientIdentities.has(identity);
+}
+
+function parentTreeClientIdentities(tree: unknown): Set<string> {
+  const identities = new Set<string>();
+  let visited = 0;
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > 32 || visited++ >= 20_000) return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, depth + 1);
+      return;
+    }
+    if (!isModUiRecord(node)) return;
+    if (node['type'] === 'Client' && isModUiRecord(node['props']) && isModUiRecord(node['client'])) {
+      const identity = modUiClientIdentity(node['client']['plugin'], node['props']['key'], node['props']['module']);
+      if (identity) identities.add(identity);
+      return;
+    }
+    if (Array.isArray(node['children'])) {
+      for (const child of node['children']) visit(child, depth + 1);
+    }
+  };
+  visit(tree, 0);
+  return identities;
+}
+
+function rememberClientFrame(
+  previous: readonly ModUiClientFrameSnapshot[],
+  snapshot: ModUiClientFrameSnapshot,
+): readonly ModUiClientFrameSnapshot[] {
+  const existing = previous.find((entry) => entry.sessionId === snapshot.sessionId
+    && entry.runtimeId === snapshot.runtimeId);
+  if (existing && isModUiRecord(existing.frame) && isModUiRecord(snapshot.frame)) {
+    const oldRevision = existing.frame['renderRevision'];
+    const nextRevision = snapshot.frame['renderRevision'];
+    const oldSequence = existing.frame['frameSequence'];
+    const nextSequence = snapshot.frame['frameSequence'];
+    if (typeof oldRevision === 'number' && typeof nextRevision === 'number'
+      && (oldRevision > nextRevision || oldRevision === nextRevision
+        && typeof oldSequence === 'number' && typeof nextSequence === 'number'
+        && oldSequence > nextSequence)) return previous;
+  }
+  const next = previous.filter((entry) => entry.sessionId !== snapshot.sessionId
+    || entry.runtimeId !== snapshot.runtimeId);
+  next.push(snapshot);
+  return next;
+}
+
 const CONFIGURATION_OPERATION_TIMEOUT_MS = 5 * 60_000;
 
 function configurationOperationId(
@@ -183,6 +291,11 @@ export function useBridge(): UseBridge {
   if (uiSurfaceClientId.current === null) uiSurfaceClientId.current = createUiSurfaceClientId();
   const uiSurfaceLifecycle = useRef<UiSurfaceLifecycleQueue | null>(null);
   if (uiSurfaceLifecycle.current === null) uiSurfaceLifecycle.current = new UiSurfaceLifecycleQueue();
+  const pendingModUiControls = useRef(new Map<string, PendingModUiControl>());
+  const currentModUiParentTrees = useRef(new Map<string, CurrentModUiParentTree>());
+  const [attachedUiSessionId, setAttachedUiSessionId] = useState<string | null>(null);
+  const [modUiInvalidationRevision, setModUiInvalidationRevision] = useState(0);
+  const [modUiClientFrames, setModUiClientFrames] = useState<readonly ModUiClientFrameSnapshot[]>([]);
   const hosted = host !== undefined;
   const [loading, setLoading] = useState(hosted);
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
@@ -376,8 +489,20 @@ export function useBridge(): UseBridge {
     const lifecycle = uiSurfaceLifecycle.current;
     if (!clientId || !lifecycle) return;
 
-    void lifecycle.attach(host, activeSessionId, clientId).catch(() => undefined);
+    let current = true;
+    setAttachedUiSessionId(null);
+    currentModUiParentTrees.current.delete(activeSessionId);
+    setModUiClientFrames((frames) => frames.filter((frame) => frame.sessionId !== activeSessionId));
+    void lifecycle.attach(host, activeSessionId, clientId).then(() => {
+      if (current) setAttachedUiSessionId(activeSessionId);
+    }).catch(() => undefined);
     return () => {
+      current = false;
+      setAttachedUiSessionId((sessionId) => sessionId === activeSessionId ? null : sessionId);
+      currentModUiParentTrees.current.delete(activeSessionId);
+      setModUiClientFrames((frames) => frames.filter((frame) => frame.sessionId !== activeSessionId));
+      rejectModUiControls(pendingModUiControls.current,
+        new Error('The Mod UI surface detached before the control completed'), activeSessionId);
       void lifecycle.detach(host, activeSessionId, clientId).catch(() => undefined);
     };
   }, [activeSessionId, connection.status, host, sessionLoading]);
@@ -590,6 +715,53 @@ export function useBridge(): UseBridge {
       const sessionId = envelope.sessionId;
       if (removedRuntimeIds.current.has(sessionId)) return;
       const event = envelope.event;
+      if (event.type === 'ui_control_result') {
+        const pending = pendingModUiControls.current.get(event.request_id);
+        if (pending?.sessionId === sessionId) {
+          pendingModUiControls.current.delete(event.request_id);
+          clearTimeout(pending.timer);
+          if (event.error !== undefined) {
+            pending.reject(new Error(event.error));
+          } else {
+            try {
+              pending.resolve({
+                response: parseModUiControlJson(event.response_json, 'control response'),
+                metadata: parseModUiControlJson(event.metadata_json, 'control metadata'),
+              });
+            } catch (cause) {
+              pending.reject(cause instanceof Error ? cause : new Error(String(cause)));
+            }
+          }
+        }
+      }
+      if (event.type === 'ui_client_frame' && activeSessionIdRef.current === sessionId) {
+        try {
+          const frame = parseModUiControlJson(event.frame_json, 'client frame');
+          if (frame !== undefined) {
+            const currentParentTree = currentModUiParentTrees.current.get(sessionId);
+            if (currentParentTree && isAbovePromptClientFrame(frame)
+              && !matchesCurrentModUiParentTree(frame, currentParentTree)) return;
+            setModUiClientFrames((previous) => rememberClientFrame(previous, {
+              sessionId, runtimeId: event.runtime_id, frame,
+            }));
+          }
+        } catch {
+          // Invalid/stale VM frames are discarded; they never cross into a
+          // plugin execution path in the renderer.
+        }
+      }
+      if (event.type === 'ui_invalidate' && event.session_id === sessionId
+        && activeSessionIdRef.current === sessionId) {
+        setModUiInvalidationRevision((revision) => revision + 1);
+        currentModUiParentTrees.current.delete(sessionId);
+        setModUiClientFrames((frames) => frames.filter((frame) => frame.sessionId !== sessionId));
+      }
+      if (event.type === 'session_ended') {
+        rejectModUiControls(pendingModUiControls.current,
+          new Error('The session ended before the Mod UI control completed'), sessionId);
+        currentModUiParentTrees.current.delete(sessionId);
+        setModUiClientFrames((frames) => frames.filter((frame) => frame.sessionId !== sessionId));
+      }
       const eventProjectPath = bootstrapRef.current?.runtimes.find((runtime) => runtime.sessionId === sessionId)?.projectPath
         ?? (pendingSessionRef.current?.sessionId.startsWith('pending-new:')
           ? pendingSessionRef.current.projectPath
@@ -849,6 +1021,11 @@ export function useBridge(): UseBridge {
       const sessionId = envelope.sessionId;
       const state = envelope.event;
       if (state.status !== 'connected') {
+        rejectModUiControls(pendingModUiControls.current,
+          new Error('The bridge disconnected before the Mod UI control completed'), sessionId);
+        if (activeSessionIdRef.current === sessionId) setAttachedUiSessionId(null);
+        currentModUiParentTrees.current.delete(sessionId);
+        setModUiClientFrames((frames) => frames.filter((frame) => frame.sessionId !== sessionId));
         interruptConfigurationOperations(pendingConfigurationOperations.current, sessionId);
       }
       if (isRuntimeRemovedState(state)) {
@@ -999,6 +1176,8 @@ export function useBridge(): UseBridge {
       });
 
     return () => {
+      rejectModUiControls(pendingModUiControls.current,
+        new Error('The renderer disconnected before the Mod UI control completed'));
       offEvent();
       offState();
       offPermission();
@@ -1774,6 +1953,59 @@ export function useBridge(): UseBridge {
     try { await host.command(sessionId, value); } catch (cause) { capture(cause); }
   }, [capture, host]);
 
+  const requestModUiControl = useCallback((request: ModUiControlRequest): Promise<ModUiControlResponse> => {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionLoadingRef.current || !host || !sessionId
+      || attachedUiSessionId !== sessionId) {
+      return Promise.reject(new Error('The desktop Mod UI surface is not attached'));
+    }
+    const requestId = globalThis.crypto.randomUUID();
+    const promise = new Promise<ModUiControlResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingModUiControls.current.delete(requestId);
+        reject(new Error('The Mod UI control did not receive a response'));
+      }, 30_000);
+      pendingModUiControls.current.set(requestId, { sessionId, resolve, reject, timer });
+    });
+    const wireCommand = { ...request, request_id: requestId } as AllowedClientCommand;
+    void host.command(sessionId, wireCommand).catch((cause: unknown) => {
+      const pending = pendingModUiControls.current.get(requestId);
+      if (!pending) return;
+      pendingModUiControls.current.delete(requestId);
+      clearTimeout(pending.timer);
+      pending.reject(cause instanceof Error ? cause : new Error(String(cause)));
+    });
+    return promise;
+  }, [attachedUiSessionId, host]);
+
+  const rememberModUiClientFrame = useCallback((snapshot: ModUiClientFrameSnapshot): void => {
+    if (activeSessionIdRef.current !== snapshot.sessionId) return;
+    const currentParentTree = currentModUiParentTrees.current.get(snapshot.sessionId);
+    if (currentParentTree && isAbovePromptClientFrame(snapshot.frame)
+      && !matchesCurrentModUiParentTree(snapshot.frame, currentParentTree)) return;
+    setModUiClientFrames((previous) => rememberClientFrame(previous, snapshot));
+  }, []);
+
+  const forgetModUiClientFrame = useCallback((sessionId: string, runtimeId: string, renderRevision: number): void => {
+    setModUiClientFrames((previous) => previous.filter((entry) => {
+      if (entry.sessionId !== sessionId || entry.runtimeId !== runtimeId || !isModUiRecord(entry.frame)) return true;
+      return entry.frame['renderRevision'] !== renderRevision;
+    }));
+  }, []);
+
+  const retainModUiClientFrames = useCallback((sessionId: string, renderRevision: number, parentTree: unknown): void => {
+    if (activeSessionIdRef.current !== sessionId) return;
+    const currentParentTree: CurrentModUiParentTree = {
+      renderRevision,
+      clientIdentities: parentTreeClientIdentities(parentTree),
+    };
+    currentModUiParentTrees.current.set(sessionId, currentParentTree);
+    setModUiClientFrames((previous) => previous.filter((entry) => {
+      if (entry.sessionId !== sessionId || !isAbovePromptClientFrame(entry.frame)) return true;
+      return matchesCurrentModUiParentTree(entry.frame, currentParentTree);
+    }));
+  }, []);
+
   const refresh = useCallback(async () => {
     await Promise.all([
       command({ type: 'list_sessions', limit: 100 }),
@@ -2146,6 +2378,10 @@ export function useBridge(): UseBridge {
     sessionLoading,
     connection,
     connected: !sessionLoading && connection.status === 'connected',
+    modUiSurfaceReady: activeSessionId !== null && attachedUiSessionId === activeSessionId,
+    modUiClientId: uiSurfaceClientId.current ?? '',
+    modUiInvalidationRevision,
+    modUiClientFrames,
     conversation,
     desktop,
     authState: desktop.auth,
@@ -2167,6 +2403,10 @@ export function useBridge(): UseBridge {
     subscribeTrackedSpeech,
     cancelTrackedPrompt,
     sendPrompt,
+    requestModUiControl,
+    rememberModUiClientFrame,
+    forgetModUiClientFrame,
+    retainModUiClientFrames,
     runSlashCommand,
     beginLocalCommand,
     emitCommandOutput,

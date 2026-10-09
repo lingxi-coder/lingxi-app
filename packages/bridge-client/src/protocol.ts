@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '17.0.0';
+export const CLIENT_PROTOCOL_VERSION = '21.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -358,6 +358,17 @@ export type ClientCommand =
   // Explicit UI mount lifecycle; transport hello/close does not imply an attach.
   | { type: 'ui_attach'; surface: 'desktop' | 'mobile' | 'vscode'; client_id: string }
   | { type: 'ui_detach'; client_id: string }
+  // Mod UI request channels are part of the canonical wire protocol. Electron
+  // keeps them off its generic desktop command allowlist.
+  | { type: 'ui_render'; request_id: string; request_json: string }
+  | { type: 'ui_client_module'; request_id: string; plugin: string }
+  | { type: 'ui_message'; request_id: string; request_json: string }
+  | { type: 'ui_client_fault'; request_id: string; request_json: string }
+  | { type: 'ui_client_press'; request_id: string; request_json: string }
+  | { type: 'ui_press'; request_id: string; request_json: string }
+  | { type: 'ui_input'; request_id: string; request_json: string }
+  | { type: 'ui_select'; request_id: string; request_json: string }
+  | { type: 'ui_client_operation'; request_id: string; operation_json: string }
   // ── Auth + session control ────────────────────────────────────────────────
   | { type: 'login' }
   | { type: 'logout' }
@@ -960,6 +971,15 @@ export interface SessionAgentSummaryDto {
   status: string;
   latest_activity?: string;
   updated_at_ms?: number;
+}
+
+/** One indexed child transcript row, including its persisted UUID and error sidecar. */
+export interface SessionAgentMessageRowDto {
+  message_index: number;
+  message_uuid: string;
+  message: MessageDto;
+  /** Complete serialized API-error row when the child response was a host error. */
+  api_error_json?: string;
 }
 
 /** Connection status for an MCP server (listings.rs `McpStatusDto`). */
@@ -2046,6 +2066,32 @@ export interface CostDto {
  *
  * `#[non_exhaustive]` on the Rust side ⇒ a future variant is additive.
  */
+export interface ServerFallbackProviderMessageDto {
+  id?: string;
+  model?: string;
+  stop_reason?: string;
+  stop_details_json?: string;
+  usage_json?: string;
+  /** Serialized JSON array of all provider content blocks. */
+  content_json: string;
+}
+
+export interface ServerFallbackTombstoneMessageDto {
+  uuid: string;
+  /** Native row type; currently emitted for assistant rows. */
+  type: string;
+  timestamp: string;
+  request_id?: string;
+  /** Serialized request-reference payload, kept opaque at this boundary. */
+  request_ref_json?: string;
+  message: ServerFallbackProviderMessageDto;
+  is_api_error_message?: boolean;
+  supersedes_uuids?: string[];
+}
+
+export type RefusalContinuationPhaseDto = 'begin';
+export type RefusalContinuationJoinDto = 'exact';
+
 export type ClientEvent =
   | { type: 'scheduled_run_finished'; run_id: string; summary?: string | null; error?: string | null }
   | { type: 'cron_run_bound'; run_id: string; error?: string | null }
@@ -2053,12 +2099,20 @@ export type ClientEvent =
   | { type: 'cron_result'; request_id: string; jobs: CronJobDto[]; error?: string }
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
+  | { type: 'terminal_api_error'; api_error_status?: number; terminal_reason: string; stop_reason: string }
   | { type: 'message_identity'; message_id: string }
   | { type: 'message_retracted'; message_id: string }
+  | { type: 'assistant_block_start'; block_key: number }
+  | { type: 'assistant_block_identity'; block_key: number; message_uuid: string }
+  | { type: 'assistant_transcript_row_uuids'; message_id: string; uuids: (string | null)[] }
   | { type: 'system_notice'; message: string; is_error: boolean }
   | { type: 'ui_log'; plugin: string; text: string }
   | { type: 'ui_toast'; plugin: string; text: string; timeout_ms: number }
   | { type: 'ui_status'; plugin: string; text: string | null }
+  | { type: 'ui_notify'; plugin: string; text: string }
+  | { type: 'ui_client_frame'; runtime_id: string; frame_json: string }
+  | { type: 'ui_control_result'; request_id: string; response_json?: string; metadata_json?: string; error?: string }
+  | { type: 'ui_invalidate'; instances_json?: string; uuid: string; session_id: string }
   | { type: 'scheduled_task_fire'; message: string }
   | {
       type: 'loop_wakeup';
@@ -2141,7 +2195,7 @@ export type ClientEvent =
       type: 'session_agent_transcript';
       session_id: string;
       agent_id: string;
-      messages: MessageDto[];
+      messages: SessionAgentMessageRowDto[];
       next_message_index: number;
       revision: number;
     }
@@ -2151,11 +2205,25 @@ export type ClientEvent =
       session_id: string;
       agent_id: string;
       message_index: number;
+      message_uuid: string;
       message: MessageDto;
+      api_error_json?: string;
     }
+  | { type: 'session_agent_tombstone'; session_id: string; agent_id: string; message_uuid: string; display_only: boolean }
   // ── Listing / screen events ─────────────────────────────────────────────────
   | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
   | { type: 'provider_model_catalog'; providers: ProviderModelCatalogEntryDto[] }
+  | { type: 'query_model_change'; to_model: string }
+  | {
+      type: 'refusal_continuation';
+      phase: RefusalContinuationPhaseDto;
+      salvage_text: string;
+      join: RefusalContinuationJoinDto;
+      replaces_uuids: string[];
+      display_salvage_text: boolean;
+    }
+  | { type: 'tombstone'; message: ServerFallbackTombstoneMessageDto; display_only: boolean }
+  | { type: 'user_transcript_row_identity'; row_token: string; uuid: string }
   | { type: 'compaction_status'; phase: string; error?: string }
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }

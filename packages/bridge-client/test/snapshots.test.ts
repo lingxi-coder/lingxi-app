@@ -446,6 +446,15 @@ function validateMessage(v: unknown): void {
   for (const b of o['blocks'] as unknown[]) validateMessageBlock(b);
 }
 
+function validateSessionAgentMessageRow(v: unknown): void {
+  const row = rec(v);
+  exactObjectKeys(row, ['message_index', 'message_uuid', 'message'], ['api_error_json'], 'session-agent message row');
+  assert.ok(Number.isSafeInteger(row['message_index']) && (row['message_index'] as number) >= 0);
+  assert.ok(isString(row['message_uuid']));
+  validateMessage(row['message']);
+  if ('api_error_json' in row) assert.ok(isString(row['api_error_json']));
+}
+
 function validateCost(v: unknown): void {
   const o = rec(v);
   assert.ok(
@@ -1609,6 +1618,33 @@ function validateCommand(name: string, v: unknown): void {
           ['chat', 'code'].includes(String(o['target_mode'])),
       );
       break;
+    case 'ui_attach':
+      exactObjectKeys(o, ['type', 'surface', 'client_id'], [], `command snapshot ${name}`);
+      assert.ok(['desktop', 'mobile', 'vscode'].includes(String(o['surface'])));
+      assert.ok(isString(o['client_id']));
+      break;
+    case 'ui_detach':
+      exactObjectKeys(o, ['type', 'client_id'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['client_id']));
+      break;
+    case 'ui_client_module':
+      exactObjectKeys(o, ['type', 'request_id', 'plugin'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['request_id']) && isString(o['plugin']));
+      break;
+    case 'ui_client_operation':
+      exactObjectKeys(o, ['type', 'request_id', 'operation_json'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['request_id']) && isString(o['operation_json']));
+      break;
+    case 'ui_client_fault':
+    case 'ui_client_press':
+    case 'ui_input':
+    case 'ui_message':
+    case 'ui_press':
+    case 'ui_render':
+    case 'ui_select':
+      exactObjectKeys(o, ['type', 'request_id', 'request_json'], [], `command snapshot ${name}`);
+      assert.ok(isString(o['request_id']) && isString(o['request_json']));
+      break;
     case 'login':
     case 'logout':
     case 'force_compact':
@@ -1830,6 +1866,14 @@ function validateEvent(name: string, v: unknown): void {
   const e = v as ClientEvent;
   const o = rec(e);
   switch (o['type']) {
+    case 'terminal_api_error':
+      exactObjectKeys(o, ['type', 'terminal_reason', 'stop_reason'], ['api_error_status'], `event snapshot ${name}`);
+      if ('api_error_status' in o) {
+        assert.ok(Number.isSafeInteger(o['api_error_status']) && (o['api_error_status'] as number) >= 0);
+      }
+      assert.ok(isString(o['terminal_reason']) && isString(o['stop_reason']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
     case 'error':
       tag(o['kind'], (rec(o['kind'])['type']) as string);
       assert.ok(
@@ -1850,6 +1894,9 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'ui_status':
       assert.ok(isString(o['plugin']) && (o['text'] === null || isString(o['text'])));
+      break;
+    case 'ui_notify':
+      assert.ok(isString(o['plugin']) && isString(o['text']));
       break;
     case 'ask_user_question':
       validateAskUserQuestionRequest(o['request']);
@@ -1982,6 +2029,9 @@ function validateEvent(name: string, v: unknown): void {
       for (const a of o['agents'] as unknown[]) validateSessionAgent(a);
       break;
     case 'session_agent_transcript':
+      exactObjectKeys(o, [
+        'type', 'session_id', 'agent_id', 'messages', 'next_message_index', 'revision',
+      ], [], `event snapshot ${name}`);
       assert.ok(
         isString(o['session_id']) &&
           isString(o['agent_id']) &&
@@ -1989,19 +2039,29 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['next_message_index']) &&
           isNumber(o['revision']),
       );
-      for (const m of o['messages'] as unknown[]) validateMessage(m);
+      for (const row of o['messages'] as unknown[]) validateSessionAgentMessageRow(row);
+      assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'session_agent_updated':
       assert.ok(isString(o['session_id']));
       validateSessionAgent(o['agent']);
       break;
     case 'session_agent_message':
+      exactObjectKeys(o, [
+        'type', 'session_id', 'agent_id', 'message_index', 'message_uuid', 'message',
+      ], ['api_error_json'], `event snapshot ${name}`);
       assert.ok(
         isString(o['session_id']) &&
           isString(o['agent_id']) &&
           isNumber(o['message_index']),
       );
-      validateMessage(o['message']);
+      validateSessionAgentMessageRow({
+        message_index: o['message_index'],
+        message_uuid: o['message_uuid'],
+        message: o['message'],
+        ...(o['api_error_json'] === undefined ? {} : { api_error_json: o['api_error_json'] }),
+      });
+      assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'model_list':
       assert.ok(Array.isArray(o['models']) && isString(o['current']));
@@ -2343,6 +2403,95 @@ function validateEvent(name: string, v: unknown): void {
     case 'plugin_catalog':
       assert.ok(isString(o['catalog_json']));
       break;
+    case 'assistant_block_start':
+      exactObjectKeys(o, ['type', 'block_key'], [], `event snapshot ${name}`);
+      assert.ok(Number.isSafeInteger(o['block_key']) && (o['block_key'] as number) >= 0);
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'assistant_block_identity':
+      exactObjectKeys(o, ['type', 'block_key', 'message_uuid'], [], `event snapshot ${name}`);
+      assert.ok(Number.isSafeInteger(o['block_key']) && (o['block_key'] as number) >= 0);
+      assert.ok(isString(o['message_uuid']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'assistant_transcript_row_uuids':
+      exactObjectKeys(o, ['type', 'message_id', 'uuids'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['message_id']) && Array.isArray(o['uuids']));
+      for (const uuid of o['uuids'] as unknown[]) assert.ok(uuid === null || isString(uuid));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'query_model_change':
+      exactObjectKeys(o, ['type', 'to_model'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['to_model']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'refusal_continuation':
+      exactObjectKeys(o, ['type', 'phase', 'salvage_text', 'join', 'replaces_uuids', 'display_salvage_text'], [], `event snapshot ${name}`);
+      assert.equal(o['phase'], 'begin');
+      assert.ok(isString(o['salvage_text']));
+      assert.equal(o['join'], 'exact');
+      assert.ok(Array.isArray(o['replaces_uuids']));
+      for (const uuid of o['replaces_uuids'] as unknown[]) assert.ok(isString(uuid));
+      assert.ok(isBool(o['display_salvage_text']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'session_agent_tombstone':
+      exactObjectKeys(o, ['type', 'session_id', 'agent_id', 'message_uuid', 'display_only'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['session_id']) && isString(o['agent_id']) && isString(o['message_uuid']));
+      assert.ok(isBool(o['display_only']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'tombstone': {
+      exactObjectKeys(o, ['type', 'message', 'display_only'], [], `event snapshot ${name}`);
+      const message = rec(o['message']);
+      exactObjectKeys(message, ['uuid', 'type', 'timestamp', 'message'], [
+        'request_id', 'request_ref_json', 'is_api_error_message', 'supersedes_uuids',
+      ], `tombstone message ${name}`);
+      assert.ok(isString(message['uuid']) && isString(message['type']) && isString(message['timestamp']));
+      for (const key of ['request_id', 'request_ref_json']) {
+        if (key in message) assert.ok(isString(message[key]));
+      }
+      if ('is_api_error_message' in message) assert.ok(isBool(message['is_api_error_message']));
+      if ('supersedes_uuids' in message) {
+        assert.ok(Array.isArray(message['supersedes_uuids']));
+        for (const uuid of message['supersedes_uuids'] as unknown[]) assert.ok(isString(uuid));
+      }
+      const provider = rec(message['message']);
+      exactObjectKeys(provider, ['content_json'], [
+        'id', 'model', 'stop_reason', 'stop_details_json', 'usage_json',
+      ], `tombstone provider message ${name}`);
+      assert.ok(isString(provider['content_json']));
+      for (const key of ['id', 'model', 'stop_reason', 'stop_details_json', 'usage_json']) {
+        if (key in provider) assert.ok(isString(provider[key]));
+      }
+      assert.ok(isBool(o['display_only']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    }
+    case 'user_transcript_row_identity':
+      exactObjectKeys(o, ['type', 'row_token', 'uuid'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['row_token']) && isString(o['uuid']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'ui_client_frame':
+      exactObjectKeys(o, ['type', 'runtime_id', 'frame_json'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['runtime_id']) && isString(o['frame_json']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'ui_control_result':
+      exactObjectKeys(o, ['type', 'request_id'], ['response_json', 'metadata_json', 'error'], `event snapshot ${name}`);
+      assert.ok(isString(o['request_id']));
+      for (const key of ['response_json', 'metadata_json', 'error']) {
+        if (key in o) assert.ok(isString(o[key]));
+      }
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'ui_invalidate':
+      exactObjectKeys(o, ['type', 'uuid', 'session_id'], ['instances_json'], `event snapshot ${name}`);
+      assert.ok(isString(o['uuid']) && isString(o['session_id']));
+      if ('instances_json' in o) assert.ok(isString(o['instances_json']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientEvent type "${String(o['type'])}"`);
   }
@@ -2481,6 +2630,26 @@ test('ALL_CLIENT_EVENT_TYPES matches the `type` tags on disk exactly', () => {
     onDisk,
     'ALL_CLIENT_EVENT_TYPES (src/protocolCoverage.ts) must declare exactly the `type` tags carried by the event goldens — no more, no fewer',
   );
+});
+
+test('terminal_api_error validates its required terminal facts and optional HTTP status', () => {
+  const apiFailure = {
+    type: 'terminal_api_error',
+    api_error_status: 400,
+    terminal_reason: 'api_error',
+    stop_reason: 'stop_sequence',
+  };
+  const refusal = {
+    type: 'terminal_api_error',
+    terminal_reason: 'api_error',
+    stop_reason: 'refusal',
+  };
+  assert.deepEqual(validateClientEvent(apiFailure), apiFailure);
+  assert.deepEqual(validateClientEvent(refusal), refusal);
+  assert.throws(() => validateClientEvent({ ...refusal, api_error_status: null }), /API error status/);
+  assert.throws(() => validateClientEvent({ ...refusal, stop_reason: undefined }), /terminal stop reason/);
+  assert.throws(() => validateClientEvent({ ...refusal, legacy_status: 400 }), /unsupported fields/);
+  assert.throws(() => validateClientEvent({ ...refusal, api_error_status: 65_536 }), /API error status/);
 });
 
 test('ALL_PLUGIN_COMMAND_TYPES matches the nested plugin_command tags on disk exactly', () => {

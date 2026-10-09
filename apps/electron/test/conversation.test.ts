@@ -359,6 +359,14 @@ test('ui_toast stays out of conversation items and is replaced by the next toast
   assert.deepEqual(reduceEvent(s, { type: 'session_ended' }).modToast, null);
 });
 
+test('ui_notify uses the desktop local toast lifetime without changing transcript content', () => {
+  const state = reduceEvent(emptyConversation(), {
+    type: 'ui_notify', plugin: 'review', text: 'Ready',
+  });
+  assert.deepEqual(state.modToast, { plugin: 'review', text: 'Ready', timeoutMs: 4000, sequence: 1 });
+  assert.deepEqual(state.items, []);
+});
+
 test('ui_status keeps one pinned line per plugin and clears only its owner', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'ui_status', plugin: 'one', text: 'First' });

@@ -43,10 +43,7 @@ impl AbovePromptButtonAction {
         let press = Utf16JsonProjection::object(vec![
             ("handle".to_string(), json_u64(self.handle)),
             ("workerEpoch".to_string(), self.worker_epoch.clone()),
-            (
-                "renderRevision".to_string(),
-                json_u64(self.render_revision),
-            ),
+            ("renderRevision".to_string(), json_u64(self.render_revision)),
         ])
         .expect("press fields form an object");
         Utf16JsonProjection::object(vec![
@@ -144,7 +141,7 @@ fn collect_buttons(
                 tree,
                 &press,
                 &["plugin", "handle", "workerEpoch", "renderRevision"],
-            ) || tree.array_len(&field("children"))? != 0
+            ) || valid_terminal_button_children(tree, &field("children")).is_none()
             {
                 return None;
             }
@@ -174,8 +171,9 @@ fn collect_buttons(
             let worker_epoch = tree.subprojection(&worker_epoch_path).ok()?;
             let handle = number_as_u64(tree.number_at(&format!("{press}/handle"))?)
                 .filter(|value| *value > 0)?;
-            let render_revision = number_as_u64(tree.number_at(&format!("{press}/renderRevision"))?)
-                .filter(|value| *value > 0)?;
+            let render_revision =
+                number_as_u64(tree.number_at(&format!("{press}/renderRevision"))?)
+                    .filter(|value| *value > 0)?;
             if plugin.string_units("")?.is_empty()
                 || worker_epoch.string_units("")?.is_empty()
                 || key.string_units("")?.is_empty()
@@ -208,17 +206,55 @@ fn collect_buttons(
                 }
             }
         }
-        "Text" => {}
+        "Text" => validate_terminal_text(tree, pointer)?,
         _ => return None,
     }
     Some(())
 }
 
-fn object_has_only_fields(
-    tree: &Utf16JsonProjection,
-    pointer: &str,
-    allowed: &[&str],
-) -> bool {
+fn valid_terminal_button_children(tree: &Utf16JsonProjection, pointer: &str) -> Option<()> {
+    let Some(_) = tree.at_pointer(pointer) else {
+        return Some(());
+    };
+    for index in 0..tree.array_len(pointer)? {
+        let child = format!("{pointer}/{index}");
+        if let Some(units) = tree.string_units(&child) {
+            if units.len() > 10_000 {
+                return None;
+            }
+            continue;
+        }
+        validate_terminal_text(tree, &child)?;
+    }
+    Some(())
+}
+
+fn validate_terminal_text(tree: &Utf16JsonProjection, pointer: &str) -> Option<()> {
+    if tree.string_at(&format!("{pointer}/type"))? != "Text"
+        || !object_has_only_fields(tree, pointer, &["type", "props", "children"])
+    {
+        return None;
+    }
+    let props = format!("{pointer}/props");
+    if tree.at_pointer(&props).is_some() {
+        if !object_has_only_fields(tree, &props, &["bold"])
+            || tree
+                .at_pointer(&format!("{props}/bold"))
+                .is_some_and(|value| value.as_bool().is_none())
+        {
+            return None;
+        }
+    }
+    let children = format!("{pointer}/children");
+    for index in 0..tree.array_len(&children)? {
+        if tree.string_units(&format!("{children}/{index}"))?.len() > 10_000 {
+            return None;
+        }
+    }
+    Some(())
+}
+
+fn object_has_only_fields(tree: &Utf16JsonProjection, pointer: &str, allowed: &[&str]) -> bool {
     tree.at_pointer(pointer)
         .and_then(JsonValueView::object_entries)
         .is_some_and(|entries| {
@@ -327,8 +363,16 @@ fn lines_for(tree: &Value, depth: usize) -> Option<Vec<String>> {
         return None;
     }
     let kind = tree.get("type")?.as_str()?;
-    let children = tree.get("children")?.as_array()?;
-    let props = tree.get("props")?.as_object()?;
+    let children = tree
+        .get("children")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let empty_props = serde_json::Map::new();
+    let props = tree
+        .get("props")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty_props);
     match kind {
         "Text" => {
             if !props.is_empty() {
@@ -508,18 +552,44 @@ mod tests {
         );
         let digit = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE);
         assert_eq!(
-            button_for_key(&actions, digit, true, false).unwrap().key_display,
+            button_for_key(&actions, digit, true, false)
+                .unwrap()
+                .key_display,
             "second",
             "later buttons win duplicate hotkeys"
         );
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
-            button_for_key(&actions, enter, true, false).unwrap().key_display,
+            button_for_key(&actions, enter, true, false)
+                .unwrap()
+                .key_display,
             "second",
             "Enter activates the auto-focused button"
         );
         assert!(button_for_key(&actions, enter, false, false).is_none());
         assert!(button_for_key(&actions, enter, true, true).is_none());
+    }
+
+    #[test]
+    fn button_children_are_validated_and_display_uses_the_native_label() {
+        let tree = source(&json!({
+            "type":"Button",
+            "props":{"key":"mixed","label":"ABC"},
+            "press":{"plugin":"button-mod","handle":4,
+                "workerEpoch":"worker-epoch","renderRevision":7},
+            "children":["A",{"type":"Text","props":{"bold":true},"children":["B","C"]}]
+        }));
+        assert_eq!(tree_lines(&tree, 1), Some(vec!["[ABC]".into()]));
+        assert_eq!(tree_buttons(&tree, 9).unwrap().len(), 1);
+
+        let folded = source(&json!({
+            "type":"Button",
+            "props":{"key":"folded","label":"Folded"},
+            "press":{"plugin":"button-mod","handle":5,
+                "workerEpoch":"worker-epoch","renderRevision":7}
+        }));
+        assert_eq!(tree_lines(&folded, 1), Some(vec!["[Folded]".into()]));
+        assert_eq!(tree_buttons(&folded, 9).unwrap().len(), 1);
     }
 
     #[test]

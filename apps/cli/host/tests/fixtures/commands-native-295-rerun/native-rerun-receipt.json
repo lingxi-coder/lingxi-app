@@ -1,0 +1,280 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "base_url_scope": "127.0.0.1 only, dummy key, no relay; telemetry disabled in fixture env",
+  "fixed_inputs": {
+    "cwd": "/private/tmp/commands-native-295-rerun-20261008/run-output/run/cwd",
+    "config_dir": "/private/tmp/commands-native-295-rerun-20261008/run-output/run/config",
+    "model": "claude-sonnet-4-5",
+    "locale": "C.UTF-8",
+    "timezone": "UTC",
+    "skills": [
+      "skill-🧪-probe",
+      "skill.alpha+beta"
+    ]
+  },
+  "cases": [
+    {
+      "id": "slash-only",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003001",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003001",
+        "/"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "slash-only.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "slash-only.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "slash-only",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 27668,
+          "sha256": "94b89bd61d0cc6dff963decb473975b49f2afca22bda24a352ff1978b476bc4d",
+          "raw_file": "run-output/requests/slash-only.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-295-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003001.jsonl",
+        "capture_file": "run-output/sessions/slash-only.jsonl",
+        "bytes": 58369,
+        "sha256": "9816db20ce931339a322eb136cd90bd5300fd7f1ffd3e94431812c3f486cb3a2"
+      }
+    },
+    {
+      "id": "unknown-slash-command",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003002",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003002",
+        "/__native_unknown_293__ fixed-argument"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unknown-slash-command.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "unknown-slash-command.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unknown-slash-command",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 29667,
+          "sha256": "4c48ba0c2d40be825c1e1f158c401dae9c13d16b868431beb9e1400567a5928b",
+          "raw_file": "run-output/requests/unknown-slash-command.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-295-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003002.jsonl",
+        "capture_file": "run-output/sessions/unknown-slash-command.jsonl",
+        "bytes": 63549,
+        "sha256": "60f2a4dfca142cf8fd454c043042ac7f84cea32f2c9951bdf395781b4b0eb274"
+      }
+    },
+    {
+      "id": "unicode-skill-name",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003003",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003003",
+        "/skill-🧪-probe"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unicode-skill-name.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "unicode-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unicode-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 29078,
+          "sha256": "4dcfe80d6ac79e41681a1fe43f4e447ad02bc0e3eb9c1f59bb7e122bde8e4aa7",
+          "raw_file": "run-output/requests/unicode-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-295-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003003.jsonl",
+        "capture_file": "run-output/sessions/unicode-skill-name.jsonl",
+        "bytes": 62586,
+        "sha256": "7026af05bbb039e707e820aae6fad093345e97ae546b342f37512260e242a2c6"
+      }
+    },
+    {
+      "id": "punctuation-skill-name",
+      "kind": "argv",
+      "session_id": "00000000-0000-4000-8000-000000003004",
+      "prompt_code_units_hex": null,
+      "input_file": null,
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003004",
+        "/skill.alpha+beta"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "punctuation-skill-name.stdout",
+      "stdout_bytes": 25,
+      "stdout_sha256": "f8f1039b3f608ea6d276b52bcfd614e9be5d7db77ab7b4eef13bc58c206053ff",
+      "stderr_file": "punctuation-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "punctuation-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 29078,
+          "sha256": "59ed61625fe72732f6639cb636c8ca47b66192b9b37780680bfbac872043f263",
+          "raw_file": "run-output/requests/punctuation-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-295-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003004.jsonl",
+        "capture_file": "run-output/sessions/punctuation-skill-name.jsonl",
+        "bytes": 62586,
+        "sha256": "d87a510c94def0d0a111a41cf4559b7d3ba851850aa5033d8e6270964be105d3"
+      }
+    },
+    {
+      "id": "unpaired-surrogate-skill-name",
+      "kind": "stream-json",
+      "session_id": "00000000-0000-4000-8000-000000003005",
+      "prompt_code_units_hex": "2f0073006b0069006c006c005f0000d85f00700072006f0062006500",
+      "input_file": "inputs/unpaired-surrogate-skill-name.stdin.jsonl",
+      "argv": [
+        "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+        "--setting-sources",
+        "project",
+        "--strict-mcp-config",
+        "--print",
+        "--tools",
+        "",
+        "--max-budget-usd",
+        "1",
+        "--model",
+        "claude-sonnet-4-5",
+        "--session-id",
+        "00000000-0000-4000-8000-000000003005",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
+      "native_exit_code": 0,
+      "timed_out": false,
+      "stdout_file": "unpaired-surrogate-skill-name.stdout",
+      "stdout_bytes": 4378,
+      "stdout_sha256": "143238ef9dd790461f617295c12db131c12a810fbf11e87b894b0eb83645164d",
+      "stderr_file": "unpaired-surrogate-skill-name.stderr",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "loopback_requests": [
+        {
+          "case": "unpaired-surrogate-skill-name",
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "accepted": true,
+          "dummy_key_matched": true,
+          "bytes": 27683,
+          "sha256": "48a3dab65261d90cb0fe2a5d758f6a5915853a7b6f92cab6fdb8fac949d12302",
+          "raw_file": "run-output/requests/unpaired-surrogate-skill-name.request-00.json",
+          "stream": true,
+          "tools": []
+        }
+      ],
+      "session_persistence": {
+        "native_path_relative_to_config": "projects/-private-tmp-commands-native-295-rerun-20261008-run-output-run-cwd/00000000-0000-4000-8000-000000003005.jsonl",
+        "capture_file": "run-output/sessions/unpaired-surrogate-skill-name.jsonl",
+        "bytes": 58391,
+        "sha256": "1b116c87efe1ebccd60b1386ee460133ebea10c4b5ef9ed332b0beff03eba935"
+      }
+    }
+  ],
+  "all_requests_accepted_locally": true,
+  "no_upstream_relay": true,
+  "scope": "Native command parse/fallback, Unicode/punctuation/unpaired-surrogate Skill-name and session persistence fixtures; no Harness result implied"
+}

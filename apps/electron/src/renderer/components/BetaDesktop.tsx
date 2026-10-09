@@ -87,6 +87,7 @@ import {
   type ContextMention, type MentionMenuEntry,
 } from '../bridge/composerMentions';
 import { MarkdownContent } from './MarkdownContent';
+import { ModUiSurface } from './ModUiSurface.js';
 import { VoiceFlowPanel } from './voice/VoiceFlowPanel';
 import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
@@ -3006,6 +3007,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
         />
       )}
       {goalActive && <GoalStatus key={`${activeSessionId}:${goal.objective}`} objective={goal.objective} disabled={!ready || bridge.sessionLoading} running={bridge.running} cancelling={bridge.isCancelling} onClear={() => bridge.runSlashCommand('/goal clear')} onPause={() => bridge.cancel()} onResume={() => bridge.sendPrompt('Continue pursuing the current goal.')} />}
+      <ModUiSurface bridge={bridge} isWorking={bridge.running} />
       <div
         className="beta-composer"
         onDragOver={(event) => {

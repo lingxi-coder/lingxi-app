@@ -101,6 +101,25 @@ pub trait TurnDriver: Send + Sync + 'static {
     async fn ui_detach(&self, _client_id: &str) -> bool {
         false
     }
+    /// Execute a session-bound Native Mod UI control.
+    async fn mod_ui_control(
+        &self,
+        _request: Utf16JsonProjection,
+    ) -> Result<lingxi_core::host::orchestrator::ModUiControlOutcome, lingxi_core::host::HandleError>
+    {
+        Err(lingxi_core::host::HandleError::ActionFailed(
+            "Mod UI controls are unavailable on this turn driver".into(),
+        ))
+    }
+    /// Execute a session-bound host-local Mod Client operation.
+    async fn mod_ui_client_operation(
+        &self,
+        _operation: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::HandleError> {
+        Err(lingxi_core::host::HandleError::ActionFailed(
+            "Mod Client operations are unavailable on this turn driver".into(),
+        ))
+    }
     /// Cancel session-local timers before replacing the conversation.
     async fn stop_dynamic_loop(&self) {}
 
@@ -254,6 +273,7 @@ fn is_owned_turn_event(event: &ClientEvent) -> bool {
             | ClientEvent::UiLog { .. }
             | ClientEvent::UiToast { .. }
             | ClientEvent::UiStatus { .. }
+            | ClientEvent::UiNotify { .. }
             | ClientEvent::TextDelta { .. }
             | ClientEvent::AskUserQuestion { .. }
             | ClientEvent::TurnStarted { .. }
@@ -1855,6 +1875,48 @@ impl BridgeConnection {
         })
     }
 
+    async fn dispatch_mod_ui_control(
+        &self,
+        request_id: String,
+        request_json: String,
+        expected_subtype: &str,
+    ) {
+        let result = match client::adapter::turn::parse_mod_ui_control_request(
+            &request_json,
+            expected_subtype,
+        ) {
+            Ok(request) => match self.driver.as_ref() {
+                Some(driver) => driver.mod_ui_control(request).await,
+                None => Err(lingxi_core::host::HandleError::ActionFailed(
+                    "Mod UI controls are unavailable without a session driver".into(),
+                )),
+            },
+            Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error)),
+        };
+        self.unscoped_event_sink()
+            .emit(client::adapter::turn::mod_ui_control_result_event(
+                request_id, result,
+            ))
+            .await;
+    }
+
+    async fn dispatch_mod_ui_client_operation(&self, request_id: String, operation_json: String) {
+        let result = match client::adapter::turn::parse_mod_ui_client_operation(&operation_json) {
+            Ok(operation) => match self.driver.as_ref() {
+                Some(driver) => driver.mod_ui_client_operation(operation).await,
+                None => Err(lingxi_core::host::HandleError::ActionFailed(
+                    "Mod Client operations are unavailable without a session driver".into(),
+                )),
+            },
+            Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error)),
+        };
+        self.unscoped_event_sink()
+            .emit(client::adapter::turn::mod_ui_client_operation_result_event(
+                request_id, result,
+            ))
+            .await;
+    }
+
     /// The connection-scoped [`PermissionRequestSink`] to bind into the
     /// [`AdapterPermissionGate`]. Every `check()` request flows through here as a
     /// [`Frame::PermissionRequest`].
@@ -2192,6 +2254,81 @@ impl BridgeConnection {
                         driver.ui_detach(&client_id).await;
                     }
                 }
+            }
+            ClientCommand::UiRender {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_render")
+                    .await;
+            }
+            ClientCommand::UiMessage {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_message")
+                    .await;
+            }
+            ClientCommand::UiClientFault {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_client_fault")
+                    .await;
+            }
+            ClientCommand::UiClientPress {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_client_press")
+                    .await;
+            }
+            ClientCommand::UiPress {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_press")
+                    .await;
+            }
+            ClientCommand::UiInput {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_input")
+                    .await;
+            }
+            ClientCommand::UiSelect {
+                request_id,
+                request_json,
+            } => {
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_select")
+                    .await;
+            }
+            ClientCommand::UiClientModule { request_id, plugin } => {
+                let response = Utf16JsonProjection::object(vec![
+                    ("subtype".to_owned(), "ui_client_module".into()),
+                    ("plugin".to_owned(), plugin.into()),
+                ])
+                .expect("generated Mod UI module response is an object");
+                let outcome = lingxi_core::host::orchestrator::ModUiControlOutcome {
+                    response,
+                    render_revision: None,
+                    client_runtime_epochs: Default::default(),
+                    client_state_token: None,
+                };
+                self.unscoped_event_sink()
+                    .emit(client::adapter::turn::mod_ui_control_result_event(
+                        request_id,
+                        Ok(outcome),
+                    ))
+                    .await;
+            }
+            ClientCommand::UiClientOperation {
+                request_id,
+                operation_json,
+            } => {
+                self.dispatch_mod_ui_client_operation(request_id, operation_json)
+                    .await;
             }
             ClientCommand::SendPrompt {
                 text,
@@ -3210,6 +3347,7 @@ mod tests {
     use client::protocol::events::ClientEvent;
     use client::protocol::permission::{PermissionRequest, PermissionResponseDto};
     use lingxi_core::host::{PermissionDecision, PermissionGate};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use msgqueue::{MessageQueueManager, QueuePriority, QueueSource};
     use tokio::sync::{Mutex, Notify};
     use tokio_util::sync::CancellationToken;
@@ -3275,6 +3413,10 @@ mod tests {
             plugin: "review".to_string(),
             text: Some("late status".to_string()),
         }));
+        assert!(is_owned_turn_event(&ClientEvent::UiNotify {
+            plugin: "review".to_string(),
+            text: "late notice".to_string(),
+        }));
         assert!(is_owned_turn_event(&ClientEvent::Attachment {
             attachment: client::protocol::events::AttachmentDto::NestedMemory {
                 display_path: "late".to_string(),
@@ -3307,6 +3449,43 @@ mod tests {
     #[derive(Default)]
     struct RecordingSurfaceDriver {
         calls: StdMutex<Vec<String>>,
+    }
+
+    #[derive(Default)]
+    struct RecordingUiDriver {
+        controls: StdMutex<Vec<Utf16JsonProjection>>,
+        operations: StdMutex<Vec<Utf16JsonProjection>>,
+    }
+
+    #[async_trait]
+    impl TurnDriver for RecordingUiDriver {
+        async fn run_turn(&self, _prompt: Utf16JsonProjection) {}
+
+        async fn mod_ui_control(
+            &self,
+            request: Utf16JsonProjection,
+        ) -> Result<
+            lingxi_core::host::orchestrator::ModUiControlOutcome,
+            lingxi_core::host::HandleError,
+        > {
+            self.controls.lock().unwrap().push(request);
+            Ok(lingxi_core::host::orchestrator::ModUiControlOutcome {
+                response: Utf16JsonProjection::parse(r#"{"handled":true}"#)
+                    .expect("static test response is valid JSON"),
+                render_revision: None,
+                client_runtime_epochs: Default::default(),
+                client_state_token: None,
+            })
+        }
+
+        async fn mod_ui_client_operation(
+            &self,
+            operation: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, lingxi_core::host::HandleError> {
+            self.operations.lock().unwrap().push(operation);
+            Ok(Utf16JsonProjection::parse(r#"{"ok":true}"#)
+                .expect("static test response is valid JSON"))
+        }
     }
 
     #[async_trait]
@@ -3415,6 +3594,38 @@ mod tests {
                 "detach:renderer-a",
                 "detach:renderer-b",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_mod_ui_commands_reach_the_bound_session_driver() {
+        let connection = BridgeConnection::new();
+        let gate = Arc::new(AdapterPermissionGate::new(Arc::new(NoopPermissionSink)));
+        let driver = Arc::new(RecordingUiDriver::default());
+        let connection = connection.bind(gate, driver.clone());
+
+        connection
+            .dispatch(ClientCommand::UiRender {
+                request_id: "render-1".to_owned(),
+                request_json: r#"{"subtype":"ui_render","surface":"desktop","component":"AbovePrompt","instance_id":"above-prompt","props":{},"viewport":{"columns":90,"rows":12}}"#.to_owned(),
+            })
+            .await;
+        connection
+            .dispatch(ClientCommand::UiClientOperation {
+                request_id: "operation-1".to_owned(),
+                operation_json: r#"{"subtype":"mount","target":null}"#.to_owned(),
+            })
+            .await;
+
+        assert_eq!(driver.controls.lock().unwrap().len(), 1);
+        assert_eq!(
+            driver.controls.lock().unwrap()[0].string_at("/subtype"),
+            Some("ui_render")
+        );
+        assert_eq!(driver.operations.lock().unwrap().len(), 1);
+        assert_eq!(
+            driver.operations.lock().unwrap()[0].string_at("/subtype"),
+            Some("mount")
         );
     }
 

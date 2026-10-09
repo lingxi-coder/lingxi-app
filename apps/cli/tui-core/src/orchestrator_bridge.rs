@@ -375,6 +375,11 @@ pub enum TurnEvent {
         text: client::protocol::text::ClientTextDto,
         timeout_ms: u64,
     },
+    /// A Mod notification without a source-provided duration.
+    UiNotify {
+        plugin: String,
+        text: client::protocol::text::ClientTextDto,
+    },
     /// Set or clear a plugin's pinned line below the composer.
     UiStatus {
         plugin: String,
@@ -550,6 +555,20 @@ impl OutputStream for BridgeOutputStream {
                     .expect("Mod toast output is a root-string projection"),
             ),
             timeout_ms,
+        });
+    }
+
+    async fn emit_mod_notify(
+        &self,
+        plugin: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        let _ = self.tx.send(TurnEvent::UiNotify {
+            plugin: plugin.to_string(),
+            text: client::protocol::text::ClientTextDto::from_code_units(
+                text.string_units("")
+                    .expect("Mod notify output is a root-string projection"),
+            ),
         });
     }
 
@@ -940,8 +959,12 @@ mod tests {
         let status =
             lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""status \udfff""#)
                 .unwrap();
+        let notify =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""notify \ud800""#)
+                .unwrap();
 
         bridge.emit_mod_toast("plugin", &toast, 2500).await;
+        bridge.emit_mod_notify("plugin", &notify).await;
         bridge.emit_mod_status("plugin", Some(&status)).await;
         bridge.emit_mod_status("plugin", None).await;
 
@@ -951,6 +974,12 @@ mod tests {
                 if plugin == "plugin"
                     && text.code_units == vec![b't' as u16, b'o' as u16, b'a' as u16, b's' as u16, b't' as u16, b' ' as u16, 0xd800]
                     && timeout_ms == 2500
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiNotify { plugin, text }
+                if plugin == "plugin"
+                    && text.code_units == vec![b'n' as u16, b'o' as u16, b't' as u16, b'i' as u16, b'f' as u16, b'y' as u16, b' ' as u16, 0xd800]
         ));
         assert!(matches!(
             rx.recv().await.unwrap(),

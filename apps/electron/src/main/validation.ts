@@ -16,6 +16,7 @@ import { isBase64 } from '../shared/base64.js';
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
 const MAX_JSON_PAYLOAD_LENGTH = 64 * 1024;
+const MAX_UI_CONTROL_JSON_PAYLOAD_LENGTH = 128 * 1024;
 const MAX_ADMIN_JSON_PAYLOAD_LENGTH = 768 * 1024;
 const MAX_LIST_ITEMS = 128;
 const MAX_RULE_LENGTH = 4096;
@@ -90,6 +91,15 @@ function jsonObjectString(value: unknown, name: string, max: number): string {
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`invalid ${name}`);
+  }
+  return text;
+}
+
+function uiControlRequestString(value: unknown, expectedSubtype: string): string {
+  const text = jsonObjectString(value, 'UI request JSON', MAX_UI_CONTROL_JSON_PAYLOAD_LENGTH);
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+  if (parsed['subtype'] !== expectedSubtype || Object.hasOwn(parsed, 'request_id')) {
+    throw new Error('invalid UI request subtype or embedded request id');
   }
   return text;
 }
@@ -380,6 +390,36 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       const client_id = string(input['client_id'], 'UI client id', 64);
       if (!/^[A-Za-z0-9._-]{1,64}$/.test(client_id)) throw new Error('invalid UI client id');
       return { type, client_id };
+    }
+    case 'ui_render':
+    case 'ui_message':
+    case 'ui_client_fault':
+    case 'ui_client_press':
+    case 'ui_press':
+    case 'ui_input':
+    case 'ui_select': {
+      exactKeys(input, ['type', 'request_id', 'request_json']);
+      const request_id = string(input['request_id'], 'UI request id', 128);
+      const request_json = uiControlRequestString(input['request_json'], type);
+      return { type, request_id, request_json } as Extract<ClientCommand, {
+        type: 'ui_render' | 'ui_message' | 'ui_client_fault' | 'ui_client_press' | 'ui_press' | 'ui_input' | 'ui_select'
+      }>;
+    }
+    case 'ui_client_module': {
+      exactKeys(input, ['type', 'request_id', 'plugin']);
+      return {
+        type,
+        request_id: string(input['request_id'], 'UI request id', 128),
+        plugin: string(input['plugin'], 'UI plugin', 256),
+      };
+    }
+    case 'ui_client_operation': {
+      exactKeys(input, ['type', 'request_id', 'operation_json']);
+      return {
+        type,
+        request_id: string(input['request_id'], 'UI request id', 128),
+        operation_json: jsonObjectString(input['operation_json'], 'UI operation JSON', MAX_UI_CONTROL_JSON_PAYLOAD_LENGTH),
+      };
     }
     case 'login':
     case 'logout':

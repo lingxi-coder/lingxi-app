@@ -934,6 +934,21 @@ impl TurnDriver for OrchestratorTurnDriver {
             .await
     }
 
+    async fn mod_ui_control(
+        &self,
+        request: Utf16JsonProjection,
+    ) -> Result<lingxi_core::host::orchestrator::ModUiControlOutcome, lingxi_core::host::HandleError>
+    {
+        self.orchestrator.mod_ui_control(request).await
+    }
+
+    async fn mod_ui_client_operation(
+        &self,
+        operation: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::HandleError> {
+        self.orchestrator.mod_ui_client_operation(operation).await
+    }
+
     async fn stop_dynamic_loop(&self) {
         tool_cron::stop_dynamic_loop(self.wakeup_scheduler.as_ref()).await;
         if let Some(runtime) = &self.loop_runtime {

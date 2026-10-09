@@ -6,6 +6,7 @@ import type {
   MessageDto,
   PlanTaskDto,
   PermissionRequest,
+  SessionAgentMessageRowDto,
   SessionAgentSummaryDto,
   TaskRowDto,
 } from '@lingxi/bridge-client';
@@ -45,6 +46,12 @@ export interface AgentTranscriptState {
   readonly nextMessageIndex: number;
   /** Sparse indexes let a late snapshot retain already-arrived live tail rows. */
   readonly messageIndexes: Readonly<Record<string, number>>;
+  /** Persisted JSONL row identities keyed by the original child message index. */
+  readonly messageUuids: Readonly<Record<string, string>>;
+  /** Complete host-created API-error rows retained alongside the display projection. */
+  readonly apiErrorJson: Readonly<Record<string, string>>;
+  /** Tombstones win over snapshots or live rows already in flight. */
+  readonly tombstoneUuids: Readonly<Record<string, true>>;
 }
 
 export interface RuntimeCenterState {
@@ -206,6 +213,9 @@ function messageKey(index: number): string {
 
 function transcriptFromEntries(
   entries: Readonly<Record<string, MessageDto>>,
+  messageUuids: Readonly<Record<string, string>>,
+  apiErrorJson: Readonly<Record<string, string>>,
+  tombstoneUuids: Readonly<Record<string, true>>,
   revision: number,
   nextMessageIndex: number,
 ): AgentTranscriptState {
@@ -217,7 +227,16 @@ function transcriptFromEntries(
     messages: ordered.map(([, message]) => message),
     revision,
     nextMessageIndex,
-    messageIndexes: Object.fromEntries(ordered.map(([index]) => [messageKey(index), index])),
+    tombstoneUuids,
+    messageIndexes: Object.fromEntries(ordered.map(([index], position) => [messageKey(position), index])),
+    messageUuids: Object.fromEntries(ordered.flatMap(([index]) => {
+      const uuid = messageUuids[messageKey(index)];
+      return uuid === undefined ? [] : [[messageKey(index), uuid]];
+    })),
+    apiErrorJson: Object.fromEntries(ordered.flatMap(([index]) => {
+      const error = apiErrorJson[messageKey(index)];
+      return error === undefined ? [] : [[messageKey(index), error]];
+    })),
   };
 }
 
@@ -225,21 +244,30 @@ function entriesFromTranscript(transcript: AgentTranscriptState): Record<string,
   const entries: Record<string, MessageDto> = {};
   const indexes = Object.entries(transcript.messageIndexes).sort(([, left], [, right]) => left - right);
   transcript.messages.forEach((message, position) => {
-    const mapped = indexes[position]?.[0];
-    entries[mapped ?? messageKey(position)] = message;
+    const sourceIndex = indexes[position]?.[1];
+    entries[messageKey(sourceIndex ?? position)] = message;
   });
   return entries;
 }
 
 function mergeTranscriptSnapshot(
   previous: AgentTranscriptState | undefined,
-  messages: readonly MessageDto[],
+  messages: readonly SessionAgentMessageRowDto[],
   revision: number,
   nextMessageIndex: number,
 ): AgentTranscriptState {
   if (previous && revision < previous.revision) return previous;
   const incoming: Record<string, MessageDto> = {};
-  messages.forEach((message, index) => { incoming[messageKey(index)] = message; });
+  const incomingUuids: Record<string, string> = {};
+  const incomingApiErrors: Record<string, string> = {};
+  const tombstoneUuids = previous?.tombstoneUuids ?? {};
+  for (const row of messages) {
+    if (tombstoneUuids[row.message_uuid] === true) continue;
+    const key = messageKey(row.message_index);
+    incoming[key] = row.message;
+    incomingUuids[key] = row.message_uuid;
+    if (row.api_error_json !== undefined) incomingApiErrors[key] = row.api_error_json;
+  }
   // A revision-aware poll can race a live message event. Keep only the live
   // tail beyond the snapshot's watermark; rows covered by the snapshot are
   // replaced authoritatively.
@@ -247,27 +275,61 @@ function mergeTranscriptSnapshot(
     const previousEntries = entriesFromTranscript(previous);
     for (const [index, message] of Object.entries(previousEntries)) {
       const numeric = Number(index);
-      if (numeric >= nextMessageIndex && incoming[index] === undefined) incoming[index] = message;
+      if (numeric >= nextMessageIndex && incoming[index] === undefined) {
+        incoming[index] = message;
+        const uuid = previous.messageUuids[index];
+        if (uuid !== undefined) incomingUuids[index] = uuid;
+        const apiError = previous.apiErrorJson[index];
+        if (apiError !== undefined) incomingApiErrors[index] = apiError;
+      }
     }
   }
-  return transcriptFromEntries(incoming, revision, Math.max(nextMessageIndex, previous?.nextMessageIndex ?? 0));
+  return transcriptFromEntries(
+    incoming,
+    incomingUuids,
+    incomingApiErrors,
+    tombstoneUuids,
+    revision,
+    Math.max(nextMessageIndex, previous?.nextMessageIndex ?? 0),
+  );
 }
 
 function mergeTranscriptMessage(
   previous: AgentTranscriptState | undefined,
-  index: number,
-  message: MessageDto,
+  row: SessionAgentMessageRowDto,
 ): AgentTranscriptState {
+  const index = row.message_index;
   if (!Number.isSafeInteger(index) || index < 0) return previous ?? {
-    messages: [], revision: 0, nextMessageIndex: 0, messageIndexes: {},
+    messages: [], revision: 0, nextMessageIndex: 0, messageIndexes: {}, messageUuids: {}, apiErrorJson: {}, tombstoneUuids: {},
   };
+  if (previous?.tombstoneUuids[row.message_uuid] === true) {
+    return index < previous.nextMessageIndex
+      ? previous
+      : { ...previous, nextMessageIndex: index + 1 };
+  }
   const entries = previous ? entriesFromTranscript(previous) : {};
+  const messageUuids = { ...(previous?.messageUuids ?? {}) };
+  const apiErrorJson = { ...(previous?.apiErrorJson ?? {}) };
   const key = messageKey(index);
-  if (entries[key] !== undefined && JSON.stringify(entries[key]) === JSON.stringify(message)) {
+  const unchanged = entries[key] !== undefined
+    && JSON.stringify(entries[key]) === JSON.stringify(row.message)
+    && messageUuids[key] === row.message_uuid
+    && apiErrorJson[key] === row.api_error_json;
+  if (unchanged) {
     return previous as AgentTranscriptState;
   }
-  entries[key] = message;
-  return transcriptFromEntries(entries, previous?.revision ?? 0, Math.max(index + 1, previous?.nextMessageIndex ?? 0));
+  entries[key] = row.message;
+  messageUuids[key] = row.message_uuid;
+  if (row.api_error_json === undefined) delete apiErrorJson[key];
+  else apiErrorJson[key] = row.api_error_json;
+  return transcriptFromEntries(
+    entries,
+    messageUuids,
+    apiErrorJson,
+    previous?.tombstoneUuids ?? {},
+    previous?.revision ?? 0,
+    Math.max(index + 1, previous?.nextMessageIndex ?? 0),
+  );
 }
 
 export function resourceFromAttachment(attachment: AttachmentDto): RuntimeResource {
@@ -477,7 +539,37 @@ export function reduceRuntimeCenterEvent(
         ...state,
         transcripts: {
           ...state.transcripts,
-          [event.agent_id]: mergeTranscriptMessage(state.transcripts[event.agent_id], event.message_index, event.message),
+          [event.agent_id]: mergeTranscriptMessage(state.transcripts[event.agent_id], event),
+        },
+      };
+    }
+    case 'session_agent_tombstone': {
+      if (event.session_id !== sessionId) return state;
+      const previous = state.transcripts[event.agent_id];
+      if (previous?.tombstoneUuids[event.message_uuid] === true) return state;
+      const entries = previous ? entriesFromTranscript(previous) : {};
+      const messageUuids = { ...(previous?.messageUuids ?? {}) };
+      const apiErrorJson = { ...(previous?.apiErrorJson ?? {}) };
+      for (const [key, uuid] of Object.entries(messageUuids)) {
+        if (uuid !== event.message_uuid) continue;
+        delete entries[key];
+        delete messageUuids[key];
+        delete apiErrorJson[key];
+      }
+      return {
+        ...state,
+        transcripts: {
+          ...state.transcripts,
+          [event.agent_id]: transcriptFromEntries(
+            entries,
+            messageUuids,
+            apiErrorJson,
+            { ...(previous?.tombstoneUuids ?? {}), [event.message_uuid]: true },
+            // Revisions count host transcript records; a live tombstone does
+            // not carry a new revision and cannot advance that watermark.
+            previous?.revision ?? 0,
+            previous?.nextMessageIndex ?? 0,
+          ),
         },
       };
     }

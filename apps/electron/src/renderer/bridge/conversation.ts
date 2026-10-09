@@ -759,6 +759,12 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       return { ...state, modToast: { plugin: event.plugin, text: event.text,
         timeoutMs: event.timeout_ms, sequence: (state.modToast?.sequence ?? 0) + 1 } };
 
+    // The Native notify operation has no duration field. Desktop uses the
+    // existing LingXi toast presentation with a local default only.
+    case 'ui_notify':
+      return { ...state, modToast: { plugin: event.plugin, text: event.text,
+        timeoutMs: 4000, sequence: (state.modToast?.sequence ?? 0) + 1 } };
+
     case 'ui_status': {
       const existing = state.modStatuses.findIndex((entry) => entry.plugin === event.plugin);
       if (event.text === null) {

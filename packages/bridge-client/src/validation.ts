@@ -19,6 +19,8 @@ import type {
   ManagedLocalAppMcpServerDto,
   PluginStatusDto,
   ServerHello,
+  ServerFallbackTombstoneMessageDto,
+  SessionAgentMessageRowDto,
   TaskRowDto,
 } from './protocol.js';
 
@@ -52,6 +54,59 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value === undefined ? undefined : string(value, name);
 }
 
+function wireString(value: unknown, name: string): string {
+  if (typeof value !== 'string') throw new Error(`invalid ${name}`);
+  return value;
+}
+
+function wireOptionalString(value: unknown, name: string): string | undefined {
+  return value === undefined ? undefined : wireString(value, name);
+}
+
+function serverFallbackTombstoneMessage(value: unknown): ServerFallbackTombstoneMessageDto {
+  const message = object(value, 'fallback tombstone message');
+  exactKeys(message, [
+    'uuid', 'type', 'timestamp', 'message',
+    'request_id', 'request_ref_json', 'is_api_error_message', 'supersedes_uuids',
+  ], 'fallback tombstone message');
+  const provider = object(message['message'], 'fallback tombstone provider message');
+  exactKeys(provider, [
+    'content_json',
+    'id', 'model', 'stop_reason', 'stop_details_json', 'usage_json',
+  ], 'fallback tombstone provider message');
+  const supersedes = message['supersedes_uuids'];
+  if (supersedes !== undefined && !Array.isArray(supersedes)) {
+    throw new Error('invalid fallback tombstone superseded UUIDs');
+  }
+  if (message['is_api_error_message'] !== undefined) {
+    boolean(message['is_api_error_message'], 'fallback tombstone API error flag');
+  }
+  const requestId = wireOptionalString(message['request_id'], 'fallback tombstone request id');
+  const requestRef = wireOptionalString(message['request_ref_json'], 'fallback tombstone request reference');
+  const providerId = wireOptionalString(provider['id'], 'fallback provider message id');
+  const providerModel = wireOptionalString(provider['model'], 'fallback provider model');
+  const stopReason = wireOptionalString(provider['stop_reason'], 'fallback provider stop reason');
+  const stopDetails = wireOptionalString(provider['stop_details_json'], 'fallback provider stop details');
+  const usage = wireOptionalString(provider['usage_json'], 'fallback provider usage');
+  return {
+    uuid: string(message['uuid'], 'fallback tombstone UUID'),
+    type: wireString(message['type'], 'fallback tombstone row type'),
+    timestamp: wireString(message['timestamp'], 'fallback tombstone timestamp'),
+    ...(requestId === undefined ? {} : { request_id: requestId }),
+    ...(requestRef === undefined ? {} : { request_ref_json: requestRef }),
+    message: {
+      ...(providerId === undefined ? {} : { id: providerId }),
+      ...(providerModel === undefined ? {} : { model: providerModel }),
+      ...(stopReason === undefined ? {} : { stop_reason: stopReason }),
+      ...(stopDetails === undefined ? {} : { stop_details_json: stopDetails }),
+      ...(usage === undefined ? {} : { usage_json: usage }),
+      content_json: wireString(provider['content_json'], 'fallback provider content'),
+    },
+    ...(message['is_api_error_message'] === undefined ? {} : { is_api_error_message: message['is_api_error_message'] as boolean }),
+    ...(supersedes === undefined ? {} : { supersedes_uuids: stringArray(supersedes, 'fallback tombstone superseded UUIDs') }),
+  };
+}
+
 function taskRow(value: unknown): TaskRowDto {
   const row = object(value, 'task row');
   exactKeys(row, ['task_id', 'task_type', 'status', 'description', 'agent_id',
@@ -73,6 +128,19 @@ function taskRow(value: unknown): TaskRowDto {
   }
   if (row['started_at_ms'] !== undefined) integer(row['started_at_ms'], 'task start time');
   return row as unknown as TaskRowDto;
+}
+
+function sessionAgentMessageRow(value: unknown): SessionAgentMessageRowDto {
+  const row = object(value, 'session-agent transcript row');
+  exactKeys(row, ['message_index', 'message_uuid', 'message', 'api_error_json'], 'session-agent transcript row');
+  const message = object(row['message'], 'session-agent message');
+  if (!Array.isArray(message['blocks'])) throw new Error('invalid session-agent message blocks');
+  return {
+    message_index: integer(row['message_index'], 'session-agent message index'),
+    message_uuid: string(row['message_uuid'], 'session-agent message UUID'),
+    message: row['message'] as SessionAgentMessageRowDto['message'],
+    ...(row['api_error_json'] === undefined ? {} : { api_error_json: wireString(row['api_error_json'], 'session-agent API error row') }),
+  };
 }
 
 /** Product-only scope lookup; request identity must match the pending ask. */
@@ -628,6 +696,103 @@ export function validateClientEvent(value: unknown): ClientEvent {
     return { type, event: validateAppEvent(input['event']) } as ClientEvent;
   }
   switch (type) {
+    case 'terminal_api_error': {
+      exactKeys(input, ['type', 'api_error_status', 'terminal_reason', 'stop_reason'], 'client event');
+      const apiErrorStatus = input['api_error_status'] === undefined
+        ? undefined
+        : integer(input['api_error_status'], 'API error status');
+      if (apiErrorStatus !== undefined && apiErrorStatus > 0xffff) {
+        throw new Error('invalid API error status');
+      }
+      return {
+        type,
+        ...(apiErrorStatus === undefined ? {} : { api_error_status: apiErrorStatus }),
+        terminal_reason: string(input['terminal_reason'], 'terminal reason'),
+        stop_reason: string(input['stop_reason'], 'terminal stop reason'),
+      };
+    }
+    case 'assistant_block_start':
+      exactKeys(input, ['type', 'block_key'], 'client event');
+      return { type, block_key: integer(input['block_key'], 'assistant block key') };
+    case 'assistant_block_identity':
+      exactKeys(input, ['type', 'block_key', 'message_uuid'], 'client event');
+      return {
+        type,
+        block_key: integer(input['block_key'], 'assistant block key'),
+        message_uuid: string(input['message_uuid'], 'assistant message UUID'),
+      };
+    case 'assistant_transcript_row_uuids': {
+      exactKeys(input, ['type', 'message_id', 'uuids'], 'client event');
+      if (!Array.isArray(input['uuids'])) throw new Error('invalid assistant transcript row UUIDs');
+      return {
+        type,
+        message_id: string(input['message_id'], 'assistant transcript message id'),
+        uuids: input['uuids'].map((uuid, index) => uuid === null ? null : string(uuid, `assistant row UUID ${index}`)),
+      };
+    }
+    case 'query_model_change':
+      exactKeys(input, ['type', 'to_model'], 'client event');
+      return { type, to_model: wireString(input['to_model'], 'query model') };
+    case 'refusal_continuation': {
+      exactKeys(input, ['type', 'phase', 'salvage_text', 'join', 'replaces_uuids', 'display_salvage_text'], 'client event');
+      if (input['phase'] !== 'begin') throw new Error('invalid refusal continuation phase');
+      if (input['join'] !== 'exact') throw new Error('invalid refusal continuation join');
+      return {
+        type,
+        phase: 'begin',
+        salvage_text: wireString(input['salvage_text'], 'refusal salvage text'),
+        join: 'exact',
+        replaces_uuids: stringArray(input['replaces_uuids'], 'refusal replaced UUIDs'),
+        display_salvage_text: boolean(input['display_salvage_text'], 'refusal display flag'),
+      };
+    }
+    case 'session_agent_tombstone':
+      exactKeys(input, ['type', 'session_id', 'agent_id', 'message_uuid', 'display_only'], 'client event');
+      return {
+        type,
+        session_id: string(input['session_id'], 'tombstone session id'),
+        agent_id: string(input['agent_id'], 'tombstone agent id'),
+        message_uuid: string(input['message_uuid'], 'tombstone message UUID'),
+        display_only: boolean(input['display_only'], 'tombstone display flag'),
+      };
+    case 'tombstone':
+      exactKeys(input, ['type', 'message', 'display_only'], 'client event');
+      return {
+        type,
+        message: serverFallbackTombstoneMessage(input['message']),
+        display_only: boolean(input['display_only'], 'tombstone display flag'),
+      };
+    case 'user_transcript_row_identity':
+      exactKeys(input, ['type', 'row_token', 'uuid'], 'client event');
+      return {
+        type,
+        row_token: string(input['row_token'], 'user row token'),
+        uuid: string(input['uuid'], 'persisted user row UUID'),
+      };
+    case 'ui_client_frame':
+      exactKeys(input, ['type', 'runtime_id', 'frame_json'], 'client event');
+      return {
+        type,
+        runtime_id: string(input['runtime_id'], 'UI runtime id'),
+        frame_json: wireString(input['frame_json'], 'UI frame JSON'),
+      };
+    case 'ui_control_result':
+      exactKeys(input, ['type', 'request_id', 'response_json', 'metadata_json', 'error'], 'client event');
+      return {
+        type,
+        request_id: string(input['request_id'], 'UI control request id'),
+        ...(input['response_json'] === undefined ? {} : { response_json: wireString(input['response_json'], 'UI response JSON') }),
+        ...(input['metadata_json'] === undefined ? {} : { metadata_json: wireString(input['metadata_json'], 'UI metadata JSON') }),
+        ...(input['error'] === undefined ? {} : { error: wireString(input['error'], 'UI control error') }),
+      };
+    case 'ui_invalidate':
+      exactKeys(input, ['type', 'uuid', 'session_id', 'instances_json'], 'client event');
+      return {
+        type,
+        ...(input['instances_json'] === undefined ? {} : { instances_json: wireString(input['instances_json'], 'UI invalidation instances JSON') }),
+        uuid: string(input['uuid'], 'UI invalidation UUID'),
+        session_id: string(input['session_id'], 'UI invalidation session id'),
+      };
     case 'ui_log':
       exactKeys(input, ['type', 'plugin', 'text'], 'client event');
       return { type, plugin: string(input['plugin'], 'plugin'), text: string(input['text'], 'text') };
@@ -639,6 +804,9 @@ export function validateClientEvent(value: unknown): ClientEvent {
       exactKeys(input, ['type', 'plugin', 'text'], 'client event');
       return { type, plugin: string(input['plugin'], 'plugin'),
         text: input['text'] === null ? null : string(input['text'], 'text') };
+    case 'ui_notify':
+      exactKeys(input, ['type', 'plugin', 'text'], 'client event');
+      return { type, plugin: string(input['plugin'], 'plugin'), text: string(input['text'], 'text') };
     case 'task_row':
       exactKeys(input, ['type', 'task'], 'client event');
       return { type, task: taskRow(input['task']) };
@@ -683,6 +851,32 @@ export function validateClientEvent(value: unknown): ClientEvent {
         session_id: string(input['session_id'], 'session_id'),
         mode: sessionMode(input['mode'], 'mode'),
       } as ClientEvent;
+    case 'session_agent_message':
+      exactKeys(input, [
+        'type', 'session_id', 'agent_id', 'message_index', 'message_uuid', 'message', 'api_error_json',
+      ], 'client event');
+      return {
+        type,
+        session_id: string(input['session_id'], 'session_id'),
+        agent_id: string(input['agent_id'], 'agent_id'),
+        ...sessionAgentMessageRow({
+          message_index: input['message_index'],
+          message_uuid: input['message_uuid'],
+          message: input['message'],
+          ...(input['api_error_json'] === undefined ? {} : { api_error_json: input['api_error_json'] }),
+        }),
+      };
+    case 'session_agent_transcript':
+      exactKeys(input, ['type', 'session_id', 'agent_id', 'messages', 'next_message_index', 'revision'], 'client event');
+      if (!Array.isArray(input['messages'])) throw new Error('invalid session-agent messages');
+      return {
+        type,
+        session_id: string(input['session_id'], 'session_id'),
+        agent_id: string(input['agent_id'], 'agent_id'),
+        messages: input['messages'].map(sessionAgentMessageRow),
+        next_message_index: integer(input['next_message_index'], 'session-agent next message index'),
+        revision: integer(input['revision'], 'session-agent transcript revision'),
+      };
     case 'session_list':
       exactKeys(input, ['type', 'sessions'], 'client event');
       if (!Array.isArray(input['sessions'])) throw new Error('invalid sessions');

@@ -13,7 +13,9 @@ use crate::control_plane::StdioControlPlane;
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
-use crate::stream_json::{build_init_params, permission_mode_str, StreamJsonStream};
+use crate::stream_json::{
+    build_init_params, permission_mode_str, StreamJsonStream, TerminalResultMetadata,
+};
 use crate::stream_json_input::{
     content_to_prompt, control_frame_request_id, control_request_subtype, emit_raw_frame_queued,
     emit_replay_ack_queued, spawn_stdin_router, ControlPlaneWriter, StdinChannels,
@@ -63,6 +65,61 @@ fn stream_json_error_subtype(err: &orchestrator::OrchestratorError) -> &'static 
         orchestrator::OrchestratorError::MaxTurnsReached { .. } => "error_max_turns",
         orchestrator::OrchestratorError::MaxBudgetReached { .. } => "error_max_budget_usd",
         _ => "error_during_execution",
+    }
+}
+
+struct CancelTokenOnDrop(tokio_util::sync::CancellationToken);
+
+impl Drop for CancelTokenOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn run_print_model_turn(
+    runtime: &Runtime,
+    prompt: &str,
+    no_stream: bool,
+) -> Result<(), orchestrator::OrchestratorError> {
+    if no_stream {
+        orchestrator::mod_prompt_origin::with_origin(
+            serde_json::json!({"kind":"sdk"}),
+            runtime.orchestrator.run_turn(prompt),
+        )
+        .await
+        .map(|_| ())
+    } else {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _cancel_on_drop = CancelTokenOnDrop(cancel.clone());
+        orchestrator::mod_prompt_origin::with_origin(
+            serde_json::json!({"kind":"sdk"}),
+            runtime
+                .orchestrator
+                .run_turn_streaming_with_cancel(prompt, cancel),
+        )
+        .await
+        .map(|_| ())
+    }
+}
+
+fn result_metadata_from_turn_metrics(
+    metrics: Option<orchestrator::TurnExecutionMetrics>,
+    safety_stops: Option<u64>,
+) -> TerminalResultMetadata {
+    let timing_metrics = metrics.as_ref().filter(|metrics| {
+        metrics.api_error_status.is_none()
+            && metrics.api_error_stop_reason.is_none()
+            && metrics.stop_reason.as_deref() != Some("tool_deferred")
+    });
+    TerminalResultMetadata {
+        num_turns: metrics.as_ref().map(|metrics| u64::from(metrics.num_turns)),
+        stop_reason: metrics.as_ref().map(|metrics| metrics.stop_reason.clone()),
+        ttft_ms: timing_metrics.and_then(|metrics| metrics.ttft_ms),
+        ttft_stream_ms: timing_metrics.and_then(|metrics| metrics.ttft_stream_ms),
+        time_to_request_ms: timing_metrics.and_then(|metrics| metrics.time_to_request_ms),
+        first_content_frame_ms: timing_metrics.and_then(|metrics| metrics.first_content_frame_ms),
+        safety_stops,
+        ..TerminalResultMetadata::default()
     }
 }
 
@@ -170,9 +227,16 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
             .as_ref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         {
-            let code =
-                run_structured_output(runtime, &prompt, &slot, &schema, argv.max_budget_usd, sink)
-                    .await;
+            let code = run_structured_output(
+                runtime,
+                &prompt,
+                &slot,
+                &schema,
+                argv.no_stream,
+                argv.max_budget_usd,
+                sink,
+            )
+            .await;
             return finish_print_branch(runtime, argv.max_budget_usd, sink, code).await;
         }
     }
@@ -180,20 +244,17 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     // Non-slash branch — drive the orchestrator turn loop. Without a real
     // ANTHROPIC_API_KEY this returns 401; we surface the error verbatim.
     sink.turn_start().await;
-    let turn_result = orchestrator::mod_prompt_origin::with_origin(
-        serde_json::json!({"kind":"sdk"}),
-        runtime.orchestrator.run_turn(&prompt),
-    )
-    .await;
+    let turn_result = run_print_model_turn(runtime, &prompt, argv.no_stream).await;
     let turn_result = match turn_result {
-        Ok(outcome) => wind_down_print_tasks(
-            runtime,
-            argv.max_budget_usd,
-            tokio_util::sync::CancellationToken::new(),
-            None,
-        )
-        .await
-        .map(|()| outcome),
+        Ok(()) => {
+            wind_down_print_tasks(
+                runtime,
+                argv.max_budget_usd,
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+        }
         Err(error) => {
             stop_print_tasks(runtime).await;
             Err(error)
@@ -206,7 +267,7 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     )
     .await;
     match turn_result {
-        Ok(_outcome) => exit_codes::SUCCESS,
+        Ok(()) => exit_codes::SUCCESS,
         Err(e) => {
             sink.error("runtime", &e.to_string()).await;
             exit_codes::RUNTIME_ERROR
@@ -444,22 +505,19 @@ async fn run_stream_json_print_inner(
     // ② system/status frame (status: "requesting")
     stream.emit_status().await;
 
-    // ③ Run the turn — streaming callbacks (emit_text / emit_tool_call /
-    //    emit_message_start / emit_message_boundary) fire on the stream.
-    let turn_result = orchestrator::mod_prompt_origin::with_origin(
-        serde_json::json!({"kind":"sdk"}),
-        runtime.orchestrator.run_turn(&prompt),
-    )
-    .await;
+    // ③ Run the turn — streaming callbacks fire by default; `--no-stream`
+    //    keeps this output protocol but uses the batched provider request.
+    let turn_result = run_print_model_turn(runtime, &prompt, argv.no_stream).await;
     let turn_result = match turn_result {
-        Ok(outcome) => wind_down_print_tasks(
-            runtime,
-            argv.max_budget_usd,
-            tokio_util::sync::CancellationToken::new(),
-            None,
-        )
-        .await
-        .map(|()| outcome),
+        Ok(()) => {
+            wind_down_print_tasks(
+                runtime,
+                argv.max_budget_usd,
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+        }
         Err(error) => {
             stop_print_tasks(runtime).await;
             Err(error)
@@ -467,7 +525,6 @@ async fn run_stream_json_print_inner(
     };
 
     // ④ Emit the result frame.
-    let cost = runtime.orchestrator.snapshot_cost().await;
     let result_text = stream.get_last_result_text().await;
     let model = {
         let session_handle = runtime.orchestrator.session();
@@ -488,6 +545,7 @@ async fn run_stream_json_print_inner(
         runtime.task_registry.as_ref(),
     )
     .await;
+    let cost = runtime.orchestrator.snapshot_cost().await;
     if let Err(err) = turn_result {
         let err_msg = err.to_string();
         let subtype = stream_json_error_subtype(&err);
@@ -505,7 +563,25 @@ async fn run_stream_json_print_inner(
         stream.flush().await;
         exit_codes::RUNTIME_ERROR
     } else {
-        stream
+        let turn_metrics = runtime.orchestrator.completed_turn_metrics();
+        let session_id = runtime.orchestrator.current_session_id().await;
+        let subagent_stats = serde_json::to_value(
+            runtime
+                .task_registry
+                .agent_session_statistics(session_id)
+                .snapshot(),
+        )
+        .expect("agent session statistics snapshot is serializable");
+        let mut result_metadata =
+            result_metadata_from_turn_metrics(turn_metrics, cost.safety_stops);
+        result_metadata.subagent_stats = Some(subagent_stats);
+        // `run_stream_json_print_inner` runs exactly one user query and
+        // publishes its first result; queued turns are owned by the separate
+        // stream-json input loop.
+        result_metadata.queued_turn_count = Some(0);
+        result_metadata.result_index = Some(0);
+        stream.set_terminal_result_metadata(result_metadata).await;
+        let terminal_api_error = stream
             .emit_result_success(
                 &result_text,
                 "end_turn",
@@ -516,6 +592,10 @@ async fn run_stream_json_print_inner(
                 &betas,
             )
             .await;
+        if terminal_api_error {
+            stream.flush().await;
+            return exit_codes::RUNTIME_ERROR;
+        }
         // The SDK contract queues the result first, then starts the
         // history-inert suggestion side query. Informational suggestion frames
         // may therefore follow the turn-complete result.
@@ -959,6 +1039,11 @@ async fn run_stream_json_input_loop_inner(
                     let cost = runtime.orchestrator.snapshot_cost().await;
                     let result_text = stream.get_last_result_text().await;
                     let model = runtime.orchestrator.session().lock().await.model.clone();
+                    let metadata = result_metadata_from_turn_metrics(
+                        runtime.orchestrator.completed_turn_metrics(),
+                        cost.safety_stops,
+                    );
+                    stream.set_terminal_result_metadata(metadata).await;
                     stream.emit_result_success(&result_text, "end_turn", &cost, &model, fast_mode_state, fast_mode_disabled_reason, &betas).await;
                 }
                 continue;
@@ -1206,6 +1291,11 @@ async fn run_stream_json_input_loop_inner(
                     let session = session_handle.lock().await;
                     session.model.clone()
                 };
+                let metadata = result_metadata_from_turn_metrics(
+                    runtime.orchestrator.completed_turn_metrics(),
+                    cost.safety_stops,
+                );
+                stream.set_terminal_result_metadata(metadata).await;
                 stream
                     .emit_result_success(
                         &result_text,
@@ -1291,6 +1381,14 @@ async fn run_stream_json_input_loop_inner(
     if !had_any_turn && last_turn_err.is_none() {
         // No user turns received — emit an empty-result envelope.
         let cost = runtime.orchestrator.snapshot_cost().await;
+        stream
+            .set_terminal_result_metadata(TerminalResultMetadata {
+                num_turns: Some(0),
+                stop_reason: Some(None),
+                safety_stops: cost.safety_stops,
+                ..TerminalResultMetadata::default()
+            })
+            .await;
         stream
             .emit_result_success(
                 &Utf16JsonProjection::from(""),
@@ -1431,6 +1529,7 @@ async fn run_structured_output(
     prompt: &str,
     slot: &orchestrator::structured_output::StructuredOutputSlot,
     schema: &serde_json::Value,
+    no_stream: bool,
     max_budget_usd: Option<f64>,
     sink: &dyn OutputSink,
 ) -> i32 {
@@ -1450,11 +1549,7 @@ async fn run_structured_output(
             *s = None;
         }
         sink.turn_start().await;
-        let turn_result = orchestrator::mod_prompt_origin::with_origin(
-            serde_json::json!({"kind":"sdk"}),
-            runtime.orchestrator.run_turn(&turn_prompt),
-        )
-        .await;
+        let turn_result = run_print_model_turn(runtime, &turn_prompt, no_stream).await;
         stop_background_agents_at_budget(
             max_budget_usd,
             runtime.orchestrator.as_ref(),
@@ -1519,6 +1614,43 @@ async fn run_slash_prompt_turn(
     )
     .await;
     match turn_result {
+        Ok(()) => exit_codes::SUCCESS,
+        Err(error) => {
+            sink.error("runtime", &error.to_string()).await;
+            exit_codes::RUNTIME_ERROR
+        }
+    }
+}
+
+/// Run an unknown slash command as the original user turn while attaching the
+/// Native reminder only to this admitted request. The request context is owned
+/// by the turn future and never enters shared history or session persistence.
+async fn run_unknown_slash_prompt_turn(
+    prompt: Utf16JsonProjection,
+    reminder: Utf16JsonProjection,
+    max_budget_usd: Option<f64>,
+    runtime: &Runtime,
+    sink: &dyn OutputSink,
+) -> i32 {
+    sink.turn_start().await;
+    let turn_result = orchestrator::mod_prompt_origin::with_origin(
+        serde_json::json!({"kind":"sdk"}),
+        runtime
+            .orchestrator
+            .run_turn_streaming_with_request_context(
+                prompt,
+                vec![reminder],
+                tokio_util::sync::CancellationToken::new(),
+            ),
+    )
+    .await;
+    stop_background_agents_at_budget(
+        max_budget_usd,
+        runtime.orchestrator.as_ref(),
+        runtime.task_registry.as_ref(),
+    )
+    .await;
+    match turn_result {
         Ok(_outcome) => exit_codes::SUCCESS,
         Err(error) => {
             sink.error("runtime", &error.to_string()).await;
@@ -1574,9 +1706,12 @@ async fn run_slash_command_with_budget(
         | SlashDispatchResult::ParseFailure { input: prompt } => {
             run_slash_prompt_turn(prompt, max_budget_usd, runtime, sink).await
         }
-        SlashDispatchResult::Unknown { .. } => {
-            run_slash_prompt_turn(
-                core::types::utf16_json::Utf16JsonProjection::from(input),
+        SlashDispatchResult::Unknown { name, .. } => {
+            let catalog = runtime.dispatcher.headless_command_catalog().await;
+            let reminder = command_api::render_unknown_command_reminder(&name, &catalog);
+            run_unknown_slash_prompt_turn(
+                Utf16JsonProjection::from(input),
+                reminder,
                 max_budget_usd,
                 runtime,
                 sink,

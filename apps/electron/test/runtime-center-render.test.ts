@@ -268,7 +268,7 @@ function renderAgentActivity(status: string, activity?: string, withTranscript =
     transcripts: withTranscript ? {
       [active.id]: {
         messages: [{ role: 'user', blocks: [{ type: 'text', text: 'Review these changes.' }], images: [] }],
-        revision: 1, nextMessageIndex: 1, messageIndexes: {},
+        revision: 1, nextMessageIndex: 1, messageIndexes: {}, messageUuids: {}, apiErrorJson: {}, tombstoneUuids: {},
       },
     } : {},
   };

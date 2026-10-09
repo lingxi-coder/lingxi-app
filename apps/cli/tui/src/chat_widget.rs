@@ -40,7 +40,7 @@ use tui_core::message::CurrentTodo;
 use tui_core::message::RenderedMessage;
 use tui_core::orchestrator_bridge::{RunningAgentStatus, TurnEvent};
 use tui_core::permission_bridge::PermissionExchange;
-use tui_core::theme::{Theme, ThemeName, ThemeSetting, theme_for};
+use tui_core::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 
 use crate::bottom_pane::ask_user_question_view::AskUserQuestionView;
 use crate::bottom_pane::computer_access_view::ComputerAccessView;
@@ -377,6 +377,7 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::SystemNotice { .. }
         | TurnEvent::UiLog { .. }
         | TurnEvent::UiToast { .. }
+        | TurnEvent::UiNotify { .. }
         | TurnEvent::UiStatus { .. }
         | TurnEvent::TranscriptRowIdentity { .. }
         | TurnEvent::AssistantTranscriptRowUuids { .. }
@@ -2071,6 +2072,9 @@ impl ChatWidget {
                 timeout_ms,
             } => {
                 self.bottom_pane.set_mod_toast(text, timeout_ms);
+            }
+            TurnEvent::UiNotify { plugin: _, text } => {
+                self.bottom_pane.set_mod_toast(text, 4_000);
             }
             TurnEvent::UiStatus { plugin, text } => {
                 self.bottom_pane.set_mod_status(plugin, text);
@@ -6531,11 +6535,11 @@ mod tests {
     use super::*;
     use crate::bottom_pane::model_picker_view::ModelPickerView;
     use crate::bottom_pane::{BottomPaneView, ViewOutcome};
-    use crate::history_cell::HistoryCell;
     use crate::history_cell::attachments::UserImageCell;
+    use crate::history_cell::HistoryCell;
     use crate::session::ModelRow;
-    use crate::terminal::Terminal;
     use crate::terminal::test_support::TestWriteBackend;
+    use crate::terminal::Terminal;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -6689,14 +6693,13 @@ mod tests {
         w.set_task_registry(registry);
         w.cmd_tasks("");
         assert!(cells(&w).is_empty());
-        assert!(
-            w.bottom_pane()
-                .view_stack()
-                .active()
-                .unwrap()
-                .as_any()
-                .is::<crate::bottom_pane::tasks_view::TasksView>()
-        );
+        assert!(w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .unwrap()
+            .as_any()
+            .is::<crate::bottom_pane::tasks_view::TasksView>());
     }
 
     /// claude-code `mie`: Ctrl+B runs `zM` only when `H_t` says there is
@@ -6711,14 +6714,13 @@ mod tests {
         let mut w = widget();
         w.set_task_registry(registry);
         assert!(matches!(w.cmd_stop(""), ChatOutcome::Continue));
-        assert!(
-            w.bottom_pane()
-                .view_stack()
-                .active()
-                .unwrap()
-                .as_any()
-                .is::<crate::bottom_pane::exit_background_view::ExitBackgroundView>()
-        );
+        assert!(w
+            .bottom_pane()
+            .view_stack()
+            .active()
+            .unwrap()
+            .as_any()
+            .is::<crate::bottom_pane::exit_background_view::ExitBackgroundView>());
         assert!(matches!(
             w.handle_key(press(KeyCode::Esc)),
             ChatOutcome::Continue
@@ -8183,12 +8185,10 @@ mod tests {
             notice.body(),
             "Moved conversation into a background session (mock-bg-abcd)."
         );
-        assert!(
-            widget
-                .bottom_pane()
-                .view_stack()
-                .contains::<crate::bottom_pane::agents_view::AgentsView>()
-        );
+        assert!(widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<crate::bottom_pane::agents_view::AgentsView>());
         match widget.handle_key(press(KeyCode::Enter)) {
             ChatOutcome::OpenAgentSession(target) => {
                 assert_eq!(target.session_id, want);
@@ -8310,8 +8310,8 @@ mod tests {
     /// path — the CLI then swaps the shared `SessionCwd` there.
     #[test]
     fn cmd_cd_usage_error_and_confirm_flow() {
-        use crate::bottom_pane::PermissionAction;
         use crate::bottom_pane::cd_confirm_view::CdConfirmView;
+        use crate::bottom_pane::PermissionAction;
 
         // Bare `/cd` → usage line (not an error, not a prompt fall-through).
         let mut w = widget();
@@ -8444,11 +8444,9 @@ mod tests {
         // `reconnect` without a wired handle → graceful "unavailable".
         let mut w = widget();
         assert!(matches!(w.cmd_mcp("reconnect"), ChatOutcome::Continue));
-        assert!(
-            cell::<crate::history_cell::system::SystemTextCell>(&w, 0)
-                .body()
-                .contains("unavailable")
-        );
+        assert!(cell::<crate::history_cell::system::SystemTextCell>(&w, 0)
+            .body()
+            .contains("unavailable"));
 
         // `enable`/`disable` are RECOGNIZED (route to the engine seam, not the
         // usage-line fallback) — without a wired handle they report "unavailable"
@@ -9761,8 +9759,8 @@ mod tests {
     /// included — and `true` only for an in-process teammate. A test that
     /// hand-sets `worker: Some(..)` here would pin a shape no Fusion panel
     /// ever produces.
-    fn background_owned_tool_exchange()
-    -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
+    fn background_owned_tool_exchange(
+    ) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
         let (resp_tx, resp_rx) = oneshot::channel();
         let request = PermissionRequest::ToolUseConfirm {
             tool_name: "WebFetch".to_string(),
@@ -9914,18 +9912,14 @@ mod tests {
         // Exactly: user "run it" · ● Bash · ⎿ result — NO empty assistant cell.
         assert_eq!(widget.transcript.committed_cells().len(), 3);
         assert_eq!(cell::<ToolUseCell>(&widget, 1).tool(), "Bash");
-        assert!(
-            cells(&widget)[2]
-                .as_any()
-                .downcast_ref::<ToolResultCell>()
-                .is_some()
-        );
+        assert!(cells(&widget)[2]
+            .as_any()
+            .downcast_ref::<ToolResultCell>()
+            .is_some());
         // The (empty) placeholder must not survive as an assistant cell.
-        assert!(
-            cells(&widget)
-                .iter()
-                .all(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_none())
-        );
+        assert!(cells(&widget)
+            .iter()
+            .all(|c| c.as_any().downcast_ref::<AssistantTextCell>().is_none()));
     }
 
     /// Consecutive read/search tool uses FOLD into a single collapsed cell
@@ -9958,17 +9952,13 @@ mod tests {
         ));
         // user "look" + ONE folded cell — no per-tool ●/⎿ cells.
         assert_eq!(widget.transcript.committed_cells().len(), 2);
-        assert!(
-            cells(&widget)[1]
-                .as_any()
-                .downcast_ref::<CollapsedReadSearchCell>()
-                .is_some()
-        );
-        assert!(
-            cells(&widget)
-                .iter()
-                .all(|c| c.as_any().downcast_ref::<ToolUseCell>().is_none())
-        );
+        assert!(cells(&widget)[1]
+            .as_any()
+            .downcast_ref::<CollapsedReadSearchCell>()
+            .is_some());
+        assert!(cells(&widget)
+            .iter()
+            .all(|c| c.as_any().downcast_ref::<ToolUseCell>().is_none()));
     }
 
     #[test]
@@ -10028,12 +10018,10 @@ mod tests {
         ));
 
         assert_eq!(widget.transcript.committed_cells().len(), 2);
-        assert!(
-            cells(&widget)[1]
-                .as_any()
-                .downcast_ref::<CollapsedReadSearchCell>()
-                .is_some()
-        );
+        assert!(cells(&widget)[1]
+            .as_any()
+            .downcast_ref::<CollapsedReadSearchCell>()
+            .is_some());
         let summary = cells(&widget)[1]
             .display_lines(
                 80,
@@ -10074,14 +10062,13 @@ mod tests {
             .as_any()
             .downcast_ref::<CollapsedReadSearchCell>()
             .expect("finalized silent group must stay in transcript for verbose replay");
-        assert!(
-            cell.display_lines(
+        assert!(cell
+            .display_lines(
                 80,
                 &Theme::dark(),
                 crate::history_cell::RenderMode::default()
             )
-            .is_empty()
-        );
+            .is_empty());
         let verbose = cell
             .display_lines(
                 80,
@@ -10416,12 +10403,10 @@ mod tests {
             widget.handle_slash("/diff".into()),
             Some(ChatOutcome::Continue)
         ));
-        assert!(
-            widget
-                .bottom_pane()
-                .view_stack()
-                .contains::<crate::diff::DiffView>()
-        );
+        assert!(widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<crate::diff::DiffView>());
         {
             let view = widget
                 .bottom_pane()
@@ -10628,12 +10613,10 @@ mod tests {
             cancel.is_cancelled(),
             "Ctrl-C must cancel the actual host-started turn"
         );
-        assert!(
-            widget
-                .current_turn
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
-        );
+        assert!(widget
+            .current_turn
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled));
     }
 
     #[test]
@@ -11399,24 +11382,20 @@ mod tests {
             "expected a switch to claude-sonnet-5"
         );
         // A pending or failed switch must retain the actual current model.
-        assert!(
-            widget
-                .session
-                .models
-                .iter()
-                .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" })
-        );
+        assert!(widget
+            .session
+            .models
+            .iter()
+            .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" }));
         widget.apply_turn_event(TurnEvent::SystemNotice {
             body: "Could not change model".into(),
             is_error: true,
         });
-        assert!(
-            widget
-                .session
-                .models
-                .iter()
-                .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" })
-        );
+        assert!(widget
+            .session
+            .models
+            .iter()
+            .any(|m| { m.is_current && m.request_model == "claude-opus-4-8" }));
         widget.apply_turn_event(TurnEvent::ModelChanged {
             model: "claude-sonnet-5".into(),
             profile: Some("anthropic".into()),
@@ -11545,12 +11524,10 @@ mod tests {
             submit_command(&mut widget, "/model"),
             ChatOutcome::Continue
         ));
-        assert!(
-            widget
-                .bottom_pane()
-                .view_stack()
-                .contains::<ModelPickerView>()
-        );
+        assert!(widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
         // Picker owns the keyboard: move up to the first (Opus) row and confirm.
         widget.handle_key(press(KeyCode::Up));
         let outcome = widget.handle_key(press(KeyCode::Enter));
@@ -11559,12 +11536,10 @@ mod tests {
             ChatOutcome::SwitchModel(ref m, ref p)
                 if m == "claude-opus-4-8" && p.as_deref() == Some("anthropic")
         ));
-        assert!(
-            !widget
-                .bottom_pane()
-                .view_stack()
-                .contains::<ModelPickerView>()
-        );
+        assert!(!widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ModelPickerView>());
         // The switch is echoed as a system message.
         let body = cell::<crate::history_cell::system::SystemTextCell>(&widget, 0).body();
         assert!(
@@ -11621,12 +11596,10 @@ mod tests {
             submit_command(&mut widget, "/theme"),
             ChatOutcome::Continue
         ));
-        assert!(
-            widget
-                .bottom_pane()
-                .view_stack()
-                .contains::<ThemePickerView>()
-        );
+        assert!(widget
+            .bottom_pane()
+            .view_stack()
+            .contains::<ThemePickerView>());
         // Move from "Dark mode" (index 1) to "Light mode" (index 2), commit.
         widget.handle_key(press(KeyCode::Down));
         let outcome = widget.handle_key(press(KeyCode::Enter));
@@ -11659,8 +11632,8 @@ mod tests {
     /// while KEEPING the editor open (edit-in-place, like a `/web` test).
     #[test]
     fn permissions_command_opens_editor_and_add_round_trips_to_chat_outcome() {
-        use crate::bottom_pane::PermissionAction;
         use crate::bottom_pane::permissions_editor_view::PermissionsEditorView;
+        use crate::bottom_pane::PermissionAction;
 
         let mut widget = widget();
         assert!(matches!(
@@ -12026,12 +11999,10 @@ mod tests {
             "failed clear cannot retain the canceled busy token"
         );
         assert!(widget.current_turn.is_none());
-        assert!(
-            widget
-                .transcript()
-                .current_turn_assistant_text()
-                .contains("old partial reply")
-        );
+        assert!(widget
+            .transcript()
+            .current_turn_assistant_text()
+            .contains("old partial reply"));
         assert!(matches!(
             widget.submit_prompt("next prompt after failure".into()),
             ChatOutcome::Submit(_, _, _, _)
@@ -12845,12 +12816,10 @@ mod tests {
         });
         let state = slot.lock().unwrap();
         assert_eq!(state.data.session_id, session_id);
-        assert!(
-            state
-                .data
-                .transcript_path
-                .ends_with(&format!("{session_id}.jsonl"))
-        );
+        assert!(state
+            .data
+            .transcript_path
+            .ends_with(&format!("{session_id}.jsonl")));
         assert_eq!(state.data.cwd, home.path());
         assert_eq!(state.data.total_api_duration_ms, 0);
         assert_eq!(state.data.total_lines_added, 0);

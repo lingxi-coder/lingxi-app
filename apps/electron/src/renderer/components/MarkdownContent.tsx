@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useId, useMemo, type CSSProperties, type ReactNode } from 'react';
+import { createContext, memo, useContext, useId, useMemo, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import type { Element } from 'hast';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import { openContextMention, parseContextMentionHref } from '../bridge/composerMentions';
@@ -22,6 +22,7 @@ interface MarkdownContentProps {
   text: string;
   trustedHtml?: boolean;
   variant?: 'plan';
+  onLinkPress?: (href: string) => void;
 }
 
 type MarkdownComponentProps = {
@@ -42,6 +43,7 @@ const remarkPlugins: PluggableList = [remarkGfm, remarkDesktopMarkdown];
 const safePlugins: PluggableList = [[rehypeSanitize, sanitizeMarkdownHtml(false)]];
 const trustedPlugins: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeMarkdownHtml(true)]];
 const InsideMarkdownLink = createContext(false);
+const MarkdownLinkPress = createContext<((href: string) => void) | null>(null);
 
 // Keep renderer identities stable so streaming updates preserve mounted DOM and state.
 const components = {
@@ -107,15 +109,20 @@ const components = {
     em: ({ children, node: _node, ...props }: MarkdownComponentProps) => <span {...props} style={{ fontStyle: 'italic' }}>{children}</span>,
     del: ({ children, node: _node, ...props }: MarkdownComponentProps) => <span {...props} className="markdown-del">{children}</span>,
     strong: ({ children, node: _node, ...props }: MarkdownComponentProps) => <span {...props} style={{ fontWeight: 650 }}>{children}</span>,
-    a: ({ href, children, node: _node, ...props }: MarkdownComponentProps) => {
+    a: function MarkdownAnchor({ href, children, node: _node, ...props }: MarkdownComponentProps) {
+      const onLinkPress = useContext(MarkdownLinkPress);
       const safeHref = href === undefined ? undefined : sanitizeMarkdownHref(href);
       if (safeHref === undefined) {
         return <span id={props.id} className="markdown-link-disabled">{children}</span>;
       }
+      const onClick = onLinkPress ? (event: MouseEvent<HTMLAnchorElement>) => {
+        event.preventDefault();
+        onLinkPress(safeHref);
+      } : undefined;
       const fragment = safeHref.startsWith('#');
       const mention = parseContextMentionHref(safeHref);
-      if (mention) return <a {...props} href={safeHref} title={mention.target} onClick={(event) => { event.preventDefault(); openContextMention(mention); }}><InsideMarkdownLink.Provider value={true}>{children}</InsideMarkdownLink.Provider></a>;
-      return <a {...props} href={safeHref} target={fragment ? undefined : '_blank'} rel={fragment ? undefined : 'noreferrer'}><InsideMarkdownLink.Provider value={true}>{children}</InsideMarkdownLink.Provider></a>;
+      if (mention && !onLinkPress) return <a {...props} href={safeHref} title={mention.target} onClick={(event) => { event.preventDefault(); openContextMention(mention); }}><InsideMarkdownLink.Provider value={true}>{children}</InsideMarkdownLink.Provider></a>;
+      return <a {...props} href={safeHref} target={fragment || onLinkPress ? undefined : '_blank'} rel={fragment || onLinkPress ? undefined : 'noreferrer'} onClick={onClick}><InsideMarkdownLink.Provider value={true}>{children}</InsideMarkdownLink.Provider></a>;
     },
     img: function MarkdownImage({ src, alt, id }: MarkdownComponentProps) {
       const insideLink = useContext(InsideMarkdownLink);
@@ -148,7 +155,7 @@ const planComponents: Components = {
   h3: ({ children }) => <h3 style={{ margin: '16px 0 0', fontSize: 15, lineHeight: 1.45, fontWeight: 600 }}>{children}</h3>,
 };
 
-export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant }: MarkdownContentProps) {
+export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml = false, variant, onLinkPress }: MarkdownContentProps) {
   const t = useT();
   const instanceId = useId();
   const rehypePlugins = useMemo<PluggableList>(() => [
@@ -178,8 +185,10 @@ export const MarkdownContent = memo(function MarkdownContent({ text, trustedHtml
   } as CSSProperties;
 
   return (
-    <div className="markdown-content" style={variables}>
-      {content}
-    </div>
+    <MarkdownLinkPress.Provider value={onLinkPress ?? null}>
+      <div className="markdown-content" style={variables}>
+        {content}
+      </div>
+    </MarkdownLinkPress.Provider>
   );
 });

@@ -68,6 +68,9 @@ struct Composer: View {
     /// Session transitions and cancellation can temporarily make a draft
     /// non-submittable even though the text field remains editable.
     var sendEnabled: Bool = true
+    /// The widget a follow-up refers to; sent with the next prompt.
+    var visualizationChip: VisualizationContextChip? = nil
+    var onRemoveVisualizationChip: () -> Void = {}
     var onStop: () -> Void = {}
 
     // Camera affordance (the + / attach button) — mirrors Android `onCameraClick`
@@ -138,6 +141,8 @@ struct Composer: View {
         inputFocused: FocusState<Bool>.Binding,
         attachment: ComposerAttachment? = nil,
         onRemoveAttachment: @escaping () -> Void = {},
+        visualizationChip: VisualizationContextChip? = nil,
+        onRemoveVisualizationChip: @escaping () -> Void = {},
         onMicHoldStart: @escaping () -> Void = {},
         onMicHoldRelease: @escaping () -> Void = {},
         onMicHoldCancel: @escaping () -> Void = {},
@@ -186,6 +191,8 @@ struct Composer: View {
         self._inputFocused = inputFocused
         self.attachment = attachment
         self.onRemoveAttachment = onRemoveAttachment
+        self.visualizationChip = visualizationChip
+        self.onRemoveVisualizationChip = onRemoveVisualizationChip
         self.onMicHoldStart = onMicHoldStart
         self.onMicHoldRelease = onMicHoldRelease
         self.onMicHoldCancel = onMicHoldCancel
@@ -214,6 +221,11 @@ struct Composer: View {
                 // shown only once a camera capture has surfaced an image.
                 if let attachment {
                     AttachmentThumb(attachment: attachment, onRemove: onRemoveAttachment)
+                }
+
+                if let visualizationChip {
+                    VisualizationContextChipView(chip: visualizationChip, onDismiss: onRemoveVisualizationChip)
+                        .padding(.horizontal, 4)
                 }
 
                 if let slashArgumentHint {

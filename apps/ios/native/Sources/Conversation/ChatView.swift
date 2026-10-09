@@ -164,6 +164,8 @@ struct ChatView: View {
                          inputFocused: $composerFocused,
                          attachment: attachment,
                          onRemoveAttachment: { attachment = nil },
+                         visualizationChip: convo.visualizationChip,
+                         onRemoveVisualizationChip: { convo.visualizationChip = nil },
                          onMicHoldStart: startVoiceHold,
                          onMicHoldRelease: endVoiceHold,
                          onMicHoldCancel: cancelVoiceHold,
@@ -226,6 +228,16 @@ struct ChatView: View {
         }
         .onReceive(convo.turnSpeechUpdates) { update in
             voiceInteraction.handleTurnSpeechUpdate(update)
+        }
+        .onChange(of: convo.visualizationFollowup) { _, followup in
+            // A widget's "ask about this": seed the draft and carry its chip
+            // with the next prompt (the source attaches and clears it).
+            guard let followup else { return }
+            draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? followup.text : "\(draft) \(followup.text)"
+            convo.visualizationChip = followup.chip
+            convo.visualizationFollowup = nil
+            composerFocused = true
         }
         .onChange(of: convo.turnCompletion) { _, completion in
             guard let completion else { return }
@@ -461,7 +473,10 @@ struct ChatView: View {
                     activeAgentID: convo.selectedAgentID,
                     onSelectAgent: { source.selectAgent($0) },
                     streaming: streaming,
-                    showThinking: canShowTranscriptThinking
+                    showThinking: canShowTranscriptThinking,
+                    // An agent's widgets live in its origin session's store.
+                    visualizationSessionId: convo.activeSessionId,
+                    onVisualizationFollowup: { convo.visualizationFollowup = $0 }
                 )
             } else if convo.isAgentTranscriptLoading {
                 childAgentLoadingState
@@ -478,7 +493,10 @@ struct ChatView: View {
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
                     streaming: streaming,
-                    showThinking: canShowTranscriptThinking
+                    showThinking: canShowTranscriptThinking,
+                    // An agent's widgets live in its origin session's store.
+                    visualizationSessionId: convo.activeSessionId,
+                    onVisualizationFollowup: { convo.visualizationFollowup = $0 }
                 )
             }
         }

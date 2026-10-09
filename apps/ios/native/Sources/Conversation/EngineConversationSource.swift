@@ -160,6 +160,7 @@ final class EngineConversationSource: ConversationSource {
         let text: String
         let images: [ImageRefDto]
         let turnId: UInt64
+        var visualizationContext: VisualizationContextChip? = nil
     }
 
     private struct CancellationOperation {
@@ -554,6 +555,58 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
+    private func removeMessage(id: UUID) {
+        model.messages.removeAll { $0.id == id }
+        model.items.removeAll {
+            if case let .message(message) = $0 { return message.id == id }
+            return false
+        }
+        model.messageDetails.removeValue(forKey: id)
+    }
+
+    /// The chip attached in the composer, consumed by exactly one send.
+    private func takeVisualizationChip() -> VisualizationContextChip? {
+        defer { model.visualizationChip = nil }
+        return model.visualizationChip
+    }
+
+    /// Order a live visualization slot. A reference line ends the narration
+    /// it interrupts: the next text delta opens a new row after the widget.
+    private func applyVisualizationBlock(status: VisualizationBlockStatusDto, reference: VisualizationRefDto?) {
+        streamingIndex = nil
+        streamingItemIndex = nil
+        let pending = currentResponseMessageIDs.last { id in
+            model.indexOfMessage(id: id).map { model.messages[$0].visualization?.status == .pending } ?? false
+        }
+        let slot: MessageVisualization
+        switch status {
+        case .pending:
+            if pending != nil { return }
+            slot = MessageVisualization(status: .pending)
+        case .ready:
+            slot = MessageVisualization(status: .ready, id: reference?.id, revision: reference?.revision)
+        case .unavailable:
+            slot = MessageVisualization(status: .unavailable)
+        case .discarded:
+            if let pending {
+                removeMessage(id: pending)
+                currentResponseMessageIDs.removeAll { $0 == pending }
+            }
+            return
+        @unknown default:
+            return
+        }
+        var message = Message(id: pending ?? UUID(), role: .ai, text: "")
+        message.visualization = slot
+        if let pending {
+            replaceMessage(id: pending, with: message, detail: nil)
+        } else {
+            appendMessage(message)
+            currentResponseMessageIDs.append(message.id)
+            appendTextBoundaryActivity(messageID: message.id)
+        }
+    }
+
     private func replaceStreamingMessage(_ message: Message, detail: ConversationMessageDetail? = nil) {
         guard let streamingIndex,
               model.messages.indices.contains(streamingIndex)
@@ -599,7 +652,9 @@ final class EngineConversationSource: ConversationSource {
             appendMessage(message, detail: detail)
             return
         }
-        let stableMessage = Message(id: id, role: message.role, tag: message.tag, text: message.text)
+        var stableMessage = Message(id: id, role: message.role, tag: message.tag, text: message.text)
+        stableMessage.visualization = message.visualization
+        stableMessage.visualizationContext = message.visualizationContext
         model.withIndexRebuildSuppressed {
             model.messages[messageIndex] = stableMessage
             if let itemIndex = model.indexOfMessageItem(id: id) {
@@ -1023,7 +1078,10 @@ final class EngineConversationSource: ConversationSource {
                     text: prompt.text,
                     promptMode: nil,
                     images: prompt.images,
-                    turnId: prompt.turnId))
+                    turnId: prompt.turnId,
+                    visualizationContext: prompt.visualizationContext.map {
+                        VisualizationRefDto(id: $0.id, revision: $0.revision)
+                    }))
             } catch {
                 guard self.activeConversationTurnToken == token else { return }
                 self.fail(.host, "\(error)")
@@ -1113,7 +1171,10 @@ final class EngineConversationSource: ConversationSource {
             guard !exactSlash, let token = activeConversationTurnToken else { return nil }
             model.isNew = false
             model.notice = nil
-            appendMessage(Message(role: .user, text: text, images: uiImages(from: images)))
+            let chip = takeVisualizationChip()
+            var queued = Message(role: .user, text: text, images: uiImages(from: images))
+            queued.visualizationContext = chip
+            appendMessage(queued)
             Task { [weak self] in
                 guard let self else { return }
                 do {
@@ -1121,7 +1182,8 @@ final class EngineConversationSource: ConversationSource {
                         text: text,
                         promptMode: nil,
                         images: images,
-                        turnId: nil))
+                        turnId: nil,
+                        visualizationContext: chip.map { VisualizationRefDto(id: $0.id, revision: $0.revision) }))
                 } catch {
                     guard self.activeConversationTurnToken == token else { return }
                     self.model.error = ConversationError(kind: .host, message: "\(error)")
@@ -1132,14 +1194,17 @@ final class EngineConversationSource: ConversationSource {
 
         model.isNew = false
         model.notice = nil
-        appendMessage(Message(role: .user, text: text, images: uiImages(from: images)))
+        let chip = exactSlash ? nil : takeVisualizationChip()
+        var prompt = Message(role: .user, text: text, images: uiImages(from: images))
+        prompt.visualizationContext = chip
+        appendMessage(prompt)
 
         let turnId = nextTurnId
         nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
         if exactSlash {
             return startSlashCommand(raw: trimmed, turnId: turnId)
         }
-        return startPrompt(TurnPrompt(text: text, images: images, turnId: turnId))
+        return startPrompt(TurnPrompt(text: text, images: images, turnId: turnId, visualizationContext: chip))
     }
 
     func cancelAndWait() async throws {
@@ -1551,6 +1616,7 @@ final class EngineConversationSource: ConversationSource {
             let builtHandle = try await buildTask.value
             if handleBuildAttemptID == attemptID {
                 handle = builtHandle
+                VisualizationWebHost.shared.attach(builtHandle.visualizationHost(origin: VisualizationWebHost.origin))
                 self.listener = listener
                 self.permissionSink = permissionSink
                 handleBuildTask = nil
@@ -3201,8 +3267,20 @@ final class EngineConversationSource: ConversationSource {
             streamingItemIndex = liveID.flatMap { model.indexOfMessageItem(id: $0) }
             activeRunItemIndex = model.items.lastIndex { if case .run = $0 { return true }; return false }
 
+        case let .visualizationBlock(status, reference):
+            guard acceptTurnEvent(event) else { return }
+            applyVisualizationBlock(status: status, reference: reference)
+
         case let .messageComplete(_, message):
             guard acceptTurnEvent(event) else { return }
+            // A placeholder whose reference line never completed is gone.
+            for id in currentResponseMessageIDs {
+                if let index = model.indexOfMessage(id: id),
+                   model.messages[index].visualization?.status == .pending {
+                    removeMessage(id: id)
+                }
+            }
+            currentResponseMessageIDs.removeAll { model.indexOfMessage(id: $0) == nil }
             if let message {
                 let segments = Self.narrativeSegments(from: message)
                 // If an out-of-band notice split streamed text but does not
@@ -4210,14 +4288,13 @@ final class EngineConversationSource: ConversationSource {
         func flush() {
             guard !narrative.isEmpty else { return }
             let detail = ConversationMessageDetail(blocks: narrative)
-            segments.append(RenderedMessage(
-                message: Message(
-                    role: role,
-                    text: text(from: narrative),
-                    images: attachedImages ? [] : uiMessageImages(from: dto.images)
-                ),
-                detail: detail
-            ))
+            var message = Message(
+                role: role,
+                text: text(from: narrative),
+                images: attachedImages ? [] : uiMessageImages(from: dto.images)
+            )
+            if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
+            segments.append(RenderedMessage(message: message, detail: detail))
             attachedImages = true
             narrative = []
         }
@@ -4228,6 +4305,9 @@ final class EngineConversationSource: ConversationSource {
                 if let lowered = messageBlock(from: block) {
                     narrative.append(lowered)
                 }
+            case let .visualization(reference):
+                flush()
+                segments.append(RenderedMessage(message: visualizationMessage(reference: reference), detail: nil))
             case .thinking, .redactedThinking, .toolUse, .toolResult:
                 flush()
             }
@@ -4240,6 +4320,21 @@ final class EngineConversationSource: ConversationSource {
             ))
         }
         return segments
+    }
+
+    /// A restored widget row: `ready` with a reference, otherwise the
+    /// revision is gone and the card says so.
+    fileprivate static func visualizationMessage(reference: VisualizationRefDto?, id: UUID = UUID()) -> Message {
+        var message = Message(id: id, role: .ai, text: "")
+        message.visualization = reference.map {
+            MessageVisualization(status: .ready, id: $0.id, revision: $0.revision)
+        } ?? MessageVisualization(status: .unavailable)
+        return message
+    }
+
+    fileprivate static func visualizationChip(from dto: MessageDto) -> VisualizationContextChip? {
+        guard dto.role == "user", let context = dto.visualizationContext else { return nil }
+        return VisualizationContextChip(id: context.id, revision: context.revision, title: context.title)
     }
 
     /// Lower ONE wire block. `nil` for a block with nothing to show (blank
@@ -4255,6 +4350,9 @@ final class EngineConversationSource: ConversationSource {
                 .thinking(text: thinking, signature: signature)
         case .redactedThinking:
             return .redactedThinking
+        case .visualization:
+            // Widgets are their own rows, never part of a bubble.
+            return nil
         case let .compactBoundary(messagesBefore, messagesAfter, summary):
             return .compactBoundary(
                 messagesBefore: Int(messagesBefore),
@@ -4319,6 +4417,8 @@ final class EngineConversationSource: ConversationSource {
                 return "tool-use|\(field(id))|\(field(tool))|\(field(inputJson))"
             case let .toolResult(id, tool, resultJson, isError, oldString, newString, filePath, _):
                 return "tool-result|\(field(id))|\(field(tool))|\(field(resultJson))|\(isError)|\(field(oldString ?? ""))|\(field(newString ?? ""))|\(field(filePath ?? ""))"
+            case let .visualization(reference):
+                return "visualization|\(field(reference?.id ?? ""))|\(reference?.revision ?? 0)"
             @unknown default: return "unknown"
             }
         }.joined(separator: "|")
@@ -4507,12 +4607,13 @@ final class EngineConversationSource: ConversationSource {
             func flushNarrative() {
                 guard !narrative.isEmpty else { return }
                 let detail = ConversationMessageDetail(blocks: narrative)
-                let message = Message(
+                var message = Message(
                     id: stableUUID("\(messageIdentity)|narrative|\(narrativeSequence)"),
                     role: role,
                     text: text(from: narrative),
                     images: attachedImages ? [] : dtoImages
                 )
+                if role == .user, !attachedImages { message.visualizationContext = visualizationChip(from: dto) }
                 attachedImages = true
                 narrativeSequence += 1
                 out.messages.append(message)
@@ -4530,6 +4631,18 @@ final class EngineConversationSource: ConversationSource {
 
             for block in dto.blocks {
                 switch block {
+                case let .visualization(reference):
+                    flushNarrative()
+                    let slot = visualizationMessage(
+                        reference: reference,
+                        id: stableUUID("\(messageIdentity)|visualization|\(narrativeSequence)")
+                    )
+                    narrativeSequence += 1
+                    out.messages.append(slot)
+                    out.items.append(.message(slot))
+                    if isAssistant {
+                        pendingRunAnchorMessageID = slot.id
+                    }
                 case let .toolUse(id, tool, inputJson, header):
                     flushNarrative()
                     ensurePendingRun()

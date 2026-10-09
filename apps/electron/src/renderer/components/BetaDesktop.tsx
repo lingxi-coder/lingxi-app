@@ -266,7 +266,7 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
   return (
     <div
       ref={sortable.ref}
-      className="sidebar-tree-row"
+      className="sidebar-tree-row sidebar-session-row"
       data-session-reorderable={reorderable || undefined}
       data-dragging={sortable.isDragging || undefined}
       data-drag-target={sortable.isDropTarget || undefined}

@@ -163,6 +163,7 @@ body {
 .sidebar-section-heading { padding: 0 8px 6px; font-size: 12px; font-weight: 500; }
 .sidebar-section-heading button { display: flex; align-items: center; gap: 5px; padding: 4px 0; border: 0; background: transparent; font: inherit; cursor: pointer; }
 .sidebar-session-metadata { display: none; }
+.sidebar-session-row + .sidebar-session-row { margin-top: 4px; }
 .desktop-sidebar .sidebar-tree-row > button[aria-current='page'] {
   background: color-mix(in srgb, var(--desktop-accent) 10%, var(--sidebar-material)) !important;
   box-shadow: inset 3px 0 0 color-mix(in srgb, var(--desktop-accent) 75%, transparent);

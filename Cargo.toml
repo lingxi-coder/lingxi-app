@@ -49,7 +49,6 @@ cron = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "516
 harness-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "516433efe063cfc7664c39fb9d2379f2a8167eef", default-features = false }
 hooks = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "516433efe063cfc7664c39fb9d2379f2a8167eef" }
 llm-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "516433efe063cfc7664c39fb9d2379f2a8167eef" }
-local-apps = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "516433efe063cfc7664c39fb9d2379f2a8167eef" }
 mcp = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "516433efe063cfc7664c39fb9d2379f2a8167eef" }
 memory = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "516433efe063cfc7664c39fb9d2379f2a8167eef" }
 migrations = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "516433efe063cfc7664c39fb9d2379f2a8167eef" }

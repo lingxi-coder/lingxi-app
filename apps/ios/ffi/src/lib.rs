@@ -72,7 +72,7 @@
 #[cfg(feature = "uniffi")]
 pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
-    CronTaskDto, FiredCronJobDto, LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle,
+    CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle,
     MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto,
     MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ModelPricingTierDto, PermissionRequestSink, ProviderCatalogEntryDto, ProviderConnectionTestDto,
@@ -311,7 +311,7 @@ mod stub_capabilities {
 
 // ---------------------------------------------------------------------------
 // Device status / haptics / deep links — one native callback object fans out
-// to the three shared Platform seams used by Local Apps.
+// to the three shared Platform seams.
 
 // F3-04: re-export `harness-runtime::mobile`'s UniFFI scaffolding so the shared host's FFI
 // symbols (the re-exported `MobileEngineHandle` / `MobileEngineError`) land in

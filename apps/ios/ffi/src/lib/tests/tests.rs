@@ -1,14 +1,13 @@
-/// The root the ios-ish runtime validates local-app mounts against must be
-/// the SAME directory the engine writes local apps into.
+/// The root the ios-ish runtime validates mounts against must be the SAME
+/// directory the engine keeps its data in.
 ///
 /// It was not. The engine's data root is whatever Swift's
 /// `appSandboxRoot()` returns — `<AppSupport>/LingxiCode`, which reaches
 /// the engine as `lingxi_home`'s parent — while the runtime INFERRED its
 /// own root from `managed_root` (`<AppSupport>/mobile-linux/ios-ish`) by
 /// cutting everything from `Library/Application Support` onward. The two
-/// answers differ by three components, so `validate_mount` computed an
-/// expected build path that nothing ever writes to and EVERY local-app
-/// build failed on device with "mount host_path must be …".
+/// answers differ by three components, so `validate_mount` guarded the wrong
+/// directory.
 ///
 /// The inference cannot be repaired in place: `LingxiCode` is not
 /// derivable from `mobile-linux/ios-ish`. It has to be told.
@@ -39,7 +38,7 @@ fn the_runtime_sandbox_root_is_the_engine_data_root_not_the_container() {
         resolved,
         std::path::PathBuf::from(&engine_data_root),
         "the runtime must validate mounts against the engine's data root; \
-         resolving to {container:?} is what broke every local-app build"
+         resolving to {container:?} guards the wrong directory"
     );
 
     // The inference this replaced returned exactly `container`. Pinning the
@@ -231,30 +230,6 @@ fn handle_holds_runtime_and_listener() {
     let _orch: Arc<orchestrator::ConversationOrchestrator> = handle.inner().orchestrator.clone();
     let _gate = handle.permission_gate();
     let _listener: Arc<dyn ClientEventListener> = handle.listener();
-
-    // The M8 smoke signal reflects the verified file-backed mobile Plugin
-    // catalog. Anchored to the live roster, never to a literal: this assert sat at a
-    // stale `1` while `BUILTIN_MOBILE` grew to five, and because the module
-    // is `#[cfg(feature = "uniffi")]` a plain `cargo test --workspace`
-    // compiled none of it, so the rot only surfaced under `--all-features`.
-    let plugin_skills = harness_runtime::mobile::mobile_plugin_skill_names();
-    assert_eq!(
-        plugin_skills.len(),
-        27,
-        "mobile ships exactly 27 Plugin skills"
-    );
-    assert_eq!(
-        handle.skill_count() as usize,
-        plugin_skills.len(),
-        "the handle must expose the live verified mobile Plugin skill catalog"
-    );
-    // `create-local-app` is always present so the agent can enter the
-    // template-guided, approval-gated local-app workflow offline.
-    assert!(
-        plugin_skills.iter().any(|name| name == "create-local-app"),
-        "mobile Plugin skills must include create-local-app; got {:?}",
-        plugin_skills
-    );
 }
 
 /// F3-04: `create_session` is no longer the M8 stub (which returned an
@@ -500,7 +475,7 @@ fn standalone_mobile_linux_runtime_applies_workspace_boundary_validation() {
 }
 
 #[test]
-fn ios_project_cwd_accepts_managed_project_and_local_app_workspaces() {
+fn ios_project_cwd_accepts_managed_project_workspaces() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
@@ -522,34 +497,6 @@ fn ios_project_cwd_accepts_managed_project_and_local_app_workspaces() {
     assert_eq!(
         resolved,
         workspace.canonicalize().expect("canonical workspace")
-    );
-
-    // v3 local apps: `apps/<engine-minted id>/workspace` is a first-class
-    // conversation scope — the exact cwd the client hands `prepare()` when
-    // it jumps into a freshly created app's init session.
-    let app_workspace = root.join("apps").join("9b48dfb5").join("workspace");
-    std::fs::create_dir_all(&app_workspace).expect("create app fixture");
-    let resolved_app = super::ios_project_cwd(
-        root.to_str().expect("utf8"),
-        Some(app_workspace.to_str().expect("utf8")),
-    )
-    .expect("local app workspace is accepted");
-    assert_eq!(
-        resolved_app,
-        app_workspace
-            .canonicalize()
-            .expect("canonical app workspace")
-    );
-
-    let illegal_app = root.join("apps").join("Bad_ID").join("workspace");
-    std::fs::create_dir_all(&illegal_app).expect("create illegal-app fixture");
-    assert!(
-        super::ios_project_cwd(
-            root.to_str().expect("utf8"),
-            Some(illegal_app.to_str().expect("utf8")),
-        )
-        .is_err(),
-        "ids the engine could never mint must not become conversation workspaces"
     );
 
     let malformed = root.join("Projects").join("user-name").join("workspace");
@@ -601,8 +548,6 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
             routing_json: Some(r#"{"default":"openai"}"#.to_string()),
         }),
         mobile_linux: None,
-        local_apps_full_runtime: false,
-        local_apps_runtime_root: None,
         physical_memory_bytes: 7 * 1024_u64.pow(3),
         host_environment: None,
     })
@@ -649,51 +594,6 @@ fn ios_launch_config_parses_provider_json_and_project_scope() {
 }
 
 #[test]
-fn ios_local_app_runtime_exposes_mobile_linux_shell_carrier() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let runtime_root = temp.path().join("local-app-runtime");
-    std::fs::create_dir_all(&runtime_root).expect("runtime root");
-
-    let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
-        api_base: String::new(),
-        api_key: String::new(),
-        model: String::new(),
-        session_mode: harness_runtime::mobile::SessionModeDto::Code,
-        vision_delegation_enabled: true,
-        app_sandbox_root: temp.path().to_string_lossy().into_owned(),
-        project_cwd: None,
-        provider_config: None,
-        mobile_linux: Some(super::IosMobileLinuxConfigFfi {
-            mode: super::MobileLinuxRuntimeModeFfi::Legacy,
-            managed_root: temp
-                .path()
-                .join("mobile-linux")
-                .to_string_lossy()
-                .into_owned(),
-            workspace_host_path: temp.path().join("workspace").to_string_lossy().into_owned(),
-            stable_workspace_id: "local-app-test".to_string(),
-            abi: "arm64".to_string(),
-            rootfs_version: "test".to_string(),
-            archive_sha256: None,
-            authorization_file: None,
-            app_sandbox_root: temp.path().to_string_lossy().into_owned(),
-        }),
-        local_apps_full_runtime: false,
-        local_apps_runtime_root: Some(runtime_root.to_string_lossy().into_owned()),
-        physical_memory_bytes: 0,
-        host_environment: None,
-    })
-    .expect("launch config");
-
-    let shell = cfg
-        .mobile_shell()
-        .expect("local-app runtime should expose the mobile-linux shell carrier");
-    assert!(shell.enabled);
-    assert_eq!(shell.shell_path, "/bin/sh");
-    assert!(shell.force_platform_sandbox);
-}
-
-#[test]
 fn ios_host_environment_maps_stable_native_facts_without_model_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let cfg = super::ios_mobile_config_from_launch_config(&super::IosEngineLaunchConfigFfi {
@@ -706,8 +606,6 @@ fn ios_host_environment_maps_stable_native_facts_without_model_state() {
         project_cwd: None,
         provider_config: None,
         mobile_linux: None,
-        local_apps_full_runtime: false,
-        local_apps_runtime_root: None,
         physical_memory_bytes: 0,
         host_environment: Some(super::IosHostEnvironmentFfi {
             os_version: "19.0".to_string(),

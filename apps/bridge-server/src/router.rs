@@ -1790,7 +1790,7 @@ impl CommandRouter for EngineCommandRouter {
                 }
             }
 
-            // Workflow resume is a mobile/local-app host capability. The
+            // Workflow resume is a mobile host capability. The
             // desktop bridge has no workflow launcher bound into this router;
             // surface that fact as a protocol error instead of silently
             // dropping the command in the catch-all below.

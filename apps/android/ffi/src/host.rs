@@ -234,8 +234,6 @@ pub fn build_android_engine(
         project_cwd,
         provider_config,
         mobile_linux,
-        local_apps_full_runtime,
-        local_apps_runtime_root,
         physical_memory_bytes,
         host_environment,
     } = config;
@@ -253,8 +251,6 @@ pub fn build_android_engine(
         device_control,
         session_mode,
         vision_delegation_enabled,
-        local_apps_full_runtime,
-        local_apps_runtime_root,
         physical_memory_bytes,
     );
     #[cfg(target_os = "android")]
@@ -291,8 +287,6 @@ pub fn build_android_engine(
                 SessionModeDto::Chat => MobileSessionMode::Chat,
                 SessionModeDto::Code => MobileSessionMode::Code,
             },
-            local_apps_full_runtime,
-            local_apps_runtime_root: local_apps_runtime_root.map(std::path::PathBuf::from),
             physical_memory_bytes,
             vision_delegation_enabled,
             host_environment: Some(host_environment.map_or_else(

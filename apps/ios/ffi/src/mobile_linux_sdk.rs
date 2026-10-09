@@ -14,7 +14,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 const LINGXI_DOT_DIR: &str = ".lingxi";
-const LOCAL_APP_BUILD_GUEST_ROOT: &str = lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_ROOT;
 
 /// Immutable iSH runtime identity and path configuration supplied by the iOS
 /// framework bridge.
@@ -68,35 +67,6 @@ impl ProductIosRuntime {
             validate_mount(mount, &self.config)?;
         }
         Ok(())
-    }
-    fn isolated_mounts(
-        &self,
-        request_mounts: &[MountSpec],
-    ) -> Result<Vec<MountSpec>, MobileLinuxError> {
-        let build_count = request_mounts
-            .iter()
-            .filter(|mount| matches!(mount.purpose, MountPurpose::LocalAppBuild))
-            .count();
-        let store_count = request_mounts
-            .iter()
-            .filter(|mount| {
-                matches!(mount.purpose, MountPurpose::Shared)
-                    && mount.guest_path
-                        == lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE
-            })
-            .count();
-        if build_count != 1 || store_count > 1 || request_mounts.len() != 1 + store_count {
-            return Err(MobileLinuxError::InvalidRequest(
-                "isolated local-app execution requires exactly one LocalAppBuild mount and at most one validated dependency store mount".to_string(),
-            ));
-        }
-        let mut mounts: Vec<MountSpec> = Vec::with_capacity(request_mounts.len());
-        for mount in request_mounts {
-            let normalized = validate_mount(mount, &self.config)?;
-            mounts.retain(|existing| existing.guest_path != normalized.guest_path);
-            mounts.push(normalized);
-        }
-        Ok(mounts)
     }
 }
 
@@ -179,7 +149,7 @@ impl MobileLinuxRuntime for ProductIosRuntime {
         &self,
         request: LinuxCommandRequest,
     ) -> Result<LinuxCommandResult, MobileLinuxError> {
-        self.isolated_mounts(&request.mounts)?;
+        self.validate_mounts(&request.mounts)?;
         self.inner.run_isolated(request).await
     }
 
@@ -358,60 +328,9 @@ fn validate_mount(
                 host_path.display()
             )));
         }
-    } else if matches!(mount.purpose, MountPurpose::LocalAppBuild) {
-        let (app_id, channel) = parse_local_app_build_guest_path(&mount.guest_path)?;
-        let expected_host_path = normalize_host_path(
-            &config
-                .app_sandbox_root
-                .join("apps")
-                .join(app_id)
-                .join("build")
-                .join(channel),
-            "local-app build host_path",
-        )?;
-        let workspace_host_path = normalize_host_path(
-            &config
-                .app_sandbox_root
-                .join("apps")
-                .join(app_id)
-                .join("workspace"),
-            "local-app workspace host_path",
-        )?;
-        if host_path != workspace_host_path
-            && !local_app_build_host_path_matches(&host_path, &expected_host_path, channel)
-        {
-            // Both paths, always. A guard that prints only what it WANTED
-            // leaves the reader to guess what it got — and the two differ
-            // here by a prefix (`/var` vs `/private/var`), a stale container
-            // UUID, or a channel mismatch, which are three different bugs
-            // that read identically without the actual value.
-            return Err(MobileLinuxError::InvalidRequest(format!(
-                "local-app build mount host_path must be {} or workspace {} or its matching .{channel}.staging-<numeric nonce> sibling (got {})",
-                expected_host_path.display(), workspace_host_path.display(),
-                host_path.display()
-            )));
-        }
-    } else if matches!(mount.purpose, MountPurpose::Shared)
-        && mount.guest_path == lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE
-    {
-        let expected_root = normalize_host_path(
-            &config.app_sandbox_root.join("dependency-cache"),
-            "dependency store host root",
-        )?;
-        if !host_path.starts_with(&expected_root) {
-            return Err(MobileLinuxError::InvalidRequest(
-                "dependency store mount must remain inside the app sandbox dependency-cache"
-                    .to_string(),
-            ));
-        }
     } else if mount.guest_path == config.workspace_guest_path() {
         return Err(MobileLinuxError::InvalidRequest(
             "only workspace mounts may target the managed workspace guest path".to_string(),
-        ));
-    } else if guest_path_has_prefix(&mount.guest_path, LOCAL_APP_BUILD_GUEST_ROOT) {
-        return Err(MobileLinuxError::InvalidRequest(
-            "local-app build guest path accepts only one root mount; nested mounts are forbidden"
-                .to_string(),
         ));
     }
 
@@ -421,64 +340,6 @@ fn validate_mount(
         read_only: mount.read_only,
         purpose: mount.purpose,
     })
-}
-
-fn local_app_build_host_path_matches(
-    host_path: &Path,
-    expected_host_path: &Path,
-    channel: &str,
-) -> bool {
-    if host_path == expected_host_path {
-        return true;
-    }
-    if host_path.parent() != expected_host_path.parent() {
-        return false;
-    }
-
-    let staging_prefix = format!(".{channel}.staging-");
-    let Some(nonce) = host_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix(staging_prefix.as_str()))
-    else {
-        return false;
-    };
-    !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn parse_local_app_build_guest_path(path: &str) -> Result<(&str, &str), MobileLinuxError> {
-    let relative = path
-        .strip_prefix(LOCAL_APP_BUILD_GUEST_ROOT)
-        .and_then(|suffix| suffix.strip_prefix('/'))
-        .ok_or_else(|| {
-            MobileLinuxError::InvalidRequest(format!(
-                "local-app build guest_path must be {LOCAL_APP_BUILD_GUEST_ROOT}/<app-id>/<channel>/project"
-            ))
-        })?;
-    let mut segments = relative.split('/');
-    let app_id = segments.next().unwrap_or_default();
-    let channel = segments.next().unwrap_or_default();
-    let project = segments.next().unwrap_or_default();
-    if segments.next().is_some()
-        || !is_valid_local_app_id(app_id)
-        || !matches!(channel, "store" | "full")
-        || project != lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_PROJECT_DIR
-    {
-        return Err(MobileLinuxError::InvalidRequest(format!(
-            "local-app build guest_path must be {LOCAL_APP_BUILD_GUEST_ROOT}/<app-id>/<store|full>/project"
-        )));
-    }
-    Ok((app_id, channel))
-}
-
-fn is_valid_local_app_id(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= 64
-        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && bytes[1..]
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 fn guest_path_has_prefix(path: &str, prefix: &str) -> bool {
@@ -683,242 +544,6 @@ mod tests {
             &config,
         )
         .expect_err("persistent root override must fail");
-        assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
-    }
-
-    #[test]
-    fn local_app_build_mount_accepts_matching_build_channel_path() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("app");
-        let config = test_config(&root);
-        let host_path = root
-            .join("apps")
-            .join("abcd1234")
-            .join("build")
-            .join("store");
-        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
-        fs::create_dir_all(host_path.clone()).expect("create build root");
-        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
-
-        let mount = validate_mount(
-            &MountSpec {
-                host_path,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
-                read_only: false,
-                purpose: MountPurpose::LocalAppBuild,
-            },
-            &config,
-        )
-        .expect("local app build mount");
-
-        assert_eq!(
-            mount.guest_path,
-            "/var/lingxi/local-app-build/abcd1234/store/project"
-        );
-    }
-
-    #[test]
-    fn local_app_build_mount_accepts_matching_staging_channel_path() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("app");
-        let config = test_config(&root);
-        let host_path = root
-            .join("apps")
-            .join("abcd1234")
-            .join("build")
-            .join(".store.staging-123456789");
-        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
-        fs::create_dir_all(host_path.clone()).expect("create staging root");
-        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
-
-        let mount = validate_mount(
-            &MountSpec {
-                host_path: host_path.clone(),
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
-                read_only: false,
-                purpose: MountPurpose::LocalAppBuild,
-            },
-            &config,
-        )
-        .expect("local app staging build mount");
-
-        assert_eq!(
-            mount.host_path,
-            normalize_host_path(&host_path, "staging host path").expect("normalize staging path")
-        );
-        assert_eq!(
-            mount.guest_path,
-            "/var/lingxi/local-app-build/abcd1234/store/project"
-        );
-    }
-
-    #[test]
-    fn local_app_build_mount_rejects_nested_dependency_mounts() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("app");
-        let config = test_config(&root);
-        let host_path = root
-            .join("apps")
-            .join("abcd1234")
-            .join("workspace")
-            .join("node_modules");
-        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
-        fs::create_dir_all(host_path.clone()).expect("create app dependencies");
-        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
-
-        let error = validate_mount(
-            &MountSpec {
-                host_path,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project/node_modules"
-                    .to_string(),
-                read_only: true,
-                purpose: MountPurpose::External,
-            },
-            &config,
-        )
-        .expect_err("nested app build mounts must be rejected");
-        assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
-    }
-
-    #[test]
-    fn local_app_build_mount_rejects_wrong_guest_path_or_root_escape() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("app");
-        let config = test_config(&root);
-        let valid_host = root
-            .join("apps")
-            .join("abcd1234")
-            .join("build")
-            .join("store");
-        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
-        fs::create_dir_all(valid_host.clone()).expect("create build root");
-        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
-
-        let wrong_guest = validate_mount(
-            &MountSpec {
-                host_path: valid_host.clone(),
-                guest_path: "/workspace/default".to_string(),
-                read_only: false,
-                purpose: MountPurpose::LocalAppBuild,
-            },
-            &config,
-        )
-        .expect_err("wrong guest path must fail");
-        assert!(matches!(wrong_guest, MobileLinuxError::InvalidRequest(_)));
-
-        let outside_host = validate_mount(
-            &MountSpec {
-                host_path: root.join("apps").join("other").join("build").join("store"),
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
-                read_only: false,
-                purpose: MountPurpose::LocalAppBuild,
-            },
-            &config,
-        )
-        .expect_err("outside build root must fail");
-        assert!(matches!(outside_host, MobileLinuxError::InvalidRequest(_)));
-
-        let invalid_channel = validate_mount(
-            &MountSpec {
-                host_path: valid_host,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/debug/project".to_string(),
-                read_only: false,
-                purpose: MountPurpose::LocalAppBuild,
-            },
-            &config,
-        )
-        .expect_err("unknown build channel must fail");
-        assert!(matches!(
-            invalid_channel,
-            MobileLinuxError::InvalidRequest(_)
-        ));
-    }
-
-    #[test]
-    fn local_app_build_mount_rejects_invalid_staging_paths() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("app");
-        let config = test_config(&root);
-        let build_root = root.join("apps").join("abcd1234").join("build");
-        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
-        fs::create_dir_all(&build_root).expect("create build root");
-        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
-
-        for invalid_name in [
-            ".store.staging-",
-            ".store.staging-not-a-number",
-            ".store.staging-123-extra",
-            ".full.staging-123",
-            ".store.previous-123",
-            "store.staging-123",
-        ] {
-            let invalid_host = build_root.join(invalid_name);
-            fs::create_dir_all(&invalid_host).expect("create invalid staging root");
-            let error = validate_mount(
-                &MountSpec {
-                    host_path: invalid_host,
-                    guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
-                    read_only: false,
-                    purpose: MountPurpose::LocalAppBuild,
-                },
-                &config,
-            )
-            .expect_err("invalid staging path must fail");
-            assert!(
-                matches!(error, MobileLinuxError::InvalidRequest(_)),
-                "unexpected result for {invalid_name}"
-            );
-        }
-
-        let wrong_app_staging = root
-            .join("apps")
-            .join("other")
-            .join("build")
-            .join(".store.staging-123");
-        fs::create_dir_all(&wrong_app_staging).expect("create wrong-app staging root");
-        let error = validate_mount(
-            &MountSpec {
-                host_path: wrong_app_staging,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
-                read_only: false,
-                purpose: MountPurpose::LocalAppBuild,
-            },
-            &config,
-        )
-        .expect_err("wrong-app staging path must fail");
-        assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
-    }
-
-    #[test]
-    fn local_app_build_mount_rejects_staging_symlink_escape() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("app");
-        let config = test_config(&root);
-        let build_root = root.join("apps").join("abcd1234").join("build");
-        let outside = temp.path().join("outside");
-        fs::create_dir_all(config.workspace_host_path.clone()).expect("create workspace");
-        fs::create_dir_all(&build_root).expect("create build root");
-        fs::create_dir_all(config.managed_root.clone()).expect("create managed root");
-        fs::create_dir_all(config.lingxi_root()).expect("create .lingxi");
-        fs::create_dir_all(&outside).expect("create outside root");
-        let staging_link = build_root.join(".store.staging-123");
-        std::os::unix::fs::symlink(&outside, &staging_link).expect("create staging symlink");
-
-        let error = validate_mount(
-            &MountSpec {
-                host_path: staging_link,
-                guest_path: "/var/lingxi/local-app-build/abcd1234/store/project".to_string(),
-                read_only: false,
-                purpose: MountPurpose::LocalAppBuild,
-            },
-            &config,
-        )
-        .expect_err("staging symlink escape must fail");
         assert!(matches!(error, MobileLinuxError::InvalidRequest(_)));
     }
 

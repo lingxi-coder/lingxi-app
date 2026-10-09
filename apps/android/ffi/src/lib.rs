@@ -73,7 +73,7 @@
 #[cfg(feature = "uniffi")]
 pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
-    CronTaskDto, FiredCronJobDto, LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle,
+    CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle,
     MobileEngineError, MobileEngineHandle, MobileSessionMode, ModelBillingModeDto,
     ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto,
     PermissionRequestSink, ProviderConnectionTestDto, SessionModeDto,
@@ -267,7 +267,7 @@ pub use probes::android_git_probe_authed;
 
 // ---------------------------------------------------------------------------
 // Device status / haptics / deep links — one native callback object fans out
-// to the three shared Platform seams used by Local Apps.
+// to the three shared Platform seams.
 
 // ---------------------------------------------------------------------------
 // Secure storage — foreign (Kotlin) Keystore callback interface + engine bridge.

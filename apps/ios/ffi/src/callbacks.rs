@@ -727,8 +727,8 @@ pub trait IosCamera: Send + Sync {
     ///
     /// The scaling happens natively because Rust ships no image codec here
     /// (the mobile build vendors its dependencies offline), and a
-    /// full-resolution 12 MP JPEG is 3-6 MB — far past what a local app's
-    /// bridge response, or a provider's vision endpoint, will take.
+    /// full-resolution 12 MP JPEG is 3-6 MB — far past what a provider's
+    /// vision endpoint will take.
     async fn capture_photo_sized(
         &self,
         front: bool,
@@ -779,7 +779,7 @@ impl lingxi_core::host::CameraControl for IosCameraBridge {
         }
     }
     // Overrides the trait's delegating defaults: on iOS the native side CAN
-    // scale, and a local app's bridge budget depends on it doing so.
+    // scale, and provider vision limits depend on it doing so.
     async fn capture_photo_sized(
         &self,
         opts: lingxi_core::host::CapturePhotoOpts,

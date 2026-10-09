@@ -96,7 +96,6 @@ pub(super) fn mount_purpose_from_ffi(
 ) -> mobile_linux_api::MountPurpose {
     match value {
         MobileLinuxMountPurposeFfi::Workspace => mobile_linux_api::MountPurpose::Workspace,
-        MobileLinuxMountPurposeFfi::LocalAppBuild => mobile_linux_api::MountPurpose::LocalAppBuild,
         MobileLinuxMountPurposeFfi::Memory => mobile_linux_api::MountPurpose::Memory,
         MobileLinuxMountPurposeFfi::Skills => mobile_linux_api::MountPurpose::Skills,
         MobileLinuxMountPurposeFfi::Shared => mobile_linux_api::MountPurpose::Shared,

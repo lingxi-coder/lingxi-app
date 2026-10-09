@@ -231,15 +231,6 @@ pub fn build_ios_engine_with_config(
             device_control.map(|service| service as Arc<dyn lingxi_core::host::DeepLinkOpener>);
 
         let cfg = ios_mobile_config_from_launch_config(&config)?;
-        // The app generator uses the bundled runtime independently of the
-        // user-facing terminal mode. Keep the platform runtime selection in
-        // sync with the Shell carrier configured above.
-        let mut local_apps_mobile_linux = config.mobile_linux.clone();
-        if config.local_apps_runtime_root.is_some() {
-            if let Some(runtime) = local_apps_mobile_linux.as_mut() {
-                runtime.mode = MobileLinuxRuntimeModeFfi::MobileLinux;
-            }
-        }
         let (workspace_host_path, stable_workspace_id) = match config.mobile_linux.as_ref() {
             Some(mobile_linux) => {
                 validate_mobile_linux_workspace_config(&config.app_sandbox_root, mobile_linux)
@@ -272,7 +263,7 @@ pub fn build_ios_engine_with_config(
                 Arc::new(IosLocationBridge { inner: l })
                     as Arc<dyn lingxi_core::host::LocationProvider>
             }),
-            mobile_linux: ios_mobile_linux_runtime(local_apps_mobile_linux.as_ref()),
+            mobile_linux: ios_mobile_linux_runtime(config.mobile_linux.as_ref()),
             workspace_host_path: Some(workspace_host_path),
             stable_workspace_id: Some(stable_workspace_id),
         }));
@@ -328,8 +319,6 @@ pub fn build_ios_engine(
             provider_config: None,
             mobile_linux,
             vision_delegation_enabled: true,
-            local_apps_full_runtime: false,
-            local_apps_runtime_root: None,
             physical_memory_bytes: 0,
             host_environment: None,
         },

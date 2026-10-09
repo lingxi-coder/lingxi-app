@@ -188,10 +188,6 @@ pub struct AndroidEngineLaunchConfigFfi {
     pub project_cwd: Option<String>,
     pub provider_config: Option<AndroidProviderConfigFfi>,
     pub mobile_linux: Option<AndroidMobileLinuxConfigFfi>,
-    /// Compile-time distribution mode: false for Play, true for Direct.
-    pub local_apps_full_runtime: bool,
-    /// Verified read-only local-app runtime bundle staged under app files.
-    pub local_apps_runtime_root: Option<String>,
     /// Device physical memory reported by the Android host.
     pub physical_memory_bytes: u64,
     /// Stable native-host facts. Absent for legacy launch entry points.
@@ -234,25 +230,13 @@ pub(super) fn android_project_cwd(
         && components[0] == "projects"
         && is_lowercase_uuid(components[1])
         && components[2] == "workspace";
-    // v3 local apps: an app's conversation scope roots at
-    // `filesDir/apps/<id>/workspace` — the same shape Kotlin's
-    // `LocalAppWorkspace` derives, with the id legality delegated to the
-    // engine's own minting rule instead of a twin regex. This MUST stay in
-    // lockstep with `ios_project_cwd`: the engine mints and lists app
-    // sessions platform-neutrally, so a gate that rejects them here shows the
-    // user rows they could never open.
-    let is_local_app_workspace = components.len() == 3
-        && components[0] == "apps"
-        && local_apps::ids::is_valid_app_id(components[1])
-        && components[2] == "workspace";
     let is_scheduled_workspace = components == ["scheduled", "workspace"];
-    let valid = (is_managed_project || is_local_app_workspace || is_scheduled_workspace)
+    let valid = (is_managed_project || is_scheduled_workspace)
         && workspace.is_dir();
     if !valid {
         return Err(MobileEngineError::Internal(
             "Android conversation workspace must match \
              filesDir/projects/<lowercase UUID>/workspace or \
-             filesDir/apps/<app id>/workspace or \
              filesDir/scheduled/workspace"
                 .to_string(),
         ));

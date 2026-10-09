@@ -2,7 +2,7 @@ import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
 import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useT } from '../theme/ThemeContext';
 import type { CommandRunItem, RunItem, TurnFileChange, VisualizationFollowup } from '../model/runItem';
 import { VisualizationCard, VisualizationContextBadge, VisualizationPlaceholder, VisualizationUnavailable } from './VisualizationCard';
@@ -746,28 +746,30 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
             );
           }
           if (item.type === 'tool-group' && item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
-            const groupDefault = <div className="transcript-run-item">{item.tools.map(tool => {
+            const groupContent = <>{item.tools.map(tool => {
               const plan = submittedPlans.find(plan => plan.id === tool.id);
               return plan ? <PlanPreview key={tool.id} content={plan.content} status={plan.status} writing={tool.status === 'running' && plan.status === 'submitted'} onOpen={() => onOpenPlan ? onOpenPlan(plan.id) : setLocalPlan(plan)}/> : <ToolGroup key={tool.id} group={{...item,id:tool.id,tools:[tool]}} modUiSessionId={modUiSessionId} open={collapseOpen(visible,sessionKey,tool.id) ?? false} toolOpen={id=>collapseOpen(visible,sessionKey,id)} onSetOpen={setOpen}/>;
-            })}</div>;
-            if (item.tools.length < 2) return <Fragment key={item.id}>{groupDefault}</Fragment>;
+            })}</>;
+            if (item.tools.length < 2) return <div className="transcript-run-item" data-run-type="tool" key={item.id}>{groupContent}</div>;
             const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
-            return <NativeToolGroupSite key={item.id} sessionId={modUiSessionId} group={item}
-              expanded={expanded} stateToken={visible}>
-              {groupDefault}
-            </NativeToolGroupSite>;
+            return <div className="transcript-run-item" data-run-type="tool" key={item.id}>
+              <NativeToolGroupSite sessionId={modUiSessionId} group={item}
+                expanded={expanded} stateToken={visible}>
+                {groupContent}
+              </NativeToolGroupSite>
+            </div>;
           }
           if (item.type === 'tool-group') {
             const expanded = collapseOpen(visible, sessionKey, item.id) ?? false;
-            const groupDefault = <div className="transcript-run-item" data-run-type="tool">
-              <ToolGroup group={item} modUiSessionId={modUiSessionId} open={expanded}
-                toolOpen={(id) => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} />
+            const groupContent = <ToolGroup group={item} modUiSessionId={modUiSessionId} open={expanded}
+              toolOpen={(id) => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen} />;
+            if (item.tools.length < 2) return <div className="transcript-run-item" data-run-type="tool" key={item.id}>{groupContent}</div>;
+            return <div className="transcript-run-item" data-run-type="tool" key={item.id}>
+              <ModUiParentSite sessionId={modUiSessionId} surface="desktop" component="ToolGroup"
+                instanceId={`tool-group:${item.id}`} props={nativeToolGroupProps(item, expanded)} engineFallback={groupContent}>
+                {groupContent}
+              </ModUiParentSite>
             </div>;
-            if (item.tools.length < 2) return <Fragment key={item.id}>{groupDefault}</Fragment>;
-            return <ModUiParentSite key={item.id} sessionId={modUiSessionId} surface="desktop" component="ToolGroup"
-              instanceId={`tool-group:${item.id}`} props={nativeToolGroupProps(item, expanded)} engineFallback={groupDefault}>
-              {groupDefault}
-            </ModUiParentSite>;
           }
           if (item.type === 'command') {
             return (

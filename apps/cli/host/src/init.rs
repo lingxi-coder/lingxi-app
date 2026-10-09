@@ -911,6 +911,8 @@ pub(crate) fn resolve_desktop_config_at(
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
         mod_render_surface: None,
+        // The terminal does not render inline visualizations.
+        inline_visualization: false,
         // Real CLI session: the machine's keychain and env ARE legitimate
         // credential sources here.
         isolated_credential_storage: false,

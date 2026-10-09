@@ -20,7 +20,7 @@ import sys
 from xml.parsers.expat import ExpatError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from local_app_branding import ios_bundle_id
+from product_identity import ios_bundle_id
 
 INFO = Path("apps/ios/native/Info.plist")
 SOURCES = Path("apps/ios/native/Sources")
@@ -28,8 +28,7 @@ SOURCES = Path("apps/ios/native/Sources")
 
 def reviewed_identifiers():
     prefix = ios_bundle_id()
-    return {prefix + ".cron.reconcile", prefix + ".localapps.background",
-            prefix + ".conversation.continued.*"}
+    return {prefix + ".cron.reconcile", prefix + ".conversation.continued.*"}
 
 
 class UniqueKeys(dict):
@@ -119,13 +118,7 @@ def validate_processing_sources(repo_root):
             r'BGTaskScheduler\.shared\.register\(forTaskWithIdentifier:\s*identifier',
             r'processingTask\.expirationHandler\s*=\s*\{\s*worker\.cancel\(\)',
             r'task\?\.setTaskCompleted\(success:\s*success\)'],
-        "App/LocalAppBackgroundTaskBridge.swift": [r'let\s+localAppBackgroundTaskIdentifier\s*=\s*"' + prefix + r'\.localapps\.background"',
-            r'BGTaskScheduler\.shared\.register\(\s*forTaskWithIdentifier:\s*localAppBackgroundTaskIdentifier',
-            r'BGProcessingTaskRequest\(identifier:\s*localAppBackgroundTaskIdentifier\)',
-            r'processing\.expirationHandler\s*=\s*\{\s*worker\.cancel\(\)',
-            r'processing\.setTaskCompleted\(success:\s*!Task\.isCancelled\)'],
-        "App/AppNotificationDelegate.swift": [r'cronBackgroundBridge\.registerAtLaunch\(\s*taskIdentifier:\s*cronBackgroundTaskIdentifier',
-            r'LocalAppBackgroundTaskBridge\.shared\.registerAtLaunch\(\)'],
+        "App/AppNotificationDelegate.swift": [r'cronBackgroundBridge\.registerAtLaunch\(\s*taskIdentifier:\s*cronBackgroundTaskIdentifier'],
         "App/ConversationBackgroundActivity.swift": [r'let\s+conversationContinuedProcessingIdentifier\s*=\s*"' + prefix + r'\.conversation\.continued"',
             r'static\s+let\s+wildcard\s*=\s*"\\\(conversationContinuedProcessingIdentifier\)\.\*"',
             r'BGTaskScheduler\.shared\.register\(\s*forTaskWithIdentifier:\s*identifier',

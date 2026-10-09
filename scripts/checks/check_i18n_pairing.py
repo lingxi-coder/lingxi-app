@@ -55,7 +55,7 @@
 key 本身**——用户会在界面上看到 `settings_provider_login` 这种裸标识符。
 Android 同理：`R.string.foo`（排除 `android.R.string.*` / `androidx.R.string.*`
 框架资源）如果既不在 `zh-Hans.json` 的合法 key 集里、也不在
-`values/strings_conversation_extra.xml`（`local_app_runtime_profiles.rs` 之外，本仓库
+`values/strings_conversation_extra.xml`（本仓库
 唯一一份手工维护、由自己的重名冲突当 tripwire 的姊妹目录）里，资源合并会直接
 报错——但只有在真的构建那个 flavor 时才会被发现。
 

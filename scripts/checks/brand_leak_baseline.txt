@@ -87,7 +87,6 @@ G1	apps/ios/native/Sources/Settings/DesktopSettingsRepository.swift	\.lingxi(?![
 G1	apps/ios/native/Sources/Settings/MCPConfigurationRepository.swift	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/ios/native/Sources/Theme/Theme.swift	LINGXI_
 G1	apps/ios/native/Tests/LXISHRuntimeBundleManifestTests.swift	LINGXI_
-G1	apps/ios/native/Tests/LocalAppDeviceRuntimeSmokeTests.swift	LINGXI_
 G1	apps/ios/native/Tests/MCPConfigurationRepositoryTests.swift	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/ios/native/Tests/NativeSettingsEngineRoundtripTests.swift	\.lingxi(?![A-Za-z0-9_.\-])
 G1	apps/ios/native/UITests/DesktopSettingsUITests.swift	LINGXI_
@@ -95,7 +94,6 @@ G1	apps/ios/native/UITests/LingxiCodeUITests.swift	LINGXI_
 G1	apps/ios/native/project.yml	LINGXI_
 G1	apps/ios/native/scripts/build-linux-runtime.sh	LINGXI_
 G1	apps/ios/native/scripts/build-xcframework.sh	LINGXI_
-G1	apps/ios/native/scripts/validate-local-app-build-assets.sh	LINGXI_
 G1	apps/ios/native/scripts/verify-linux-runtime.sh	LINGXI_
 G1	packages/bridge-client/scripts/e2e.mjs	\.lingxi(?![A-Za-z0-9_.\-])
 G1	packages/bridge-client/src/client.ts	X-LingXi-Ide-Authorization
@@ -215,10 +213,8 @@ G1	packaging/npm/scripts/build_npm_package.py	LingXi
 G1	packaging/pypi/hatch_build.py	LINGXI
 G1	packaging/pypi/pyproject.toml	LingXi
 G1	packaging/pypi/src/lingxi_cli_bin/__init__.py	LINGXI
-G1	scripts/local-apps/check-authorizations.sh	LINGXI
-G1	scripts/local-apps/smoke.sh	LINGXI
-G1	scripts/local-apps/verify-local-app-host.py	LingXi
-G1	scripts/local-apps/verify-local-app-host.py	Lingxi
+G1	scripts/mobile-linux/check-authorizations.sh	LINGXI
+G1	scripts/mobile-linux/smoke.sh	LINGXI
 G1	scripts/tests/bench-startup.py	LingXi
 G1	scripts/tests/parity_behaviour.py	CLAUDE\.local\.md
 G1	scripts/tests/parity_behaviour.py	CLAUDE\.md
@@ -377,7 +373,6 @@ G3	scripts/tests/parity_behaviour.py	.lingxi.json
 G3	scripts/tests/parity_behaviour.py	LINGXI.local.md
 G3	scripts/tests/parity_behaviour.py	LINGXI.md
 G3	scripts/tests/teammate_worker_smoke.py	LINGXI_CONFIG_DIR
-G3	scripts/tests/test-local-app-r4-libs.mjs	.lingxi
 G6	crates/branding/src/lib.rs	CONFIG_DIR_ENV not in NAMESPACE_VALUES
 G6	crates/branding/src/lib.rs	DOT_DIR not in NAMESPACE_VALUES
 G6	crates/branding/src/lib.rs	ENV_PREFIX not in NAMESPACE_VALUES

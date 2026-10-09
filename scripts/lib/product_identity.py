@@ -1,4 +1,4 @@
-"""Trusted product identities for local-app policy gates.
+"""Trusted product identities for the release policy gates.
 
 Sources are relative to this module's Host checkout, never the scanned
 --repo-root. Native IDs use the existing literal Gradle/XcodeGen config forms;
@@ -74,12 +74,5 @@ def branding_constant(name, resolved=None):
 @lru_cache(maxsize=1)
 def authorization_enabled_env():
     return literal(r'^enabled="\$\{([A-Z][A-Z0-9_]*):-0\}"$',
-                   (HOST / "scripts/local-apps/check-authorizations.sh").read_text(),
+                   (HOST / "scripts/mobile-linux/check-authorizations.sh").read_text(),
                    "authorization enabled environment key")
-
-
-@lru_cache(maxsize=1)
-def local_app_apk_env():
-    return literal(r'^  if \[\[ -z "\$\{([A-Z][A-Z0-9_]*):-\}" \]\]; then$',
-                   (HOST / "scripts/local-apps/smoke.sh").read_text(),
-                   "release APK environment key")

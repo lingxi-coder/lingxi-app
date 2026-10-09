@@ -27,9 +27,6 @@ jobs:
       - name: Verify every gate and the trigger chain
         working-directory: .
         run: python3 scripts/tests/test_gate_triggers.py
-      - name: Native Host and pinned runtime template integration
-        working-directory: .
-        run: node --test scripts/tests/test-local-app-r4-libs.mjs
 
   unit-tests:
     runs-on: ubuntu-latest

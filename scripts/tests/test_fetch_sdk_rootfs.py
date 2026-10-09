@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-SCRIPT = Path(__file__).resolve().parents[1] / "local-apps/fetch-sdk-rootfs.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "mobile-linux/fetch-sdk-rootfs.py"
 spec = importlib.util.spec_from_file_location("fetch_sdk_rootfs", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

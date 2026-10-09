@@ -20,7 +20,7 @@ import sys
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from local_app_branding import android_package, branding_constant
+from product_identity import android_package, branding_constant
 
 ANDROID = "{http://schemas.android.com/apk/res/android}"
 TOOLS = "{http://schemas.android.com/tools}"

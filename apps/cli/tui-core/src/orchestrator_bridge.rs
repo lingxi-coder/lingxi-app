@@ -896,6 +896,7 @@ mod tests {
                     usage: None,
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "old refusal".into(),
+                        citations: None,
                     }],
                     is_api_error_message: None,
                     supersedes_uuids: None,

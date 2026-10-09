@@ -296,6 +296,7 @@ async fn permission_request_event_then_approve_resolves_check() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -392,6 +393,7 @@ async fn disconnect_mid_permission_denies() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -454,6 +456,7 @@ async fn reconnect_does_not_receive_stale_frames_from_aborted_first_turn() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -470,6 +473,7 @@ async fn reconnect_does_not_receive_stale_frames_from_aborted_first_turn() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;

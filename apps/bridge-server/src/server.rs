@@ -3737,6 +3737,7 @@ mod tests {
                 prompt_mode: None,
                 images: images.clone(),
                 turn_id: None,
+                visualization_context: None,
             })
             .await;
 
@@ -4507,6 +4508,7 @@ mod tests {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: Some(41),
+                visualization_context: None,
             })
             .await;
         started.notified().await;
@@ -4715,6 +4717,7 @@ mod tests {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: None,
+                visualization_context: None,
             })
             .await;
         started.notified().await;
@@ -4728,6 +4731,7 @@ mod tests {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: None,
+                visualization_context: None,
             })
             .await;
         assert_eq!(

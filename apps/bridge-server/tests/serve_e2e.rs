@@ -239,6 +239,7 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         }),
     )
     .await;

@@ -322,6 +322,7 @@ async fn refused_connection_does_not_route_commands() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -350,6 +351,7 @@ async fn command_before_hello_is_rejected() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -410,6 +412,7 @@ async fn second_client_is_rejected_while_first_remains_active() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;

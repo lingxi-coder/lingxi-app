@@ -249,6 +249,7 @@ async fn real_boot_handshakes_and_surfaces_turn_error() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         }),
     )
     .await;

@@ -424,6 +424,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
             prompt_mode: None,
             images: Vec::new(),
             turn_id: Some(1),
+            visualization_context: None,
         })
         .unwrap(),
     )

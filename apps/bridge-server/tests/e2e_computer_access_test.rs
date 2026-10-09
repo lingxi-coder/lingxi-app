@@ -256,6 +256,7 @@ async fn computer_access_request_event_then_approve_resolves_resolver() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -360,6 +361,7 @@ async fn disconnect_mid_computer_access_denies() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;

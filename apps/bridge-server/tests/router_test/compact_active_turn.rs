@@ -88,6 +88,7 @@ async fn active_compact_refusals_keep_ws_permission_and_cancel_processing_live()
             prompt_mode: None,
             images: vec![],
             turn_id: Some(91),
+            visualization_context: None,
         },
     )
     .await;

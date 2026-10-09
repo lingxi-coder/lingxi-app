@@ -94,17 +94,6 @@ test-harness/conversation-*.txt
 
 # Root diagnostic captures from local verification runs.
 /*.log
-# ---------------------------------------------------------------
-# Local-app template `.lingxi/` documents are SOURCE, not tool state.
-# `.lingxi/` above ignores the runtime state directory everywhere, but the
-# app templates ship a committed `.lingxi/source-policy.json` (and the Next
-# template's manifest/design-spec) that engine-mobile `include_bytes!`s and
-# the supply-chain verifier reads. Without these negations `git add` silently
-# skips them and a fresh clone cannot compile engine-mobile.
-# The directory itself must be re-included first: git never descends into an
-# excluded directory, so a file-only negation would never be reached.
-# ---------------------------------------------------------------
-
 # Rust workspace and distribution build outputs
 .lingxi/settings.local.json
 /packaging/npm/vendor/

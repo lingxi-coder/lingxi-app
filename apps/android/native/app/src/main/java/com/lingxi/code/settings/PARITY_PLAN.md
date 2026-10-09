@@ -12,7 +12,7 @@ Baseline: inspect existing settings contracts and run SettingsStoreLocalizationT
 - MCP has independent storage scopes and captured revisions. Skills and hooks use revisioned administration. Plugin lifecycle requires an engine preview before confirmation.
 - Plugin secrets use the existing Android Keystore adapter and exact Rust SecureStorageData envelope; sensitive values never enter settings patches. Applying/clearing the engine cache requires explicit reconnect.
 - Common provider fields use native controls; optional provider metadata/pricing/capabilities use a labeled advanced editor. Full per-profile configuration is editable; bulk LingXi/OpenCode paste and file imports include validation, sanitized previews and conflict selection.
-- Existing provider/OAuth connection testing, appearance/language/voice stores, Linux runtime, scheduling and local-app skill surfaces remain available. Old MCP URLs resolve to live administration. Notification/input/privacy settings use actual Android system surfaces. Unsupported mock Dream controls are no longer advertised.
+- Existing provider/OAuth connection testing, appearance/language/voice stores, Linux runtime, scheduling and skill surfaces remain available. Old MCP URLs resolve to live administration. Notification/input/privacy settings use actual Android system surfaces. Unsupported mock Dream controls are no longer advertised.
 
 ## Verification handoff
 

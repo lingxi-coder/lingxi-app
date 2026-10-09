@@ -353,13 +353,13 @@ function SessionRow({ projectPath, session, active, pinned, opening, status, met
       </button>
       <button type="button" className="sidebar-row-action" aria-label={`${pinned ? 'Unpin' : 'Pin'} ${session.title || 'Untitled session'}`}
         title={pinned ? 'Unpin session' : 'Pin session'} onClick={onPin} disabled={opening}
-        style={{ position: 'absolute', right: 32, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: pinned ? t.accent : t.text3, cursor: 'pointer' }}>
-        <Icon name="pin" size={13} stroke={1.8} />
+        style={{ position: 'absolute', right: 32, top: '50%', transform: 'translateY(-50%)', width: 26, height: 26, padding: 0, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: pinned ? t.accent : t.text3, cursor: 'pointer' }}>
+        <Icon name="pin" size={16} />
       </button>
       <button type="button" className="sidebar-row-action" aria-label={`Archive ${session.title || 'Untitled session'}`}
         title="Archive chat" onClick={onArchive} disabled={opening}
-        style={{ position: 'absolute', right: 4, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
-        <Icon name="archive" size={13} />
+        style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', width: 26, height: 26, padding: 0, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
+        <Icon name="archive" size={16} />
       </button>
       {!pinnedSection && attention?.label === 'Session error' && (
         // Sits where the pin/archive actions sit, and yields to them: the row

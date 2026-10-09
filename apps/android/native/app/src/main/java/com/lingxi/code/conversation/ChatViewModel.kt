@@ -1579,6 +1579,8 @@ class ChatViewModel(
             it.copy(
                 session = SessionRef(id = restored.sessionId, title = title),
                 messages = restored.transcript, // clear-then-restore (oldest-first)
+                visualizationChip = null,
+                visualizationFollowup = null,
                 streamingMessage = null,
                 isNew = restored.kind == SessionActivationKind.Started && restored.transcript.isEmpty(),
                 streaming = false,
@@ -1785,6 +1787,8 @@ class ChatViewModel(
             it.copy(
                 session = target,
                 messages = emptyList(),
+                visualizationChip = null,
+                visualizationFollowup = null,
                 streamingMessage = null,
                 isNew = newSession || resumeEmpty,
                 streaming = false,
@@ -1890,6 +1894,23 @@ class ChatViewModel(
         newChat()
     }
 
+    /** A widget drafted a follow-up: the screen moves it into the composer. */
+    fun offerVisualizationFollowup(followup: VisualizationFollowup) {
+        _state.update { it.copy(visualizationFollowup = followup) }
+    }
+
+    /** The composer took the offered follow-up; its chip now rides the next send. */
+    fun acceptVisualizationFollowup(followup: VisualizationFollowup) {
+        _state.update {
+            if (it.visualizationFollowup != followup) it
+            else it.copy(visualizationFollowup = null, visualizationChip = followup.chip)
+        }
+    }
+
+    fun clearVisualizationChip() {
+        _state.update { it.copy(visualizationChip = null) }
+    }
+
     /**
      * Submit a user turn. Appends the user message, flips [ChatState.streaming]
      * on, and collects the [ConversationSource] reply stream — appending the
@@ -1942,6 +1963,9 @@ class ChatViewModel(
             return
         }
 
+        // The widget this prompt follows up on rides with it exactly once.
+        val visualizationChip = _state.value.visualizationChip
+
         if (_state.value.streaming) {
             if (_sourceScope.value !is ConversationScope.LocalApp) {
                 savedState?.set(KEY_DRAFT, "")
@@ -1950,10 +1974,12 @@ class ChatViewModel(
                 it.copy(
                     isNew = false,
                     error = null,
+                    visualizationChip = null,
                     messages = it.messages + Message(
                         role = Role.User,
                         text = trimmed,
                         images = images,
+                        visualizationContext = visualizationChip,
                     ),
                 )
             }
@@ -1965,6 +1991,7 @@ class ChatViewModel(
                             promptMode = null,
                             images = images,
                             turnId = null,
+                            visualizationContext = visualizationChip?.reference?.toDto(),
                         ),
                     )
                 }.onFailure { failure ->
@@ -2007,7 +2034,13 @@ class ChatViewModel(
                 error = null, // a fresh turn clears the prior turn's error banner
                 streaming = true, // gate the composer immediately, before the first event
                 liveTurnWaitingForUser = false,
-                messages = it.messages + Message(role = Role.User, text = trimmed, images = images),
+                messages = it.messages + Message(
+                    role = Role.User,
+                    text = trimmed,
+                    images = images,
+                    visualizationContext = visualizationChip,
+                ),
+                visualizationChip = null,
                 streamingMessage = null,
                 agentRun = AgentRunState(turnId = token),
             )
@@ -2019,7 +2052,7 @@ class ChatViewModel(
         setBackgroundTurnActive(true)
 
         turnJob = viewModelScope.launch {
-            source.submit(trimmed, images, submittedTurnId).collect { event ->
+            source.submit(trimmed, images, submittedTurnId, visualizationChip?.reference).collect { event ->
                 reduce(event, token)
                 if (
                     event is ReplyEvent.DurableTurnReplayAcknowledged &&
@@ -2052,7 +2085,7 @@ class ChatViewModel(
         _state.update {
             val settled = it.settleTurn(
                 run = it.agentRun?.finish(AgentRunOutcome.Cancelled),
-                settling = it.streamingMessage,
+                settling = it.streamingMessage?.withoutPendingVisualizations(),
             )
             it.copy(
                 streaming = false,
@@ -2198,7 +2231,7 @@ class ChatViewModel(
                 if (live != null) {
                     s.copy(
                         streaming = true,
-                        streamingMessage = live.copy(text = live.text + event.text),
+                        streamingMessage = live.appendingStreamText(event.text),
                         agentRun = run,
                     )
                 } else {
@@ -2209,6 +2242,15 @@ class ChatViewModel(
                         agentRun = run,
                     )
                 }
+            }
+
+            is ReplyEvent.Visualization -> _state.update { s ->
+                val live = s.streamingMessage ?: Message(role = Role.Ai, text = "")
+                s.copy(
+                    streaming = true,
+                    streamingMessage = live.applyingVisualizationBlock(event.status, event.reference),
+                    agentRun = (s.agentRun ?: AgentRunState(turnId = token)).markGenerating(),
+                )
             }
 
             is ReplyEvent.ToolActivity -> _state.update {
@@ -2438,7 +2480,7 @@ class ChatViewModel(
                         run = (it.agentRun ?: AgentRunState(turnId = token))
                             .addNotice(AgentRunNotice(event.message, AgentRunNoticeKind.Error))
                             .finish(AgentRunOutcome.Failed),
-                        settling = it.streamingMessage,
+                        settling = it.streamingMessage?.withoutPendingVisualizations(),
                     )
                     it.copy(
                         streaming = false,
@@ -2503,7 +2545,7 @@ class ChatViewModel(
                         } else {
                             run
                         },
-                        settling = it.streamingMessage,
+                        settling = it.streamingMessage?.withoutPendingVisualizations(),
                     )
                     it.copy(
                         streaming = false,

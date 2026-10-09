@@ -880,6 +880,8 @@ fun RootScreen(
     // `(workspace, mode)` draft; the legacy SavedStateHandle value is consulted
     // only once for a Code-mode process restore.
     var draft by remember { mutableStateOf(chatViewModel.restoredDraft) }
+    val conversationSource by chatViewModel.engineSource.collectAsState()
+    val visualizationHost = conversationSource.visualizationHost
     var voiceDraftBase by remember { mutableStateOf("") }
 
     // Which scope's draft the composer is currently showing — guards the
@@ -2558,6 +2560,10 @@ fun RootScreen(
                         onAnswerQuestion = chatViewModel::answerQuestion,
                         onCancelQuestion = chatViewModel::cancelQuestion,
                         onResumeWorkflow = chatViewModel::resumeWorkflow,
+                        visualizationHost = visualizationHost,
+                        onVisualizationFollowup = chatViewModel::offerVisualizationFollowup,
+                        onAcceptVisualizationFollowup = chatViewModel::acceptVisualizationFollowup,
+                        onRemoveVisualizationChip = chatViewModel::clearVisualizationChip,
                         // Tool-call expansion and the plan panel keep their state in
                         // the ViewModel, not in the recycled rows that render them.
                         onToggleToolCall = chatViewModel::toggleToolCall,

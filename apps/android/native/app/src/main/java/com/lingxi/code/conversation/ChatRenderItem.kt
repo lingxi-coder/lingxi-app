@@ -41,6 +41,21 @@ sealed interface ChatRenderItem {
         override val contentType: String get() = "message"
     }
 
+    /**
+     * An inline visualization slot. Keyed by its message and ordinal so the
+     * same WebView survives the streaming row settling into a message.
+     */
+    @Immutable
+    data class Visualization(
+        val messageId: String,
+        val ordinal: Int,
+        val status: VisualizationSlotStatus,
+        val reference: VisualizationRef?,
+    ) : ChatRenderItem {
+        override val key: String get() = "$messageId:visualization:$ordinal"
+        override val contentType: String get() = "visualization"
+    }
+
     /** Consecutive tools can span provider message envelopes within a turn. */
     @Immutable
     data class Tools(val calls: List<ToolCallUi>) : ChatRenderItem {
@@ -131,6 +146,10 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<Cha
                         id = if (index == 0) message.id else "${message.id}:prose:$index",
                         text = block.text, blocks = listOf(MessageContent.Text(block.text)),
                     )))
+                    is TranscriptBlock.Visualization -> {
+                        canMergeTools = false
+                        add(ChatRenderItem.Visualization(message.id, block.ordinal, block.status, block.reference))
+                    }
                 }
             }
         } else if (message.text.isNotBlank() || message.images.isNotEmpty() || message.blocks.isNotEmpty()) {
@@ -148,7 +167,25 @@ fun buildChatRenderItems(state: ChatState): List<ChatRenderItem> = buildList<Cha
             canMergeTools = false
         }
     }
-    state.streamingMessage?.let { add(ChatRenderItem.Streaming(it)) }
+    state.streamingMessage?.let { live ->
+        // A visualization splits the live message into the same rows (and
+        // keys) it will have once settled, so its WebView is not remounted.
+        if (live.blocks.none { it is MessageContent.Visualization }) {
+            add(ChatRenderItem.Streaming(live))
+        } else {
+            transcriptBlocks(live.blocks).forEachIndexed { index, block ->
+                when (block) {
+                    is TranscriptBlock.Visualization ->
+                        add(ChatRenderItem.Visualization(live.id, block.ordinal, block.status, block.reference))
+                    is TranscriptBlock.Prose -> add(ChatRenderItem.Streaming(live.copy(
+                        id = if (index == 0) live.id else "${live.id}:prose:$index",
+                        text = block.text, blocks = listOf(MessageContent.Text(block.text)),
+                    )))
+                    is TranscriptBlock.Plan, is TranscriptBlock.Tools -> Unit
+                }
+            }
+        }
+    }
     state.shellTools.forEach { add(ChatRenderItem.Shell(it)) }
     if (state.streaming && state.agentRun == null) {
         add(ChatRenderItem.StreamingIndicator)

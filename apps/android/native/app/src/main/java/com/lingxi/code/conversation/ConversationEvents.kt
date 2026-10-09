@@ -94,6 +94,12 @@ sealed interface ReplyEvent {
     data class MessageIdentity(val messageId: String) : ReplyEvent
     data class MessageRetracted(val messageId: String) : ReplyEvent
 
+    /** A visualization slot in the assistant stream started, resolved or was discarded. */
+    data class Visualization(
+        val status: VisualizationBlockStatus,
+        val reference: VisualizationRef?,
+    ) : ReplyEvent
+
     /** The final assistant message used by sources without engine boundaries. */
     data class Completed(val message: Message) : ReplyEvent
 
@@ -105,6 +111,7 @@ private fun shouldAwaitDurableTurnReplayAck(event: ClientEvent, reply: ReplyEven
     when (event) {
         is ClientEvent.TurnStarted,
         is ClientEvent.TextDelta,
+        is ClientEvent.VisualizationBlock,
         is ClientEvent.ThinkingDelta,
         is ClientEvent.SystemNotice,
         is ClientEvent.ToolUseStarted,
@@ -139,6 +146,8 @@ fun clientEventToReply(
 ): ReplyEvent? = when (event) {
     is ClientEvent.TurnStarted -> ReplyEvent.Thinking
     is ClientEvent.TextDelta -> ReplyEvent.Delta(event.text)
+    is ClientEvent.VisualizationBlock ->
+        ReplyEvent.Visualization(event.status.toUi(), event.reference?.toUi())
     is ClientEvent.ThinkingDelta -> ReplyEvent.ReasoningDelta(event.thinking)
     // Reduced on the session-level raw event stream, including before TurnStarted.
     is ClientEvent.ScheduledTaskFire -> null
@@ -242,6 +251,15 @@ internal fun retainedTurnEventToReply(
     when (event.optString("type")) {
         "turn_started" -> ReplyEvent.Thinking
         "text_delta" -> ReplyEvent.Delta(event.optString("text"))
+        "visualization_block" -> visualizationBlockStatus(event.optString("status"))?.let { status ->
+            val reference = event.optJSONObject("reference")?.let { ref ->
+                val id = ref.optString("id")
+                val revision = ref.optLong("revision")
+                if (id.isEmpty() || revision !in 1L..UInt.MAX_VALUE.toLong()) null
+                else VisualizationRef(id, revision.toUInt())
+            }
+            ReplyEvent.Visualization(status, reference)
+        }
         "thinking_delta" -> ReplyEvent.ReasoningDelta(event.optString("thinking"))
         "system_notice" -> ReplyEvent.Notice(
             message = event.optString("message"),

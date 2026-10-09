@@ -29,7 +29,7 @@ fun messageDtoToMessage(
     dto: MessageDto,
     strings: ConversationStrings = DefaultConversationStrings,
 ): Message {
-    val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup)
+    val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup, dto.visualizationContext)
     val index = mutableMapOf<String, ToolBlockRef>()
     dto.blocks.forEach { block ->
         // One DTO in isolation has no preceding turn to hand an orphan result
@@ -60,7 +60,7 @@ fun transcriptFromDtos(
     val builds = mutableListOf<MessageBuild>()
     val index = mutableMapOf<String, ToolBlockRef>()
     dtos.forEach { dto ->
-        val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup)
+        val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup, dto.visualizationContext)
         builds.add(build)
         dto.blocks.forEach { block ->
             build.fold(block, strings, index) { orphanHostFor(builds, build) }
@@ -139,6 +139,7 @@ private class MessageBuild(
     wireRole: String,
     val images: List<ImageRefDto> = emptyList(),
     val loopWakeup: com.lingxi.code.bindings.client.LoopWakeupDto? = null,
+    val visualizationContext: com.lingxi.code.bindings.client.VisualizationContextDto? = null,
 ) {
     val role: Role = if (wireRole.equals("user", ignoreCase = true)) Role.User else Role.Ai
     val textParts = mutableListOf<String>().apply { loopWakeup?.let { add(it.message) } }
@@ -159,7 +160,7 @@ private class MessageBuild(
     fun isRenderable(): Boolean =
         textParts.any { it.isNotBlank() } ||
             (role == Role.User && images.isNotEmpty()) ||
-            (role == Role.Ai && blocks.any { it is MessageContent.Tool })
+            (role == Role.Ai && blocks.any { it is MessageContent.Tool || it is MessageContent.Visualization })
 
     fun toMessage(): Message = Message(
         role = role,
@@ -167,6 +168,9 @@ private class MessageBuild(
         images = images,
         blocks = blocks.toList(),
         loopWakeupStreak = loopWakeup?.streak,
+        visualizationContext = visualizationContext
+            ?.takeIf { role == Role.User }
+            ?.let { VisualizationContextChip(it.id, it.revision, it.title) },
     )
 
     private fun addText(text: String) {
@@ -197,6 +201,14 @@ private class MessageBuild(
             is MessageBlockDto.Thinking, is MessageBlockDto.RedactedThinking -> Unit
             is MessageBlockDto.CompactBoundary ->
                 addText(strings.resolve(R.string.chat_compacted_label, "对话已压缩"))
+            // A reference line the engine resolved; `null` is a line that did
+            // not parse and renders as the "unavailable" card.
+            is MessageBlockDto.Visualization -> if (role == Role.Ai) {
+                blocks.add(
+                    block.reference?.let { MessageContent.Visualization(VisualizationSlotStatus.Ready, it.toUi()) }
+                        ?: MessageContent.Visualization(VisualizationSlotStatus.Unavailable, null),
+                )
+            }
             is MessageBlockDto.ToolUse -> {
                 index[block.id] = ToolBlockRef(this, blocks.size)
                 blocks.add(
@@ -281,6 +293,7 @@ fun messageDtoText(
             is MessageBlockDto.Thinking -> block.thinking
             is MessageBlockDto.RedactedThinking -> strings.resolve(R.string.chat_redacted_thinking, "[已折叠的思考]")
             is MessageBlockDto.CompactBoundary -> strings.resolve(R.string.chat_compacted_label, "对话已压缩")
+            is MessageBlockDto.Visualization -> ""
             is MessageBlockDto.ToolUse ->
                 strings.resolve(R.string.chat_tool_calling_label, "调用工具 %1\$s…", block.tool)
             is MessageBlockDto.ToolResult ->

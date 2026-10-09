@@ -9,6 +9,7 @@ import com.lingxi.code.bindings.client.ErrorKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
 import com.lingxi.code.bindings.client.ListingKindDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
+import com.lingxi.code.bindings.runtime.VisualizationHost
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.TurnRecoveryStateDto
 import com.lingxi.code.model.EngineModelState
@@ -337,6 +338,18 @@ class EngineConversationSource private constructor(
         submit(text, images, nextFallbackTurnId())
 
     override fun submit(text: String, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> =
+        submit(text, images, turnId, null)
+
+    override val visualizationHost: VisualizationHost? by lazy {
+        runCatching { handle.visualizationHost(VISUALIZATION_ORIGIN) }.getOrNull()
+    }
+
+    override fun submit(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long,
+        visualizationContext: VisualizationRef?,
+    ): Flow<ReplyEvent> =
         // Subscribe-before-submit: the returned reply stream maps the shared
         // engine flow through `mapReplyStream`, but the `SendPrompt` is fired
         // from `events.onSubscription { … }` — which runs ONLY AFTER this
@@ -358,6 +371,7 @@ class EngineConversationSource private constructor(
                             promptMode = null,
                             images = images,
                             turnId = turnId.toULong(),
+                            visualizationContext = visualizationContext?.toDto(),
                         ),
                     )
                 } catch (t: Throwable) {

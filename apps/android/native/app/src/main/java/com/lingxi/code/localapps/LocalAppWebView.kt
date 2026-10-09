@@ -5,7 +5,9 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
+import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.SafeBrowsingResponse
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -19,6 +21,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -2268,6 +2272,8 @@ fun LocalAppWebView(
     var pendingExternalUrl by remember(appId) { mutableStateOf<String?>(null) }
     var webView by remember(appId) { mutableStateOf<WebView?>(null) }
     var controller by remember(appId) { mutableStateOf<LocalAppWebViewController?>(null) }
+    // Bumped when the renderer dies: the dead WebView is torn down and rebuilt.
+    var rendererGeneration by remember(appId) { mutableIntStateOf(0) }
     val currentBridgeHandler by rememberUpdatedState(onBridgeRequest)
     val currentControllerHandler by rememberUpdatedState(onControllerReady)
     val trustedOrigin = remember(url) { Uri.parse(url).takeIf { it.isTrustedLoopback() } }
@@ -2318,101 +2324,120 @@ fun LocalAppWebView(
         LocalAppWebStorageGate.Ready -> Unit
     }
 
-    AndroidView(
-        modifier = modifier,
-        factory = { context ->
-            WebView(context).apply webView@ {
-                webView = this
-                WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.allowFileAccess = false
-                settings.allowContentAccess = false
-                @Suppress("DEPRECATION")
-                settings.allowFileAccessFromFileURLs = false
-                @Suppress("DEPRECATION")
-                settings.allowUniversalAccessFromFileURLs = false
-                settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                settings.safeBrowsingEnabled = true
-                CookieManager.getInstance().apply {
-                    setAcceptCookie(false)
-                    setAcceptThirdPartyCookies(this@webView, false)
-                }
-                val broker = LocalAppBridgeBroker(
-                    appId = appId,
-                    trustedOrigin = trustedOrigin,
-                    webView = this,
-                    onMessage = { currentBridgeHandler(it) },
-                )
-                WebViewCompat.addWebMessageListener(
-                    this,
-                    LINGXI_V1_MESSAGE_OBJECT,
-                    setOf(trustedOriginRule),
-                ) { _, message, sourceOrigin, isMainFrame, _ ->
-                    broker.receive(message.data.orEmpty(), sourceOrigin, isMainFrame)
-                }
-                WebViewCompat.addDocumentStartJavaScript(
-                    this,
-                    buildLingxiV1Bootstrap(androidFormFactor(context.resources.configuration)),
-                    setOf(trustedOriginRule),
-                )
-                val guardedClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                        val target = request.url
-                        if (target.sameTrustedOrigin(trustedOrigin)) return false
-                        if (request.isForMainFrame) pendingExternalUrl = target.toString()
-                        return true
+    key(rendererGeneration) {
+        AndroidView(
+            modifier = modifier,
+            factory = { context ->
+                WebView(context).apply webView@ {
+                    webView = this
+                    WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
+                    @Suppress("DEPRECATION")
+                    settings.allowFileAccessFromFileURLs = false
+                    @Suppress("DEPRECATION")
+                    settings.allowUniversalAccessFromFileURLs = false
+                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                    settings.safeBrowsingEnabled = true
+                    CookieManager.getInstance().apply {
+                        setAcceptCookie(false)
+                        setAcceptThirdPartyCookies(this@webView, false)
                     }
-
-                    override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
-                        controller?.onPageStarted(url)
-                        if (!Uri.parse(url).sameTrustedOrigin(trustedOrigin)) view.stopLoading()
+                    val broker = LocalAppBridgeBroker(
+                        appId = appId,
+                        trustedOrigin = trustedOrigin,
+                        webView = this,
+                        onMessage = { currentBridgeHandler(it) },
+                    )
+                    WebViewCompat.addWebMessageListener(
+                        this,
+                        LINGXI_V1_MESSAGE_OBJECT,
+                        setOf(trustedOriginRule),
+                    ) { _, message, sourceOrigin, isMainFrame, _ ->
+                        broker.receive(message.data.orEmpty(), sourceOrigin, isMainFrame)
                     }
+                    WebViewCompat.addDocumentStartJavaScript(
+                        this,
+                        buildLingxiV1Bootstrap(androidFormFactor(context.resources.configuration)),
+                        setOf(trustedOriginRule),
+                    )
+                    val guardedClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                            val target = request.url
+                            if (target.sameTrustedOrigin(trustedOrigin)) return false
+                            if (request.isForMainFrame) pendingExternalUrl = target.toString()
+                            return true
+                        }
 
-                    override fun onPageFinished(view: WebView, url: String) {
-                        controller?.onPageFinished(url)
-                    }
+                        override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                            controller?.onPageStarted(url)
+                            if (!Uri.parse(url).sameTrustedOrigin(trustedOrigin)) view.stopLoading()
+                        }
 
-                    override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
-                        controller?.onVisitedHistoryUpdated(url, isReload)
-                    }
+                        override fun onPageFinished(view: WebView, url: String) {
+                            controller?.onPageFinished(url)
+                        }
 
-                    override fun onSafeBrowsingHit(
-                        view: WebView,
-                        request: WebResourceRequest,
-                        threatType: Int,
-                        callback: SafeBrowsingResponse,
-                    ) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                            callback.backToSafety(true)
+                        override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                            controller?.onVisitedHistoryUpdated(url, isReload)
+                        }
+
+                        override fun onSafeBrowsingHit(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            threatType: Int,
+                            callback: SafeBrowsingResponse,
+                        ) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                                callback.backToSafety(true)
+                            }
+                        }
+
+                        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                            if (!request.url.sameTrustedOrigin(trustedOrigin)) {
+                                return WebResourceResponse("text/plain", "utf-8", 403, "Blocked", emptyMap(), null)
+                            }
+                            return super.shouldInterceptRequest(view, request)
+                        }
+
+                        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                            // Handled, so the renderer's death does not take the app
+                            // down: detach and destroy the dead view, then rebuild.
+                            if (webView !== view) return true
+                            controller?.let { attached ->
+                                LocalAppWebViewRegistry.unregister(appId, attached)
+                                attached.detach()
+                            }
+                            runCatching { WebViewCompat.removeWebMessageListener(view, LINGXI_V1_MESSAGE_OBJECT) }
+                            (view.parent as? ViewGroup)?.removeView(view)
+                            view.destroy()
+                            controller = null
+                            webView = null
+                            rendererGeneration++
+                            return true
                         }
                     }
-
-                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                        if (!request.url.sameTrustedOrigin(trustedOrigin)) {
-                            return WebResourceResponse("text/plain", "utf-8", 403, "Blocked", emptyMap(), null)
-                        }
-                        return super.shouldInterceptRequest(view, request)
+                    webViewClient = guardedClient
+                    controller = LocalAppWebViewController(this, broker, guardedClient, url).also { attached ->
+                        LocalAppWebViewRegistry.register(appId, attached)
+                        currentControllerHandler(attached)
+                        attached.beginNavigation(url)
                     }
+                    tag = url
+                    loadUrl(url)
                 }
-                webViewClient = guardedClient
-                controller = LocalAppWebViewController(this, broker, guardedClient, url).also { attached ->
-                    LocalAppWebViewRegistry.register(appId, attached)
-                    currentControllerHandler(attached)
-                    attached.beginNavigation(url)
+            },
+            update = { view ->
+                if (view.tag != url) {
+                    view.tag = url
+                    controller?.beginNavigation(url)
+                    view.loadUrl(url)
                 }
-                tag = url
-                loadUrl(url)
-            }
-        },
-        update = { view ->
-            if (view.tag != url) {
-                view.tag = url
-                controller?.beginNavigation(url)
-                view.loadUrl(url)
-            }
-        },
-    )
+            },
+        )
+    }
 
     DisposableEffect(appId) {
         onDispose {

@@ -112,6 +112,10 @@ data class ChatState(
      * it assertable from a plain JVM reducer test.
      */
     val expandedToolCalls: Set<String> = emptySet(),
+    /** The widget the next prompt follows up on, shown above the composer. */
+    val visualizationChip: VisualizationContextChip? = null,
+    /** A widget's drafted follow-up, waiting for the composer to take it. */
+    val visualizationFollowup: VisualizationFollowup? = null,
 ) {
     /** True while a turn is in flight or a live executor is waiting for input. */
     val isStreaming: Boolean get() = streaming || liveTurnWaitingForUser

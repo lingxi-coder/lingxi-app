@@ -90,6 +90,17 @@ interface ConversationSource {
     fun submit(text: String, images: List<ImageRefDto>, turnId: Long): Flow<ReplyEvent> =
         submit(text, images)
 
+    /** Submit a prompt that follows up on an inline visualization. */
+    fun submit(
+        text: String,
+        images: List<ImageRefDto>,
+        turnId: Long,
+        visualizationContext: VisualizationRef?,
+    ): Flow<ReplyEvent> = submit(text, images, turnId)
+
+    /** Serves the dedicated visualization WebView; null without an engine. */
+    val visualizationHost: com.lingxi.code.bindings.runtime.VisualizationHost? get() = null
+
     /**
      * Cancel the in-flight turn (the composer's Stop affordance). Fires the
      * engine's `Cancel` command so the streaming turn terminates promptly; the

@@ -1,9 +1,7 @@
 import type {
-  AppEventDto,
   ClientCommand,
   ClientEvent,
   ListingKindDto,
-  PluginCommandDto,
 } from '@lingxi/bridge-client';
 
 export type DesktopDisposition = 'exposed' | 'host_private' | 'degraded' | 'not_applicable';
@@ -63,24 +61,6 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   task_stop: 'exposed',
   task_message: 'exposed',
   resume_workflow: 'not_applicable',
-  list_apps: 'not_applicable',
-  get_app_details: 'not_applicable',
-  create_app: 'not_applicable',
-  start_app: 'not_applicable',
-  stop_app: 'not_applicable',
-  restart_app: 'not_applicable',
-  execute_app_bridge_request: 'not_applicable',
-  resolve_app_ui_request: 'not_applicable',
-  resolve_app_capability_request: 'not_applicable',
-  resolve_app_dependency_change_confirmation: 'not_applicable',
-  resolve_app_profile_proposal: 'not_applicable',
-  resolve_app_runtime_profile_selection: 'not_applicable',
-  plugin_command: 'not_applicable',
-  reset_app_permissions: 'not_applicable',
-  list_app_sessions: 'not_applicable',
-  list_app_checkpoints: 'not_applicable',
-  restore_app_checkpoint: 'not_applicable',
-  delete_app: 'not_applicable',
   request_exit: 'not_applicable',
   update_settings: 'exposed',
   update_permission_rules: 'exposed',
@@ -196,13 +176,6 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   task_list_complete: 'exposed',
   workflow_resumed: 'degraded',
   commands_changed: 'exposed',
-  apps_changed: 'not_applicable',
-  app_event: 'not_applicable',
-  app_workflow_changed: 'not_applicable',
-  app_runtime_changed: 'not_applicable',
-  app_sessions_changed: 'not_applicable',
-  app_checkpoint_created: 'not_applicable',
-  app_operation_failed: 'not_applicable',
   coordinator_status: 'exposed',
   coordinator_worker: 'exposed',
   attachment: 'exposed',
@@ -213,42 +186,6 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   audio_cancel: 'host_private',
   audio_capabilities_changed: 'host_private',
 } as const satisfies Record<ClientEvent['type'], DesktopDisposition>;
-
-export const PLUGIN_COMMAND_DISPOSITIONS = {
-  set_enabled: 'not_applicable',
-  get_status: 'not_applicable',
-  get_inventory: 'not_applicable',
-  resolve_create_confirmation: 'not_applicable',
-  resolve_mcp_proposal_approval: 'not_applicable',
-  start_local_app_mcp_authoring: 'not_applicable',
-  set_local_app_mcp_enabled: 'not_applicable',
-  set_local_app_mcp_tool_enabled: 'not_applicable',
-  set_local_app_mcp_conversation_pinned: 'not_applicable',
-  get_managed_mcp_inventory: 'not_applicable',
-} as const satisfies Record<PluginCommandDto['type'], DesktopDisposition>;
-
-export const APP_EVENT_DISPOSITIONS = {
-  app_details_changed: 'not_applicable',
-  app_created: 'not_applicable',
-  app_record_changed: 'not_applicable',
-  app_profile_proposal: 'not_applicable',
-  app_bridge_response: 'not_applicable',
-  app_ui_request: 'not_applicable',
-  app_capability_requested: 'not_applicable',
-  app_dependency_change_confirmation_requested: 'not_applicable',
-  app_checkpoints_changed: 'not_applicable',
-  app_llm_activity_changed: 'not_applicable',
-  app_agent_event_posted: 'not_applicable',
-  app_background_task_changed: 'not_applicable',
-  app_bridge_stream_frame: 'not_applicable',
-  plugin_status_changed: 'not_applicable',
-  plugin_inventory_changed: 'not_applicable',
-  create_confirmation_requested: 'not_applicable',
-  mcp_proposal_approval_requested: 'not_applicable',
-  managed_mcp_inventory_changed: 'not_applicable',
-  verification_summary_changed: 'not_applicable',
-  local_app_operation_failed: 'not_applicable',
-} as const satisfies Record<AppEventDto['type'], DesktopDisposition>;
 
 /**
  * The runtime-checkable source of truth for the bounded, Desktop-facing

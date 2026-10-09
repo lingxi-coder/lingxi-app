@@ -1310,16 +1310,6 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
 }) {
   const t = useT();
   const inspectorOpen = bridge.runtimeCenter.inspectorOpen;
-  // Cost events include all completed calls; status seeds a resumed session
-  // before its next turn. usage_update only describes the latest API response.
-  // A status refresh after turn completion can arrive just after cost_update,
-  // so keep the greatest cumulative total visible while the two converge.
-  const costTokens = bridge.cost
-    ? bridge.cost.input_tokens + bridge.cost.output_tokens : null;
-  const statusTokens = bridge.desktop?.status
-    ? bridge.desktop.status.input_tokens + bridge.desktop.status.output_tokens : null;
-  const sessionTokens = !bridge.sessionLoading && (costTokens !== null || statusTokens !== null)
-    ? Math.max(costTokens ?? 0, statusTokens ?? 0) : null;
 
   const topbarActionTokens = {
     '--topbar-action-focus': t.surfaceHover,
@@ -1338,11 +1328,6 @@ export function BetaTopBar({ bridge, runtimeCenterOpen, onToggleRuntimeCenter, t
           <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
         </div>
       </div>
-      {sessionTokens !== null && (
-        <span className="mono desktop-topbar-usage" style={{ color: t.text4, fontSize: 9.5 }} title="Session total: input + output tokens">
-          {sessionTokens.toLocaleString()} tok
-        </span>
-      )}
       <button
         className="no-drag desktop-topbar-action"
         type="button"

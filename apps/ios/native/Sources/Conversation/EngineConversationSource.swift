@@ -2149,12 +2149,15 @@ final class EngineConversationSource: ConversationSource {
     private func applyAgentTranscript(
         sessionID: String,
         agentId: String,
-        messages: [MessageDto],
+        rows: [SessionAgentMessageRowDto],
         nextMessageIndex: UInt64? = nil,
         revision: UInt64 = 0
     ) {
         guard agentId != ConversationModel.mainAgentID else { return }
         guard sessionID == model.activeSessionId else { return }
+        // Deleted rows leave gaps in the host's numbering, so the position in
+        // the array is not the wire index.
+        let messages = rows.map(\.message)
         let watermark = nextMessageIndex ?? UInt64(messages.count)
         if let current = model.agentTranscripts[agentId],
            current.loaded,
@@ -2175,7 +2178,7 @@ final class EngineConversationSource: ConversationSource {
             sessionID: sessionID,
             identityPrefix: "\(sessionID)|agent|\(agentId)",
             occurrenceOffsets: [:],
-            wireIndices: messages.indices.map { Optional(UInt64($0)) }
+            wireIndices: rows.map { Optional($0.messageIndex) }
         )
         var transcript = ConversationAgentTranscript(
             messages: restored.messages,
@@ -3717,18 +3720,18 @@ final class EngineConversationSource: ConversationSource {
             applyAgentTranscript(
                 sessionID: sessionId,
                 agentId: agentId,
-                messages: messages,
+                rows: messages,
                 nextMessageIndex: nextMessageIndex,
                 revision: revision
             )
 
-        case let .sessionAgentMessage(sessionId, agentId, messageIndex, message):
+        case let .sessionAgentMessage(sessionId, agentId, row):
             guard sessionId == model.activeSessionId,
                   !model.sessionTransitionPending else { return }
             appendAgentMessage(
                 agentId: agentId,
-                message: message,
-                messageIndex: messageIndex
+                message: row.message,
+                messageIndex: row.messageIndex
             )
 
         case let .sessionStarted(sessionId, mode):

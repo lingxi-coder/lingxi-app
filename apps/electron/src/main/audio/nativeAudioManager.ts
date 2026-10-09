@@ -185,14 +185,6 @@ function audioOwnerFromSnapshotOwner(owner: NativeAudioOwner): AudioOwnerDto | n
     case 'session':
     case 'engine':
       return { type: 'session', session_id: owner.id };
-    case 'local_app': {
-      const separator = owner.id.lastIndexOf(':');
-      if (separator <= 0) return null;
-      const appId = owner.id.slice(0, separator);
-      const runtimeGeneration = Number(owner.id.slice(separator + 1));
-      if (!Number.isSafeInteger(runtimeGeneration) || runtimeGeneration < 0) return null;
-      return { type: 'local_app', app_id: appId, runtime_generation: runtimeGeneration };
-    }
     case 'ui':
     case 'system':
       return { type: owner.kind, instance_id: owner.id };
@@ -228,7 +220,6 @@ function audioIdentityKey(identity: AudioOperationIdDto): string {
 function audioOwnerKey(owner: AudioOwnerDto): string {
   switch (owner.type) {
     case 'session': return `session:${owner.session_id}`;
-    case 'local_app': return `local_app:${owner.app_id}:${owner.runtime_generation}`;
     case 'ui': return `ui:${owner.instance_id}`;
     case 'system': return `system:${owner.instance_id}`;
   }

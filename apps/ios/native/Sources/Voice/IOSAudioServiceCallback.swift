@@ -61,7 +61,6 @@ final class IOSAudioServiceCallbackAdapter: IosAudioService, @unchecked Sendable
     private static func localOwner(_ owner: AudioOwnerDto) -> IOSAudioOwner {
         switch owner {
         case let .session(sessionId): .session(sessionID: sessionId)
-        case let .localApp(appId, runtimeGeneration): .localApp(appID: appId, runtimeGeneration: runtimeGeneration)
         case let .ui(instanceId): .ui(instanceID: instanceId)
         case let .system(instanceId): .system(instanceID: instanceId)
         }

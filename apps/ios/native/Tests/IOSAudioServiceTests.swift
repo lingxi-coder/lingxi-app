@@ -59,7 +59,7 @@ final class IOSAudioServiceTests: XCTestCase {
     func testEndOwnerFencesSameOwnerAdmissionsUntilCleanupDrains() async {
         let recorder = EndOwnerGateRecordingDriver()
         let service = IOSAudioService(recorder: recorder, serviceEpoch: 81, onInvalidation: { _ in })
-        let owner = IOSAudioOwner.localApp(appID: "closing-app", runtimeGeneration: 4)
+        let owner = IOSAudioOwner.system(instanceID: "closing-app")
         let started = await service.execute(request(
             identity: identity(generation: 1, epoch: 81),
             owner: owner,
@@ -106,7 +106,7 @@ final class IOSAudioServiceTests: XCTestCase {
             serviceEpoch: 52,
             onInvalidation: { _ in }
         )
-        let owner = IOSAudioOwner.localApp(appID: "demo", runtimeGeneration: 7)
+        let owner = IOSAudioOwner.system(instanceID: "demo")
         let operationIdentity = identity(generation: 9, epoch: 52)
         let operation = Task { @MainActor in
             await service.execute(request(
@@ -334,7 +334,7 @@ final class IOSAudioServiceTests: XCTestCase {
             serviceEpoch: 56,
             onInvalidation: { _ in }
         )
-        let oldOwner = IOSAudioOwner.localApp(appID: "old-app", runtimeGeneration: 3)
+        let oldOwner = IOSAudioOwner.system(instanceID: "old-app")
         let newOwner = IOSAudioOwner.session(sessionID: "new-session")
         let oldStart = Task { @MainActor in
             await service.execute(request(

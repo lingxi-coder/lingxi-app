@@ -148,7 +148,6 @@ export interface AudioOperationIdDto {
 /** Trusted host context; model arguments never supply this identity. */
 export type AudioOwnerDto =
   | { type: 'session'; session_id: string }
-  | { type: 'local_app'; app_id: string; runtime_generation: number }
   | { type: 'ui'; instance_id: string }
   | { type: 'system'; instance_id: string };
 

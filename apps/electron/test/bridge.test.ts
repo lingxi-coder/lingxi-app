@@ -2042,7 +2042,7 @@ test('unexpected bridge close cancels pending audio and ends only its accepted o
   (runtime as any).wireClient(client, 4);
   const request = {
     identity: { id: 'close-pending', generation: 1, service_epoch: 3 },
-    owner: { type: 'local_app', app_id: 'desktop-companion', runtime_generation: 7 },
+    owner: { type: 'system', instance_id: 'desktop-companion' },
     max_payload_bytes: 1_000_000,
     operation: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' },
   };
@@ -2055,7 +2055,7 @@ test('unexpected bridge close cancels pending audio and ends only its accepted o
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.ok(calls.some((call: any) => call.cancel?.id === request.identity.id));
-  assert.ok(calls.some((call: any) => call.end?.type === 'local_app' && call.end.runtime_generation === 7));
+  assert.ok(calls.some((call: any) => call.end?.type === 'system' && call.end.instance_id === 'desktop-companion'));
   assert.deepEqual(commands, [], 'a disconnected bridge must not receive a late success response');
   await runtime.dispose();
 });

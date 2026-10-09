@@ -72,7 +72,6 @@ test('input level events carry only a bounded real microphone amplitude', () => 
 test('snapshots and events accept every engine owner kind emitted by the Swift helper', () => {
   const owners = [
     { legacy: { kind: 'session', id: 'session-1' }, engine: { type: 'session', session_id: 'session-1' } },
-    { legacy: { kind: 'local_app', id: 'app-1:7' }, engine: { type: 'local_app', app_id: 'app-1', runtime_generation: 7 } },
     { legacy: { kind: 'ui', id: 'voice-preview' }, engine: { type: 'ui', instance_id: 'voice-preview' } },
     { legacy: { kind: 'system', id: 'desktop' }, engine: { type: 'system', instance_id: 'desktop' } },
   ] as const;
@@ -294,7 +293,7 @@ test('an invalid audio helper envelope fails the helper instead of escaping its 
 test('audio operation telemetry preserves bounded payload-free trace and resource counts', () => {
   const trace = {
     identity: { id: '00000000-0000-4000-8000-000000000001', generation: 4, service_epoch: 7 },
-    owner: { type: 'local_app', app_id: 'app-1', runtime_generation: 19 },
+    owner: { type: 'ui', instance_id: 'voice-preview' },
     operation: 'synthesize',
     configurationRevision: 12,
     requestedSource: 'automatic',

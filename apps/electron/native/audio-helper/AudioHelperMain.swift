@@ -184,22 +184,17 @@ final class AudioCancellationFlag: @unchecked Sendable {
 struct HelperAudioOwner: Codable, Equatable, Sendable {
     let type: String
     let sessionID: String?
-    let appID: String?
-    let runtimeGeneration: UInt64?
     let instanceID: String?
 
     enum CodingKeys: String, CodingKey {
         case type
         case sessionID = "session_id"
-        case appID = "app_id"
-        case runtimeGeneration = "runtime_generation"
         case instanceID = "instance_id"
     }
 
     var helperOwner: HelperOwner {
         switch type {
         case "session": return HelperOwner(kind: type, id: sessionID ?? "")
-        case "local_app": return HelperOwner(kind: type, id: "\(appID ?? ""):\(runtimeGeneration ?? 0)")
         default: return HelperOwner(kind: type, id: instanceID ?? "")
         }
     }
@@ -219,7 +214,6 @@ func helperAudioIdentityKey(_ identity: HelperAudioOperationIdentity) -> String 
 func helperAudioOwnerKey(_ owner: HelperAudioOwner) -> String {
     switch owner.type {
     case "session": return "session:\(owner.sessionID ?? "")"
-    case "local_app": return "local_app:\(owner.appID ?? ""):\(owner.runtimeGeneration ?? 0)"
     default: return "\(owner.type):\(owner.instanceID ?? "")"
     }
 }
@@ -233,14 +227,10 @@ func parseHelperAudioOwner(_ value: [String: Any]) -> HelperAudioOwner? {
     switch type {
     case "session":
         guard let sessionID = value["session_id"] as? String else { return nil }
-        return HelperAudioOwner(type: type, sessionID: sessionID, appID: nil, runtimeGeneration: nil, instanceID: nil)
-    case "local_app":
-        guard let appID = value["app_id"] as? String,
-              let generation = (value["runtime_generation"] as? NSNumber)?.uint64Value else { return nil }
-        return HelperAudioOwner(type: type, sessionID: nil, appID: appID, runtimeGeneration: generation, instanceID: nil)
+        return HelperAudioOwner(type: type, sessionID: sessionID, instanceID: nil)
     case "ui", "system":
         guard let instanceID = value["instance_id"] as? String else { return nil }
-        return HelperAudioOwner(type: type, sessionID: nil, appID: nil, runtimeGeneration: nil, instanceID: instanceID)
+        return HelperAudioOwner(type: type, sessionID: nil, instanceID: instanceID)
     default:
         return nil
     }

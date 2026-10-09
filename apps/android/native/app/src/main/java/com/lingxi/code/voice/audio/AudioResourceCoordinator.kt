@@ -12,14 +12,11 @@ import kotlinx.coroutines.withContext
 internal data class AudioOwnerKey(
     val kind: Kind,
     val id: String,
-    val generation: Long? = null,
 ) {
-    enum class Kind { Session, LocalApp, Ui, System }
+    enum class Kind { Session, Ui, System }
 
     companion object {
         fun session(sessionId: String) = AudioOwnerKey(Kind.Session, sessionId)
-        fun localApp(appId: String, runtimeGeneration: Long) =
-            AudioOwnerKey(Kind.LocalApp, appId, runtimeGeneration)
         fun ui(instanceId: String) = AudioOwnerKey(Kind.Ui, instanceId)
         fun system(instanceId: String) = AudioOwnerKey(Kind.System, instanceId)
     }

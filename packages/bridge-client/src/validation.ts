@@ -268,13 +268,6 @@ function audioOwner(value: unknown): AudioOwnerDto {
     case 'session':
       exactKeys(input, ['type', 'session_id'], 'audio owner');
       return { type: 'session', session_id: string(input['session_id'], 'audio session id') };
-    case 'local_app':
-      exactKeys(input, ['type', 'app_id', 'runtime_generation'], 'audio owner');
-      return {
-        type: 'local_app',
-        app_id: string(input['app_id'], 'audio app id'),
-        runtime_generation: integer(input['runtime_generation'], 'audio app runtime generation'),
-      };
     case 'ui':
     case 'system':
       exactKeys(input, ['type', 'instance_id'], 'audio owner');

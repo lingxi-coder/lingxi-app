@@ -8,14 +8,12 @@ struct IOSAudioOperationIdentity: Hashable, Sendable {
 
 enum IOSAudioOwner: Hashable, Sendable {
     case session(sessionID: String)
-    case localApp(appID: String, runtimeGeneration: UInt64)
     case ui(instanceID: String)
     case system(instanceID: String)
 
     var stableKey: String {
         switch self {
         case let .session(sessionID): "session:\(sessionID)"
-        case let .localApp(appID, generation): "local-app:\(appID):\(generation)"
         case let .ui(instanceID): "ui:\(instanceID)"
         case let .system(instanceID): "system:\(instanceID)"
         }

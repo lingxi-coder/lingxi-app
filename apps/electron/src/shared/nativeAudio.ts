@@ -58,7 +58,7 @@ export interface NativeAudioError {
 }
 
 export interface NativeAudioOwner {
-  kind: 'dictation' | 'flow' | 'preview' | 'autoplay' | 'engine' | 'session' | 'local_app' | 'ui' | 'system';
+  kind: 'dictation' | 'flow' | 'preview' | 'autoplay' | 'engine' | 'session' | 'ui' | 'system';
   id: string;
 }
 
@@ -272,7 +272,6 @@ function validateOwner(value: unknown): NativeAudioOwner {
     && kind !== 'autoplay'
     && kind !== 'engine'
     && kind !== 'session'
-    && kind !== 'local_app'
     && kind !== 'ui'
     && kind !== 'system'
   ) {
@@ -650,13 +649,6 @@ function validateAudioOwnerDto(value: unknown): AudioOwnerDto {
     case 'session':
       exactKeys(input, ['type', 'session_id'], 'audio operation owner');
       return { type, session_id: boundedString(input['session_id'], 'audio session id', 128) };
-    case 'local_app':
-      exactKeys(input, ['type', 'app_id', 'runtime_generation'], 'audio operation owner');
-      return {
-        type,
-        app_id: boundedString(input['app_id'], 'audio app id', 128),
-        runtime_generation: boundedInteger(input['runtime_generation'], 'audio app runtime generation', 0, Number.MAX_SAFE_INTEGER),
-      };
     case 'ui':
     case 'system':
       exactKeys(input, ['type', 'instance_id'], 'audio operation owner');

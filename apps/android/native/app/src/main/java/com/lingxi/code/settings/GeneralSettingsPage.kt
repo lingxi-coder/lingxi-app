@@ -27,7 +27,7 @@ internal fun GeneralSettingsPage(onNavigate: (String) -> Unit, onReplayOnboardin
         "Linux runtime" to SettingsRoutes.LINUX_RUNTIME,
         "Computer use" to SettingsRoutes.COMPUTER_USE,
         "Scheduled tasks" to SettingsRoutes.CRON,
-        "Bundled skills & local apps" to SettingsRoutes.SKILLS,
+        "Skills" to SettingsRoutes.SKILLS,
     )
     SettingsSection(label = settingsLabel("Device & mobile capabilities")) {
         pages.filter { it.second != SettingsRoutes.COMPUTER_USE || com.lingxi.code.computeruse.ComputerUseFeatureProvider.available }.forEach { (title, route) -> TextButton(onClick = { onNavigate(route) }) { Text(settingsLabel(title)) } }

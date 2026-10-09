@@ -27,8 +27,6 @@ SDK_ROOT="$(python3 "${REPO_ROOT}/scripts/lib/mobile_linux_source.py" --root)"
 NATIVE_ROOT="${ANDROID_DIR}/app/build/mobileLinuxNative/${VARIANT}/native-support"
 OUTPUT="${ANDROID_DIR}/app/build/generated/mobileLinux/${VARIANT}/assets/mobile-linux"
 
-bash "${SCRIPT_DIR}/verify-local-app-supply-chain.sh" --release --apk-dir "${APK_DIR}"
-
 "${SCRIPT_DIR}/verify-mobile-linux-native.sh" --variant "${VARIANT}"
 
 exec python3 "${SCRIPT_DIR}/stage-mobile-linux-assets.py" \

@@ -44,7 +44,7 @@ class NativeSettingsEngineRoundtripTest {
                         apiBase = "https://invalid.example", apiKey = "", model = "", sessionMode = SessionModeDto.CODE,
                         visionDelegationEnabled = false, appFilesRoot = root.absolutePath, projectCwd = workspace.absolutePath,
                         providerConfig = AndroidProviderConfigFfi("{}", """{"mobileEnabledProfiles":[]}"""),
-                        mobileLinux = null, localAppsFullRuntime = false, localAppsRuntimeRoot = null,
+                        mobileLinux = null,
                         physicalMemoryBytes = 0u, hostEnvironment = null),
                     listener = object : AndroidEventListener {
                         override suspend fun onEvent(event: ClientEvent) {

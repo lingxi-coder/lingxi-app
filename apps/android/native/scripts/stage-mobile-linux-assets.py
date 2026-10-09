@@ -106,7 +106,6 @@ def stage(source, output, sdk, runtime, native):
         }
         (temporary / "mobile-linux-pins.json").write_text(json.dumps(compatibility_pins, indent=2) + "\n")
         shutil.copy2(pins_path, temporary / "runtime-pins.json")
-        shutil.copy2(runtime / "docs/mobile-linux/local-app-runtime-pins.json", temporary / "local-app-runtime-pins.json")
         licenses = temporary / "licenses"
         licenses.mkdir()
         shutil.copy2(sdk / "docs/mobile-linux/LICENSES/NOTICE.md", licenses / "NOTICE.md")

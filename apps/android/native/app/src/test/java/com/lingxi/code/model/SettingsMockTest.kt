@@ -54,51 +54,6 @@ class SettingsMockTest {
         assertTrue("every skill has >= 1 trigger", skills.all { it.triggers.isNotEmpty() })
     }
 
-    @Test
-    fun bundledSkills_areTheEightLocalAppSkills() {
-        val skills = SettingsMock.bundledSkills()
-        assertEquals(8, skills.size)
-        assertEquals(
-            listOf(
-                "create-local-app",
-                "frontend-design",
-                "ionic-react-local-app",
-                "canvas-2d-local-app",
-                "threejs-local-app",
-                "frontend-qa",
-                "accessibility",
-                "react-best-practices",
-            ),
-            skills.map { it.id },
-        )
-        assertTrue(skills.all { it.builtin && it.enabled && it.author == "官方" })
-        assertTrue(skills.all { it.triggers == listOf("/${it.id}") })
-    }
-
-    @Test
-    fun bundledSkills_resolveEveryDescriptionThroughTheStringCatalog() {
-        // `SkillsPages` renders `desc` VERBATIM. A resolver-less roster meant an
-        // English / Japanese / Korean / zh-TW device read Simplified Chinese in
-        // Settings → Skills, because no `settings_skill_*` key was ever consulted.
-        val requested = mutableListOf<Int>()
-        val skills = SettingsMock.bundledSkills { id, _ ->
-            requested += id
-            "localized-$id"
-        }
-        assertEquals(
-            "every bundled description must go through a string resource",
-            skills.size,
-            requested.size,
-        )
-        assertEquals(skills.size, requested.toSet().size)
-        assertTrue(skills.all { it.desc == "localized-${requested[skills.indexOf(it)]}" })
-        assertTrue("no description may be a hardcoded literal", skills.none { it.desc.isBlank() })
-
-        // The NAME stays the canonical slug — it is the identifier the
-        // `/create-local-app` trigger and the engine's registry both use.
-        assertTrue(skills.all { it.name == it.id })
-    }
-
     // --- MCP servers ------------------------------------------------------
 
     @Test

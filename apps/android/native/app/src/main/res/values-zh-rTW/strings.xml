@@ -1413,14 +1413,6 @@
     <string name="settings_shortcuts_actions_count">4 個動作</string>
     <string name="settings_shortcuts_footer">可在系統快捷指令中組合分享表單、剪貼簿、檔案或其他 App 的輸出，再交給靈犀。</string>
     <string name="settings_shortcuts_sub">檢視靈犀提供的動作</string>
-    <string name="settings_skill_bundled_accessibility_desc">檢查語意、鍵盤、觸控、對比度和動態字體</string>
-    <string name="settings_skill_bundled_canvas_2d_local_app_desc">以確定性的 Canvas 2D 場景和原生感覆蓋層建置本地應用</string>
-    <string name="settings_skill_bundled_create_local_app_desc">先與你確認需求與介面，獲准後按計畫搭建並建置本地應用</string>
-    <string name="settings_skill_bundled_frontend_design_desc">為目標平台和 form factor 設計原生前端方向</string>
-    <string name="settings_skill_bundled_frontend_qa_desc">用 Browser 與原生 WebView 驗證介面和互動</string>
-    <string name="settings_skill_bundled_ionic_react_local_app_desc">在固定的 Ionic React 腳手架中實作本地應用，遵守原生 WebView 橋接限制</string>
-    <string name="settings_skill_bundled_react_best_practices_desc">檢查 React 狀態、效果、效能和完整狀態</string>
-    <string name="settings_skill_bundled_threejs_local_app_desc">使用 Three.js 建置本地應用，明確處理生命週期、輸入和資源釋放</string>
     <string name="settings_skill_seed_code_review_desc">對貼上的 diff 給出嚴格 review</string>
     <string name="settings_skill_seed_code_review_name">程式碼評審</string>
     <string name="settings_skill_seed_code_review_trigger_2">拖入 .diff</string>

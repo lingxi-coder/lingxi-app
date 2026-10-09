@@ -1413,14 +1413,6 @@
     <string name="settings_shortcuts_actions_count">4 個のアクション</string>
     <string name="settings_shortcuts_footer">システムのショートカットで共有フォーム・クリップボード・ファイル・他アプリの出力を組み合わせ、灵犀に渡すことができます。</string>
     <string name="settings_shortcuts_sub">灵犀が提供するアクションを確認</string>
-    <string name="settings_skill_bundled_accessibility_desc">セマンティクス、キーボード操作、タッチターゲット、コントラスト、動的文字サイズを確認</string>
-    <string name="settings_skill_bundled_canvas_2d_local_app_desc">決定的な Canvas 2D シーンとネイティブ風オーバーレイでローカルアプリを構築</string>
-    <string name="settings_skill_bundled_create_local_app_desc">要件とUIをあなたと確認し、承認された計画に沿ってローカルアプリを構築・ビルド</string>
-    <string name="settings_skill_bundled_frontend_design_desc">対象プラットフォームとフォームファクターに合わせてネイティブフロントエンドの方向性を設計</string>
-    <string name="settings_skill_bundled_frontend_qa_desc">Browser とネイティブ WebView で UI と操作を検証</string>
-    <string name="settings_skill_bundled_ionic_react_local_app_desc">固定の Ionic React スキャフォールドで、ネイティブ WebView ブリッジ対応のローカルアプリを実装</string>
-    <string name="settings_skill_bundled_react_best_practices_desc">React の状態、エフェクト、パフォーマンス、UI 状態の網羅性を確認</string>
-    <string name="settings_skill_bundled_threejs_local_app_desc">Three.js シーンでローカルアプリを構築し、ライフサイクル、入力、リソース破棄を明示的に管理</string>
     <string name="settings_skill_seed_code_review_desc">貼り付けられた diff に対して厳密なレビューを行う</string>
     <string name="settings_skill_seed_code_review_name">コードレビュー</string>
     <string name="settings_skill_seed_code_review_trigger_2">.diff をドラッグ＆ドロップ</string>

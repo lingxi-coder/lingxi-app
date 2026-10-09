@@ -72,7 +72,6 @@ import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.DrawerProductionData
 import com.lingxi.code.drawer.DrawerSection
 import com.lingxi.code.drawer.rememberDrawerUiState
-import com.lingxi.code.localapps.disableLocalAppPlugin
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.CatalogModelDetails
@@ -405,7 +404,6 @@ fun RootScreen(
     fun projectSnapshotForScope(scope: ConversationScope): ProjectSnapshot? = when (scope) {
         ConversationScope.Global, ConversationScope.Scheduled -> null
         is ConversationScope.Project -> projectState.projects.firstOrNull { it.record.id == scope.projectId }
-        is ConversationScope.LocalApp -> null
     }
 
     fun workspaceForScope(scope: ConversationScope) = when (scope) {
@@ -416,8 +414,6 @@ fun RootScreen(
             guestPath = "/workspace/global",
         )
         is ConversationScope.Project -> projectSnapshotForScope(scope)?.workspace
-        // Local App workspaces are no longer surfaced by this client.
-        is ConversationScope.LocalApp -> null
     }
 
     fun restorableSession(
@@ -454,7 +450,6 @@ fun RootScreen(
                     modifiedAtEpochSeconds = it.updatedAtEpochMillis / 1000L,
                 )
             }
-        is ConversationScope.LocalApp -> null
     }
 
     DisposableEffect(chatViewModel, context) {
@@ -517,13 +512,13 @@ fun RootScreen(
     // directly and never falls back to mock sessions.
     val sessionState by chatViewModel.sessions.collectAsState()
     val sourceProjectId by chatViewModel.sourceProjectId.collectAsState()
-    // Which workspace the live engine is bound to (Global / Project / LocalApp)
-    // — the generalization of sourceProjectId for the local-app scopes.
+    // Which workspace the live engine is bound to (Global / Scheduled / Project)
+    // — the generalization of sourceProjectId.
     val sourceScope by chatViewModel.sourceScope.collectAsState()
     // Durable per-scope conversation state (last-active session + draft),
-    // keyed `global` / `project.<id>` / `app.<id>`. Project/global last-active
-    // stays with ProjectStore; this store carries the app scopes and records
-    // which scope was active across process death.
+    // keyed `global` / `scheduled` / `project.<id>`. Project/global last-active
+    // stays with ProjectStore; this store records which scope was active
+    // across process death.
 
     LaunchedEffect(scopeStore) {
         val restoredMode = scopeStore.readActiveMode() ?: SessionMode.Code
@@ -688,12 +683,6 @@ fun RootScreen(
     LaunchedEffect(engineMcp) {
         resolvedSettingsStore.setMcpServers(engineMcp)
     }
-    // This client has no Local App UI, so the engine's Local App plugin is switched off on every
-    // (re)connect: its tools would otherwise be offered with nothing to answer an approval or show a result.
-    LaunchedEffect(currentEngineSource, reconnectToken) {
-        currentEngineSource.disableLocalAppPlugin()
-    }
-
     fun currentEngineMode(): SessionMode = currentEngineSource.recoverySpec?.sessionMode ?: SessionMode.Code
 
     fun sourceMatches(scope: ConversationScope, mode: SessionMode): Boolean = isBoundToScopeMode(
@@ -798,10 +787,8 @@ fun RootScreen(
 
     /**
      * Transactionally rebind the conversation engine to [engineScope]. For a
-     * Project scope [project] supplies the workspace snapshot (as before); a
-     * LocalApp scope resolves its `apps/<id>/workspace` directory against the
-     * engine data root exactly the way the code browser does; Global binds no
-     * workspace. The active scope is persisted per-scope alongside the
+     * Project scope [project] supplies the workspace snapshot (as before);
+     * Global binds no workspace. The active scope is persisted per-scope alongside the
      * project store's active-project index.
      */
     suspend fun switchEngineScope(
@@ -837,7 +824,6 @@ fun RootScreen(
                         ConversationScope.Global -> null
                         ConversationScope.Scheduled -> workspaceForScope(engineScope)
                         is ConversationScope.Project -> project?.workspace
-                        is ConversationScope.LocalApp -> workspaceForScope(engineScope)
                     },
                     workspaceKey = engineScope.persistenceKey(),
                     sessionMode = sessionModeOverride,
@@ -1132,8 +1118,7 @@ fun RootScreen(
         if (
             !projectState.loading &&
                 project != null &&
-                sourceProjectId == null &&
-                chatViewModel.sourceScope.value !is ConversationScope.LocalApp
+                sourceProjectId == null
         ) {
             val scopedLastActiveSessionId = scopeStore.read(
                 ConversationScope.Project(project.record.id).sessionStateKey(activeSessionMode),
@@ -1194,7 +1179,7 @@ fun RootScreen(
     ) {
         if (
             sessionState.phase == SessionCatalogPhase.Ready &&
-            sourceScope !is ConversationScope.LocalApp && sourceScope != ConversationScope.Scheduled
+            sourceScope != ConversationScope.Scheduled
         ) {
             val provisionalSessionMayNotBeListed =
                 state.isNew &&
@@ -1225,7 +1210,7 @@ fun RootScreen(
             state.messages.any { it.role == com.lingxi.code.model.Role.User } &&
             state.session.id != "new" &&
             (if (sourceProjectId == null) projectState.globalSessions else projectState.projects.firstOrNull { it.record.id == sourceProjectId }?.sessions.orEmpty()).none { it.sessionId == state.session.id && it.messageCount > 0 } &&
-            sourceScope !is ConversationScope.LocalApp && sourceScope != ConversationScope.Scheduled
+            sourceScope != ConversationScope.Scheduled
         ) {
             runCatching {
                 projectStore.recordStartedSession(
@@ -1325,7 +1310,6 @@ fun RootScreen(
                         modifiedAtEpochSeconds = it.updatedAtEpochMillis / 1000L,
                     )
                 }
-            is ConversationScope.LocalApp -> null
         }
         return when (scope) {
             ConversationScope.Scheduled -> SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
@@ -1339,7 +1323,6 @@ fun RootScreen(
             } else {
                 SessionCatalogLookup(SessionCatalogLookupState.Pending)
             }
-            is ConversationScope.LocalApp -> SessionCatalogLookup(SessionCatalogLookupState.Ready, row)
         }
     }
     var restoredModeSessionKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -1560,7 +1543,7 @@ fun RootScreen(
                             globalDrawerSessions.rows.firstOrNull { it.uuid == uuid }?.let { row ->
                                 val targetScope = if (scheduledSessionRows.any { it.uuid == uuid }) ConversationScope.Scheduled else ConversationScope.Global
                                 // Resume directly only when the live engine IS
-                                // the global scope — a Project OR LocalApp
+                                // the global scope — a Project
                                 // scope must rebind first, or the session would
                                 // resume against the wrong cwd.
                                 if (sourceMatches(targetScope, row.mode)) {

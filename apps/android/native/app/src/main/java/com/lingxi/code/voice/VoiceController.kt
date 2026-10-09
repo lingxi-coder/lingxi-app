@@ -138,8 +138,7 @@ private fun androidHostEnvironment(
  * Resolves a localized string for voice-package code that runs OUTSIDE a
  * `@Composable` body — [VoiceCapture] — and therefore cannot call
  * `stringResource()`. Mirrors `ConversationStrings`
- * (conversation/ConversationSource.kt) and `LocalAppsStrings`
- * (localapps/LocalAppsContract.kt): the fallback keeps `VoiceCaptureLifecycleTest`
+ * (conversation/ConversationSource.kt): the fallback keeps `VoiceCaptureLifecycleTest`
  * — which constructs [VoiceCapture] directly with a non-functional
  * `ContextWrapper(null)` — passing unmodified (calling `context.getString`
  * there would NPE, since that test's [android.content.Context] has no base to
@@ -166,7 +165,7 @@ fun voiceStrings(context: Context): VoiceStrings =
  * Two concerns live here:
  *  1. [buildVoiceEngine] constructs the real [MobileEngineHandle] through the
  *     generated UniFFI `buildAndroidEngine(...)` with one app-scoped audio
- *     callback. UI, Flow, tool, Local App, and Computer Use requests all share
+ *     callback. UI, Flow, tool, and Computer Use requests all share
  *     the same service and resource arbitration. On a non-Android host (and if
  *     the cdylib fails to load) it returns `null` rather than crashing the shell.
  *  2. [rememberVoiceCapture] routes hold-to-talk through the app-scoped audio
@@ -238,8 +237,8 @@ fun buildVoiceEngine(
     // bridges this onto `traits::Clipboard`, lighting up `tool-clipboard`
     // on-device (engine-driven; no UI affordance).
     val clipboard = AndroidClipboardAdapter()
-    // Device-location: the local-app capability gate authorizes the operation
-    // before this adapter requests Android's fine/coarse runtime permission.
+    // Device-location: the engine authorizes the operation before this adapter
+    // requests Android's fine/coarse runtime permission.
     val location = AndroidLocationAdapter()
     val listener = object : AndroidEventListener {
         override suspend fun onEvent(event: ClientEvent) {
@@ -288,8 +287,6 @@ fun buildVoiceEngine(
                     mode = linuxRuntimeMode,
                     workspace = projectWorkspace,
                 ),
-                localAppsFullRuntime = BuildConfig.MOBILE_LINUX_FULL,
-                localAppsRuntimeRoot = null,
                 physicalMemoryBytes = runCatching {
                     val memoryInfo = ActivityManager.MemoryInfo()
                     val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager

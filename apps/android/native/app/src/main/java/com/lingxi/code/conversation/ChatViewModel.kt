@@ -146,7 +146,7 @@ class ChatViewModel(
 
     /**
      * The conversation scope the CURRENT engine source is bound to — Global,
-     * a Project workspace, or a LocalApp workspace. The generalization of
+     * Scheduled, or a Project workspace. The generalization of
      * [sourceProjectId] (which stays for the project-only flows): the drawer
      * and the scope-restore effects branch on this.
      */
@@ -156,9 +156,9 @@ class ChatViewModel(
     /**
      * Current engine connection for profile-global feature stores.
      *
-     * Local Apps collects this flow with `collectLatest`; switching Project or
-     * Provider therefore cancels the old event binding, attaches to the new
-     * source, and requests authoritative app/template snapshots again.
+     * Feature stores collect this flow with `collectLatest`; switching Project
+     * or Provider therefore cancels the old event binding and attaches to the
+     * new source.
      */
     private val _engineSource = MutableStateFlow(source)
     internal val engineSource: StateFlow<ConversationSource> = _engineSource.asStateFlow()
@@ -1326,8 +1326,8 @@ class ChatViewModel(
         allowInactiveWaitingRecovery: Boolean = false,
         /**
          * The scope the replacement source is bound to. Defaults to the
-         * project/global split [projectId] already implies so existing project
-         * flows are untouched; local-app switches pass their scope explicitly.
+         * project/global split [projectId] already implies; callers binding
+         * the Scheduled scope pass it explicitly.
          */
         scope: ConversationScope = projectId?.let { ConversationScope.Project(it) }
             ?: ConversationScope.Global,
@@ -1934,7 +1934,7 @@ class ChatViewModel(
 
         if (isManualCompactCommand(trimmed)) {
             if (images.isNotEmpty() || _state.value.streaming) return
-            if (_sourceScope.value !is ConversationScope.LocalApp) savedState?.set(KEY_DRAFT, "")
+            savedState?.set(KEY_DRAFT, "")
             _state.update {
                 it.copy(
                     isNew = false,
@@ -1967,9 +1967,7 @@ class ChatViewModel(
         val visualizationChip = _state.value.visualizationChip
 
         if (_state.value.streaming) {
-            if (_sourceScope.value !is ConversationScope.LocalApp) {
-                savedState?.set(KEY_DRAFT, "")
-            }
+            savedState?.set(KEY_DRAFT, "")
             _state.update {
                 it.copy(
                     isNew = false,
@@ -2020,12 +2018,8 @@ class ChatViewModel(
         durableTurnUiSequence = 0L
         pendingRecoveredReplayAckTurnId = null
         currentTurnOrigin = origin
-        if (_sourceScope.value !is ConversationScope.LocalApp) {
-            // The draft was just sent — clear the persisted copy. App scopes
-            // keep their drafts in the per-scope store (RootScreen wires it),
-            // so an app-scope send must not clear the project/global slot.
-            savedState?.set(KEY_DRAFT, "")
-        }
+        // The draft was just sent — clear the persisted copy.
+        savedState?.set(KEY_DRAFT, "")
         _state.update {
             it.copy(
                 isNew = false,

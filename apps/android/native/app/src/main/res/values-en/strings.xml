@@ -1413,14 +1413,6 @@
     <string name="settings_shortcuts_actions_count">4 actions</string>
     <string name="settings_shortcuts_footer">Combine share sheets, clipboard, files, or output from other apps in system Shortcuts, then hand it off to Lingxi.</string>
     <string name="settings_shortcuts_sub">View the actions Lingxi provides</string>
-    <string name="settings_skill_bundled_accessibility_desc">Checks semantics, keyboard access, touch targets, contrast, and dynamic type</string>
-    <string name="settings_skill_bundled_canvas_2d_local_app_desc">Builds local apps around a deterministic Canvas 2D scene with native-feeling overlays</string>
-    <string name="settings_skill_bundled_create_local_app_desc">Confirms the requirements and UI with you, then scaffolds and builds the local app once you approve the plan</string>
-    <string name="settings_skill_bundled_frontend_design_desc">Designs a native frontend direction for the target platform and form factor</string>
-    <string name="settings_skill_bundled_frontend_qa_desc">Validates UI and interactions with Browser and the native WebView</string>
-    <string name="settings_skill_bundled_ionic_react_local_app_desc">Builds local apps in the pinned Ionic React scaffold with the native WebView bridge</string>
-    <string name="settings_skill_bundled_react_best_practices_desc">Checks React state, effects, performance, and complete UI states</string>
-    <string name="settings_skill_bundled_threejs_local_app_desc">Builds local apps with Three.js scenes and explicit lifecycle, input, and disposal rules</string>
     <string name="settings_skill_seed_code_review_desc">Gives a strict review of a pasted diff</string>
     <string name="settings_skill_seed_code_review_name">Code Review</string>
     <string name="settings_skill_seed_code_review_trigger_2">Drop a .diff file</string>

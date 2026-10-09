@@ -56,7 +56,7 @@ data class SettingsUiState(
     val voiceSaveError: String? = null,
     val voiceCapability: VoiceCapabilitySnapshot = VoiceCapabilitySnapshot(),
     val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
-    val skills: List<Skill> = SettingsMock.bundledSkills(),
+    val skills: List<Skill> = emptyList(),
     val mcpServers: List<MCPServer> = SettingsMock.mcpServers(),
     val dream: DreamConfig = DreamConfig(),
     val language: String = "zh-CN",
@@ -109,8 +109,7 @@ class SettingsStore(
 ) : ViewModel() {
     /**
      * Adapts [resolveString] (empty-string in tests, real `Context.getString`
-     * in production — see the factory below) to [SettingsMock.bundledSkills]/
-     * [SettingsMock.mcpServers]'s (id, fallback) shape: falls back to the
+     * in production — see the factory below) to [SettingsMock.mcpServers]'s (id, fallback) shape: falls back to the
      * literal zh-Hans copy whenever [resolveString] has nothing (i.e. every
      * JVM test that constructs [SettingsStore] with no [Context] at all).
      */
@@ -133,7 +132,6 @@ class SettingsStore(
                 voiceRevision = initialAudioConfiguration?.snapshot?.revision ?: 0,
                 voiceSaveError = initialAudioConfiguration?.persistenceError,
                 notifs = notifRepo?.load() ?: NotifConfig(),
-                skills = SettingsMock.bundledSkills(::resolveWithFallback),
                 mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
                 dream = DreamConfig(
                     lastRun = resolveWithFallback(
@@ -150,7 +148,6 @@ class SettingsStore(
             notifs = notifRepo?.load() ?: NotifConfig(),
             permissionMode = initialPermissionMode,
             effectivePermissionMode = initialPermissionMode,
-            skills = SettingsMock.bundledSkills(::resolveWithFallback),
             mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
             dream = DreamConfig(
                 lastRun = resolveWithFallback(

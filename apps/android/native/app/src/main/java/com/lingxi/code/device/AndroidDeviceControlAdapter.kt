@@ -19,7 +19,7 @@ import com.lingxi.code.bindings.android.DeviceControlFfiException
 import org.json.JSONObject
 import org.json.JSONArray
 
-/** Process-global Android implementation of Local App device controls. */
+/** Process-global Android implementation of the engine's device controls. */
 object AndroidDeviceControlController {
     private class Host(val context: Context, val permissions: DeviceReadPermissionController)
 

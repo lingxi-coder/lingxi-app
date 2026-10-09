@@ -196,8 +196,6 @@ private fun WorkspaceGroupCard(
                         when (val scope = group.scope) {
                             ConversationScope.Global, ConversationScope.Scheduled -> onNewGlobalSession()
                             is ConversationScope.Project -> onNewProjectSession(scope.projectId)
-                            // Local App workspaces are not listed in the drawer.
-                            is ConversationScope.LocalApp -> Unit
                         }
                     },
             )
@@ -212,7 +210,6 @@ private fun WorkspaceGroupCard(
                             ConversationScope.Global, ConversationScope.Scheduled -> onSelectGlobalSession(row)
                             is ConversationScope.Project ->
                                 onSelectProjectSession(scope.projectId, SessionRef(row.uuid, row.title))
-                            is ConversationScope.LocalApp -> Unit
                         }
                     },
                     onContinue = { onContinueSession(row) },
@@ -228,8 +225,6 @@ private fun WorkspaceGroupCard(
                         when (val scope = group.scope) {
                             ConversationScope.Global, ConversationScope.Scheduled -> onNewGlobalSession()
                             is ConversationScope.Project -> onNewProjectSession(scope.projectId)
-                            // Local App workspaces are not listed in the drawer.
-                            is ConversationScope.LocalApp -> Unit
                         }
                     },
             )

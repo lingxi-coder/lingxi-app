@@ -145,14 +145,6 @@ impl MobileLinuxRuntime for ProductIosRuntime {
         self.inner.run(request).await
     }
 
-    async fn run_isolated(
-        &self,
-        request: LinuxCommandRequest,
-    ) -> Result<LinuxCommandResult, MobileLinuxError> {
-        self.validate_mounts(&request.mounts)?;
-        self.inner.run_isolated(request).await
-    }
-
     async fn run_streaming(
         &self,
         request: LinuxCommandRequest,

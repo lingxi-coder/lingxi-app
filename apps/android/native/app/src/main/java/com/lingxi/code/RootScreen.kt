@@ -104,11 +104,8 @@ import com.lingxi.code.settings.ProviderSettingsRepository
 import com.lingxi.code.settings.LinuxRuntimeBridge
 import com.lingxi.code.settings.LinuxRuntimeMode
 import com.lingxi.code.settings.SettingsStore
-import com.lingxi.code.bindings.client.AppEventDto
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
-import com.lingxi.code.bindings.client.PluginActivationStateDto
-import com.lingxi.code.bindings.client.PluginCommandDto
 import com.lingxi.code.theme.LingXiTheme
 import android.Manifest
 import android.content.Context

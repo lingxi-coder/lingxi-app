@@ -1,4 +1,10 @@
 import type {
+  VisualizationBlockStatusDto,
+  VisualizationMountDto,
+  VisualizationRefDto,
+  VisualizationRevisionDto,
+  VisualizationServeDto,
+  VisualizationStateWriteDto,
   AppEventDto,
   AppRuntimeProfileDto,
   AudioCapabilitySnapshotDto,
@@ -82,9 +88,24 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value === undefined ? undefined : string(value, name);
 }
 
+const VISUALIZATION_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** A visualization reference: `[A-Za-z0-9_-]{1,64}` id and a positive revision. */
+export function visualizationRef(value: unknown, name: string): VisualizationRefDto {
+  const input = object(value, name);
+  exactKeys(input, ['id', 'revision'], name);
+  const id = string(input['id'], `${name} id`);
+  if (!VISUALIZATION_ID.test(id)) throw new Error(`invalid ${name} id`);
+  const revision = integer(input['revision'], `${name} revision`);
+  if (revision < 1 || revision > 0xffff_ffff) throw new Error(`invalid ${name} revision`);
+  return { id, revision };
+}
+
+const VISUALIZATION_BLOCK_STATUSES: readonly VisualizationBlockStatusDto[] = ['pending', 'ready', 'unavailable', 'discarded'];
+
 function conversationMessage(value: unknown): MessageDto {
   const input = object(value, 'session agent message');
-  exactKeys(input, ['role', 'blocks', 'images', 'loop_wakeup'], 'session agent message');
+  exactKeys(input, ['role', 'blocks', 'images', 'loop_wakeup', 'visualization_context'], 'session agent message');
   string(input['role'], 'session agent message role');
   if (!Array.isArray(input['blocks'])) throw new Error('invalid session agent message blocks');
   for (const value of input['blocks']) {
@@ -116,6 +137,10 @@ function conversationMessage(value: unknown): MessageDto {
         if (typeof block['result_json'] !== 'string') throw new Error('invalid session agent tool result');
         boolean(block['is_error'], 'session agent tool result error');
         break;
+      case 'visualization':
+        exactKeys(block, ['type', 'reference'], 'session agent visualization block');
+        if (block['reference'] !== undefined) visualizationRef(block['reference'], 'session agent visualization reference');
+        break;
       default: throw new Error('invalid session agent message block type');
     }
   }
@@ -127,6 +152,12 @@ function conversationMessage(value: unknown): MessageDto {
       string(image['media_type'], 'session agent image media type');
       string(image['url'], 'session agent image URL');
     }
+  }
+  if (input['visualization_context'] !== undefined && input['visualization_context'] !== null) {
+    const context = object(input['visualization_context'], 'session agent visualization context');
+    exactKeys(context, ['id', 'revision', 'title'], 'session agent visualization context');
+    visualizationRef({ id: context['id'], revision: context['revision'] }, 'session agent visualization context');
+    string(context['title'], 'session agent visualization context title');
   }
   if (input['loop_wakeup'] !== undefined && input['loop_wakeup'] !== null) {
     const wakeup = object(input['loop_wakeup'], 'session agent loop wakeup');
@@ -1382,6 +1413,24 @@ export function validateClientEvent(value: unknown): ClientEvent {
         parseUiClientFramePayload(parseUiJsonString(frame_json, 'UI client frame'));
         return { type, runtime_id, frame_json };
       }
+    case 'visualization_block': {
+      exactKeys(input, ['type', 'status', 'reference'], 'client event');
+      const status = input['status'];
+      if (!VISUALIZATION_BLOCK_STATUSES.includes(status as VisualizationBlockStatusDto)) {
+        throw new Error('invalid visualization block status');
+      }
+      const reference = input['reference'] === undefined
+        ? undefined
+        : visualizationRef(input['reference'], 'visualization block reference');
+      if ((status === 'ready') !== (reference !== undefined)) {
+        throw new Error('a visualization block carries a reference exactly when it is ready');
+      }
+      return {
+        type,
+        status: status as VisualizationBlockStatusDto,
+        ...(reference === undefined ? {} : { reference }),
+      };
+    }
     case 'ui_invalidate':
       exactKeys(input, ['type', 'instances_json', 'uuid', 'session_id'], 'client event');
       if (input['instances_json'] !== undefined) parseUiInvalidateInstances(input['instances_json']);
@@ -1687,4 +1736,68 @@ export function validateRuntimeSnapshot(value: unknown): ClientEvent[] {
   });
   if (rosters !== 1 || statuses !== 1 || taskCompletions !== 1) throw new Error('incomplete runtime snapshot');
   return events;
+}
+
+/** A `visualization` `mount` response: a ticket, or `null` for "unavailable". */
+export function validateVisualizationMount(value: unknown): VisualizationMountDto | null {
+  if (value === null || value === undefined) return null;
+  const input = object(value, 'visualization mount');
+  exactKeys(input, ['token', 'generation', 'doc_url', 'title'], 'visualization mount');
+  const token = string(input['token'], 'visualization mount token');
+  if (!/^[0-9a-f]{64}$/.test(token)) throw new Error('invalid visualization mount token');
+  const generation = integer(input['generation'], 'visualization mount generation');
+  if (generation < 1) throw new Error('invalid visualization mount generation');
+  return {
+    token,
+    generation,
+    doc_url: string(input['doc_url'], 'visualization document URL'),
+    title: string(input['title'], 'visualization title'),
+  };
+}
+
+/** A `visualization` `serve` response. */
+export function validateVisualizationServe(value: unknown): VisualizationServeDto {
+  const input = object(value, 'visualization response');
+  exactKeys(input, ['status', 'headers', 'body_base64'], 'visualization response');
+  const status = integer(input['status'], 'visualization response status');
+  if (status !== 200 && status !== 404) throw new Error('invalid visualization response status');
+  if (!Array.isArray(input['headers'])) throw new Error('invalid visualization response headers');
+  const headers = input['headers'].map((entry): [string, string] => {
+    if (!Array.isArray(entry) || entry.length !== 2) throw new Error('invalid visualization response header');
+    return [string(entry[0], 'visualization header name'), string(entry[1], 'visualization header value')];
+  });
+  const body = input['body_base64'];
+  if (typeof body !== 'string') throw new Error('invalid visualization response body');
+  return { status, headers, body_base64: body };
+}
+
+/** A `visualization` `write_state` response. */
+export function validateVisualizationStateWrite(value: unknown): VisualizationStateWriteDto {
+  const input = object(value, 'visualization state write');
+  exactKeys(input, ['saved', 'version', 'reason', 'current_state'], 'visualization state write');
+  const saved = boolean(input['saved'], 'visualization state saved');
+  const version = integer(input['version'], 'visualization state version');
+  const reason = optionalString(input['reason'], 'visualization state rejection');
+  if (saved === (reason !== undefined)) throw new Error('a state write is either saved or carries a reason');
+  return {
+    saved,
+    version,
+    ...(reason === undefined ? {} : { reason }),
+    ...(input['current_state'] === undefined ? {} : { current_state: input['current_state'] }),
+  };
+}
+
+/** A `visualization` `list` response. */
+export function validateVisualizationList(value: unknown): VisualizationRevisionDto[] {
+  if (!Array.isArray(value)) throw new Error('invalid visualization list');
+  return value.map((entry) => {
+    const input = object(entry, 'visualization revision');
+    exactKeys(input, ['id', 'revision', 'title', 'created_at_ms'], 'visualization revision');
+    const reference = visualizationRef({ id: input['id'], revision: input['revision'] }, 'visualization revision');
+    return {
+      ...reference,
+      title: string(input['title'], 'visualization revision title'),
+      created_at_ms: integer(input['created_at_ms'], 'visualization revision time'),
+    };
+  });
 }

@@ -608,6 +608,8 @@ export type ClientCommand =
       prompt_mode?: PromptModeDto;
       images: ImageRefDto[];
       turn_id?: number;
+      /** Widget the user follows up on; the engine attaches its saved model state. */
+      visualization_context?: VisualizationRefDto;
     }
   | { type: 'cancel'; turn_id?: number }
   /**
@@ -952,7 +954,25 @@ export type MessageBlockDto =
       new_string?: string;
       file_path?: string;
       display?: ToolResultDisplayDto;
-    };
+    }
+  /** An inline visualization placed by a reference line; no `reference` renders "unavailable". */
+  | { type: 'visualization'; reference?: VisualizationRefDto };
+
+/** One published revision of an inline visualization (message.rs `VisualizationRefDto`). */
+export interface VisualizationRefDto {
+  id: string;
+  revision: number;
+}
+
+/** The widget a user message continued from (message.rs `VisualizationContextDto`). */
+export interface VisualizationContextDto {
+  id: string;
+  revision: number;
+  title: string;
+}
+
+/** Progress of a live visualization slot (message.rs `VisualizationBlockStatusDto`). */
+export type VisualizationBlockStatusDto = 'pending' | 'ready' | 'unavailable' | 'discarded';
 
 /** A complete conversation message (message.rs `MessageDto`). */
 export interface LoopWakeupDto {
@@ -968,6 +988,8 @@ export interface MessageDto {
   blocks: MessageBlockDto[];
   /** User-attached images projected as stable renderable URLs. */
   images?: MessageImageDto[];
+  /** The widget this user message followed up on, shown as an attachment chip. */
+  visualization_context?: VisualizationContextDto | null;
 }
 
 export interface MessageImageDto {
@@ -2400,6 +2422,8 @@ export type ClientEvent =
   | { type: 'ui_control_result'; request_id: string; response_json?: string; metadata_json?: string; error?: string }
   | { type: 'ui_client_frame'; runtime_id: string; frame_json: string }
   | { type: 'ui_invalidate'; instances_json?: string; uuid: string; session_id: string }
+  /** A visualization slot in the live assistant text (events.rs `VisualizationBlock`). */
+  | { type: 'visualization_block'; status: VisualizationBlockStatusDto; reference?: VisualizationRefDto }
   // ── Error ─────────────────────────────────────────────────────────────────
   | { type: 'error'; kind: ErrorKindDto; message: string }
   | { type: 'message_identity'; message_id: string }
@@ -2797,3 +2821,70 @@ export type Frame =
   | { type: 'event'; payload: ClientEvent }
   | { type: 'permission_request'; payload: PermissionRequest }
   | { type: 'computer_access_request'; payload: ComputerAccessRequestDto };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inline visualization host (bridge `visualization` request method)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Host theme handed to a mount; token names are the upstream CSS variables. */
+export interface VisualizationThemeDto {
+  dark: boolean;
+  tokens: Record<string, string>;
+}
+
+/** Parameters of the bridge `visualization` request, tagged by `op`. */
+export type VisualizationRequest =
+  | {
+      op: 'mount';
+      session_id: string;
+      id: string;
+      revision: number;
+      theme: VisualizationThemeDto;
+      locale: string;
+      expanded: boolean;
+    }
+  | { op: 'serve'; path: string }
+  | {
+      op: 'write_state';
+      token: string;
+      generation: number;
+      base_version: number;
+      model_content: string;
+      private_content: string;
+    }
+  | { op: 'unmount'; token: string }
+  | { op: 'unmount_session'; session_id: string }
+  | { op: 'list'; session_id: string }
+  | { op: 'notices' };
+
+/** A granted mount; `null` from the bridge means "unavailable". */
+export interface VisualizationMountDto {
+  token: string;
+  generation: number;
+  doc_url: string;
+  title: string;
+}
+
+/** One scheme-handler response; the body is base64. */
+export interface VisualizationServeDto {
+  status: number;
+  headers: Array<[string, string]>;
+  body_base64: string;
+}
+
+/** Outcome of a compare-and-swap state write. */
+export interface VisualizationStateWriteDto {
+  saved: boolean;
+  version: number;
+  reason?: string;
+  /** On `conflict`, the winning `{version, modelContent, privateContent}`. */
+  current_state?: unknown;
+}
+
+/** One stored revision of a conversation. */
+export interface VisualizationRevisionDto {
+  id: string;
+  revision: number;
+  title: string;
+  created_at_ms: number;
+}

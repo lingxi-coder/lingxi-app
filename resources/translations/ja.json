@@ -2293,5 +2293,10 @@
   "settings_provider_region_china": "中国本土",
   "settings_provider_region_help": "既定は国際リージョンです。実行中のリージョンを変更するには、タスクが待機中のときに保存済みの設定を適用してください。",
   "settings_provider_region_international": "国際",
-  "voice_flow_finalizing_hint": "音声認識の完了を待っています…"
+  "voice_flow_finalizing_hint": "音声認識の完了を待っています…",
+  "visualization_preparing": "ビジュアライゼーションを準備中…",
+  "visualization_loading": "ビジュアライゼーションを読み込み中…",
+  "visualization_unavailable": "このビジュアライゼーションは利用できなくなりました。",
+  "visualization_label": "ビジュアライゼーション",
+  "visualization_remove_context": "ビジュアライゼーションのコンテキストを削除"
 }

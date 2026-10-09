@@ -819,12 +819,16 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
 
     case 'message_complete': {
       // The streamed assistant text is final; stop appending to it and seal
-      // any open reasoning block.
-      const items = state.items.slice();
-      closeThinking(items, state.openThinkingIndex);
+      // any open reasoning block. A visualization placeholder that never
+      // resolved belongs to a cut stream: drop it.
+      const items = state.items.filter((item) => item.type !== 'visualization' || item.status !== 'pending');
+      closeThinking(items, state.openThinkingIndex === -1 ? -1 : items.findIndex((item) => item.id === state.items[state.openThinkingIndex]?.id));
       return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1, pendingAssistantItems: [],
       };
     }
+
+    case 'visualization_block':
+      return reduceVisualizationBlock(state, event);
 
     case 'usage_update': {
       // OpenAI emits an all-zero placeholder at request start, before usage is
@@ -1132,6 +1136,52 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
 }
 
 /** Rebuild the visible transcript carried by a successful session resume. */
+/**
+ * Order a live visualization slot. A reference line ends the narration it
+ * interrupts; `pending` reserves the slot, `ready`/`unavailable` settle it in
+ * place, and `discarded` removes it.
+ */
+function reduceVisualizationBlock(
+  state: ConversationState,
+  event: Extract<ClientEvent, { type: 'visualization_block' }>,
+): ConversationState {
+  const items = state.items.slice();
+  closeThinking(items, state.openThinkingIndex);
+  let pendingIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.type === 'visualization' && item.status === 'pending') {
+      pendingIndex = index;
+      break;
+    }
+  }
+  let nextId = state.nextId;
+  if (event.status === 'discarded') {
+    if (pendingIndex >= 0) items.splice(pendingIndex, 1);
+    return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1 };
+  }
+  const settled: Extract<RunItem, { type: 'visualization' }> = {
+    type: 'visualization',
+    id: pendingIndex >= 0 ? items[pendingIndex]!.id : itemId(nextId),
+    status: event.status,
+    ...(event.status === 'ready' && event.reference ? { reference: { id: event.reference.id, revision: event.reference.revision } } : {}),
+  };
+  if (pendingIndex >= 0 && event.status !== 'pending') {
+    items[pendingIndex] = settled;
+  } else if (pendingIndex < 0) {
+    items.push(settled);
+    nextId += 1;
+  }
+  return {
+    ...state,
+    items,
+    nextId,
+    openAssistantIndex: -1,
+    openThinkingIndex: -1,
+    pendingAssistantItems: [...new Set([...(state.pendingAssistantItems ?? []), settled.id])],
+  };
+}
+
 export function conversationFromMessages(
   messages: readonly MessageDto[],
 ): ConversationState {
@@ -1157,6 +1207,10 @@ export function conversationFromMessages(
       ? (message.images ?? []).filter(isRenderableMessageImage)
       : [];
     let attachedImages = false;
+    const visualizationContext = message.role === 'user' && message.visualization_context
+      ? { id: message.visualization_context.id, revision: message.visualization_context.revision, title: message.visualization_context.title }
+      : undefined;
+    let attachedContext = false;
     for (const block of message.blocks) {
       switch (block.type) {
         case 'text':
@@ -1169,10 +1223,20 @@ export function conversationFromMessages(
               strong: message.role === 'user',
               role: message.role === 'user' ? 'user' : 'assistant',
               ...(!attachedImages && images.length ? { images } : {}),
+              ...(!attachedContext && visualizationContext ? { visualizationContext } : {}),
             });
             attachedImages = true;
+            attachedContext = true;
             break;
           }
+        case 'visualization':
+          items.push({
+            type: 'visualization',
+            id: itemId(nextId++),
+            status: block.reference ? 'ready' : 'unavailable',
+            ...(block.reference ? { reference: { id: block.reference.id, revision: block.reference.revision } } : {}),
+          });
+          break;
         case 'thinking':
           if (block.thinking.trim()) {
             // Rehydrated, not streamed — starts collapsed.

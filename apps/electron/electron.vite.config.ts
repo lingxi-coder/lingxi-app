@@ -21,7 +21,11 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin({ exclude: ['@lingxi/bridge-client'] })],
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/preload/index.ts') },
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          // Inline visualization guests: a minimal bridge for the shell frame.
+          visualization: resolve(__dirname, 'src/preload/visualization.ts'),
+        },
         output: {
           format: 'cjs',
           entryFileNames: '[name].cjs',

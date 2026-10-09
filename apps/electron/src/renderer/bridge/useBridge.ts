@@ -34,6 +34,7 @@ import type { NotificationPreferences } from '../../shared/notificationPreferenc
 import type { ScheduledContext, ScheduledScope } from '../../shared/scheduled.js';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings.js';
 import type { VoicePreferences } from '../../shared/voicePreferences.js';
+import type { VisualizationContextChip, VisualizationFollowup } from '../model/runItem.js';
 import {
   isPermissionRequestGone,
   messageFrom,
@@ -202,6 +203,7 @@ export function useBridge(): UseBridge {
   const runtimeStatesRef = useRef(runtimeStates);
   runtimeStatesRef.current = runtimeStates;
   const [error, setError] = useState<string | null>(null);
+  const [visualizationOffer, setVisualizationOffer] = useState<(VisualizationFollowup & { readonly sessionId: string }) | null>(null);
   const clearError = useCallback(() => setError(null), []);
   const [audioSnapshot, setAudioSnapshot] = useState<NativeAudioSnapshot>(defaultNativeAudioSnapshot());
   // Settings are file-layer state, not per-conversation state, so this is
@@ -1042,7 +1044,7 @@ export function useBridge(): UseBridge {
     images: ImageRefDto[] = [],
     imageNames: string[] = [],
     filePaths: string[] = [],
-    options: { purpose?: TrackedPromptPurpose } = {},
+    options: { purpose?: TrackedPromptPurpose; visualizationContext?: VisualizationContextChip } = {},
   ): { token: DesktopTurnToken; queued: Promise<void> } | null => {
     const trimmed = text.trim();
     const sessionId = activeSessionIdRef.current;
@@ -1057,8 +1059,15 @@ export function useBridge(): UseBridge {
     const submittedSession = submittedSessionFor(sessionId, trimmed);
     let promptItem: ConversationState['items'][number] | undefined;
     updateRuntime(sessionId, (state) => {
-      const conversation = appendPendingUserPrompt(state.conversation, trimmed, images);
+      let conversation = appendPendingUserPrompt(state.conversation, trimmed, images);
       promptItem = conversation.items.at(-1);
+      // A widget follow-up shows its chip from the first frame, exactly as
+      // the replayed `visualization_context` will.
+      if (options.visualizationContext && conversation !== state.conversation
+        && promptItem?.type === 'narration' && promptItem.role === 'user') {
+        promptItem = { ...promptItem, visualizationContext: options.visualizationContext };
+        conversation = { ...conversation, items: [...conversation.items.slice(0, -1), promptItem] };
+      }
       return {
         ...state,
         submittedSession: state.submittedSession ?? submittedSession,
@@ -1067,7 +1076,9 @@ export function useBridge(): UseBridge {
       };
     });
     pendingTrackedDispatches.current.add(token.clientTurnId);
-    const queued = host.sendPrompt(sessionId, trimmed, images, token.turnId).then(() => {
+    const context = options.visualizationContext;
+    const queued = host.sendPrompt(sessionId, trimmed, images, token.turnId,
+      context ? { id: context.id, revision: context.revision } : undefined).then(() => {
       pendingTrackedDispatches.current.delete(token.clientTurnId);
       cancelledTrackedTokens.current.delete(token.clientTurnId);
       if (removedRuntimeIds.current.has(sessionId)) return;
@@ -1102,6 +1113,12 @@ export function useBridge(): UseBridge {
     });
     return { token, queued };
   }, [capture, host, submittedSessionFor, updateRuntime]);
+
+  const offerVisualizationFollowup = useCallback((followup: VisualizationFollowup) => {
+    const sessionId = activeSessionIdRef.current;
+    if (sessionId) setVisualizationOffer({ ...followup, sessionId });
+  }, []);
+  const clearVisualizationFollowup = useCallback(() => setVisualizationOffer(null), []);
 
   const sendPrompt = useCallback(async (
     text: string,
@@ -2166,6 +2183,9 @@ export function useBridge(): UseBridge {
     error,
     clearError,
     sendTrackedPrompt,
+    visualizationFollowup: visualizationOffer && visualizationOffer.sessionId === activeSessionId ? visualizationOffer : null,
+    offerVisualizationFollowup,
+    clearVisualizationFollowup,
     subscribeTrackedSpeech,
     cancelTrackedPrompt,
     sendPrompt,

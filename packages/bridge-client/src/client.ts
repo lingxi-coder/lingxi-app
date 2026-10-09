@@ -40,8 +40,24 @@ import {
   type PermissionRequest,
   type PermissionResponseDto,
   type ServerHello,
+  type VisualizationMountDto,
+  type VisualizationRefDto,
+  type VisualizationRequest,
+  type VisualizationRevisionDto,
+  type VisualizationServeDto,
+  type VisualizationStateWriteDto,
+  type VisualizationThemeDto,
 } from './protocol.js';
-import { validateClientEvent, validatePermissionScope, validateRuntimeSnapshot, validateServerHello } from './validation.js';
+import {
+  validateClientEvent,
+  validatePermissionScope,
+  validateRuntimeSnapshot,
+  validateServerHello,
+  validateVisualizationList,
+  validateVisualizationMount,
+  validateVisualizationServe,
+  validateVisualizationStateWrite,
+} from './validation.js';
 import {
   discoverLatestLockfile,
   readLockfile,
@@ -382,7 +398,7 @@ export class BridgeClient extends EventEmitter {
   /** Submit a user prompt to drive a turn ({@link ClientCommand} `send_prompt`). */
   sendPrompt(
     text: string,
-    opts: { images?: ImageRefDto[]; turnId?: number } = {},
+    opts: { images?: ImageRefDto[]; turnId?: number; visualizationContext?: VisualizationRefDto } = {},
   ): void {
     const command: ClientCommand = {
       type: 'send_prompt',
@@ -392,7 +408,80 @@ export class BridgeClient extends EventEmitter {
     if (opts.turnId !== undefined) {
       command.turn_id = opts.turnId;
     }
+    if (opts.visualizationContext !== undefined) {
+      command.visualization_context = opts.visualizationContext;
+    }
     this.sendCommand(command);
+  }
+
+  // ── Inline visualization host (correlated `visualization` requests) ─────────
+
+  private visualization(params: VisualizationRequest, timeoutMs = 15_000): Promise<unknown> {
+    return this.request('visualization', params, timeoutMs);
+  }
+
+  /** Authorize a mount; `null` means the reference is unavailable here. */
+  async visualizationMount(
+    sessionId: string,
+    reference: VisualizationRefDto,
+    theme: VisualizationThemeDto,
+    locale: string,
+    expanded: boolean,
+  ): Promise<VisualizationMountDto | null> {
+    return validateVisualizationMount(await this.visualization({
+      op: 'mount',
+      session_id: sessionId,
+      id: reference.id,
+      revision: reference.revision,
+      theme,
+      locale,
+      expanded,
+    }));
+  }
+
+  /** Answer one request of the visualization origin (shell, asset or document). */
+  async visualizationServe(path: string): Promise<VisualizationServeDto> {
+    return validateVisualizationServe(await this.visualization({ op: 'serve', path }));
+  }
+
+  /** Compare-and-swap a state write from a live mount. */
+  async visualizationWriteState(
+    token: string,
+    generation: number,
+    baseVersion: number,
+    modelContent: string,
+    privateContent: string,
+  ): Promise<VisualizationStateWriteDto> {
+    return validateVisualizationStateWrite(await this.visualization({
+      op: 'write_state',
+      token,
+      generation,
+      base_version: baseVersion,
+      model_content: modelContent,
+      private_content: privateContent,
+    }));
+  }
+
+  /** Retire a mount. */
+  async visualizationUnmount(token: string): Promise<void> {
+    await this.visualization({ op: 'unmount', token });
+  }
+
+  /** Retire every mount of a conversation. */
+  async visualizationUnmountSession(sessionId: string): Promise<void> {
+    await this.visualization({ op: 'unmount_session', session_id: sessionId });
+  }
+
+  /** Stored revisions of a conversation. */
+  async visualizationList(sessionId: string): Promise<VisualizationRevisionDto[]> {
+    return validateVisualizationList(await this.visualization({ op: 'list', session_id: sessionId }));
+  }
+
+  /** Third-party notices bundled with the visualization runtime. */
+  async visualizationNotices(): Promise<string> {
+    const notices = await this.visualization({ op: 'notices' });
+    if (typeof notices !== 'string') throw new Error('invalid visualization notices');
+    return notices;
   }
 
   /** Cancel the in-flight turn (optionally a specific `turnId`). */

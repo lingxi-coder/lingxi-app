@@ -162,6 +162,7 @@ export function App() {
                   sessionKey={bridge.conversation.sessionKey}
                   modUiSessionId={settledSession?.sessionId ?? ''}
                   foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
+                  onVisualizationFollowup={bridge.offerVisualizationFollowup}
                 />
                 <PermissionPrompt
                   request={bridge.sessionLoading ? null : bridge.pendingPermission}

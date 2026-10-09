@@ -1,4 +1,5 @@
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
+import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../shared/visualization.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT } from '../shared/git.js';
 import type { GitApi } from '../shared/git.js';
 import { CH_TERMINAL_REQUEST, CH_TERMINAL_EVENT } from '../shared/terminal.js';
@@ -190,6 +191,13 @@ export interface ModUiApi {
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
+export interface VisualizationApi {
+  mount(sessionId: string, reference: VisualizationReference, theme: VisualizationTheme, locale: string, expanded: boolean): Promise<VisualizationMount | null>;
+  writeState(sessionId: string, token: string, generation: number, baseVersion: number, modelContent: string, privateContent: string): Promise<VisualizationStateWrite>;
+  unmount(sessionId: string, token: string): Promise<void>;
+  onGuestEvent(callback: (event: VisualizationGuestEvent) => void): () => void;
+}
+
 export interface LingxiApi {
   scheduled: ScheduledApi;
   git?: GitApi;
@@ -239,7 +247,7 @@ export interface LingxiApi {
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   clearSession(sessionId: string, name?: string): Promise<void>;
-  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[], turnId?: number): Promise<void>;
+  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[], turnId?: number, visualizationContext?: VisualizationReference): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(sessionId: string, requestId: number): Promise<void>;
   approveComputerAccess(sessionId: string, requestId: number, response: ComputerAccessResponseDto): Promise<void>;
@@ -264,6 +272,7 @@ export interface LingxiApi {
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
   audio: NativeAudioApi;
+  visualization: VisualizationApi;
   modUi: ModUiApi;
 }
 
@@ -343,7 +352,7 @@ const api: LingxiApi = {
   touchSession: (projectPath, sessionId) => ipcRenderer.invoke(CH_SESSION_TOUCH, projectPath, sessionId) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   renameSession: (projectPath, sessionId, title) => ipcRenderer.invoke(CH_SESSION_RENAME, projectPath, sessionId, title) as Promise<ProjectSessionCatalogState & { projectPath: string }>,
   clearSession: (sessionId, name) => ipcRenderer.invoke(CH_SESSION_CLEAR, sessionId, name) as Promise<void>,
-  sendPrompt: (sessionId, text, images, turnId) => ipcRenderer.invoke(CH_SEND_PROMPT, sessionId, text, images ?? [], turnId) as Promise<void>,
+  sendPrompt: (sessionId, text, images, turnId, visualizationContext) => ipcRenderer.invoke(CH_SEND_PROMPT, sessionId, text, images ?? [], turnId, visualizationContext) as Promise<void>,
   approve: (sessionId, requestId, response) => ipcRenderer.invoke(CH_APPROVE, sessionId, requestId, response) as Promise<void>,
   deny: (sessionId, requestId) => ipcRenderer.invoke(CH_DENY, sessionId, requestId) as Promise<void>,
   approveComputerAccess: (sessionId, requestId, response) => ipcRenderer.invoke(CH_APPROVE_COMPUTER_ACCESS, sessionId, requestId, response) as Promise<void>,
@@ -370,6 +379,13 @@ const api: LingxiApi = {
     onInvalidate: (callback) => subscribe(CH_MOD_UI_INVALIDATE, (envelope: RuntimeEventEnvelope<Omit<UiInvalidateEventDto, 'sessionId'>>) => {
       callback({ sessionId: envelope.sessionId, ...envelope.event });
     }),
+  },
+  visualization: {
+    mount: (sessionId, reference, theme, locale, expanded) => ipcRenderer.invoke('lingxi:visualization:mount', sessionId, reference, theme, locale, expanded) as Promise<VisualizationMount | null>,
+    writeState: (sessionId, token, generation, baseVersion, modelContent, privateContent) =>
+      ipcRenderer.invoke('lingxi:visualization:writeState', sessionId, token, generation, baseVersion, modelContent, privateContent) as Promise<VisualizationStateWrite>,
+    unmount: (sessionId, token) => ipcRenderer.invoke('lingxi:visualization:unmount', sessionId, token) as Promise<void>,
+    onGuestEvent: (callback) => subscribe('lingxi:visualization:guestEvent', callback),
   },
   audio: {
     request: (command) => ipcRenderer.invoke(CH_NATIVE_AUDIO_REQUEST, command) as Promise<NativeAudioCommandResult>,

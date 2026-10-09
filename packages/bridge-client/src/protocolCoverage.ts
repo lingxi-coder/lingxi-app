@@ -134,6 +134,7 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   ui_control_result: true,
   ui_client_frame: true,
   ui_invalidate: true,
+  visualization_block: true,
   cron_run_requested: true,
   cron_run_bound: true,
   scheduled_run_finished: true,

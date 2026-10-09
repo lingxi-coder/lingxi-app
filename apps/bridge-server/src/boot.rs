@@ -776,6 +776,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // proxies through cannot exist until `assemble` has a connection to
         // build it over, so it is filled there and never here.
         audio: None,
+        // Electron renders inline widgets (`lingxi-viz://visualization`), so
+        // the `Visualization` tool and `/visualize` skill are offered here.
+        inline_visualization: true,
     }
 }
 
@@ -1286,7 +1289,10 @@ pub async fn assemble_with_credentials(
     let enable_automation_scheduler = cfg.enable_automation_scheduler;
     let receive_gate = Arc::new(lingxi_core::host::uds_inbox::PeerReceiveGateSlot::new());
     let mut live_session = initialize_live_session(&mut cfg, Some(receive_gate.clone()))?;
-    let connection = BridgeConnection::new();
+    let connection = BridgeConnection::new().with_visualization(
+        Arc::new(HostFileSystem::new(cfg.cwd.clone())),
+        &cfg.lingxi_home,
+    );
 
     // Preserve only the non-secret parent-source fact before `cfg` moves. The
     // authoritative decision is completed after `build`, when the runtime has
@@ -2532,6 +2538,7 @@ mod tests {
             // caller-supplied value would be a lie about which connection the
             // engine's audio calls reach.
             audio: None,
+            inline_visualization: false,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         assert!(bound.runtime.orchestrator.workspace_trusted().await);

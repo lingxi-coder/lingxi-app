@@ -2293,5 +2293,10 @@
   "settings_provider_region_china": "중국 본토",
   "settings_provider_region_help": "기본값은 국제 지역입니다. 실행 중인 지역을 변경하려면 작업이 유휴 상태일 때 저장한 설정을 적용하세요.",
   "settings_provider_region_international": "국제",
-  "voice_flow_finalizing_hint": "음성 인식이 끝나기를 기다리는 중…"
+  "voice_flow_finalizing_hint": "음성 인식이 끝나기를 기다리는 중…",
+  "visualization_preparing": "시각화 준비 중…",
+  "visualization_loading": "시각화 불러오는 중…",
+  "visualization_unavailable": "이 시각화는 더 이상 사용할 수 없습니다.",
+  "visualization_label": "시각화",
+  "visualization_remove_context": "시각화 컨텍스트 제거"
 }

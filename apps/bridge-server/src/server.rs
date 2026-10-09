@@ -632,6 +632,15 @@ pub struct BridgeConnection {
     queue_wakeup_task: Option<tokio::task::AbortHandle>,
     task_notification_registry:
         Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
+    /// Inline visualizations: the `visualization` request host and the store
+    /// a follow-up `SendPrompt` snapshots its widget state from.
+    visualization: Option<Arc<BridgeVisualization>>,
+}
+
+struct BridgeVisualization {
+    host: harness_runtime::desktop_visualization::DesktopVisualizationHost,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
+    config_home: std::path::PathBuf,
 }
 
 #[derive(Clone, Default)]
@@ -1523,7 +1532,27 @@ impl BridgeConnection {
             active_turn_task: Arc::new(StdMutex::new(None)),
             queue_wakeup_task: None,
             task_notification_registry: None,
+            visualization: None,
         }
+    }
+
+    /// Answer `visualization` requests and resolve follow-up context from the
+    /// store under `config_home`.
+    #[must_use]
+    pub fn with_visualization(
+        mut self,
+        fs: Arc<dyn lingxi_core::host::FileSystem>,
+        config_home: &std::path::Path,
+    ) -> Self {
+        self.visualization = Some(Arc::new(BridgeVisualization {
+            host: harness_runtime::desktop_visualization::DesktopVisualizationHost::for_config_home(
+                fs.clone(),
+                config_home,
+            ),
+            fs,
+            config_home: config_home.to_path_buf(),
+        }));
+        self
     }
 
     /// Wake an idle main loop when teammates enqueue a noninterrupting prompt.
@@ -2165,8 +2194,12 @@ impl BridgeConnection {
                 text,
                 images,
                 turn_id,
+                visualization_context,
                 ..
             } => {
+                let text = self
+                    .visualization_followup(text, visualization_context.as_ref())
+                    .await;
                 self.handle_send_prompt(text, images, turn_id).await;
             }
             ClientCommand::ScheduledRunTurn {
@@ -2469,6 +2502,31 @@ impl BridgeConnection {
         }
         self.queue.remove(&queued, "conversation replaced").await;
         self.loop_runtime.reset();
+    }
+
+    /// A follow-up from a widget carries that revision's confirmed state,
+    /// snapshotted now (at send or enqueue time) ahead of the typed text.
+    async fn visualization_followup(
+        &self,
+        text: String,
+        context: Option<&client::protocol::message::VisualizationRefDto>,
+    ) -> String {
+        let (Some(visualization), Some(context), Some(driver)) =
+            (&self.visualization, context, &self.driver)
+        else {
+            return text;
+        };
+        let Some(session_id) = driver.current_session_id().await else {
+            return text;
+        };
+        harness_runtime::inline_visualization::followup_text(
+            visualization.fs.clone(),
+            &visualization.config_home,
+            &session_id,
+            Some(context),
+            text,
+        )
+        .await
     }
 
     async fn handle_send_prompt(
@@ -2824,7 +2882,9 @@ impl FramePump for BridgeConnection {
         if request.method == "hello" {
             return false;
         }
-        if request.method == "permission_request_scope" {
+        // A widget's document and state requests are independent of the
+        // command stream; a slow control must not leave a card loading.
+        if request.method == "permission_request_scope" || request.method == "visualization" {
             return self.handshaken.load(Ordering::SeqCst);
         }
         match serde_json::from_value::<ClientCommand>(request.params.clone()) {
@@ -2916,6 +2976,31 @@ impl FramePump for BridgeConnection {
                     if let Some(sink) = self.out.lock().await.as_ref() {
                         let _ = sink.send(response);
                     }
+                    return;
+                }
+                if method == "visualization" {
+                    // Answered on its own task: a document or asset read must
+                    // never wait behind (or stall) the ordered command stream.
+                    let Some(visualization) = self.visualization.clone() else {
+                        if let Some(sink) = self.out.lock().await.as_ref() {
+                            let _ = sink.send(Self::error_response(id, "visualizations are unavailable"));
+                        }
+                        return;
+                    };
+                    let out = self.out.clone();
+                    tokio::spawn(async move {
+                        let response = match visualization.host.handle(params).await {
+                            Ok(result) => Frame::Response(BridgeResponse {
+                                id,
+                                result: Some(result),
+                                error: None,
+                            }),
+                            Err(error) => Self::error_response(id, error),
+                        };
+                        if let Some(sink) = out.lock().await.as_ref() {
+                            let _ = sink.send(response);
+                        }
+                    });
                     return;
                 }
                 if method == "desktop_runtime_snapshot" {

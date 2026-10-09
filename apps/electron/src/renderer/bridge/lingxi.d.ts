@@ -1,4 +1,5 @@
 import type { ScheduledApi } from '../../shared/scheduled';
+import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../../shared/visualization';
 import type { GitApi } from '../../shared/git.js';
 import type { TerminalApi } from '../../shared/terminal.js';
 import type { CronJobDto } from '@lingxi/bridge-client';
@@ -136,6 +137,13 @@ export interface ModUiApi {
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
+export interface VisualizationApi {
+  mount(sessionId: string, reference: VisualizationReference, theme: VisualizationTheme, locale: string, expanded: boolean): Promise<VisualizationMount | null>;
+  writeState(sessionId: string, token: string, generation: number, baseVersion: number, modelContent: string, privateContent: string): Promise<VisualizationStateWrite>;
+  unmount(sessionId: string, token: string): Promise<void>;
+  onGuestEvent(callback: (event: VisualizationGuestEvent) => void): () => void;
+}
+
 export interface LingxiApi {
   scheduled?: ScheduledApi;
   git?: GitApi;
@@ -186,7 +194,7 @@ export interface LingxiApi {
   touchSession(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   renameSession(projectPath: string, sessionId: string, title: string): Promise<ProjectSessionCatalogState & { projectPath: string }>;
   clearSession(sessionId: string, name?: string): Promise<void>;
-  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[], turnId?: number): Promise<void>;
+  sendPrompt(sessionId: string, text: string, images?: ImageRefDto[], turnId?: number, visualizationContext?: VisualizationReference): Promise<void>;
   approve(sessionId: string, requestId: number, response?: PermissionResponseDto): Promise<void>;
   deny(sessionId: string, requestId: number): Promise<void>;
   approveComputerAccess(sessionId: string, requestId: number, response: ComputerAccessResponseDto): Promise<void>;
@@ -204,6 +212,7 @@ export interface LingxiApi {
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
   audio: NativeAudioApi;
+  visualization: VisualizationApi;
   modUi: ModUiApi;
 }
 

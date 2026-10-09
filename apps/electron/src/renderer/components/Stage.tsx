@@ -4,7 +4,8 @@ import { PlanPreview, PlanDocument } from './PlanDocument';
 import type { SubmittedPlan } from '../bridge/submittedPlan';
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useT } from '../theme/ThemeContext';
-import type { CommandRunItem, RunItem, TurnFileChange } from '../model/runItem';
+import type { CommandRunItem, RunItem, TurnFileChange, VisualizationFollowup } from '../model/runItem';
+import { VisualizationCard, VisualizationContextBadge, VisualizationPlaceholder, VisualizationUnavailable } from './VisualizationCard';
 import {
   commandDefaultOpen,
   narrationDefaultOpen,
@@ -322,6 +323,13 @@ interface StageProps {
    * which uses the same per-item collapse map as every other disclosure.
    */
   foldedItemIds?: readonly string[];
+  /**
+   * Session whose store owns this transcript's widgets, when it differs from
+   * `modUiSessionId` (an agent's widgets belong to its origin session).
+   */
+  visualizationSessionId?: string;
+  /** A widget drafted a follow-up question for the composer. */
+  onVisualizationFollowup?: (followup: VisualizationFollowup) => void;
 }
 
 /**
@@ -334,7 +342,7 @@ interface StageProps {
  */
 const BOTTOM_SLACK = 24;
 
-export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [] }: StageProps) {
+export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -701,6 +709,7 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
                   gap: user ? 4 : 10, width: '100%', animation: 'fade-in 0.3s ease',
                 }}
               >
+                {user && item.visualizationContext && <VisualizationContextBadge chip={item.visualizationContext} />}
                 {narration}
                 {/*
                   Keyed by the SESSION, not just by the item: ids restart at `i1`
@@ -769,6 +778,17 @@ export function Stage({ onReviewFiles, submittedPlans = [], onOpenPlan, liveItem
                     onSetOpen={setOpen}
                   />
                 </div>
+              </div>
+            );
+          }
+          if (item.type === 'visualization') {
+            // Keyed by the session too: a reference is per-session, and a
+            // reused fiber would keep another session's mounted webview.
+            return (
+              <div className="transcript-run-item" data-run-type="visualization" key={`${sessionKey}:${item.id}`} style={{ width: '100%' }}>
+                {item.status === 'ready' && item.reference && (visualizationSessionId || modUiSessionId)
+                  ? <VisualizationCard sessionId={visualizationSessionId || modUiSessionId} reference={item.reference} onFollowup={onVisualizationFollowup} />
+                  : item.status === 'pending' ? <VisualizationPlaceholder /> : <VisualizationUnavailable />}
               </div>
             );
           }

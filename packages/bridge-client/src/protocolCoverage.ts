@@ -26,18 +26,12 @@
  * `snapshots.test.ts` asserts at RUNTIME that each record's key set equals
  * the set of `type` values actually found in the on-disk golden snapshots,
  * closing the other direction: a golden whose `type` has no union member, or
- * a union member with no golden exercising it. (The comparison must read
- * each golden's `type` FIELD, not its filename: several `event/` goldens
- * share the `app_event` tag but are named after their inner `AppEventDto`
- * variant instead, e.g. `app_details_changed.json`.)
+ * a union member with no golden exercising it. (The comparison reads each
+ * golden's `type` FIELD, not its filename.)
  */
 import type {
-  AppEventDto,
   ClientCommand,
   ClientEvent,
-  LocalAppPluginErrorCodeDto,
-  ManagedLocalAppMcpStatusDto,
-  PluginCommandDto,
   TaskRowDto,
 } from './protocol.js';
 
@@ -96,24 +90,6 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   task_stop: true,
   task_message: true,
   resume_workflow: true,
-  list_apps: true,
-  get_app_details: true,
-  create_app: true,
-  start_app: true,
-  stop_app: true,
-  restart_app: true,
-  execute_app_bridge_request: true,
-  resolve_app_ui_request: true,
-  resolve_app_capability_request: true,
-  resolve_app_dependency_change_confirmation: true,
-  resolve_app_profile_proposal: true,
-  resolve_app_runtime_profile_selection: true,
-  plugin_command: true,
-  reset_app_permissions: true,
-  list_app_sessions: true,
-  list_app_checkpoints: true,
-  restore_app_checkpoint: true,
-  delete_app: true,
   request_exit: true,
   update_settings: true,
   update_permission_rules: true,
@@ -213,13 +189,6 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   task_status_changed: true,
   workflow_resumed: true,
   commands_changed: true,
-  apps_changed: true,
-  app_event: true,
-  app_workflow_changed: true,
-  app_runtime_changed: true,
-  app_sessions_changed: true,
-  app_checkpoint_created: true,
-  app_operation_failed: true,
   coordinator_status: true,
   coordinator_worker: true,
   attachment: true,
@@ -229,51 +198,6 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   audio_request: true,
   audio_cancel: true,
   audio_capabilities_changed: true,
-};
-
-export const ALL_PLUGIN_COMMAND_TYPES: Record<PluginCommandDto['type'], true> = {
-  set_enabled: true,
-  get_status: true,
-  get_inventory: true,
-  resolve_create_confirmation: true,
-  resolve_mcp_proposal_approval: true,
-  start_local_app_mcp_authoring: true,
-  set_local_app_mcp_enabled: true,
-  set_local_app_mcp_tool_enabled: true,
-  set_local_app_mcp_conversation_pinned: true,
-  get_managed_mcp_inventory: true,
-};
-
-export const ALL_APP_EVENT_TYPES: Record<AppEventDto['type'], true> = {
-  app_details_changed: true,
-  app_created: true,
-  app_record_changed: true,
-  app_profile_proposal: true,
-  app_bridge_response: true,
-  app_ui_request: true,
-  app_capability_requested: true,
-  app_dependency_change_confirmation_requested: true,
-  app_checkpoints_changed: true,
-  app_llm_activity_changed: true,
-  app_agent_event_posted: true,
-  app_background_task_changed: true,
-  app_bridge_stream_frame: true,
-  plugin_status_changed: true,
-  plugin_inventory_changed: true,
-  create_confirmation_requested: true,
-  mcp_proposal_approval_requested: true,
-  managed_mcp_inventory_changed: true,
-  verification_summary_changed: true,
-  local_app_operation_failed: true,
-};
-
-export const ALL_MANAGED_LOCAL_APP_MCP_STATUS_TYPES: Record<ManagedLocalAppMcpStatusDto, true> = {
-  disabled: true,
-  needs_setup: true,
-  authoring: true,
-  enabled: true,
-  needs_revalidation: true,
-  error: true,
 };
 
 /**
@@ -304,16 +228,3 @@ export const ALL_TASK_ROW_DTO_KEYS: Record<keyof TaskRowDto, true> = {
   effort: true,
 };
 
-export const ALL_LOCAL_APP_PLUGIN_ERROR_CODES: Record<LocalAppPluginErrorCodeDto, true> = {
-  plugin_disabled: true,
-  builtin_bundle_unavailable: true,
-  template_unavailable: true,
-  proposal_invalid: true,
-  catalog_stale: true,
-  active_state_corrupt: true,
-  revision_conflict: true,
-  invalid_mcp_settings: true,
-  mcp_authoring_required: true,
-  repair_budget_exhausted: true,
-  exposure_capacity_reached: true,
-};

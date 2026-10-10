@@ -476,7 +476,9 @@ function AgentDetail({ agent, bridge }: { agent: SessionAgentSummaryDto | undefi
         {agent.model && <span> · {agent.model}</span>}
         {latestActivity && <span role="status" style={{ display: 'block', marginTop: 4, color: t.dark ? t.text2 : t.text3 }}>{shorten(latestActivity, 150)}</span>}
       </div>
-      <Stage onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id: `agent:${agent.agent_id}:${id}`, files, path })} liveItems={conversation.items} running={agent.status === 'running'} pendingActivity={latestActivity} sessionKey={`agent:${agent.agent_id}`} emptyMessage="Waiting for the agent to emit its first message." />
+      <Stage onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id: `agent:${agent.agent_id}:${id}`, files, path })} liveItems={conversation.items} running={agent.status === 'running'} pendingActivity={latestActivity} sessionKey={`agent:${agent.agent_id}`} emptyMessage="Waiting for the agent to emit its first message."
+        visualizationSessionId={bridge.activeSession?.sessionId.startsWith('pending-new:') ? undefined : bridge.activeSession?.sessionId}
+        onVisualizationFollowup={bridge.offerVisualizationFollowup} />
     </div>
   );
 }

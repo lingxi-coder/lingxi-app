@@ -2169,4 +2169,9 @@
     <string name="settings_provider_region_help">Defaults to international. Apply saved settings when idle to change the running region.</string>
     <string name="settings_provider_region_international">International</string>
     <string name="voice_flow_finalizing_hint">Waiting for speech recognition to finish…</string>
+    <string name="visualization_preparing">Preparing visualization…</string>
+    <string name="visualization_loading">Loading visualization…</string>
+    <string name="visualization_unavailable">This visualization is no longer available.</string>
+    <string name="visualization_label">Visualization</string>
+    <string name="visualization_remove_context">Remove visualization context</string>
 </resources>

@@ -5,6 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.runtime.MobileEngineHandle
 import com.lingxi.code.voice.buildVoiceEngine
 import kotlinx.coroutines.channels.Channel
@@ -138,7 +139,9 @@ class EngineRoundtripTest {
             // queued; a turn failure streams to the listener, it is NOT thrown.
             engine.submit(
                 ClientCommand.SendPrompt(
-                    text = "Reply with exactly: hello from lingxi",
+                    text = ClientTextDto(
+                        codeUnits = "Reply with exactly: hello from lingxi".map { it.code.toUShort() },
+                    ),
                     promptMode = null,
                     images = emptyList(),
                     turnId = null,

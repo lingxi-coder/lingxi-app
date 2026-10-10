@@ -343,6 +343,9 @@ pub enum InitError {
     /// Anthropic session; OAuth and alternate providers reject them.
     #[error("--betas requires an Anthropic API key and a first-party Anthropic model")]
     InvalidCustomBetas,
+    /// Structured output schema could not be compiled for the active request.
+    #[error("structured output JSON Schema compilation failed: {0}")]
+    StructuredOutputSchema(#[source] lingxi_core::host::json_schema_validator::SchemaCompileError),
 }
 
 impl From<harness_runtime::desktop::BuildError> for InitError {
@@ -365,6 +368,9 @@ impl From<harness_runtime::desktop::BuildError> for InitError {
             }
             harness_runtime::desktop::BuildError::TmuxNotInstalled(m) => Self::TmuxNotInstalled(m),
             harness_runtime::desktop::BuildError::InvalidCustomBetas => Self::InvalidCustomBetas,
+            harness_runtime::desktop::BuildError::StructuredOutputSchema(error) => {
+                Self::StructuredOutputSchema(error)
+            }
         }
     }
 }
@@ -986,6 +992,20 @@ pub(crate) fn resolve_desktop_config_at(
 
     DesktopConfig {
         build_info,
+        diagnostics: None,
+        mcp_services_factory: None,
+        composition: None,
+        user_agent_environment: None,
+        request_identity: None,
+        anthropic_compatible_version: None,
+        native_thinking_display: None,
+        oauth_environment_lookup: None,
+        defer_session_start: false,
+        max_structured_output_retries: 5,
+        inline_visualization: false,
+        session_transcript_path: None,
+        session_resume_snapshot: None,
+        session_resume_cost: None,
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
         mod_render_surface: None,

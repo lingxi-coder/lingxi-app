@@ -105,11 +105,16 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
     async fn has_queued_goal_work(&self) -> bool {
         self.queue.has_main_thread_commands().await
     }
-    async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
+    async fn enqueue_goal_retry(
+        &self,
+        id: String,
+        body: Utf16JsonProjection,
+        cancel: CancellationToken,
+    ) {
         self.queue.enqueue_goal_retry(id, body, cancel).await;
     }
 
-    async fn take_mid_turn_input(&self) -> Option<String> {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
         let taken = self.queue.take_mid_turn_prompt().await;
         if taken.is_some() {
             self.foreign_inputs
@@ -128,14 +133,21 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
             batch
                 .into_iter()
                 .filter_map(|command| {
+                    let text = command.text_projection()?.clone();
                     Some(orchestrator::prompt::mid_turn_input::MidTurnInput {
-                        text: command.text()?.to_owned(),
+                        text: text.clone(),
                         origin_kind: match command.source {
                             msgqueue::QueueSource::AgentSendMessage => Some("peer"),
                             msgqueue::QueueSource::TaskCompletion => Some("task-notification"),
                             msgqueue::QueueSource::Cron => Some("scheduled-trigger"),
                             _ => None,
                         },
+                        projected_content: Some(text),
+                        // Bridge prompts have no source transcript UUID or
+                        // SDK delivery receipt; don't invent either from the
+                        // queue's private command id.
+                        source_message_uuid: None,
+                        queue_delivery: None,
                     })
                 })
                 .collect(),
@@ -145,7 +157,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 
 struct PendingWakeup {
     handle: lingxi_core::host::BackgroundTaskHandle,
-    prompt: String,
+    prompt: Utf16JsonProjection,
     command_id: String,
     cancel: CancellationToken,
 }
@@ -244,7 +256,12 @@ impl MsgQueueWakeupScheduler {
 
 #[async_trait]
 impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
-    async fn schedule(&self, delay: std::time::Duration, prompt: String, _reason: String) {
+    async fn schedule(
+        &self,
+        delay: std::time::Duration,
+        prompt: Utf16JsonProjection,
+        _reason: String,
+    ) {
         let queue = self.queue.clone();
         let runtime = self.runtime.clone();
         let pending = self.pending.clone();
@@ -357,7 +374,7 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
         }
     }
 
-    async fn cancel_pending(&self) -> Vec<String> {
+    async fn cancel_pending(&self) -> Vec<Utf16JsonProjection> {
         let armed: Vec<_> =
             std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
         // Logical cancellation also covers a timer blocked in persistence, and
@@ -397,11 +414,11 @@ impl tool_cron::WakeupScheduler for MsgQueueWakeupScheduler {
                 .collect();
             self.queue.remove(&ids, "dynamic loop cancelled").await;
             for command in stranded {
-                if let Some(text) = command.text() {
+                if let Some(text) = command.text_projection() {
                     // One pending wakeup per prompt: count the
                     // enqueue -> pending-retirement handoff once.
                     if !cancelled.iter().any(|prompt| prompt == text) {
-                        cancelled.push(text.to_string());
+                        cancelled.push(text.clone());
                     }
                 }
             }
@@ -956,7 +973,10 @@ impl TurnDriver for OrchestratorTurnDriver {
         }
     }
 
-    fn resolve_loop_prompt(&self, prompt: &str) -> std::io::Result<String> {
+    fn resolve_loop_prompt(
+        &self,
+        prompt: &Utf16JsonProjection,
+    ) -> std::io::Result<Utf16JsonProjection> {
         let fallback = tool_cron::LoopRuntime::default();
         let runtime = self.loop_runtime.as_deref().unwrap_or(&fallback);
         runtime.try_resolve_loop_default_fire(
@@ -1151,6 +1171,7 @@ mod tests {
     use client::protocol::commands::ImageRefDto;
     use client::protocol::events::ClientEvent;
     use lingxi_core::host::{BudgetError, WorkflowOutputScope, WorkflowOutputScopes};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{ContentBlock, ConversationMessage};
     use orchestrator::conversation::ImageSource;
     use orchestrator::test_support::{
@@ -1251,15 +1272,18 @@ mod tests {
                 directory.path().to_path_buf(),
             )));
         let driver = OrchestratorTurnDriver::new(Arc::new(orchestrator));
+        let prompt = Utf16JsonProjection::from("<<loop.md-dynamic>>");
         assert!(driver
-            .resolve_loop_prompt("<<loop.md-dynamic>>")
+            .resolve_loop_prompt(&prompt)
             .unwrap()
-            .contains("First session task"));
+            .string_at("")
+            .is_some_and(|text| text.contains("First session task")));
         std::fs::write(directory.path().join("loop.md"), "Updated session task").unwrap();
         assert!(driver
-            .resolve_loop_prompt("<<loop.md-dynamic>>")
+            .resolve_loop_prompt(&prompt)
             .unwrap()
-            .contains("Updated session task"));
+            .string_at("")
+            .is_some_and(|text| text.contains("Updated session task")));
         tool_cron::reset_autonomous_loop_delivered();
     }
 
@@ -1567,7 +1591,7 @@ mod tests {
             scheduled_fire_id: None,
             uuid: uuid.to_string(),
             content: QueuedCommandContent::UserInput {
-                text: text.to_string(),
+                text: Utf16JsonProjection::from(text),
             },
             priority: prio,
             queued_at: SystemTime::now(),
@@ -1593,10 +1617,42 @@ mod tests {
         let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
 
         let joined = adapter.take_mid_turn_input().await;
-        assert_eq!(joined.as_deref(), Some("first\nsecond"));
+        assert_eq!(
+            joined.as_ref().and_then(|text| text.string_at("")),
+            Some("first\nsecond")
+        );
         // Consumed — the queue is now empty, so a second drain yields None.
         assert!(queue.is_empty().await);
         assert_eq!(adapter.take_mid_turn_input().await, None);
+    }
+
+    #[tokio::test]
+    async fn mid_turn_batch_preserves_source_units_and_origin_without_fabricated_delivery_ids() {
+        let queue = Arc::new(MessageQueueManager::new());
+        let units = vec![b'x' as u16, 0xd800, b'!' as u16];
+        let text =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let mut command = user_cmd("peer-command", QueuePriority::Next, "placeholder");
+        command.content = QueuedCommandContent::UserInput { text };
+        command.source = QueueSource::AgentSendMessage;
+        queue.enqueue(command).await;
+        let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
+
+        let batch = adapter.take_mid_turn_batch().await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].text.string_units(""), Some(units.clone()));
+        assert_eq!(
+            batch[0]
+                .projected_content
+                .as_ref()
+                .and_then(|content| content.string_units("")),
+            Some(units)
+        );
+        assert_eq!(batch[0].origin_kind, Some("peer"));
+        assert!(batch[0].source_message_uuid.is_none());
+        assert!(batch[0].queue_delivery.is_none());
+        assert!(queue.is_empty().await);
     }
 
     /// A `Now`-priority command is EXCLUDED from the mid-turn drain: it has
@@ -1857,7 +1913,10 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), sink.entered.notified())
             .await
             .unwrap();
-        assert_eq!(scheduler.cancel_pending().await, vec!["stopped prompt"]);
+        assert_eq!(
+            scheduler.cancel_pending().await,
+            vec![Utf16JsonProjection::from("stopped prompt")]
+        );
         sink.release.notify_one();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(
@@ -1901,7 +1960,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl tool_cron::WakeupScheduler for KaRec {
-        async fn schedule(&self, delay: std::time::Duration, _p: String, _r: String) {
+        async fn schedule(&self, delay: std::time::Duration, _p: Utf16JsonProjection, _r: String) {
             self.calls.lock().unwrap().push(delay);
         }
 
@@ -1922,7 +1981,7 @@ mod tests {
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
         // The drain tags a Cron-sourced command as the in-flight loop tick.
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
 
         let rec = Arc::new(KaRec {
             calls: std::sync::Mutex::new(Vec::new()),
@@ -1965,7 +2024,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
 
         let rec = Arc::new(KaRec {
             calls: std::sync::Mutex::new(Vec::new()),
@@ -2003,7 +2062,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         telemetry::test_set_flag("tengu_kairos_loop_keepalive", true);
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
         let rec = Arc::new(KaRec {
             calls: std::sync::Mutex::new(Vec::new()),
             runtime: loop_runtime.clone(),
@@ -2094,7 +2153,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
         // What `ScheduleWakeup({noop:true})` records during the tick.
         loop_runtime.mark_noop_reported(true);
 
@@ -2124,7 +2183,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let loop_runtime = Arc::new(tool_cron::LoopRuntime::default());
-        loop_runtime.begin_tick("<<autonomous-loop-dynamic>>".to_string());
+        loop_runtime.begin_tick(Utf16JsonProjection::from("<<autonomous-loop-dynamic>>"));
         loop_runtime.mark_noop_reported(true);
 
         let rec = Arc::new(KaRec {
@@ -2155,7 +2214,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let runtime = Arc::new(tool_cron::LoopRuntime::default());
-        runtime.begin_tick("quiet tick".into());
+        runtime.begin_tick(Utf16JsonProjection::from("quiet tick"));
         runtime.mark_noop_reported(true);
         runtime.settle_tick(
             std::time::SystemTime::now(),

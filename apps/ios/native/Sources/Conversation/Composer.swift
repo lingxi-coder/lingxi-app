@@ -48,7 +48,8 @@ struct Composer: View {
     /// hold-to-talk STT fills it with the recognized utterance (mirrors Android
     /// `onTranscript` → draft). The caller owns it (see ChatView).
     @Binding var draft: String
-    let onSend: (String) -> Void
+    let onSend: (String, ConversationSlashCommand?) -> Void
+    @State private var selectedSlashCommand: ConversationSlashCommand? = nil
 
     /// Engine-owned slash-command catalog. An empty loaded catalog is
     /// authoritative; `slashCommandsLoaded == false` renders a loading row and
@@ -68,6 +69,9 @@ struct Composer: View {
     /// Session transitions and cancellation can temporarily make a draft
     /// non-submittable even though the text field remains editable.
     var sendEnabled: Bool = true
+    /// The widget a follow-up refers to; sent with the next prompt.
+    var visualizationChip: VisualizationContextChip? = nil
+    var onRemoveVisualizationChip: () -> Void = {}
     var onStop: () -> Void = {}
 
     // Camera affordance (the + / attach button) — mirrors Android `onCameraClick`
@@ -125,7 +129,7 @@ struct Composer: View {
         onConfirmBypassPermissions: @escaping (Bool) -> Void = { _ in },
         recentModels: [String] = [],
         draft: Binding<String>,
-        onSend: @escaping (String) -> Void,
+        onSend: @escaping (String, ConversationSlashCommand?) -> Void,
         slashCommands: [ConversationSlashCommand] = [],
         slashCommandsLoaded: Bool = false,
         slashCommandPending: Bool = false,
@@ -138,6 +142,8 @@ struct Composer: View {
         inputFocused: FocusState<Bool>.Binding,
         attachment: ComposerAttachment? = nil,
         onRemoveAttachment: @escaping () -> Void = {},
+        visualizationChip: VisualizationContextChip? = nil,
+        onRemoveVisualizationChip: @escaping () -> Void = {},
         onMicHoldStart: @escaping () -> Void = {},
         onMicHoldRelease: @escaping () -> Void = {},
         onMicHoldCancel: @escaping () -> Void = {},
@@ -186,6 +192,8 @@ struct Composer: View {
         self._inputFocused = inputFocused
         self.attachment = attachment
         self.onRemoveAttachment = onRemoveAttachment
+        self.visualizationChip = visualizationChip
+        self.onRemoveVisualizationChip = onRemoveVisualizationChip
         self.onMicHoldStart = onMicHoldStart
         self.onMicHoldRelease = onMicHoldRelease
         self.onMicHoldCancel = onMicHoldCancel
@@ -214,6 +222,11 @@ struct Composer: View {
                 // shown only once a camera capture has surfaced an image.
                 if let attachment {
                     AttachmentThumb(attachment: attachment, onRemove: onRemoveAttachment)
+                }
+
+                if let visualizationChip {
+                    VisualizationContextChipView(chip: visualizationChip, onDismiss: onRemoveVisualizationChip)
+                        .padding(.horizontal, 4)
                 }
 
                 if let slashArgumentHint {
@@ -670,8 +683,17 @@ struct Composer: View {
             && !showDiscardRecovery
     }
 
+    private var selectedSlashCommandForDraft: ConversationSlashCommand? {
+        guard let selectedSlashCommand,
+              let token = SlashCommandMatcher.commandToken(in: draft),
+              selectedSlashCommand.matchesExactToken(token)
+        else { return nil }
+        return selectedSlashCommand
+    }
+
     private func acceptSlashCommand(_ command: ConversationSlashCommand) {
         let accepted = command.canonicalTrigger
+        selectedSlashCommand = command
         draft = accepted
         dismissedSlashDraft = accepted
         inputFocused = true
@@ -691,7 +713,9 @@ struct Composer: View {
             acceptSlashCommand(suggestion.command)
             return
         }
-        onSend(draft); draft = ""
+        onSend(draft, selectedSlashCommandForDraft)
+        selectedSlashCommand = nil
+        draft = ""
         dismissedSlashDraft = nil
     }
 }

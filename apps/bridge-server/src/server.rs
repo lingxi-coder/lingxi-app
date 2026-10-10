@@ -47,8 +47,8 @@ use crate::audio_bridge::{AudioRequestSink, AudioResponder};
 use async_trait::async_trait;
 use bridge::wire::Frame;
 use bridge::{
-    version_compatible, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities, ClientHello,
-    FramePump, FrameSink, ServerHello, BRIDGE_PROTOCOL_VERSION,
+    BRIDGE_PROTOCOL_VERSION, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities,
+    ClientHello, FramePump, FrameSink, ServerHello, version_compatible,
 };
 use client::adapter::{
     AskUserQuestionBroker, ClientEventSink, ComputerAccessRequestSink, PermissionRequestSink,
@@ -60,13 +60,43 @@ use client::protocol::permission::{PermissionKindDto, PermissionRequest, Permiss
 use client::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use msgqueue::{
-    join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,
-    QueuedCommandContent, TelemetryQueueRecorder,
+    MessageQueueManager, QueuePriority, QueueSource, QueuedCommand, QueuedCommandContent,
+    TelemetryQueueRecorder, join_prompt_values,
 };
 use permission::computer_access::ComputerAccessExchange;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tool_api::ask_user_question::AskUserQuestionExchange;
+
+fn deserialize_source<T>(source: &Utf16JsonProjection) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let json = source.to_json_string().map_err(|error| error.to_string())?;
+    serde_json::from_str(&json).map_err(|error| error.to_string())
+}
+
+fn serialize_source<T: serde::Serialize>(value: &T) -> Result<Utf16JsonProjection, String> {
+    let json = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    Utf16JsonProjection::parse(&json).map_err(|error| error.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionRequestScopeQuery {
+    request_id: u64,
+}
+
+#[derive(serde::Serialize)]
+struct PermissionRequestScopeResult {
+    request_id: u64,
+    background_owned: bool,
+}
+
+#[derive(serde::Serialize)]
+struct DesktopRuntimeSnapshotResult<'a> {
+    events: &'a [ClientEvent],
+}
 
 use client::adapter::AdapterPermissionGate;
 use client::adapter::ComputerAccessBroker;
@@ -124,7 +154,10 @@ pub trait TurnDriver: Send + Sync + 'static {
     async fn stop_dynamic_loop(&self) {}
 
     /// Resolve a scheduled sentinel against this session's working directory.
-    fn resolve_loop_prompt(&self, prompt: &str) -> std::io::Result<String> {
+    fn resolve_loop_prompt(
+        &self,
+        prompt: &Utf16JsonProjection,
+    ) -> std::io::Result<Utf16JsonProjection> {
         let cwd = std::env::current_dir()?;
         tool_cron::LoopRuntime::default().try_resolve_loop_default_fire(prompt, &cwd, &cwd)
     }
@@ -652,6 +685,15 @@ pub struct BridgeConnection {
     queue_wakeup_task: Option<tokio::task::AbortHandle>,
     task_notification_registry:
         Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
+    /// Inline visualizations: the `visualization` request host and the store
+    /// a follow-up `SendPrompt` snapshots its widget state from.
+    visualization: Option<Arc<BridgeVisualization>>,
+}
+
+struct BridgeVisualization {
+    host: harness_runtime::desktop_visualization::DesktopVisualizationHost,
+    fs: Arc<dyn lingxi_core::host::FileSystem>,
+    config_home: std::path::PathBuf,
 }
 
 #[derive(Clone, Default)]
@@ -1380,11 +1422,11 @@ async fn drain_main_thread(
                     }
                     if let Some(payload) = payload {
                         let (generation, cancel) = owned_turn.expect("complete prompt owns a turn");
-                        tag_loop_tick_in_flight(
-                            loop_runtime,
-                            false,
-                            cmd.text().unwrap_or_default(),
-                        );
+                        let prompt = cmd
+                            .text_projection()
+                            .cloned()
+                            .unwrap_or_else(|| Utf16JsonProjection::from(""));
+                        tag_loop_tick_in_flight(loop_runtime, false, &prompt);
                         orchestrator::mod_prompt_origin::with_origin(
                             serde_json::json!({"kind":"bridge"}),
                             driver.run_queued_turn_with_images(
@@ -1401,12 +1443,11 @@ async fn drain_main_thread(
                     }
                     if let Some(text) = cmd.text_projection() {
                         if text.string_units("").is_some_and(|units| !units.is_empty()) {
-                            let display = cmd.text().unwrap_or_default();
                             tag_loop_tick_in_flight(
                                 loop_runtime,
                                 cmd.source == QueueSource::Cron
                                     && cmd.uuid.starts_with("loop-wakeup-"),
-                                display,
+                                text,
                             );
                             let (generation, cancel) =
                                 owned_turn.expect("nonempty queued prompt owns a turn");
@@ -1447,14 +1488,10 @@ async fn drain_main_thread(
                     && c.uuid.starts_with("loop-wakeup-")
                     && consumed.contains(&c.uuid)
             })
-            .and_then(|c| c.text().map(str::to_string));
+            .and_then(|c| c.text_projection().cloned());
         match cron_tick {
             Some(ref t) => tag_loop_tick_in_flight(loop_runtime, true, t),
-            None => tag_loop_tick_in_flight(
-                loop_runtime,
-                false,
-                joined.string_at("").unwrap_or_default(),
-            ),
+            None => tag_loop_tick_in_flight(loop_runtime, false, &joined),
         }
         // Resolve only consumed prompts: touching a later sentinel early would
         // incorrectly mark its preamble/loop.md as already delivered.
@@ -1473,9 +1510,8 @@ async fn drain_main_thread(
                 continue;
             };
             let text = if command.source == QueueSource::Cron {
-                let display_text = command.text().unwrap_or_default();
-                match driver.resolve_loop_prompt(display_text) {
-                    Ok(text) => text.into(),
+                match driver.resolve_loop_prompt(source_text) {
+                    Ok(text) => text,
                     Err(error) => {
                         failed_uuids.push(command.uuid.clone());
                         loop_failure.get_or_insert(error);
@@ -1539,9 +1575,13 @@ async fn drain_main_thread(
 /// edge can arm the keepalive fallback. A `QueueSource::Cron` command IS a loop
 /// tick (binary `d.kind==="loop"`); any other turn clears a stale tag so a user
 /// turn never inherits one.
-fn tag_loop_tick_in_flight(loop_runtime: &tool_cron::LoopRuntime, is_cron: bool, text: &str) {
+fn tag_loop_tick_in_flight(
+    loop_runtime: &tool_cron::LoopRuntime,
+    is_cron: bool,
+    text: &Utf16JsonProjection,
+) {
     if is_cron {
-        loop_runtime.begin_tick(text.to_string());
+        loop_runtime.begin_tick(text.clone());
     } else {
         loop_runtime.take_in_flight_prompt();
         loop_runtime.invalidate_noop_streak();
@@ -1613,7 +1653,27 @@ impl BridgeConnection {
             active_turn_task: Arc::new(StdMutex::new(None)),
             queue_wakeup_task: None,
             task_notification_registry: None,
+            visualization: None,
         }
+    }
+
+    /// Answer `visualization` requests and resolve follow-up context from the
+    /// store under `config_home`.
+    #[must_use]
+    pub fn with_visualization(
+        mut self,
+        fs: Arc<dyn lingxi_core::host::FileSystem>,
+        config_home: &std::path::Path,
+    ) -> Self {
+        self.visualization = Some(Arc::new(BridgeVisualization {
+            host: harness_runtime::desktop_visualization::DesktopVisualizationHost::for_config_home(
+                fs.clone(),
+                config_home,
+            ),
+            fs,
+            config_home: config_home.to_path_buf(),
+        }));
+        self
     }
 
     /// Wake an idle main loop when teammates enqueue a noninterrupting prompt.
@@ -2155,7 +2215,7 @@ impl BridgeConnection {
             BridgeResponse {
                 id: request_id,
                 result: Some(
-                    serde_json::to_value(ServerHello {
+                    serialize_source(&ServerHello {
                         protocol_version: BRIDGE_PROTOCOL_VERSION.to_string(),
                         server_name: concat!("lingxi-bridge-server/", env!("CARGO_PKG_VERSION"))
                             .to_string(),
@@ -2335,9 +2395,13 @@ impl BridgeConnection {
                 text,
                 images,
                 turn_id,
+                visualization_context,
                 ..
             } => {
-                self.handle_send_prompt(text.into(), images, turn_id).await;
+                let text = self
+                    .visualization_followup(text.into_projection(), visualization_context.as_ref())
+                    .await;
+                self.handle_send_prompt(text, images, turn_id).await;
             }
             ClientCommand::ScheduledRunTurn {
                 run_id,
@@ -2425,7 +2489,7 @@ impl BridgeConnection {
             // only / unknown / no-dispatcher cases fall back to the router's
             // text-surface path.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
-                let raw_source: Utf16JsonProjection = raw.clone().into();
+                let raw_source = raw.clone().into_projection();
                 // Check before dispatch_slash: builtins execute there, not in
                 // the later display-only routing fallback. Use connection run
                 // ownership, which also covers queued follow-up turns.
@@ -2539,15 +2603,12 @@ impl BridgeConnection {
                             .await;
                     }
                     Some(lingxi_core::host::SlashDispatchResult::NotASlashCommand) => {
+                        let mut units = "not a slash command: ".encode_utf16().collect::<Vec<_>>();
+                        units.extend_from_slice(&raw.code_units);
                         self.unscoped_event_sink()
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
-                                display: ClientTextDto::from_projection(
-                                    &Utf16JsonProjection::from(format!(
-                                        "not a slash command: {raw}"
-                                    )),
-                                )
-                                .expect("generated slash display is a root string"),
+                                display: ClientTextDto::from_code_units(units),
                                 is_error: true,
                             })
                             .await;
@@ -2668,6 +2729,31 @@ impl BridgeConnection {
         }
         self.queue.remove(&queued, "conversation replaced").await;
         self.loop_runtime.reset();
+    }
+
+    /// A follow-up from a widget carries that revision's confirmed state,
+    /// snapshotted now (at send or enqueue time) ahead of the typed text.
+    async fn visualization_followup(
+        &self,
+        text: Utf16JsonProjection,
+        context: Option<&client::protocol::message::VisualizationRefDto>,
+    ) -> Utf16JsonProjection {
+        let (Some(visualization), Some(context), Some(driver)) =
+            (&self.visualization, context, &self.driver)
+        else {
+            return text;
+        };
+        let Some(session_id) = driver.current_session_id().await else {
+            return text;
+        };
+        harness_runtime::inline_visualization::followup_text(
+            visualization.fs.clone(),
+            &visualization.config_home,
+            &session_id,
+            Some(context),
+            text,
+        )
+        .await
     }
 
     async fn handle_send_prompt(
@@ -2989,11 +3075,15 @@ impl BridgeConnection {
             .await;
     }
 
-    async fn resolve_ask_user_question(&self, request_id: u64, answers: HashMap<String, String>) {
+    async fn resolve_ask_user_question(
+        &self,
+        request_id: u64,
+        answers: client::protocol::ask_user_question::AskUserQuestionAnswersDto,
+    ) {
         let Some(broker) = self.ask_user_question_broker.as_ref() else {
             return;
         };
-        if !broker.resolve(request_id, answers).await {
+        if !broker.resolve(request_id, answers.into_projections()).await {
             tracing::debug!(
                 request_id,
                 "bridge-server: resolve for unknown / already-resolved AskUserQuestion id"
@@ -3023,10 +3113,12 @@ impl FramePump for BridgeConnection {
         if request.method == "hello" {
             return false;
         }
-        if request.method == "permission_request_scope" {
+        // A widget's document and state requests are independent of the
+        // command stream; a slow control must not leave a card loading.
+        if request.method == "permission_request_scope" || request.method == "visualization" {
             return self.handshaken.load(Ordering::SeqCst);
         }
-        match serde_json::from_value::<ClientCommand>(request.params.clone()) {
+        match deserialize_source::<ClientCommand>(&request.params) {
             // A cancel for a prompt still queued behind a slow control must
             // remain behind that prompt. Otherwise it is ignored before the
             // prompt has claimed an owner and the cancelled work starts later.
@@ -3069,7 +3161,7 @@ impl FramePump for BridgeConnection {
             // error, and is the ONLY frame routed before `handshaken` is set.
             Frame::Request(BridgeRequest {
                 id, method, params, ..
-            }) if method == "hello" => match serde_json::from_value::<ClientHello>(params) {
+            }) if method == "hello" => match deserialize_source::<ClientHello>(&params) {
                 Ok(hello) => self.handle_hello(id, hello).await,
                 Err(e) => {
                     tracing::debug!(error = %e, "bridge-server: undecodable ClientHello");
@@ -3092,21 +3184,33 @@ impl FramePump for BridgeConnection {
                 }
                 if method == "permission_request_scope" {
                     let request_id = params
-                        .as_object()
-                        .filter(|params| params.len() == 1)
-                        .and_then(|params| params.get("request_id"))
-                        .and_then(serde_json::Value::as_u64);
+                        .object_entries()
+                        .filter(|entries| entries.len() == 1)
+                        .and_then(|_| {
+                            deserialize_source::<PermissionRequestScopeQuery>(&params).ok()
+                        })
+                        .map(|query| query.request_id);
                     let response = match request_id {
                         Some(request_id) => {
                             let scope = match &self.gate {
                                 Some(gate) => gate.request_is_background(request_id).await,
                                 None => None,
                             };
+                            let result = match scope {
+                                Some(background_owned) => {
+                                    serialize_source(&PermissionRequestScopeResult {
+                                        request_id,
+                                        background_owned,
+                                    })
+                                    .expect("permission scope response serializes")
+                                }
+                                None => {
+                                    Utf16JsonProjection::parse("null").expect("null is valid JSON")
+                                }
+                            };
                             Frame::Response(BridgeResponse {
                                 id,
-                                result: Some(scope.map_or(serde_json::Value::Null, |background_owned| {
-                                    serde_json::json!({"request_id":request_id,"background_owned":background_owned})
-                                })),
+                                result: Some(result),
                                 error: None,
                             })
                         }
@@ -3117,6 +3221,32 @@ impl FramePump for BridgeConnection {
                     }
                     return;
                 }
+                if method == "visualization" {
+                    // Answered on its own task: a document or asset read must
+                    // never wait behind (or stall) the ordered command stream.
+                    let Some(visualization) = self.visualization.clone() else {
+                        if let Some(sink) = self.out.lock().await.as_ref() {
+                            let _ = sink
+                                .send(Self::error_response(id, "visualizations are unavailable"));
+                        }
+                        return;
+                    };
+                    let out = self.out.clone();
+                    tokio::spawn(async move {
+                        let response = match visualization.host.handle(params).await {
+                            Ok(result) => Frame::Response(BridgeResponse {
+                                id,
+                                result: Some(result),
+                                error: None,
+                            }),
+                            Err(error) => Self::error_response(id, error),
+                        };
+                        if let Some(sink) = out.lock().await.as_ref() {
+                            let _ = sink.send(response);
+                        }
+                    });
+                    return;
+                }
                 if method == "desktop_runtime_snapshot" {
                     // This router seam only reads state into a collector. Fence
                     // its read and reply against live outbound pushes: a worker
@@ -3125,7 +3255,9 @@ impl FramePump for BridgeConnection {
                     // No broker drain, turn-gate wait, or outbound callback is
                     // allowed inside runtime_snapshot.
                     let out = self.out.lock().await;
-                    let response = if params != serde_json::json!({"type":"list_session_agents"}) {
+                    let expected = Utf16JsonProjection::parse(r#"{"type":"list_session_agents"}"#)
+                        .expect("static snapshot request is valid JSON");
+                    let response = if !params.semantically_eq(&expected) {
                         Self::error_response(id, "invalid desktop runtime snapshot request")
                     } else {
                         let snapshot = match &self.router {
@@ -3133,11 +3265,21 @@ impl FramePump for BridgeConnection {
                             None => Err("desktop runtime snapshot is unavailable".into()),
                         };
                         match snapshot {
-                            Ok(events) => Frame::Response(BridgeResponse {
-                                id,
-                                result: Some(serde_json::json!({"events":events})),
-                                error: None,
-                            }),
+                            Ok(events) => match serialize_source(&DesktopRuntimeSnapshotResult {
+                                events: &events,
+                            }) {
+                                Ok(result) => Frame::Response(BridgeResponse {
+                                    id,
+                                    result: Some(result),
+                                    error: None,
+                                }),
+                                Err(error) => Self::error_response(
+                                    id,
+                                    format!(
+                                        "could not serialize desktop runtime snapshot: {error}"
+                                    ),
+                                ),
+                            },
                             Err(error) => Self::error_response(id, error),
                         }
                     };
@@ -3146,7 +3288,7 @@ impl FramePump for BridgeConnection {
                     }
                     return;
                 }
-                match serde_json::from_value::<ClientCommand>(params) {
+                match deserialize_source::<ClientCommand>(&params) {
                     Ok(command) => self.dispatch(command).await,
                     Err(e) => {
                         tracing::debug!(error = %e, "bridge-server: undecodable command params");
@@ -3256,9 +3398,11 @@ impl BridgeConnection {
             ));
         }
         for (_, pending) in self.mod_prompts.lock().unwrap().drain() {
-            let _ = pending.settle.send(Ok(serde_json::json!({
-                "drop":"the prompt was removed from the queue before it ran"
-            })));
+            let dropped = Utf16JsonProjection::parse(
+                r#"{"drop":"the prompt was removed from the queue before it ran"}"#,
+            )
+            .expect("static prompt result is valid JSON");
+            let _ = pending.settle.send(Ok(dropped));
         }
         self.queued_prompt_payloads.lock().await.clear();
         self.loop_runtime.take_in_flight_prompt();
@@ -3354,10 +3498,41 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        batchable_prompt_snapshot, drain_main_thread, is_owned_turn_event, run_queued_mod_command,
         ActiveTurnControl, BridgeConnection, BridgeModCommandQueue, ModQueueDrain,
         PendingModCommands, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
+        batchable_prompt_snapshot, deserialize_source, drain_main_thread, is_owned_turn_event,
+        run_queued_mod_command, serialize_source,
     };
+
+    #[test]
+    fn bridge_command_source_decode_preserves_isolated_utf16_units() {
+        let prompt = Utf16JsonProjection::parse(
+            r#"{"type":"send_prompt","text":"prompt\ud800","images":[]}"#,
+        )
+        .unwrap();
+        let ClientCommand::SendPrompt { text, .. } = deserialize_source(&prompt).unwrap() else {
+            panic!("send_prompt source must decode as a prompt command");
+        };
+        assert_eq!(
+            text.code_units,
+            [
+                b'p' as u16,
+                b'r' as u16,
+                b'o' as u16,
+                b'm' as u16,
+                b'p' as u16,
+                b't' as u16,
+                0xd800,
+            ]
+        );
+
+        let slash =
+            Utf16JsonProjection::parse(r#"{"type":"run_slash_command","raw":"/x\udfff"}"#).unwrap();
+        let ClientCommand::RunSlashCommand { raw, .. } = deserialize_source(&slash).unwrap() else {
+            panic!("run_slash_command source must decode as a slash command");
+        };
+        assert_eq!(raw.code_units, [b'/' as u16, b'x' as u16, 0xdfff]);
+    }
 
     #[test]
     fn terminal_closes_all_turn_events_without_releasing_the_driver_slot() {
@@ -3840,12 +4015,14 @@ mod tests {
         connection.turn_running.store(true, Ordering::SeqCst);
         connection.handshaken.store(true, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            driver.started.notified()
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                driver.started.notified()
+            )
+            .await
+            .is_err()
+        );
         connection.turn_running.store(false, Ordering::SeqCst);
         tokio::time::timeout(std::time::Duration::from_secs(2), driver.started.notified())
             .await
@@ -3930,10 +4107,11 @@ mod tests {
         ];
         connection
             .dispatch(ClientCommand::SendPrompt {
-                text: "look at these".to_string(),
+                text: "look at these".into(),
                 prompt_mode: None,
                 images: images.clone(),
                 turn_id: None,
+                visualization_context: None,
             })
             .await;
 
@@ -4206,13 +4384,15 @@ mod tests {
         assert_eq!(queued.source, QueueSource::Plugin);
         assert_eq!(queued.priority, QueuePriority::Later);
         assert!(!queued.is_meta);
-        assert!(batchable_prompt_snapshot(
-            &queue,
-            &connection.queued_prompt_payloads,
-            &connection.turn_handoff,
-        )
-        .await
-        .is_empty());
+        assert!(
+            batchable_prompt_snapshot(
+                &queue,
+                &connection.queued_prompt_payloads,
+                &connection.turn_handoff,
+            )
+            .await
+            .is_empty()
+        );
 
         let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
             captured: Arc::new(Mutex::new(None)),
@@ -4598,7 +4778,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
-                raw: "/loop 5m /babysit-prs".to_string(),
+                raw: "/loop 5m /babysit-prs".into(),
                 turn_id: Some(41),
             })
             .await;
@@ -4641,7 +4821,7 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::RunSlashCommand {
-                raw: "/help".to_string(),
+                raw: "/help".into(),
                 turn_id: Some(42),
             })
             .await;
@@ -4686,14 +4866,15 @@ mod tests {
 
     #[test]
     fn cancellation_priority_requires_an_existing_matching_turn() {
-        use bridge::wire::{BridgeRequest, Frame};
         use bridge::FramePump;
+        use bridge::wire::{BridgeRequest, Frame};
         let connection = BridgeConnection::new();
         let cancel = |turn_id| {
             Frame::Request(BridgeRequest {
                 id: 1,
                 method: "command".into(),
-                params: serde_json::to_value(ClientCommand::Cancel { turn_id }).unwrap(),
+                params: serialize_source(&ClientCommand::Cancel { turn_id })
+                    .expect("cancel command serializes as source JSON"),
             })
         };
         // Slow SetModel -> queued SendPrompt(42) -> Cancel(42): cancellation
@@ -4713,14 +4894,14 @@ mod tests {
 
     #[test]
     fn audio_capability_updates_share_the_response_lane_after_handshake() {
-        use bridge::wire::{BridgeRequest, Frame};
         use bridge::FramePump;
+        use bridge::wire::{BridgeRequest, Frame};
 
         let connection = BridgeConnection::new();
         let update = Frame::Request(BridgeRequest {
             id: 1,
             method: "command".into(),
-            params: serde_json::to_value(ClientCommand::UpdateAudioCapabilities {
+            params: serialize_source(&ClientCommand::UpdateAudioCapabilities {
                 capabilities: client::protocol::audio::AudioCapabilitySnapshotDto {
                     service_epoch: 8,
                     support_revision: 1,
@@ -4729,7 +4910,7 @@ mod tests {
                     max_payload_bytes: 1024,
                 },
             })
-            .unwrap(),
+            .expect("audio capability command serializes as source JSON"),
         });
 
         assert!(!connection.is_priority_frame(&update));
@@ -4752,10 +4933,11 @@ mod tests {
 
         connection
             .dispatch(ClientCommand::SendPrompt {
-                text: "block".to_string(),
+                text: "block".into(),
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: Some(41),
+                visualization_context: None,
             })
             .await;
         started.notified().await;
@@ -4960,10 +5142,11 @@ mod tests {
         // First prompt — wins the run loop and parks on the barrier.
         connection
             .dispatch(ClientCommand::SendPrompt {
-                text: "first".to_string(),
+                text: "first".into(),
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: None,
+                visualization_context: None,
             })
             .await;
         started.notified().await;
@@ -4973,10 +5156,11 @@ mod tests {
         assert!(connection.turn_running.load(Ordering::SeqCst));
         connection
             .dispatch(ClientCommand::SendPrompt {
-                text: "second".to_string(),
+                text: "second".into(),
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: None,
+                visualization_context: None,
             })
             .await;
         assert_eq!(

@@ -466,6 +466,8 @@ data class Message(
     val loopWakeupStreak: UInt? = null,
     val loopFoldedItemIds: Set<String> = emptySet(),
     val loopPreexistingItemIds: Set<String> = emptySet(),
+    /** The widget a user turn continued from, rendered as a chip on the bubble. */
+    val visualizationContext: com.lingxi.code.conversation.VisualizationContextChip? = null,
 )
 
 /** A unified "session" reference used by the conversation title bar. */

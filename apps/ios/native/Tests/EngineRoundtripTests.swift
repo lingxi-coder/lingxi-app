@@ -325,7 +325,7 @@ import XCTest
             // spawned on the engine's owned runtime; a turn failure is NOT thrown
             // here, it streams to the listener as a `ClientEvent.error`.
             try await handle.submit(command: .sendPrompt(
-                text: "Reply with exactly: hello from lingxi",
+                text: ClientTextDto(codeUnits: Array("Reply with exactly: hello from lingxi".utf16)),
                 promptMode: nil,
                 images: [],
                 turnId: nil))

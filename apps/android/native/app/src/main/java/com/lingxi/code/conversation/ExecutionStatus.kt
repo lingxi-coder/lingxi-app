@@ -1,5 +1,6 @@
 package com.lingxi.code.conversation
 
+import com.lingxi.code.bindings.client.ClientTextDto
 import com.lingxi.code.bindings.client.SessionAgentSummaryDto
 import com.lingxi.code.bindings.client.TaskRowDto
 import com.lingxi.code.bindings.client.TaskStatusDto
@@ -49,12 +50,37 @@ fun TaskRowDto.toBackgroundTaskUi(): BackgroundTaskUi = BackgroundTaskUi(
 
 fun SessionAgentSummaryDto.toSessionAgentUi(): SessionAgentUi = SessionAgentUi(
     agentId = agentId,
-    name = name,
+    name = name.displayText(),
     agentType = agentType,
     model = model,
     status = status,
-    latestActivity = latestActivity,
+    latestActivity = latestActivity?.displayText(),
 )
+
+/** Display-only conversion; command, task, and session identities keep code units. */
+private fun ClientTextDto.displayText(): String = buildString(codeUnits.size) {
+    var index = 0
+    while (index < codeUnits.size) {
+        val unit = codeUnits[index].toInt()
+        when {
+            unit in 0xd800..0xdbff &&
+                index + 1 < codeUnits.size &&
+                codeUnits[index + 1].toInt() in 0xdc00..0xdfff -> {
+                append(unit.toChar())
+                append(codeUnits[index + 1].toInt().toChar())
+                index += 2
+            }
+            unit in 0xd800..0xdfff -> {
+                append('\uFFFD')
+                index++
+            }
+            else -> {
+                append(unit.toChar())
+                index++
+            }
+        }
+    }
+}
 
 internal fun TaskStatusDto.isAttentionStatus(): Boolean =
     this == TaskStatusDto.PAUSED || this == TaskStatusDto.FAILED

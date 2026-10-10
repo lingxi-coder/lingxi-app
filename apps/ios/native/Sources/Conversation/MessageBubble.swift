@@ -120,6 +120,9 @@ struct MessageBubble: View, Equatable {
     var body: some View {
         if message.role == .user {
             VStack(alignment: .trailing, spacing: 4) {
+                if let chip = message.visualizationContext {
+                    VisualizationContextChipView(chip: chip)
+                }
                 if !message.images.isEmpty {
                     MessageImages(images: message.images)
                 }

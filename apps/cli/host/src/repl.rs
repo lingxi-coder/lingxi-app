@@ -12,6 +12,7 @@ use harness_runtime::headless::output::{JsonSink, OutputSink, PlainSink};
 use harness_runtime::headless::output_adapter::SinkAdapter;
 use lingxi_core::host::task_registry::TaskRegistryHandle;
 use lingxi_core::host::{OrchestratorHandle, OutputStream};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::SessionId;
 use orchestrator::{OrchestratorError, TurnOutcome};
 use std::io::IsTerminal;
@@ -82,13 +83,16 @@ impl TaskNotificationWake for ReplTaskWake {
             })
             .await
         {
-            let raw = command.text().unwrap_or_default();
+            let raw = command
+                .text_projection()
+                .cloned()
+                .unwrap_or_else(|| "".into());
             let resolved = if command.uuid.starts_with("goal-retry-") {
-                Ok(Some(raw.to_owned()))
+                Ok(Some(raw.clone()))
             } else if command.uuid.starts_with("loop-wakeup-") {
-                self.loop_host.begin(Some(raw), false)
+                self.loop_host.begin(Some(&raw), false)
             } else {
-                self.loop_host.resolve_scheduled(raw).map(Some)
+                self.loop_host.resolve_scheduled(&raw).map(Some)
             };
             match resolved {
                 Ok(prompt) => {
@@ -99,7 +103,7 @@ impl TaskNotificationWake for ReplTaskWake {
                                     .uuid
                                     .starts_with("goal-retry-")
                                     .then(|| command.uuid.clone()),
-                                text: prompt.unwrap_or_else(|| raw.to_owned()),
+                                text: prompt.unwrap_or_else(|| raw.clone()),
                                 is_meta: true,
                                 mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
                                     serde_json::json!({"kind":"auto-continuation"})
@@ -156,7 +160,7 @@ async fn confirm_repl_exit<R: AsyncBufRead + Send + Unpin + ?Sized>(
         let handoff = handle.can_background_conversation_on_exit().await;
         let descriptions = live
             .iter()
-            .map(|task| format!("  {}", task.description))
+            .map(|task| format!("  {}", task.description.string_at("").unwrap_or_default()))
             .collect::<Vec<_>>()
             .join("\n");
         sink.text(&format!("Background work is running\nThe following will stop when you exit:\n{descriptions}\n1. Exit and stop tasks\n{}3. Stay\n", if handoff { "2. Move to background and exit\n" } else { "" })).await;
@@ -496,7 +500,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
         // surface does not render instead.
         while let Some(event) = loop_rx.recv().await {
             if let tui::TurnEvent::SystemNotice { body, .. } = event {
-                loop_sink.text(&format!("{body}\n")).await;
+                loop_sink.text(&format!("{}\n", body.display())).await;
             }
         }
     });
@@ -645,10 +649,15 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for ReplGoalQueue 
     async fn has_queued_goal_work(&self) -> bool {
         self.0.has_main_thread_commands().await
     }
-    async fn enqueue_goal_retry(&self, id: String, body: String, cancel: CancellationToken) {
+    async fn enqueue_goal_retry(
+        &self,
+        id: String,
+        body: Utf16JsonProjection,
+        cancel: CancellationToken,
+    ) {
         self.0.enqueue_goal_retry(id, body, cancel).await;
     }
-    async fn take_mid_turn_input(&self) -> Option<String> {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
         None
     }
 }

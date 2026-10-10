@@ -1,6 +1,6 @@
 use super::RataApp;
-use crate::RataTerminal;
 use crate::chat_widget::ChatOutcome;
+use crate::RataTerminal;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use lingxi_core::host::ModUiSelection;
 use ratatui::layout::Position;

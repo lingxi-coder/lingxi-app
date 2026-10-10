@@ -1,9 +1,10 @@
-//! Public CLI replay for Native 2.1.293 terminal provider-error results.
+//! Public CLI replay for Native 2.1.295 terminal provider-error results.
 //!
 //! The subprocess uses one loopback-only Anthropic Messages stub and checks the
-//! actual `--print --output-format json` entrypoint, including the final result
-//! envelope and UTF-16 source text. Dynamic timing/UUID fields are shape-checked
-//! rather than compared to fixed Native values.
+//! actual `--print --output-format json` entrypoint. It compares the raw JSON
+//! result string literal and fixed top-level value slices with the Native
+//! capture. The generated duration and UUID remain untouched and have separate
+//! format and relationship constraints; the complete stdout is not byte-equal.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -16,56 +17,42 @@ use std::time::{Duration, Instant};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-const API_KEY: &str = "native-provider-error-fixture-dummy-key";
+
+const NATIVE_VERSION: &str = "2.1.295 (Claude Code)";
+const NATIVE_SHA256: &str = "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70";
+const API_KEY: &str = "native-provider-error-295-dummy";
+const MODEL: &str = "claude-sonnet-4-5";
+const PROMPT: &str = "Return the fixed provider error fixture response.";
+const ENTRYPOINT: &str = "--print --output-format json";
 
 #[derive(Deserialize)]
-struct NativeReceipt {
+struct Native295Receipt {
     native_version: String,
-    native_binary_sha256: String,
-    provenance: Vec<NativeProvenance>,
-    capture: NativeCapture,
-    dynamic_json_fields: Vec<String>,
-    cases: Vec<NativeCase>,
+    native_sha256: String,
+    cases: Vec<Native295Case>,
 }
 
 #[derive(Deserialize)]
-struct NativeProvenance {
-    source: String,
-    sha256: String,
-}
-
-#[derive(Deserialize)]
-struct NativeCapture {
-    entrypoint: String,
-    model: String,
-    prompt: String,
-    setting_sources: String,
-    strict_mcp_config: bool,
-    disable_tools: bool,
-    max_budget_usd: u64,
-    response_content_type: String,
-    network_boundary: String,
-    response_header_behavior: String,
-}
-
-#[derive(Deserialize)]
-struct NativeCase {
+struct Native295Case {
+    #[serde(rename = "case")]
     id: String,
     session_id: String,
-    #[serde(rename = "http_status")]
     status: u16,
-    max_retries: Option<u32>,
-    native_exit_code: i32,
-    native_stderr_sha256: String,
-    request_count: usize,
+    exit_code: i32,
+    requests: Vec<Native295Request>,
+    stdout_sha256: String,
+    response_sha256: String,
+    no_retry_header: bool,
     terminal_reason: String,
     stop_reason: String,
-    response_body_source: String,
-    response_body_file: String,
-    response_body_sha256: String,
-    native_stdout_source: String,
-    stdout_file: String,
-    stdout_sha256: String,
+}
+
+#[derive(Deserialize)]
+struct Native295Request {
+    model: String,
+    stream: bool,
+    body_sha256: String,
+    body_bytes: u64,
 }
 
 struct LocalApiStub {
@@ -192,28 +179,24 @@ fn write_http_response(
         "HTTP/1.0 {status} {reason}\r\nContent-Length: {}\r\n",
         body.len()
     )?;
-    if !body.is_empty() {
-        write!(stream, "Content-Type: {content_type}\r\n")?;
-    }
+    write!(stream, "Content-Type: {content_type}\r\n")?;
     write!(stream, "\r\n")?;
     stream.write_all(body)?;
     stream.flush()
 }
 
 fn invoke_cli(
-    case: &NativeCase,
-    capture: &NativeCapture,
+    case: &Native295Case,
     response_body: &[u8],
     entrypoint: &str,
     no_stream: bool,
 ) -> (std::process::Output, Vec<Vec<u8>>) {
     let config = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let max_budget_usd = capture.max_budget_usd.to_string();
     let stub = LocalApiStub::start(
         case.status,
         response_body.to_vec(),
-        capture.response_content_type.clone(),
+        "application/json".into(),
     );
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_lingxi-cli"));
@@ -235,6 +218,7 @@ fn invoke_cli(
             format!("http://{}", stub.address),
         )
         .env("ANTHROPIC_API_KEY", API_KEY)
+        .env("ANTHROPIC_MAX_RETRIES", "0")
         .env("LINGXI_SIMPLE", "1")
         .env("CLAUDE_CONFIG_DIR", config.path())
         .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
@@ -247,25 +231,15 @@ fn invoke_cli(
         .env_remove("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD")
         .env_remove("CLAUDE_CODE_USE_MANTLE")
         .env_remove("CLAUDE_CODE_USE_VERTEX")
-        .args(["--setting-sources", capture.setting_sources.as_str()]);
-    if let Some(max_retries) = case.max_retries {
-        command.env("ANTHROPIC_MAX_RETRIES", max_retries.to_string());
-    }
-    if capture.strict_mcp_config {
-        command.arg("--strict-mcp-config");
-    }
+        .args(["--setting-sources", "project", "--strict-mcp-config"]);
     command
         .args(entrypoint.split_whitespace())
-        .args(if capture.disable_tools {
-            vec!["--tools", ""]
-        } else {
-            Vec::new()
-        })
+        .args(["--tools", ""])
         .args([
             "--max-budget-usd",
-            max_budget_usd.as_str(),
+            "1",
             "--model",
-            capture.model.as_str(),
+            MODEL,
             "--session-id",
             case.session_id.as_str(),
         ]);
@@ -273,7 +247,7 @@ fn invoke_cli(
         command.arg("--no-stream");
     }
     command
-        .arg(capture.prompt.as_str())
+        .arg(PROMPT)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -311,136 +285,327 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn unique_field_span(raw: &[u8], marker: &[u8]) -> (usize, usize) {
-    let marker_start = find_bytes(raw, marker).expect("dynamic field marker exists");
-    assert!(
-        find_bytes(&raw[marker_start + 1..], marker).is_none(),
-        "dynamic field marker is unique"
-    );
-    let value_start = marker_start + marker.len();
-    (marker_start, value_start)
+fn is_json_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
-fn mask_duration_ms(raw: &[u8]) -> Vec<u8> {
-    let (_, mut value_start) = unique_field_span(raw, b"\"duration_ms\":");
-    while raw[value_start].is_ascii_whitespace() {
-        value_start += 1;
+fn skip_json_whitespace(raw: &[u8], mut index: usize) -> usize {
+    while raw.get(index).is_some_and(|byte| is_json_whitespace(*byte)) {
+        index += 1;
     }
-    let mut value_end = value_start;
-    while raw.get(value_end).is_some_and(u8::is_ascii_digit) {
-        value_end += 1;
-    }
-    assert!(
-        value_end > value_start,
-        "duration_ms is an unsigned integer"
-    );
-    let value = std::str::from_utf8(&raw[value_start..value_end]).unwrap();
-    value.parse::<u64>().expect("duration_ms is a u64");
-    let mut masked = Vec::with_capacity(raw.len() + 1);
-    masked.extend_from_slice(&raw[..value_start]);
-    masked.push(b'0');
-    masked.extend_from_slice(&raw[value_end..]);
-    masked
+    index
 }
 
-fn mask_uuid(raw: &[u8]) -> Vec<u8> {
-    let (_, value_start) = unique_field_span(raw, b"\"uuid\":\"");
-    let value_end = value_start
-        + raw[value_start..]
+fn json_string_end(raw: &[u8], start: usize) -> usize {
+    assert_eq!(
+        raw.get(start),
+        Some(&b'"'),
+        "JSON string starts with a quote"
+    );
+    let mut index = start + 1;
+    while let Some(byte) = raw.get(index) {
+        match byte {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    panic!("JSON string is terminated");
+}
+
+fn json_value_end(raw: &[u8], start: usize) -> usize {
+    match raw.get(start).copied().expect("JSON value exists") {
+        b'"' => json_string_end(raw, start),
+        opening @ (b'{' | b'[') => {
+            let mut closers = vec![if opening == b'{' { b'}' } else { b']' }];
+            let mut index = start + 1;
+            let mut in_string = false;
+            while let Some(byte) = raw.get(index).copied() {
+                if in_string {
+                    match byte {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            in_string = false;
+                            index += 1;
+                        }
+                        _ => index += 1,
+                    }
+                    continue;
+                }
+                match byte {
+                    b'"' => in_string = true,
+                    b'{' => closers.push(b'}'),
+                    b'[' => closers.push(b']'),
+                    b'}' | b']' => {
+                        assert_eq!(closers.pop(), Some(byte), "JSON containers are balanced");
+                        if closers.is_empty() {
+                            return index + 1;
+                        }
+                    }
+                    _ => {}
+                }
+                index += 1;
+            }
+            panic!("JSON container is terminated");
+        }
+        _ => {
+            let mut index = start;
+            while raw.get(index).is_some_and(|byte| {
+                !matches!(*byte, b',' | b'}' | b']') && !is_json_whitespace(*byte)
+            }) {
+                index += 1;
+            }
+            assert!(index > start, "JSON scalar is nonempty");
+            index
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RawTopLevelField<'a> {
+    key: &'a [u8],
+    value: &'a [u8],
+    field: &'a [u8],
+}
+
+fn raw_top_level_fields(raw: &[u8]) -> Vec<RawTopLevelField<'_>> {
+    let mut index = skip_json_whitespace(raw, 0);
+    assert_eq!(raw.get(index), Some(&b'{'), "stdout is a JSON object");
+    index += 1;
+    let mut fields = Vec::new();
+    loop {
+        index = skip_json_whitespace(raw, index);
+        if raw.get(index) == Some(&b'}') {
+            index += 1;
+            break;
+        }
+        let key_start = index;
+        let key_end = json_string_end(raw, key_start);
+        index = skip_json_whitespace(raw, key_end);
+        assert_eq!(raw.get(index), Some(&b':'), "JSON object field has a colon");
+        let value_start = skip_json_whitespace(raw, index + 1);
+        let value_end = json_value_end(raw, value_start);
+        fields.push(RawTopLevelField {
+            key: &raw[key_start..key_end],
+            value: &raw[value_start..value_end],
+            field: &raw[key_start..value_end],
+        });
+        index = skip_json_whitespace(raw, value_end);
+        match raw.get(index) {
+            Some(b',') => index += 1,
+            Some(b'}') => {
+                index += 1;
+                break;
+            }
+            _ => panic!("JSON object ends after each field"),
+        }
+    }
+    assert!(
+        raw[index..].iter().all(|byte| is_json_whitespace(*byte)),
+        "stdout contains no bytes after its JSON object"
+    );
+    let mut keys = std::collections::HashSet::new();
+    assert!(
+        fields.iter().all(|field| keys.insert(field.key)),
+        "top-level JSON field names are unique"
+    );
+    fields
+}
+
+fn raw_top_level_value<'a>(raw: &'a [u8], key: &[u8]) -> &'a [u8] {
+    raw_top_level_fields(raw)
+        .into_iter()
+        .find(|field| field.key == key)
+        .unwrap_or_else(|| panic!("top-level field {} exists", String::from_utf8_lossy(key)))
+        .value
+}
+
+fn raw_unsigned_integer(raw: &[u8], key: &[u8]) -> u64 {
+    let value = raw_top_level_value(raw, key);
+    assert!(
+        !value.is_empty() && value.iter().all(u8::is_ascii_digit),
+        "{} is encoded as unsigned integer bytes",
+        String::from_utf8_lossy(key)
+    );
+    std::str::from_utf8(value)
+        .expect("unsigned integer bytes are ASCII")
+        .parse::<u64>()
+        .expect("unsigned integer fits u64")
+}
+
+fn assert_canonical_uuid_v4(value: &str, field: &str) {
+    let parsed = uuid::Uuid::parse_str(value).expect("generated UUID is valid");
+    assert_eq!(
+        parsed.to_string(),
+        value,
+        "{field} uses canonical lowercase UUID format"
+    );
+    assert_eq!(value.as_bytes().get(14), Some(&b'4'), "{field} is UUID v4");
+    let variant = value.as_bytes().get(19).copied().unwrap_or_default();
+    assert!(
+        matches!(variant, b'8' | b'9' | b'a' | b'b'),
+        "{field} uses the RFC 4122 variant"
+    );
+}
+
+fn assert_generated_field_constraints(
+    raw: &[u8],
+    frame: &Utf16JsonProjection,
+    session_id: &str,
+    case_id: &str,
+) {
+    let duration_ms = raw_unsigned_integer(raw, b"\"duration_ms\"");
+    assert_eq!(
+        frame.unsigned_integer_at("/duration_ms"),
+        Some(duration_ms),
+        "case {case_id} duration projection matches its untouched raw integer"
+    );
+    let uuid_value = frame.string_at("/uuid").expect("result UUID exists");
+    assert_canonical_uuid_v4(uuid_value, "result uuid");
+    assert_ne!(
+        uuid_value, session_id,
+        "case {case_id} result UUID is distinct from its fixed session identity"
+    );
+}
+
+fn assert_native_fixed_field_slices(actual: &[u8], native: &[u8], case_id: &str) {
+    let actual_fields = raw_top_level_fields(actual);
+    let native_fields = raw_top_level_fields(native);
+    let actual_keys: Vec<_> = actual_fields.iter().map(|field| field.key).collect();
+    let native_keys: Vec<_> = native_fields.iter().map(|field| field.key).collect();
+    assert_eq!(
+        actual_keys, native_keys,
+        "case {case_id} top-level key order"
+    );
+
+    // These generated fields stay untouched in both buffers and are constrained
+    // separately. All remaining raw top-level field slices, including result,
+    // are compared literally; the complete stdout is not claimed byte-equal.
+    for (actual_field, native_field) in actual_fields.iter().zip(&native_fields) {
+        if actual_field.key == b"\"duration_ms\"" || actual_field.key == b"\"uuid\"" {
+            continue;
+        }
+        assert_eq!(
+            actual_field.field,
+            native_field.field,
+            "case {case_id} raw JSON field bytes for {}",
+            String::from_utf8_lossy(actual_field.key)
+        );
+    }
+}
+
+fn native_receipt() -> Native295Receipt {
+    serde_json::from_str(include_str!(
+        "fixtures/provider-error-native-295/receipt.json"
+    ))
+    .expect("Native 2.1.295 receipt parses")
+}
+
+fn native_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-error-native-295")
+}
+
+fn selected_native_cases(receipt: &Native295Receipt) -> Vec<&Native295Case> {
+    const CASE_IDS: [&str; 4] = [
+        "nested-error-message-lone-surrogate",
+        "empty-response-body",
+        "nested-error-message-null",
+        "http-413",
+    ];
+    let selected: Vec<_> = receipt
+        .cases
+        .iter()
+        .filter(|case| CASE_IDS.contains(&case.id.as_str()))
+        .collect();
+    assert_eq!(
+        selected.len(),
+        CASE_IDS.len(),
+        "all selected 2.1.295 cases exist"
+    );
+    assert_eq!(
+        selected
             .iter()
-            .position(|byte| *byte == b'\"')
-            .expect("uuid string closes");
-    let uuid = std::str::from_utf8(&raw[value_start..value_end]).unwrap();
-    assert!(uuid::Uuid::parse_str(uuid).is_ok(), "uuid is valid");
-    let replacement = b"00000000-0000-4000-8000-000000000000";
-    assert_eq!(raw[value_start..value_end].len(), replacement.len());
-    let mut masked = raw.to_vec();
-    masked[value_start..value_end].copy_from_slice(replacement);
-    masked
-}
-
-fn mask_dynamic_native_fields(raw: &[u8]) -> Vec<u8> {
-    let duration_masked = mask_duration_ms(raw);
-    mask_uuid(&duration_masked)
+            .map(|case| case.id.as_str())
+            .collect::<Vec<_>>(),
+        CASE_IDS.to_vec()
+    );
+    assert_eq!(
+        selected.iter().map(|case| case.status).collect::<Vec<_>>(),
+        [400, 400, 400, 413]
+    );
+    selected
 }
 
 #[test]
-fn print_json_provider_errors_match_captured_native_293_stdout_bytes() {
-    let receipt: NativeReceipt = serde_json::from_str(include_str!(
-        "fixtures/provider-error-native-293/receipt.json"
-    ))
-    .unwrap();
-    assert_eq!(receipt.native_version, "2.1.293");
-    assert_eq!(
-        receipt.native_binary_sha256,
-        "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e"
-    );
-    assert_eq!(receipt.provenance.len(), 2);
-    assert_eq!(
-        receipt.provenance[0].source,
-        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error/native-baseline/native-receipt.json"
-    );
-    assert_eq!(
-        receipt.provenance[0].sha256,
-        "bb39f4b76730a03e0ae868d2d3af8f3416bd28ad1b6a693d9e690a3796923e67"
-    );
-    assert_eq!(
-        receipt.provenance[1].source,
-        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error/native-baseline/status-controls/receipt.json"
-    );
-    assert_eq!(
-        receipt.provenance[1].sha256,
-        "9b8f235b0100cfb3edbe65085460d3e49bebb16c296b9df7b96ee02c74b48ffe"
-    );
-    assert_eq!(
-        receipt.dynamic_json_fields,
-        vec!["/duration_ms".to_owned(), "/uuid".to_owned()]
-    );
-    assert!(receipt.capture.network_boundary.contains("127.0.0.1"));
-    assert!(receipt.capture.network_boundary.contains("no upstream"));
-    assert_eq!(
-        receipt.capture.response_header_behavior,
-        "HTTP/1.0; Content-Type is sent only for nonempty response bodies"
-    );
-    assert_eq!(receipt.cases.len(), 4, "keep all three 400 cases plus 413");
-    assert_eq!(
-        receipt
-            .cases
-            .iter()
-            .map(|case| case.status)
-            .collect::<Vec<_>>(),
-        [400, 400, 400, 413]
-    );
+fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
+    let receipt = native_receipt();
+    assert_eq!(receipt.native_version, NATIVE_VERSION);
+    assert_eq!(receipt.native_sha256, NATIVE_SHA256);
+    let fixture_root = native_fixture_root();
 
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-error-native-293");
-    for case in receipt.cases {
-        assert!(case.native_stdout_source.starts_with("provider-error/"));
-        let response_source = case
-            .response_body_source
-            .strip_prefix("provider-error/native-baseline/")
-            .expect("response source is under the Native baseline");
-        assert!(!response_source.split('/').any(|part| part == ".."));
-        let response_body = fixture_file(&fixture_root, &case.response_body_file);
+    for case in selected_native_cases(&receipt) {
+        assert_eq!(case.exit_code, 1, "Native exit status for {}", case.id);
+        assert!(!case.no_retry_header, "selected cases use max retries zero");
+        assert_eq!(
+            case.requests.len(),
+            1,
+            "Native request count for {}",
+            case.id
+        );
+        let native_request = &case.requests[0];
+        assert_eq!(native_request.model, MODEL, "Native model for {}", case.id);
+        assert!(
+            native_request.stream,
+            "Native request streams for {}",
+            case.id
+        );
+
+        let response_body = fixture_file(
+            &fixture_root,
+            &format!("{}/http-response.body.raw", case.id),
+        );
         assert_eq!(
             sha256_hex(&response_body),
-            case.response_body_sha256,
+            case.response_sha256,
             "Native response fixture hash for {}",
             case.id
         );
-        let native_stdout = fixture_file(&fixture_root, &case.stdout_file);
+        let captured_request = fixture_file(
+            &fixture_root,
+            &format!("{}/request-0.body.raw.json", case.id),
+        );
+        assert_eq!(
+            sha256_hex(&captured_request),
+            native_request.body_sha256,
+            "Native request fixture hash for {}",
+            case.id
+        );
+        assert_eq!(
+            captured_request.len() as u64,
+            native_request.body_bytes,
+            "Native request fixture length for {}",
+            case.id
+        );
+        let native_stdout = fixture_file(&fixture_root, &format!("{}/native.stdout.raw", case.id));
         assert_eq!(
             sha256_hex(&native_stdout),
             case.stdout_sha256,
             "Native stdout fixture hash for {}",
             case.id
         );
+        let native_stderr = fixture_file(&fixture_root, &format!("{}/native.stderr.raw", case.id));
         assert_eq!(
-            case.native_exit_code, 1,
-            "captured Native exit status for {}",
+            sha256_hex(&native_stderr),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "Native stderr fixture hash for {}",
             case.id
         );
         let native_stdout_text = std::str::from_utf8(&native_stdout).unwrap();
+        assert_eq!(
+            native_stdout_text.lines().count(),
+            1,
+            "Native result frame count"
+        );
         let native_frame = Utf16JsonProjection::parse(native_stdout_text.trim_end()).unwrap();
         assert_eq!(native_frame.string_at("/type"), Some("result"));
         assert_eq!(native_frame.string_at("/subtype"), Some("success"));
@@ -462,8 +627,16 @@ fn print_json_provider_errors_match_captured_native_293_stdout_bytes() {
             Some(case.session_id.as_str())
         );
         assert_eq!(native_frame.unsigned_integer_at("/num_turns"), Some(1));
-        assert!(native_frame.unsigned_integer_at("/duration_ms").is_some());
-        assert!(uuid::Uuid::parse_str(native_frame.string_at("/uuid").unwrap()).is_ok());
+        assert_eq!(
+            native_frame.unsigned_integer_at("/duration_api_ms"),
+            Some(0)
+        );
+        assert_generated_field_constraints(
+            &native_stdout,
+            &native_frame,
+            &case.session_id,
+            &case.id,
+        );
         if case.id == "nested-error-message-lone-surrogate" {
             assert!(native_frame
                 .string_units("/result")
@@ -474,30 +647,30 @@ fn print_json_provider_errors_match_captured_native_293_stdout_bytes() {
                 .any(|window| window == b"\\ud800"));
         }
 
-        let (output, requests) = invoke_cli(
-            &case,
-            &receipt.capture,
-            &response_body,
-            &receipt.capture.entrypoint,
-            false,
-        );
+        let (output, requests) = invoke_cli(case, &response_body, ENTRYPOINT, false);
         assert_eq!(
             output.status.code(),
-            Some(case.native_exit_code),
+            Some(case.exit_code),
             "case {}",
             case.id
         );
         assert_eq!(
-            sha256_hex(&output.stderr),
-            case.native_stderr_sha256,
+            output.stderr, native_stderr,
             "case {} stderr bytes",
             case.id
         );
-        assert_eq!(requests.len(), case.request_count, "case {}", case.id);
+        assert_eq!(requests.len(), case.requests.len(), "case {}", case.id);
+        let actual_request = request_body_json(&requests[0]);
         assert_eq!(
-            request_body_json(&requests[0]).bool_at("/stream"),
-            Some(true),
-            "default print-json request must use streaming transport: {}",
+            actual_request.string_at("/model"),
+            Some(native_request.model.as_str()),
+            "case {} model",
+            case.id
+        );
+        assert_eq!(
+            actual_request.bool_at("/stream"),
+            Some(native_request.stream),
+            "default print-json request must use Native streaming transport: {}",
             case.id
         );
         let request = String::from_utf8_lossy(&requests[0]);
@@ -533,7 +706,7 @@ fn print_json_provider_errors_match_captured_native_293_stdout_bytes() {
             case.id
         );
         assert!(
-            request.contains(receipt.capture.model.as_str()),
+            request.contains(MODEL),
             "case {} missed the captured model",
             case.id
         );
@@ -542,7 +715,7 @@ fn print_json_provider_errors_match_captured_native_293_stdout_bytes() {
         assert_eq!(
             actual_stdout_text.lines().count(),
             1,
-            "case {} emitted extra frames",
+            "case {} emitted extra result frames",
             case.id
         );
         let actual_frame = Utf16JsonProjection::parse(actual_stdout_text.trim_end()).unwrap();
@@ -562,47 +735,53 @@ fn print_json_provider_errors_match_captured_native_293_stdout_bytes() {
             Some(case.stop_reason.as_str())
         );
         assert_eq!(
+            actual_frame.string_at("/session_id"),
+            Some(case.session_id.as_str())
+        );
+        assert_eq!(actual_frame.unsigned_integer_at("/num_turns"), Some(1));
+        assert_eq!(
+            actual_frame.unsigned_integer_at("/duration_api_ms"),
+            Some(0)
+        );
+        assert_eq!(
             actual_frame.string_units("/result"),
             native_frame.string_units("/result"),
             "case {} result UTF-16 units",
             case.id
         );
-        assert!(actual_frame.unsigned_integer_at("/duration_ms").is_some());
-        assert!(uuid::Uuid::parse_str(actual_frame.string_at("/uuid").unwrap()).is_ok());
+        assert_generated_field_constraints(
+            &output.stdout,
+            &actual_frame,
+            &case.session_id,
+            &case.id,
+        );
 
         assert_eq!(
-            mask_dynamic_native_fields(&output.stdout),
-            mask_dynamic_native_fields(&native_stdout),
-            "case {} differs from captured Native stdout outside /duration_ms and /uuid",
+            raw_top_level_value(&output.stdout, b"\"result\""),
+            raw_top_level_value(&native_stdout, b"\"result\""),
+            "case {} raw JSON result string literal bytes",
             case.id
         );
+        assert_native_fixed_field_slices(&output.stdout, &native_stdout, &case.id);
     }
 }
 
 #[test]
-fn explicit_no_stream_uses_batched_messages_create() {
-    let receipt: NativeReceipt = serde_json::from_str(include_str!(
-        "fixtures/provider-error-native-293/receipt.json"
-    ))
-    .unwrap();
-    let case = receipt
-        .cases
-        .iter()
+fn explicit_no_stream_uses_batched_messages_create_with_native_295_response() {
+    let receipt = native_receipt();
+    let case = selected_native_cases(&receipt)
+        .into_iter()
         .find(|case| case.status == 400)
         .expect("fixture contains a 400 provider error");
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-error-native-293");
-    let response_body = fixture_file(&fixture_root, &case.response_body_file);
-
-    let (output, requests) = invoke_cli(
-        case,
-        &receipt.capture,
-        &response_body,
-        &receipt.capture.entrypoint,
-        true,
+    let fixture_root = native_fixture_root();
+    let response_body = fixture_file(
+        &fixture_root,
+        &format!("{}/http-response.body.raw", case.id),
     );
 
-    assert_eq!(output.status.code(), Some(case.native_exit_code));
+    let (output, requests) = invoke_cli(case, &response_body, ENTRYPOINT, true);
+
+    assert_eq!(output.status.code(), Some(case.exit_code));
     assert_eq!(requests.len(), 1);
     assert_eq!(
         request_body_json(&requests[0]).bool_at("/stream"),
@@ -616,29 +795,26 @@ fn explicit_no_stream_uses_batched_messages_create() {
 }
 
 #[test]
-fn default_print_text_uses_streaming_provider_request() {
-    let receipt: NativeReceipt = serde_json::from_str(include_str!(
-        "fixtures/provider-error-native-293/receipt.json"
-    ))
-    .unwrap();
-    let case = receipt
-        .cases
-        .iter()
+fn default_print_text_uses_streaming_provider_request_with_native_295_response() {
+    let receipt = native_receipt();
+    let case = selected_native_cases(&receipt)
+        .into_iter()
         .find(|case| case.status == 400)
         .expect("fixture contains a 400 provider error");
-    let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/provider-error-native-293");
-    let response_body = fixture_file(&fixture_root, &case.response_body_file);
+    let fixture_root = native_fixture_root();
+    let response_body = fixture_file(
+        &fixture_root,
+        &format!("{}/http-response.body.raw", case.id),
+    );
 
     let (output, requests) = invoke_cli(
         case,
-        &receipt.capture,
         &response_body,
         "--print --no-session-persistence",
         false,
     );
 
-    assert_eq!(output.status.code(), Some(case.native_exit_code));
+    assert_eq!(output.status.code(), Some(case.exit_code));
     assert_eq!(requests.len(), 1);
     assert_eq!(
         request_body_json(&requests[0]).bool_at("/stream"),

@@ -141,7 +141,7 @@ pub struct AskUserQuestionView {
     states: Vec<QuestionState>,
     /// Which question is active.
     current: usize,
-    /// Exact question/answer projections for already-confirmed questions.
+    /// Exact UTF-16 question/answer text for already-confirmed questions.
     answers: Vec<(ClientTextDto, ClientTextDto)>,
     /// One-shot reply channel, consumed by the final submit.
     resp_tx: Option<oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>>,
@@ -305,7 +305,7 @@ impl AskUserQuestionView {
                 .options
                 .iter()
                 .zip(&st.checked)
-                .filter_map(|(opt, on)| on.then(|| opt.label.clone()))
+                .filter_map(|(opt, on)| on.then(|| projection_from_client_text(&opt.label)))
                 .collect();
             let mut picked = picked;
             if st.other_selected {

@@ -2293,5 +2293,10 @@
   "settings_provider_region_china": "中国大陆",
   "settings_provider_region_help": "默认使用国际区域。保存后请在任务空闲时应用设置，更改当前运行区域。",
   "settings_provider_region_international": "国际",
-  "voice_flow_finalizing_hint": "正在等待语音识别完成…"
+  "voice_flow_finalizing_hint": "正在等待语音识别完成…",
+  "visualization_preparing": "正在准备可视化…",
+  "visualization_loading": "正在加载可视化…",
+  "visualization_unavailable": "此可视化已不可用。",
+  "visualization_label": "可视化",
+  "visualization_remove_context": "移除可视化上下文"
 }

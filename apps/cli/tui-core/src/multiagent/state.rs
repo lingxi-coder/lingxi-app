@@ -4,6 +4,8 @@
 //! `crate::multiagent::apply::apply_multiagent_event`. Renderers (M9-03+)
 //! are pure functions of this state.
 
+use client::protocol::text::ClientTextDto;
+
 /// One background task as surfaced to the TUI. Mirrors the field shape of
 /// `lingxi_core::host::task_registry::TaskRecord` (the live task path) so the poller
 /// maps one-to-one.

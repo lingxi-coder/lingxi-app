@@ -126,16 +126,16 @@ final class ConversationTurnCompletionTests: XCTestCase {
             await flushTasks()
             source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
 
-            XCTAssertEqual(source.send("pending"), token)
+            XCTAssertEqual(source.send("pending 🧭"), token)
             await flushTasks()
 
             XCTAssertTrue(source.model.streaming)
-            XCTAssertEqual(source.model.messages.suffix(2).map(\.text), ["first", "pending"])
+            XCTAssertEqual(source.model.messages.suffix(2).map(\.text), ["first", "pending 🧭"])
             XCTAssertEqual(submitted.count, 2)
             guard case let .sendPrompt(text, _, images, _) = submitted.last else {
                 return XCTFail("pending send must use SendPrompt")
             }
-            XCTAssertEqual(text, "pending")
+            XCTAssertEqual(text.codeUnits, Array("pending 🧭".utf16))
             XCTAssertTrue(images.isEmpty)
         }
 

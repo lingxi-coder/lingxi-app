@@ -3123,7 +3123,15 @@ test('Mod UI requests and event frames stay bound to their session and request i
 
   first.client.emit('event', {
     type: 'ui_client_frame', runtime_id: 'runtime-1',
-    frame_json: JSON.stringify({ renderRevision: 7, frameSequence: 2, tree: { type: 'text', text: 'frame' }, hasPointerListener: true, hasKeyListener: false }),
+    frame_json: JSON.stringify({
+      renderRevision: 7,
+      frameSequence: 2,
+      tree: { type: 'text', text: 'frame' },
+      hasPointerListener: true,
+      hasKeyListener: false,
+      parent: { surface: 'desktop', component: operation.component, instance_id: operation.instance_id },
+      client: { plugin: operation.plugin, key: operation.client, module: operation.module },
+    }),
   });
   first.client.emit('event', {
     type: 'ui_client_frame', runtime_id: 'runtime-1',
@@ -3145,7 +3153,15 @@ test('Mod UI requests and event frames stay bound to their session and request i
       sessionId: firstId,
       event: {
         runtimeId: 'runtime-1',
-        frame: { renderRevision: 7, frameSequence: 2, tree: { type: 'text', text: 'frame' }, hasPointerListener: true, hasKeyListener: false },
+        frame: {
+          renderRevision: 7,
+          frameSequence: 2,
+          tree: { type: 'text', text: 'frame' },
+          hasPointerListener: true,
+          hasKeyListener: false,
+          parent: { surface: 'desktop', component: operation.component, instance_id: operation.instance_id },
+          client: { plugin: operation.plugin, key: operation.client, module: operation.module },
+        },
       },
     },
   }, {

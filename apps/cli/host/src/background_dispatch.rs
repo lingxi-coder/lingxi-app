@@ -287,12 +287,15 @@ pub async fn dispatch_background(
             resolved_permission_mode: Some(resolved_permission_mode),
             ..ForkLaunchContext::default()
         };
+        let prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            argv.prompt.as_deref().unwrap_or(""),
+        );
         return match dispatch_resumed_session_inner(
             &config_home,
             &runtime_dir,
             &cwd.display().to_string(),
             &target_id.to_string(),
-            argv.prompt.as_deref().unwrap_or(""),
+            &prompt,
             argv.fork_session,
             &context,
             &SystemLockProbe,
@@ -1324,7 +1327,7 @@ mod tests {
             &home,
             "/tmp/target",
             target_id,
-            "",
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             true,
             &context,
             &lockp,
@@ -1560,7 +1563,7 @@ mod tests {
                 &home,
                 dispatch_cwd,
                 session_id,
-                "",
+                &lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
                 fork,
                 &context,
                 &lockp,

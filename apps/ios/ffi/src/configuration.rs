@@ -320,6 +320,8 @@ pub(super) fn ios_mobile_config_from_launch_config(
         // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
         // its system prompt and `fire_instructions_loaded()` fires over them.
         memory_provider: Some(orchestrator::prompt::real_provider()),
+        // The native WebView host renders inline widgets.
+        inline_visualization: true,
         ..MobileConfig::default()
     };
     if !config.api_base.is_empty() {

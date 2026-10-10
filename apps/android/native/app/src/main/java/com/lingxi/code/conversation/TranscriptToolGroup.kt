@@ -19,6 +19,12 @@ import com.lingxi.code.theme.LingXiTheme
 internal sealed interface TranscriptBlock {
     data class Prose(val text: String) : TranscriptBlock
     data class Plan(val markdown: String, val writing: Boolean, val id: String) : TranscriptBlock
+    /** [ordinal] counts the message's visualization slots, keying the row across settle. */
+    data class Visualization(
+        val status: VisualizationSlotStatus,
+        val reference: VisualizationRef?,
+        val ordinal: Int,
+    ) : TranscriptBlock
     data class Tools(val calls: List<ToolCallUi>, val firstToolId: String = calls.first().id) : TranscriptBlock {
         val id get() = "tool-group:$firstToolId"
         val summary get() = calls.last()
@@ -29,6 +35,7 @@ internal sealed interface TranscriptBlock {
 
 internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBlock> = buildList {
     val pending = mutableListOf<ToolCallUi>()
+    var visualizations = 0
     fun flush() {
         if (pending.isNotEmpty()) { add(TranscriptBlock.Tools(pending.toList())); pending.clear() }
     }
@@ -41,6 +48,10 @@ internal fun transcriptBlocks(blocks: List<MessageContent>): List<TranscriptBloc
             is MessageContent.Text -> if (block.text.isNotBlank()) {
                 flush()
                 add(TranscriptBlock.Prose(block.text))
+            }
+            is MessageContent.Visualization -> {
+                flush()
+                add(TranscriptBlock.Visualization(block.status, block.reference, visualizations++))
             }
         }
     }

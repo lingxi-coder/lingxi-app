@@ -2536,6 +2536,27 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(isString(o['row_token']) && isString(o['uuid']));
       assert.deepEqual(validateClientEvent(v), v);
       break;
+    case 'visualization_block': {
+      exactObjectKeys(o, ['type', 'status'], ['reference'], `event snapshot ${name}`);
+      assert.ok(
+        ['pending', 'ready', 'unavailable', 'discarded'].includes(o['status'] as string),
+        `event snapshot ${name} has an unknown visualization status`,
+      );
+      assert.equal(o['status'] === 'ready', 'reference' in o,
+        `event snapshot ${name} carries a reference exactly when ready`);
+      if ('reference' in o) {
+        const reference = rec(o['reference']);
+        exactObjectKeys(reference, ['id', 'revision'], [], `visualization reference ${name}`);
+        assert.ok(isString(reference['id']));
+        assert.ok(
+          Number.isSafeInteger(reference['revision'])
+            && (reference['revision'] as number) >= 1
+            && (reference['revision'] as number) <= 0xffff_ffff,
+        );
+      }
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    }
     case 'ui_client_frame':
       exactObjectKeys(o, ['type', 'runtime_id', 'frame_json'], [], `event snapshot ${name}`);
       assert.ok(isString(o['runtime_id']) && isString(o['frame_json']));

@@ -125,6 +125,8 @@ pub fn build_mobile_engine(
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
             memory_provider: Some(orchestrator::prompt::real_provider()),
+            // The native WebView host renders inline widgets.
+            inline_visualization: true,
             ..MobileConfig::default()
         };
         let mobile_linux_config = impls.mobile_linux.as_ref().ok_or_else(|| {
@@ -309,6 +311,8 @@ pub fn build_android_engine(
             // orchestrator loads `<cwd>/LINGXI.md` + `<lingxi_home>/LINGXI.md` into
             // its system prompt and `fire_instructions_loaded()` fires over them.
             memory_provider: Some(orchestrator::prompt::real_provider()),
+            // The native WebView host renders inline widgets.
+            inline_visualization: true,
             ..MobileConfig::default()
         };
         if !api_base.is_empty() {

@@ -501,6 +501,46 @@ fn print_family_help() {
 // ──────────────────────────────────────────────────────────────────────────
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+type ProtocolJson = lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn parse_protocol_message(
+    line: &str,
+) -> Result<ProtocolJson, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    ProtocolJson::parse(line)
+}
+
+fn source_json(value: &serde_json::Value) -> ProtocolJson {
+    ProtocolJson::from_serde_value(value).expect("serde JSON value is a valid source projection")
+}
+
+fn source_object(fields: Vec<(&str, ProtocolJson)>) -> ProtocolJson {
+    ProtocolJson::object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+    .expect("protocol object fields are valid")
+}
+
+fn source_array(values: Vec<ProtocolJson>) -> ProtocolJson {
+    ProtocolJson::array(values).expect("protocol array values are valid")
+}
+
+fn source_null() -> ProtocolJson {
+    source_json(&serde_json::Value::Null)
+}
+
+fn source_string_at(source: &ProtocolJson, pointer: &str) -> Option<String> {
+    String::from_utf16(&source.string_units(pointer)?).ok()
+}
+
+fn tool_arguments(params: &ProtocolJson) -> Option<ProtocolJson> {
+    let arguments = params
+        .subprojection("/arguments")
+        .unwrap_or_else(|_| source_object(Vec::new()));
+    arguments.object_entries().is_some().then_some(arguments)
+}
 
 type ProtocolWriter = Arc<Mutex<BufWriter<tokio::io::Stdout>>>;
 
@@ -508,7 +548,7 @@ type ProtocolWriter = Arc<Mutex<BufWriter<tokio::io::Stdout>>>;
 /// protocol-authorized progress notifications are written to stdout.
 struct McpProtocolOutput {
     writer: ProtocolWriter,
-    progress_tokens: Mutex<HashMap<String, serde_json::Value>>,
+    progress_tokens: Mutex<HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection>>,
 }
 
 impl McpProtocolOutput {
@@ -522,7 +562,7 @@ impl McpProtocolOutput {
     async fn register_progress(
         &self,
         tool_use_id: &lingxi_core::types::ToolUseId,
-        token: Option<serde_json::Value>,
+        token: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
         if let Some(token) = token {
             self.progress_tokens
@@ -558,6 +598,7 @@ impl lingxi_core::host::OutputStream for McpProtocolOutput {
         _tool: &str,
         _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
     }
 
@@ -569,15 +610,29 @@ impl lingxi_core::host::OutputStream for McpProtocolOutput {
     ) {
         let token = self.progress_tokens.lock().await.get(id.as_str()).cloned();
         if let Some(token) = token {
-            let frame = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/progress",
-                "params": {
-                    "progressToken": token,
-                    "progress": elapsed_ms,
-                    "message": format!("{tool} is still running"),
-                }
-            });
+            let params = source_object(vec![
+                ("progressToken", token),
+                ("progress", source_json(&serde_json::json!(elapsed_ms))),
+                (
+                    "message",
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from(format!(
+                        "{tool} is still running"
+                    )),
+                ),
+            ]);
+            let frame = source_object(vec![
+                (
+                    "jsonrpc",
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from("2.0"),
+                ),
+                (
+                    "method",
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                        "notifications/progress",
+                    ),
+                ),
+                ("params", params),
+            ]);
             let _ = write_protocol_frame(&self.writer, &frame).await;
         }
     }
@@ -691,51 +746,65 @@ async fn serve_stdio(
                 if line.trim().is_empty() {
                     continue;
                 }
-                let message: serde_json::Value = match serde_json::from_str(&line) {
+                let message = match parse_protocol_message(&line) {
                     Ok(value) => value,
                     Err(error) => {
-                        let response = jsonrpc_error(serde_json::Value::Null, -32700, "Parse error", Some(serde_json::json!({ "detail": error.to_string() })));
+                        let response = jsonrpc_error(
+                            source_null(),
+                            -32700,
+                            "Parse error",
+                            Some(serde_json::json!({ "detail": error.to_string() })),
+                        );
                         write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
                         continue;
                     }
                 };
-                let Some(object) = message.as_object() else {
-                    let response = jsonrpc_error(serde_json::Value::Null, -32600, "Invalid Request", None);
+                if message.object_entries().is_none() {
+                    let response = jsonrpc_error(source_null(), -32600, "Invalid Request", None);
                     write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
                     continue;
-                };
-                let request_id = object.get("id").cloned();
-                let method = object.get("method").and_then(serde_json::Value::as_str);
-                if object.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") || method.is_none() {
+                }
+                let request_id = message.subprojection("/id").ok();
+                let method = source_string_at(&message, "/method");
+                if source_string_at(&message, "/jsonrpc").as_deref() != Some("2.0")
+                    || method.is_none()
+                {
                     if request_id.is_some() {
-                        let response = jsonrpc_error(request_id.unwrap_or(serde_json::Value::Null), -32600, "Invalid Request", None);
+                        let response = jsonrpc_error(
+                            request_id.unwrap_or_else(source_null),
+                            -32600,
+                            "Invalid Request",
+                            None,
+                        );
                         write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
                     }
                     continue;
                 }
                 let method = method.unwrap_or_default();
-                let params = object.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let params = message
+                    .subprojection("/params")
+                    .unwrap_or_else(|_| source_object(Vec::new()));
 
-                match method {
+                match method.as_str() {
                     "notifications/initialized" => {
                         if initialize_seen {
                             client_initialized = true;
                         }
                     }
                     "notifications/cancelled" => {
-                        if let Some(id) = params.get("requestId") {
-                            if let Some(cancel) = active.lock().await.get(&request_id_key(id)).cloned() {
+                        if let Ok(id) = params.subprojection("/requestId") {
+                            if let Some(cancel) = active.lock().await.get(&request_id_key(&id)).cloned() {
                                 cancel.cancel();
                             }
                         }
                     }
                     _ if request_id.is_none() => {}
                     "initialize" => {
-                        let id = request_id.unwrap_or(serde_json::Value::Null);
-                        let requested = params.get("protocolVersion").and_then(serde_json::Value::as_str);
+                        let id = request_id.unwrap_or_else(source_null);
+                        let requested = source_string_at(&params, "/protocolVersion");
                         let response = if initialize_seen {
                             jsonrpc_error(id, -32600, "Server is already initialized", None)
-                        } else if requested != Some(MCP_PROTOCOL_VERSION) {
+                        } else if requested.as_deref() != Some(MCP_PROTOCOL_VERSION) {
                             jsonrpc_error(
                                 id,
                                 -32602,
@@ -752,12 +821,15 @@ async fn serve_stdio(
                         write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
                     }
                     "ping" => {
-                        let response = jsonrpc_result(request_id.unwrap_or(serde_json::Value::Null), serde_json::json!({}));
+                        let response = jsonrpc_result(
+                            request_id.unwrap_or_else(source_null),
+                            source_object(Vec::new()),
+                        );
                         write_protocol_frame(&writer, &response).await.map_err(|e| e.to_string())?;
                     }
                     _ if !client_initialized => {
                         let response = jsonrpc_error(
-                            request_id.unwrap_or(serde_json::Value::Null),
+                            request_id.unwrap_or_else(source_null),
                             -32002,
                             "Server is not initialized",
                             None,
@@ -767,13 +839,13 @@ async fn serve_stdio(
                     "tools/list" => {
                         let tools = orchestrator.mcp_tool_definitions().await;
                         let response = tools_list_response(
-                            request_id.unwrap_or(serde_json::Value::Null),
+                            request_id.unwrap_or_else(source_null),
                             tools,
                         )?;
                         write_protocol_bytes(&writer, response.into_bytes()).await.map_err(|e| e.to_string())?;
                     }
                     "tools/call" => {
-                        let id = request_id.unwrap_or(serde_json::Value::Null);
+                        let id = request_id.unwrap_or_else(source_null);
                         let key = request_id_key(&id);
                         let cancel = CancellationToken::new();
                         let duplicate = {
@@ -792,9 +864,8 @@ async fn serve_stdio(
                             continue;
                         }
                         let progress_token = params
-                            .get("_meta")
-                            .and_then(|meta| meta.get("progressToken"))
-                            .cloned();
+                            .subprojection("/_meta/progressToken")
+                            .ok();
                         let orchestrator = orchestrator.clone();
                         let output = output.clone();
                         let writer = writer.clone();
@@ -815,7 +886,7 @@ async fn serve_stdio(
                     }
                     _ => {
                         let response = jsonrpc_error(
-                            request_id.unwrap_or(serde_json::Value::Null),
+                            request_id.unwrap_or_else(source_null),
                             -32601,
                             "Method not found",
                             Some(serde_json::json!({ "method": method })),
@@ -844,31 +915,22 @@ async fn serve_stdio(
 async fn call_tool_response(
     orchestrator: Arc<orchestrator::ConversationOrchestrator>,
     output: Arc<McpProtocolOutput>,
-    request_id: serde_json::Value,
-    params: serde_json::Value,
-    progress_token: Option<serde_json::Value>,
+    request_id: ProtocolJson,
+    params: ProtocolJson,
+    progress_token: Option<ProtocolJson>,
     cancel: CancellationToken,
-) -> serde_json::Value {
-    let Some(name) = params.get("name").and_then(serde_json::Value::as_str) else {
+) -> ProtocolJson {
+    let Some(name) = source_string_at(&params, "/name") else {
         return jsonrpc_error(request_id, -32602, "Missing tool name", None);
     };
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !arguments.is_object() {
+    let Some(arguments) = tool_arguments(&params) else {
         return jsonrpc_error(request_id, -32602, "Tool arguments must be an object", None);
-    }
+    };
 
     let tool_use_id = lingxi_core::types::ToolUseId::new();
     output.register_progress(&tool_use_id, progress_token).await;
     let result = orchestrator
-        .call_tool_from_host(
-            tool_use_id.clone(),
-            name.to_string(),
-            arguments,
-            Some(cancel),
-        )
+        .call_tool_from_host(tool_use_id.clone(), name.clone(), arguments, Some(cancel))
         .await;
     output.unregister_progress(&tool_use_id).await;
 
@@ -879,90 +941,116 @@ async fn call_tool_response(
             is_error,
             content_blocks,
             ..
-        })) => {
-            let content = content_blocks
-                .unwrap_or_else(|| vec![serde_json::json!({ "type": "text", "text": content })]);
-            jsonrpc_result(
-                request_id,
-                serde_json::json!({ "content": content, "isError": is_error }),
-            )
-        }
-        Ok(Some(_)) => jsonrpc_result(
+        })) => tool_result_response(request_id, content, content_blocks, is_error),
+        Ok(Some(_)) => text_tool_result_response(
             request_id,
-            serde_json::json!({
-                "content": [{ "type": "text", "text": "Tool returned an unsupported result" }],
-                "isError": true,
-            }),
+            "Tool returned an unsupported result".into(),
+            Some(true),
         ),
-        Err(error) => jsonrpc_result(
+        Err(error) => text_tool_result_response(
             request_id,
-            serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Tool execution failed: {error}") }],
-                "isError": true,
-            }),
+            format!("Tool execution failed: {error}").into(),
+            Some(true),
         ),
     }
 }
 
-fn initialize_response(id: serde_json::Value) -> serde_json::Value {
+fn tool_result_response(
+    id: ProtocolJson,
+    content: ProtocolJson,
+    content_blocks: Option<ProtocolJson>,
+    is_error: Option<bool>,
+) -> ProtocolJson {
+    let content = content_blocks.unwrap_or_else(|| {
+        source_array(vec![source_object(vec![
+            ("type", ProtocolJson::from("text")),
+            ("text", content),
+        ])])
+    });
     jsonrpc_result(
         id,
-        serde_json::json!({
+        source_object(vec![
+            ("content", content),
+            ("isError", source_json(&serde_json::json!(is_error))),
+        ]),
+    )
+}
+
+fn text_tool_result_response(
+    id: ProtocolJson,
+    content: ProtocolJson,
+    is_error: Option<bool>,
+) -> ProtocolJson {
+    tool_result_response(id, content, None, is_error)
+}
+
+fn initialize_response(id: ProtocolJson) -> ProtocolJson {
+    jsonrpc_result(
+        id,
+        source_json(&serde_json::json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": {
                 "name": "LingXi",
                 "version": env!("CARGO_PKG_VERSION"),
             },
-        }),
+        })),
     )
 }
 
-fn jsonrpc_result(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+fn jsonrpc_result(id: ProtocolJson, result: ProtocolJson) -> ProtocolJson {
+    source_object(vec![
+        ("jsonrpc", ProtocolJson::from("2.0")),
+        ("id", id),
+        ("result", result),
+    ])
 }
 
 fn jsonrpc_error(
-    id: serde_json::Value,
+    id: ProtocolJson,
     code: i64,
     message: &str,
     data: Option<serde_json::Value>,
-) -> serde_json::Value {
-    let mut error = serde_json::json!({ "code": code, "message": message });
+) -> ProtocolJson {
+    let mut error = source_object(vec![
+        ("code", source_json(&serde_json::json!(code))),
+        ("message", ProtocolJson::from(message)),
+    ]);
     if let Some(data) = data {
-        error["data"] = data;
+        error
+            .set_field("data", source_json(&data))
+            .expect("error data field is valid");
     }
-    serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": error })
+    source_object(vec![
+        ("jsonrpc", ProtocolJson::from("2.0")),
+        ("id", id),
+        ("error", error),
+    ])
 }
 
-fn request_id_key(id: &serde_json::Value) -> String {
-    serde_json::to_string(id).unwrap_or_else(|_| "null".into())
+fn request_id_key(id: &ProtocolJson) -> String {
+    id.to_json_string().unwrap_or_else(|_| "null".into())
 }
 
 async fn write_protocol_frame(
     writer: &ProtocolWriter,
-    frame: &serde_json::Value,
+    frame: &ProtocolJson,
 ) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(frame)
+    let bytes = frame
+        .to_json_string()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    write_protocol_bytes(writer, bytes).await
+    write_protocol_bytes(writer, bytes.into_bytes()).await
 }
 
-fn tools_list_response(
-    id: serde_json::Value,
-    tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
-) -> Result<String, String> {
-    use lingxi_core::types::utf16_json::Utf16JsonProjection;
-    let tools = Utf16JsonProjection::array(tools).map_err(|error| error.to_string())?;
-    let mut result = Utf16JsonProjection::plain(serde_json::json!({}));
+fn tools_list_response(id: ProtocolJson, tools: Vec<ProtocolJson>) -> Result<String, String> {
+    let tools = ProtocolJson::array(tools).map_err(|error| error.to_string())?;
+    let mut result = source_object(Vec::new());
     result
         .set_field("tools", tools)
         .map_err(|error| error.to_string())?;
-    let mut response = Utf16JsonProjection::plain(jsonrpc_result(id, serde_json::json!({})));
-    response
-        .set_field("result", result)
-        .map_err(|error| error.to_string())?;
-    response.to_json_string().map_err(|error| error.to_string())
+    jsonrpc_result(id, result)
+        .to_json_string()
+        .map_err(|error| error.to_string())
 }
 
 async fn write_protocol_bytes(writer: &ProtocolWriter, mut bytes: Vec<u8>) -> std::io::Result<()> {
@@ -3837,8 +3925,8 @@ mod url_redaction_tests {
 #[cfg(test)]
 mod serve_protocol_tests {
     use super::{
-        credential_accounts_for_server, initialize_response, jsonrpc_error, tools_list_response,
-        windows_path_to_wsl,
+        credential_accounts_for_server, initialize_response, jsonrpc_error, source_json,
+        tools_list_response, windows_path_to_wsl,
     };
 
     #[test]
@@ -3847,7 +3935,7 @@ mod serve_protocol_tests {
         let tool = Utf16JsonProjection::parse(
             r#"{"name":"exact","inputSchema":{"type":"object","properties":{"\ud800":{"description":"\udc00"}}}}"#,
         ).unwrap();
-        let frame = tools_list_response(serde_json::json!("list-1"), vec![tool]).unwrap();
+        let frame = tools_list_response(Utf16JsonProjection::from("list-1"), vec![tool]).unwrap();
         assert!(
             frame.contains(r#""\ud800":{"description":"\udc00"}"#),
             "{frame}"
@@ -3855,13 +3943,15 @@ mod serve_protocol_tests {
         assert!(!frame.contains("\"strings\""));
         assert!(!frame.contains("\"keys\""));
         let parsed = Utf16JsonProjection::parse(&frame).unwrap();
-        assert_eq!(parsed.value["id"], "list-1");
-        assert_eq!(parsed.value["result"]["tools"][0]["name"], "exact");
+        assert_eq!(parsed.string_at("/id"), Some("list-1"));
+        assert_eq!(parsed.string_at("/result/tools/0/name"), Some("exact"));
     }
 
     #[test]
     fn initialize_response_is_a_stable_2025_06_18_frame() {
-        let encoded = serde_json::to_string(&initialize_response(serde_json::json!(1))).unwrap();
+        let encoded = initialize_response(source_json(&serde_json::json!(1)))
+            .to_json_string()
+            .unwrap();
         assert_eq!(
             encoded,
             format!(
@@ -3873,22 +3963,74 @@ mod serve_protocol_tests {
 
     #[test]
     fn protocol_error_preserves_request_id_and_optional_data() {
+        let actual = jsonrpc_error(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from("req-7"),
+            -32602,
+            "bad params",
+            Some(serde_json::json!({ "field": "name" })),
+        )
+        .to_json_string()
+        .unwrap();
+        let expected = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"jsonrpc":"2.0","id":"req-7","error":{"code":-32602,"message":"bad params","data":{"field":"name"}}}"#,
+        )
+        .unwrap()
+        .to_json_string()
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn mcp_request_and_structured_tool_result_preserve_source_units() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+        let request = super::parse_protocol_message(
+            r#"{"jsonrpc":"2.0","id":"request-\ud800","method":"tools/call","params":{"name":"echo","arguments":{"text":"argument-\udc00"},"_meta":{"progressToken":"progress-\ud800"}}}"#,
+        )
+        .unwrap();
         assert_eq!(
-            jsonrpc_error(
-                serde_json::json!("req-7"),
-                -32602,
-                "bad params",
-                Some(serde_json::json!({ "field": "name" })),
-            ),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": "req-7",
-                "error": {
-                    "code": -32602,
-                    "message": "bad params",
-                    "data": { "field": "name" },
-                }
-            })
+            super::source_string_at(&request, "/method").as_deref(),
+            Some("tools/call")
+        );
+        let params = request.subprojection("/params").unwrap();
+        let arguments = super::tool_arguments(&params).expect("MCP arguments are an object");
+        assert_eq!(
+            arguments.string_units("/text"),
+            Some("argument-".encode_utf16().chain([0xdc00]).collect())
+        );
+        let progress = params.subprojection("/_meta/progressToken").unwrap();
+        assert_eq!(
+            progress.string_units(""),
+            Some("progress-".encode_utf16().chain([0xd800]).collect())
+        );
+
+        let id = request.subprojection("/id").unwrap();
+        let content_blocks = Utf16JsonProjection::parse(
+            r#"[{"type":"text","text":"result-\ud800"},{"type":"resource","resource":{"text":"nested-\udc00"}}]"#,
+        )
+        .unwrap();
+        let response = super::tool_result_response(
+            id,
+            Utf16JsonProjection::from("unused fallback"),
+            Some(content_blocks),
+            Some(false),
+        );
+        let encoded = response.to_json_string().unwrap();
+        assert!(encoded.contains(r#""id":"request-\ud800""#));
+        assert!(encoded.contains(r#""text":"result-\ud800""#));
+        assert!(encoded.contains(r#""text":"nested-\udc00""#));
+        let round_trip = super::parse_protocol_message(&encoded).unwrap();
+        assert_eq!(
+            round_trip.string_units("/id"),
+            Some("request-".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            round_trip.string_units("/result/content/0/text"),
+            Some("result-".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            round_trip.string_units("/result/content/1/resource/text"),
+            Some("nested-".encode_utf16().chain([0xdc00]).collect())
         );
     }
 

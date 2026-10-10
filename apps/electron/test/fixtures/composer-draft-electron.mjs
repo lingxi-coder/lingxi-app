@@ -78,7 +78,7 @@ async function main() {
       return { firstCharacterX: range.getBoundingClientRect().x - prompt.getBoundingClientRect().x,
         enabled: !document.querySelector('[aria-label="Send prompt"]').disabled };
     })()`);
-    assert.equal(typedState.firstCharacterX, 18);
+    assert.equal(typedState.firstCharacterX, 12);
     assert.equal(typedState.enabled, true);
     if (process.env.LINGXI_COMPOSER_SCREENSHOT) {
       await writeFile(process.env.LINGXI_COMPOSER_SCREENSHOT + '.filled.png', (await webContents.capturePage()).toPNG());

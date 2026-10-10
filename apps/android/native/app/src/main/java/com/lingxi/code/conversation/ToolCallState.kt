@@ -322,6 +322,13 @@ sealed interface MessageContent {
     /** A tool call — header, `⎿` headline, and its collapsible body/diff. */
     @Immutable
     data class Tool(val call: ToolCallUi) : MessageContent
+
+    /** An inline visualization the assistant placed; [reference] is null unless ready. */
+    @Immutable
+    data class Visualization(
+        val status: VisualizationSlotStatus,
+        val reference: VisualizationRef?,
+    ) : MessageContent
 }
 
 // MARK: - DTO → model -------------------------------------------------------

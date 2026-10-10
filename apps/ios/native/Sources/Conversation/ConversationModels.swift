@@ -512,8 +512,17 @@ final class ConversationModel: ObservableObject {
     @Published var engineSessionsLoaded: Bool = false
     /// The engine session id currently driving the connection — set by
     /// `SessionStarted` / `SessionResumed`. Empty until the engine reports one.
+    /// A follow-up a widget drafted; the composer takes it into its draft.
+    @Published var visualizationFollowup: VisualizationFollowup?
+    /// The widget the next prompt follows up on; consumed by `send`.
+    @Published var visualizationChip: VisualizationContextChip?
+
     @Published var activeSessionId: String = "" {
-        didSet { restoreTranscriptDisclosures() }
+        didSet {
+            restoreTranscriptDisclosures()
+            visualizationChip = nil
+            visualizationFollowup = nil
+        }
     }
     /// A NewSession / ResumeSession command has been issued but has not yet been
     /// confirmed by SessionStarted / SessionResumed. While true, an older

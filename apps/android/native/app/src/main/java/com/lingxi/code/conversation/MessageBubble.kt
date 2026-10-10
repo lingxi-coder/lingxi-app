@@ -100,6 +100,7 @@ fun MessageBubble(
             if (message.images.isNotEmpty()) {
                 AttachedImages(images = message.images)
             }
+            message.visualizationContext?.let { VisualizationContextChipView(chip = it) }
             Row(horizontalArrangement = Arrangement.End) {
                 Spacer(Modifier.weight(1f))
                 val shape = RoundedCornerShape(18.dp)
@@ -194,6 +195,7 @@ fun MessageBubble(
                                 is TranscriptBlock.Prose -> PlanAwareText(block.text, onOpenLink = onOpenLink)
                                 is TranscriptBlock.Plan -> PlanDocumentCard(block.markdown, block.writing, onOpenLink)
                                 is TranscriptBlock.Tools -> ToolGroupView(block, expandedToolCalls, onToggleToolCall)
+                                is TranscriptBlock.Visualization -> VisualizationCard(block.status, block.reference)
                             }
                         }
                     }

@@ -3,6 +3,7 @@ use crate::exit_codes;
 use crate::init::Runtime;
 use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::{FileSystem, OrchestratorHandle};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission;
 #[cfg(unix)]
 use platform_posix::PosixFileSystem as HostFileSystem;
@@ -404,7 +405,7 @@ pub(crate) async fn mount_background_resumed_tui(
     session_id: uuid::Uuid,
     messages: Vec<JsonlMessage>,
     registration: std::sync::Arc<crate::agents_registry::SessionRegistration>,
-    initial_prompt: Option<core::types::utf16_json::Utf16JsonProjection>,
+    initial_prompt: Option<Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: &crate::background_launch::BackgroundLaunchSpec,
 ) -> crate::mode::RunOutcome {
@@ -427,7 +428,7 @@ pub(super) async fn mount_resumed_tui_inner(
     messages: Vec<JsonlMessage>,
     carried_state: Option<crate::mode::RemountState>,
     registration: Option<std::sync::Arc<crate::agents_registry::SessionRegistration>>,
-    initial_prompt: Option<core::types::utf16_json::Utf16JsonProjection>,
+    initial_prompt: Option<Utf16JsonProjection>,
     handoff: Option<lingxi_core::host::BackgroundingSnapshot>,
     shell_launch: Option<&crate::background_launch::BackgroundLaunchSpec>,
 ) -> crate::mode::RunOutcome {
@@ -588,11 +589,9 @@ pub(super) fn parent_session_id_from_messages(messages: &[JsonlMessage]) -> Opti
     messages.iter().find_map(|entry| {
         entry
             .extra
-            .get("forkedFrom")?
-            .get("sessionId")?
-            .as_str()
+            .string_units("/forkedFrom/sessionId")
+            .and_then(|units| String::from_utf16(&units).ok())
             .filter(|id| !id.is_empty())
-            .map(str::to_string)
     })
 }
 

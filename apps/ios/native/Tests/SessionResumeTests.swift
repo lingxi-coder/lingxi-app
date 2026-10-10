@@ -42,6 +42,10 @@ visionDelegationEnabled: true)
 
         private func uuid() -> String { "22222222-2222-4222-8222-222222222222" }
 
+        private func sourceText(_ value: String) -> ClientTextDto {
+            ClientTextDto(codeUnits: Array(value.utf16))
+        }
+
         /// An empty array before the first `SessionList` means "not loaded";
         /// the same array after the event is an authoritative empty catalog.
         /// Persisting code relies on this distinction to avoid erasing a cached
@@ -76,12 +80,12 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let summary = SessionAgentSummaryDto(
                 agentId: "agent:child-1",
-                name: "researcher",
+                name: sourceText("researcher"),
                 agentType: "explorer",
                 model: "deepseek-flash",
                 modelProfile: "deepseek",
                 status: "running",
-                latestActivity: "搜索代码",
+                latestActivity: sourceText("搜索代码"),
                 updatedAtMs: 42
             )
 
@@ -109,12 +113,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agent: SessionAgentSummaryDto(
                     agentId: ConversationModel.mainAgentID,
-                    name: "Remote main",
+                    name: sourceText("Remote main"),
                     agentType: "main",
                     model: nil,
                     modelProfile: nil,
                     status: "idle",
-                    latestActivity: "12 messages · model",
+                    latestActivity: sourceText("12 messages · model"),
                     updatedAtMs: nil
                 )
             ))
@@ -134,12 +138,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agent: SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "designer",
+                    name: sourceText("designer"),
                     agentType: "workflow-subagent",
                     model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "completed",
-                    latestActivity: "Design complete",
+                    latestActivity: sourceText("Design complete"),
                     updatedAtMs: 2_000
                 )
             ))
@@ -147,12 +151,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agents: [SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "designer",
+                    name: sourceText("designer"),
                     agentType: "workflow-subagent",
                     model: "claude-opus-4-8",
                     modelProfile: "anthropic",
                     status: "running",
-                    latestActivity: "Starting",
+                    latestActivity: sourceText("Starting"),
                     updatedAtMs: 1_000
                 )]
             ))
@@ -175,7 +179,7 @@ visionDelegationEnabled: true)
                         source.applyForTesting(.sessionAgentUpdated(
                             sessionId: "session-a",
                             agent: SessionAgentSummaryDto(
-                                agentId: agentID, name: "preparer", agentType: "workflow-subagent",
+                                agentId: agentID, name: sourceText("preparer"), agentType: "workflow-subagent",
                                 model: nil, modelProfile: nil, status: status,
                                 latestActivity: nil, updatedAtMs: timestamp
                             )
@@ -223,12 +227,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agent: SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "designer",
+                    name: sourceText("designer"),
                     agentType: "workflow-subagent",
                     model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "completed",
-                    latestActivity: "Design complete",
+                    latestActivity: sourceText("Design complete"),
                     updatedAtMs: 1_000
                 )
             ))
@@ -240,12 +244,12 @@ visionDelegationEnabled: true)
                 sessionId: "session-a",
                 agent: SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "designer",
+                    name: sourceText("designer"),
                     agentType: "workflow-subagent",
                     model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "running",
-                    latestActivity: "Reviewing feedback",
+                    latestActivity: sourceText("Reviewing feedback"),
                     updatedAtMs: 2_000
                 )
             ))
@@ -260,7 +264,7 @@ visionDelegationEnabled: true)
             let source = makeSource()
             source.model.activeSessionId = "session-a"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: "agent:child-1", name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: "agent:child-1", name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent("agent:child-1")
             source.applyForTesting(.sessionAgentTranscript(
@@ -284,7 +288,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -317,7 +321,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -354,7 +358,7 @@ visionDelegationEnabled: true)
             let agentID = "agent:child-1"
             let repeated = MessageDto(role: "assistant", blocks: [.text(text: "same")])
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -386,7 +390,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -439,7 +443,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -479,7 +483,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -526,7 +530,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -574,7 +578,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -620,7 +624,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-a"
             let agentID = "agent:child-1"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "worker", agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: sourceText("worker"), agentType: "general", model: nil, modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
 
@@ -646,8 +650,8 @@ visionDelegationEnabled: true)
             let first = "agent:first"
             let second = "agent:second"
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
-                SessionAgentSummaryDto(agentId: first, name: "first", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil),
-                SessionAgentSummaryDto(agentId: second, name: "second", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: first, name: sourceText("first"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil),
+                SessionAgentSummaryDto(agentId: second, name: sourceText("second"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(first)
             source.selectAgent(second)
@@ -664,7 +668,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -704,7 +708,7 @@ visionDelegationEnabled: true)
             source.model.activeSessionId = "session-old"
             let agentID = "agent:old"
             source.applyForTesting(.sessionAgentList(sessionId: "session-old", agents: [
-                SessionAgentSummaryDto(agentId: agentID, name: "old", agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
+                SessionAgentSummaryDto(agentId: agentID, name: sourceText("old"), agentType: "general", model: nil, modelProfile: nil, status: "idle", latestActivity: nil, updatedAtMs: nil)
             ]))
             source.selectAgent(agentID)
             source.model.activeSessionId = "session-new"
@@ -727,7 +731,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: "agent:child-1",
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -748,7 +752,7 @@ visionDelegationEnabled: true)
             XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["live tail"])
             XCTAssertEqual(source.model.selectedAgentSummary?.status, "idle", "transcript delivery must preserve authoritative lifecycle state")
             source.applyForTesting(.sessionAgentUpdated(sessionId: "session-a", agent: SessionAgentSummaryDto(
-                agentId: "agent:child-1", name: "worker", agentType: "general", model: nil,
+                agentId: "agent:child-1", name: sourceText("worker"), agentType: "general", model: nil,
                 modelProfile: nil, status: "working", latestActivity: nil, updatedAtMs: 1
             )))
             XCTAssertEqual(source.model.selectedAgentSummary?.status, "working")
@@ -779,7 +783,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: "session-a", agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "worker",
+                    name: sourceText("worker"),
                     agentType: "general",
                     model: nil,
                     modelProfile: nil,
@@ -1068,12 +1072,12 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentList(sessionId: sessionID, agents: [
                 SessionAgentSummaryDto(
                     agentId: agentID,
-                    name: "design",
+                    name: sourceText("design"),
                     agentType: "designer",
                     model: "deepseek-flash",
                     modelProfile: "deepseek",
                     status: "running",
-                    latestActivity: "Inspecting layout",
+                    latestActivity: sourceText("Inspecting layout"),
                     updatedAtMs: 10
                 )
             ]))

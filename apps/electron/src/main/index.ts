@@ -1,6 +1,6 @@
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,9 +26,27 @@ import { requestMicrophoneAccess } from './microphoneAccess.js';
 import { ProjectSessionCatalog } from './session-catalog.js';
 import { ignoreBrokenPipe } from './process-streams.js';
 import { PROVIDER_IDS } from '../shared/providers.js';
+import {
+  guardVisualizationWebview,
+  hardenVisualizationGuest,
+  installVisualizationSession,
+} from './visualization.js';
+import {
+  CH_VISUALIZATION_GUEST_EVENT,
+  VISUALIZATION_PARTITION,
+  VISUALIZATION_SCHEME,
+} from '../shared/visualization.js';
 
 ignoreBrokenPipe(process.stdout);
 ignoreBrokenPipe(process.stderr);
+
+// Inline visualization guests load `lingxi-viz://visualization/...` only. The
+// scheme must be privileged before `app.ready` so its pages get a real origin
+// and secure context; its handler is installed on the dedicated partition.
+protocol.registerSchemesAsPrivileged([{
+  scheme: VISUALIZATION_SCHEME,
+  privileges: { standard: true, secure: true, supportFetchAPI: false, corsEnabled: false, stream: false, codeCache: false },
+}]);
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const securedSessions = new WeakSet<Session>();
@@ -119,7 +137,9 @@ function createWindow(): BrowserWindow {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      webviewTag: false,
+      // Enabled only for inline visualizations: `will-attach-webview` below
+      // refuses every other webview and overwrites the guest's preferences.
+      webviewTag: true,
       navigateOnDragDrop: false,
       webSecurity: true,
       devTools: !app.isPackaged,
@@ -153,7 +173,20 @@ function createWindow(): BrowserWindow {
     if (isHttpsUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
-  mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  mainWindow.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    guardVisualizationWebview(
+      event,
+      webPreferences,
+      params,
+      join(moduleDirectory, '../preload/visualization.cjs'),
+      !app.isPackaged,
+    );
+  });
+  mainWindow.webContents.on('did-attach-webview', (_event, guest) => {
+    hardenVisualizationGuest(guest, (guestEvent) => {
+      if (!mainWindow.isDestroyed()) mainWindow.webContents.send(CH_VISUALIZATION_GUEST_EVENT, guestEvent);
+    });
+  });
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const expected = new URL(target.url);
     const proposed = new URL(url);
@@ -404,6 +437,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   } });
   host.attachGit(git);
   host.registerIpc();
+  try {
+    await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);
+  } catch (error) {
+    diagnostics.add('warn', 'host', `inline visualizations unavailable: ${sanitizeDiagnostic(error)}`);
+  }
   createWindow();
 
   const publicSettings = settings.getPublic();

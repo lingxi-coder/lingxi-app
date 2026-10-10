@@ -23,6 +23,10 @@ import type {
   NativeUiControlResponse,
   UiClientOperationResponse,
   UiControlCallResultDto,
+  VisualizationMountDto,
+  VisualizationServeDto,
+  VisualizationStateWriteDto,
+  VisualizationThemeDto,
 } from '@lingxi/bridge-client';
 import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { spawn } from 'node:child_process';
@@ -102,6 +106,7 @@ import {
 } from './host-utils.js';
 import type { OpenAiOAuthSession } from './host-utils.js';
 import { isSessionId } from './sessionIdentity.js';
+import { parseVisualizationReference, type VisualizationReference } from '../shared/visualization.js';
 import {
   assertCommandAllowedDuringTurn,
   validateAskUserQuestionAnswers,
@@ -2034,11 +2039,14 @@ export class SessionRuntime {
     if (!origin || !origins.has(origin)) throw new Error('unauthorized IPC origin');
   }
 
-  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown): void | Promise<void> {
+  sendPrompt(text: unknown, images: unknown = [], turnId?: unknown, visualizationContext?: unknown): void | Promise<void> {
     const id = validateOptionalTurnId(turnId);
     if (this.archiving) throw new Error('This chat is being archived.');
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
+    const context = visualizationContext === undefined || visualizationContext === null
+      ? undefined
+      : parseVisualizationReference(visualizationContext);
     if (this.opts.resolveProviderCredential) {
       const generation = this.generation;
       const client = this.requireClient();
@@ -2056,19 +2064,28 @@ export class SessionRuntime {
             this.diagnostics.add('warn', 'bridge', 'Optional Fusion credential preload failed.');
           });
           if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
-          this.sendPreparedPrompt(prompt, validatedImages, id);
+          this.sendPreparedPrompt(prompt, validatedImages, id, context);
         } finally {
           this.pendingPromptHydrations.delete(token);
           this.notifyActivityChanged();
         }
       })();
     }
-    this.sendPreparedPrompt(prompt, validatedImages, id);
+    this.sendPreparedPrompt(prompt, validatedImages, id, context);
   }
 
-  private sendPreparedPrompt(prompt: string, validatedImages: ReturnType<typeof validateImageRefs>, turnId?: number): void {
+  private sendPreparedPrompt(
+    prompt: string,
+    validatedImages: ReturnType<typeof validateImageRefs>,
+    turnId?: number,
+    visualizationContext?: VisualizationReference,
+  ): void {
     const needsIdentityCommit = !this.sessionIdentityCommitted;
-    this.requireClient().sendPrompt(prompt, { images: validatedImages, ...(turnId !== undefined ? { turnId } : {}) });
+    this.requireClient().sendPrompt(prompt, {
+      images: validatedImages,
+      ...(turnId !== undefined ? { turnId } : {}),
+      ...(visualizationContext !== undefined ? { visualizationContext } : {}),
+    });
     this.sessionHasHistory = true;
     if (needsIdentityCommit && this.opts.onFirstPromptSent?.() !== false) {
       this.sessionIdentityCommitted = true;
@@ -2629,6 +2646,40 @@ export class SessionRuntime {
     this.pendingSessionResume = null;
     clearTimeout(pending.timer);
     pending.reject(error);
+  }
+
+  // ── Inline visualizations (see `visualization.ts`) ─────────────────────────
+
+  visualizationMount(
+    reference: VisualizationReference,
+    theme: VisualizationThemeDto,
+    locale: string,
+    expanded: boolean,
+  ): Promise<VisualizationMountDto | null> {
+    return this.requireClient().visualizationMount(this.sessionId, reference, theme, locale, expanded);
+  }
+
+  visualizationServe(path: string): Promise<VisualizationServeDto> {
+    return this.requireClient().visualizationServe(path);
+  }
+
+  visualizationWriteState(
+    token: string,
+    generation: number,
+    baseVersion: number,
+    modelContent: string,
+    privateContent: string,
+  ): Promise<VisualizationStateWriteDto> {
+    return this.requireClient().visualizationWriteState(token, generation, baseVersion, modelContent, privateContent);
+  }
+
+  visualizationUnmount(token: string): Promise<void> {
+    return this.requireClient().visualizationUnmount(token);
+  }
+
+  /** Whether this runtime can answer visualization requests right now. */
+  get visualizationReady(): boolean {
+    return this.client !== null;
   }
 
   private requireClient(): BridgeClient {

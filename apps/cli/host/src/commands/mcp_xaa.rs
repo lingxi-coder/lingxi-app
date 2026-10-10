@@ -291,7 +291,7 @@ async fn run_setup(a: &SetupArgs) -> i32 {
                 Ok((storage, clock)) => {
                     mcp::xaa_idp::save_idp_client_secret(storage, clock, &a.issuer, secret).await
                 }
-                Err(e) => Err(lingxi_core::host::McpError::OAuth(e.clone())),
+                Err(e) => Err(lingxi_core::host::McpError::OAuth(e.clone().into())),
             };
             if let Err(e) = saved {
                 eprintln!(

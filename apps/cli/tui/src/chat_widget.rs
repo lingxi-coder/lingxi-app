@@ -112,7 +112,7 @@ pub enum ChatOutcome {
     /// atomically with the prompt. The second `String` is an opaque row token
     /// used to connect the visible row to its eventual persisted JSONL UUID.
     Submit(
-        core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
         String,
         Vec<std::path::PathBuf>,
         CancellationToken,
@@ -122,7 +122,7 @@ pub enum ChatOutcome {
     /// turn or replacing the current cancellation owner. The second `String`
     /// is an opaque row token used for persisted transcript identity.
     QueuePrompt(
-        core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
         String,
         Vec<std::path::PathBuf>,
         CancellationToken,
@@ -282,7 +282,7 @@ pub enum ChatOutcome {
     /// dispatched model prompt owns the turn. Local results only emit a notice
     /// and leave any active model turn untouched.
     DispatchSlash(
-        core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
         PendingSlashDispatch,
     ),
     /// A held cross-session message was delivered. The caller should drive
@@ -381,6 +381,10 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::UiStatus { .. }
         | TurnEvent::TranscriptRowIdentity { .. }
         | TurnEvent::AssistantTranscriptRowUuids { .. }
+        | TurnEvent::AssistantBlockStart { .. }
+        | TurnEvent::AssistantBlockIdentity { .. }
+        | TurnEvent::ServerFallbackTombstone { .. }
+        | TurnEvent::RefusalContinuation { .. }
         | TurnEvent::BashOutput { .. }
         | TurnEvent::CompactionCompleted { .. }
         | TurnEvent::MessageIdentity(_)
@@ -2066,7 +2070,7 @@ impl ChatWidget {
                 // the compact hint by default and the full summary under
                 // Ctrl-O; counts remain debug/telemetry-only). Consecutive
                 // boundaries de-dupe to one marker.
-                self.push_compact_boundary(messages_before, messages_after, summary);
+                self.push_compact_boundary(messages_before, messages_after, summary.display());
                 // An AUTO/reactive compaction (mid-turn) has no `CompactEnded`
                 // sender (that's the manual `/compact` task's job), so a
                 // successful pass clears the `Compacting conversation…`
@@ -2845,7 +2849,7 @@ impl ChatWidget {
     /// through and send the input as a normal prompt.
     pub fn handle_slash(
         &mut self,
-        input: core::types::utf16_json::Utf16JsonProjection,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Option<ChatOutcome> {
         if self.session_clear_pending {
             return Some(ChatOutcome::Continue);
@@ -2895,7 +2899,7 @@ impl ChatWidget {
     /// the off-loop registry dispatcher.
     fn dispatch_registry_slash(
         &mut self,
-        input: core::types::utf16_json::Utf16JsonProjection,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> ChatOutcome {
         self.transcript.push_message(RenderedMessage::UserText {
             body: input.string_at("").unwrap_or_default().to_owned(),
@@ -4704,9 +4708,12 @@ impl ChatWidget {
     ) -> ChatOutcome {
         use command_api::model::CommandResult;
         let parsed = command_api::parser::ParsedSlashCommand {
-            name: name.to_string(),
-            raw_args: args.to_string(),
-            positional_args: args.split_whitespace().map(str::to_string).collect(),
+            name: name.to_string().into(),
+            raw_args: args.to_string().into(),
+            positional_args: args
+                .split_whitespace()
+                .map(|argument| argument.to_string().into())
+                .collect(),
         };
         // The TUI event loop is synchronous (off the async runtime, on a
         // `spawn_blocking` thread), so a throwaway current-thread runtime is
@@ -4731,7 +4738,12 @@ impl ChatWidget {
                 // WHOLE prompt: surface the error and do NOT submit (patterns are
                 // never left in place). `None` provider (tests / no embedder) or a
                 // body with no embedded pattern keeps the verbatim submit path.
-                let has_embedded = content.contains("```!") || content.contains("!`");
+                let has_embedded = content.string_units("").is_some_and(|units| {
+                    ["```!", "!`"].iter().any(|pattern| {
+                        let pattern = pattern.encode_utf16().collect::<Vec<_>>();
+                        units.windows(pattern.len()).any(|window| window == pattern)
+                    })
+                });
                 match self.shell_expansion.clone() {
                     Some(provider) if has_embedded => {
                         let allowed: Vec<String> = handler
@@ -4740,10 +4752,14 @@ impl ChatWidget {
                             .map(|s| (*s).to_string())
                             .collect();
                         let shell_ctx = provider.build(&allowed, None);
+                        let slash_command =
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::from(format!(
+                                "/{name}"
+                            ));
                         match runtime.block_on(command_api::execute_shell_commands_in_prompt(
                             &content,
                             &shell_ctx,
-                            &format!("/{name}"),
+                            &slash_command,
                             None,
                         )) {
                             Ok(expanded) => self.submit_core_prompt(name, args, expanded),
@@ -4755,11 +4771,11 @@ impl ChatWidget {
             }
             CommandResult::Done {
                 display: Some(text),
-            } => self.show_system_text(&text, false),
+            } => self.show_system_text(text.string_at("").unwrap_or_default(), false),
             CommandResult::Done { display: None } => ChatOutcome::Continue,
             // Only InjectMessage/Done commands are wired; guard the rest.
             CommandResult::EmitEffects { display, .. } => match display {
-                Some(text) => self.show_system_text(&text, false),
+                Some(text) => self.show_system_text(text.string_at("").unwrap_or_default(), false),
                 None => ChatOutcome::Continue,
             },
             CommandResult::RequestConfirmation { prompt, .. } => {
@@ -4775,7 +4791,12 @@ impl ChatWidget {
     /// (`processSlashCommand.getMessagesForPromptSlashCommand`). Reusing
     /// [`Self::submit_prompt`] here would echo the entire template into the
     /// transcript as if the user had typed it.
-    fn submit_core_prompt(&mut self, name: &str, args: &str, content: String) -> ChatOutcome {
+    fn submit_core_prompt(
+        &mut self,
+        name: &str,
+        args: &str,
+        content: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> ChatOutcome {
         let invocation = if args.is_empty() {
             format!("/{name}")
         } else {
@@ -4791,7 +4812,7 @@ impl ChatWidget {
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
         self.accepts_turn_events = true;
-        ChatOutcome::Submit(content.into(), row_token, self.take_pending_images(), token)
+        ChatOutcome::Submit(content, row_token, self.take_pending_images(), token)
     }
 
     /// Render read-only command output into the transcript as a `system`
@@ -4939,7 +4960,7 @@ impl ChatWidget {
         };
         let handler = match registry.try_read() {
             Ok(registry) => registry.get_handler(
-                &core::types::utf16_json::Utf16JsonProjection::from("skill-doctor"),
+                &lingxi_core::types::utf16_json::Utf16JsonProjection::from("skill-doctor"),
             ),
             Err(_) => None,
         };
@@ -5100,9 +5121,12 @@ impl ChatWidget {
             return self.show_system_text("/btw is unavailable (no engine handle wired)", true);
         };
         let parsed = command_api::parser::ParsedSlashCommand {
-            name: "btw".to_string(),
-            raw_args: args.to_string(),
-            positional_args: args.split_whitespace().map(str::to_string).collect(),
+            name: "btw".into(),
+            raw_args: args.to_string().into(),
+            positional_args: args
+                .split_whitespace()
+                .map(|argument| argument.to_string().into())
+                .collect(),
         };
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -5120,7 +5144,10 @@ impl ChatWidget {
             command_api::model::CommandResult::Done {
                 display: Some(answer),
             } => {
-                self.last_btw_exchange = Some((question.to_string(), answer));
+                self.last_btw_exchange = Some((
+                    question.to_string(),
+                    answer.string_at("").unwrap_or_default().to_owned(),
+                ));
                 let (question, answer) = self
                     .last_btw_exchange
                     .as_ref()
@@ -5270,7 +5297,7 @@ impl ChatWidget {
         };
         let handler = match registry.try_read() {
             Ok(registry) => registry.get_handler(
-                &core::types::utf16_json::Utf16JsonProjection::from("reload-skills"),
+                &lingxi_core::types::utf16_json::Utf16JsonProjection::from("reload-skills"),
             ),
             Err(_) => None,
         };
@@ -5337,7 +5364,12 @@ impl ChatWidget {
                     "running" | "pending" | "paused" | "queued"
                 ) || task.is_parked
             })
-            .map(|task| task.description)
+            .map(|task| {
+                task.description
+                    .string_at("")
+                    .unwrap_or_default()
+                    .to_owned()
+            })
             .collect::<Vec<_>>();
         if items.is_empty() {
             return ChatOutcome::Quit;
@@ -6048,7 +6080,7 @@ impl ChatWidget {
     /// dispatches through the registry; anything else is sent as a prompt.
     fn dispatch_submission(
         &mut self,
-        text: core::types::utf16_json::Utf16JsonProjection,
+        text: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> ChatOutcome {
         let units = text.string_units("").unwrap_or_default();
         let display = text.string_at("").unwrap_or_default().to_owned();
@@ -6079,7 +6111,7 @@ impl ChatWidget {
     /// and [`BottomPaneOutcome::SubmitPrompt`].
     pub(crate) fn submit_prompt(
         &mut self,
-        text: core::types::utf16_json::Utf16JsonProjection,
+        text: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> ChatOutcome {
         if self.session_clear_pending {
             return ChatOutcome::Continue;
@@ -6339,14 +6371,14 @@ fn registry_slash_rows(
     reg: &command_api::CommandRegistry,
 ) -> Vec<crate::bottom_pane::completion_view::RegistrySlashRow> {
     use command_api::SlashCommandKind;
-    let to_text = |source: &core::types::utf16_json::Utf16JsonProjection| {
+    let to_text = |source: &lingxi_core::types::utf16_json::Utf16JsonProjection| {
         client::protocol::text::ClientTextDto::from_code_units(
             source
                 .string_units("")
                 .expect("command catalog text is a root-string projection"),
         )
     };
-    let with_slash = |name: &core::types::utf16_json::Utf16JsonProjection| {
+    let with_slash = |name: &lingxi_core::types::utf16_json::Utf16JsonProjection| {
         let mut units = name
             .string_units("")
             .expect("command names are root-string projections");
@@ -6371,7 +6403,10 @@ fn registry_slash_rows(
         .map(|c| crate::bottom_pane::completion_view::RegistrySlashRow {
             name: with_slash(&c.name),
             description: to_text(&c.description),
-            menu_description: c.menu_description.as_ref().map(to_text),
+            menu_description: c
+                .menu_description
+                .as_ref()
+                .map(|text| client::protocol::text::ClientTextDto::from_utf8(text)),
             aliases: c.aliases.iter().map(|a| with_slash(a)).collect(),
             hidden: false,
             replaces_builtin: false,
@@ -9278,7 +9313,7 @@ mod tests {
             messages_before: 40,
             messages_after: 8,
             bytes_saved: 1024,
-            summary: "Summary:\nauto compact".to_string(),
+            summary: client::protocol::text::ClientTextDto::from_utf8("Summary:\nauto compact"),
         });
         assert!(
             w1.pane_status().compact_percent.is_none(),
@@ -9507,7 +9542,7 @@ mod tests {
     #[test]
     fn registry_slash_route_keeps_exact_source_name_and_arguments() {
         use command_api::{CommandSource, SlashCommand, SlashCommandKind};
-        use core::types::utf16_json::Utf16JsonProjection;
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
         let mut widget = widget();
         let mut registry = command_api::CommandRegistry::new();
@@ -9534,7 +9569,7 @@ mod tests {
 
     #[test]
     fn submitted_model_prompt_keeps_exact_source_units() {
-        use core::types::utf16_json::Utf16JsonProjection;
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
         let mut widget = widget();
         let input = Utf16JsonProjection::parse(r#""prompt\ud800""#).unwrap();
@@ -11087,7 +11122,7 @@ mod tests {
             messages_before: 10,
             messages_after: 2,
             bytes_saved: 100,
-            summary: "late compaction".to_string(),
+            summary: client::protocol::text::ClientTextDto::from_utf8("late compaction"),
         });
         widget.apply_turn_event(TurnEvent::CostUpdated("$9.9999".to_string()));
         widget.apply_turn_event(rate_limit_rejected());
@@ -13237,7 +13272,9 @@ mod tests {
             messages_before: 40,
             messages_after: 8,
             bytes_saved: 1024,
-            summary: "Summary:\nimportant context".to_string(),
+            summary: client::protocol::text::ClientTextDto::from_utf8(
+                "Summary:\nimportant context",
+            ),
         });
         assert_eq!(cells(&widget).len(), 1);
         let boundary = cell::<CompactBoundaryCell>(&widget, 0);
@@ -13248,7 +13285,9 @@ mod tests {
             messages_before: 40,
             messages_after: 8,
             bytes_saved: 1024,
-            summary: "Summary:\nimportant context".to_string(),
+            summary: client::protocol::text::ClientTextDto::from_utf8(
+                "Summary:\nimportant context",
+            ),
         });
         assert_eq!(cells(&widget).len(), 1, "consecutive boundaries de-dupe");
         // A NON-boundary message in between makes the next boundary render.
@@ -13261,10 +13300,29 @@ mod tests {
             messages_before: 12,
             messages_after: 4,
             bytes_saved: 2048,
-            summary: "Summary:\nnew context".to_string(),
+            summary: client::protocol::text::ClientTextDto::from_utf8("Summary:\nnew context"),
         });
         assert_eq!(cells(&widget).len(), 3);
         let _ = cell::<CompactBoundaryCell>(&widget, 2);
+    }
+
+    #[test]
+    fn compaction_summary_displays_utf16_only_at_widget_boundary() {
+        use crate::history_cell::system::CompactBoundaryCell;
+        let (mut widget, _mock) = widget_with_orchestrator();
+        widget.apply_turn_event(TurnEvent::CompactionCompleted {
+            messages_before: 12,
+            messages_after: 4,
+            bytes_saved: 256,
+            summary: client::protocol::text::ClientTextDto::from_code_units(vec![
+                u16::from(b'A'),
+                0xd800,
+                u16::from(b'B'),
+            ]),
+        });
+
+        let boundary = cell::<CompactBoundaryCell>(&widget, 0);
+        assert_eq!(boundary.summary(), "A\u{fffd}B");
     }
 
     /// A rejected five-hour rate-limit header snapshot.

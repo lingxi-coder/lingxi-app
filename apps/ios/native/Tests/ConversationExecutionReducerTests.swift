@@ -621,7 +621,11 @@ import SwiftUI
             source.applyForTesting(.apiRetry(message: "429", attempt: 2, maxRetries: 5, delayMs: 1200))
             source.applyForTesting(.costUpdate(
                 totalUsd: 0.12, inputTokens: 11, outputTokens: 22, apiCalls: 1, sessionDurationSecs: 9, formatted: "$0.12"))
-            source.applyForTesting(.compactionCompleted(messagesBefore: 20, messagesAfter: 7, bytesSaved: 4096, summary: "kept context"))
+            source.applyForTesting(.compactionCompleted(
+                messagesBefore: 20,
+                messagesAfter: 7,
+                bytesSaved: 4096,
+                summary: ClientTextDto(codeUnits: Array("kept context".utf16))))
             source.applyForTesting(.coordinatorStatus(activeWorkers: 2, team: "triage"))
             source.applyForTesting(
                 .coordinatorWorker(
@@ -826,7 +830,7 @@ import SwiftUI
 
             XCTAssertEqual(submittedCommands.count, 2, "B should submit exactly once after cancellation returns")
             if case let .sendPrompt(text, _, _, turnId)? = submittedCommands.last {
-                XCTAssertEqual(text, "B prompt")
+                XCTAssertEqual(text.codeUnits, Array("B prompt".utf16))
                 XCTAssertEqual(turnId, 2)
             } else {
                 XCTFail("expected B sendPrompt after cancellation completion")

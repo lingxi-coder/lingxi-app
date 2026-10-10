@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
-use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
 use bridge_server::mcp_bridge::McpPaths;
 use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreContext};
 use bridge_server::server::BridgeConnection;
@@ -68,8 +68,8 @@ use platform_windows::{
     WindowsHttp as NativeHttp,
 };
 use tokio::sync::Mutex;
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
 #[path = "router_test/resume_usage.rs"]
 mod resume_usage;
@@ -831,11 +831,13 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
         )
         .await;
 
-    assert!(credentials
-        .get_provider_key("deepseek")
-        .await
-        .expect("read after delete")
-        .is_none());
+    assert!(
+        credentials
+            .get_provider_key("deepseek")
+            .await
+            .expect("read after delete")
+            .is_none()
+    );
     assert_eq!(
         sink.events().await.last(),
         Some(&ClientEvent::ProviderCredentialStatus {
@@ -874,11 +876,13 @@ async fn provider_credentials_round_trip_through_shared_engine_store() {
             sink,
         )
         .await;
-    assert!(credentials
-        .get_anthropic_api_key()
-        .await
-        .expect("read Anthropic key after delete")
-        .is_none());
+    assert!(
+        credentials
+            .get_anthropic_api_key()
+            .await
+            .expect("read Anthropic key after delete")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -938,11 +942,13 @@ async fn externally_owned_provider_credentials_stay_process_local() {
             sink,
         )
         .await;
-    assert!(credentials
-        .get_provider_key("openrouter")
-        .await
-        .expect("read after process-cache delete")
-        .is_none());
+    assert!(
+        credentials
+            .get_provider_key("openrouter")
+            .await
+            .expect("read after process-cache delete")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -993,9 +999,11 @@ async fn provider_credential_listing_reports_partial_success_without_erasing_unk
         credential_previews.get("deepseek").map(String::as_str),
         Some("••••seek")
     );
-    assert!(error
-        .as_deref()
-        .is_some_and(|message| message.contains("openrouter")));
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("openrouter"))
+    );
 }
 
 #[tokio::test]
@@ -2364,8 +2372,8 @@ fn seed_session_agent_transcript(
 }
 
 #[tokio::test]
-async fn session_agent_main_snapshot_uses_the_shared_writer_identity_without_rewriting_native_bytes(
-) {
+async fn session_agent_main_snapshot_uses_the_shared_writer_identity_without_rewriting_native_bytes()
+ {
     let root = tempfile::tempdir().unwrap();
     let handle = Arc::new(MockOrchestratorHandle::new());
     let session_id = handle.current_session_id().await;
@@ -2399,11 +2407,13 @@ async fn session_agent_main_snapshot_uses_the_shared_writer_identity_without_rew
         )
         .await;
     let events = sink.events().await;
-    let [ClientEvent::SessionAgentTranscript {
-        messages,
-        next_message_index,
-        ..
-    }] = events.as_slice()
+    let [
+        ClientEvent::SessionAgentTranscript {
+            messages,
+            next_message_index,
+            ..
+        },
+    ] = events.as_slice()
     else {
         panic!("expected main transcript snapshot: {events:?}");
     };
@@ -2427,10 +2437,12 @@ async fn session_agent_routes_list_nested_transcripts_and_load_real_messages() {
         .route(ClientCommand::ListSessionAgents, list_sink.clone())
         .await;
     let list_events = list_sink.events().await;
-    let [ClientEvent::SessionAgentList {
-        session_id: emitted_session,
-        agents,
-    }] = list_events.as_slice()
+    let [
+        ClientEvent::SessionAgentList {
+            session_id: emitted_session,
+            agents,
+        },
+    ] = list_events.as_slice()
     else {
         panic!("expected one session-agent list, got {list_events:?}");
     };
@@ -2670,17 +2682,22 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     // history messages lower to 2 client messages — this assertion still
     // expected the pre-fold count.
     let events = sink.events().await;
-    let [ClientEvent::SessionResumed {
-        session_id: emitted_id,
-        mode,
-        messages,
-    }, ClientEvent::UsageUpdate {
-        is_snapshot: Some(true),
-        input_tokens: 1200,
-        output_tokens: 80,
-        cache_read_tokens: 3000,
-        cache_creation_tokens: 500,
-    }, ClientEvent::StatusSnapshot { .. }, ClientEvent::ModelChanged { model }] = events.as_slice()
+    let [
+        ClientEvent::SessionResumed {
+            session_id: emitted_id,
+            mode,
+            messages,
+        },
+        ClientEvent::UsageUpdate {
+            is_snapshot: Some(true),
+            input_tokens: 1200,
+            output_tokens: 80,
+            cache_read_tokens: 3000,
+            cache_creation_tokens: 500,
+        },
+        ClientEvent::StatusSnapshot { .. },
+        ClientEvent::ModelChanged { model },
+    ] = events.as_slice()
     else {
         panic!("expected SessionResumed followed by its model, got {events:?}");
     };
@@ -3003,7 +3020,7 @@ where
     let frame = Frame::Request(bridge::BridgeRequest {
         id: 7,
         method: "submit".into(),
-        params: serde_json::to_value(command).expect("serialize command"),
+        params: bridge_source(&command),
     });
     let text = serde_json::to_string(&frame).expect("serialize frame");
     ws.send(Message::Text(text)).await.expect("send command");
@@ -3018,12 +3035,11 @@ where
     let frame = Frame::Request(BridgeRequest {
         id: 1,
         method: "hello".into(),
-        params: serde_json::to_value(ClientHello {
+        params: bridge_source(&ClientHello {
             protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
             client_name: "router-test".into(),
             capabilities: Capabilities::default(),
-        })
-        .unwrap(),
+        }),
     });
     ws.send(Message::Text(serde_json::to_string(&frame).unwrap()))
         .await
@@ -4240,4 +4256,11 @@ async fn resume_workflow_is_explicitly_rejected() {
             message: "resume_workflow is unavailable on this bridge".to_string(),
         }]
     );
+}
+fn bridge_source<T: serde::Serialize>(
+    value: &T,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let json = serde_json::to_string(value).expect("serialize bridge payload");
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
+        .expect("serialized bridge payload is valid JSON")
 }

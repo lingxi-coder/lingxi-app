@@ -137,7 +137,16 @@ class CronNativeExecutionTest {
                     // must return a durable busy result, then retry the same run.
                     val humanGate = server.blockNextRequest()
                     val humanTurn = async {
-                        engine.submit(ClientCommand.SendPrompt("Human busy fixture", null, emptyList(), null))
+                        engine.submit(
+                            ClientCommand.SendPrompt(
+                                ClientTextDto(
+                                    codeUnits = "Human busy fixture".map { it.code.toUShort() },
+                                ),
+                                null,
+                                emptyList(),
+                                null,
+                            ),
+                        )
                     }
                     humanGate.awaitRequest()
                     val manualOccurrence = System.currentTimeMillis().toULong()

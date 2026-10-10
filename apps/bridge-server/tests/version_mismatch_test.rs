@@ -21,21 +21,21 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bridge::wire::Frame;
-use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
 use bridge_server::server::{BridgeConnection, TurnDriver};
 use client::adapter::AdapterPermissionGate;
 use client::protocol::commands::ClientCommand;
 use client::protocol::permission::PermissionRequest;
 use client::protocol::version::CLIENT_PROTOCOL_VERSION;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
 const TEST_TOKEN: &str = "ver-e2e-token-32chars00000000000";
 
@@ -81,7 +81,7 @@ where
     let frame = Frame::Request(BridgeRequest {
         id: 2,
         method: "submit".into(),
-        params: serde_json::to_value(command).expect("serialize command"),
+        params: bridge_source(&command),
     });
     let text = serde_json::to_string(&frame).expect("serialize frame");
     ws.send(Message::Text(text)).await.expect("send command");
@@ -138,7 +138,7 @@ where
     let frame = Frame::Request(BridgeRequest {
         id: 1,
         method: "hello".into(),
-        params: serde_json::to_value(hello).expect("serialize ClientHello"),
+        params: bridge_source(&hello),
     });
     let text = serde_json::to_string(&frame).expect("serialize frame");
     ws.send(Message::Text(text)).await.expect("send hello");
@@ -179,8 +179,11 @@ async fn matching_versions_accept_handshake() {
                 "matching versions must NOT be refused"
             );
             let result = resp.result.expect("accept must carry a ServerHello result");
+            let result_json = result
+                .to_json_string()
+                .expect("ServerHello source serializes");
             let server_hello: bridge::ServerHello =
-                serde_json::from_value(result).expect("ServerHello in result");
+                serde_json::from_str(&result_json).expect("ServerHello in result");
             assert_eq!(server_hello.protocol_version, BRIDGE_PROTOCOL_VERSION);
             assert_eq!(
                 server_hello.capabilities.client_protocol_version,
@@ -322,6 +325,7 @@ async fn refused_connection_does_not_route_commands() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -350,6 +354,7 @@ async fn command_before_hello_is_rejected() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -410,6 +415,7 @@ async fn second_client_is_rejected_while_first_remains_active() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -422,4 +428,11 @@ async fn second_client_is_rejected_while_first_remains_active() {
     .expect("first client command must still route");
 
     endpoint.shutdown().await;
+}
+fn bridge_source<T: serde::Serialize>(
+    value: &T,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let json = serde_json::to_string(value).expect("serialize bridge payload");
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
+        .expect("serialized bridge payload is valid JSON")
 }

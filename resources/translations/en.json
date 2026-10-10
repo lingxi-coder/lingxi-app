@@ -2293,5 +2293,10 @@
   "settings_provider_region_china": "China mainland",
   "settings_provider_region_help": "Defaults to international. Apply saved settings when idle to change the running region.",
   "settings_provider_region_international": "International",
-  "voice_flow_finalizing_hint": "Waiting for speech recognition to finish…"
+  "voice_flow_finalizing_hint": "Waiting for speech recognition to finish…",
+  "visualization_preparing": "Preparing visualization…",
+  "visualization_loading": "Loading visualization…",
+  "visualization_unavailable": "This visualization is no longer available.",
+  "visualization_label": "Visualization",
+  "visualization_remove_context": "Remove visualization context"
 }

@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bridge::wire::Frame;
-use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
 use bridge_server::server::{BridgeConnection, TurnDriver};
 use client::adapter::{AdapterOutputStream, AdapterPermissionGate, ComputerAccessBroker};
 use client::protocol::commands::ClientCommand;
@@ -54,13 +54,13 @@ use client::protocol::events::ClientEvent;
 use futures_util::{SinkExt, StreamExt};
 use lingxi_core::types::ToolUseId;
 use orchestrator::test_support::{
+    MockApiClient, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
-    message_delta_stop, message_start, message_stop, text_delta, MockApiClient,
-    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+    message_delta_stop, message_start, message_stop, text_delta,
 };
-use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig, scripted};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
 mod computer_access_fixture;
 use async_trait::async_trait;
@@ -187,12 +187,11 @@ async fn connect(
     let hello = Frame::Request(BridgeRequest {
         id: 0,
         method: "hello".into(),
-        params: serde_json::to_value(ClientHello {
+        params: bridge_source(&ClientHello {
             protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
             client_name: "computer-access-test".into(),
             capabilities: Capabilities::default(),
-        })
-        .unwrap(),
+        }),
     });
     ws.send(Message::Text(serde_json::to_string(&hello).unwrap()))
         .await
@@ -232,7 +231,7 @@ where
     let frame = Frame::Request(bridge::BridgeRequest {
         id: 1,
         method: "submit".into(),
-        params: serde_json::to_value(command).expect("serialize command"),
+        params: bridge_source(&command),
     });
     let text = serde_json::to_string(&frame).expect("serialize frame");
     async move {
@@ -256,6 +255,7 @@ async fn computer_access_request_event_then_approve_resolves_resolver() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -360,6 +360,7 @@ async fn disconnect_mid_computer_access_denies() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         },
     )
     .await;
@@ -393,4 +394,11 @@ async fn disconnect_mid_computer_access_denies() {
     );
 
     endpoint.shutdown().await;
+}
+fn bridge_source<T: serde::Serialize>(
+    value: &T,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let json = serde_json::to_string(value).expect("serialize bridge payload");
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
+        .expect("serialized bridge payload is valid JSON")
 }

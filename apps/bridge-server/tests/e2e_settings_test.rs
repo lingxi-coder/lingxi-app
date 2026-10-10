@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bridge::wire::Frame;
-use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
 use bridge_server::boot;
 use client::protocol::commands::{
     ClientCommand, ListingKindDto, PermissionBehaviorDto, WritableScopeDto,
@@ -36,8 +36,8 @@ use client::protocol::events::{ClientEvent, ErrorKindDto};
 use futures_util::{SinkExt, StreamExt};
 use harness_runtime::desktop::DesktopConfig;
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
 /// `boot::assemble` → `initialize_live_session` writes to PROCESS-GLOBAL
 /// statics (`PROCESS_DIR` / `PROCESS_SESSION` / `PROCESS_NAME` in
@@ -222,12 +222,11 @@ async fn connect(
     let hello = Frame::Request(BridgeRequest {
         id: 0,
         method: "hello".into(),
-        params: serde_json::to_value(ClientHello {
+        params: bridge_source(&ClientHello {
             protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
             client_name: "settings-e2e-test".into(),
             capabilities: Capabilities::default(),
-        })
-        .unwrap(),
+        }),
     });
     send_frame(&mut ws, &hello).await;
     match next_frame(&mut ws).await {
@@ -266,7 +265,7 @@ fn submit(command: &ClientCommand) -> Frame {
     Frame::Request(BridgeRequest {
         id: 1,
         method: "submit".into(),
-        params: serde_json::to_value(command).expect("serialize command"),
+        params: bridge_source(&command),
     })
 }
 
@@ -687,4 +686,11 @@ async fn the_managed_layer_comes_from_the_sandbox_not_the_machine() {
     }
 
     endpoint.shutdown().await;
+}
+fn bridge_source<T: serde::Serialize>(
+    value: &T,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let json = serde_json::to_string(value).expect("serialize bridge payload");
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
+        .expect("serialized bridge payload is valid JSON")
 }

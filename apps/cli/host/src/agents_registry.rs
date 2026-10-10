@@ -1653,6 +1653,34 @@ impl SessionRegistration {
     }
 }
 
+fn idle_notification_summary(
+    from: &str,
+    summary: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    exited: bool,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    let state = if exited { "exited" } else { "is idle" };
+    let fallback = format!("{from} {state}");
+    if let Some(summary) = summary {
+        if let Some(code_units) = summary.string_units("") {
+            // String conversion is used only to decide whether the display
+            // suffix is empty and to produce its display form. The transmitted
+            // projection below retains the exact source code units.
+            let display_summary = String::from_utf16_lossy(&code_units);
+            if !display_summary.trim().is_empty() {
+                let prefix = format!("{fallback}: ");
+                let display = format!("{prefix}{display_summary}");
+                let mut source_units: Vec<u16> = prefix.encode_utf16().collect();
+                source_units.extend(code_units);
+                return Utf16JsonProjection::root_string(display, source_units)
+                    .expect("composed idle summary is a valid root string projection");
+            }
+        }
+    }
+    fallback.into()
+}
+
 fn deliver_idle_notifications(path: &Path, record: &LiveSessionRecord, exited: bool) {
     let Some(root) = path.parent() else {
         return;
@@ -1670,24 +1698,18 @@ fn deliver_idle_notifications(path: &Path, record: &LiveSessionRecord, exited: b
     let from = record.name.clone().unwrap_or_else(|| "session".to_string());
     let from_session_id = session_id.to_string();
     for sub in subscriptions {
-        let summary = Some(match sub.summary {
-            Some(summary) if !summary.trim().is_empty() => {
-                if exited {
-                    format!("{from} exited: {summary}")
-                } else {
-                    format!("{from} is idle: {summary}")
-                }
-            }
-            _ if exited => format!("{from} exited"),
-            _ => format!("{from} is idle"),
-        });
+        let summary = Some(idle_notification_summary(
+            from.as_str(),
+            sub.summary,
+            exited,
+        ));
         let msg = lingxi_core::host::live_sessions::PeerMessage {
             from: from.clone(),
             from_session_id: from_session_id.clone(),
             content: if exited {
-                format!("{from} has exited.")
+                format!("{from} has exited.").into()
             } else {
-                format!("{from} is now idle.")
+                format!("{from} is now idle.").into()
             },
             summary,
             msg_id: None,
@@ -2087,7 +2109,7 @@ mod tests {
             &lingxi_core::host::live_sessions::IdleNotificationRequest {
                 from: "lead".to_string(),
                 from_session_id: "subscriber-session".to_string(),
-                summary: Some("review finished".to_string()),
+                summary: Some("review finished".into()),
             },
         )
         .unwrap();
@@ -2099,7 +2121,10 @@ mod tests {
         assert_eq!(first[0].from, "peer");
         assert_eq!(first[0].content, "peer is now idle.");
         assert_eq!(
-            first[0].summary.as_deref(),
+            first[0]
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.string_at("")),
             Some("peer is idle: review finished")
         );
 
@@ -2120,7 +2145,35 @@ mod tests {
         let exit = dir.drain_inbox("subscriber-session").unwrap();
         assert_eq!(exit.len(), 1);
         assert_eq!(exit[0].content, "peer has exited.");
-        assert_eq!(exit[0].summary.as_deref(), Some("peer exited"));
+        assert_eq!(
+            exit[0]
+                .summary
+                .as_ref()
+                .and_then(|summary| summary.string_at("")),
+            Some("peer exited")
+        );
+    }
+
+    #[test]
+    fn idle_notification_summary_preserves_exact_source_code_units() {
+        let source_units = "review ".encode_utf16().chain([0xd800]).collect();
+        let source = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            "review �".into(),
+            source_units,
+        )
+        .unwrap();
+        let summary = idle_notification_summary("peer", Some(source), false);
+
+        assert_eq!(summary.string_at(""), Some("peer is idle: review �"));
+        assert_eq!(
+            summary.string_units(""),
+            Some(
+                "peer is idle: review "
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .collect()
+            )
+        );
     }
 
     #[test]

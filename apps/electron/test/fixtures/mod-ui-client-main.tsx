@@ -7,6 +7,7 @@ import type {
   NativeUiRenderResponseDto,
   UiClientFrameDto,
   UiClientFrameEventDto,
+  UiClientFrameEventSnapshotDto,
   UiClientOperation,
   UiClientOperationResponseFor,
   UiControlCallResultDto,
@@ -80,6 +81,7 @@ const lifecycleCalls: Array<{ sessionId: string; command: AllowedClientCommand }
 const frameListeners = new Set<(event: UiClientFrameEventDto) => void>();
 const invalidationListeners = new Set<(event: UiInvalidateEventDto) => void>();
 const runtimeFrames = new Map<string, UiClientFrameDto>();
+const frameIdentityByRuntime = new Map<string, Pick<UiClientFrameEventSnapshotDto, 'parent' | 'client'>>();
 const frameSequenceByRuntime = new Map<string, number>();
 const failedRuntimeIds = new Set<string>();
 const heldFrameOperationReleases: Array<() => void> = [];
@@ -157,7 +159,19 @@ function makeRuntimeFrame(runtimeId: string, renderRevision: number, tree: UiCli
 
 function emitRuntimeFrame(sessionId: string, frame: UiClientFrameDto): void {
   const { runtimeId, ...frameBody } = frame;
-  for (const listener of frameListeners) listener({ sessionId, runtimeId, frame: frameBody });
+  const identity = frameIdentityByRuntime.get(runtimeId);
+  if (!identity) throw new Error(`missing parent/client identity for runtime ${runtimeId}`);
+  for (const listener of frameListeners) listener({ sessionId, runtimeId, frame: { ...frameBody, ...identity } });
+}
+
+function emitSnapshotFrame(
+  sessionId: string,
+  runtimeId: string,
+  frame: Omit<UiClientFrameEventSnapshotDto, 'parent' | 'client'>,
+): void {
+  const identity = frameIdentityByRuntime.get(runtimeId);
+  if (!identity) throw new Error(`missing parent/client identity for runtime ${runtimeId}`);
+  for (const listener of frameListeners) listener({ sessionId, runtimeId, frame: { ...frame, ...identity } });
 }
 
 function emitWorkerFaultFrame(sessionId: string, runtimeId: string, renderRevision: number, reason: string): void {
@@ -261,6 +275,10 @@ const host: ModUiClientHostApi = {
         runtimeId = `runtime-sibling-${nextRuntimeId++}`;
       }
       call.returnedRuntimeId = runtimeId;
+      frameIdentityByRuntime.set(runtimeId, {
+        parent: { surface: request.surface, component: request.component, instance_id: request.instance_id },
+        client: { plugin: request.plugin, key: request.client, module: request.module },
+      });
       if (request.client === 'status') {
         currentStatusRuntimeId = runtimeId;
       }
@@ -461,15 +479,19 @@ window.__modUiClientFixture = {
     });
   },
   emitStaleFrame() {
-    for (const listener of frameListeners) listener({
-      sessionId,
-      runtimeId: 'runtime-status',
-      frame: { renderRevision: revision - 1, frameSequence: 10_000, tree: { type: 'Text', children: ['Stale revision frame'] }, hasPointerListener: false, hasKeyListener: false },
+    emitSnapshotFrame(sessionId, 'runtime-status', {
+      renderRevision: revision - 1,
+      frameSequence: 10_000,
+      tree: { type: 'Text', children: ['Stale revision frame'] },
+      hasPointerListener: false,
+      hasKeyListener: false,
     });
-    for (const listener of frameListeners) listener({
-      sessionId: 'old-session',
-      runtimeId: 'runtime-status',
-      frame: { renderRevision: revision, frameSequence: 10_001, tree: { type: 'Text', children: ['Old session frame'] }, hasPointerListener: false, hasKeyListener: false },
+    emitSnapshotFrame('old-session', 'runtime-status', {
+      renderRevision: revision,
+      frameSequence: 10_001,
+      tree: { type: 'Text', children: ['Old session frame'] },
+      hasPointerListener: false,
+      hasKeyListener: false,
     });
   },
   rejectNextRunAtAdapter() { rejectRunAtAdapter = true; },
@@ -509,16 +531,12 @@ window.__modUiClientFixture = {
   },
   emitHighSequenceFrameForFailedRuntime(runtimeId) {
     if (!failedRuntimeIds.has(runtimeId)) return;
-    for (const listener of frameListeners) listener({
-      sessionId,
-      runtimeId,
-      frame: {
-        renderRevision: revision,
-        frameSequence: 50_000,
-        tree: surfaceTree('Late failed runtime frame'),
-        hasPointerListener: false,
-        hasKeyListener: false,
-      },
+    emitSnapshotFrame(sessionId, runtimeId, {
+      renderRevision: revision,
+      frameSequence: 50_000,
+      tree: surfaceTree('Late failed runtime frame'),
+      hasPointerListener: false,
+      hasKeyListener: false,
     });
   },
   reloadStatusPluginEnvironment() {

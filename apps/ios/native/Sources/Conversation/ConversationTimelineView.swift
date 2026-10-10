@@ -18,6 +18,9 @@ struct ConversationTimelineView: View {
     var onSelectAgent: (String) -> Void = { _ in }
     var streaming = false
     var showThinking = true
+    /// Session whose store owns the inline widgets of this transcript.
+    var visualizationSessionId: String = ""
+    var onVisualizationFollowup: (VisualizationFollowup) -> Void = { _ in }
 
     var body: some View {
         let segments = timelineSegments
@@ -53,6 +56,13 @@ struct ConversationTimelineView: View {
     @ViewBuilder
     private func segmentView(_ segment: Segment) -> some View {
         switch segment {
+        case let .message(rowID, message) where message.visualization != nil:
+            VisualizationCardView(
+                sessionId: visualizationSessionId,
+                visualization: message.visualization!,
+                onFollowup: onVisualizationFollowup
+            )
+            .id(rowID)
         case let .message(rowID, message):
             MessageBubble(
                 message: message,

@@ -30,7 +30,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bridge::lockfile::IdeLockfile;
 use bridge::wire::Frame;
-use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
 use bridge_server::boot;
 use bridge_server::server::{BridgeConnection, TurnDriver};
 use client::adapter::{AdapterPermissionGate, ClientEventSink};
@@ -38,8 +38,8 @@ use client::protocol::commands::ClientCommand;
 use client::protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client::protocol::version::CLIENT_PROTOCOL_VERSION;
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
 /// A deterministic, network-free [`TurnDriver`]: every turn echoes the prompt
 /// back as a single `TextDelta`, then ends the turn with a clean `EndTurn`.
@@ -146,12 +146,11 @@ fn hello_frame() -> Frame {
     Frame::Request(BridgeRequest {
         id: 1,
         method: "hello".into(),
-        params: serde_json::to_value(ClientHello {
+        params: bridge_source(&ClientHello {
             protocol_version: BRIDGE_PROTOCOL_VERSION.to_string(),
             client_name: "serve-e2e/0.0.0".into(),
             capabilities: Capabilities::default(),
-        })
-        .unwrap(),
+        }),
     })
 }
 
@@ -159,7 +158,7 @@ fn submit(command: &ClientCommand) -> Frame {
     Frame::Request(BridgeRequest {
         id: 2,
         method: "submit".into(),
-        params: serde_json::to_value(command).expect("serialize command"),
+        params: bridge_source(&command),
     })
 }
 
@@ -213,9 +212,14 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
         Frame::Response(resp) => {
             assert_eq!(resp.id, 1, "ServerHello echoes the hello request id");
             assert!(resp.error.is_none(), "compatible hello must not error");
-            let server_hello: bridge::ServerHello =
-                serde_json::from_value(resp.result.expect("ServerHello result"))
-                    .expect("decode ServerHello");
+            let server_hello: bridge::ServerHello = serde_json::from_str(
+                &resp
+                    .result
+                    .expect("ServerHello result")
+                    .to_json_string()
+                    .expect("ServerHello source serializes"),
+            )
+            .expect("decode ServerHello");
             // BOTH independently-versioned numbers must be compatible / match
             // (governing decision §0.10).
             assert!(
@@ -239,6 +243,7 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
             prompt_mode: None,
             images: Vec::new(),
             turn_id: None,
+            visualization_context: None,
         }),
     )
     .await;
@@ -289,4 +294,11 @@ async fn serve_path_handshakes_streams_turn_and_reaps_lockfile() {
         !lockfile_path.exists(),
         "the discovery lockfile must be removed on shutdown (Drop-guard)"
     );
+}
+fn bridge_source<T: serde::Serialize>(
+    value: &T,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let json = serde_json::to_string(value).expect("serialize bridge payload");
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
+        .expect("serialized bridge payload is valid JSON")
 }

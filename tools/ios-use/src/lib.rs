@@ -8,16 +8,17 @@
 
 use async_trait::async_trait;
 use lingxi_core::host::computer_control::ComputerError;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 use tool_api::BuiltinToolContext;
 
@@ -38,8 +39,8 @@ impl IosUseTool {
     }
 }
 
-static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
-    json!({
+static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
+    Utf16JsonProjection::from_serde_value(&json!({
         "type": "object",
         "properties": {
             "action": { "type": "string", "enum": ["screenshot", "tap", "type", "key"] },
@@ -48,13 +49,27 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "text": { "type": "string" }
         },
         "required": ["action"]
-    })
+    }))
+    .expect("iOS tool input schema is valid JSON")
 });
+
+fn unsigned_integer_at(input: &Utf16JsonProjection, pointer: &str) -> Option<u64> {
+    let number = input.number_at(pointer)?;
+    if !number.is_finite()
+        || number.fract() != 0.0
+        || !(0.0..18_446_744_073_709_551_616.0).contains(&number)
+    {
+        return None;
+    }
+    // The exclusive upper bound above guarantees this conversion does not saturate.
+    #[allow(clippy::cast_possible_truncation)]
+    Some(number as u64)
+}
 
 fn map_err(e: &ComputerError) -> ToolError {
     match e {
-        ComputerError::PermissionDenied(m) => ToolError::PermissionDenied(m.clone()),
-        other => ToolError::Internal(other.to_string()),
+        ComputerError::PermissionDenied(m) => ToolError::PermissionDenied(m.clone().into()),
+        other => ToolError::Internal(other.to_string().into()),
     }
 }
 
@@ -63,8 +78,15 @@ impl Tool for IosUseTool {
     fn name(&self) -> &str {
         TOOL_NAME
     }
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &INPUT_SCHEMA
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -72,17 +94,18 @@ impl Tool for IosUseTool {
     fn max_result_size_chars(&self) -> usize {
         4096
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, input: &Value) -> bool {
-        matches!(
-            input.get("action").and_then(Value::as_str),
-            Some("screenshot")
-        )
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
+        input.string_at("/action") == Some("screenshot")
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _: &Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "ios_use — iOS automation entitlement gates use".into(),
@@ -93,24 +116,21 @@ impl Tool for IosUseTool {
         }
     }
 
-    async fn description(&self, input: &Value, _: &DescriptionOptions) -> String {
-        let action = input
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("screenshot");
+    async fn description(&self, input: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
+        let action = input.string_at("/action").unwrap_or("screenshot");
         format!("iOS action: {action}")
     }
 
-    async fn prompt(&self, _: &PromptOptions) -> String {
+    async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         "Drive the iOS UI: screenshot, tap, type, key.".into()
     }
 
     async fn validate_input(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        match input.get("action").and_then(Value::as_str) {
+        match input.string_at("/action") {
             Some("screenshot" | "tap" | "type" | "key") => Ok(()),
             _ => Err(ValidationError(
                 "`action` must be screenshot|tap|type|key".into(),
@@ -120,7 +140,7 @@ impl Tool for IosUseTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -130,18 +150,15 @@ impl Tool for IosUseTool {
             .as_ref()
             .ok_or_else(|| ToolError::Internal("ios automation not available".into()))?;
 
-        let action = input
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("screenshot");
+        let action = input.string_at("/action").unwrap_or("screenshot");
         let data = match action {
             "screenshot" => {
                 let s = cc.screenshot().await.map_err(|e| map_err(&e))?;
                 json!({ "width": s.width, "height": s.height, "png_bytes_len": s.png_bytes.len() })
             }
             "tap" => {
-                let x = input.get("x").and_then(Value::as_u64);
-                let y = input.get("y").and_then(Value::as_u64);
+                let x = unsigned_integer_at(&input, "/x");
+                let y = unsigned_integer_at(&input, "/y");
                 #[allow(clippy::cast_possible_truncation)] // coordinate space never exceeds u32
                 let (x, y) = match (x, y) {
                     (Some(x), Some(y)) => (x as u32, y as u32),
@@ -152,8 +169,7 @@ impl Tool for IosUseTool {
             }
             "type" => {
                 let text = input
-                    .get("text")
-                    .and_then(Value::as_str)
+                    .string_at("/text")
                     .ok_or_else(|| ToolError::InvalidInput("`type` requires `text`".into()))?;
                 cc.type_text(text.to_string())
                     .await
@@ -162,25 +178,16 @@ impl Tool for IosUseTool {
             }
             _ => {
                 let key = input
-                    .get("text")
-                    .and_then(Value::as_str)
+                    .string_at("/text")
                     .ok_or_else(|| ToolError::InvalidInput("`key` requires `text`".into()))?;
                 cc.key(key.to_string()).await.map_err(|e| map_err(&e))?;
                 json!({ "ok": true })
             }
         };
 
-        Ok(ToolCallResult {
-            data,
-            data_projection: None,
-            model_content_projection: None,
-            model_content: None,
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-            mcp_meta_projection: None,
-        })
+        let data =
+            Utf16JsonProjection::from_serde_value(&data).expect("iOS tool result is valid JSON");
+        Ok(ToolCallResult::from_data(data))
     }
 }
 

@@ -51,6 +51,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::computer_access::ComputerAccessExchange;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -152,7 +153,7 @@ pub enum BottomPaneOutcome {
     Consumed,
     /// The composer submitted this trimmed source text. Display conversion is
     /// deferred to the UI boundary; command routing uses the original units.
-    Submitted(core::types::utf16_json::Utf16JsonProjection),
+    Submitted(Utf16JsonProjection),
     /// Idle `Esc Esc` on an empty prompt: open the `/rewind` picker.
     OpenRewindPicker,
     /// A stacked view asks the owner to submit `String` as a user prompt.
@@ -593,7 +594,7 @@ impl BottomPane {
     ///
     /// [`ChatWidget::handle_slash`]: crate::chat_widget::ChatWidget::handle_slash
     #[must_use]
-    pub fn is_registry_command(&self, name: &core::types::utf16_json::Utf16JsonProjection) -> bool {
+    pub fn is_registry_command(&self, name: &Utf16JsonProjection) -> bool {
         let mut name_units = vec![b'/' as u16];
         name_units.extend(name.string_units("").unwrap_or_default());
         self.registry_commands.iter().any(|r| {
@@ -1329,9 +1330,7 @@ impl BottomPane {
     /// Take the composer's submission: pushes non-blank text to history,
     /// clears the buffer, and returns the trimmed text. `None` (buffer
     /// untouched) when the composer is blank.
-    pub fn take_submission_state(
-        &mut self,
-    ) -> Option<core::types::utf16_json::Utf16JsonProjection> {
+    pub fn take_submission_state(&mut self) -> Option<Utf16JsonProjection> {
         if self.composer.is_blank() {
             return None;
         }
@@ -1383,11 +1382,8 @@ impl BottomPane {
             let end_unit = utf16_unit_offset_for_display_char(&units, end_character);
             units.splice(start_unit..end_unit, actual.encode_utf16());
             text.replace_range(start..end, actual);
-            source = core::types::utf16_json::Utf16JsonProjection::root_string(
-                String::from_utf16_lossy(&units),
-                units,
-            )
-            .expect("display is derived from the exact UTF-16 units");
+            source = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("display is derived from the exact UTF-16 units");
         }
         let trimmed_start = text.trim_start();
         let leading_characters = text.chars().count() - trimmed_start.chars().count();
@@ -1401,7 +1397,7 @@ impl BottomPane {
         );
         let units = units[start_unit..end_unit].to_vec();
         Some(
-            core::types::utf16_json::Utf16JsonProjection::root_string(trimmed.to_owned(), units)
+            Utf16JsonProjection::root_string(trimmed.to_owned(), units)
                 .expect("trimmed display matches the exact source units"),
         )
     }
@@ -1810,8 +1806,10 @@ impl BottomPane {
                 } else if self.composer.source_units() == source_insert
                     || String::from_utf16(&self.composer.source_units())
                         .ok()
-                        .and_then(|text| crate::command::resolve(&text))
-                        .is_some_and(|(cmd, _)| cmd.name == insert)
+                        .is_some_and(|text| {
+                            crate::command::resolve(&text)
+                                .is_some_and(|(cmd, _)| cmd.name == insert)
+                        })
                 {
                     // Buffer already IS the highlighted command — by name or in
                     // full as one of its aliases (`/quit` highlights `/exit
@@ -2283,7 +2281,7 @@ impl BottomPane {
         lines.extend(tasks);
         lines.extend(self.mod_render_lines.iter().map(|text| {
             Line::from(Span::styled(
-                text.display(),
+                text.to_owned(),
                 Style::default().fg(crate::style_adapter::to_ratatui(self.theme.dim)),
             ))
         }));
@@ -3917,11 +3915,9 @@ mod tests {
         }]);
         typ(&mut malformed_source_pane, "/mode� ");
         assert_eq!(malformed_source_pane.command_argument_hint(), None);
-        assert!(!malformed_source_pane
-            .is_registry_command(&core::types::utf16_json::Utf16JsonProjection::from("mode�")));
-        assert!(malformed_source_pane.is_registry_command(
-            &core::types::utf16_json::Utf16JsonProjection::parse(r#""mode\ud800""#).unwrap()
-        ));
+        assert!(!malformed_source_pane.is_registry_command(&Utf16JsonProjection::from("mode�")));
+        assert!(malformed_source_pane
+            .is_registry_command(&Utf16JsonProjection::parse(r#""mode\ud800""#).unwrap()));
     }
 
     #[test]
@@ -5119,7 +5115,8 @@ mod tests {
         PermissionExchange {
             request: permission::gate::PermissionRequest::ToolUseConfirm {
                 tool_name: "WebFetch".to_string(),
-                tool_input: serde_json::json!({ "url": "https://example.com" }),
+                tool_input: Utf16JsonProjection::parse(r#"{"url":"https://example.com"}"#)
+                    .expect("valid test permission input"),
                 default_decision: permission::gate::PromptDefault::DenyByDefault,
                 suppress_always_allow_rule: false,
             },

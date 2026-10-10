@@ -3,6 +3,8 @@ package com.lingxi.code.conversation
 import androidx.lifecycle.SavedStateHandle
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientTextDto
+import com.lingxi.code.bindings.client.SessionAgentSummaryDto
 import com.lingxi.code.bindings.client.CostDto
 import com.lingxi.code.bindings.client.HeadlineKindDto
 import com.lingxi.code.bindings.client.ImageRefDto
@@ -87,7 +89,7 @@ class ChatViewModelReducerTest {
      */
     private class RecordingSource : ConversationSource {
         val submitted = mutableListOf<String>()
-        val pending = mutableListOf<String>()
+        val pending = mutableListOf<List<UShort>>()
         val commands = mutableListOf<ClientCommand>()
         val cancelledTurnIds = mutableListOf<Long?>()
         var submittedTurnId: Long? = null
@@ -103,7 +105,7 @@ class ChatViewModelReducerTest {
         }
         override suspend fun submitClientCommand(command: ClientCommand) {
             commands += command
-            if (command is ClientCommand.SendPrompt) pending += command.text
+            if (command is ClientCommand.SendPrompt) pending += command.text.codeUnits.toList()
         }
         override fun submit(
             text: String,
@@ -387,7 +389,14 @@ class ChatViewModelReducerTest {
         vm.send("must not overlap compaction")
         assertEquals(1, vm.state.value.messages.size)
 
-        vm.reduceClientEvent(ClientEvent.CompactionCompleted(20u, 7u, 4096u, "kept context"))
+        vm.reduceClientEvent(
+            ClientEvent.CompactionCompleted(
+                20u,
+                7u,
+                4096u,
+                ClientTextDto(codeUnits = "kept context".map { it.code.toUShort() }),
+            ),
+        )
         val completed = vm.state.value.compaction
         assertEquals(CompactionProgressStatus.Completed, completed?.status)
         assertEquals(20, completed?.messagesBefore)
@@ -1394,9 +1403,45 @@ class ChatViewModelReducerTest {
         runCurrent()
 
         assertEquals("only the first turn owns a reply collector", listOf("first"), src.submitted)
-        assertEquals(listOf("second"), src.pending)
+        assertEquals(listOf("second".map { it.code.toUShort() }), src.pending)
         assertEquals(2, vm.state.value.messages.count { it.role == Role.User })
         assertTrue(vm.state.value.streaming)
+    }
+
+    @Test
+    fun send_whileStreamingPreservesExactUtf16Units() = runTest(dispatcher) {
+        val source = RecordingSource()
+        val vm = ChatViewModel(source)
+        val prompt = String(charArrayOf('x', 0xD800.toChar(), 0xD83D.toChar(), 0xDE03.toChar()))
+
+        vm.send("first")
+        vm.send(prompt)
+        runCurrent()
+
+        val command = source.commands.filterIsInstance<ClientCommand.SendPrompt>().single()
+        assertEquals(prompt.map { it.code.toUShort() }, command.text.codeUnits)
+        assertEquals(prompt.map { it.code.toUShort() }, source.pending.single())
+    }
+
+    @Test
+    fun sessionAgentTextProjectsToDisplayOnlyAtTheUiBoundary() {
+        val summary = SessionAgentSummaryDto(
+            agentId = "agent:worker",
+            name = ClientTextDto(codeUnits = listOf('A'.code.toUShort(), 0xD800.toUShort())),
+            agentType = "worker",
+            model = null,
+            modelProfile = null,
+            status = "running",
+            latestActivity = ClientTextDto(
+                codeUnits = listOf('x'.code.toUShort(), 0xD83D.toUShort(), 0xDE03.toUShort()),
+            ),
+            updatedAtMs = null,
+        )
+
+        val ui = summary.toSessionAgentUi()
+
+        assertEquals("A�", ui.name)
+        assertEquals("x😃", ui.latestActivity)
     }
 
     @Test

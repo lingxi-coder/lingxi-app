@@ -1,6 +1,8 @@
 //! Dynamic /loop delivery for the local terminal host.
+use client::protocol::text::ClientTextDto;
 use harness_runtime::desktop::loop_tools;
 use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use loop_tools::WakeupScheduler;
 use std::sync::{Arc, Weak};
 use tokio_util::sync::CancellationToken;
@@ -78,7 +80,11 @@ impl CliLoopHost {
         }
         *self.session_id.lock().unwrap() = Some(current);
     }
-    pub fn begin(&self, raw_loop: Option<&str>, human: bool) -> std::io::Result<Option<String>> {
+    pub fn begin(
+        &self,
+        raw_loop: Option<&Utf16JsonProjection>,
+        human: bool,
+    ) -> std::io::Result<Option<Utf16JsonProjection>> {
         if let Some(orch) = self.orch.upgrade() {
             orch.turn_span().reset();
         }
@@ -89,7 +95,7 @@ impl CliLoopHost {
                 &self.cwd.project_root(),
                 &self.cwd.cwd(),
             )?;
-            self.state.begin_tick(raw.to_owned());
+            self.state.begin_tick(raw.clone());
             Ok(Some(resolved))
         } else {
             if human {
@@ -98,7 +104,10 @@ impl CliLoopHost {
             Ok(None)
         }
     }
-    pub fn resolve_scheduled(&self, raw: &str) -> std::io::Result<String> {
+    pub fn resolve_scheduled(
+        &self,
+        raw: &Utf16JsonProjection,
+    ) -> std::io::Result<Utf16JsonProjection> {
         self.state.take_in_flight_prompt();
         self.state.invalidate_noop_streak();
         self.state
@@ -106,7 +115,7 @@ impl CliLoopHost {
     }
     pub async fn run_scheduled(
         &self,
-        prompt: &str,
+        prompt: &Utf16JsonProjection,
         command: &msgqueue::QueuedCommand,
         cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -120,7 +129,7 @@ impl CliLoopHost {
                     .uuid
                     .starts_with("goal-retry-")
                     .then(|| command.uuid.clone()),
-                text: prompt.to_string(),
+                text: prompt.clone(),
                 is_meta: true,
                 mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
                     serde_json::json!({"kind":"auto-continuation"})
@@ -190,7 +199,7 @@ impl loop_tools::WakeupDelivery for CliDelivery {
     async fn deliver(
         &self,
         command_id: &str,
-        prompt: String,
+        prompt: Utf16JsonProjection,
         _reason: String,
         task: loop_tools::WakeupTask,
     ) {
@@ -239,12 +248,12 @@ impl loop_tools::WakeupDelivery for CliDelivery {
             tracing::warn!(%error, "cannot persist loop wakeup");
         }
         let _ = self.tx.send(tui::TurnEvent::SystemNotice {
-            body: message,
+            body: ClientTextDto::from_utf8(&message),
             is_error: false,
         });
         if let Some(body) = companion {
             let _ = self.tx.send(tui::TurnEvent::SystemNotice {
-                body,
+                body: ClientTextDto::from_utf8(&body),
                 is_error: false,
             });
         }
@@ -263,7 +272,7 @@ impl loop_tools::WakeupDelivery for CliDelivery {
             })
             .await;
     }
-    async fn cancel_queued(&self) -> Vec<String> {
+    async fn cancel_queued(&self) -> Vec<Utf16JsonProjection> {
         let queued = self
             .queue
             .get_by_max_priority(msgqueue::QueuePriority::Later, |c| {
@@ -278,7 +287,7 @@ impl loop_tools::WakeupDelivery for CliDelivery {
             .await;
         queued
             .iter()
-            .filter_map(|c| c.text().map(str::to_owned))
+            .filter_map(|command| command.text_projection().cloned())
             .collect()
     }
 }
@@ -337,11 +346,11 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl WakeupScheduler for Recorder {
-        async fn schedule(&self, _: std::time::Duration, _: String, _: String) {
+        async fn schedule(&self, _: std::time::Duration, _: Utf16JsonProjection, _: String) {
             self.scheduled
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        async fn cancel_pending(&self) -> Vec<String> {
+        async fn cancel_pending(&self) -> Vec<Utf16JsonProjection> {
             self.cancelled
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             vec![]
@@ -374,14 +383,23 @@ mod tests {
     async fn dynamic_tick_keeps_raw_identity_and_fallback_ends_after_one_retry() {
         let tmp = tempfile::tempdir().unwrap();
         let (host, rec) = host(tmp.path().into());
+        let prompt = Utf16JsonProjection::from("  /check  ");
+        let prompt_units = prompt.string_units("");
         assert_eq!(
-            host.begin(Some("  /check  "), false).unwrap().as_deref(),
-            Some("  /check  ")
+            host.begin(Some(&prompt), false)
+                .unwrap()
+                .and_then(|value| value.string_units("")),
+            prompt_units
         );
-        assert_eq!(host.state.in_flight_prompt().as_deref(), Some("  /check  "));
+        assert_eq!(
+            host.state
+                .in_flight_prompt()
+                .and_then(|value| value.string_units("")),
+            prompt_units
+        );
         host.finish(&CancellationToken::new()).await;
         assert_eq!(rec.scheduled.load(std::sync::atomic::Ordering::SeqCst), 1);
-        host.begin(Some("  /check  "), false).unwrap();
+        host.begin(Some(&prompt), false).unwrap();
         host.finish(&CancellationToken::new()).await;
         assert_eq!(rec.scheduled.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(host.state.loop_ended());
@@ -390,14 +408,15 @@ mod tests {
     async fn user_abort_cancels_while_queue_now_preserves_keepalive() {
         let tmp = tempfile::tempdir().unwrap();
         let (host, rec) = host(tmp.path().into());
-        host.begin(Some("p"), false).unwrap();
+        let prompt = Utf16JsonProjection::from("p");
+        host.begin(Some(&prompt), false).unwrap();
         host.reason
             .set(orchestrator::prompt::mid_turn_input::CancelReason::QueueNowCommand);
         let cancel = CancellationToken::new();
         cancel.cancel();
         host.finish(&cancel).await;
         assert_eq!(rec.scheduled.load(std::sync::atomic::Ordering::SeqCst), 1);
-        host.begin(Some("p"), false).unwrap();
+        host.begin(Some(&prompt), false).unwrap();
         host.finish(&cancel).await;
         assert!(host.state.loop_ended());
         assert!(host.state.in_flight_prompt().is_none());

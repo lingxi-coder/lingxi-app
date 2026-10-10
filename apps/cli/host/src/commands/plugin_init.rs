@@ -422,10 +422,16 @@ fn name_collision_warning(name: &str, home: &Path, cwd: &Path) -> Option<String>
     // separate disabled-setting check below reads a value.
     let mut merged: BTreeMap<String, Option<bool>> = BTreeMap::new();
     for scope in plugin_settings::SCOPES {
-        for (key, value) in
-            plugin_settings::read_enabled(&plugin_settings::scope_path(scope, home, cwd))
-        {
-            merged.insert(key, value.as_bool());
+        let enabled = plugin_settings::read_enabled(&plugin_settings::scope_path(scope, home, cwd));
+        if let Some(entries) = enabled.object_entries() {
+            for entry in entries {
+                // Plugin ids are Rust strings. Decode only valid UTF-16 key
+                // identities; a lossy display key must never alias a real id.
+                let Ok(key) = String::from_utf16(entry.code_units) else {
+                    continue;
+                };
+                merged.insert(key, entry.value.as_bool());
+            }
         }
     }
 

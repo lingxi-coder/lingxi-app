@@ -149,7 +149,9 @@ struct ChatView: View {
                          onConfirmBypassPermissions: { source.confirmAndSetBypassPermissions(suppressWarning: $0) },
                          recentModels: recentModels,
                          draft: $draft,
-                         onSend: send,
+                         onSend: { text, selectedSlashCommand in
+                             send(text, selectedSlashCommand: selectedSlashCommand)
+                         },
                          slashCommands: convo.slashCommands,
                          slashCommandsLoaded: convo.slashCommandsLoaded,
                          slashCommandPending: convo.slashCommandPending,
@@ -164,6 +166,8 @@ struct ChatView: View {
                          inputFocused: $composerFocused,
                          attachment: attachment,
                          onRemoveAttachment: { attachment = nil },
+                         visualizationChip: convo.visualizationChip,
+                         onRemoveVisualizationChip: { convo.visualizationChip = nil },
                          onMicHoldStart: startVoiceHold,
                          onMicHoldRelease: endVoiceHold,
                          onMicHoldCancel: cancelVoiceHold,
@@ -226,6 +230,16 @@ struct ChatView: View {
         }
         .onReceive(convo.turnSpeechUpdates) { update in
             voiceInteraction.handleTurnSpeechUpdate(update)
+        }
+        .onChange(of: convo.visualizationFollowup) { _, followup in
+            // A widget's "ask about this": seed the draft and carry its chip
+            // with the next prompt (the source attaches and clears it).
+            guard let followup else { return }
+            draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? followup.text : "\(draft) \(followup.text)"
+            convo.visualizationChip = followup.chip
+            convo.visualizationFollowup = nil
+            composerFocused = true
         }
         .onChange(of: convo.turnCompletion) { _, completion in
             guard let completion else { return }
@@ -461,7 +475,10 @@ struct ChatView: View {
                     activeAgentID: convo.selectedAgentID,
                     onSelectAgent: { source.selectAgent($0) },
                     streaming: streaming,
-                    showThinking: canShowTranscriptThinking
+                    showThinking: canShowTranscriptThinking,
+                    // An agent's widgets live in its origin session's store.
+                    visualizationSessionId: convo.activeSessionId,
+                    onVisualizationFollowup: { convo.visualizationFollowup = $0 }
                 )
             } else if convo.isAgentTranscriptLoading {
                 childAgentLoadingState
@@ -478,7 +495,10 @@ struct ChatView: View {
                     expandedToolCalls: convo.expandedToolCalls,
                     onToggleToolCall: toggleToolCall,
                     streaming: streaming,
-                    showThinking: canShowTranscriptThinking
+                    showThinking: canShowTranscriptThinking,
+                    // An agent's widgets live in its origin session's store.
+                    visualizationSessionId: convo.activeSessionId,
+                    onVisualizationFollowup: { convo.visualizationFollowup = $0 }
                 )
             }
         }
@@ -783,9 +803,13 @@ struct ChatView: View {
         source.startNewConversation()
     }
 
-    private func send(_ txt: String) {
+    private func send(_ txt: String, selectedSlashCommand: ConversationSlashCommand? = nil) {
         let images = attachment.map { [ImageRefDto(mediaType: $0.mediaType, base64: $0.base64)] } ?? []
-        guard let token = source.send(txt, images: images) else { return }
+        guard let token = source.send(
+            txt,
+            images: images,
+            selectedSlashCommand: selectedSlashCommand
+        ) else { return }
         // The source owns the durable transcript now; remove only after it has
         // accepted the turn so a failed send leaves the attachment retryable.
         attachment = nil

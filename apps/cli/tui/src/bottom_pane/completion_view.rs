@@ -98,7 +98,7 @@ pub fn emoji_items(fragment: &str) -> Vec<CompletionItem> {
         .filter(|(name, _)| name.starts_with(&query))
         .map(|(name, glyph)| CompletionItem {
             label: format!(":{name}:  {glyph}"),
-            insert: (*glyph).to_string(),
+            insert: (*glyph).into(),
             desc: String::new(),
         })
         .collect()
@@ -152,11 +152,12 @@ enum Cand<'a> {
 }
 
 impl Cand<'_> {
-    /// Command name WITH the leading `/`.
-    fn name(&self) -> String {
+    /// Command name WITH the leading `/`, kept as exact UTF-16 for matching
+    /// and ordering. Display conversion belongs at the popup-label boundary.
+    fn name_units(&self) -> Vec<u16> {
         match self {
-            Cand::Builtin(c) => c.name.to_owned(),
-            Cand::Registry(r) => r.name.display(),
+            Cand::Builtin(c) => c.name.encode_utf16().collect(),
+            Cand::Registry(r) => r.name.code_units.clone(),
         }
     }
 
@@ -168,10 +169,10 @@ impl Cand<'_> {
     }
 
     /// Full description — used for match candidacy (the searchable text).
-    fn describe(&self) -> String {
+    fn description_units(&self) -> Vec<u16> {
         match self {
-            Cand::Builtin(c) => c.describe(),
-            Cand::Registry(r) => r.description.display(),
+            Cand::Builtin(c) => c.describe().encode_utf16().collect(),
+            Cand::Registry(r) => r.description.code_units.clone(),
         }
     }
 
@@ -189,13 +190,110 @@ impl Cand<'_> {
         }
     }
 
-    /// Alternate names WITH the leading `/`.
-    fn aliases(&self) -> Vec<String> {
+    /// Alternate names WITH the leading `/`, kept as exact UTF-16.
+    fn aliases(&self) -> Vec<Vec<u16>> {
         match self {
-            Cand::Builtin(c) => c.aliases.iter().map(|alias| (*alias).to_owned()).collect(),
-            Cand::Registry(r) => r.aliases.iter().map(ClientTextDto::display).collect(),
+            Cand::Builtin(c) => c
+                .aliases
+                .iter()
+                .map(|alias| alias.encode_utf16().collect())
+                .collect(),
+            Cand::Registry(r) => r
+                .aliases
+                .iter()
+                .map(|alias| alias.code_units.clone())
+                .collect(),
         }
     }
+}
+
+/// Lowercase valid Unicode scalars while preserving unpaired UTF-16 units.
+/// This keeps case-insensitive command matching from making malformed source
+/// text collide with the replacement character used only for display.
+fn lowercase_units(units: &[u16]) -> Vec<u16> {
+    fn flush_valid_run(run: &mut String, lowered: &mut Vec<u16>) {
+        let lowercase = run.to_lowercase();
+        lowered.extend(lowercase.encode_utf16());
+        run.clear();
+    }
+
+    let mut lowered = Vec::with_capacity(units.len());
+    let mut valid_run = String::new();
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => valid_run.push(character),
+            Err(error) => {
+                flush_valid_run(&mut valid_run, &mut lowered);
+                lowered.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    flush_valid_run(&mut valid_run, &mut lowered);
+    lowered
+}
+
+fn bare_units(units: &[u16]) -> &[u16] {
+    units.strip_prefix(&[b'/' as u16]).unwrap_or(units)
+}
+
+fn contains_units(haystack: &[u16], needle: &[u16]) -> bool {
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn description_has_word_prefix(description: &[u16], query: &[u16]) -> bool {
+    fn matches_word(word: &[u16], query: &[u16]) -> bool {
+        let mut characters: Vec<(Vec<u16>, bool)> = Vec::new();
+        for decoded in char::decode_utf16(word.iter().copied()) {
+            match decoded {
+                Ok(character) => {
+                    let mut encoded = [0; 2];
+                    characters.push((
+                        character.encode_utf16(&mut encoded).to_vec(),
+                        character.is_alphanumeric(),
+                    ));
+                }
+                Err(error) => characters.push((vec![error.unpaired_surrogate()], false)),
+            }
+        }
+        let Some(first) = characters
+            .iter()
+            .position(|(_, alphanumeric)| *alphanumeric)
+        else {
+            return false;
+        };
+        let last = characters
+            .iter()
+            .rposition(|(_, alphanumeric)| *alphanumeric)
+            .expect("a first alphanumeric character exists");
+        let trimmed: Vec<u16> = characters[first..=last]
+            .iter()
+            .flat_map(|(units, _)| units.iter().copied())
+            .collect();
+        lowercase_units(&trimmed).starts_with(query)
+    }
+
+    let mut word = Vec::new();
+    for decoded in char::decode_utf16(description.iter().copied()) {
+        match decoded {
+            Ok(character) if character.is_whitespace() => {
+                if matches_word(&word, query) {
+                    return true;
+                }
+                word.clear();
+            }
+            Ok(character) => {
+                let mut encoded = [0; 2];
+                word.extend_from_slice(character.encode_utf16(&mut encoded));
+            }
+            Err(error) => {
+                word.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    matches_word(&word, query)
 }
 
 /// The builtin commands matching `prefix` (a `/`-led token), as completion
@@ -204,7 +302,7 @@ impl Cand<'_> {
 /// [`command_items_merged`] with an empty registry snapshot.
 #[must_use]
 pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
-    let prefix = core::types::utf16_json::Utf16JsonProjection::from(prefix);
+    let prefix = lingxi_core::types::utf16_json::Utf16JsonProjection::from(prefix);
     command_items_merged(&prefix, &[])
 }
 
@@ -232,7 +330,7 @@ pub fn command_items(prefix: &str) -> Vec<CompletionItem> {
 ///   (`findMatchedAlias`), e.g. `/quit` → `/exit (quit)`.
 #[must_use]
 pub fn command_items_merged<'a>(
-    prefix: &core::types::utf16_json::Utf16JsonProjection,
+    prefix: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     registry: &'a [RegistrySlashRow],
 ) -> Vec<CompletionItem> {
     let Some(prefix_units) = prefix.string_units("") else {
@@ -242,13 +340,15 @@ pub fn command_items_merged<'a>(
         return Vec::new();
     }
     let rest_units = &prefix_units[1..];
-    let rest = String::from_utf16_lossy(rest_units);
     // `hasCommandArgs`: once arguments are being typed there are no command
-    // suggestions. Matching here is presentation-only; insertion remains exact.
-    if rest.contains(char::is_whitespace) {
+    // suggestions. Inspect decoded source units so malformed UTF-16 remains
+    // distinct from the replacement character used by display rendering.
+    if char::decode_utf16(rest_units.iter().copied())
+        .any(|decoded| decoded.is_ok_and(char::is_whitespace))
+    {
         return Vec::new();
     }
-    let query = rest.to_lowercase();
+    let query = lowercase_units(rest_units);
     let replaces_builtin = |name: &str| {
         registry.iter().any(|row| {
             row.replaces_builtin && row.name.code_units == name.encode_utf16().collect::<Vec<_>>()
@@ -287,15 +387,12 @@ pub fn command_items_merged<'a>(
                     Cand::Builtin(command)
                 }),
         );
-        commands.sort_by(|left, right| left.name().cmp(&right.name()));
+        commands.sort_by_key(Cand::name_units);
         return commands
             .into_iter()
             .map(|c| item_source(&c.source_name(), c.display_desc(), None))
             .collect();
     }
-
-    // Strip the leading slash from a registry name/alias for matching.
-    let bare = |name: &str| name[1..].to_lowercase();
 
     // `hiddenExact`: an unadvertised builtin typed out in full surfaces — unless
     // a visible command shares the name. Only builtins carry a hidden flag;
@@ -304,20 +401,7 @@ pub fn command_items_merged<'a>(
         .iter()
         .filter(registry_is_available)
         .filter(|row| row.hidden)
-        .find(|row| {
-            let row_units = row
-                .name
-                .code_units
-                .strip_prefix(&[b'/' as u16])
-                .unwrap_or(&row.name.code_units);
-            match (
-                String::from_utf16(row_units),
-                String::from_utf16(rest_units),
-            ) {
-                (Ok(name), Ok(query)) => name.to_lowercase() == query.to_lowercase(),
-                _ => row_units == rest_units,
-            }
-        })
+        .find(|row| lowercase_units(bare_units(&row.name.code_units)) == query)
         .map(Cand::Registry)
         .or_else(|| {
             crate::command::BUILTIN
@@ -326,7 +410,10 @@ pub fn command_items_merged<'a>(
                 .filter(|command| {
                     !command.advertised || crate::command::is_runtime_hidden(command.name)
                 })
-                .find(|command| bare(command.name) == query)
+                .find(|command| {
+                    lowercase_units(bare_units(&command.name.encode_utf16().collect::<Vec<_>>()))
+                        == query
+                })
                 .map(|command| {
                     let command: &'a crate::command::SlashCommand = command;
                     Cand::Builtin(command)
@@ -350,24 +437,29 @@ pub fn command_items_merged<'a>(
             }),
     );
     candidates.retain(|c| {
-        bare(&c.name()).contains(&query)
-            || c.aliases().iter().any(|a| bare(a).contains(&query))
-            || bare(&c.name())
-                .split(['-', '_', ':'])
+        let name = lowercase_units(bare_units(&c.name_units()));
+        contains_units(&name, &query)
+            || c.aliases()
+                .iter()
+                .any(|alias| contains_units(&lowercase_units(bare_units(alias)), &query))
+            || name
+                .split(|unit| {
+                    *unit == u16::from(b'-') || *unit == u16::from(b'_') || *unit == u16::from(b':')
+                })
                 .any(|part| part.starts_with(&query))
-            || c.describe().to_lowercase().split_whitespace().any(|word| {
-                word.trim_matches(|ch: char| !ch.is_alphanumeric())
-                    .starts_with(&query)
-            })
+            || description_has_word_prefix(&c.description_units(), &query)
     });
 
     // Rank tiers (the reference comparator, minus the Fuse-score tail).
     let tier = |c: &Cand| -> (u8, usize) {
-        let name = bare(&c.name());
+        let name = lowercase_units(bare_units(&c.name_units()));
         if name == query {
             return (0, 0);
         }
-        if c.aliases().iter().any(|a| bare(a) == query) {
+        if c.aliases()
+            .iter()
+            .any(|alias| lowercase_units(bare_units(alias)) == query)
+        {
             return (1, 0);
         }
         if name.starts_with(&query) {
@@ -376,14 +468,19 @@ pub fn command_items_merged<'a>(
         if let Some(alias) = c
             .aliases()
             .iter()
-            .filter(|a| bare(a).starts_with(&query))
-            .min_by_key(|a| a.len())
+            .map(|alias| lowercase_units(bare_units(&alias)))
+            .filter(|alias| alias.starts_with(&query))
+            .min_by_key(Vec::len)
         {
             return (3, alias.len());
         }
         (4, 0)
     };
-    candidates.sort_by(|a, b| tier(a).cmp(&tier(b)).then(a.name().cmp(&b.name())));
+    candidates.sort_by(|a, b| {
+        tier(a)
+            .cmp(&tier(b))
+            .then(a.name_units().cmp(&b.name_units()))
+    });
 
     let mut items: Vec<CompletionItem> = candidates
         .into_iter()
@@ -392,8 +489,8 @@ pub fn command_items_merged<'a>(
             let matched_alias = c
                 .aliases()
                 .into_iter()
-                .find(|a| bare(a).starts_with(&query))
-                .map(|a| a[1..].to_string());
+                .find(|alias| lowercase_units(bare_units(&alias)).starts_with(&query))
+                .map(|alias| bare_units(&alias).to_vec());
             item_source(&c.source_name(), c.display_desc(), matched_alias.as_deref())
         })
         .collect();
@@ -421,10 +518,14 @@ fn item(name: &str, desc: String, matched_alias: Option<&str>) -> CompletionItem
     }
 }
 
-fn item_source(name: &ClientTextDto, desc: String, matched_alias: Option<&str>) -> CompletionItem {
+fn item_source(
+    name: &ClientTextDto,
+    desc: String,
+    matched_alias: Option<&[u16]>,
+) -> CompletionItem {
     let display = name.display();
     let label = match matched_alias {
-        Some(alias) => format!("{display} ({alias})"),
+        Some(alias) => format!("{display} ({})", String::from_utf16_lossy(alias)),
         None => display,
     };
     CompletionItem {
@@ -604,7 +705,10 @@ mod tests {
         // builtin-only popup — the R1 ordering guarantee is untouched.
         for q in ["/", "/m", "/re", "/help", "/zzz", "model"] {
             assert_eq!(
-                command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from(q), &[]),
+                command_items_merged(
+                    &lingxi_core::types::utf16_json::Utf16JsonProjection::from(q),
+                    &[]
+                ),
                 command_items(q),
                 "query {q:?}"
             );
@@ -617,7 +721,7 @@ mod tests {
         // Bare "/" now includes the registry rows alongside the builtins,
         // alphabetically, and one more than the builtin-only count.
         let all = command_items_merged(
-            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
             &reg,
         );
         assert_eq!(all.len(), crate::command::advertised().count() + reg.len());
@@ -635,7 +739,7 @@ mod tests {
         assert!(d < l);
         // A query surfaces the registry command with its description.
         let lo = command_items_merged(
-            &core::types::utf16_json::Utf16JsonProjection::from("/lo"),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/lo"),
             &reg,
         );
         let loop_row = lo
@@ -657,7 +761,8 @@ mod tests {
             argument_hint: None,
             argument_names: Vec::new(),
         };
-        let prefix = core::types::utf16_json::Utf16JsonProjection::parse(r#""/x\ud800""#).unwrap();
+        let prefix =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""/x\ud800""#).unwrap();
         let candidates = command_items_merged(&prefix, &[row]);
         assert_eq!(candidates.len(), 1);
         assert_eq!(
@@ -665,6 +770,77 @@ mod tests {
             vec![b'/' as u16, b'x' as u16, 0xd800]
         );
         assert_eq!(candidates[0].display_insert(), "/x�");
+    }
+
+    #[test]
+    fn malformed_alias_matching_does_not_collide_with_replacement_character() {
+        let row = RegistrySlashRow {
+            name: "/custom".into(),
+            description: "unrelated command".into(),
+            menu_description: None,
+            aliases: vec![ClientTextDto::from_code_units(vec![
+                b'/' as u16,
+                b'a' as u16,
+                b'l' as u16,
+                b'i' as u16,
+                b'a' as u16,
+                b's' as u16,
+                0xd800,
+            ])],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        };
+
+        let malformed_query =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""/alias\ud800""#)
+                .unwrap();
+        let matching = command_items_merged(&malformed_query, std::slice::from_ref(&row));
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].insert, ClientTextDto::from_utf8("/custom"));
+        assert_eq!(matching[0].label, "/custom (alias�)");
+
+        let replacement_query =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from("/alias�");
+        let nonmatching = command_items_merged(&replacement_query, &[row]);
+        assert!(!nonmatching
+            .iter()
+            .any(|candidate| candidate.insert == ClientTextDto::from_utf8("/custom")));
+    }
+
+    #[test]
+    fn lowercase_units_preserves_contextual_sigma_and_surrogate_boundaries() {
+        let uppercase_sigma: Vec<u16> = "ΟΣ".encode_utf16().collect();
+        let final_sigma: Vec<u16> = "ος".encode_utf16().collect();
+        assert_eq!(lowercase_units(&uppercase_sigma), final_sigma);
+
+        let mut separated_runs: Vec<u16> = "ΟΣ".encode_utf16().collect();
+        separated_runs.push(0xd800);
+        separated_runs.extend("Σ".encode_utf16());
+        let mut expected: Vec<u16> = "ος".encode_utf16().collect();
+        expected.push(0xd800);
+        expected.extend("σ".encode_utf16());
+        assert_eq!(lowercase_units(&separated_runs), expected);
+    }
+
+    #[test]
+    fn contextual_sigma_case_folding_matches_registry_aliases() {
+        let row = RegistrySlashRow {
+            name: "/custom".into(),
+            description: "unrelated command".into(),
+            menu_description: None,
+            aliases: vec!["/ΟΣ".into()],
+            hidden: false,
+            replaces_builtin: false,
+            argument_hint: None,
+            argument_names: Vec::new(),
+        };
+        let query = lingxi_core::types::utf16_json::Utf16JsonProjection::from("/ος");
+        let matching = command_items_merged(&query, &[row]);
+        assert!(matching
+            .iter()
+            .any(|candidate| candidate.insert == ClientTextDto::from_utf8("/custom")));
     }
 
     #[test]
@@ -684,7 +860,7 @@ mod tests {
         }];
         // Bare "/": the row shows the compact menu label, not the full description.
         let all = command_items_merged(
-            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
             &reg,
         );
         let row = all
@@ -694,7 +870,7 @@ mod tests {
         assert_eq!(row.desc, "Clean up the changed code");
         // Matching still works off the full description ("altitude" is only there).
         assert!(command_items_merged(
-            &core::types::utf16_json::Utf16JsonProjection::from("/altitude"),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/altitude"),
             &reg
         )
         .iter()
@@ -702,7 +878,7 @@ mod tests {
         // A row without a menu label falls back to its description.
         let reg2 = rows(&[("/verify", "Verify a code change end-to-end")]);
         let v = command_items_merged(
-            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
             &reg2,
         );
         assert_eq!(
@@ -720,7 +896,7 @@ mod tests {
         // builtin row — the builtin surface is authoritative.
         let reg = rows(&[("/help", "SHOULD NOT WIN")]);
         let all = command_items_merged(
-            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
             &reg,
         );
         assert_eq!(all.len(), crate::command::advertised().count());
@@ -738,7 +914,7 @@ mod tests {
         rows[0].replaces_builtin = true;
         rows[1].hidden = true;
         let all = command_items_merged(
-            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/"),
             &rows,
         );
         assert_eq!(
@@ -750,7 +926,7 @@ mod tests {
         );
         assert!(!all.iter().any(|item| item.display_insert() == "/secret"));
         assert!(command_items_merged(
-            &core::types::utf16_json::Utf16JsonProjection::from("/secret"),
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("/secret"),
             &rows
         )
         .iter()

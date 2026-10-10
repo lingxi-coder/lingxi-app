@@ -488,6 +488,10 @@ struct Message: Identifiable, Equatable {
 
     var loopWakeupStreak: UInt32? = nil
     var loopFoldedItemIDs: Set<String> = []
+    /// An inline visualization slot the assistant placed; `nil` for text.
+    var visualization: MessageVisualization? = nil
+    /// The widget a user message followed up on, shown as a chip.
+    var visualizationContext: VisualizationContextChip? = nil
 
     init(id: UUID = UUID(), role: Role, tag: String? = nil, text: String, images: [MessageImage] = []) {
         self.id = id
@@ -496,6 +500,28 @@ struct Message: Identifiable, Equatable {
         self.text = text
         self.images = images
     }
+}
+
+/// Where an inline visualization slot stands. `ready` carries the published
+/// revision; `pending` is a reference line still streaming.
+struct MessageVisualization: Equatable {
+    enum Status: Equatable { case pending, ready, unavailable }
+    var status: Status
+    var id: String?
+    var revision: UInt32?
+}
+
+/// The widget a follow-up question is about.
+struct VisualizationContextChip: Equatable {
+    let id: String
+    let revision: UInt32
+    let title: String
+}
+
+/// A follow-up question a widget drafted for the composer.
+struct VisualizationFollowup: Equatable {
+    let text: String
+    let chip: VisualizationContextChip
 }
 
 /// A unified "session" reference used by ChatView's title bar.

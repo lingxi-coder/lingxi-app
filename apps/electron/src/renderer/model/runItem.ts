@@ -75,6 +75,8 @@ export interface NarrationRunItem {
    * one, `N > 0` when the `N` groups before it are collapsed behind this row.
    */
   readonly loopWakeupStreak?: number;
+  /** A follow-up sent from an inline visualization carries its chip. */
+  readonly visualizationContext?: VisualizationContextChip;
   /**
    * Semantic colouring. `danger` is the engine reporting a failure — carried as
    * a TONE rather than baked into {@link text}, so the renderer decides how a
@@ -226,9 +228,39 @@ export interface AudioRunItem {
   readonly duration: number;
 }
 
+/** Where an inline visualization slot stands in the stream. */
+export type VisualizationStatus = 'pending' | 'ready' | 'unavailable';
+
+/**
+ * An inline visualization the assistant placed with a reference line. The
+ * widget itself is mounted by the Stage; the reducer only orders the slot.
+ */
+export interface VisualizationRunItem {
+  readonly type: 'visualization';
+  readonly id: string;
+  readonly status: VisualizationStatus;
+  /** The published revision; present exactly when `status` is `ready`. */
+  readonly reference?: { readonly id: string; readonly revision: number };
+}
+
+/** The widget a user message followed up on (rendered as a chip). */
+export interface VisualizationContextChip {
+  readonly id: string;
+  readonly revision: number;
+  readonly title: string;
+}
+
+/** A follow-up question a widget drafted for the composer. */
+export interface VisualizationFollowup {
+  readonly text: string;
+  readonly reference: { readonly id: string; readonly revision: number };
+  readonly title: string;
+}
+
 /** One row of the transcript. */
 export type RunItem =
   | NarrationRunItem
+  | VisualizationRunItem
   | ToolRunItem
   | MetaRunItem
   | ModLogRunItem

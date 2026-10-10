@@ -145,6 +145,7 @@ function composerHarness() {
     voicePrefs: { autoPlayReplies: false }, audio: undefined, URL: { revokeObjectURL: (url: string) => revoked.push(url) }, slashDismissed: { current: false },
     setText: () => {}, setSelectedFiles: () => {}, setImageAttachments: (update: any) => { images = update(images); context.imageAttachmentsRef.current = images; },
     setImageNotice: (notice: unknown) => notices.push(notice), setFilePicker: () => {}, setSlashQuery: () => {}, matchesComposerSubmission,
+    visualizationChip: null, setVisualizationChip: () => {},
   };
   for (const name of ['savedEditorSelection', 'activeMentionRange', 'activeSlashRange', 'activeSlashQuery']) context[name] = { current: null };
   evaluate('globalThis.clearComposer = ' + declaration(composerSource, 'clearComposer'), context);

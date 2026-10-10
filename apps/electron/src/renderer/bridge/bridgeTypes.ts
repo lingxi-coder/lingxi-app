@@ -37,6 +37,7 @@ import type { HostPermissionRequest } from '../../shared/permission.js';
 import type { ScheduledContext, ScheduledScope } from '../../shared/scheduled.js';
 import type { ModelPickerVisibilitySettings } from '../../shared/settings.js';
 import type { VoicePreferences } from '../../shared/voicePreferences.js';
+import type { VisualizationContextChip, VisualizationFollowup } from '../model/runItem.js';
 import type { ConversationState, UsageSnapshot } from './conversation.js';
 import type { DesktopState } from './desktopState.js';
 import type {
@@ -148,8 +149,12 @@ export interface UseBridge {
     images?: ImageRefDto[],
     imageNames?: string[],
     filePaths?: string[],
-    options?: { purpose?: TrackedPromptPurpose },
+    options?: { purpose?: TrackedPromptPurpose; visualizationContext?: VisualizationContextChip },
   ): { token: DesktopTurnToken; queued: Promise<void> } | null;
+  /** A follow-up a widget in the active session drafted, until the composer takes it. */
+  readonly visualizationFollowup: VisualizationFollowup | null;
+  offerVisualizationFollowup(followup: VisualizationFollowup): void;
+  clearVisualizationFollowup(): void;
   subscribeTrackedSpeech(token: DesktopTurnToken, listener: (event: TrackedSpeechEvent) => void): () => void;
   sendPrompt(text: string, images?: ImageRefDto[], imageNames?: string[], filePaths?: string[]): Promise<void>;
   runSlashCommand(raw: string): Promise<void>;

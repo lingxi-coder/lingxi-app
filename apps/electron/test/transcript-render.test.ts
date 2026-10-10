@@ -273,8 +273,8 @@ test('short messages render no disclosure affordance', () => {
 test('user messages use a neutral rounded Codex-style bubble', () => {
   const html = renderStage({ type: 'narration', id: 'i1', role: 'user', text: 'A user message.' });
   assert.match(html, /class="user-message-bubble"/);
-  assert.match(html, /padding:10px 16px/);
-  assert.match(html, /border-radius:18px/);
+  assert.match(html, /padding:12px 18px/);
+  assert.match(html, /border-radius:16px/);
   assert.match(html, /border:1px solid transparent/);
   assert.doesNotMatch(html, /accentBg/);
 });
@@ -387,6 +387,28 @@ test('tool rows use compact adjacency hooks and a system-font transcript type sc
   assert.match(css, /--font-sans-default:\s*-apple-system,\s*BlinkMacSystemFont/);
   assert.match(css, /font-family:\s*var\(--font-sans-default\)/);
   assert.doesNotMatch(css, /--font-openai-sans|"OpenAI Sans"/);
+});
+
+test('a multi-tool group keeps its transcript row wrapper so row spacing stays fixed', () => {
+  // The row the feed spaces must stay the direct child even once a group hosts
+  // a UI site: re-parenting onto `.mod-ui-parent-site` dropped the row class,
+  // so the gap (and the "Thinking…" slot below it) shifted mid-turn.
+  const html = renderWithModUiHost(React.createElement(Stage, {
+    liveItems: [
+      { type: 'thinking', id: 'thinking-before', text: 'Looking it up', done: true },
+      READ,
+      { ...READ, id: 'toolu_2' },
+      { type: 'thinking', id: 'thinking-after', text: 'Summarizing it', done: true },
+    ],
+    sessionKey: 'session-a',
+    modUiSessionId: 'session-a',
+  }));
+  const runTypes = [...html.matchAll(/data-run-type="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(runTypes, ['tool']);
+  // Direct child of the feed — not nested inside the site's `.mod-ui-parent-site`
+  // wrapper, which is what the `+` sibling margin rules key off.
+  assert.match(html, /class="desktop-stage-feed"[^>]*>\s*<div class="transcript-run-item" data-run-type="tool"/);
+  assert.doesNotMatch(html, /class="desktop-stage-feed"[^>]*>\s*<div class="mod-ui-parent-site"/);
 });
 
 test('code cards highlight known and auto-detected languages with copy semantics', () => {

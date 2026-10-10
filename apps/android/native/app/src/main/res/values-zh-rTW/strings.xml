@@ -2169,4 +2169,9 @@
     <string name="settings_provider_region_help">預設使用國際區域。儲存後請在任務閒置時套用設定，變更目前執行區域。</string>
     <string name="settings_provider_region_international">國際</string>
     <string name="voice_flow_finalizing_hint">正在等待語音辨識完成…</string>
+    <string name="visualization_preparing">正在準備視覺化…</string>
+    <string name="visualization_loading">正在載入視覺化…</string>
+    <string name="visualization_unavailable">此視覺化已無法使用。</string>
+    <string name="visualization_label">視覺化</string>
+    <string name="visualization_remove_context">移除視覺化脈絡</string>
 </resources>

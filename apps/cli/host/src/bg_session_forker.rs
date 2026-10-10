@@ -127,7 +127,7 @@ impl CliBgSessionForker {
 
     async fn fork_with_handoff(
         &self,
-        history: &[lingxi_core::types::ConversationMessage],
+        conversation: &BgSessionSnapshot,
         system_prompt: Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
         prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         model: &str,
@@ -240,24 +240,24 @@ impl BgSessionForker for CliBgSessionForker {
 
     async fn fork_to_background(
         &self,
-        history: &[lingxi_core::types::ConversationMessage],
+        conversation: &BgSessionSnapshot,
         system_prompt: Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
         prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         model: &str,
     ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, BgForkError> {
-        self.fork_with_handoff(history, system_prompt, prompt, model, None)
+        self.fork_with_handoff(conversation, system_prompt, prompt, model, None)
             .await
     }
 
     async fn background_conversation(
         &self,
-        history: &[lingxi_core::types::ConversationMessage],
+        conversation: &BgSessionSnapshot,
         system_prompt: Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
         prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         model: &str,
         snapshot: &lingxi_core::host::BackgroundingSnapshot,
     ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, BgForkError> {
-        self.fork_with_handoff(history, system_prompt, prompt, model, Some(snapshot))
+        self.fork_with_handoff(conversation, system_prompt, prompt, model, Some(snapshot))
             .await
     }
 

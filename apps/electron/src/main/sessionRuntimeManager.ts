@@ -30,6 +30,14 @@ import type {
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
 import { sanitizeDiagnostic } from './host-utils.js';
+import { VisualizationRouter } from './visualization.js';
+import {
+  CH_VISUALIZATION_MOUNT,
+  CH_VISUALIZATION_UNMOUNT,
+  CH_VISUALIZATION_WRITE_STATE,
+  parseVisualizationReference,
+  parseVisualizationTheme,
+} from '../shared/visualization.js';
 import { validateRequestId } from './validation.js';
 
 
@@ -64,6 +72,15 @@ export class SessionRuntimeManager {
   private registered = false;
   private oauthOwner: string | undefined;
   private oauthLifecycle: Promise<void> = Promise.resolve();
+
+  /** Routes visualization documents and state writes to the session that issued the mount. */
+  readonly visualizations = new VisualizationRouter({
+    get: (sessionId) => {
+      const runtime = this.runtimes.get(sessionId);
+      return runtime?.visualizationReady ? runtime : undefined;
+    },
+    any: () => [...this.runtimes.values()].find((runtime) => runtime.visualizationReady),
+  });
 
   constructor(private readonly opts: SessionRuntimeManagerOptions) {
     const requestedLimit = opts.maxCachedRuntimes ?? DEFAULT_MAX_CACHED_RUNTIMES;
@@ -124,6 +141,7 @@ export class SessionRuntimeManager {
         .sort((left, right) => (this.lastUsed.get(left.sessionId) ?? 0) - (this.lastUsed.get(right.sessionId) ?? 0))[0];
       if (!victim) return;
       this.runtimes.delete(victim.sessionId);
+      this.visualizations.forgetSession(victim.sessionId);
       this.lastUsed.delete(victim.sessionId);
       this.sessionModelHints.delete(victim.sessionId);
       const eviction = victim.dispose()
@@ -203,6 +221,7 @@ export class SessionRuntimeManager {
       return runtime;
     } catch (error) {
       this.runtimes.delete(ref.sessionId);
+      this.visualizations.forgetSession(ref.sessionId);
       this.lastUsed.delete(ref.sessionId);
       this.sessionModelHints.delete(ref.sessionId);
       await runtime.dispose().catch(() => undefined);
@@ -256,6 +275,7 @@ export class SessionRuntimeManager {
     } catch (error) {
       if (!existing && runtime) {
         this.runtimes.delete(ref.sessionId);
+        this.visualizations.forgetSession(ref.sessionId);
         this.lastUsed.delete(ref.sessionId);
         this.sessionModelHints.delete(ref.sessionId);
         await runtime.dispose().catch(() => undefined);
@@ -371,6 +391,7 @@ export class SessionRuntimeManager {
     // instead of resolving silently — surfacing a failure for a settings or
     // credential write that actually succeeded.
     this.runtimes.delete(ref.sessionId);
+    this.visualizations.forgetSession(ref.sessionId);
     this.lastUsed.delete(ref.sessionId);
     this.sessionModelHints.delete(ref.sessionId);
     if (this.activeSessionId === ref.sessionId) this.activeSessionId = null;
@@ -388,7 +409,10 @@ export class SessionRuntimeManager {
     // Remove runtimes from the routable map before the first await. A prompt
     // arriving while disposal is in progress must fail instead of entering a
     // runtime whose child is already being torn down.
-    for (const runtime of projectRuntimes) this.runtimes.delete(runtime.sessionId);
+    for (const runtime of projectRuntimes) {
+      this.runtimes.delete(runtime.sessionId);
+      this.visualizations.forgetSession(runtime.sessionId);
+    }
     for (const runtime of projectRuntimes) this.lastUsed.delete(runtime.sessionId);
     for (const runtime of projectRuntimes) this.sessionModelHints.delete(runtime.sessionId);
     if (projectRuntimes.some((runtime) => runtime.sessionId === this.activeSessionId)) this.activeSessionId = null;
@@ -491,9 +515,34 @@ export class SessionRuntimeManager {
       this.assertSender(event);
       return this.replaySnapshots;
     });
-    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown, turnId?: unknown) => {
+    ipcMain.handle(CH_SEND_PROMPT, (event: IpcMainInvokeEvent, sessionId: unknown, text: unknown, images: unknown, turnId?: unknown, visualizationContext?: unknown) => {
       this.assertSender(event);
-      return this.requireById(sessionId).sendPrompt(text, images, turnId);
+      return this.requireById(sessionId).sendPrompt(text, images, turnId, visualizationContext);
+    });
+    ipcMain.handle(CH_VISUALIZATION_MOUNT, (event: IpcMainInvokeEvent, sessionId: unknown, reference: unknown, theme: unknown, locale: unknown, expanded: unknown) => {
+      this.assertSender(event);
+      const runtime = this.requireById(sessionId);
+      return this.visualizations.mount(
+        runtime.sessionId,
+        parseVisualizationReference(reference),
+        parseVisualizationTheme(theme),
+        typeof locale === 'string' && /^[A-Za-z0-9-]{1,35}$/.test(locale) ? locale : 'en',
+        expanded === true,
+      );
+    });
+    ipcMain.handle(CH_VISUALIZATION_WRITE_STATE, (event: IpcMainInvokeEvent, sessionId: unknown, token: unknown, generation: unknown, baseVersion: unknown, modelContent: unknown, privateContent: unknown) => {
+      this.assertSender(event);
+      const runtime = this.requireById(sessionId);
+      if (typeof token !== 'string' || !Number.isSafeInteger(generation) || !Number.isSafeInteger(baseVersion)
+        || typeof modelContent !== 'string' || typeof privateContent !== 'string') {
+        throw new Error('invalid visualization state write');
+      }
+      return this.visualizations.writeState(runtime.sessionId, token, generation as number, baseVersion as number, modelContent, privateContent);
+    });
+    ipcMain.handle(CH_VISUALIZATION_UNMOUNT, (event: IpcMainInvokeEvent, sessionId: unknown, token: unknown) => {
+      this.assertSender(event);
+      if (typeof sessionId !== 'string' || typeof token !== 'string') return;
+      return this.visualizations.unmount(sessionId, token);
     });
     ipcMain.handle(CH_APPROVE, (event: IpcMainInvokeEvent, sessionId: unknown, requestId: unknown, response: unknown) => {
       this.assertSender(event);
@@ -629,6 +678,7 @@ export class SessionRuntimeManager {
       CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
       CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION, CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
       CH_MOD_UI_CONTROL, CH_MOD_UI_OPERATION,
+      CH_VISUALIZATION_MOUNT, CH_VISUALIZATION_WRITE_STATE, CH_VISUALIZATION_UNMOUNT,
     ]) ipcMain.removeHandler(channel);
     this.registered = false;
   }

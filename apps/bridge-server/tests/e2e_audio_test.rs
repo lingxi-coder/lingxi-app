@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bridge::wire::Frame;
-use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge::{BRIDGE_PROTOCOL_VERSION, BridgeRequest, Capabilities, ClientHello, McpEndpoint};
 use bridge_server::audio_bridge::new_audio_bridge;
 use bridge_server::server::BridgeConnection;
 use client::protocol::audio::{
@@ -42,8 +42,8 @@ use lingxi_core::host::audio::{
     AudioOperation, AudioOperationContext, AudioOperationId, AudioOperationSuccess, AudioOwner,
     AudioRecordingHandle, AudioService,
 };
-use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
 const TEST_TOKEN: &str = "audio-e2e-token-32chars000000000";
 
@@ -101,15 +101,14 @@ async fn connect(
     let hello = Frame::Request(BridgeRequest {
         id: 0,
         method: "hello".into(),
-        params: serde_json::to_value(ClientHello {
+        params: bridge_source(&ClientHello {
             protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
             client_name: "audio-test".into(),
             capabilities: Capabilities {
                 audio: Some(audio_capabilities()),
                 ..Capabilities::default()
             },
-        })
-        .unwrap(),
+        }),
     });
     ws.send(Message::Text(serde_json::to_string(&hello).unwrap()))
         .await
@@ -149,7 +148,7 @@ where
     let frame = Frame::Request(BridgeRequest {
         id: 1,
         method: "submit".into(),
-        params: serde_json::to_value(command).expect("serialize command"),
+        params: bridge_source(&command),
     });
     let text = serde_json::to_string(&frame).expect("serialize frame");
     async move {
@@ -356,4 +355,11 @@ async fn capability_updates_replace_the_live_snapshot_and_notify_the_client() {
     );
 
     endpoint.shutdown().await;
+}
+fn bridge_source<T: serde::Serialize>(
+    value: &T,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let json = serde_json::to_string(value).expect("serialize bridge payload");
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&json)
+        .expect("serialized bridge payload is valid JSON")
 }

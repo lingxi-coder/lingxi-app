@@ -266,7 +266,8 @@ where
         .await;
         let prompt = match res {
             SlashDispatchResult::Handled { display } => {
-                sink.command_output_source(input, &display).await;
+                sink.command_output(input, display.string_at("").unwrap_or_default())
+                    .await;
                 None
             }
             // A prompt-expanding command (`/loop`, Markdown/Plugin) runs AS a

@@ -4,8 +4,8 @@ use crate::cron_host::HostCronFirer;
 use cron::CronJobFirer;
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
-use tokio::sync::{mpsc, Notify};
-use tokio_tungstenite::tungstenite::{handshake::client::generate_key, Message};
+use tokio::sync::{Notify, mpsc};
+use tokio_tungstenite::tungstenite::{Message, handshake::client::generate_key};
 
 pub(super) type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -31,7 +31,7 @@ pub(super) async fn captured_sink() -> (bridge::McpEndpoint, Socket, FrameSink) 
     let frame = Frame::Request(BridgeRequest {
         id: 0,
         method: "capture".into(),
-        params: serde_json::json!({}),
+        params: Utf16JsonProjection::parse("{}").expect("empty request params are valid JSON"),
     });
     socket
         .send(Message::Text(serde_json::to_string(&frame).unwrap()))
@@ -511,11 +511,13 @@ async fn batch_selection_serializes_complete_prompt_publication() {
         .iter()
         .find(|c| c.text() == Some("new attachment"))
         .unwrap();
-    assert!(connection
-        .queued_prompt_payloads
-        .lock()
-        .await
-        .contains_key(&complete.uuid));
+    assert!(
+        connection
+            .queued_prompt_payloads
+            .lock()
+            .await
+            .contains_key(&complete.uuid)
+    );
     assert_eq!(complete.priority, QueuePriority::Later);
     connection.cancel_active_turn(Some(2)).await;
     assert_eq!(connection.queue.len().await, 1);
@@ -647,11 +649,13 @@ async fn cancelling_delivered_cron_replays_only_recovery_until_termination_confi
     emitted.notified().await;
     connection.cron_requests.replay(|_| true).await;
     connection.cron_requests.disconnected().await;
-    assert!(firer
-        .cancel_run("possibly-running")
-        .await
-        .unwrap_err()
-        .contains("not confirmed termination"));
+    assert!(
+        firer
+            .cancel_run("possibly-running")
+            .await
+            .unwrap_err()
+            .contains("not confirmed termination")
+    );
     let mut replayed = Vec::new();
     connection
         .cron_requests

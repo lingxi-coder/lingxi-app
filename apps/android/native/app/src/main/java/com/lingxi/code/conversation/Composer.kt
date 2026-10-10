@@ -97,6 +97,9 @@ fun Composer(
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
+    /** The widget the next prompt follows up on, with its remove control. */
+    visualizationChip: VisualizationContextChip? = null,
+    onRemoveVisualizationChip: () -> Unit = {},
     /** True while a turn streams — the trailing action becomes a Stop button. */
     isStreaming: Boolean = false,
     /** False until the visible engine session has been confirmed. */
@@ -140,6 +143,9 @@ fun Composer(
             // shown only once a camera capture has surfaced an image.
             if (attachment != null) {
                 AttachmentThumb(attachment = attachment, onRemove = onRemoveAttachment)
+            }
+            if (visualizationChip != null) {
+                VisualizationContextChipView(chip = visualizationChip, onDismiss = onRemoveVisualizationChip)
             }
 
             // Text field (1..5 lines), brand-styled with a placeholder.

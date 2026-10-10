@@ -1,5 +1,5 @@
 //! Real SDK broker and authenticated transport coverage for execution ownership.
-use super::connection_regression_test::{connect_authenticated, hello, next_frame, Socket};
+use super::connection_regression_test::{Socket, connect_authenticated, hello, next_frame};
 use super::*;
 use client::protocol::events::TurnOutcomeDto;
 use client::protocol::permission::PermissionResolutionDto;
@@ -19,7 +19,8 @@ impl TurnDriver for IdleDriver {
     }
 }
 
-async fn request(socket: &mut Socket, id: u64, method: &str, params: serde_json::Value) {
+async fn request<P: serde::Serialize>(socket: &mut Socket, id: u64, method: &str, params: P) {
+    let params = serialize_source(&params).expect("test request params serialize as source JSON");
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Request(BridgeRequest {
@@ -34,7 +35,7 @@ async fn request(socket: &mut Socket, id: u64, method: &str, params: serde_json:
 }
 
 async fn handshake(socket: &mut Socket) {
-    request(socket, 1, "hello", serde_json::to_value(hello()).unwrap()).await;
+    request(socket, 1, "hello", hello()).await;
     assert!(matches!(
         next_frame(socket).await,
         Frame::Response(BridgeResponse {
@@ -62,8 +63,8 @@ async fn scope(socket: &mut Socket, id: u64, request_id: u64) -> serde_json::Val
         let Message::Text(text) = message else {
             continue;
         };
+        let frame: Frame = serde_json::from_str(&text).unwrap();
         let wire: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let frame: Frame = serde_json::from_value(wire.clone()).unwrap();
         let Frame::Response(BridgeResponse {
             id: response_id,
             error: None,
@@ -225,11 +226,10 @@ async fn background_permissions_survive_main_cancel_and_normal_terminal_but_not_
             &mut socket,
             7,
             "command",
-            serde_json::to_value(ClientCommand::ApprovePermission {
+            ClientCommand::ApprovePermission {
                 request_id: named_request.request_id,
                 response: PermissionResponseDto::AllowAlways,
-            })
-            .unwrap(),
+            },
         )
         .await;
         assert!(
@@ -400,10 +400,9 @@ async fn permission_scope_rpc_requires_hello_validates_params_and_bypasses_ordin
         &mut socket,
         12,
         "command",
-        serde_json::to_value(ClientCommand::SetModel {
+        ClientCommand::SetModel {
             model: "slow".into(),
-        })
-        .unwrap(),
+        },
     )
     .await;
     tokio::time::timeout(Duration::from_secs(2), router.entered.notified())

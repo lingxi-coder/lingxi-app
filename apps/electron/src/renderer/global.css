@@ -247,7 +247,6 @@ body {
   cursor: default;
 }
 
-.desktop-topbar-usage { padding: 0 8px; white-space: nowrap; }
 .context-summary-panel {
   position: absolute;
   top: 48px;

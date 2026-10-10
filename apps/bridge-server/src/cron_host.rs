@@ -2,6 +2,7 @@
 use async_trait::async_trait;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{oneshot, Mutex};
 
@@ -232,7 +233,7 @@ impl HostCronFirer {
 }
 #[async_trait]
 impl cron::CronJobFirer for HostCronFirer {
-    async fn fire(&self, _: &str, _: &str) -> Result<String, String> {
+    async fn fire(&self, _: &str, _: &Utf16JsonProjection) -> Result<String, String> {
         Err("Host execution requires versioned automation settings".into())
     }
     async fn fire_automation(&self, request: &cron::automation::AutomationRunRequest) -> RunReply {

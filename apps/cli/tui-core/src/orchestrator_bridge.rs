@@ -17,7 +17,10 @@
 //! 5. On `emit_end_turn` the bridge fires `TurnEvent::TurnEnded(_)`.
 
 use async_trait::async_trait;
-use lingxi_core::host::{ContextPressureBanner, CostSnapshot, OutputStream, TurnOutcome};
+use lingxi_core::host::{
+    ContextPressureBanner, CostSnapshot, OutputStream, RefusalContinuationJoin,
+    RefusalContinuationPhase, ServerFallbackTombstoneMessage, TurnOutcome,
+};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -302,7 +305,7 @@ pub enum TurnEvent {
         /// UX estimate of bytes freed.
         bytes_saved: u64,
         /// Full transcript-only compact summary revealed by Ctrl-O.
-        summary: String,
+        summary: client::protocol::text::ClientTextDto,
     },
     /// Unified rate-limit header snapshot (llm-runtime future-work batch 3,
     /// Task 9). Mirrors `lingxi_core::host::OutputEvent::RateLimit`'s nine fields —
@@ -391,6 +394,28 @@ pub enum TurnEvent {
     AssistantTranscriptRowUuids {
         message_id: lingxi_core::types::MessageId,
         uuids: Vec<Option<String>>,
+    },
+    /// Per-query fallback model; does not alter the selected model snapshot.
+    ServerFallbackQueryModelChange { to_model: String },
+    /// Start of one provider content block before its transcript UUID exists.
+    AssistantBlockStart { block_key: u64 },
+    /// Durable UUID assigned when one assistant content block completes.
+    AssistantBlockIdentity {
+        block_key: u64,
+        message_uuid: String,
+    },
+    /// Remove a durable assistant row superseded by an accepted server fallback.
+    ServerFallbackTombstone {
+        message: ServerFallbackTombstoneMessage,
+        display_only: bool,
+    },
+    /// Begin exact-text continuation from retained refusal rows.
+    RefusalContinuation {
+        phase: RefusalContinuationPhase,
+        salvage_text: String,
+        join: RefusalContinuationJoin,
+        replaces_uuids: Vec<lingxi_core::types::MessageId>,
+        display_salvage_text: bool,
     },
     /// The live command registry was reconciled. The render-thread owner swaps
     /// this complete snapshot into the bottom pane in one event, preserving the
@@ -606,6 +631,53 @@ impl OutputStream for BridgeOutputStream {
         });
     }
 
+    async fn emit_server_fallback_query_model_change(&self, to_model: &str) {
+        let _ = self.tx.send(TurnEvent::ServerFallbackQueryModelChange {
+            to_model: to_model.to_string(),
+        });
+    }
+
+    async fn emit_assistant_block_start(&self, block_key: u64) {
+        let _ = self.tx.send(TurnEvent::AssistantBlockStart { block_key });
+    }
+
+    async fn emit_assistant_block_identity(
+        &self,
+        block_key: u64,
+        row_id: &lingxi_core::types::MessageId,
+    ) {
+        let _ = self.tx.send(TurnEvent::AssistantBlockIdentity {
+            block_key,
+            message_uuid: row_id.as_uuid().to_string(),
+        });
+    }
+
+    async fn emit_server_fallback_tombstone(
+        &self,
+        message: &ServerFallbackTombstoneMessage,
+        display_only: bool,
+    ) {
+        let _ = self.tx.send(TurnEvent::ServerFallbackTombstone {
+            message: message.clone(),
+            display_only,
+        });
+    }
+
+    async fn emit_refusal_continuation_begin(
+        &self,
+        salvage_text: &str,
+        replaces_uuids: &[lingxi_core::types::MessageId],
+        display_salvage_text: bool,
+    ) {
+        let _ = self.tx.send(TurnEvent::RefusalContinuation {
+            phase: RefusalContinuationPhase::Begin,
+            salvage_text: salvage_text.to_string(),
+            join: RefusalContinuationJoin::Exact,
+            replaces_uuids: replaces_uuids.to_vec(),
+            display_salvage_text,
+        });
+    }
+
     async fn emit_thinking(&self, thinking: &str, _signature: Option<&str>) {
         if self.omit_thinking.load(Ordering::Relaxed) {
             return;
@@ -717,6 +789,7 @@ impl OutputStream for BridgeOutputStream {
         tool: &str,
         model_text: &Utf16JsonProjection,
         result: &Utf16JsonProjection,
+        _mcp_meta: Option<&Utf16JsonProjection>,
     ) {
         // (gap-3 general) Many tools return a structured `data` object with no
         // human-display string (Read's `{type,file:{…}}`, …), so the scrollback
@@ -774,13 +847,17 @@ impl OutputStream for BridgeOutputStream {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
-        summary: &str,
+        summary: &Utf16JsonProjection,
     ) {
         let _ = self.tx.send(TurnEvent::CompactionCompleted {
             messages_before,
             messages_after,
             bytes_saved,
-            summary: summary.to_string(),
+            summary: client::protocol::text::ClientTextDto::from_code_units(
+                summary
+                    .string_units("")
+                    .expect("compaction summary is a root-string projection"),
+            ),
         });
     }
 
@@ -1159,6 +1236,27 @@ mod tests {
                 matches!(rx.recv().await.unwrap(), TurnEvent::CompactPhase { phase } if phase == expected)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn compaction_completed_keeps_exact_source_utf16_summary() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let summary =
+            Utf16JsonProjection::parse(r#""before\ud800after""#).expect("valid exact JSON string");
+
+        OutputStream::emit_compaction_completed(&bridge, 10, 3, 1024, &summary).await;
+
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::CompactionCompleted { summary, .. }
+                if summary.code_units
+                    == "before"
+                        .encode_utf16()
+                        .chain([0xd800])
+                        .chain("after".encode_utf16())
+                        .collect::<Vec<_>>()
+        ));
     }
 
     #[tokio::test]

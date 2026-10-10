@@ -34,6 +34,7 @@ import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -148,8 +149,25 @@ fun ChatScreen(
     onToggleToolCall: (String) -> Unit = {},
     /** Expand / collapse the pinned plan checklist above the composer. */
     onTogglePlan: () -> Unit = {},
+    /** Serves inline visualization widgets; null renders them unavailable. */
+    visualizationHost: com.lingxi.code.bindings.runtime.VisualizationHost? = null,
+    /** A widget drafted a follow-up question for the composer. */
+    onVisualizationFollowup: (VisualizationFollowup) -> Unit = {},
+    /** The composer took the offered follow-up; its chip rides the next send. */
+    onAcceptVisualizationFollowup: (VisualizationFollowup) -> Unit = {},
+    onRemoveVisualizationChip: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
+    val currentDraft by rememberUpdatedState(draft)
+    val currentOnDraftChange by rememberUpdatedState(onDraftChange)
+    val offeredFollowup = state.visualizationFollowup
+    LaunchedEffect(offeredFollowup) {
+        val followup = offeredFollowup ?: return@LaunchedEffect
+        currentOnDraftChange(
+            if (currentDraft.isBlank()) followup.text else "$currentDraft ${followup.text}",
+        )
+        onAcceptVisualizationFollowup(followup)
+    }
     val listState = rememberLazyListState()
     // The ONE ordered transcript list. Every row the LazyColumn shows comes
     // from this builder, so ordering and item keys live in a single testable
@@ -216,15 +234,26 @@ fun ChatScreen(
                 onNewChat = onNewChat,
             )
             Box(modifier = Modifier.weight(1f)) {
-                MessageList(
-                    state = state,
-                    items = renderItems,
-                    listState = listState,
-                    onShare = onShare,
-                    onOpenTerminal = onOpenTerminal,
-                    onToggleToolCall = onToggleToolCall,
-                    modifier = Modifier.fillMaxSize(),
-                )
+                val currentOnVisualizationFollowup by rememberUpdatedState(onVisualizationFollowup)
+                val visualizationContext = remember(visualizationHost, state.session.id, isDark) {
+                    VisualizationScreenContext(
+                        host = visualizationHost,
+                        sessionId = state.session.id,
+                        dark = isDark,
+                        onFollowup = { currentOnVisualizationFollowup(it) },
+                    )
+                }
+                CompositionLocalProvider(LocalVisualizationContext provides visualizationContext) {
+                    MessageList(
+                        state = state,
+                        items = renderItems,
+                        listState = listState,
+                        onShare = onShare,
+                        onOpenTerminal = onOpenTerminal,
+                        onToggleToolCall = onToggleToolCall,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
                 // The way back for a reader who scrolled up.
                 if (!followsLatest) {
                     JumpToLatestButton(
@@ -295,6 +324,8 @@ fun ChatScreen(
                 onCameraClick = onCameraClick,
                 attachment = attachment,
                 onRemoveAttachment = onRemoveAttachment,
+                visualizationChip = state.visualizationChip,
+                onRemoveVisualizationChip = onRemoveVisualizationChip,
                 isStreaming = state.isStreaming,
                 showDiscardRecovery = state.durableRecoveryBlocked,
                 enabled = !state.durableRecoveryBlocked &&
@@ -532,6 +563,7 @@ private fun MessageList(
                     modifier = Modifier.padding(vertical = 4.dp),
                 )
                 ChatRenderItem.StreamingIndicator -> StreamingRow()
+                is ChatRenderItem.Visualization -> VisualizationCard(item.status, item.reference)
             }
         }
         // Zero-height anchor past the last real row, so scrolling to the latest

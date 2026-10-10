@@ -1,12 +1,12 @@
 //! Ownership, queued lifecycle, and session-transition admission regressions.
 use super::connection_regression_test::{
-    captured_sink, connect_authenticated, hello, images, next_frame, Socket,
+    Socket, captured_sink, connect_authenticated, hello, images, next_frame,
 };
 use super::*;
 use futures_util::SinkExt;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
@@ -210,11 +210,11 @@ impl ClientEventSink for FirstTextBarrier {
 async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
     use client::adapter::AdapterOutputStream;
     use orchestrator::test_support::{
+        MockApiClient, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
-        message_stop, noop_hook_executor, text_delta, MockApiClient, MockStreamingApiClient,
-        NoOpPermissionGate, StaticMemoryProvider,
+        message_stop, noop_hook_executor, text_delta,
     };
-    use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
+    use orchestrator::{ConversationOrchestrator, OrchestratorConfig, scripted};
     for (attachments, turn_id) in [
         (images(), None),
         (Vec::new(), Some(22)),
@@ -374,7 +374,8 @@ impl TurnDriver for WaitingQuestionDriver {
     }
 }
 
-async fn send_request(socket: &mut Socket, id: u64, method: &str, params: serde_json::Value) {
+async fn send_request<P: serde::Serialize>(socket: &mut Socket, id: u64, method: &str, params: P) {
+    let params = serialize_source(&params).expect("test request params serialize as source JSON");
     socket
         .send(Message::Text(
             serde_json::to_string(&Frame::Request(BridgeRequest {
@@ -410,13 +411,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         .unwrap();
     endpoint.set_auth_token("connection-regression-token".into());
     let mut socket = connect_authenticated(&endpoint).await;
-    send_request(
-        &mut socket,
-        1,
-        "hello",
-        serde_json::to_value(hello()).unwrap(),
-    )
-    .await;
+    send_request(&mut socket, 1, "hello", hello()).await;
     assert!(matches!(
         next_frame(&mut socket).await,
         Frame::Response(BridgeResponse { error: None, .. })
@@ -425,13 +420,13 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         &mut socket,
         2,
         "send_prompt",
-        serde_json::to_value(ClientCommand::SendPrompt {
+        ClientCommand::SendPrompt {
             text: "ask".into(),
             prompt_mode: None,
             images: Vec::new(),
             turn_id: Some(1),
-        })
-        .unwrap(),
+            visualization_context: None,
+        },
     )
     .await;
     assert!(matches!(
@@ -462,13 +457,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
         },
     ];
     for (index, command) in commands.into_iter().enumerate() {
-        send_request(
-            &mut socket,
-            index as u64 + 3,
-            "command",
-            serde_json::to_value(command).unwrap(),
-        )
-        .await;
+        send_request(&mut socket, index as u64 + 3, "command", command).await;
         assert!(matches!(
             next_frame(&mut socket).await,
             Frame::Event(ClientEvent::Error {
@@ -493,13 +482,7 @@ async fn active_session_replacement_rejects_before_router_and_socket_close_drain
     .await
     .expect("socket close must reach abort/drain after rejected controls");
     let mut reconnected = connect_authenticated(&endpoint).await;
-    send_request(
-        &mut reconnected,
-        100,
-        "hello",
-        serde_json::to_value(hello()).unwrap(),
-    )
-    .await;
+    send_request(&mut reconnected, 100, "hello", hello()).await;
     assert!(matches!(
         next_frame(&mut reconnected).await,
         Frame::Response(BridgeResponse { error: None, .. })
@@ -605,13 +588,7 @@ async fn runtime_snapshot_requires_hello_and_replies_as_one_correlated_frame() {
         })
     ));
     assert_eq!(router.calls.load(Ordering::SeqCst), 0);
-    send_request(
-        &mut socket,
-        42,
-        "hello",
-        serde_json::to_value(hello()).unwrap(),
-    )
-    .await;
+    send_request(&mut socket, 42, "hello", hello()).await;
     assert!(matches!(
         next_frame(&mut socket).await,
         Frame::Response(BridgeResponse {
@@ -629,7 +606,14 @@ async fn runtime_snapshot_requires_hello_and_replies_as_one_correlated_frame() {
     else {
         panic!("snapshot must be one correlated response, never incremental push frames");
     };
-    let events: Vec<ClientEvent> = serde_json::from_value(result["events"].clone()).unwrap();
+    #[derive(serde::Deserialize)]
+    struct SnapshotResult {
+        events: Vec<ClientEvent>,
+    }
+    let result_json = result.to_json_string().unwrap();
+    let events = serde_json::from_str::<SnapshotResult>(&result_json)
+        .unwrap()
+        .events;
     assert_eq!(events, snapshot_events());
     assert_eq!(router.calls.load(Ordering::SeqCst), 1);
     send_request(
@@ -695,13 +679,7 @@ async fn runtime_snapshot_read_fences_live_worker_delivery_until_after_reply() {
         .unwrap();
     endpoint.set_auth_token("connection-regression-token".into());
     let mut socket = connect_authenticated(&endpoint).await;
-    send_request(
-        &mut socket,
-        1,
-        "hello",
-        serde_json::to_value(hello()).unwrap(),
-    )
-    .await;
+    send_request(&mut socket, 1, "hello", hello()).await;
     assert!(matches!(
         next_frame(&mut socket).await,
         Frame::Response(BridgeResponse { error: None, .. })

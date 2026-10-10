@@ -117,6 +117,7 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   ui_control_result: 'host_private',
   ui_client_frame: 'host_private',
   ui_invalidate: 'host_private',
+  visualization_block: 'exposed',
   cron_run_requested: 'host_private',
   cron_run_bound: 'host_private',
   scheduled_run_finished: 'host_private',

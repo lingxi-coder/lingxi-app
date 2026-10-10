@@ -67,15 +67,15 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use client::adapter::ClientEventSink;
 pub(crate) use client::adapter::controls::decode_reasoning_selection;
 use client::adapter::lowering::{
     lower_provider_model_catalog_entry, lower_status_snapshot, lower_task_output_chunk,
 };
-use client::adapter::ClientEventSink;
 use client::protocol::commands::{ClientCommand, ListingKindDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::listings::{AuthStateDto, SessionModeDto};
@@ -83,11 +83,11 @@ use client::protocol::text::ClientTextDto;
 use command_api::model::CommandSource;
 use command_api::parser::parse_slash_command;
 use command_api::registry::CommandRegistry;
+use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::host::auth::{AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::HandleError;
 use lingxi_core::host::orchestrator::OrchestratorHandle;
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
-use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::RwLock;
 
@@ -773,11 +773,11 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
             }
             ClientCommand::UiClientModule { request_id, plugin } => {
-                let request = Ok(serde_json::json!({
-                    "subtype": "ui_client_module",
-                    "plugin": plugin,
-                })
-                .into());
+                let request = Ok(Utf16JsonProjection::object(vec![
+                    ("subtype".to_owned(), "ui_client_module".into()),
+                    ("plugin".to_owned(), plugin.into()),
+                ])
+                .expect("generated Mod UI module request is an object"));
                 self.dispatch_mod_ui_control_result(request_id, request, sink.as_ref())
                     .await;
             }
@@ -1298,9 +1298,7 @@ impl CommandRouter for EngineCommandRouter {
                     };
                     let (display, is_error) = match command_api::with_mod_command_context(
                         context,
-                        dispatcher.dispatch(
-                            lingxi_core::types::utf16_json::Utf16JsonProjection::from(raw.as_str()),
-                        ),
+                        dispatcher.dispatch(raw.clone().into_projection()),
                     )
                     .await
                     {
@@ -1321,7 +1319,13 @@ impl CommandRouter for EngineCommandRouter {
                             ("Commands are in the form `/command [args]`".into(), true)
                         }
                         lingxi_core::host::SlashDispatchResult::NotASlashCommand => {
-                            (format!("not a slash command: {raw}").into(), true)
+                            let mut units =
+                                "not a slash command: ".encode_utf16().collect::<Vec<_>>();
+                            units.extend_from_slice(&raw.code_units);
+                            (
+                                ClientTextDto::from_code_units(units).into_projection(),
+                                true,
+                            )
                         }
                     };
                     sink.emit(ClientEvent::SlashCommandResult {
@@ -1466,7 +1470,10 @@ impl CommandRouter for EngineCommandRouter {
                         messages_before: summary.messages_before,
                         messages_after: summary.messages_after,
                         bytes_saved: summary.bytes_saved,
-                        summary: summary.summary,
+                        summary: client::protocol::text::ClientTextDto::from_projection(
+                            &summary.summary,
+                        )
+                        .expect("compaction summary is text"),
                     })
                     .await;
                 }
@@ -1972,9 +1979,9 @@ mod tasks;
 
 #[cfg(test)]
 use settings::parse_settings_patch;
+pub use tasks::TaskPoll;
 use tasks::emit_correlated_task_list;
 use tasks::task_status_wire;
-pub use tasks::TaskPoll;
 
 #[cfg(test)]
 use configuration::parse_mcp_config_json;

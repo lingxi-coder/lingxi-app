@@ -17,6 +17,7 @@
 
 use std::ops::Range;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Span;
@@ -297,9 +298,9 @@ impl Composer {
 
     /// The exact source projection for the current logical buffer.
     #[must_use]
-    pub fn source_projection(&self) -> core::types::utf16_json::Utf16JsonProjection {
+    pub fn source_projection(&self) -> Utf16JsonProjection {
         let units = flatten_source_segments(&self.source_segments);
-        core::types::utf16_json::Utf16JsonProjection::root_string(self.text(), units)
+        Utf16JsonProjection::root_string(self.text(), units)
             .expect("composer display is derived from its exact source units")
     }
 
@@ -857,7 +858,7 @@ impl Composer {
 
     /// Take the current text, pushing it to history (when non-blank) and
     /// resetting the buffer. Returns the raw (untrimmed) text.
-    pub fn take(&mut self) -> core::types::utf16_json::Utf16JsonProjection {
+    pub fn take(&mut self) -> Utf16JsonProjection {
         let text = self.text();
         let units = flatten_source_segments(&self.source_segments);
         if !text.trim().is_empty() {
@@ -870,7 +871,7 @@ impl Composer {
         self.stash.clear();
         self.preferred_col = None;
         self.revision = self.revision.wrapping_add(1);
-        core::types::utf16_json::Utf16JsonProjection::root_string(text, units)
+        Utf16JsonProjection::root_string(text, units)
             .expect("composer display is derived from its exact source units")
     }
 

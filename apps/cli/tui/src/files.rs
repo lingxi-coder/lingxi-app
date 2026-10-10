@@ -81,7 +81,7 @@ fn session_completions(prefix: &str) -> Vec<CompletionItem> {
     .into_iter()
     .map(|name| CompletionItem {
         label: format!("session {name}"),
-        insert: name,
+        insert: name.into(),
         desc: "live session".into(),
     })
     .collect()
@@ -102,7 +102,7 @@ fn recursive_file_completions(name_prefix: &str) -> Vec<CompletionItem> {
         .into_iter()
         .map(|path| CompletionItem {
             label: path.clone(),
-            insert: path,
+            insert: path.into(),
             desc: String::new(),
         })
         .collect()
@@ -182,7 +182,7 @@ pub fn filter_entries(
             let slash = if *is_dir { "/" } else { "" };
             CompletionItem {
                 label: format!("{name}{slash}"),
-                insert: format!("{dir_prefix}{name}{slash}"),
+                insert: format!("{dir_prefix}{name}{slash}").into(),
                 desc: if *is_dir {
                     "dir".to_string()
                 } else {
@@ -218,9 +218,9 @@ mod tests {
     #[test]
     fn filter_matches_prefix_and_marks_dirs() {
         let items = filter_entries(&entries(), "src/", "mo");
-        let inserts: Vec<&str> = items.iter().map(|i| i.insert.as_str()).collect();
-        assert!(inserts.contains(&"src/models/"));
-        assert!(inserts.contains(&"src/mod.rs"));
+        let inserts: Vec<String> = items.iter().map(|i| i.insert.display()).collect();
+        assert!(inserts.iter().any(|insert| insert == "src/models/"));
+        assert!(inserts.iter().any(|insert| insert == "src/mod.rs"));
         assert!(!inserts.iter().any(|i| i.contains("main")));
         // The directory item is `/`-suffixed and labelled.
         let dir = items.iter().find(|i| i.label == "models/").unwrap();
@@ -283,7 +283,7 @@ mod tests {
         let items = file_completions("c");
         std::env::set_current_dir(&prev).expect("restore cwd");
         assert!(
-            items.iter().any(|i| i.insert == "a/b/c.rs"),
+            items.iter().any(|i| i.insert.display() == "a/b/c.rs"),
             "got: {items:?}"
         );
     }

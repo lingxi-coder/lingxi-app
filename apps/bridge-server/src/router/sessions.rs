@@ -1,37 +1,36 @@
 use super::EngineCommandRouter;
+use client::adapter::activity::summarize_activity_line;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
 use client::protocol::events::ErrorKindDto;
 use client::protocol::listings::SessionAgentSummaryDto;
+use client::protocol::text::ClientTextDto;
 use lingxi_core::host::task_registry::TaskListFilter;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use std::borrow::Cow;
 
 pub(super) fn session_agent_activity(
     messages: &[client::protocol::message::MessageDto],
-) -> Option<String> {
+) -> Option<ClientTextDto> {
     messages
         .iter()
         .rev()
         .flat_map(|message| message.blocks.iter().rev())
         .find_map(|block| {
-            let text = match block {
-                client::protocol::message::MessageBlockDto::Text { text }
-                | client::protocol::message::MessageBlockDto::Thinking { thinking: text, .. } => {
-                    text
+            let units: Cow<'_, [u16]> = match block {
+                client::protocol::message::MessageBlockDto::Text { text } => {
+                    Cow::Borrowed(&text.code_units)
                 }
-                client::protocol::message::MessageBlockDto::ToolUse { tool, .. } => tool,
-                client::protocol::message::MessageBlockDto::ToolResult { tool, .. } => tool,
+                client::protocol::message::MessageBlockDto::Thinking { thinking, .. } => {
+                    Cow::Owned(thinking.encode_utf16().collect())
+                }
+                client::protocol::message::MessageBlockDto::ToolUse { tool, .. }
+                | client::protocol::message::MessageBlockDto::ToolResult { tool, .. } => {
+                    Cow::Owned(tool.encode_utf16().collect())
+                }
                 _ => return None,
             };
-            let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
-            if line.is_empty()
-                || matches!(
-                    line,
-                    "completed" | "cancelled" | "failed" | "idle" | "running"
-                )
-            {
-                return None;
-            }
-            Some(line.chars().take(160).collect())
+            summarize_activity_line(&units)
         })
 }
 
@@ -52,15 +51,22 @@ pub(super) async fn read_session_agent_summary(
         .rev()
         .filter(|line| !line.is_empty())
     {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+        let Ok(source) = std::str::from_utf8(line)
+            .map_err(|error| error.to_string())
+            .and_then(|line| Utf16JsonProjection::parse(line).map_err(|error| error.to_string()))
+        else {
             continue;
         };
-        name = value
-            .get("agent_name")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
+        name = source
+            .subprojection("/agent_name")
+            .ok()
+            .and_then(|value| ClientTextDto::from_projection(&value).ok())
+            .filter(|value| !value.code_units.is_empty())
             .or(name);
+        let value =
+            lingxi_core::types::exact_json::parse_exact_json(std::str::from_utf8(line).ok()?)
+                .ok()?
+                .value;
         agent_type = value
             .get("agent_type")
             .and_then(serde_json::Value::as_str)
@@ -106,7 +112,14 @@ pub(super) async fn read_session_agent_summary(
             None
         };
         if let Some(row) = row {
-            name = name.or(row.request.name).or(row.request.description);
+            name = name
+                .or_else(|| row.request.name.map(ClientTextDto::from))
+                .or_else(|| {
+                    row.request
+                        .description
+                        .as_ref()
+                        .and_then(|source| ClientTextDto::from_projection(source).ok())
+                });
             agent_type = agent_type.or_else(|| {
                 (!row.request.subagent_type.is_empty()).then_some(row.request.subagent_type)
             });
@@ -121,14 +134,15 @@ pub(super) async fn read_session_agent_summary(
     }
     let agent_type = agent_type.unwrap_or_else(|| "unknown".to_string());
     let name = name
-        .or_else(|| (agent_type != "unknown").then(|| agent_type.clone()))
+        .or_else(|| (agent_type != "unknown").then(|| ClientTextDto::from(agent_type.clone())))
         .unwrap_or_else(|| {
             agent_id
                 .strip_prefix("agent:")
                 .unwrap_or(&agent_id)
                 .chars()
                 .take(8)
-                .collect()
+                .collect::<String>()
+                .into()
         });
     let updated_at_ms = tokio::fs::symlink_metadata(path)
         .await
@@ -267,7 +281,7 @@ impl EngineCommandRouter {
         let model_snapshot = self.handle.get_status_snapshot().await;
         let mut agents = vec![SessionAgentSummaryDto {
             agent_id: "main".to_string(),
-            name: "Main agent".to_string(),
+            name: "Main agent".into(),
             agent_type: "main".to_string(),
             model: Some(model_snapshot.model),
             model_profile: model_snapshot.model_profile,
@@ -374,12 +388,11 @@ impl EngineCommandRouter {
             } else if matches!(agent.status.as_str(), "running" | "pending") {
                 if tasks.is_ok() {
                     agent.status = "cancelled".to_string();
-                    agent.latest_activity =
-                        Some("Interrupted when the engine stopped.".to_string());
+                    agent.latest_activity = Some("Interrupted when the engine stopped.".into());
                 } else {
                     agent.status = "unknown".to_string();
                     agent.latest_activity =
-                        Some("Unable to verify whether this agent is still running.".to_string());
+                        Some("Unable to verify whether this agent is still running.".into());
                 }
             }
         }

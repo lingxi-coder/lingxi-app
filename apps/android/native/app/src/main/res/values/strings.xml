@@ -2169,4 +2169,9 @@
     <string name="settings_provider_region_help">默认使用国际区域。保存后请在任务空闲时应用设置，更改当前运行区域。</string>
     <string name="settings_provider_region_international">国际</string>
     <string name="voice_flow_finalizing_hint">正在等待语音识别完成…</string>
+    <string name="visualization_preparing">正在准备可视化…</string>
+    <string name="visualization_loading">正在加载可视化…</string>
+    <string name="visualization_unavailable">此可视化已不可用。</string>
+    <string name="visualization_label">可视化</string>
+    <string name="visualization_remove_context">移除可视化上下文</string>
 </resources>

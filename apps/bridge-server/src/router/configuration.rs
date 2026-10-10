@@ -15,7 +15,13 @@ use client::protocol::events::ErrorKindDto;
 use client::protocol::listings::ConfigurationDomainDto;
 use client::protocol::listings::ConfigurationEffectDto;
 use client::protocol::listings::ConfigurationOperationStatusDto;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashMap;
+
+/// Convert a source-preserving string only at the UI catalog rendering edge.
+fn display_source_text(value: &Utf16JsonProjection) -> String {
+    value.string_at("").unwrap_or_default().to_owned()
+}
 
 /// Decode a `ClientCommand::UpsertMcpServer.config_json` wire string into the
 /// `serde_json::Value` [`crate::mcp_bridge::upsert_server`] expects. Mirrors
@@ -214,6 +220,9 @@ impl EngineCommandRouter {
                                             file_path,
                                             ..
                                         } if command.skill_root.is_some() => {
+                                            let command_name = display_source_text(&command.name);
+                                            let description =
+                                                display_source_text(&command.description);
                                             let directory = command
                                                 .skill_root
                                                 .as_deref()
@@ -226,8 +235,8 @@ impl EngineCommandRouter {
                                                     crate::config_admin::sha256_hex(&bytes)
                                                 });
                                             entries.push(serde_json::json!({
-                                                "id": format!("command:{}", command.name),
-                                                "name": command.name,
+                                                "id": format!("command:{command_name}"),
+                                                "name": command_name,
                                                 "source": "plugin",
                                                 "pluginOwner": plugin_id.to_string(),
                                                 "rootDir": directory,
@@ -235,7 +244,7 @@ impl EngineCommandRouter {
                                                 "writable": false,
                                                 "readonlyReason": "Plugin skills are managed by their owning plugin.",
                                                 "revision": revision,
-                                                "description": command.description,
+                                                "description": description,
                                                 "whenToUse": command.when_to_use,
                                                 "diagnosticsJson": "{\"ok\":true,\"issues\":[]}",
                                             }));
@@ -245,17 +254,21 @@ impl EngineCommandRouter {
                                             prompt_name,
                                             ..
                                         } => {
+                                            let command_name = display_source_text(&command.name);
+                                            let description =
+                                                display_source_text(&command.description);
+                                            let prompt_name = display_source_text(prompt_name);
                                             let directory =
                                                 format!("<mcp:{connection_id}:{prompt_name}>");
                                             entries.push(serde_json::json!({
-                                                "id": format!("command:{}", command.name),
-                                                "name": command.name,
+                                                "id": format!("command:{command_name}"),
+                                                "name": command_name,
                                                 "source": "mcp",
                                                 "rootDir": directory,
                                                 "directory": directory,
                                                 "writable": false,
                                                 "readonlyReason": "MCP skills are provided by the connected server.",
-                                                "description": command.description,
+                                                "description": description,
                                                 "whenToUse": command.when_to_use,
                                                 "diagnosticsJson": "{\"status\":\"runtime\"}",
                                             }));
@@ -289,8 +302,9 @@ impl EngineCommandRouter {
             return;
         };
         if let Some(name) = skill_id.strip_prefix("command:") {
+            let name = Utf16JsonProjection::from(name);
             let command = match self.slash_registry.as_ref() {
-                Some(registry) => registry.read().await.resolve(name).cloned(),
+                Some(registry) => registry.read().await.resolve(&name).cloned(),
                 None => None,
             };
             if let Some(command) = command {
@@ -300,6 +314,7 @@ impl EngineCommandRouter {
                         file_path,
                         ..
                     } if command.skill_root.is_some() => {
+                        let command_name = display_source_text(&command.name);
                         let markdown = std::fs::read_to_string(&file_path).unwrap_or_default();
                         let directory = command
                             .skill_root
@@ -310,7 +325,7 @@ impl EngineCommandRouter {
                             .into_owned();
                         serde_json::json!({
                             "id": skill_id,
-                            "name": command.name,
+                            "name": command_name,
                             "source": "plugin",
                             "pluginOwner": plugin_id.to_string(),
                             "directory": directory,
@@ -327,10 +342,12 @@ impl EngineCommandRouter {
                         prompt_name,
                         ..
                     } => {
+                        let command_name = display_source_text(&command.name);
+                        let prompt_name = display_source_text(&prompt_name);
                         let directory = format!("<mcp:{connection_id}:{prompt_name}>");
                         serde_json::json!({
                             "id": skill_id,
-                            "name": command.name,
+                            "name": command_name,
                             "source": "mcp",
                             "directory": directory,
                             "rootDir": directory,
@@ -1317,7 +1334,13 @@ impl EngineCommandRouter {
                             if let Some(watcher) = self.file_changed_watcher.as_ref() {
                                 if let Some(settings) = self.settings.as_ref() {
                                     watcher.replace_matchers(
-                                        matchers,
+                                        matchers
+                                            .into_iter()
+                                            .filter_map(|matcher| {
+                                                let units = matcher.string_units("")?;
+                                                String::from_utf16(&units).ok()
+                                            })
+                                            .collect(),
                                         settings.paths.project_dir.clone(),
                                     );
                                 }

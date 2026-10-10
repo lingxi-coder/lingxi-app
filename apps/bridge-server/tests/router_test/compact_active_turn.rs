@@ -17,10 +17,11 @@ impl SlashCommandDispatcher for CompactDispatcher {
         &self,
         raw: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> SlashDispatchResult {
-        assert!(raw
-            .string_at("")
-            .unwrap_or_default()
-            .starts_with("/compact"));
+        assert!(
+            raw.string_at("")
+                .unwrap_or_default()
+                .starts_with("/compact")
+        );
         self.0.fetch_add(1, Ordering::SeqCst);
         SlashDispatchResult::Handled {
             display: "idle compact dispatched".into(),
@@ -94,6 +95,7 @@ async fn active_compact_refusals_keep_ws_permission_and_cancel_processing_live()
             prompt_mode: None,
             images: vec![],
             turn_id: Some(91),
+            visualization_context: None,
         },
     )
     .await;

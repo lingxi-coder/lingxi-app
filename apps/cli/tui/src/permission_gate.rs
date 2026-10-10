@@ -17,12 +17,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::gate::{
     PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
     PermissionRequest, PermissionResponse, PromptWorker,
 };
-use permission::{persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use permission::{PermissionPaths, PermissionRule, PermissionUpdate, persist_permission_update};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// One in-flight permission round-trip between the orchestrator and TUI.
 ///
@@ -31,7 +32,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// keeps resolving. `TuiPermissionGate` (below) still constructs it.
 use tui_core::permission_bridge::PermissionExchange;
 
-type PolicyRuleAuthority = dyn Fn(&str, &serde_json::Value) -> bool + Send + Sync;
+type PolicyRuleAuthority = dyn Fn(&str, &Utf16JsonProjection) -> bool + Send + Sync;
 
 /// Orchestrator-side permission gate that forwards each `check` call to
 /// the TUI over an mpsc channel and awaits a oneshot reply.
@@ -106,7 +107,7 @@ impl PermissionGate for TuiPermissionGate {
             .store(enabled, std::sync::atomic::Ordering::Release);
     }
 
-    async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
+    async fn check(&self, name: &str, input: &Utf16JsonProjection) -> PermissionDecision {
         // Main-thread call — no worker attribution.
         self.check_with_worker(name, input, None).await
     }
@@ -114,7 +115,7 @@ impl PermissionGate for TuiPermissionGate {
     async fn check_with_worker(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         match self
@@ -137,7 +138,7 @@ impl PermissionGate for TuiPermissionGate {
     async fn check_with_context(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
         match self
@@ -170,7 +171,7 @@ impl TuiPermissionGate {
     async fn check_with_context_impl(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &Utf16JsonProjection,
         worker: Option<PromptWorker>,
         suppress_always_allow_rule: bool,
         permission_persistence: Option<
@@ -234,11 +235,7 @@ impl TuiPermissionGate {
         let default_decision = permission::tool_default(name);
         let request = if name == "ExitPlanMode" {
             PermissionRequest::ExitPlanMode {
-                plan: input
-                    .get("plan")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                plan: input.string_at("/plan").unwrap_or_default().to_string(),
             }
         } else {
             PermissionRequest::ToolUseConfirm {
@@ -276,12 +273,12 @@ impl TuiPermissionGate {
         if self.event_tx.send(exchange).await.is_err() {
             // TUI is gone — fail closed.
             return PermissionOutcome::Deny {
-                reason: "permission request could not be delivered".to_string(),
+                reason: "permission request could not be delivered".into(),
             };
         }
         let Ok(response) = rx.await else {
             return PermissionOutcome::Deny {
-                reason: "permission request was not resolved".to_string(),
+                reason: "permission request was not resolved".into(),
             };
         };
 
@@ -365,7 +362,7 @@ impl TuiPermissionGate {
                 decision_classification: None,
             },
             PermissionResponse::Deny => PermissionOutcome::Deny {
-                reason: "user denied via dialog".to_string(),
+                reason: "user denied via dialog".into(),
             },
         }
     }
@@ -482,11 +479,13 @@ mod tests {
             .await;
         assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
         responder.await.unwrap();
-        assert!(!first
-            .path()
-            .join(branding::DOT_DIR)
-            .join("settings.local.json")
-            .exists());
+        assert!(
+            !first
+                .path()
+                .join(branding::DOT_DIR)
+                .join("settings.local.json")
+                .exists()
+        );
         let body = std::fs::read_to_string(
             second
                 .path()

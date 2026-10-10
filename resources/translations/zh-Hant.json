@@ -2293,5 +2293,10 @@
   "settings_provider_region_china": "中國大陸",
   "settings_provider_region_help": "預設使用國際區域。儲存後請在任務閒置時套用設定，變更目前執行區域。",
   "settings_provider_region_international": "國際",
-  "voice_flow_finalizing_hint": "正在等待語音辨識完成…"
+  "voice_flow_finalizing_hint": "正在等待語音辨識完成…",
+  "visualization_preparing": "正在準備視覺化…",
+  "visualization_loading": "正在載入視覺化…",
+  "visualization_unavailable": "此視覺化已無法使用。",
+  "visualization_label": "視覺化",
+  "visualization_remove_context": "移除視覺化脈絡"
 }

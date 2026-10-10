@@ -597,6 +597,20 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
 
     DesktopConfig {
         build_info,
+        diagnostics: None,
+        mcp_services_factory: None,
+        composition: None,
+        user_agent_environment: None,
+        request_identity: None,
+        anthropic_compatible_version: None,
+        native_thinking_display: None,
+        oauth_environment_lookup: None,
+        defer_session_start: false,
+        max_structured_output_retries: 5,
+        session_transcript_path: None,
+        session_resume_snapshot: None,
+        session_resume_cost: None,
+        verified_computer_profiles: Vec::new(),
         host_workspace_trusted: Some(trusted),
         mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
         enable_automation_scheduler: args.scheduled_controller,
@@ -770,6 +784,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // proxies through cannot exist until `assemble` has a connection to
         // build it over, so it is filled there and never here.
         audio: None,
+        // Electron renders inline widgets (`lingxi-viz://visualization`), so
+        // the `Visualization` tool and `/visualize` skill are offered here.
+        inline_visualization: true,
     }
 }
 
@@ -1280,7 +1297,10 @@ pub async fn assemble_with_credentials(
     let enable_automation_scheduler = cfg.enable_automation_scheduler;
     let receive_gate = Arc::new(lingxi_core::host::uds_inbox::PeerReceiveGateSlot::new());
     let mut live_session = initialize_live_session(&mut cfg, Some(receive_gate.clone()))?;
-    let connection = BridgeConnection::new();
+    let connection = BridgeConnection::new().with_visualization(
+        Arc::new(HostFileSystem::new(cfg.cwd.clone())),
+        &cfg.lingxi_home,
+    );
 
     // Preserve only the non-secret parent-source fact before `cfg` moves. The
     // authoritative decision is completed after `build`, when the runtime has
@@ -1531,7 +1551,7 @@ pub async fn assemble_with_credentials(
                             text: harness_runtime::desktop::teammate_message_envelope_with_summary(
                                 &message.from_name,
                                 &message.content,
-                                message.summary.as_deref(),
+                                message.summary.as_ref(),
                             ),
                         },
                         priority: msgqueue::QueuePriority::Next,
@@ -2531,6 +2551,7 @@ mod tests {
             // caller-supplied value would be a lie about which connection the
             // engine's audio calls reach.
             audio: None,
+            inline_visualization: false,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         assert!(bound.runtime.orchestrator.workspace_trusted().await);

@@ -1,5 +1,5 @@
 //! Three-way mode dispatch added in M6-01. Routes argv to one of:
-//! - `Mode::Print(prompt)`: existing `run::run_oneshot` (v0.6.0, unchanged)
+//! - `Mode::Print(prompt)`: the Harness headless runner
 //! - `Mode::Tui`: the ratatui TUI via `run_ratatui` (default)
 //! - `Mode::StdioRepl`: existing `repl::run_repl` (v0.6.0, kept as `--no-tui`
 //!   and non-TTY fallback)
@@ -59,7 +59,7 @@ pub(crate) fn is_full_tty() -> bool {
 
 use crate::exit_codes;
 use crate::init::Runtime;
-use crate::output::OutputSink;
+use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::OrchestratorHandle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -1085,7 +1085,7 @@ fn build_model_details(m: &lingxi_core::host::ModelListing) -> Vec<String> {
 
 /// Execute the chosen mode. Returns the process exit code.
 ///
-/// `Mode::Print` uses the caller-provided runtime. Interactive modes own their
+/// Print sessions enter the Harness headless runner. Interactive modes own their
 /// runtime construction so callers can route to them without pre-building and
 /// discarding a generic runtime.
 pub async fn dispatch(
@@ -1096,10 +1096,8 @@ pub async fn dispatch(
 ) -> i32 {
     match mode {
         Mode::Print(_) => {
-            // run_oneshot reads the prompt directly from argv.prompt;
-            // the captured-prompt copy in Mode::Print(prompt) exists for
-            // test introspection only.
-            crate::run::run_oneshot(argv, runtime, sink.as_ref()).await
+            let (permission_mode, _) = crate::resolve_permission_mode(argv);
+            crate::headless_host::run(argv, permission_mode).await
         }
         Mode::StdioRepl => {
             let _ = runtime;
@@ -2704,7 +2702,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         let orch = rewake_orch.clone();
         let tx = rewake_turn_tx.clone();
         rewake_handle.spawn(async move {
-            if let Err(error) = orch.run_async_hook_rewake().await {
+            if let Err(error) = orch.run_async_hook_rewake(None).await {
                 let _ = tx.send(tui_core::orchestrator_bridge::TurnEvent::SystemNotice {
                     body: format!("Failed to deliver held peer message: {error}"),
                     is_error: true,
@@ -3911,7 +3909,7 @@ pub(crate) async fn rollback_cd_after_launch_identity_failure(
     }
 }
 
-fn fail_current_background_job_after_cd_failure(detail: &str) {
+pub(crate) fn fail_current_background_job_after_cd_failure(detail: &str) {
     let Ok(job_dir_raw) = std::env::var("LINGXI_JOB_DIR") else {
         return;
     };
@@ -5109,40 +5107,10 @@ async fn build_session_info(
     let memory = home_dir
         .as_ref()
         .map_or_else(Vec::new, |home| memory_rows(&cwd, home));
-    // `/status` oversized-memory-file warnings (`htf()`, 2.1.220 @241152161).
-    //
-    // The oracle is `fJr(await ZH())` — it filters the ALREADY-LOADED memory
-    // set, it does not re-walk the filesystem. So this reads the SAME provider
-    // production loads the system-prompt block from
-    // (`RealMemoryHierarchyProvider`), which is what makes the warning agree
-    // with what is actually in the context: it honors the
-    // `LINGXI_DISABLE_LINGXI_MDS` kill-switch (`htf`'s `if(Epe())return[]`),
-    // probes the Managed tier (`LLu` admits `User|Project|Local|Managed`),
-    // splices each `@import`'d file as its own entry, applies the loader's
-    // 4 MiB `MEMORY_FILE_BYTE_LIMIT` skip, and yields the frontmatter- and
-    // comment-STRIPPED body the oracle measures (`bn_`'s `content`, not
-    // `rawContent`) in claude-code splice order.
-    //
-    // Two gates this still misses, both because they live in the `DesktopConfig`
-    // the composition root already consumed and are not reachable from an
-    // `OrchestratorHandle`: `--bare` (which sets `memory_provider: None` without
-    // exporting the env kill-switch) and the `lingxiMdExcludes` setting.
-    let memory_files = orchestrator::prompt::real_provider().load(&cwd).await;
-    // `pJr()` (@230802563) derives the threshold from the model. Resolve the
-    // picker ALIAS first (`Ei`, @227933508): `current_model` is the raw session
-    // model, and `memory::memory_chars_per_token`'s contract is "pass a
-    // concrete model id, not a picker alias" — a bare `opus` otherwise scores
-    // as an unknown 200k/4-cpt model (threshold 40k) when it resolves to a
-    // natively-1M model (threshold 150k).
-    let threshold_model = agent::model_resolution::resolve_user_specified_model(&current_model);
-    let active_betas = orch.active_betas().await;
-    let large_memory_warnings = orchestrator::prompt::large_memory_warning_rows(
-        &memory_files,
-        &cwd,
-        home_dir.as_deref(),
-        &threshold_model,
-        &active_betas,
-    );
+    // The engine owns the loaded instruction snapshot and the live resolved
+    // session model. Reuse its authoritative warnings so source filtering and
+    // model switches agree with the prompt actually sent for this session.
+    let large_memory_warnings = orch.large_memory_warnings().await.unwrap_or_default();
 
     // Managed `availableModels` allowlist for the `/model` picker filter (parity
     // 2.1.207 H-BIN-08): reads the same policy tier the boot default-model
@@ -7031,10 +6999,8 @@ mod tests {
         );
     }
 
-    /// The threshold model must be the RESOLVED wire id, not the raw picker
-    /// alias: `lingxi --model opus` leaves `StatusSnapshot.model` as the literal
-    /// `"opus"`, which scores as an unknown 200k/4-cpt model (40k threshold)
-    /// though it resolves to a natively-1M model (150k threshold).
+    /// Alias resolution needs the selected provider's catalog defaults before
+    /// the memory threshold can be measured against a concrete wire model.
     #[test]
     fn large_memory_warning_threshold_uses_the_resolved_model_not_the_alias() {
         let cwd = std::path::Path::new("/work/repo");
@@ -7048,7 +7014,22 @@ mod tests {
             "the unresolved alias must be the case that misfires"
         );
         // … while the id `Ei` resolves it to does not.
-        let resolved = agent::model_resolution::resolve_user_specified_model("opus");
+        let context = agent::model_resolution::ModelResolutionContext {
+            route: agent::model_resolution::ModelRouteFacts {
+                model: "claude-opus-4-8".into(),
+                profile: Some("anthropic".into()),
+                provider: Some(agent::model_resolution::ModelProviderKind::FirstParty),
+                ..Default::default()
+            },
+            family_defaults: agent::model_resolution::FamilyModelDefaults {
+                opus: Some("claude-opus-4-8".into()),
+                ..Default::default()
+            },
+            native_1m: Some(true),
+            ..Default::default()
+        };
+        let resolved = agent::model_resolution::resolve_user_specified_model("opus", &context)
+            .expect("fixture provides the selected profile's opus default");
         assert!(
             orchestrator::prompt::large_memory_warning_rows(&files, cwd, home, &resolved, &[])
                 .is_empty(),

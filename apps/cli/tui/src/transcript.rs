@@ -37,6 +37,8 @@ pub struct Transcript {
     /// The in-flight (actively streaming) cell, if any. Held out of
     /// `committed` so native-scrollback flushes never commit it early.
     active: Option<Box<dyn HistoryCell>>,
+    active_request_id: Option<String>,
+    active_row_uuids: Vec<String>,
     /// How many of `committed` are already inserted into the terminal's
     /// native scrollback (the commit cursor — cells before it are immutable
     /// terminal history).
@@ -254,6 +256,10 @@ impl Transcript {
     /// Replace the active in-flight cell. Callers that must not lose a
     /// still-streaming predecessor call [`Self::flush_active`] first.
     pub fn set_active(&mut self, cell: Box<dyn HistoryCell>) {
+        if self.active.is_none() {
+            self.active_request_id = None;
+            self.active_row_uuids.clear();
+        }
         self.active = Some(cell);
     }
 
@@ -268,6 +274,15 @@ impl Transcript {
     /// flush.
     pub fn flush_active(&mut self) {
         if let Some(cell) = self.active.take() {
+            if let Some(request_id) = self.active_request_id.take() {
+                self.request_ids.insert(self.committed.len(), request_id);
+            }
+            if !self.active_row_uuids.is_empty() {
+                self.row_uuids.insert(
+                    self.committed.len(),
+                    std::mem::take(&mut self.active_row_uuids),
+                );
+            }
             self.committed.push(cell);
             self.invalidate_wrap_cache();
         }
@@ -280,6 +295,8 @@ impl Transcript {
     /// marker with no body.
     pub fn discard_active(&mut self) {
         self.active = None;
+        self.active_request_id = None;
+        self.active_row_uuids.clear();
     }
 
     /// Insert every not-yet-committed finalized cell into the terminal's
@@ -522,6 +539,8 @@ impl Transcript {
         self.row_tokens.clear();
         self.committed.clear();
         self.active = None;
+        self.active_request_id = None;
+        self.active_row_uuids.clear();
         self.committed_to_terminal = 0;
         self.invalidate_wrap_cache();
     }
@@ -858,6 +877,67 @@ mod tests {
         assert_eq!(transcript.committed.len(), 3);
         transcript.retract_assistant_response(retained);
         assert_eq!(transcript.committed.len(), 2);
+    }
+
+    #[test]
+    fn server_fallback_row_uuid_survives_flush_and_removes_only_its_cell() {
+        let mut transcript = Transcript::new();
+        transcript.start_assistant_response();
+        transcript.set_active(assistant_cell("discarded refusal"));
+        let row_uuid = "83f67a72-a806-49b7-9a18-e57307177a86".to_string();
+        assert!(transcript.identify_active_row(row_uuid.clone()));
+        transcript.flush_active();
+        transcript.push_message(system("unrelated notice"));
+        transcript.committed_to_terminal = transcript.committed.len();
+
+        assert_eq!(transcript.row_uuids.get(&0), Some(&vec![row_uuid.clone()]));
+        assert_eq!(transcript.request_ids.get(&0), Some(&row_uuid));
+        assert_eq!(
+            transcript.remove_transcript_rows(std::slice::from_ref(&row_uuid)),
+            1
+        );
+        assert_eq!(transcript.committed.len(), 1);
+        assert!(transcript.committed[0]
+            .as_any()
+            .is::<crate::history_cell::system::SystemTextCell>());
+        assert!(transcript.take_terminal_replay_required());
+        assert_eq!(transcript.committed_to_terminal(), 0);
+    }
+
+    #[test]
+    fn server_fallback_row_uuid_can_remove_the_current_active_cell() {
+        let mut transcript = Transcript::new();
+        transcript.set_active(assistant_cell("live refusal"));
+        let row_uuid = "a3566d96-b8e6-4a19-a063-6c9539c9e26d".to_string();
+        assert!(transcript.identify_active_row(row_uuid.clone()));
+
+        assert_eq!(transcript.remove_transcript_rows(&[row_uuid]), 1);
+        assert!(transcript.is_empty());
+    }
+
+    #[test]
+    fn aggregate_row_waits_until_all_member_uuids_are_tombstoned() {
+        let mut transcript = Transcript::new();
+        transcript.set_active(assistant_cell("collapsed tool run"));
+        // A collapsed progress cell can represent several persisted rows. The
+        // Native fallback tombstone carries each actual outer message UUID,
+        // not the aggregate's tool id or its current screen position.
+        let first_row_uuid = "5ad9fc2b-7172-4b95-9db2-6f0e8c1d7a0a";
+        let second_row_uuid = "b19f8c0e-40e2-49ab-9fd0-9c3f2d6a710e";
+        assert!(transcript.identify_active_row_uuid(first_row_uuid.into()));
+        assert!(transcript.identify_active_row_uuid(second_row_uuid.into()));
+        transcript.flush_active();
+
+        assert_eq!(
+            transcript.remove_transcript_rows(&[first_row_uuid.into()]),
+            0
+        );
+        assert_eq!(transcript.committed.len(), 1);
+        assert_eq!(
+            transcript.remove_transcript_rows(&[first_row_uuid.into(), second_row_uuid.into()]),
+            1
+        );
+        assert!(transcript.committed.is_empty());
     }
 
     /// Append `delta` to the active assistant cell; `false` when the active

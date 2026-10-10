@@ -3,7 +3,6 @@ import type {
   AskUserQuestionRequestDto,
   AudioOperationDto,
   AuthStateDto,
-  ClientCommand,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -98,28 +97,6 @@ export interface DesktopTurnToken {
 
 export type TrackedSpeechTerminal = 'turn_ended' | 'stale';
 
-type NativeModUiCommand = Extract<ClientCommand, {
-  type: 'ui_render' | 'ui_client_module' | 'ui_message' | 'ui_client_fault' | 'ui_client_press'
-    | 'ui_press' | 'ui_input' | 'ui_select' | 'ui_client_operation'
-}>;
-
-type WithoutRequestId<Command> = Command extends { request_id: string }
-  ? Omit<Command, 'request_id'>
-  : never;
-
-export type ModUiControlRequest = WithoutRequestId<NativeModUiCommand>;
-
-export interface ModUiControlResponse {
-  readonly response: unknown;
-  readonly metadata: unknown;
-}
-
-export interface ModUiClientFrameSnapshot {
-  readonly sessionId: string;
-  readonly runtimeId: string;
-  readonly frame: unknown;
-}
-
 export interface TrackedSpeechEvent {
   readonly type: 'delta' | 'message' | 'completion';
   readonly token: DesktopTurnToken;
@@ -130,6 +107,8 @@ export interface TrackedSpeechEvent {
 }
 
 export interface UseBridge {
+  /** Stable per-renderer identity shared by ui_attach and parent UI requests. */
+  readonly uiSurfaceClientId: string;
   readonly hosted: boolean;
   readonly loading: boolean;
   readonly bootstrap: BootstrapState | null;
@@ -145,13 +124,6 @@ export interface UseBridge {
   readonly sessionLoading: boolean;
   readonly connection: ConnectionState;
   readonly connected: boolean;
-  /** True after this renderer's desktop Mod UI surface has attached to the active session. */
-  readonly modUiSurfaceReady: boolean;
-  readonly modUiClientId: string;
-  /** Incremented for each active-session `ui_invalidate` event. */
-  readonly modUiInvalidationRevision: number;
-  /** Latest ephemeral VM frames from the active desktop Mod UI surface. */
-  readonly modUiClientFrames: readonly ModUiClientFrameSnapshot[];
   readonly conversation: ConversationState;
   readonly desktop: DesktopState;
   readonly authState: AuthStateDto | null;
@@ -180,10 +152,6 @@ export interface UseBridge {
   ): { token: DesktopTurnToken; queued: Promise<void> } | null;
   subscribeTrackedSpeech(token: DesktopTurnToken, listener: (event: TrackedSpeechEvent) => void): () => void;
   sendPrompt(text: string, images?: ImageRefDto[], imageNames?: string[], filePaths?: string[]): Promise<void>;
-  requestModUiControl(request: ModUiControlRequest): Promise<ModUiControlResponse>;
-  rememberModUiClientFrame(snapshot: ModUiClientFrameSnapshot): void;
-  forgetModUiClientFrame(sessionId: string, runtimeId: string, renderRevision: number): void;
-  retainModUiClientFrames(sessionId: string, renderRevision: number, parentTree: unknown): void;
   runSlashCommand(raw: string): Promise<void>;
   /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
   beginLocalCommand(raw: string): void;

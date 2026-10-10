@@ -4,9 +4,9 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-13-repl-mode.md` Task 4.
 
 use crate::idle_notify::IdleNotifier;
-use crate::output::OutputSink;
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
+use harness_runtime::headless::output::OutputSink;
 use lingxi_core::host::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::{OrchestratorError, TurnOutcome};
@@ -391,8 +391,8 @@ mod tests {
     // by withholding stdin until after the timer has had its chance to win.
 
     use crate::idle_notify::IdleNotifier;
-    use crate::output::PlainSink;
     use futures::future::BoxFuture;
+    use harness_runtime::headless::output::PlainSink;
     use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
     use orchestrator::test_support::MockOrchestratorHandle;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -466,7 +466,10 @@ mod tests {
 
         let dispatcher = NoopDispatcher;
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
-        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
         let sigint = SigintSource::spawn();
 
         let line_owned = format!("{line}\n");
@@ -551,7 +554,10 @@ mod tests {
         let mut stderr = Vec::new();
         let dispatcher = NoopDispatcher;
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
-        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
         let sigint = SigintSource::spawn();
         let writer_task = tokio::spawn(async move {
             let _ = writer.write_all(b"hello\n").await;
@@ -611,7 +617,10 @@ mod tests {
         let mut stderr = Vec::new();
         let dispatcher = NoopDispatcher;
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
-        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
         let sigint = SigintSource::spawn();
 
         // `run_turn_fn` re-locks the SAME shared reader and reads the queued
@@ -675,7 +684,10 @@ mod tests {
         let stdin = shared_stdin(client);
         let mut stderr = Vec::new();
         let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
-        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new());
+        let sink: Arc<dyn OutputSink> = Arc::new(PlainSink::new(
+            crate::headless_host::process_stdout(),
+            crate::headless_host::process_stderr(),
+        ));
         let sigint = SigintSource::spawn();
 
         let prompts = Arc::new(Mutex::new(Vec::<Utf16JsonProjection>::new()));
@@ -818,7 +830,10 @@ mod tests {
                 &mut Vec::new(),
                 &NoopDispatcher,
                 Arc::new(MockOrchestratorHandle::new()),
-                Arc::new(PlainSink::new()),
+                Arc::new(PlainSink::new(
+                    crate::headless_host::process_stdout(),
+                    crate::headless_host::process_stderr(),
+                )),
                 &SigintSource::spawn(),
                 None,
                 Some(wake.as_ref()),
@@ -872,7 +887,10 @@ mod tests {
             &mut Vec::new(),
             &NoopDispatcher,
             Arc::new(MockOrchestratorHandle::new()),
-            Arc::new(PlainSink::new()),
+            Arc::new(PlainSink::new(
+                crate::headless_host::process_stdout(),
+                crate::headless_host::process_stderr(),
+            )),
             &SigintSource::spawn(),
             None,
             Some(&host),

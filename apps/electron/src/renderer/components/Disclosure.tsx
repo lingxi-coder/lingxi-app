@@ -10,9 +10,9 @@
  * item's stable id can key it.
  *
  * Deliberately NOT animated. A height transition on a transcript that repaints
- * on every streaming delta costs a layout pass per frame for a 150ms flourish,
- * and the body is UNMOUNTED when closed — a collapsed tool call is ~6 DOM
- * nodes, which is the entire reason this list survives without a virtualizer.
+ * on every streaming delta costs a layout pass per frame for a 150ms flourish.
+ * The body is normally unmounted when closed; callers with lifecycle-sensitive
+ * content may keep it mounted but hidden while preserving the same disclosure.
  */
 
 import type { CSSProperties, ReactNode } from 'react';
@@ -27,11 +27,13 @@ export interface DisclosureProps {
   id: string;
   /** Whether the body is shown. Owned by the caller. */
   open: boolean;
+  /** Keep a hidden body mounted for children with an independent lifecycle. */
+  keepMounted?: boolean;
   /** Toggle request. The caller decides what "open" means for this id. */
   onToggle(): void;
   /** Summary content rendered inside the button, before the chevron. */
   summary: ReactNode;
-  /** Body content. Rendered only while {@link open}. */
+  /** Body content. Rendered while open, or hidden when {@link keepMounted}. */
   children: ReactNode;
   /** Accessible name when {@link summary} is not plain text. */
   label?: string;
@@ -59,6 +61,7 @@ const TRIGGER_BASE: CSSProperties = {
 export function Disclosure({
   id,
   open,
+  keepMounted = false,
   onToggle,
   summary,
   children,
@@ -86,8 +89,8 @@ export function Disclosure({
           <Icon name={open ? 'chevron' : 'chevronR'} size={13} stroke={2} />
         </span>
       </button>
-      {open && (
-        <div id={bodyId} style={bodyStyle}>
+      {(open || keepMounted) && (
+        <div id={bodyId} style={{ ...bodyStyle, ...(keepMounted && !open ? { display: 'none' } : {}) }}>
           {children}
         </div>
       )}

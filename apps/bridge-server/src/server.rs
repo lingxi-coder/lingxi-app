@@ -270,6 +270,7 @@ fn is_owned_turn_event(event: &ClientEvent) -> bool {
     matches!(
         event,
         ClientEvent::SystemNotice { .. }
+            | ClientEvent::TerminalApiError { .. }
             | ClientEvent::UiLog { .. }
             | ClientEvent::UiToast { .. }
             | ClientEvent::UiStatus { .. }
@@ -3399,6 +3400,11 @@ mod tests {
         assert!(is_owned_turn_event(&ClientEvent::SystemNotice {
             message: "late notice".into(),
             is_error: false,
+        }));
+        assert!(is_owned_turn_event(&ClientEvent::TerminalApiError {
+            api_error_status: Some(400),
+            terminal_reason: "api_error".into(),
+            stop_reason: "stop_sequence".into(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::UiLog {
             plugin: "review".to_string(),

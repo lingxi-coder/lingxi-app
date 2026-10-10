@@ -709,12 +709,11 @@ fn slash_help_opens_screen_view_without_sending_a_prompt() {
     // of dumping text into scrollback (plan Phase 4 view-stack routing).
     assert!(matches!(outcome, ChatOutcome::RefreshCommandCatalog));
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ScreenView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ScreenView>());
     assert!(cells(&app).is_empty(), "no scrollback dump");
     assert!(!app.chat_widget.turn_running());
 }
@@ -723,12 +722,11 @@ fn slash_help_opens_screen_view_without_sending_a_prompt() {
 fn screen_view_owns_keys_scrolls_and_esc_closes_without_quitting() {
     let mut app = test_app(Vec::new());
     submit_command(&mut app, "/help");
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ScreenView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ScreenView>());
     // Keys go to the view, not the composer.
     app.on_key(press(KeyCode::Char('x')));
     assert_eq!(app.chat_widget.bottom_pane().composer().text(), "");
@@ -894,12 +892,11 @@ fn slash_doctor_and_mcp_open_screen_views() {
         submit_command(&mut app, "/mcp"),
         ChatOutcome::Continue
     ));
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ScreenView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ScreenView>());
     // Focused views, not scrollback dumps; and no prompt turn started.
     assert!(cells(&app).is_empty());
     assert!(!app.chat_widget.turn_running());
@@ -956,12 +953,11 @@ fn slash_model_with_no_models_opens_picker_with_in_view_empty_message() {
         submit_command(&mut app, "/model"),
         ChatOutcome::Continue
     ));
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ModelPickerView>());
     assert!(cells(&app).is_empty(), "no scrollback dump");
     let terminal = draw_viewport(&mut app);
     let all = buffer_rows(&terminal).join("\n");
@@ -984,12 +980,11 @@ fn slash_model_opens_picker_and_enter_switches() {
         submit_command(&mut app, "/model"),
         ChatOutcome::Continue
     ));
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ModelPickerView>());
     // Picker owns the keyboard: move up to the first (Opus) row and confirm.
     app.on_key(press(KeyCode::Up));
     let outcome = app.on_key(press(KeyCode::Enter));
@@ -998,44 +993,40 @@ fn slash_model_opens_picker_and_enter_switches() {
         ChatOutcome::SwitchModel(ref m, ref p)
             if m == "claude-opus-4-8" && p.as_deref() == Some("anthropic")
     ));
-    assert!(
-        !app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>()
-    );
+    assert!(!app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ModelPickerView>());
 }
 
 #[test]
 fn model_picker_esc_cancels_without_switching() {
     let mut app = app_with_models();
     submit_command(&mut app, "/model");
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ModelPickerView>());
     let outcome = app.on_key(press(KeyCode::Esc));
     assert!(matches!(outcome, ChatOutcome::Continue));
-    assert!(
-        !app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>()
-    );
+    assert!(!app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ModelPickerView>());
 }
 
 #[test]
 fn permission_stacks_over_picker_and_returns_keys_to_it() {
     let mut app = app_with_models();
     submit_command(&mut app, "/model");
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ModelPickerView>());
     app.apply_turn_event(TurnEvent::TurnStarted);
     // A permission request arriving while the picker is open stacks on
     // top and owns the keyboard.
@@ -1049,12 +1040,11 @@ fn permission_stacks_over_picker_and_returns_keys_to_it() {
         PermissionResponse::AllowOnce
     );
     // The picker beneath survives and gets the keyboard back.
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ModelPickerView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ModelPickerView>());
     app.on_key(press(KeyCode::Up));
     let outcome = app.on_key(press(KeyCode::Enter));
     assert!(matches!(outcome, ChatOutcome::SwitchModel(ref m, _) if m == "claude-opus-4-8"));
@@ -1073,8 +1063,8 @@ fn permission_stacks_over_picker_and_returns_keys_to_it() {
 use ratatui::buffer::Cell;
 use ratatui::layout::Position;
 
-use crate::terminal::Terminal;
 use crate::terminal::test_support::TestWriteBackend;
+use crate::terminal::Terminal;
 
 /// A bottom-anchored custom terminal over an 80x24 test backend with its
 /// viewport sized to `viewport` rows, mirroring the production runtime
@@ -1140,14 +1130,13 @@ fn slash_hooks_agents_and_quit_route_as_commands() {
         submit_command(&mut app, "/hooks"),
         ChatOutcome::Continue
     ));
-    assert!(
-        app.chat_widget
-            .bottom_pane()
-            .view_stack()
-            .contains::<ScreenView>()
-    );
+    assert!(app
+        .chat_widget
+        .bottom_pane()
+        .view_stack()
+        .contains::<ScreenView>());
     app.on_key(press(KeyCode::Esc)); // close /hooks
-    // `/agents` prints the 2.1.205 removed-notice (no picker view).
+                                     // `/agents` prints the 2.1.205 removed-notice (no picker view).
     assert!(matches!(
         submit_command(&mut app, "/agents"),
         ChatOutcome::Continue

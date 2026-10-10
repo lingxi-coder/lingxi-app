@@ -12,6 +12,8 @@ import {
   CH_CANCEL,
   CH_CANCEL_ASK_USER_QUESTION,
   CH_COMMAND,
+  CH_MOD_UI_CONTROL,
+  CH_MOD_UI_OPERATION,
   CH_CONNECTION_STATE,
   CH_DENY,
   CH_DENY_COMPUTER_ACCESS,
@@ -525,6 +527,14 @@ export class SessionRuntimeManager {
       this.assertSender(event);
       await this.requireById(sessionId).dispatchCommand(command);
     });
+    ipcMain.handle(CH_MOD_UI_CONTROL, (event: IpcMainInvokeEvent, sessionId: unknown, request: unknown) => {
+      this.assertSender(event);
+      return this.requireById(sessionId).dispatchModUiControl(request);
+    });
+    ipcMain.handle(CH_MOD_UI_OPERATION, (event: IpcMainInvokeEvent, sessionId: unknown, operation: unknown) => {
+      this.assertSender(event);
+      return this.requireById(sessionId).dispatchModUiOperation(operation);
+    });
     ipcMain.handle(CH_CONNECTION_STATE, (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
       return this.requireById(sessionId).connectionState;
@@ -618,6 +628,7 @@ export class SessionRuntimeManager {
       CH_EVENT_REPLAY,
       CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
       CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION, CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
+      CH_MOD_UI_CONTROL, CH_MOD_UI_OPERATION,
     ]) ipcMain.removeHandler(channel);
     this.registered = false;
   }

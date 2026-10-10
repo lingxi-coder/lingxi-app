@@ -51,15 +51,6 @@ test('the shared definition covers every newly-added command and listing kind', 
     'remove_mcp_server',
     'ui_attach',
     'ui_detach',
-    'ui_render',
-    'ui_client_module',
-    'ui_message',
-    'ui_client_fault',
-    'ui_client_press',
-    'ui_press',
-    'ui_input',
-    'ui_select',
-    'ui_client_operation',
   ];
   for (const name of newCommands) {
     assert.ok(shared.includes(`'${name}'`), `expected AllowedClientCommand to mention '${name}'`);
@@ -92,9 +83,11 @@ test('the allowlists are the exposed subset of the exhaustive desktop dispositio
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.resume_workflow, 'not_applicable');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.turn_recovery_state, 'degraded');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.terminal_api_error, 'host_private');
-  assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_control_result, 'exposed');
-  assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_invalidate, 'exposed');
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.ui_render, 'not_applicable');
+  assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_control_result, 'host_private');
+  assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_invalidate, 'host_private');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_notify, 'exposed');
+  assert.equal(CLIENT_EVENT_DISPOSITIONS.session_agent_tombstone, 'exposed');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.app_event, 'not_applicable');
 });
 

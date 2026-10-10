@@ -13,6 +13,8 @@ import {
   validateImageRefs,
   validatePermissionResponse,
   validatePrompt,
+  validateModUiControlRequest,
+  validateModUiOperation,
 } from '../src/main/validation';
 
 test('clipboard writes accept only bounded plain text', () => {
@@ -290,47 +292,6 @@ test('UI surface lifecycle commands enforce the native client id and surface con
   );
 });
 
-test('desktop Mod UI controls are bounded, correlated, and subtype-bound before transport', () => {
-  const controls = [
-    ['ui_render', { subtype: 'ui_render', surface: 'desktop', component: 'AbovePrompt', instance_id: 'above-prompt', props: {} }],
-    ['ui_message', { subtype: 'ui_message', surface: 'desktop', component: 'AbovePrompt', instance_id: 'above-prompt', client: 'client', module: 'surface.js', data: {} }],
-    ['ui_client_fault', { subtype: 'ui_client_fault', surface: 'desktop', component: 'AbovePrompt', instance_id: 'above-prompt', client: 'client', module: 'surface.js', phase: 'render', reason: 'failure' }],
-    ['ui_client_press', { subtype: 'ui_client_press', surface: 'desktop', component: 'AbovePrompt', instance_id: 'above-prompt', client: 'client', module: 'surface.js', event: { type: 'press' } }],
-    ['ui_press', { subtype: 'ui_press', surface: 'desktop', component: 'AbovePrompt', instance_id: 'above-prompt', plugin: 'plugin', handle: 1, key: 'button' }],
-    ['ui_input', { subtype: 'ui_input', surface: 'desktop', component: 'AbovePrompt', instance_id: 'above-prompt', plugin: 'plugin', handle: 1, kind: 'change', value: 'value' }],
-    ['ui_select', { subtype: 'ui_select', surface: 'desktop', component: 'AbovePrompt', instance_id: 'above-prompt', plugin: 'plugin', handle: 1, value: 'choice' }],
-  ] as const;
-
-  for (const [type, body] of controls) {
-    const request_id = `request-${type}`;
-    assert.deepEqual(
-      validateClientCommand({ type, request_id, request_json: JSON.stringify(body) }),
-      { type, request_id, request_json: JSON.stringify(body) },
-    );
-  }
-
-  assert.deepEqual(
-    validateClientCommand({ type: 'ui_client_module', request_id: 'module-1', plugin: 'review' }),
-    { type: 'ui_client_module', request_id: 'module-1', plugin: 'review' },
-  );
-  assert.deepEqual(
-    validateClientCommand({ type: 'ui_client_operation', request_id: 'operation-1', operation_json: '{"subtype":"mount"}' }),
-    { type: 'ui_client_operation', request_id: 'operation-1', operation_json: '{"subtype":"mount"}' },
-  );
-  assert.throws(
-    () => validateClientCommand({ type: 'ui_press', request_id: 'press-1', request_json: '{"subtype":"ui_input"}' }),
-    /invalid UI request subtype/,
-  );
-  assert.throws(
-    () => validateClientCommand({ type: 'ui_press', request_id: 'press-1', request_json: '{"subtype":"ui_press","request_id":"forged"}' }),
-    /embedded request id/,
-  );
-  assert.throws(
-    () => validateClientCommand({ type: 'ui_client_operation', request_id: 'operation-1', operation_json: '[]' }),
-    /invalid UI operation JSON/,
-  );
-});
-
 test('active turns allow live model and permission controls but reject session lifecycle mutations', () => {
   for (const command of [
     { type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } },
@@ -528,4 +489,26 @@ test('cron_manage accepts the v2 lifecycle actions and validates the automation 
   assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, targetSessionId: undefined } }), /select a target session/);
   assert.throws(() => manage({ action: 'create', cron: '0 3 * * *', prompt: 'p', automation: { ...automation, surprise: true } }), /unsupported fields/);
   assert.throws(() => manage({ action: 'prune_history', id: 'task-1' }), /invalid cron action/);
+});
+
+test('Mod UI payloads use dedicated typed guards and stay outside generic command()', () => {
+  const control = {
+    subtype: 'ui_render', surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1', props: {},
+  };
+  assert.deepEqual(validateModUiControlRequest(control), control);
+  assert.deepEqual(validateModUiControlRequest({ ...control, arbitrary: true }), control);
+  assert.throws(() => validateClientCommand({ type: 'ui_render', request_id: 'r1', request_json: JSON.stringify(control) }), /not allowed/);
+  assert.deepEqual(validateModUiControlRequest({
+    subtype: 'ui_input', plugin: 'plugin-a', handle: 3, kind: 'change', value: '', arbitrary: true,
+  }), {
+    subtype: 'ui_input', plugin: 'plugin-a', handle: 3, kind: 'change', value: '', surface: 'desktop',
+  });
+  assert.throws(() => validateClientCommand({ type: 'ui_input', request_id: 'r1', request_json: '{}' }), /not allowed/);
+
+  const operation = {
+    type: 'mount', surface: 'desktop', component: 'AbovePrompt', instance_id: 'instance-1',
+    plugin: 'plugin-a', client: 'client-a', module: 'main', render_revision: 1, columns: 80, rows: 24,
+  };
+  assert.deepEqual(validateModUiOperation(operation), operation);
+  assert.throws(() => validateModUiOperation({ ...operation, source: 'renderer-provided-code' }), /unsupported fields/);
 });

@@ -192,6 +192,7 @@ fn decode_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
     if let Some(s) = content.as_str() {
         return vec![ContentBlock::Text {
             text: s.to_string(),
+            citations: None,
         }];
     }
     if content.is_array() {
@@ -231,7 +232,7 @@ impl ReplayAcc {
         let summary = content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -280,7 +281,7 @@ fn push_user_block(
     out: &mut Vec<RenderedMessage>,
 ) {
     match block {
-        ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
             out.push(RenderedMessage::UserText {
                 body: text.clone(),
                 timestamp: 0,
@@ -352,7 +353,7 @@ fn push_assistant_block(
     out: &mut Vec<RenderedMessage>,
 ) {
     match block {
-        ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
             out.push(RenderedMessage::AssistantText {
                 body: text.clone(),
                 timestamp: 0,
@@ -403,8 +404,12 @@ mod tests {
 
     fn user_text(text: &str) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
@@ -413,8 +418,12 @@ mod tests {
 
     fn assistant_text(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             stop_reason: None,
         }
     }
@@ -444,10 +453,12 @@ mod tests {
         let id = ToolUseId::new();
         let h = vec![
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
                     id: id.clone(),
                     name: "Edit".into(),
+                    input_projection: None,
                     input: serde_json::json!({
                         "file_path": "/tmp/x.rs",
                         "old_string": "a",
@@ -458,11 +469,13 @@ mod tests {
                 stop_reason: None,
             },
             ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: "edited".into(),
-                    is_error: false,
+                    content_projection: None,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 }],
@@ -509,11 +522,13 @@ mod tests {
         // render (empty tool name, no diff inputs) rather than be dropped.
         let id = ToolUseId::new();
         let h = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: id,
                 content: "stdout".into(),
-                is_error: false,
+                content_projection: None,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -541,6 +556,7 @@ mod tests {
     #[test]
     fn thinking_block_replays_collapsed() {
         let h = vec![ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Thinking {
                 thinking: "reasoning".into(),
@@ -564,6 +580,7 @@ mod tests {
         // which must render as `AssistantRedactedThinking` rather than be
         // dropped (it previously fell into the silent-skip arm).
         let h = vec![ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::RedactedThinking {
                 data: "opaque-payload".into(),
@@ -583,6 +600,7 @@ mod tests {
         // The wire transcript can carry a redacted-thinking block on a user-role
         // entry (provider replay envelope); it replays identically.
         let h = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::RedactedThinking {
                 data: "opaque".into(),
@@ -603,13 +621,16 @@ mod tests {
     fn system_and_image_blocks_are_not_replayed() {
         let h = vec![
             ConversationMessage::System {
+                api_system: None,
                 id: MessageId::new(),
                 content: "you are a helpful assistant".into(),
                 subtype: None,
                 compact_metadata: None,
                 refusal_fallback: None,
+                model_fallback: None,
             },
             ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Image {
                     source: ImageSource::Url {
@@ -847,14 +868,17 @@ mod tests {
         // assistant text + tool-use in ONE message → two rows, in order.
         let id = ToolUseId::new();
         let h = vec![ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
                     text: "let me read it".into(),
+                    citations: None,
                 },
                 ContentBlock::ToolUse {
                     id,
                     name: "Read".into(),
+                    input_projection: None,
                     input: serde_json::json!({"file_path": "/a"}),
                     provider_id: None,
                 },

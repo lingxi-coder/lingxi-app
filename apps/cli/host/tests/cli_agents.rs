@@ -18,23 +18,28 @@ use predicates::prelude::*;
 
 const AGENTS_HELP_FIXTURE: &str = include_str!("../assets/cc_2_1_252_agents_help.txt");
 
-/// `agents --help` / `-h` print the fixture byte-for-byte, exit 0.
+/// `agents --help` / `-h` retain the upstream layout with the current CLI name.
 #[test]
-fn agents_help_matches_fixture_byte_for_byte() {
+fn agents_help_projects_fixture_to_current_cli_name() {
+    let current_help = AGENTS_HELP_FIXTURE.replacen(
+        "Usage: claude agents [options]",
+        "Usage: lingxi-cli agents [options]",
+        1,
+    );
     for flag in ["--help", "-h"] {
         Command::cargo_bin("lingxi-cli")
             .unwrap()
             .args(["agents", flag])
             .assert()
             .code(0)
-            .stdout(predicate::eq(AGENTS_HELP_FIXTURE));
+            .stdout(predicate::eq(current_help.clone()));
     }
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .args(["agents", "--restricted", "--help"])
         .assert()
         .code(0)
-        .stdout(predicate::eq(AGENTS_HELP_FIXTURE));
+        .stdout(predicate::eq(current_help));
 }
 
 /// `agents --json` with an empty registry prints `[]` + newline, exit 0.

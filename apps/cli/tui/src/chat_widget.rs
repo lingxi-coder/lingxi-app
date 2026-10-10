@@ -390,7 +390,8 @@ fn focus_refresh_for_turn_event(event: &TurnEvent) -> FocusRefreshKind {
         | TurnEvent::TurnStartedWithCancel(_)
         | TurnEvent::ThinkingDelta(_)
         | TurnEvent::ToolUseStart { .. }
-        | TurnEvent::ToolUseResult { .. } => FocusRefreshKind::ResetAssistantTail,
+        | TurnEvent::ToolUseResult { .. }
+        | TurnEvent::ServerFallbackQueryModelChange { .. } => FocusRefreshKind::ResetAssistantTail,
         TurnEvent::RateLimit { .. } | TurnEvent::SubagentActivity { .. } => FocusRefreshKind::None,
         TurnEvent::PermissionRequest { .. }
         | TurnEvent::ModelChanged { .. }
@@ -494,6 +495,17 @@ pub struct ChatWidget {
     /// Assistant text received in the current turn. This sidecar survives an
     /// abort-then-fork boundary without changing the normal transcript wire.
     partial_assistant_text: String,
+    /// Per-query served model reported by an admitted server fallback. Kept
+    /// separate from the user-selected session model because stream sinks do
+    /// not carry enough scope to safely mutate the global model picker.
+    server_fallback_model: Option<String>,
+    /// Current provider content block awaiting its durable assistant-row UUID.
+    active_assistant_block_key: Option<u64>,
+    assistant_block_uuids: std::collections::HashMap<u64, String>,
+    pending_server_fallback_tombstones: std::collections::HashSet<String>,
+    /// Retained refusal text is reintroduced only when the next visible block
+    /// opens, so following deltas concatenate with the exact native join.
+    pending_refusal_continuation: Option<(String, bool)>,
     /// Correlates a live turn with the snapshot persisted by backgrounding.
     background_boundary_id: uuid::Uuid,
     /// Set while ← waits for an active tool to finish.
@@ -744,6 +756,11 @@ impl ChatWidget {
             active_tool_elapsed_ms: None,
             active_tool_kinds: Vec::new(),
             partial_assistant_text: String::new(),
+            server_fallback_model: None,
+            active_assistant_block_key: None,
+            assistant_block_uuids: std::collections::HashMap::new(),
+            pending_server_fallback_tombstones: std::collections::HashSet::new(),
+            pending_refusal_continuation: None,
             background_boundary_id: uuid::Uuid::new_v4(),
             pending_backgrounding: None,
             response_chars: 0,
@@ -1397,24 +1414,40 @@ impl ChatWidget {
             .take()
             .unwrap_or_else(lingxi_core::types::ToolUseId::new);
         self.collapse_ids.clear();
-        self.transcript.discard_active();
         self.transcript
-            .push_message(RenderedMessage::CollapsedReadSearch {
-                search_count: group.search_count(),
-                read_count: group.read_count(),
-                list_count: group.list_count(),
-                repl_count: group.repl_count(),
-                mcp_call_count: group.mcp_call_count(),
-                mcp_server_names: group.mcp_server_names(),
-                bash_count: group.bash_count(),
-                is_active: false,
-                group_id,
-                latest_hint: None,
-                entries: group.entries().to_vec(),
-                mem_read: 0,
-                mem_search: 0,
-                mem_write: group.memory_write_count(),
-            });
+            .set_active(crate::history_cell::cell_for_message(
+                RenderedMessage::CollapsedReadSearch {
+                    search_count: group.search_count(),
+                    read_count: group.read_count(),
+                    list_count: group.list_count(),
+                    repl_count: group.repl_count(),
+                    mcp_call_count: group.mcp_call_count(),
+                    mcp_server_names: group.mcp_server_names(),
+                    bash_count: group.bash_count(),
+                    is_active: false,
+                    group_id,
+                    latest_hint: None,
+                    entries: group.entries().to_vec(),
+                    mem_read: 0,
+                    mem_search: 0,
+                    mem_write: group.memory_write_count(),
+                },
+            ));
+        self.transcript.flush_active();
+    }
+
+    /// Drop the in-flight aggregate when a fallback tombstone removed its
+    /// active transcript cell. Tool rows retain independent UUIDs, so the
+    /// group disappears only after every member row was reported superseded.
+    fn clear_removed_collapse_group(&mut self) {
+        if self.collapse_group.is_none() || self.transcript.active_cell().is_some() {
+            return;
+        }
+        self.collapse_group = None;
+        self.collapse_group_id = None;
+        for id in self.collapse_ids.drain() {
+            self.tool_inputs.remove(&id);
+        }
     }
 
     fn flush_or_discard_active(&mut self) {
@@ -1496,6 +1529,11 @@ impl ChatWidget {
                 self.turn_started_at = None;
                 self.activity = None;
                 self.partial_assistant_text.clear();
+                self.server_fallback_model = None;
+                self.active_assistant_block_key = None;
+                self.assistant_block_uuids.clear();
+                self.pending_server_fallback_tombstones.clear();
+                self.pending_refusal_continuation = None;
                 self.active_tool_id = None;
                 self.active_tool_kinds.clear();
                 self.background_boundary_id = uuid::Uuid::new_v4();
@@ -1535,6 +1573,11 @@ impl ChatWidget {
                 self.accepts_turn_events = true;
                 self.has_seen_turn = true;
                 self.finalize_collapse_group();
+                self.server_fallback_model = None;
+                self.active_assistant_block_key = None;
+                self.assistant_block_uuids.clear();
+                self.pending_server_fallback_tombstones.clear();
+                self.pending_refusal_continuation = None;
                 self.turn_started_at = Some(std::time::Instant::now());
                 self.activity = None;
                 self.active_tool_id = None;
@@ -1559,9 +1602,113 @@ impl ChatWidget {
                 self.transcript
                     .set_active(Box::new(AssistantTextCell::new(String::new())));
             }
+            TurnEvent::ServerFallbackQueryModelChange { to_model } => {
+                // This is a per-query observation, not a `/model` selection.
+                // The current output sink carries no main/child scope, so keep
+                // it local instead of mutating the global model snapshot.
+                self.server_fallback_model = Some(to_model);
+            }
+            TurnEvent::AssistantBlockStart { block_key } => {
+                let continuation = self.pending_refusal_continuation.take();
+                if let Some(previous_key) = self.active_assistant_block_key.take() {
+                    self.assistant_block_uuids.remove(&previous_key);
+                }
+                if continuation.is_some() {
+                    self.finalize_collapse_group();
+                    self.flush_or_discard_active();
+                } else if self.collapse_group.is_none() {
+                    self.flush_or_discard_active();
+                }
+
+                // Tool blocks can follow one another inside a collapsed run;
+                // retain that active group until its next visible text/tool
+                // event decides whether it continues. Otherwise open a row
+                // placeholder for this block's incoming text.
+                if self.collapse_group.is_none() {
+                    let seed = continuation
+                        .as_ref()
+                        .filter(|(_, display)| *display)
+                        .map(|(text, _)| text.clone())
+                        .unwrap_or_default();
+                    if !seed.is_empty() {
+                        self.partial_assistant_text.push_str(&seed);
+                    }
+                    self.transcript
+                        .set_active(Box::new(AssistantTextCell::new(seed)));
+                }
+                self.active_assistant_block_key = Some(block_key);
+                if let Some(uuid) = self.assistant_block_uuids.get(&block_key).cloned() {
+                    if self.collapse_group.is_some() {
+                        self.transcript.identify_active_row_uuid(uuid);
+                    } else {
+                        self.transcript.identify_active_row(uuid);
+                    }
+                }
+            }
+            TurnEvent::AssistantBlockIdentity {
+                block_key,
+                message_uuid,
+            } => {
+                self.assistant_block_uuids
+                    .insert(block_key, message_uuid.clone());
+                if self.active_assistant_block_key == Some(block_key) {
+                    if self.collapse_group.is_some() {
+                        self.transcript.identify_active_row_uuid(message_uuid);
+                    } else {
+                        self.transcript.identify_active_row(message_uuid);
+                    }
+                }
+            }
+            TurnEvent::ServerFallbackTombstone {
+                message,
+                display_only: _,
+            } => {
+                // A tombstone edits only this TUI's displayed transcript. The
+                // history writer owns persistence and has already received
+                // the matching removal request.
+                let uuid = message.uuid.as_uuid().to_string();
+                self.pending_server_fallback_tombstones.insert(uuid.clone());
+                let tombstoned = self
+                    .pending_server_fallback_tombstones
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.transcript.remove_transcript_rows(&tombstoned);
+                self.clear_removed_collapse_group();
+                self.assistant_block_uuids
+                    .retain(|_, candidate| candidate != &uuid);
+                self.partial_assistant_text = self.transcript.current_turn_assistant_text();
+            }
+            TurnEvent::RefusalContinuation {
+                phase: lingxi_core::host::RefusalContinuationPhase::Begin,
+                salvage_text,
+                join: lingxi_core::host::RefusalContinuationJoin::Exact,
+                replaces_uuids,
+                display_salvage_text,
+            } => {
+                self.finalize_collapse_group();
+                let replaced = replaces_uuids
+                    .into_iter()
+                    .map(|uuid| uuid.as_uuid().to_string())
+                    .collect::<Vec<_>>();
+                self.pending_server_fallback_tombstones.extend(replaced);
+                let tombstoned = self
+                    .pending_server_fallback_tombstones
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.transcript.remove_transcript_rows(&tombstoned);
+                self.clear_removed_collapse_group();
+                self.partial_assistant_text = self.transcript.current_turn_assistant_text();
+                self.pending_refusal_continuation = Some((salvage_text, display_salvage_text));
+                self.active_assistant_block_key = None;
+            }
             TurnEvent::MessageIdentity(id) => {
                 self.flush_or_discard_active();
                 self.transcript.identify_assistant_response(id);
+                if let Some(block_key) = self.active_assistant_block_key.take() {
+                    self.assistant_block_uuids.remove(&block_key);
+                }
             }
             TurnEvent::MessageRetracted(id) => {
                 self.transcript.retract_assistant_response(id);
@@ -1629,6 +1776,10 @@ impl ChatWidget {
                 }
             }
             TurnEvent::ToolUseStart { id, tool, input } => {
+                let block_uuid = self
+                    .active_assistant_block_key
+                    .take()
+                    .and_then(|key| self.assistant_block_uuids.remove(&key));
                 self.activity = Some(activity_label(&tool));
                 self.active_tool_id = Some(id.clone());
                 self.active_tool_elapsed_ms = Some(0);
@@ -1677,6 +1828,9 @@ impl ChatWidget {
                     if let Some(group) = self.collapse_group.as_mut() {
                         group.absorb_start(&tool, &input);
                     }
+                    if let Some(uuid) = block_uuid {
+                        self.transcript.identify_active_row_uuid(uuid);
+                    }
                     self.collapse_ids.insert(id.clone());
                     self.tool_inputs.insert(id.clone(), input.clone());
                     self.render_active_collapse();
@@ -1689,6 +1843,9 @@ impl ChatWidget {
                 self.tool_inputs.insert(id.clone(), input.clone());
                 self.transcript
                     .push_message(RenderedMessage::AssistantToolUse { id, tool, input });
+                if let Some(uuid) = block_uuid {
+                    self.transcript.identify_latest_committed_row(uuid);
+                }
             }
             TurnEvent::ToolHeartbeat {
                 id,
@@ -1780,6 +1937,10 @@ impl ChatWidget {
                 self.active_tool_elapsed_ms = None;
                 self.active_tool_kinds.clear();
                 self.partial_assistant_text.clear();
+                self.active_assistant_block_key = None;
+                self.assistant_block_uuids.clear();
+                self.pending_server_fallback_tombstones.clear();
+                self.pending_refusal_continuation = None;
                 self.foreground_agents.clear();
                 self.sync_running_agents();
                 self.bottom_pane.clear_running_hooks();
@@ -4268,24 +4429,35 @@ impl ChatWidget {
         let records = runtime
             .block_on(registry.list_workflows())
             .unwrap_or_default();
-        let live_effort = self
+        let ultracode_enabled = self
             .orchestrator
             .as_ref()
-            .and_then(|handle| runtime.block_on(handle.current_effort()));
+            .is_some_and(|handle| runtime.block_on(handle.ultracode_enabled()));
+        let model_supported = self.orchestrator.as_ref().is_some_and(|handle| {
+            match runtime.block_on(handle.effort_command_snapshot()) {
+                Ok(Some(snapshot)) => snapshot.capabilities.xhigh,
+                Ok(None) => runtime
+                    .block_on(handle.conversation_controls())
+                    .is_some_and(|controls| {
+                        controls.reasoning_spec.available.iter().any(|selection| {
+                            matches!(
+                                selection,
+                                lingxi_core::host::ReasoningSelection::Level { id }
+                                    if id == "xhigh"
+                            )
+                        })
+                    }),
+                Err(_) => false,
+            }
+        });
         let workflows_enabled = self
             .orchestrator
             .as_ref()
             .is_some_and(|handle| runtime.block_on(handle.dynamic_workflows_enabled()));
-        let current_model = self
-            .session
-            .models
-            .iter()
-            .find(|model| model.is_current)
-            .map_or("", |model| model.request_model.as_str());
         let warning_config = crate::bottom_pane::workflows_view::WorkflowWarningConfig {
             ultracode_active: UltracodeGate {
-                model: current_model,
-                effort: live_effort.as_deref(),
+                enabled: ultracode_enabled,
+                model_supported,
                 workflows_enabled,
             }
             .active(),
@@ -6104,7 +6276,11 @@ impl ChatWidget {
         );
         let receiving = self.response_chars > 0 || self.activity.is_some();
         let paren = crate::spinner_status::status_paren(elapsed_ms, self.response_chars, receiving);
-        format!("{frame} {verb}… {paren}")
+        let served_model = self
+            .server_fallback_model
+            .as_deref()
+            .map_or_else(String::new, |model| format!(" · {model}"));
+        format!("{frame} {verb}… {paren}{served_model}")
     }
 }
 
@@ -6218,7 +6394,7 @@ fn is_plan_tool(tool: &str) -> bool {
 
 /// Whether a tool invokes a foreground/background subagent.
 fn is_agent_tool(tool: &str) -> bool {
-    matches!(tool, "Agent" | "Task")
+    tool == "Agent"
 }
 
 fn agent_status_from_tool_start(
@@ -10337,6 +10513,96 @@ mod tests {
     }
 
     #[test]
+    fn server_fallback_row_events_retract_and_stitch_exact_text_without_changing_selection() {
+        use crate::history_cell::message::AssistantTextCell;
+
+        let mut widget = widget_with_models();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        widget.apply_turn_event(TurnEvent::ServerFallbackQueryModelChange {
+            to_model: "claude-sonnet-5".into(),
+        });
+        assert_eq!(
+            widget.server_fallback_model.as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert!(widget.spinner_text().contains("claude-sonnet-5"));
+        assert!(widget.session.models[0].is_current);
+        assert!(!widget.session.models[1].is_current);
+
+        let discarded_id = lingxi_core::types::MessageId::new();
+        widget.apply_turn_event(TurnEvent::AssistantBlockStart { block_key: 41 });
+        widget.apply_turn_event(TurnEvent::TextDelta("discarded refusal".into()));
+        widget.apply_turn_event(TurnEvent::AssistantBlockIdentity {
+            block_key: 41,
+            message_uuid: discarded_id.as_uuid().to_string(),
+        });
+        widget.apply_turn_event(TurnEvent::ServerFallbackTombstone {
+            message: lingxi_core::host::ServerFallbackTombstoneMessage {
+                uuid: discarded_id,
+                message_type: "assistant".into(),
+                timestamp: "2026-10-03T12:00:00.000Z".into(),
+                request_id: Some("request-1".into()),
+                request_ref: None,
+                provider_message_id: Some("provider-1".into()),
+                model: Some("claude-opus-4-8".into()),
+                stop_reason: Some("refusal".into()),
+                stop_details: None,
+                usage: None,
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "discarded refusal".into(),
+                    citations: None,
+                }],
+                is_api_error_message: None,
+                supersedes_uuids: None,
+            },
+            display_only: true,
+        });
+
+        let retained_id = lingxi_core::types::MessageId::new();
+        widget.apply_turn_event(TurnEvent::AssistantBlockStart { block_key: 42 });
+        widget.apply_turn_event(TurnEvent::TextDelta("retained🙂".into()));
+        widget.apply_turn_event(TurnEvent::AssistantBlockIdentity {
+            block_key: 42,
+            message_uuid: retained_id.as_uuid().to_string(),
+        });
+        widget.apply_turn_event(TurnEvent::RefusalContinuation {
+            phase: lingxi_core::host::RefusalContinuationPhase::Begin,
+            salvage_text: "retained🙂".into(),
+            join: lingxi_core::host::RefusalContinuationJoin::Exact,
+            replaces_uuids: vec![retained_id],
+            display_salvage_text: true,
+        });
+        let replacement_id = lingxi_core::types::MessageId::new();
+        widget.apply_turn_event(TurnEvent::AssistantBlockStart { block_key: 43 });
+        widget.apply_turn_event(TurnEvent::TextDelta(" fresh".into()));
+        widget.apply_turn_event(TurnEvent::AssistantBlockIdentity {
+            block_key: 43,
+            message_uuid: replacement_id.as_uuid().to_string(),
+        });
+        widget.apply_turn_event(TurnEvent::TurnEnded(
+            lingxi_core::host::TurnOutcome::EndTurn,
+        ));
+
+        let text_rows = widget
+            .transcript
+            .committed_cells()
+            .iter()
+            .filter_map(|cell| {
+                cell.as_any()
+                    .downcast_ref::<AssistantTextCell>()
+                    .map(|cell| cell.body().to_string())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text_rows, ["retained🙂 fresh"]);
+        assert_eq!(
+            widget.server_fallback_model.as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert!(widget.session.models[0].is_current);
+        assert!(!widget.session.models[1].is_current);
+    }
+
+    #[test]
     fn active_streaming_tail_stays_live_until_turn_ends() {
         let mut widget = widget();
         submit_command(&mut widget, "hi");
@@ -12534,6 +12800,31 @@ mod tests {
     }
 
     #[test]
+    fn task_named_tool_keeps_ordinary_activity_without_agent_status() {
+        let mut widget = widget();
+        widget.apply_turn_event(TurnEvent::TurnStarted);
+        let id = lingxi_core::types::ToolUseId::from("ordinary-task-tool");
+        widget.apply_turn_event(TurnEvent::ToolUseStart {
+            id: id.clone(),
+            tool: "Task".into(),
+            input: serde_json::json!({ "description": "Ordinary task" }),
+        });
+        assert_eq!(widget.activity.as_deref(), Some("Running Task"));
+        assert!(widget.foreground_agents.is_empty());
+        assert!(widget.bottom_pane().running_agents().is_empty());
+        assert_eq!(widget.active_tool_id.as_ref(), Some(&id));
+
+        widget.apply_turn_event(TurnEvent::ToolUseResult {
+            id,
+            tool: "Task".into(),
+            result: serde_json::json!({ "success": true }),
+        });
+        assert!(widget.active_tool_id.is_none());
+        assert!(widget.foreground_agents.is_empty());
+        assert!(widget.bottom_pane().running_agents().is_empty());
+    }
+
+    #[test]
     fn agent_status_combines_foreground_and_background_lifecycles() {
         let mut widget = widget();
         widget.apply_turn_event(TurnEvent::TurnStarted);
@@ -12689,7 +12980,8 @@ mod tests {
         assert_eq!(activity_label("Glob"), "Searching");
         assert_eq!(activity_label("WebFetch"), "Browsing");
         assert_eq!(activity_label("WebSearch"), "Browsing");
-        assert_eq!(activity_label("Task"), "Delegating");
+        assert_eq!(activity_label("Agent"), "Delegating");
+        assert_eq!(activity_label("Task"), "Running Task");
         assert_eq!(activity_label("SomeMcpTool"), "Running SomeMcpTool");
     }
 

@@ -1,15 +1,15 @@
-use super::DEFAULT_SESSION_LIST_LIMIT;
-use super::EngineCommandRouter;
 use super::command_source_string;
 use super::lower_auth_state;
 use super::provider_model_catalog_from_listings;
-use client::adapter::ClientEventSink;
+use super::EngineCommandRouter;
+use super::DEFAULT_SESSION_LIST_LIMIT;
 use client::adapter::lowering::lower_agent_info;
 use client::adapter::lowering::lower_doctor_report;
 use client::adapter::lowering::lower_hook_info;
 use client::adapter::lowering::lower_mcp_server_info;
 use client::adapter::lowering::lower_skill_info;
 use client::adapter::lowering::lower_status_snapshot;
+use client::adapter::ClientEventSink;
 use client::protocol::commands::ListingKindDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::listings::AuthStateDto;
@@ -19,7 +19,7 @@ use command_api::builtin_support::names::is_palette_hidden;
 use command_api::registry::CommandRegistry;
 use futures_util::future::join_all;
 use lingxi_core::host::task_registry::TaskListFilter;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SlashAuthoritySnapshot {

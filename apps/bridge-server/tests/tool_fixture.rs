@@ -80,11 +80,14 @@ impl Tool for AlwaysOkTool {
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
             data: json!({"ok": true}),
+            data_projection: None,
+            model_content_projection: None,
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            mcp_meta_projection: None,
         })
     }
 }

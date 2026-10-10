@@ -12,8 +12,15 @@ import type {
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
   ImageRefDto,
+  NativeUiControlRequest,
+  NativeUiControlResponseFor,
   PermissionResponseDto,
   SessionRowDto,
+  UiClientFrameEventDto,
+  UiClientOperation,
+  UiClientOperationResponseFor,
+  UiControlCallResultDto,
+  UiInvalidateEventDto,
 } from '@lingxi/bridge-client';
 import type { HostPermissionRequest } from '../shared/permission.js';
 import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
@@ -54,6 +61,10 @@ const CH_ANSWER_ASK_USER_QUESTION = 'lingxi:answerAskUserQuestion';
 const CH_CANCEL_ASK_USER_QUESTION = 'lingxi:cancelAskUserQuestion';
 const CH_CANCEL = 'lingxi:cancel';
 const CH_COMMAND = 'lingxi:command';
+const CH_MOD_UI_CONTROL = 'lingxi:modUi:control';
+const CH_MOD_UI_OPERATION = 'lingxi:modUi:operation';
+const CH_MOD_UI_FRAME = 'lingxi:modUi:frame';
+const CH_MOD_UI_INVALIDATE = 'lingxi:modUi:invalidate';
 const CH_CONNECTION_STATE = 'lingxi:connectionState';
 const CH_EVENT = 'lingxi:event';
 const CH_EVENT_REPLAY = 'lingxi:event:replay';
@@ -163,6 +174,19 @@ export interface NativeAudioApi {
   onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
 }
 
+export interface ModUiApi {
+  control<T extends NativeUiControlRequest>(
+    sessionId: string,
+    request: T,
+  ): Promise<UiControlCallResultDto<NativeUiControlResponseFor<T>>>;
+  operation<T extends UiClientOperation>(
+    sessionId: string,
+    operation: T,
+  ): Promise<UiClientOperationResponseFor<T>>;
+  onFrame(callback: (event: UiClientFrameEventDto) => void): Unsubscribe;
+  onInvalidate(callback: (event: UiInvalidateEventDto) => void): Unsubscribe;
+}
+
 /** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
@@ -240,6 +264,7 @@ export interface LingxiApi {
   onComputerAccess(cb: (request: RuntimeEventEnvelope<ComputerAccessRequestDto>) => void): Unsubscribe;
   onConnectionStateChanged(cb: (state: RuntimeEventEnvelope<ConnectionState>) => void): Unsubscribe;
   audio: NativeAudioApi;
+  modUi: ModUiApi;
 }
 
 function subscribe<T>(channel: string, callback: (payload: T) => void): Unsubscribe {
@@ -334,6 +359,18 @@ const api: LingxiApi = {
   onPermission: (callback) => subscribe(CH_PERMISSION, callback),
   onComputerAccess: (callback) => subscribe(CH_COMPUTER_ACCESS, callback),
   onConnectionStateChanged: (callback) => subscribe(CH_STATE_CHANGED, callback),
+  modUi: {
+    control: <T extends NativeUiControlRequest>(sessionId: string, request: T) =>
+      ipcRenderer.invoke(CH_MOD_UI_CONTROL, sessionId, request) as Promise<UiControlCallResultDto<NativeUiControlResponseFor<T>>>,
+    operation: <T extends UiClientOperation>(sessionId: string, operation: T) =>
+      ipcRenderer.invoke(CH_MOD_UI_OPERATION, sessionId, operation) as Promise<UiClientOperationResponseFor<T>>,
+    onFrame: (callback) => subscribe(CH_MOD_UI_FRAME, (envelope: RuntimeEventEnvelope<Omit<UiClientFrameEventDto, 'sessionId'>>) => {
+      callback({ sessionId: envelope.sessionId, ...envelope.event });
+    }),
+    onInvalidate: (callback) => subscribe(CH_MOD_UI_INVALIDATE, (envelope: RuntimeEventEnvelope<Omit<UiInvalidateEventDto, 'sessionId'>>) => {
+      callback({ sessionId: envelope.sessionId, ...envelope.event });
+    }),
+  },
   audio: {
     request: (command) => ipcRenderer.invoke(CH_NATIVE_AUDIO_REQUEST, command) as Promise<NativeAudioCommandResult>,
     execute: (operation, configurationRevision, configurationOverride) => ipcRenderer.invoke(CH_NATIVE_AUDIO_OPERATION, operation, configurationRevision, configurationOverride) as Promise<NativeAudioOperationResponse>,

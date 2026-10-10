@@ -217,9 +217,10 @@ test('sidebar renders global pins before projects and limits each project sessio
   ));
 
   assert.ok(markup.indexOf('Pinned work') < markup.indexOf('id="projects-heading"'));
-  const footer = markup.slice(markup.indexOf('class="desktop-sidebar-footer"'), markup.indexOf('class="sidebar-resize-handle'));
-  assert.match(footer, /> Settings<|>Settings<|> <!-- -->Settings</);
-  assert.doesNotMatch(footer, /Engine|diagnostics|role="status"/);
+  const rail = markup.slice(markup.indexOf('aria-label="Main navigation"'), markup.indexOf('</nav>'));
+  assert.match(rail, /class="desktop-rail-button desktop-rail-settings" aria-label="Settings"/);
+  assert.ok(rail.indexOf('aria-label="Review changes"') < rail.indexOf('aria-label="Settings"'));
+  assert.doesNotMatch(markup, /desktop-sidebar-footer/);
   assert.match(markup, /MLPlatform/);
   assert.match(markup, /LingXi-Next/);
   assert.match(markup, /Session 5/);

@@ -17,6 +17,7 @@
     "harness-runtime",
     "hooks",
     "http-client",
+    "json-projection",
     "jsonrpc",
     "llm-runtime",
     "local-apps",
@@ -69,6 +70,7 @@
     "tool-web",
     "tool-workflow",
     "tool-worktree",
+    "visualization",
     "workflow"
   ],
   "vendored_packages": [

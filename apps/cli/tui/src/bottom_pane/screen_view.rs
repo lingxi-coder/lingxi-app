@@ -969,18 +969,15 @@ fn help_lines_with_commands(
     out.push(Line::from(""));
     out.push(header("Slash commands"));
     for command in crate::command::BUILTIN {
-        match commands
-            .iter()
-            .find(|candidate| {
-                candidate.replaces_builtin
-                    && candidate
-                        .name
-                        .code_units
-                        .iter()
-                        .copied()
-                        .eq(command.name.encode_utf16())
-            })
-        {
+        match commands.iter().find(|candidate| {
+            candidate.replaces_builtin
+                && candidate
+                    .name
+                    .code_units
+                    .iter()
+                    .copied()
+                    .eq(command.name.encode_utf16())
+        }) {
             Some(described) if !described.hidden => {
                 out.push(row(command.name, &described.description.display()));
             }
@@ -994,14 +991,12 @@ fn help_lines_with_commands(
     for command in commands.iter().filter(|command| {
         !command.hidden
             && !command.replaces_builtin
-            && !crate::command::BUILTIN
-                .iter()
-                .any(|builtin| {
-                    builtin
-                        .name
-                        .encode_utf16()
-                        .eq(command.name.code_units.iter().copied())
-                })
+            && !crate::command::BUILTIN.iter().any(|builtin| {
+                builtin
+                    .name
+                    .encode_utf16()
+                    .eq(command.name.code_units.iter().copied())
+            })
     }) {
         out.push(row(&command.name.display(), &command.description.display()));
     }

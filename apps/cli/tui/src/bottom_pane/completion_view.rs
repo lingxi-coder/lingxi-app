@@ -10,12 +10,12 @@
 //! coexists with the composer (typing keeps filtering), so its state stays
 //! with the composer owner (`RataApp` today, `BottomPane` in plan Phase 5).
 
+use client::protocol::text::ClientTextDto;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
-use client::protocol::text::ClientTextDto;
 
 /// Rows shown in the popup before it stops growing (and starts scrolling to
 /// follow the highlight).
@@ -250,15 +250,18 @@ pub fn command_items_merged<'a>(
     }
     let query = rest.to_lowercase();
     let replaces_builtin = |name: &str| {
-        registry
-            .iter()
-            .any(|row| row.replaces_builtin && row.name.code_units == name.encode_utf16().collect::<Vec<_>>())
+        registry.iter().any(|row| {
+            row.replaces_builtin && row.name.code_units == name.encode_utf16().collect::<Vec<_>>()
+        })
     };
     let registry_is_available = |row: &&RegistrySlashRow| {
         row.replaces_builtin
-            || !crate::command::BUILTIN
-                .iter()
-                .any(|builtin| builtin.name.encode_utf16().eq(row.name.code_units.iter().copied()))
+            || !crate::command::BUILTIN.iter().any(|builtin| {
+                builtin
+                    .name
+                    .encode_utf16()
+                    .eq(row.name.code_units.iter().copied())
+            })
     };
 
     // Registry rows whose name a builtin already owns are dropped (the builtin
@@ -302,8 +305,15 @@ pub fn command_items_merged<'a>(
         .filter(registry_is_available)
         .filter(|row| row.hidden)
         .find(|row| {
-            let row_units = row.name.code_units.strip_prefix(&[b'/' as u16]).unwrap_or(&row.name.code_units);
-            match (String::from_utf16(row_units), String::from_utf16(rest_units)) {
+            let row_units = row
+                .name
+                .code_units
+                .strip_prefix(&[b'/' as u16])
+                .unwrap_or(&row.name.code_units);
+            match (
+                String::from_utf16(row_units),
+                String::from_utf16(rest_units),
+            ) {
                 (Ok(name), Ok(query)) => name.to_lowercase() == query.to_lowercase(),
                 _ => row_units == rest_units,
             }
@@ -411,11 +421,7 @@ fn item(name: &str, desc: String, matched_alias: Option<&str>) -> CompletionItem
     }
 }
 
-fn item_source(
-    name: &ClientTextDto,
-    desc: String,
-    matched_alias: Option<&str>,
-) -> CompletionItem {
+fn item_source(name: &ClientTextDto, desc: String, matched_alias: Option<&str>) -> CompletionItem {
     let display = name.display();
     let label = match matched_alias {
         Some(alias) => format!("{display} ({alias})"),
@@ -487,7 +493,6 @@ impl CompletionView {
     pub fn items(&self) -> &[CompletionItem] {
         &self.items
     }
-
 
     /// Move the highlight up (clamped).
     pub fn prev(&mut self) {
@@ -611,16 +616,28 @@ mod tests {
         let reg = rows(&[("/loop", "run a task on a loop"), ("/deploy", "ship it")]);
         // Bare "/" now includes the registry rows alongside the builtins,
         // alphabetically, and one more than the builtin-only count.
-        let all = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &reg);
+        let all = command_items_merged(
+            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &reg,
+        );
         assert_eq!(all.len(), crate::command::advertised().count() + reg.len());
         assert!(all.iter().any(|i| i.display_insert() == "/loop"));
         assert!(all.iter().any(|i| i.display_insert() == "/deploy"));
         // Sorted by name: /deploy precedes /loop.
-        let d = all.iter().position(|i| i.display_insert() == "/deploy").unwrap();
-        let l = all.iter().position(|i| i.display_insert() == "/loop").unwrap();
+        let d = all
+            .iter()
+            .position(|i| i.display_insert() == "/deploy")
+            .unwrap();
+        let l = all
+            .iter()
+            .position(|i| i.display_insert() == "/loop")
+            .unwrap();
         assert!(d < l);
         // A query surfaces the registry command with its description.
-        let lo = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/lo"), &reg);
+        let lo = command_items_merged(
+            &core::types::utf16_json::Utf16JsonProjection::from("/lo"),
+            &reg,
+        );
         let loop_row = lo
             .iter()
             .find(|i| i.display_insert() == "/loop")
@@ -643,7 +660,10 @@ mod tests {
         let prefix = core::types::utf16_json::Utf16JsonProjection::parse(r#""/x\ud800""#).unwrap();
         let candidates = command_items_merged(&prefix, &[row]);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].insert.code_units, vec![b'/' as u16, b'x' as u16, 0xd800]);
+        assert_eq!(
+            candidates[0].insert.code_units,
+            vec![b'/' as u16, b'x' as u16, 0xd800]
+        );
         assert_eq!(candidates[0].display_insert(), "/x�");
     }
 
@@ -663,18 +683,33 @@ mod tests {
             argument_names: Vec::new(),
         }];
         // Bare "/": the row shows the compact menu label, not the full description.
-        let all = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &reg);
-        let row = all.iter().find(|i| i.display_insert() == "/simplify").unwrap();
+        let all = command_items_merged(
+            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &reg,
+        );
+        let row = all
+            .iter()
+            .find(|i| i.display_insert() == "/simplify")
+            .unwrap();
         assert_eq!(row.desc, "Clean up the changed code");
         // Matching still works off the full description ("altitude" is only there).
-        assert!(command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/altitude"), &reg)
-            .iter()
-            .any(|i| i.display_insert() == "/simplify"));
+        assert!(command_items_merged(
+            &core::types::utf16_json::Utf16JsonProjection::from("/altitude"),
+            &reg
+        )
+        .iter()
+        .any(|i| i.display_insert() == "/simplify"));
         // A row without a menu label falls back to its description.
         let reg2 = rows(&[("/verify", "Verify a code change end-to-end")]);
-        let v = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &reg2);
+        let v = command_items_merged(
+            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &reg2,
+        );
         assert_eq!(
-            v.iter().find(|i| i.display_insert() == "/verify").unwrap().desc,
+            v.iter()
+                .find(|i| i.display_insert() == "/verify")
+                .unwrap()
+                .desc,
             "Verify a code change end-to-end"
         );
     }
@@ -684,9 +719,15 @@ mod tests {
         // A registry entry that reuses a builtin name never duplicates the
         // builtin row — the builtin surface is authoritative.
         let reg = rows(&[("/help", "SHOULD NOT WIN")]);
-        let all = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &reg);
+        let all = command_items_merged(
+            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &reg,
+        );
         assert_eq!(all.len(), crate::command::advertised().count());
-        let help: Vec<_> = all.iter().filter(|i| i.display_insert() == "/help").collect();
+        let help: Vec<_> = all
+            .iter()
+            .filter(|i| i.display_insert() == "/help")
+            .collect();
         assert_eq!(help.len(), 1);
         assert_ne!(help[0].desc, "SHOULD NOT WIN");
     }
@@ -696,15 +737,24 @@ mod tests {
         let mut rows = rows(&[("/help", "Mod help"), ("/secret", "Secret command")]);
         rows[0].replaces_builtin = true;
         rows[1].hidden = true;
-        let all = command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/"), &rows);
+        let all = command_items_merged(
+            &core::types::utf16_json::Utf16JsonProjection::from("/"),
+            &rows,
+        );
         assert_eq!(
-            all.iter().find(|item| item.display_insert() == "/help").unwrap().desc,
+            all.iter()
+                .find(|item| item.display_insert() == "/help")
+                .unwrap()
+                .desc,
             "Mod help"
         );
         assert!(!all.iter().any(|item| item.display_insert() == "/secret"));
-        assert!(command_items_merged(&core::types::utf16_json::Utf16JsonProjection::from("/secret"), &rows)
-            .iter()
-            .any(|item| item.display_insert() == "/secret"));
+        assert!(command_items_merged(
+            &core::types::utf16_json::Utf16JsonProjection::from("/secret"),
+            &rows
+        )
+        .iter()
+        .any(|item| item.display_insert() == "/secret"));
     }
 
     #[test]

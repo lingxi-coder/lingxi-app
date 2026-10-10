@@ -72,7 +72,10 @@ impl Band {
             Band::Review => "",
             Band::Blocked => "Sessions that have a question or need your decision land here",
             Band::Working => {
-                "Sessions Claude is actively working on \u{2014} they keep running even if you close the terminal"
+                static DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+                    format!("Sessions {} is actively working on \u{2014} they keep running even if you close the terminal", branding::PRODUCT_NAME)
+                });
+                DESCRIPTION.as_str()
             }
             Band::Done => "Finished sessions wait here for you to review",
         }
@@ -492,7 +495,7 @@ mod tests {
         );
         assert_eq!(
             Band::Working.description(),
-            "Sessions Claude is actively working on \u{2014} they keep running even if you close the terminal"
+            format!("Sessions {} is actively working on \u{2014} they keep running even if you close the terminal", branding::PRODUCT_NAME)
         );
         assert_eq!(
             Band::Done.description(),

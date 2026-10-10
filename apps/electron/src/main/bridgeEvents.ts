@@ -58,6 +58,13 @@ export function isTurnOwnedEvent(event: ClientEvent): boolean {
     'cost_update',
     'usage_update',
     'api_retry',
+    'query_model_change',
+    'assistant_block_start',
+    'assistant_block_identity',
+    'tombstone',
+    'refusal_continuation',
+    'user_transcript_row_identity',
+    'assistant_transcript_row_uuids',
   ].includes(event.type);
 }
 
@@ -82,6 +89,13 @@ export const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'error',
   'message_identity',
   'message_retracted',
+  'query_model_change',
+  'assistant_block_start',
+  'assistant_block_identity',
+  'tombstone',
+  'refusal_continuation',
+  'user_transcript_row_identity',
+  'assistant_transcript_row_uuids',
   'system_notice',
   'ui_log',
   'ui_status',

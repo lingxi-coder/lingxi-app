@@ -876,6 +876,72 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn server_fallback_callbacks_keep_row_identity_and_continuation_facts_ordered() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream = BridgeOutputStream::new(tx);
+        let row_id = lingxi_core::types::MessageId::new();
+        stream
+            .emit_server_fallback_query_model_change("claude-sonnet-4")
+            .await;
+        stream.emit_assistant_block_start(41).await;
+        stream.emit_assistant_block_identity(41, &row_id).await;
+        stream
+            .emit_server_fallback_tombstone(
+                &ServerFallbackTombstoneMessage {
+                    uuid: row_id,
+                    message_type: "assistant".into(),
+                    timestamp: "2026-10-03T12:00:00.000Z".into(),
+                    request_id: Some("request-1".into()),
+                    request_ref: Some(serde_json::json!({"lane": "main"})),
+                    provider_message_id: Some("provider-1".into()),
+                    model: Some("claude-sonnet-4".into()),
+                    stop_reason: Some("refusal".into()),
+                    stop_details: None,
+                    usage: None,
+                    content: vec![lingxi_core::types::ContentBlock::Text {
+                        text: "old refusal".into(),
+                    }],
+                    is_api_error_message: None,
+                    supersedes_uuids: None,
+                },
+                true,
+            )
+            .await;
+        stream
+            .emit_refusal_continuation_begin("retained", &[row_id], true)
+            .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::ServerFallbackQueryModelChange { to_model }) if to_model == "claude-sonnet-4"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::AssistantBlockStart { block_key: 41 })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::AssistantBlockIdentity { block_key: 41, message_uuid })
+                if message_uuid == row_id.as_uuid().to_string()
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::ServerFallbackTombstone { message, display_only: true })
+                if message.uuid == row_id && message.request_id.as_deref() == Some("request-1")
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::RefusalContinuation {
+                phase: RefusalContinuationPhase::Begin,
+                salvage_text,
+                join: RefusalContinuationJoin::Exact,
+                replaces_uuids,
+                display_salvage_text: true,
+            }) if salvage_text == "retained" && replaces_uuids == vec![row_id]
+        ));
+    }
+
+    #[tokio::test]
     async fn assistant_identity_and_retraction_preserve_exact_id() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let stream = BridgeOutputStream::new(tx);
@@ -990,6 +1056,43 @@ mod tests {
         assert!(matches!(
             rx.recv().await.unwrap(),
             TurnEvent::UiStatus { plugin, text: None } if plugin == "plugin"
+        ));
+    }
+
+    #[tokio::test]
+    async fn transcript_row_identity_events_keep_persisted_uuids_separate_from_message_ids() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let message_id = lingxi_core::types::MessageId::new();
+        let persisted_uuid = "83f67a72-a806-49b7-9a18-e57307177a86";
+        bridge
+            .emit_user_transcript_row_identity("ui-row-token", persisted_uuid)
+            .await;
+        bridge
+            .emit_assistant_transcript_row_uuids(&message_id, &[Some(persisted_uuid.to_string())])
+            .await;
+
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::TranscriptRowIdentity { row_token, uuid }
+                if row_token == "ui-row-token" && uuid == persisted_uuid
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::AssistantTranscriptRowUuids { message_id: actual, uuids }
+                if actual == message_id && uuids == vec![Some(persisted_uuid.to_string())]
+        ));
+    }
+
+    #[tokio::test]
+    async fn emit_mod_log_keeps_plugin_and_text_separate() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        bridge.emit_mod_log("review", "Found a mismatch").await;
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::UiLog { plugin, text }
+                if plugin == "review" && text == "Found a mismatch"
         ));
     }
 

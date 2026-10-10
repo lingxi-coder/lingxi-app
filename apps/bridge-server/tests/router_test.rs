@@ -191,6 +191,12 @@ struct MockAuth;
 
 #[async_trait]
 impl AuthHandle for MockAuth {
+    fn register_account_change_observer(
+        &self,
+        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+    ) {
+    }
+
     async fn login(&self) -> Result<LoginInfo, AuthError> {
         Ok(LoginInfo {
             email: "u@x.com".into(),
@@ -2339,6 +2345,8 @@ fn seed_session_agent_transcript(
             "{}\n",
             serde_json::json!({
                 "message": message,
+                "uuid": message.id().as_uuid().to_string(),
+                "message_index": 0,
                 "status": "idle",
                 "agent_name": "Runtime reviewer",
                 "agent_type": "reviewer",
@@ -2347,7 +2355,63 @@ fn seed_session_agent_transcript(
         ),
     )
     .unwrap();
+    std::fs::write(
+        path.with_file_name(format!("agent-{agent_id}.jsonl.meta")),
+        "{\"next_message_index\":1}",
+    )
+    .unwrap();
     (agent_id, path)
+}
+
+#[tokio::test]
+async fn session_agent_main_snapshot_uses_the_shared_writer_identity_without_rewriting_native_bytes(
+) {
+    let root = tempfile::tempdir().unwrap();
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    let session_id = handle.current_session_id().await;
+    let message_id = "11111111-1111-4111-8111-111111111111";
+    seed_session_file_with_ids(
+        root.path(),
+        &session_id.as_uuid().to_string(),
+        message_id,
+        "native input",
+    );
+    let cwd = root.path().to_string_lossy().into_owned();
+    let home = root.path().join(".lingxi");
+    let path = orchestrator::transcript_paths::main_transcript_path(
+        &home,
+        &cwd,
+        &session_id.as_uuid().to_string(),
+    );
+    let before = std::fs::read(&path).unwrap();
+    let fs = Arc::new(NativeFileSystem::new(root.path().to_path_buf()));
+    let writer = Arc::new(session::jsonl::JsonlWriter::new(path.clone(), fs.clone()));
+    let router = router_with_store(handle, root.path()).with_session_store(
+        SessionStoreContext::new(home, cwd, fs).with_transcript_writer(Some(writer)),
+    );
+    let sink = CapturingSink::arc();
+    router
+        .route(
+            ClientCommand::LoadSessionAgentTranscript {
+                agent_id: "main".into(),
+            },
+            sink.clone(),
+        )
+        .await;
+    let events = sink.events().await;
+    let [ClientEvent::SessionAgentTranscript {
+        messages,
+        next_message_index,
+        ..
+    }] = events.as_slice()
+    else {
+        panic!("expected main transcript snapshot: {events:?}");
+    };
+    assert_eq!(*next_message_index, 1);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].message_uuid, message_id);
+    assert_eq!(messages[0].message_index, 0);
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[tokio::test]

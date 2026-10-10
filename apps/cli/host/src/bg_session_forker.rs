@@ -20,7 +20,7 @@
 //! depends on `apps/cli`.
 
 use async_trait::async_trait;
-use lingxi_core::host::bg_session_forker::{BgForkError, BgSessionForker};
+use lingxi_core::host::bg_session_forker::{BgForkError, BgSessionForker, BgSessionSnapshot};
 use lingxi_core::host::FileSystem;
 #[cfg(unix)]
 use platform_posix::PosixFileSystem as HostFileSystem;
@@ -145,7 +145,7 @@ impl CliBgSessionForker {
         let session_path =
             session::jsonl::path::session_path(&self.config_home, &cwd, &new_session_id);
         let lines = orchestrator::bg_snapshot::history_to_jsonl_lines(
-            history,
+            conversation,
             &new_session_id,
             &cwd,
             &self.version,

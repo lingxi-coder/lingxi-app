@@ -66,6 +66,20 @@ function render(node: React.ReactElement): string {
   );
 }
 
+function renderWithModUiHost(node: React.ReactElement): string {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { lingxi: { modUi: {} } },
+  });
+  try {
+    return render(node);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+}
+
 test('finished shell cards and groups do not announce that commands are still running', () => {
   for (const status of ['running', 'done', 'error'] as const) {
     const item: ToolRunItem = {
@@ -510,6 +524,41 @@ test('short tool bodies and diffs stay unmounted until explicitly opened', () =>
   const openBody = render(React.createElement(ToolCall, { item: bodyItem, open: true, onSetOpen: () => {} }));
   assert.match(openBody, /body-visible-only-when-open/);
   assert.doesNotMatch(openBody, /code-card/);
+});
+
+test('settled ToolResult site stays mounted in the collapsed result slot', () => {
+  const item: ToolRunItem = {
+    ...READ,
+    nativeOutput: { content: 'native result' },
+    result: { headline: 'Read complete', body: 'result-slot-body', body_lines: 1 },
+  };
+  const renderTool = (open: boolean) => renderWithModUiHost(React.createElement(ToolCall, {
+    item,
+    modUiSessionId: 'session-native-ui',
+    open,
+    onSetOpen: () => {},
+  }));
+
+  const collapsed = renderTool(false);
+  assert.match(collapsed, /data-component="ToolUse"/);
+  assert.match(collapsed, /data-component="ToolResult"/);
+  assert.match(collapsed, /style="[^"]*display:none/);
+  assert.doesNotMatch(collapsed, /result-slot-body/);
+  assert.match(collapsed, /Read complete/);
+
+  const expanded = renderTool(true);
+  assert.equal(expanded.split('result-slot-body').length - 1, 1);
+});
+
+test('settled ToolResult site also exists when Product has no expandable body', () => {
+  const item: ToolRunItem = { ...READ, nativeOutput: { content: '' } };
+  const html = renderWithModUiHost(React.createElement(ToolCall, {
+    item,
+    modUiSessionId: 'session-native-ui',
+    onSetOpen: () => {},
+  }));
+  assert.match(html, /data-component="ToolResult"/);
+  assert.doesNotMatch(html, /aria-expanded=/);
 });
 
 test('an open JSON tool result uses the shared formatted code card', () => {

@@ -452,7 +452,11 @@ function validateSessionAgentMessageRow(v: unknown): void {
   assert.ok(Number.isSafeInteger(row['message_index']) && (row['message_index'] as number) >= 0);
   assert.ok(isString(row['message_uuid']));
   validateMessage(row['message']);
-  if ('api_error_json' in row) assert.ok(isString(row['api_error_json']));
+  if ('api_error_json' in row) {
+    assert.ok(isString(row['api_error_json']));
+    const parsed: unknown = JSON.parse(row['api_error_json'] as string);
+    assert.ok(parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed));
+  }
 }
 
 function validateCost(v: unknown): void {
@@ -1464,6 +1468,31 @@ function validateCommand(name: string, v: unknown): void {
   const c = v as ClientCommand;
   const o = rec(c);
   switch (o['type']) {
+    case 'ui_attach':
+      assert.ok(['desktop', 'mobile', 'vscode'].includes(o['surface'] as string));
+      assert.ok(isString(o['client_id']));
+      break;
+    case 'ui_detach':
+      assert.ok(isString(o['client_id']));
+      break;
+    case 'ui_client_module':
+      exactObjectKeys(o, ['type', 'request_id', 'plugin']);
+      assert.ok(isString(o['request_id']) && isString(o['plugin']));
+      break;
+    case 'ui_render':
+    case 'ui_message':
+    case 'ui_client_fault':
+    case 'ui_client_press':
+    case 'ui_press':
+    case 'ui_input':
+    case 'ui_select':
+      assert.ok(isString(o['request_id']) && isString(o['request_json']));
+      rec(JSON.parse(o['request_json'] as string));
+      break;
+    case 'ui_client_operation':
+      assert.ok(isString(o['request_id']) && isString(o['operation_json']));
+      rec(JSON.parse(o['operation_json'] as string));
+      break;
     case 'send_prompt':
       assert.ok(isString(o['text']));
       assert.ok(Array.isArray(o['images']));
@@ -1874,6 +1903,26 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(isString(o['terminal_reason']) && isString(o['stop_reason']));
       assert.deepEqual(validateClientEvent(v), v);
       break;
+    case 'query_model_change':
+    case 'assistant_block_start':
+    case 'assistant_block_identity':
+    case 'tombstone':
+    case 'refusal_continuation':
+    case 'user_transcript_row_identity':
+    case 'assistant_transcript_row_uuids':
+    case 'ui_control_result':
+    case 'ui_invalidate':
+      assert.equal(validateClientEvent(v).type, o['type']);
+      break;
+    case 'ui_client_frame':
+      // The Rust DTO stores opaque JSON; these serde fixtures exercise that
+      // envelope. ui-runtime.test.ts checks valid VM payloads and rejects
+      // malformed revisions through the production validator.
+      exactObjectKeys(o, ['type', 'runtime_id', 'frame_json']);
+      assert.ok(isString(o['runtime_id']) && isString(o['frame_json']));
+      rec(JSON.parse(o['frame_json'] as string));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
     case 'error':
       tag(o['kind'], (rec(o['kind'])['type']) as string);
       assert.ok(
@@ -2039,7 +2088,20 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['next_message_index']) &&
           isNumber(o['revision']),
       );
-      for (const row of o['messages'] as unknown[]) validateSessionAgentMessageRow(row);
+      {
+        const indexes = new Set<number>();
+        const uuids = new Set<string>();
+        for (const value of o['messages'] as unknown[]) {
+          validateSessionAgentMessageRow(value);
+          const row = rec(value);
+          const index = row['message_index'] as number;
+          const uuid = row['message_uuid'] as string;
+          assert.ok(!indexes.has(index), `duplicate session-agent message index ${index}`);
+          assert.ok(!uuids.has(uuid), `duplicate session-agent message UUID ${uuid}`);
+          indexes.add(index);
+          uuids.add(uuid);
+        }
+      }
       assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'session_agent_updated':
@@ -2053,7 +2115,9 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(
         isString(o['session_id']) &&
           isString(o['agent_id']) &&
-          isNumber(o['message_index']),
+          Number.isSafeInteger(o['message_index']) &&
+          (o['message_index'] as number) >= 0 &&
+          isString(o['message_uuid']),
       );
       validateSessionAgentMessageRow({
         message_index: o['message_index'],
@@ -2061,6 +2125,11 @@ function validateEvent(name: string, v: unknown): void {
         message: o['message'],
         ...(o['api_error_json'] === undefined ? {} : { api_error_json: o['api_error_json'] }),
       });
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'session_agent_tombstone':
+      exactObjectKeys(o, ['type', 'session_id', 'agent_id', 'message_uuid', 'display_only'], [], `event snapshot ${name}`);
+      assert.ok(isString(o['session_id']) && isString(o['agent_id']) && isString(o['message_uuid']) && isBool(o['display_only']));
       assert.deepEqual(validateClientEvent(v), v);
       break;
     case 'model_list':
@@ -2435,12 +2504,6 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(isBool(o['display_salvage_text']));
       assert.deepEqual(validateClientEvent(v), v);
       break;
-    case 'session_agent_tombstone':
-      exactObjectKeys(o, ['type', 'session_id', 'agent_id', 'message_uuid', 'display_only'], [], `event snapshot ${name}`);
-      assert.ok(isString(o['session_id']) && isString(o['agent_id']) && isString(o['message_uuid']));
-      assert.ok(isBool(o['display_only']));
-      assert.deepEqual(validateClientEvent(v), v);
-      break;
     case 'tombstone': {
       exactObjectKeys(o, ['type', 'message', 'display_only'], [], `event snapshot ${name}`);
       const message = rec(o['message']);
@@ -2612,24 +2675,12 @@ test('every event snapshot parses as ClientEvent', () => {
 // runtime direction: the record's keys must also match what the goldens
 // actually carry, so a golden with no union member (or a union member with no
 // golden) fails HERE, by name, instead of staying silent.
-test('ALL_CLIENT_COMMAND_TYPES matches the `type` tags on disk exactly', () => {
-  const onDisk = [...typeTagsOnDisk('command')].sort();
-  const declared = Object.keys(ALL_CLIENT_COMMAND_TYPES).sort();
-  assert.deepEqual(
-    declared,
-    onDisk,
-    'ALL_CLIENT_COMMAND_TYPES (src/protocolCoverage.ts) must declare exactly the `type` tags carried by the command goldens — no more, no fewer',
-  );
+test('ALL_CLIENT_COMMAND_TYPES matches the locked runtime exactly', () => {
+  assert.deepEqual(Object.keys(ALL_CLIENT_COMMAND_TYPES).sort(), [...typeTagsOnDisk('command')].sort());
 });
 
-test('ALL_CLIENT_EVENT_TYPES matches the `type` tags on disk exactly', () => {
-  const onDisk = [...typeTagsOnDisk('event')].sort();
-  const declared = Object.keys(ALL_CLIENT_EVENT_TYPES).sort();
-  assert.deepEqual(
-    declared,
-    onDisk,
-    'ALL_CLIENT_EVENT_TYPES (src/protocolCoverage.ts) must declare exactly the `type` tags carried by the event goldens — no more, no fewer',
-  );
+test('ALL_CLIENT_EVENT_TYPES matches the locked runtime exactly', () => {
+  assert.deepEqual(Object.keys(ALL_CLIENT_EVENT_TYPES).sort(), [...typeTagsOnDisk('event')].sort());
 });
 
 test('terminal_api_error validates its required terminal facts and optional HTTP status', () => {

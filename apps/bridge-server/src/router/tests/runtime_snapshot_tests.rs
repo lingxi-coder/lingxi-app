@@ -10,6 +10,12 @@ use std::sync::{Arc, Mutex};
 struct SnapshotAuth;
 #[async_trait::async_trait]
 impl AuthHandle for SnapshotAuth {
+    fn register_account_change_observer(
+        &self,
+        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+    ) {
+    }
+
     async fn login(&self) -> Result<LoginInfo, AuthError> {
         unreachable!()
     }
@@ -219,11 +225,9 @@ async fn runtime_snapshot_contains_all_live_task_kinds_and_terminal_rows() {
     }) if request_id == "desktop-runtime-snapshot"));
     tasks.records.lock().unwrap().clear();
     let empty = router.runtime_snapshot().await.unwrap();
-    assert!(
-        !empty
-            .iter()
-            .any(|event| matches!(event, ClientEvent::TaskRow { .. }))
-    );
+    assert!(!empty
+        .iter()
+        .any(|event| matches!(event, ClientEvent::TaskRow { .. })));
     assert!(matches!(
         empty.last(),
         Some(ClientEvent::TaskListComplete {

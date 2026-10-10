@@ -13,7 +13,6 @@
 //! receives the prompt + a per-turn `CancellationToken` (the caller spawns the
 //! real turn; the widget cancels it on Ctrl-C/Esc).
 
-use crate::RataTerminal;
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::{
     ConnectAction, FusionSetupAction, PermissionAction, PluginAction, TaskAction, WebAction,
@@ -21,6 +20,7 @@ use crate::bottom_pane::{
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
 use crate::terminal::TerminalSession;
+use crate::RataTerminal;
 #[cfg(test)]
 use crossterm::event::KeyEvent;
 use crossterm::event::{self, Event, KeyEventKind};

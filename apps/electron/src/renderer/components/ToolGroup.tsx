@@ -8,17 +8,18 @@ import { useT } from '../theme/ThemeContext';
 
 interface ToolGroupProps {
   group: TranscriptToolGroup;
+  modUiSessionId?: string;
   open: boolean;
   toolOpen(id: string): boolean | undefined;
   onSetOpen(id: string, next: boolean): void;
 }
 
-export function ToolGroup({ group, open, toolOpen, onSetOpen }: ToolGroupProps) {
+export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: ToolGroupProps) {
   const t = useT();
   const active = group.tools.filter((tool) => tool.status === 'running');
   if (active.length > 0) {
     return <div className="transcript-tool-group" aria-label="Running tools">
-      {active.map((tool) => <ToolCall key={tool.id} item={tool} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
+      {active.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
     </div>;
   }
   const singleTool = group.tools.length === 1 ? group.tools[0] : undefined;
@@ -26,7 +27,7 @@ export function ToolGroup({ group, open, toolOpen, onSetOpen }: ToolGroupProps) 
     const singleView = toolDisplayHeader(singleTool);
     if (/permission/i.test(`${singleTool.tool} ${singleView.label} ${singleView.title}`)) {
       return <div className="transcript-tool-group">
-        <ToolCall item={singleTool} open={toolOpen(singleTool.id)} onSetOpen={onSetOpen} />
+        <ToolCall item={singleTool} modUiSessionId={modUiSessionId} open={toolOpen(singleTool.id)} onSetOpen={onSetOpen} />
       </div>;
     }
   }
@@ -49,7 +50,7 @@ export function ToolGroup({ group, open, toolOpen, onSetOpen }: ToolGroupProps) 
         {failed > 0 && <span style={{ flexShrink: 0, color: t.danger }}>{failureSummary}</span>}
       </>}
       bodyStyle={{ borderLeft: `1px solid ${t.border}`, paddingLeft: 12, margin: '4px 0 0 8px' }}>
-      {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
+      {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
     </Disclosure>
   </div>;
 }

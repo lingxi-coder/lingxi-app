@@ -23,11 +23,13 @@ pub(crate) const CLAIM_OWNER_DELETE: &str = "delete";
 pub(crate) const BG_WORKER_GENERATION_ENV: &str = "LINGXI_BG_WORKER_GENERATION";
 pub(crate) const BG_WORKER_CLAIM_TOKEN_ENV: &str = "LINGXI_BG_WORKER_CLAIM_TOKEN";
 
-/// The locked `claude respawn --help` text from 2.1.252.
-pub const RESPAWN_HELP: &str = "Usage: claude respawn <id>|--all\n\n  Restart a background session (or all of them) so it picks up the current Claude binary.\n";
+/// Current help for restarting background sessions with the product CLI.
+pub fn respawn_help() -> String {
+    format!("Usage: lingxi-cli respawn <id>|--all\n\n  Restart a background session (or all of them) so it picks up the current {} binary.\n", branding::PRODUCT_NAME)
+}
 
 /// Bare usage emitted for a missing target or an invalid combination.
-pub const RESPAWN_USAGE: &str = "usage: claude respawn <id>|--all";
+pub const RESPAWN_USAGE: &str = "usage: lingxi-cli respawn <id>|--all";
 
 #[derive(Debug, Clone, Args)]
 #[command(disable_help_flag = true)]
@@ -531,7 +533,7 @@ fn print_single_error(short: &str, reason: &str) {
 /// Run the `respawn` family.
 pub async fn run(cli: &Cli) -> i32 {
     if cli.help {
-        print!("{RESPAWN_HELP}");
+        print!("{}", respawn_help());
         return crate::exit_codes::SUCCESS;
     }
     if cli.all && cli.id.is_some() {
@@ -697,10 +699,10 @@ mod tests {
     #[test]
     fn help_and_usage_are_byte_exact() {
         assert_eq!(
-            RESPAWN_HELP,
-            "Usage: claude respawn <id>|--all\n\n  Restart a background session (or all of them) so it picks up the current Claude binary.\n"
+            respawn_help(),
+            format!("Usage: lingxi-cli respawn <id>|--all\n\n  Restart a background session (or all of them) so it picks up the current {} binary.\n", branding::PRODUCT_NAME)
         );
-        assert_eq!(RESPAWN_USAGE, "usage: claude respawn <id>|--all");
+        assert_eq!(RESPAWN_USAGE, "usage: lingxi-cli respawn <id>|--all");
     }
 
     #[test]

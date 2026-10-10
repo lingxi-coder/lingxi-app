@@ -593,18 +593,13 @@ impl BottomPane {
     ///
     /// [`ChatWidget::handle_slash`]: crate::chat_widget::ChatWidget::handle_slash
     #[must_use]
-    pub fn is_registry_command(
-        &self,
-        name: &core::types::utf16_json::Utf16JsonProjection,
-    ) -> bool {
+    pub fn is_registry_command(&self, name: &core::types::utf16_json::Utf16JsonProjection) -> bool {
         let mut name_units = vec![b'/' as u16];
         name_units.extend(name.string_units("").unwrap_or_default());
-        self.registry_commands
-            .iter()
-            .any(|r| {
-                r.name.code_units == name_units
-                    || r.aliases.iter().any(|alias| alias.code_units == name_units)
-            })
+        self.registry_commands.iter().any(|r| {
+            r.name.code_units == name_units
+                || r.aliases.iter().any(|alias| alias.code_units == name_units)
+        })
     }
 
     /// Route one key press. Layered: the active view owns the keyboard until
@@ -1144,11 +1139,7 @@ impl BottomPane {
     }
 
     /// Show a transient Mod notification below the composer.
-    pub fn set_mod_toast(
-        &mut self,
-        text: client::protocol::text::ClientTextDto,
-        timeout_ms: u64,
-    ) {
+    pub fn set_mod_toast(&mut self, text: client::protocol::text::ClientTextDto, timeout_ms: u64) {
         self.mod_toast = Some((text, Instant::now() + Duration::from_millis(timeout_ms)));
     }
 
@@ -1190,7 +1181,9 @@ impl BottomPane {
             return 0;
         }
         let rendered_rows = u16::try_from(self.mod_render_lines.len()).unwrap_or(u16::MAX);
-        let baseline = self.desired_height_for(width, running).saturating_sub(rendered_rows);
+        let baseline = self
+            .desired_height_for(width, running)
+            .saturating_sub(rendered_rows);
         height_limit.saturating_sub(baseline)
     }
 
@@ -1408,11 +1401,8 @@ impl BottomPane {
         );
         let units = units[start_unit..end_unit].to_vec();
         Some(
-            core::types::utf16_json::Utf16JsonProjection::root_string(
-                trimmed.to_owned(),
-                units,
-            )
-            .expect("trimmed display matches the exact source units"),
+            core::types::utf16_json::Utf16JsonProjection::root_string(trimmed.to_owned(), units)
+                .expect("trimmed display matches the exact source units"),
         )
     }
 
@@ -1756,7 +1746,12 @@ impl BottomPane {
                 Some(BottomPaneOutcome::Consumed)
             }
             KeyCode::Tab => {
-                let source_insert = self.completion.as_ref()?.selected_source_insert().code_units.clone();
+                let source_insert = self
+                    .completion
+                    .as_ref()?
+                    .selected_source_insert()
+                    .code_units
+                    .clone();
                 let insert = String::from_utf16_lossy(&source_insert);
                 // Emoji and `@file` tokens complete in place; a `/command`
                 // replaces the whole buffer.
@@ -1792,7 +1787,12 @@ impl BottomPane {
                 {
                     return None;
                 }
-                let source_insert = self.completion.as_ref()?.selected_source_insert().code_units.clone();
+                let source_insert = self
+                    .completion
+                    .as_ref()?
+                    .selected_source_insert()
+                    .code_units
+                    .clone();
                 let insert = String::from_utf16_lossy(&source_insert);
                 if let Some((start, _)) = self
                     .emoji_completion_enabled
@@ -2896,7 +2896,9 @@ mod tests {
         let units = vec![b's' as u16, b't' as u16, 0xd800, b'x' as u16];
         pane.set_mod_status(
             "plugin".into(),
-            Some(client::protocol::text::ClientTextDto::from_code_units(units.clone())),
+            Some(client::protocol::text::ClientTextDto::from_code_units(
+                units.clone(),
+            )),
         );
         assert_eq!(pane.mod_statuses[0].1.code_units, units);
         assert_eq!(pane.mod_notification_lines()[0].spans[0].content, "st�x");
@@ -3343,7 +3345,11 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text.string_at(""), Some(big.as_str()), "submit expands the placeholder to the paste");
+        assert_eq!(
+            text.string_at(""),
+            Some(big.as_str()),
+            "submit expands the placeholder to the paste"
+        );
     }
 
     #[test]
@@ -3359,7 +3365,11 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text.string_at(""), Some(format!("{big}{big}").as_str()), "both placeholders expand");
+        assert_eq!(
+            text.string_at(""),
+            Some(format!("{big}{big}").as_str()),
+            "both placeholders expand"
+        );
     }
 
     #[test]
@@ -3370,7 +3380,11 @@ mod tests {
         let BottomPaneOutcome::Submitted(text) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected submit");
         };
-        assert_eq!(text.string_at(""), Some("keep this"), "deleted placeholder drops the paste");
+        assert_eq!(
+            text.string_at(""),
+            Some("keep this"),
+            "deleted placeholder drops the paste"
+        );
     }
 
     #[test]
@@ -3391,7 +3405,11 @@ mod tests {
         let BottomPaneOutcome::Submitted(second) = pane.handle_key(key(KeyCode::Enter)) else {
             panic!("expected resubmit");
         };
-        assert_eq!(second.string_at(""), Some(big.as_str()), "recalled placeholder re-expands to the paste");
+        assert_eq!(
+            second.string_at(""),
+            Some(big.as_str()),
+            "recalled placeholder re-expands to the paste"
+        );
     }
 
     #[test]
@@ -3899,7 +3917,8 @@ mod tests {
         }]);
         typ(&mut malformed_source_pane, "/mode� ");
         assert_eq!(malformed_source_pane.command_argument_hint(), None);
-        assert!(!malformed_source_pane.is_registry_command(&core::types::utf16_json::Utf16JsonProjection::from("mode�")));
+        assert!(!malformed_source_pane
+            .is_registry_command(&core::types::utf16_json::Utf16JsonProjection::from("mode�")));
         assert!(malformed_source_pane.is_registry_command(
             &core::types::utf16_json::Utf16JsonProjection::parse(r#""mode\ud800""#).unwrap()
         ));
@@ -4023,7 +4042,12 @@ mod tests {
         assert_eq!(pane.composer().text(), "   ", "blank buffer untouched");
         let mut pane = super::BottomPane::new(Theme::dark());
         typ(&mut pane, "  hi there  ");
-        assert_eq!(pane.take_submission_state().and_then(|value| value.string_at("").map(str::to_owned)).as_deref(), Some("hi there"));
+        assert_eq!(
+            pane.take_submission_state()
+                .and_then(|value| value.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("hi there")
+        );
         assert!(pane.composer_is_empty());
         // The submission was pushed to history.
         let _ = pane.handle_key(key(KeyCode::Up));
@@ -4066,7 +4090,10 @@ mod tests {
         }]);
         typ(&mut pane, "/c");
 
-        assert!(matches!(pane.handle_key(key(KeyCode::Tab)), BottomPaneOutcome::Consumed));
+        assert!(matches!(
+            pane.handle_key(key(KeyCode::Tab)),
+            BottomPaneOutcome::Consumed
+        ));
         assert_eq!(pane.composer().source_units(), name);
 
         let BottomPaneOutcome::Submitted(submitted) = pane.handle_key(key(KeyCode::Enter)) else {
@@ -4087,7 +4114,12 @@ mod tests {
         let mut pane = super::BottomPane::new(Theme::dark());
         pane.set_prompt_history_store(old.clone());
         typ(&mut pane, "old prompt");
-        assert_eq!(pane.take_submission_state().and_then(|value| value.string_at("").map(str::to_owned)).as_deref(), Some("old prompt"));
+        assert_eq!(
+            pane.take_submission_state()
+                .and_then(|value| value.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("old prompt")
+        );
         assert!(old.flush());
         let new = std::sync::Arc::new(session::prompt_history::PromptHistoryStore::new(
             home.path(),
@@ -4096,7 +4128,12 @@ mod tests {
         ));
         pane.reset_prompt_history_store(new.clone());
         typ(&mut pane, "new prompt");
-        assert_eq!(pane.take_submission_state().and_then(|value| value.string_at("").map(str::to_owned)).as_deref(), Some("new prompt"));
+        assert_eq!(
+            pane.take_submission_state()
+                .and_then(|value| value.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("new prompt")
+        );
         assert!(new.flush());
         let rows: Vec<serde_json::Value> =
             std::fs::read_to_string(home.path().join("history.jsonl"))
@@ -4123,7 +4160,9 @@ mod tests {
         pane.set_prompt_history_store(store.clone());
         typ(&mut pane, "persisted prompt");
         assert_eq!(
-            pane.take_submission_state().and_then(|value| value.string_at("").map(str::to_owned)).as_deref(),
+            pane.take_submission_state()
+                .and_then(|value| value.string_at("").map(str::to_owned))
+                .as_deref(),
             Some("persisted prompt")
         );
         // The submit spawned a background flush; a direct flush serializes

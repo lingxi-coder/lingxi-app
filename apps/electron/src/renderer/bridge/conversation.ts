@@ -35,18 +35,19 @@ import { spawnResultAgentId } from '../components/transcriptAgentPlacement';
  *
  * ## Two rules this file exists to enforce
  *
- * 1. **Never re-derive presentation from `input_json`/`result_json`.** The
- *    engine derives the header and result block ONCE and ships them; four
- *    clients re-parsing the payload is exactly the drift this deletes. The
- *    shared `fallbackToolHeader`/`fallbackToolBody` are for an OLDER engine
- *    that sends neither field, and are the only summarizers left.
+ * 1. **Never re-derive Product presentation from `input_json`/`result_json`.**
+ *    The engine derives the header and result block ONCE and ships them; four
+ *    clients re-parsing the payload is exactly the drift this deletes. A
+ *    parsed copy is retained only for Native UI render-site props. The shared
+ *    `fallbackToolHeader`/`fallbackToolBody` remain the path for an older
+ *    engine that sends neither derived field.
  * 2. **Return the IDENTICAL state object when nothing changed.**
  *    `tool_heartbeat` arrives at ~1 Hz per in-flight tool and the Stage is not
  *    virtualized; a fresh state object every second repaints the whole
  *    transcript for no visible gain.
  */
 
-import type { ClientEvent, ImageRefDto, MessageDto, MessageImageDto, PlanTaskDto } from '@lingxi/bridge-client';
+import type { ClientEvent, ImageRefDto, MessageDto, MessageImageDto, PlanTaskDto, UiJsonValue } from '@lingxi/bridge-client';
 // The SUBPATH, not the barrel: `@lingxi/bridge-client` re-exports `lockfile.js`,
 // which imports `node:fs`/`node:os`. A type-only import of the barrel is erased,
 // but a VALUE import of it drags Node builtins into the renderer bundle and the
@@ -159,6 +160,16 @@ export interface ConversationState {
   readonly modStatuses: readonly { readonly plugin: string; readonly text: string }[];
   /** Stable id of the optimistic `/compact` status row awaiting a terminal event. */
   readonly activeCompactionId: string | null;
+  /** Last model selected for this query by an accepted server-fallback hop. */
+  readonly serverFallbackModel: string | null;
+  /** Current transient assistant content-block key, before its UUID is assigned. */
+  readonly assistantBlockKey: number | null;
+  /** Block key → rendered item id, retained until completion/tombstone processing. */
+  readonly assistantBlockItemIds: Readonly<Record<string, string>>;
+  /** Block key → persisted row UUID, including tool blocks whose card starts later. */
+  readonly assistantBlockUuids: Readonly<Record<string, string>>;
+  /** Pending refusal prefix for the next accepted assistant block. */
+  readonly pendingRefusalContinuation: { readonly salvageText: string; readonly displaySalvageText: boolean } | null;
 }
 
 /** A fresh, empty conversation (no items, not running). */
@@ -183,6 +194,11 @@ export function emptyConversation(): ConversationState {
     modToast: null,
     modStatuses: [],
     activeCompactionId: null,
+    serverFallbackModel: null,
+    assistantBlockKey: null,
+    assistantBlockItemIds: {},
+    assistantBlockUuids: {},
+    pendingRefusalContinuation: null,
   };
 }
 
@@ -192,6 +208,23 @@ function closeThinking(items: RunItem[], idx: number): void {
     const prev = items[idx] as Extract<RunItem, { type: 'thinking' }>;
     if (!prev.done) items[idx] = { ...prev, done: true };
   }
+}
+
+function parseNativeToolJson(value: string): UiJsonValue {
+  try {
+    return JSON.parse(value) as UiJsonValue;
+  } catch {
+    // Keep the exact payload available to a render hook if an older host sent
+    // non-JSON text. The built-in transcript still uses its pre-derived view.
+    return value;
+  }
+}
+
+function commandArguments(raw: string | null): string | undefined {
+  if (raw === null) return undefined;
+  const trimmed = raw.trim();
+  const firstWhitespace = trimmed.search(/\s/);
+  return firstWhitespace < 0 ? '' : trimmed.slice(firstWhitespace).trimStart();
 }
 
 /**
@@ -217,6 +250,48 @@ function settleRunningTools(items: RunItem[], status: 'done' | 'error'): boolean
     changed = true;
   }
   return changed;
+}
+
+/** Remove renderer rows named by durable JSONL UUIDs and repair local indexes. */
+function removeTranscriptRows(state: ConversationState, uuids: readonly string[]): ConversationState {
+  const removedUuids = new Set(uuids);
+  if (removedUuids.size === 0) return state;
+  const removedIds = new Set(state.items.flatMap((item) =>
+    (item.type === 'narration' || item.type === 'tool')
+      && item.transcriptUuid && removedUuids.has(item.transcriptUuid) ? [item.id] : []));
+  if (removedIds.size === 0) return state;
+  const items = state.items.filter((item) => !removedIds.has(item.id));
+  const toolIndex: Record<string, number> = {};
+  for (const [toolId, index] of Object.entries(state.toolIndex)) {
+    const id = state.items[index]?.id;
+    if (!id || removedIds.has(id)) continue;
+    const next = items.findIndex((item) => item.id === id);
+    if (next >= 0) toolIndex[toolId] = next;
+  }
+  const remap = (index: number) => index < 0 ? -1 : items.findIndex((item) => item.id === state.items[index]?.id);
+  const assistantBlockItemIds = Object.fromEntries(
+    Object.entries(state.assistantBlockItemIds).filter(([, id]) => !removedIds.has(id)),
+  );
+  const assistantBlockUuids = Object.fromEntries(
+    Object.entries(state.assistantBlockUuids).filter(([, uuid]) => !removedUuids.has(uuid)),
+  );
+  const assistantAttemptItems = Object.fromEntries(
+    Object.entries(state.assistantAttemptItems ?? {}).map(([attempt, ids]) => [
+      attempt,
+      ids.filter((id) => !removedIds.has(id)),
+    ]),
+  );
+  return {
+    ...state,
+    items,
+    toolIndex,
+    openAssistantIndex: remap(state.openAssistantIndex),
+    openThinkingIndex: remap(state.openThinkingIndex),
+    pendingAssistantItems: state.pendingAssistantItems?.filter((id) => !removedIds.has(id)),
+    assistantAttemptItems,
+    assistantBlockItemIds,
+    assistantBlockUuids,
+  };
 }
 
 /** A user message immediately echoed when the composer submits (optimistic). */
@@ -406,6 +481,92 @@ function settlePendingPrompts(items: readonly RunItem[]): RunItem[] {
  */
 export function reduceEvent(state: ConversationState, event: ClientEvent, now = Date.now()): ConversationState {
   switch (event.type) {
+    case 'query_model_change':
+      return state.serverFallbackModel === event.to_model
+        ? state : { ...state, serverFallbackModel: event.to_model };
+
+    case 'assistant_block_start': {
+      const items = state.items.slice();
+      closeThinking(items, state.openThinkingIndex);
+      let nextId = state.nextId;
+      let openAssistantIndex = -1;
+      const pending = state.pendingRefusalContinuation;
+      const assistantBlockItemIds = { ...state.assistantBlockItemIds };
+      if (pending?.displaySalvageText && pending.salvageText.length > 0) {
+        const id = itemId(nextId++);
+        openAssistantIndex = items.length;
+        items.push({
+          type: 'narration',
+          id,
+          text: pending.salvageText,
+          role: 'assistant',
+          streamed: true,
+          blockKey: event.block_key,
+          ...(state.serverFallbackModel ? { servedModel: state.serverFallbackModel } : {}),
+        });
+        assistantBlockItemIds[String(event.block_key)] = id;
+      }
+      return {
+        ...state,
+        items,
+        nextId,
+        openAssistantIndex,
+        openThinkingIndex: -1,
+        assistantBlockKey: event.block_key,
+        assistantBlockItemIds,
+        pendingRefusalContinuation: null,
+      };
+    }
+
+    case 'assistant_block_identity': {
+      const key = String(event.block_key);
+      const itemIdForBlock = state.assistantBlockItemIds[key];
+      const items = itemIdForBlock ? state.items.map((item) => item.id === itemIdForBlock
+        ? { ...item, transcriptUuid: event.message_uuid } : item) : state.items;
+      return {
+        ...state,
+        items,
+        assistantBlockUuids: { ...state.assistantBlockUuids, [key]: event.message_uuid },
+      };
+    }
+
+    case 'tombstone':
+      // A tombstone means this durable row is gone from the visible conversation
+      // regardless of whether the native adapter also removes it from JSONL.
+      return removeTranscriptRows(state, [event.message.uuid]);
+
+    case 'refusal_continuation': {
+      const withoutReplacedRows = removeTranscriptRows(state, event.replaces_uuids);
+      return {
+        ...withoutReplacedRows,
+        openAssistantIndex: -1,
+        pendingRefusalContinuation: {
+          salvageText: event.salvage_text,
+          displaySalvageText: event.display_salvage_text,
+        },
+      };
+    }
+
+    case 'user_transcript_row_identity':
+      // The desktop prompt path has no TUI row token to resolve. Keep the event
+      // typed and replayable; the terminal consumer owns this correlation.
+      return state;
+
+    case 'assistant_transcript_row_uuids': {
+      const responseItems = new Set(state.assistantAttemptItems?.[event.message_id] ?? state.pendingAssistantItems ?? []);
+      const textRows = state.items.filter((item) => responseItems.has(item.id)
+        && item.type === 'narration' && item.role === 'assistant');
+      if (textRows.length !== event.uuids.length) return state;
+      const byId = new Map(textRows.map((item, index) => [item.id, event.uuids[index]]));
+      return {
+        ...state,
+        items: state.items.map((item) => {
+          const uuid = byId.get(item.id);
+          return uuid ? { ...item, transcriptUuid: uuid } : item;
+        }),
+      };
+    }
+
     case 'session_started':
       // A brand-new transcript whose ids restart at `i1`. The session id goes
       // with it so per-item UI state cannot be inherited by the next session's
@@ -425,7 +586,21 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // stale `pendingSlashName` must not label a later, unrelated result.
       {
         const next = state.pendingSlashPrompt ? appendUserPrompt(state, state.pendingSlashPrompt, [], now) : state;
-        return { ...next, items: settlePendingPrompts(next.items), running: true, pendingSlashName: null, pendingSlashPrompt: null, openAssistantIndex: -1, openThinkingIndex: -1, turnToolIds: [] };
+        return {
+          ...next,
+          items: settlePendingPrompts(next.items),
+          running: true,
+          pendingSlashName: null,
+          pendingSlashPrompt: null,
+          openAssistantIndex: -1,
+          openThinkingIndex: -1,
+          turnToolIds: [],
+          serverFallbackModel: null,
+          assistantBlockKey: null,
+          assistantBlockItemIds: {},
+          assistantBlockUuids: {},
+          pendingRefusalContinuation: null,
+        };
       }
 
     case 'turn_ended': {
@@ -457,6 +632,11 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         openAssistantIndex: -1,
         openThinkingIndex: -1,
         nextId,
+        serverFallbackModel: null,
+        assistantBlockKey: null,
+        assistantBlockItemIds: {},
+        assistantBlockUuids: {},
+        pendingRefusalContinuation: null,
       };
     }
 
@@ -466,21 +646,28 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       closeThinking(items, state.openThinkingIndex);
       let idx = state.openAssistantIndex;
       let nextId = state.nextId;
+      let assistantBlockItemIds = state.assistantBlockItemIds;
       if (idx < 0 || items[idx]?.type !== 'narration') {
         idx = items.length;
-        items.push({
+        const item: Extract<RunItem, { type: 'narration' }> = {
           type: 'narration',
           id: itemId(nextId),
           text: event.text,
           role: 'assistant',
           streamed: true,
-        });
+          ...(state.assistantBlockKey === null ? {} : { blockKey: state.assistantBlockKey }),
+          ...(state.serverFallbackModel ? { servedModel: state.serverFallbackModel } : {}),
+        };
+        items.push(item);
+        if (state.assistantBlockKey !== null) {
+          assistantBlockItemIds = { ...state.assistantBlockItemIds, [String(state.assistantBlockKey)]: item.id };
+        }
         nextId += 1;
       } else {
         const prev = items[idx] as Extract<RunItem, { type: 'narration' }>;
         items[idx] = { ...prev, text: prev.text + event.text };
       }
-      return { ...state, items, openAssistantIndex: idx, openThinkingIndex: -1, nextId,
+      return { ...state, items, assistantBlockItemIds, openAssistantIndex: idx, openThinkingIndex: -1, nextId,
         pendingAssistantItems: [...new Set([...(state.pendingAssistantItems ?? []), items[idx]!.id])],
       };
     }
@@ -507,18 +694,27 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       // A tool runs after the reasoning that led to it — seal the block.
       closeThinking(items, state.openThinkingIndex);
       const idx = items.length;
-      items.push({
+      const blockKey = state.assistantBlockKey;
+      const transcriptUuid = blockKey === null ? undefined : state.assistantBlockUuids[String(blockKey)];
+      const item: Extract<RunItem, { type: 'tool' }> = {
         type: 'tool',
         id: event.id,
         tool: event.tool,
         status: 'running',
+        nativeInput: parseNativeToolJson(event.input_json),
         // The engine derived this once. Only an older engine leaves it absent.
         view: event.header ?? fallbackToolHeader(event.tool, event.input_json),
-      });
+        ...(blockKey === null ? {} : { blockKey }),
+        ...(transcriptUuid ? { transcriptUuid } : {}),
+      };
+      items.push(item);
+      const assistantBlockItemIds = blockKey === null ? state.assistantBlockItemIds
+        : { ...state.assistantBlockItemIds, [String(blockKey)]: item.id };
       // A tool card interrupts the open assistant text line.
       return {
         ...state,
         items,
+        assistantBlockItemIds,
         openAssistantIndex: -1,
         openThinkingIndex: -1,
         toolIndex: { ...state.toolIndex, [event.id]: idx },
@@ -548,6 +744,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
       const settled = {
         status: event.is_error ? ('error' as const) : ('done' as const),
         agentId: spawnResultAgentId(event.tool, event.result_json),
+        nativeOutput: parseNativeToolJson(event.result_json),
         ...(event.display
           ? { result: event.display }
           : { note: fallbackToolBody(event.result_json) }),
@@ -858,6 +1055,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
           ...state,
           commandResult: event.display.trim() ? {
             type: 'command', id: itemId(state.nextId), name: state.pendingSlashName ?? '',
+            ...(commandArguments(state.pendingSlashPrompt) === undefined ? {} : { args: commandArguments(state.pendingSlashPrompt) }),
             output: event.display, isError: event.is_error === true,
           } : null,
           ...(event.is_error === true ? { lastError: event.display } : {}),
@@ -872,6 +1070,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         type: 'command',
         id: itemId(state.nextId),
         name: state.pendingSlashName ?? '',
+        ...(commandArguments(state.pendingSlashPrompt) === undefined ? {} : { args: commandArguments(state.pendingSlashPrompt) }),
         output: event.display,
         isError: event.is_error === true,
       });
@@ -1022,6 +1221,7 @@ export function conversationFromMessages(
             id: block.id,
             tool: block.tool,
             status: 'running',
+            nativeInput: parseNativeToolJson(block.input_json),
             view: block.header ?? fallbackToolHeader(block.tool, block.input_json),
           });
           toolIndex.set(block.id, idx);
@@ -1032,6 +1232,7 @@ export function conversationFromMessages(
           const settled = {
             status: block.is_error ? ('error' as const) : ('done' as const),
             agentId: spawnResultAgentId(block.tool, block.result_json),
+            nativeOutput: parseNativeToolJson(block.result_json),
             ...(block.display
               ? { result: block.display }
               : { note: fallbackToolBody(block.result_json) }),

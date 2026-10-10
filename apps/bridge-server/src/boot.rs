@@ -607,6 +607,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // assigned by `main` immediately before assembly. Never inherit them
         // from environment or argv.
         api_key: String::new(),
+        api_key_source: llm_runtime::CredentialSource::Configured,
         // The packaged bridge gets an explicit process-local store. Desktop,
         // CLI, and TUI own persistent broker access; this sidecar receives only
         // its current session credential over stdin.
@@ -711,6 +712,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         parent_session_id: None,
         // The Electron bridge has no --disable-slash-commands flag.
         disable_slash_commands: false,
+        // There is no per-session skill allowlist input on the bridge. `None`
+        // keeps all otherwise eligible registered skills model-invocable.
+        session_skill_allowlist: None,
         // The Electron bridge has no --add-dir flag.
         add_dir: Vec::new(),
         // The Electron bridge has no --mcp-config flag.
@@ -1635,7 +1639,9 @@ pub async fn assemble_with_credentials(
         .with_provider_model_catalog_listings(provider_model_catalog_listings)
         .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
         .with_http(runtime.http.clone())
-        .with_session_store(session_store)
+        .with_session_store(
+            session_store.with_transcript_writer(runtime.orchestrator.session_transcript_writer()),
+        )
         .with_session_agent_observer(session_agent_observer)
         .with_team_registry(runtime.coordinator.clone())
         .with_settings_context(settings_context)
@@ -2370,12 +2376,11 @@ mod tests {
         assert_eq!(cfg.mcp_paths.len(), 2);
         assert!(cfg.memory_provider.is_some());
         assert!(cfg.api_key_helper.is_none());
-        assert!(cfg
-            .provider_profiles
-            .as_ref()
-            .is_none_or(|profiles| profiles
+        assert!(cfg.provider_profiles.as_ref().is_none_or(|profiles| {
+            profiles
                 .values()
-                .all(|profile| profile.get("apiKeyEnv").is_none())));
+                .all(|profile| profile.get("apiKeyEnv").is_none())
+        }));
         assert_eq!(
             cfg.credential_storage_policy,
             CredentialStoragePolicy::NativeOrMemory,
@@ -2427,6 +2432,22 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
         let cfg = DesktopConfig {
+            diagnostics: None,
+            composition: None,
+            defer_session_start: false,
+            session_transcript_path: None,
+            session_resume_snapshot: None,
+            session_resume_cost: None,
+            max_structured_output_retries: 5,
+            mcp_services_factory: None,
+            user_agent_environment: None,
+            request_identity: None,
+            anthropic_compatible_version: None,
+            anthropic_client_metadata: None,
+            native_thinking_display: None,
+            oauth_environment_lookup: None,
+            verified_computer_profiles: Vec::new(),
+            api_key_source: llm_runtime::CredentialSource::Configured,
             build_info: harness_runtime::desktop::BuildInfo::new(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
@@ -2487,6 +2508,7 @@ mod tests {
             session_writer_lease: None,
             parent_session_id: None,
             disable_slash_commands: false,
+            session_skill_allowlist: None,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             strict_mcp_config: false,

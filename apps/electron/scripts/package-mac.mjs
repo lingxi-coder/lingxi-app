@@ -50,6 +50,7 @@ import {
   buildAudioHelperApp,
   ensureAudioHelperResourceLayout,
 } from './audio-helper.mjs';
+import { prepareModBun, sealModBun, stageModBun } from './mod-bun.mjs';
 
 function log(message) {
   process.stdout.write(`[package:mac] ${message}\n`);
@@ -158,12 +159,16 @@ function signApplication(appPath, contents, appContainer, packagedSidecar, broke
     pluginEntitlementsPath,
   );
   const audioHelperAppPath = join(contents, 'Resources', AUDIO_HELPER_APP);
+  const modCompilerPath = join(contents, 'Resources', 'bin', 'bun');
+  signBinary(modCompilerPath, identity, `${identifiers.desktopBundleId}.mod-compiler`, helperEntitlementsPath);
+  sealModBun(join(contents, 'Resources'));
   signBinary(packagedSidecar, identity, identifiers.bridgeServerIdentifier);
   signBinary(join(brokerResourceRoot, 'bin', 'lingxi-credential-client'), identity, identifiers.clientIdentifier);
   signAppBundle(audioHelperAppPath, identity, audioEntitlementsPath);
   signAppBundle(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), identity, brokerEntitlementsPath);
   signAppBundle(appPath, identity, appEntitlementsPath);
   verifyIdentifier(packagedSidecar, identifiers.bridgeServerIdentifier, teamId);
+  verifyIdentifier(modCompilerPath, `${identifiers.desktopBundleId}.mod-compiler`, teamId);
   verifyIdentifier(join(brokerResourceRoot, 'bin', 'lingxi-credential-client'), identifiers.clientIdentifier, teamId);
   verifyIdentifier(audioHelperAppPath, audioIdentifiers.bundleId, teamId);
   verifyIdentifier(join(brokerResourceRoot, 'LingXiCredentialBroker.app'), identifiers.brokerBundleId, teamId);
@@ -200,6 +205,8 @@ async function main() {
   // Reject the most expensive and most common packaging mistakes before building.
   assertArm64Executable(electronExecutable, 'Electron runtime');
   assertArm64Executable(sidecar, 'release bridge-server sidecar');
+  const modCompiler = await prepareModBun({ platform: 'darwin', arch: TARGET_ARCH });
+  assertArm64Executable(modCompiler.executable, 'Mod Bun compiler');
   try {
     scanTreeForForbiddenContent(sidecar);
   } catch (error) {
@@ -250,6 +257,7 @@ async function main() {
   const packagedSidecar = join(binDir, 'bridge-server');
   copyFileSync(sidecar, packagedSidecar);
   chmodSync(packagedSidecar, 0o755);
+  stageModBun(resources, modCompiler);
   const brokerResourceRoot = join(resources, BROKER_RESOURCE_DIRNAME);
   buildCredentialBrokerResources(brokerResourceRoot, {
     channel: brokerChannel,

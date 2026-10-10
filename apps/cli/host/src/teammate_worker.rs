@@ -468,9 +468,12 @@ mod unix {
         if let Some(model) = &manifest.request.model {
             cfg.default_model = model.clone();
         }
-        let output = Arc::new(crate::output_adapter::SinkAdapter::new(Arc::new(
-            crate::output::PlainSink::new(),
-        )));
+        let output = Arc::new(harness_runtime::headless::output_adapter::SinkAdapter::new(
+            Arc::new(harness_runtime::headless::output::PlainSink::new(
+                crate::headless_host::process_stdout(),
+                crate::headless_host::process_stderr(),
+            )),
+        ));
         let runtime =
             harness_runtime::desktop::build(cfg, output, Arc::new(InjectedPermissionSink))
                 .await
@@ -524,6 +527,12 @@ mod unix {
         connection
             .write(&WorkerToParent::Ready {
                 task_id: task_id.clone(),
+                selection: lingxi_core::host::team_spawn::TeamSpawnSeam::resolved_model_selection(
+                    runtime.task_registry.as_ref(),
+                    &task_id,
+                )
+                .await
+                .map_err(|error| error.to_string())?,
             })
             .await?;
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));

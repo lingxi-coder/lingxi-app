@@ -33,6 +33,14 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+struct CliDesktopDiagnostics;
+#[async_trait]
+impl harness_runtime::desktop::DesktopDiagnosticSink for CliDesktopDiagnostics {
+    async fn stderr_line(&self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
     pub catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
@@ -328,6 +336,9 @@ pub enum InitError {
     /// installed; payload is the platform-specific install hint.
     #[error("tmux is not installed.\n{0}")]
     TmuxNotInstalled(String),
+    /// Explicit custom-agent configuration could not be parsed.
+    #[error("Invalid --agents configuration: {0}")]
+    InvalidAgents(String),
     /// Custom Anthropic beta headers require an API-key-backed first-party
     /// Anthropic session; OAuth and alternate providers reject them.
     #[error("--betas requires an Anthropic API key and a first-party Anthropic model")]
@@ -338,6 +349,7 @@ impl From<harness_runtime::desktop::BuildError> for InitError {
     fn from(e: harness_runtime::desktop::BuildError) -> Self {
         match e {
             harness_runtime::desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
+            harness_runtime::desktop::BuildError::InvalidAgents(m) => Self::InvalidAgents(m),
             harness_runtime::desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
             harness_runtime::desktop::BuildError::DurableSession(m) => Self::DurableSession(m),
             harness_runtime::desktop::BuildError::SecureStorage(m) => Self::SecureStorage(m),
@@ -955,12 +967,12 @@ pub(crate) fn resolve_desktop_config_at(
         None
     };
     // `--json-schema` is structured-output, "only works with --print". Parse the
-    // schema string to a JSON value (print-gated). An unparseable schema is
+    // Preserve exact JSON strings and property names (print-gated). An unparseable schema is
     // dropped → structured output simply does not activate (the turn runs normally).
     let json_schema = if argv.print {
         argv.json_schema
             .as_ref()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|s| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(s).ok())
     } else {
         None
     };
@@ -985,6 +997,9 @@ pub(crate) fn resolve_desktop_config_at(
         api_base,
         anthropic_client_metadata,
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+        api_key_source: llm_runtime::CredentialSource::Environment {
+            variable: "ANTHROPIC_API_KEY".into(),
+        },
         api_key_helper: if restricted {
             flag_settings
                 .as_ref()
@@ -1180,6 +1195,10 @@ pub(crate) fn resolve_desktop_config_at(
         parent_session_id: None,
         // CLI `--disable-slash-commands`: empties the command/skill registry.
         disable_slash_commands: argv.disable_slash_commands,
+        // The CLI has no per-session skill allowlist input: `None` means all
+        // eligible registered skills remain model-invocable. The separate
+        // `--disable-slash-commands` flag still empties the registry entirely.
+        session_skill_allowlist: None,
         // CLI `--add-dir <directories...>`: extra tool-access directories,
         // unioned into the permission working-dir set in `build()`.
         add_dir: argv.add_dir.clone().unwrap_or_default(),
@@ -1274,6 +1293,7 @@ pub(crate) fn resolve_desktop_config_at(
         )),
         ask_user_question_tx: None,
         computer_access_tx: None,
+        verified_computer_profiles: Vec::new(),
         session_agent_observer: None,
         // No device audio on the CLI/TUI path: audio is proxied to a connected
         // client, and this host has none. The `voice`/`speech` tools are
@@ -1359,8 +1379,8 @@ pub(crate) fn parse_flag_settings_checked(
 /// Build the full runtime from parsed argv + the chosen output stream.
 ///
 /// `output` is the sink the orchestrator will push turn events to (plain
-/// stdout or NDJSON, projected from `crate::output::OutputSink` through
-/// `crate::output_adapter::SinkAdapter`). M5-12 Task 9 wires this end-to-end
+/// stdout or NDJSON, projected from `harness_runtime::headless::output::OutputSink` through
+/// `harness_runtime::headless::output_adapter::SinkAdapter`). M5-12 Task 9 wires this end-to-end
 /// so `--json` produces NDJSON `text` / `tool_call` / `turn_end` lines.
 ///
 /// **F2-01**: the actual assembly is delegated to [`harness_runtime::desktop::build`].
@@ -1421,7 +1441,7 @@ fn bind_tui_permission_gate(gate: &tui::permission_gate::TuiPermissionGate, runt
     if let Some(policy_gate) = &runtime.enforcing_permission_gate {
         let policy_gate = Arc::downgrade(policy_gate);
         gate.set_policy_rule_authority(Arc::new(move |name, input| {
-            policy_gate.upgrade().map_or(true, |gate| {
+            policy_gate.upgrade().is_none_or(|gate| {
                 gate.check_noninteractive_with_allow_rules(name, input, &[])
                     .is_some()
             })

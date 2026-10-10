@@ -286,6 +286,307 @@ export interface CronJobDto {
   last_fired_at?: number;
 }
 
+/** JSON value carried by the isolated Mod UI protocol boundary. */
+export type UiJsonValue = null | boolean | number | string | UiJsonValue[] | { [key: string]: UiJsonValue };
+
+export type NativeUiComponent =
+  | 'AskUserQuestion'
+  | 'UserMessage'
+  | 'AssistantMessage'
+  | 'ToolUse'
+  | 'ToolResult'
+  | 'ToolGroup'
+  | 'ToolProgress'
+  | 'CommandOutput'
+  | 'Spinner'
+  | 'TurnDuration'
+  | 'InfoNotice'
+  | 'SessionMode'
+  | 'PromptHint'
+  | 'AbovePrompt'
+  | 'Pane';
+
+export interface NativeUiViewportDto {
+  columns: number;
+  rows: number;
+  isFullscreen?: boolean;
+}
+
+export interface NativeUiOnScreenDto {
+  first: number;
+  last: number;
+  of: number;
+}
+
+export interface NativeUiKeyedRegionDto {
+  plugin: string;
+  key: string;
+  top: number;
+  bottom: number;
+}
+
+export interface NativeUiBenchRequestDto {
+  seq: number;
+  t0: number;
+}
+
+export interface NativeUiClientAddressDto {
+  plugin: string;
+  component: NativeUiComponent;
+  instance_id: string;
+  client: string;
+  module: string;
+}
+
+export type NativeUiClientPressEventDto =
+  | { type: 'press' }
+  | { type: 'input'; kind: 'change' | 'submit'; value: string }
+  | { type: 'select'; value: string };
+
+export type NativeUiSurfaceDto = 'desktop' | 'mobile' | 'vscode';
+
+/** Native parent-surface controls. These are distinct from Client `ui_client_press`. */
+export type NativeUiParentControlRequest =
+  | {
+      subtype: 'ui_press';
+      plugin: string;
+      handle: number;
+      key?: string;
+      surface?: NativeUiSurfaceDto;
+      href?: string;
+      client_id?: string;
+    }
+  | {
+      subtype: 'ui_input';
+      plugin: string;
+      handle: number;
+      kind: 'change' | 'submit';
+      value: string;
+      key?: string;
+      component?: NativeUiComponent;
+      instance_id?: string;
+      surface?: NativeUiSurfaceDto;
+      client_id?: string;
+    }
+  | {
+      subtype: 'ui_select';
+      plugin: string;
+      handle: number;
+      value: string;
+      key?: string;
+      component?: NativeUiComponent;
+      instance_id?: string;
+      surface?: NativeUiSurfaceDto;
+      client_id?: string;
+    };
+
+/** Native `ui_*` payloads. The transport wraps these JSON bodies in strings. */
+export type NativeUiControlRequest =
+  | {
+      subtype: 'ui_render';
+      surface: 'desktop' | 'mobile' | 'vscode';
+      component: NativeUiComponent;
+      instance_id: string;
+      props: Record<string, UiJsonValue>;
+      client_id?: string;
+      viewport?: NativeUiViewportDto;
+      on_screen?: NativeUiOnScreenDto | null;
+      content_rows?: number;
+      keyed?: NativeUiKeyedRegionDto[];
+      bench?: NativeUiBenchRequestDto;
+    }
+  | { subtype: 'ui_client_module'; plugin: string }
+  | (NativeUiClientAddressDto & {
+      subtype: 'ui_client_press';
+      element: string;
+      event: NativeUiClientPressEventDto;
+    })
+  | (NativeUiClientAddressDto & { subtype: 'ui_message'; data: UiJsonValue })
+  | (NativeUiClientAddressDto & {
+      subtype: 'ui_client_fault';
+      phase: 'load' | 'render' | 'run';
+      reason: string;
+    })
+  | NativeUiParentControlRequest;
+
+export interface NativeUiRenderResponseDto {
+  tree: UiJsonValue;
+  props: Record<string, UiJsonValue>;
+  rewritten: boolean;
+  hooked: boolean;
+  client_modules?: Record<string, string>;
+  bench?: Record<string, UiJsonValue>;
+}
+
+export interface NativeUiClientModuleResponseDto {
+  plugin: string;
+  hash: string;
+  modules: Array<{ module: string; entry: string; component: string }>;
+  runtime: string;
+  limits: { nodes: number; depth: number; chars: number; values: number; dataDepth: number };
+  files: Array<{ key: string; source: string }>;
+}
+
+export interface NativeUiClientPressResponseDto {
+  handled: boolean;
+  reached?: NativeUiClientPressReachedDto;
+}
+
+export interface NativeUiParentPressResponseDto {
+  handled: boolean;
+  element?: string;
+}
+
+export interface NativeUiParentInputResponseDto {
+  handled: boolean;
+  element?: string;
+  value?: string;
+}
+
+export interface NativeUiParentSelectResponseDto {
+  handled: boolean;
+  element?: string;
+  value?: string;
+}
+
+export interface NativeUiClientPressReachedDto {
+  element: string;
+  value?: string;
+}
+
+export interface NativeUiMessageResponseDto {
+  handled: boolean;
+  props?: UiJsonValue;
+}
+
+export interface NativeUiClientFaultResponseDto {
+  handled: boolean;
+}
+
+export type NativeUiControlResponse =
+  | NativeUiRenderResponseDto
+  | NativeUiClientModuleResponseDto
+  | NativeUiClientPressResponseDto
+  | NativeUiParentPressResponseDto
+  | NativeUiParentInputResponseDto
+  | NativeUiParentSelectResponseDto
+  | NativeUiMessageResponseDto
+  | NativeUiClientFaultResponseDto
+  | null;
+
+export type NativeUiControlResponseFor<T extends NativeUiControlRequest> = T extends { subtype: 'ui_render' }
+  ? NativeUiRenderResponseDto
+  : T extends { subtype: 'ui_client_module' }
+    ? NativeUiClientModuleResponseDto | null
+    : T extends { subtype: 'ui_client_press' }
+      ? NativeUiClientPressResponseDto
+      : T extends { subtype: 'ui_press' }
+        ? NativeUiParentPressResponseDto
+        : T extends { subtype: 'ui_input' }
+          ? NativeUiParentInputResponseDto
+          : T extends { subtype: 'ui_select' }
+            ? NativeUiParentSelectResponseDto
+      : T extends { subtype: 'ui_message' }
+        ? NativeUiMessageResponseDto
+        : NativeUiClientFaultResponseDto;
+
+/** Local Harness VM operation request; source code is never part of this DTO. */
+export type UiClientOperation =
+  | {
+      type: 'mount'; surface: 'desktop'; component: NativeUiComponent; instance_id: string;
+      plugin: string; client: string; module: string; render_revision: number; columns: number; rows: number;
+    }
+  | { type: 'render'; runtimeId: string; render_revision: number }
+  | { type: 'unmount'; runtimeId: string; render_revision: number }
+  | { type: 'setProps'; runtimeId: string; render_revision: number; props: Record<string, UiJsonValue> }
+  | { type: 'resize'; runtimeId: string; render_revision: number; columns: number; rows: number }
+  | { type: 'pointer'; runtimeId: string; render_revision: number; event: UiJsonValue }
+  | { type: 'key'; runtimeId: string; render_revision: number; event: UiJsonValue }
+  | { type: 'runHeld'; runtimeId: string; render_revision: number; event?: UiJsonValue; handle: number }
+  | {
+      type: 'draw_commit'; surface: 'desktop'; component: NativeUiComponent; instance_id: string;
+      render_revision: number; clients: Array<{ plugin: string; key: string; module: string }>;
+    }
+  | { type: 'draw_unmount'; surface: 'desktop'; component: NativeUiComponent; instance_id: string; render_revision: number };
+
+export interface UiClientFrameDto {
+  runtimeId: string;
+  renderRevision: number;
+  /** Host-local per-runtime ordering for RPC and asynchronous frames. */
+  frameSequence: number;
+  tree: UiJsonValue;
+  hasPointerListener: boolean;
+  hasKeyListener: boolean;
+}
+
+/** Worker-side failure published asynchronously without a successful tree frame. */
+export interface UiClientWorkerFaultSnapshotDto {
+  renderRevision: number;
+  fault: UiClientWorkerFaultResponseDto['fault'];
+}
+
+export type UiClientFrameEventPayloadDto = Omit<UiClientFrameDto, 'runtimeId'> | UiClientWorkerFaultSnapshotDto;
+
+export interface UiClientHandledOperationResponseDto {
+  handled: boolean;
+  renderRevision: number;
+}
+
+/** A frame operation was safely ignored because its runtime/revision is stale. */
+export interface UiClientOperationNoopResponseDto {
+  handled: false;
+  renderRevision: number;
+}
+
+/** A worker fault is a leaf result for this operation, not a second fault command. */
+export interface UiClientWorkerFaultResponseDto {
+  handled: false;
+  renderRevision: number;
+  runtimeId?: string;
+  fault: {
+    phase: 'load' | 'render' | 'run';
+    reason: string;
+    source: 'worker';
+  };
+}
+
+export type UiClientFrameOperationResponseDto =
+  | UiClientFrameDto
+  | UiClientOperationNoopResponseDto
+  | UiClientWorkerFaultResponseDto;
+
+export type UiClientOperationResponse = UiClientFrameOperationResponseDto | UiClientHandledOperationResponseDto;
+
+export type UiClientOperationResponseFor<T extends UiClientOperation> = T extends
+  | { type: 'mount' | 'render' | 'setProps' | 'resize' | 'pointer' | 'key' | 'runHeld' }
+  ? UiClientFrameOperationResponseDto
+  : UiClientHandledOperationResponseDto;
+
+/** Host-local runtime facts are separate from Native UI JSON. */
+export interface UiControlMetadataDto {
+  renderRevision?: number;
+  clientRuntimeEpochs?: Record<string, number>;
+  /** Opaque Native Client failure-state version for this parent render site. */
+  clientStateToken?: string;
+}
+
+export interface UiControlCallResultDto<TResponse = NativeUiControlResponse> {
+  response: TResponse;
+  metadata?: UiControlMetadataDto;
+}
+
+export interface UiClientFrameEventDto {
+  sessionId: string;
+  runtimeId: string;
+  frame: UiClientFrameEventPayloadDto;
+}
+
+export interface UiInvalidateEventDto {
+  sessionId: string;
+  instances?: Array<{ surface: 'desktop' | 'mobile' | 'vscode'; component: NativeUiComponent; instance_id: string }>;
+  uuid: string;
+}
+
 export type ClientCommand =
   | { type: 'cron_run_started'; run_id: string; session_id: string }
   | { type: 'scheduled_run_turn'; run_id: string; prompt: string; model: string; reasoning: ReasoningSelectionDto }

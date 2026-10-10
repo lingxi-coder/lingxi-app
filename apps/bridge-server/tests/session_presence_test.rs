@@ -134,6 +134,12 @@ struct Auth;
 
 #[async_trait]
 impl AuthHandle for Auth {
+    fn register_account_change_observer(
+        &self,
+        _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+    ) {
+    }
+
     async fn login(&self) -> Result<LoginInfo, AuthError> {
         Err(AuthError::Network("test".into()))
     }

@@ -1347,7 +1347,7 @@ mod tests {
         assert!(
             content
                 .iter()
-                .any(|b| matches!(b, ContentBlock::Text { text } if text == "describe this")),
+                .any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "describe this")),
             "the prompt text must precede the image: {content:?}"
         );
         let source = content
@@ -1489,9 +1489,9 @@ mod tests {
         );
         let calls = streaming.captured_calls().await;
         let content = first_user_content(&calls[0].messages);
-        assert!(content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text } if text == "queued image")));
+        assert!(content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text, .. } if text == "queued image")
+        ));
         assert!(content.iter().any(|block| matches!(block, ContentBlock::Image { source: ImageSource::Base64 { media_type, data } } if media_type == &image.media_type && data == &image.base64)));
     }
 

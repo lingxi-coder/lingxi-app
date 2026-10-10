@@ -106,6 +106,38 @@ private func emptyHelperSnapshot() -> HelperSnapshot {
 
 struct AudioHelperEncodingTests {
     @Test
+    func realtimeCaptureChunkCarriesAnExactOwnerAndOperationWithoutASnapshot() throws {
+        let identity = HelperAudioOperationIdentity(id: UUID().uuidString.lowercased(), generation: 7, serviceEpoch: 9)
+        let event = HelperEvent(type: "capture_chunk", snapshot: nil, owner: .init(kind: "session", id: "current-session"), progress: nil, model: nil, state: nil, error: nil, message: nil,
+                                pcmBase64: Data([0, 0]).base64EncodedString(), sampleRateHz: 24_000, identity: identity, sequence: 3)
+        let data = try JSONEncoder().encode(event)
+        let value = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(value["snapshot"] == nil)
+        #expect(value["pcmBase64"] as? String == "AAA=")
+        #expect(value["sampleRateHz"] as? Int == 24_000)
+        #expect((value["identity"] as? [String: Any])?["service_epoch"] as? Int == 9)
+        #expect((value["owner"] as? [String: Any])?["id"] as? String == "current-session")
+    }
+
+    @Test
+    func pcmPlaybackRejectsAnIncompleteSampleBeforeAcquiringDevicePlayback() async throws {
+        let output = AudioHelperOutputProbe()
+        let state = HelperStateStore(storageRoot: FileManager.default.temporaryDirectory.appending(path: "lingxi-play-invalid-\(UUID().uuidString)"), writer: LineWriter(emit: { output.append($0) }))
+        let epoch = try #require(await state.snapshot(message: nil).capabilities?.serviceEpoch)
+        await handleHelperInputEnvelope([
+            "id": "invalid-play", "kind": "engine_request", "configuration": [:], "configurationRevision": 0,
+            "request": ["identity": ["id": UUID().uuidString.lowercased(), "generation": 1, "service_epoch": epoch],
+                        "owner": ["type": "session", "session_id": "play-owner"], "max_payload_bytes": 1024,
+                        "operation": ["type": "play", "pcm_base64": "AAAA", "sample_rate_hz": 24_000]]
+        ], state: state)
+        let response = try #require(output.values.compactMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }.first { $0["id"] as? String == "invalid-play" })
+        let result = try #require((response["result"] as? [String: Any])?["result"] as? [String: Any])
+        #expect(result["type"] as? String == "failed")
+        #expect((result["error"] as? [String: Any])?["kind"] as? String == "invalid_request")
+        #expect(await state.snapshot(message: nil).activePlaybackCount == 0)
+    }
+
+    @Test
     func foregroundPermissionArgumentsAreStrictlyBounded() throws {
         #expect(try permissionRequestFromArguments(["LingXiAudioHelper", "--jsonl"]) == nil)
         #expect(try permissionRequestFromArguments([
@@ -184,15 +216,11 @@ struct AudioHelperEncodingTests {
         let recordingOwner = HelperAudioOwner(
             type: "session",
             sessionID: "recording-session",
-            appID: nil,
-            runtimeGeneration: nil,
             instanceID: nil
         )
         let otherOwner = HelperAudioOwner(
             type: "session",
             sessionID: "other-session",
-            appID: nil,
-            runtimeGeneration: nil,
             instanceID: nil
         )
         let origin = HelperAudioOperationIdentity(id: "recording-origin", generation: 1, serviceEpoch: 7)
@@ -265,8 +293,6 @@ struct AudioHelperEncodingTests {
         let originalOwner = HelperAudioOwner(
             type: "session",
             sessionID: "session-original",
-            appID: nil,
-            runtimeGeneration: nil,
             instanceID: nil
         )
         var owner: HelperAudioOwner? = originalOwner
@@ -281,9 +307,7 @@ struct AudioHelperEncodingTests {
                 owner: HelperAudioOwner(
                     type: "session",
                     sessionID: "session-next",
-                    appID: nil,
-                    runtimeGeneration: nil,
-                    instanceID: nil
+                                    instanceID: nil
                 ),
                 origin: HelperAudioOperationIdentity(id: "origin-next", generation: 2, serviceEpoch: 7),
                 physicalAudioBusy: true
@@ -539,43 +563,6 @@ struct AudioHelperEncodingTests {
     }
 
     @Test
-    func migratedSystemVoiceNameResolvesToStableIdBeforeRouting() {
-        let voices = [
-            SystemVoiceIdentity(identifier: "com.apple.voice.compact.en-US.Samantha", name: "Samantha"),
-            SystemVoiceIdentity(identifier: "com.apple.voice.compact.en-US.Alex", name: "Alex"),
-        ]
-        let migrated = resolvingLegacySystemVoice(
-            AudioVoiceSelection(source: .system, id: "samantha"),
-            against: voices
-        )
-        #expect(migrated?.id == "com.apple.voice.compact.en-US.Samantha")
-
-        let route = resolveAudioRoute(AudioRouteRequest(
-            kind: .speech,
-            preference: AudioSpeechPreference(source: .system, voice: migrated),
-            language: "en-US",
-            systemStatus: .available,
-            offlineModels: [],
-            systemVoiceIds: voices.map(\.identifier)
-        ))
-        #expect(route.status == .ready)
-        #expect(route.effective?.voiceId == "com.apple.voice.compact.en-US.Samantha")
-    }
-
-    @Test
-    func ambiguousLegacySystemVoiceNameIsNotMappedArbitrarily() {
-        let voices = [
-            SystemVoiceIdentity(identifier: "voice-one", name: "Alex"),
-            SystemVoiceIdentity(identifier: "voice-two", name: "Alex"),
-        ]
-        let unresolved = resolvingLegacySystemVoice(
-            AudioVoiceSelection(source: .system, id: "Alex"),
-            against: voices
-        )
-        #expect(unresolved?.id == "Alex")
-    }
-
-    @Test
     func modelRetryRestartsUnsatisfiableRangeAndDiscardsBadChecksum() async throws {
         let model = try #require(GeneratedVoiceModelCatalog.all.first)
         let root = FileManager.default.temporaryDirectory.appending(path: "lingxi-model-retry-\(UUID().uuidString)")
@@ -723,7 +710,7 @@ struct AudioHelperEncodingTests {
         ]
         let owner: [String: Any] = ["type": "session", "session_id": "session-1"]
         let configuration: [String: Any] = [
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "recognition": ["source": "automatic"],
             "speech": ["source": "automatic"],
             "language": "auto",
@@ -810,7 +797,7 @@ struct AudioHelperEncodingTests {
         let state = HelperStateStore(storageRoot: root, writer: writer, operationExecutor: executor)
         let epoch = try #require((await state.snapshot(message: nil)).capabilities?.serviceEpoch)
         let configuration: [String: Any] = [
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "recognition": ["source": "automatic"],
             "speech": ["source": "automatic"],
             "language": "auto",
@@ -882,7 +869,7 @@ struct AudioHelperEncodingTests {
             "id": "zero-timeout",
             "kind": "engine_request",
             "configuration": [
-                "schemaVersion": 3,
+                "schemaVersion": 4,
                 "recognition": ["source": "automatic"],
                 "speech": ["source": "automatic"],
                 "language": "auto",
@@ -951,7 +938,7 @@ struct AudioHelperEncodingTests {
             "id": "eof-audio-request",
             "kind": "engine_request",
             "configuration": [
-                "schemaVersion": 3,
+                "schemaVersion": 4,
                 "recognition": ["source": "automatic"],
                 "speech": ["source": "automatic"],
                 "language": "auto",
@@ -1011,7 +998,7 @@ struct AudioHelperEncodingTests {
         let epoch = try #require((await state.snapshot(message: nil)).capabilities?.serviceEpoch)
         let owner: [String: Any] = ["type": "session", "session_id": "end-owner-session"]
         let configuration: [String: Any] = [
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "recognition": ["source": "automatic"],
             "speech": ["source": "automatic"],
             "language": "auto",
@@ -1280,4 +1267,13 @@ struct AudioHelperEncodingTests {
     #expect(!recordingStatus(ownsRecording: true, recordingFailure: nil, leaseIsActive: false,
                              releaseTerminatedRecording: { releases += 1 }))
     #expect(releases == 0)
+}
+
+
+@Test func systemVoiceNamesDoNotResolveAsStableIdentifiers() {
+    let route = resolveAudioRoute(AudioRouteRequest(kind: .speech,
+        preference: AudioSpeechPreference(source: .system, voice: .init(source: .system, id: "Samantha")),
+        language: "en-US", systemStatus: .available, offlineModels: [], systemVoiceIds: ["com.apple.voice.compact.en-US.Samantha"]))
+    #expect(route.status == .unavailable)
+    #expect(route.reason == "systemVoiceUnknown")
 }

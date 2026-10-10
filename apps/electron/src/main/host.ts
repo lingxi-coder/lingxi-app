@@ -1,3 +1,5 @@
+import { RealtimeAudioController } from './audio/realtimeAudioController.js';
+import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED } from '../shared/scheduled.js';
 import type { ScheduledTaskService } from './scheduled.js';
 import type { HostNotifier } from './notifications.js';
@@ -373,6 +375,8 @@ export class HostController {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly workspaceFiles = new WorkspaceFileSearch();
+  private realtimeAudioController?: RealtimeAudioController;
+  private realtimeAudioWindow?: WebContents;
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
@@ -484,6 +488,7 @@ export class HostController {
       this.terminalDeliveries.delete(webContents);
     };
     const detachAudio = () => {
+      if (this.realtimeAudioWindow === webContents) void this.realtimeAudioController?.stop();
       void this.nativeAudio?.cancelUiAudioOperations(String(webContents.id), true).catch((error) => {
         this.diagnostics.add('warn', 'host', `desktop UI audio teardown failed: ${sanitizeDiagnostic(error)}`);
       });
@@ -512,6 +517,7 @@ export class HostController {
     this.bridge.registerIpc();
     if (this.nativeAudio && !this.offNativeAudio) {
       this.offNativeAudio = this.nativeAudio.onEvent((audioEvent) => {
+        if (audioEvent.type === 'capture_chunk') return;
         for (const webContents of this.targets.keys()) {
           if (webContents.isDestroyed()) continue;
           if (audioEvent.type === 'input_level' && audioEvent.owner.kind === 'ui'
@@ -1098,6 +1104,35 @@ export class HostController {
         configurationRevision as number | undefined,
         configurationOverride,
       );
+    });
+    this.ipc.handle(CH_REALTIME_AUDIO_COMMAND, async (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (command !== 'start' && command !== 'commit' && command !== 'stop') throw new Error('invalid realtime audio command');
+      if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
+      this.realtimeAudioController ??= new RealtimeAudioController({
+        audio: this.nativeAudio,
+        recordUsage: (metadata, usage) => this.nativeAudio?.recordAudioUsage(metadata, usage),
+        currentRuntime: () => { const sessionId = this.settings.getPublic().activeSession?.sessionId; return sessionId ? this.bridge.get(sessionId) : undefined; },
+        publish: (state) => { if (this.realtimeAudioWindow && !this.realtimeAudioWindow.isDestroyed()) this.realtimeAudioWindow.send(CH_REALTIME_AUDIO_STATE, state); },
+      });
+      if (command === 'start') {
+        const error = this.settings.getAudioConfigurationError();
+        if (error) throw new Error(error);
+        if (this.realtimeAudioWindow && this.realtimeAudioWindow !== event.sender) throw new Error('another desktop window owns realtime audio');
+        this.realtimeAudioWindow = event.sender;
+        const configuration = this.settings.getPublic().voice;
+        if (!configuration) throw new Error('configure realtime audio before starting');
+        const capability = (await this.nativeAudio.request({ type: 'get_snapshot' })).snapshot.realtimeReadiness;
+        if (!capability?.ready) throw new Error(capability?.reason ?? '实时音频尚未就绪，请检查语音设置。');
+        const voice = configuration.conversation.voice;
+        if (voice && (voice.source !== 'provider' || voice.profileId !== capability.profileId || (voice.modelId ?? null) !== (configuration.conversation.cloud.modelId ?? capability.defaultModelId ?? null))) throw new Error('实时音色属于其他 profile 或音频模型，请重新选择。');
+        const session = this.settings.getPublic().activeSession;
+        const context = session ? this.bridge.get(session.sessionId)?.audioSessionContext : undefined;
+        await this.realtimeAudioController.start(configuration, capability.profileId && capability.providerId ? { kind: 'realtime', configurationRevision: this.settings.getPublic().voiceRevision ?? 0, profileId: capability.profileId, providerId: capability.providerId, sessionId: context?.sessionId, accountScope: configuration.conversation.cloud.binding === 'explicit_profile' ? `profile:${capability.profileId}` : context?.accountScope } : undefined);
+      } else if (this.realtimeAudioWindow === event.sender) {
+        if (command === 'commit') await this.realtimeAudioController.commit();
+        else { await this.realtimeAudioController.stop(); this.realtimeAudioWindow = undefined; }
+      }
     });
     this.ipc.handle(CH_NATIVE_AUDIO_CANCEL, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
@@ -1778,6 +1813,7 @@ export class HostController {
   }
 
   dispose(): void {
+    void this.realtimeAudioController?.stop();
     this.scheduled?.dispose();
     this.ipc.removeHandler(CH_SCHEDULED);
     this.codexLoginAbort?.abort();
@@ -1797,7 +1833,7 @@ export class HostController {
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
-      CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN,
+      CH_REALTIME_AUDIO_COMMAND, CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN,
     ]) this.ipc.removeHandler(channel);
     this.offNativeAudio?.();
     this.offNativeAudio = undefined;

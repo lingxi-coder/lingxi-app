@@ -345,7 +345,7 @@ struct HelperVoiceOption: Encodable, Sendable {
 }
 
 struct HelperRecognitionSnapshot: Encodable, Sendable {
-    let requestedMode: String
+    let requestedSource: String
     let effectiveBackend: String
     let effectiveLanguage: String
     let detail: String
@@ -421,6 +421,10 @@ struct HelperEvent: Encodable, Sendable {
     let error: HelperErrorPayload?
     let message: String?
     let level: Double?
+    let pcmBase64: String?
+    let sampleRateHz: Int?
+    let identity: HelperAudioOperationIdentity?
+    let sequence: UInt64?
 
     init(
         type: String,
@@ -431,7 +435,11 @@ struct HelperEvent: Encodable, Sendable {
         state: String?,
         error: HelperErrorPayload?,
         message: String?,
-        level: Double? = nil
+        level: Double? = nil,
+        pcmBase64: String? = nil,
+        sampleRateHz: Int? = nil,
+        identity: HelperAudioOperationIdentity? = nil,
+        sequence: UInt64? = nil
     ) {
         self.type = type
         self.snapshot = snapshot
@@ -442,6 +450,10 @@ struct HelperEvent: Encodable, Sendable {
         self.error = error
         self.message = message
         self.level = level
+        self.pcmBase64 = pcmBase64
+        self.sampleRateHz = sampleRateHz
+        self.identity = identity
+        self.sequence = sequence
     }
 }
 
@@ -1159,23 +1171,6 @@ enum ResolvedPlaybackVoice {
     }
 }
 
-struct SystemVoiceIdentity: Equatable, Sendable {
-    let identifier: String
-    let name: String
-}
-
-func resolvingLegacySystemVoice(
-    _ selection: AudioVoiceSelection?,
-    against voices: [SystemVoiceIdentity]
-) -> AudioVoiceSelection? {
-    guard let selection, selection.source == .system,
-          selection.id != "default",
-          !voices.contains(where: { $0.identifier == selection.id }) else { return selection }
-    let matches = voices.filter { $0.name.compare(selection.id, options: .caseInsensitive) == .orderedSame }
-    guard matches.count == 1, let match = matches.first else { return selection }
-    return AudioVoiceSelection(source: .system, id: match.identifier)
-}
-
 func resolvePlaybackVoice(_ requestedVoiceID: String?, language: String, root: URL) throws -> ResolvedPlaybackVoice {
     let requested = requestedVoiceID?.isEmpty == false ? requestedVoiceID! : "system:default"
     if requested.hasPrefix("sherpa:") {
@@ -1193,12 +1188,10 @@ func resolvePlaybackVoice(_ requestedVoiceID: String?, language: String, root: U
     }
     let explicitSystemID = requested.hasPrefix("system:") ? String(requested.dropFirst("system:".count)) : nil
     let systemVoices = AVSpeechSynthesisVoice.speechVoices()
-    let legacyNameMatch = explicitSystemID.flatMap { name in
-        systemVoices.first { $0.name.compare(name, options: .caseInsensitive) == .orderedSame }
-    }
     let voice = explicitSystemID == nil || explicitSystemID == "default"
         ? (AVSpeechSynthesisVoice(language: language) ?? systemVoices.first)
-        : (AVSpeechSynthesisVoice(identifier: explicitSystemID!) ?? legacyNameMatch ?? AVSpeechSynthesisVoice(language: language) ?? systemVoices.first)
+        : AVSpeechSynthesisVoice(identifier: explicitSystemID!)
+    if explicitSystemID != nil && explicitSystemID != "default" && voice == nil { throw HelperError.voiceMissing("the selected system voice identifier is unavailable") }
     return .system(
         voice,
         HelperPlaybackSnapshot(
@@ -1542,6 +1535,9 @@ final class ListeningSession {
     private let cancellation: AudioCancellationFlag
     private let onPartial: @Sendable (HelperTranscript) async -> Void
     private let onLevel: @Sendable (Double) async -> Void
+    private let onPCM: (@Sendable (Data) async -> Void)?
+    private var pcmQueue: [Data] = []
+    private var pcmPublishTask: Task<Void, Never>?
     private let onSilence: @Sendable () async -> Void
     private let onNoSpeech: @Sendable () async -> Void
     private let onLimit: @Sendable () async -> Void
@@ -1573,6 +1569,7 @@ final class ListeningSession {
         cancellation: AudioCancellationFlag,
         onPartial: @escaping @Sendable (HelperTranscript) async -> Void,
         onLevel: @escaping @Sendable (Double) async -> Void,
+        onPCM: (@Sendable (Data) async -> Void)? = nil,
         onSilence: @escaping @Sendable () async -> Void,
         onNoSpeech: @escaping @Sendable () async -> Void = {},
         onLimit: @escaping @Sendable () async -> Void
@@ -1585,6 +1582,7 @@ final class ListeningSession {
         self.cancellation = cancellation
         self.onPartial = onPartial
         self.onLevel = onLevel
+        self.onPCM = onPCM
         self.onSilence = onSilence
         self.onNoSpeech = onNoSpeech
         self.onLimit = onLimit
@@ -1698,7 +1696,27 @@ final class ListeningSession {
         let converted = sourceRate == outputSampleRate
             ? Array(source)
             : resample(Array(source), from: sourceRate, to: outputSampleRate, outputCount: outputCount)
-        samples.append(contentsOf: converted)
+        if let onPCM {
+            guard pcmQueue.count < 32 else {
+                captureFailure = .mediaTooLarge("the realtime input stream exceeded its bounded queue")
+                Task { await onLimit() }
+                return
+            }
+            pcmQueue.append(pcm16Data(from: converted))
+            if pcmPublishTask == nil {
+                pcmPublishTask = Task { [weak self] in
+                    guard let self else { return }
+                    while !self.pcmQueue.isEmpty && !self.cancellation.isCancelled {
+                        let data = self.pcmQueue.removeFirst()
+                        await onPCM(data)
+                    }
+                    self.pcmQueue.removeAll()
+                    self.pcmPublishTask = nil
+                }
+            }
+        } else {
+            samples.append(contentsOf: converted)
+        }
         captureAdmissionGate.reportFirstBuffer(failure: nil)
         let rms = sqrt(converted.reduce(0) { $0 + ($1 * $1) } / Float(max(1, converted.count)))
         let now = Date()
@@ -1741,6 +1759,7 @@ final class ListeningSession {
         monitorTask = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        await pcmPublishTask?.value
         request?.endAudio()
         if route == .system, request != nil, task != nil {
             _ = await finalResultGate.waitForFinalResult(timeoutNanoseconds: speechFinalResultTimeoutNanoseconds)
@@ -2384,6 +2403,7 @@ actor HelperStateStore {
     private var recordingHandle: String?
     private var recordingOwner: HelperAudioOwner?
     private var recordingOriginIdentity: HelperAudioOperationIdentity?
+    private var recordingStreamsPCM = false
     private var recordingFormat = "wav"
     private var recordingMaximumPayloadBytes = maxInlineAudioBase64Bytes * 3 / 4
     private var recordingConfigurationRevision: UInt64 = 0
@@ -2535,6 +2555,18 @@ actor HelperStateStore {
             ),
             error: nil
         ))
+    }
+
+    private var captureSequences: [String: UInt64] = [:]
+    private func publishCaptureChunk(owner: HelperOwner, identity: HelperAudioOperationIdentity, pcm: Data, sampleRate: Int) async {
+        guard listeningIdentity == identity, pcm.count <= 65536, !pcm.isEmpty else { return }
+        let key = helperAudioIdentityKey(identity)
+        let sequence = captureSequences[key, default: 0]
+        captureSequences[key] = sequence + 1
+        if captureSequences.count > 8 { captureSequences = [key: sequence + 1] }
+        await writer.writeEnvelope(OutputEnvelope(id: nil, type: "event", result: nil,
+            event: HelperEvent(type: "capture_chunk", snapshot: nil, owner: owner, progress: nil, model: nil, state: nil, error: nil, message: nil,
+                               pcmBase64: pcm.base64EncodedString(), sampleRateHz: sampleRate, identity: identity, sequence: sequence), error: nil))
     }
 
     private func publishSpeechState(owner: HelperOwner, state: String) async {
@@ -2729,7 +2761,7 @@ actor HelperStateStore {
         identity: HelperAudioOperationIdentity,
         owner requestOwner: HelperAudioOwner,
         operation: [String: Any],
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         configurationRevision: UInt64,
         maxPayloadBytes: UInt64,
         timeoutBudgetMs: UInt64? = nil
@@ -2987,7 +3019,7 @@ actor HelperStateStore {
         identity: HelperAudioOperationIdentity,
         owner requestOwner: HelperAudioOwner,
         operation: [String: Any],
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         configurationRevision: UInt64,
         maxPayloadBytes: UInt64,
         cancellation: AudioCancellationFlag
@@ -3038,6 +3070,31 @@ actor HelperStateStore {
                 maxPayloadBytes: maxPayloadBytes,
                 cancellation: cancellation
             )
+        case "play":
+            guard let encoded = operation["pcm_base64"] as? String,
+                  let pcm = Data(base64Encoded: encoded), !pcm.isEmpty, pcm.count.isMultiple(of: 2),
+                  pcm.count <= (try payloadLimit(maxPayloadBytes)),
+                  let rate = operation["sample_rate_hz"] as? NSNumber, (8_000...768_000).contains(rate.intValue) else {
+                throw HelperError.invalidRequest("play requires bounded mono PCM16 and a valid sample rate")
+            }
+            let session = try await startPhysicalPlayback(identity: identity, owner: requestOwner)
+            let startedAt = Date()
+            do {
+                try cancellation.check()
+                try await session.playPCM16(pcm, sampleRate: Int32(rate.intValue), cancellation: cancellation)
+                try ensureCurrent(identity)
+                clearPhysicalLease(identity: identity)
+                await publishSpeechState(owner: requestOwner.helperOwner, state: "finished")
+                await publishOwnerChanged()
+                await publishSnapshotChanged()
+                return .playbackCompleted(durationMs: UInt64(max(0, Date().timeIntervalSince(startedAt) * 1000)))
+            } catch {
+                if speechIdentity == identity || reservedPhysicalIdentity == identity { clearPhysicalLease(identity: identity) }
+                await publishSpeechState(owner: requestOwner.helperOwner, state: "interrupted")
+                await publishOwnerChanged()
+                await publishSnapshotChanged()
+                throw error
+            }
         case "speak":
             return try await speak(
                 identity: identity,
@@ -3092,7 +3149,7 @@ actor HelperStateStore {
         }
     }
 
-    private func resolvedLanguage(_ override: Any?, configuration: AudioConfigurationV3) -> String {
+    private func resolvedLanguage(_ override: Any?, configuration: AudioConfigurationV4) -> String {
         let configured = (override as? String) ?? configuration.language
         return resolveAudioLanguage(configured: configured, deviceLocale: currentLocaleTag())
     }
@@ -3121,9 +3178,9 @@ actor HelperStateStore {
     }
 
     private func configurationForSingleUtterance(
-        _ configuration: AudioConfigurationV3,
+        _ configuration: AudioConfigurationV4,
         operation: [String: Any]
-    ) -> AudioConfigurationV3 {
+    ) -> AudioConfigurationV4 {
         var adjusted = configuration
         adjusted.speech = speechPreferenceForSingleUtterance(
             configuration.speech,
@@ -3150,7 +3207,7 @@ actor HelperStateStore {
     }
 
     private func resolveRecognitionRoute(
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         language: String,
         speechStatus: SFSpeechRecognizerAuthorizationStatus? = nil
     ) async -> AudioRouteResolution {
@@ -3165,17 +3222,16 @@ actor HelperStateStore {
     }
 
     private func resolveSpeechRoute(
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         language: String,
         voiceOverride: AudioVoiceSelection?
     ) async -> AudioRouteResolution {
         let models = await offlineModelAvailability()
         let systemVoices = AVSpeechSynthesisVoice.speechVoices()
-        let voiceIdentities = systemVoices.map { SystemVoiceIdentity(identifier: $0.identifier, name: $0.name) }
         let preference = AudioSpeechPreference(
             source: configuration.speech.source,
             offlineModelId: configuration.speech.offlineModelId,
-            voice: resolvingLegacySystemVoice(configuration.speech.voice, against: voiceIdentities)
+            voice: configuration.speech.voice
         )
         return resolveAudioRoute(AudioRouteRequest(
             kind: .speech,
@@ -3184,7 +3240,7 @@ actor HelperStateStore {
             systemStatus: speechSystemReadiness(),
             offlineModels: models,
             systemVoiceIds: systemVoices.map(\.identifier),
-            voiceOverride: resolvingLegacySystemVoice(voiceOverride, against: voiceIdentities)
+            voiceOverride: voiceOverride
         ))
     }
 
@@ -3211,7 +3267,7 @@ actor HelperStateStore {
         identity: HelperAudioOperationIdentity,
         owner: HelperAudioOwner,
         operation: String,
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         revision: UInt64
     ) {
         let preference: AudioRoutePreferenceProviding?
@@ -3306,7 +3362,8 @@ actor HelperStateStore {
         cancellation: AudioCancellationFlag,
         onSilence: @escaping @Sendable () async -> Void,
         onNoSpeech: @escaping @Sendable () async -> Void,
-        onLimit: @escaping @Sendable () async -> Void
+        onLimit: @escaping @Sendable () async -> Void,
+        streamPCM: Bool = false
     ) async throws {
         try ensureCurrent(identity)
         guard (8_000...768_000).contains(sampleRate) else {
@@ -3327,6 +3384,12 @@ actor HelperStateStore {
         }
         activeLanguage = language
         let maximumSamples = max(0, maximumPayloadBytes / 2)
+        let pcmCallback: (@Sendable (Data) async -> Void)?
+        if streamPCM {
+            pcmCallback = { [weak self] data in
+                await self?.publishCaptureChunk(owner: requestOwner.helperOwner, identity: identity, pcm: data, sampleRate: sampleRate)
+            }
+        } else { pcmCallback = nil }
         let session = await MainActor.run {
             ListeningSession(
                 owner: requestOwner.helperOwner,
@@ -3341,6 +3404,7 @@ actor HelperStateStore {
                 onLevel: { [weak self] level in
                     await self?.publishInputLevel(owner: requestOwner.helperOwner, level: level)
                 },
+                onPCM: pcmCallback,
                 onSilence: onSilence,
                 onNoSpeech: onNoSpeech,
                 onLimit: onLimit
@@ -3416,6 +3480,7 @@ actor HelperStateStore {
                 || speechIdentity != nil
                 || systemRenderIdentity != nil
         )
+        recordingStreamsPCM = operation["stream_pcm"] as? Bool == true
         recordingFormat = format
         recordingMaximumPayloadBytes = payloadBytes
         recordingConfigurationRevision = configurationRevision
@@ -3431,7 +3496,8 @@ actor HelperStateStore {
                 cancellation: cancellation,
                 onSilence: {},
                 onNoSpeech: {},
-                onLimit: { [weak self] in await self?.recordingLimitReached(identity: identity) }
+                onLimit: { [weak self] in await self?.recordingLimitReached(identity: identity) },
+                streamPCM: operation["stream_pcm"] as? Bool == true
             )
             try ensureCurrent(identity)
             if let session = activeSession, listeningIdentity == identity,
@@ -3492,6 +3558,13 @@ actor HelperStateStore {
         }
         let captured = await activeSession.stop()
         let stillOwnsRecording = recordingOriginIdentity == origin && self.activeSession === activeSession
+        if recordingStreamsPCM && stillOwnsRecording {
+            self.clearRecordingLease(identity: origin)
+            await publishOwnerChanged()
+            await publishSnapshotChanged()
+            if let error = captured.4 { throw error }
+            return .status(recording: false, playing: false)
+        }
         let payload = try finalizeStoppedRecording(
             ownsCurrentLease: stillOwnsRecording,
             releaseLease: { self.clearRecordingLease(identity: origin) }
@@ -3526,7 +3599,7 @@ actor HelperStateStore {
         identity: HelperAudioOperationIdentity,
         owner requestOwner: HelperAudioOwner,
         operation: [String: Any],
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         configurationRevision: UInt64,
         maxPayloadBytes: UInt64,
         cancellation: AudioCancellationFlag
@@ -3550,7 +3623,7 @@ actor HelperStateStore {
             cancellation: cancellation
         )
         recognitionSnapshot = HelperRecognitionSnapshot(
-            requestedMode: route.requested.source == .offline ? "localOnly" : "automatic",
+            requestedSource: route.requested.source.rawValue,
             effectiveBackend: effective.source == .system ? "apple" : "sherpa",
             effectiveLanguage: language,
             detail: effective.source == .system ? "Using Apple Speech for this live listen." : "Using the selected installed offline recognizer.",
@@ -3653,7 +3726,7 @@ actor HelperStateStore {
             try ensureCurrent(context.identity)
             try context.cancellation.check()
             recognitionSnapshot = HelperRecognitionSnapshot(
-                requestedMode: context.route.requested.source == .offline ? "localOnly" : "automatic",
+                requestedSource: context.route.requested.source.rawValue,
                 effectiveBackend: effective.source == .system ? "apple" : "sherpa",
                 effectiveLanguage: context.language,
                 detail: effective.source == .system ? "Apple Speech completed this live listen." : "The installed offline model completed this live listen.",
@@ -3716,7 +3789,7 @@ actor HelperStateStore {
 
     private func automaticOfflineSpeechFallback(
         from requestedRoute: AudioRouteResolution,
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         language: String
     ) async -> AudioRouteResolution? {
         guard allowsAutomaticSpeechFallback(requestedRoute) else { return nil }
@@ -3810,7 +3883,7 @@ actor HelperStateStore {
         identity: HelperAudioOperationIdentity,
         owner requestOwner: HelperAudioOwner,
         operation: [String: Any],
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         configurationRevision: UInt64,
         maxPayloadBytes: UInt64,
         cancellation: AudioCancellationFlag
@@ -3854,7 +3927,7 @@ actor HelperStateStore {
         identity: HelperAudioOperationIdentity,
         owner requestOwner: HelperAudioOwner,
         operation: [String: Any],
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         configurationRevision: UInt64,
         maxPayloadBytes: UInt64,
         cancellation: AudioCancellationFlag
@@ -4364,7 +4437,8 @@ func handleHelperInputEnvelope(_ parsed: [String: Any], state: HelperStateStore)
         await state.rejectOverloaded(parsed)
         return
     }
-    let operation = request["operation"] as? [String: Any] ?? [:]
+    var operation = request["operation"] as? [String: Any] ?? [:]
+    if parsed["streamPcm"] as? Bool == true, operation["type"] as? String == "start_recording" { operation["stream_pcm"] = true }
     let configuration = AudioConfigurationNormalizer.normalize(parsed["configuration"])
     let revision = (parsed["configurationRevision"] as? NSNumber)?.uint64Value ?? 0
     let maxPayloadBytes = (request["max_payload_bytes"] as? NSNumber)?.uint64Value

@@ -62,6 +62,7 @@ cli = [
 ]
 
 [dependencies]
+audio-provider = { path = "../../audio-provider" }
 core = { workspace = true }
 mobile-linux-api.workspace = true
 harness-runtime = { workspace = true, default-features = false, features = ["mobile"] }

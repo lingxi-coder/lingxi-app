@@ -70,6 +70,11 @@ final class IOSAudioServiceCallbackAdapter: IosAudioService, @unchecked Sendable
         switch operation {
         case let .startRecording(sampleRateHz, format): .startRecording(sampleRateHz: sampleRateHz, format: format)
         case let .stopRecording(handle): .stopRecording(handle: handle)
+        case let .capture(sampleRateHz, format): .capture(sampleRateHz: sampleRateHz, format: format)
+        case let .play(pcmBase64, sampleRateHz):
+            .play(pcm: Data(base64Encoded: pcmBase64) ?? Data(), sampleRateHz: sampleRateHz)
+        case let .transcribe(audioBase64, mimeType, language):
+            .transcribe(audio: Data(base64Encoded: audioBase64) ?? Data(), mimeType: mimeType, language: language)
         case let .listen(language): .listen(language: language)
         case let .synthesize(text, language, rate, voice): .synthesize(text: text, language: language, rate: rate, voice: voice)
         case let .speak(text, language, rate, voice): .speak(text: text, language: language, rate: rate, voice: voice)
@@ -136,15 +141,21 @@ final class IOSAudioServiceCallbackAdapter: IosAudioService, @unchecked Sendable
     private static func operationOrder(_ operation: IOSAudioCapabilityState.Operation) -> Int {
         switch operation {
         case .record: 0
-        case .listen: 1
-        case .synthesize: 2
-        case .speak: 3
+        case .capture: 1
+        case .play: 2
+        case .transcribe: 3
+        case .listen: 4
+        case .synthesize: 5
+        case .speak: 6
         }
     }
 
     private static func dtoOperation(_ operation: IOSAudioCapabilityState.Operation) -> AudioOperationKindDto {
         switch operation {
         case .record: .record
+        case .capture: .capture
+        case .play: .play
+        case .transcribe: .transcribe
         case .listen: .listen
         case .synthesize: .synthesize
         case .speak: .speak

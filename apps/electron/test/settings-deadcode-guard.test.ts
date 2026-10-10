@@ -147,7 +147,7 @@ test('the device settings shape is declared exactly once, in src/shared', () => 
 test('the voice preference and native audio shapes are declared exactly once', () => {
   const expectedHomes: Record<string, string> = {
     VoicePreferences: 'apps/electron/src/shared/voicePreferences.ts',
-    AudioConfigurationV3: 'apps/electron/src/shared/generatedAudioConfiguration.ts',
+    AudioConfigurationV4: 'apps/electron/src/shared/generatedAudioConfiguration.ts',
     NativeAudioVoiceOption: 'apps/electron/src/shared/nativeAudio.ts',
   };
   for (const [name, home] of Object.entries(expectedHomes)) {

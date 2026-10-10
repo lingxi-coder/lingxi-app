@@ -94,6 +94,8 @@ fun Composer(
     onMicHoldRelease: () -> Unit = {},
     onFlowModeClick: () -> Unit = {},
     flowModeActive: Boolean = false,
+    voiceInputSupported: Boolean = true,
+    voiceConversationSupported: Boolean = true,
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
@@ -319,7 +321,7 @@ fun Composer(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(
+                        if (voiceInputSupported) Box(
                             modifier = Modifier
                                 .size(34.dp)
                                 .voiceHold(
@@ -338,7 +340,7 @@ fun Composer(
                         ) {
                             LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.text2, stroke = 1.8f)
                         }
-                        Box(
+                        if (voiceConversationSupported) Box(
                             modifier = Modifier
                                 .size(40.dp)
                                 .clip(CircleShape)

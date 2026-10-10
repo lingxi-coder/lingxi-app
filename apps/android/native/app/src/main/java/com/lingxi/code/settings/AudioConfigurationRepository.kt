@@ -2,23 +2,19 @@ package com.lingxi.code.settings
 
 import android.content.Context
 import android.content.SharedPreferences
-import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.voice.audio.AudioConfigurationNormalizer
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import com.lingxi.code.voice.audio.AudioVoiceSelection
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 
 data class VersionedAudioConfiguration(
-    val configuration: AudioConfigurationV3,
+    val configuration: AudioConfigurationV4,
     val revision: Long,
 )
 
 data class AudioConfigurationLoadResult(
     val snapshot: VersionedAudioConfiguration,
-    val migrated: Boolean,
     val persistenceError: String? = null,
 )
 
@@ -28,10 +24,9 @@ sealed interface AudioConfigurationSaveResult {
     data class Failed(val message: String) : AudioConfigurationSaveResult
 }
 
-/** Storage seam keeps revision and migration behavior testable without Android preferences. */
+/** Storage seam keeps durable revision behavior testable without Android preferences. */
 internal interface AudioConfigurationStorage {
     fun readConfiguration(): Any?
-    fun readLegacyConfiguration(): Map<String, Any?>
     fun readRevision(): Long
     fun writeConfiguration(value: Map<String, Any?>, revision: Long): Boolean
 }
@@ -39,7 +34,7 @@ internal interface AudioConfigurationStorage {
 /** Read marker for malformed persisted data. Callers must preserve the raw value and fail routes closed. */
 internal data class CorruptAudioConfiguration(val message: String)
 
-/** Device-local v3 store. Writes are serialized and advance revision only after durable commit. */
+/** Device-local v4 store. Writes are serialized and advance revision only after durable commit. */
 class AudioConfigurationRepository internal constructor(
     private val storage: AudioConfigurationStorage,
     authorityKey: Any = storage,
@@ -54,42 +49,15 @@ class AudioConfigurationRepository internal constructor(
     }
 
     fun load(): AudioConfigurationLoadResult = synchronized(PROCESS_LOCK) {
-        val raw = storage.readConfiguration()
         if (sharedState.hasUncommittedWriteFailure) {
-            val committed = sharedState.lastCommittedSnapshot
-            if (sharedState.retryMigrationAfterFailure) {
-                val pendingMigration = sharedState.pendingMigrationConfiguration
-                val baseRevision = committed?.revision ?: storage.readRevision().coerceAtLeast(0L)
-                val nextRevision = nextRevision(baseRevision)
-                if (pendingMigration != null && nextRevision != null &&
-                    storage.writeConfiguration(pendingMigration.toStorageMap(), nextRevision)
-                ) {
-                    val migrated = VersionedAudioConfiguration(pendingMigration, nextRevision)
-                    sharedState.lastCommittedSnapshot = migrated
-                    sharedState.hasUncommittedWriteFailure = false
-                    sharedState.retryMigrationAfterFailure = false
-                    sharedState.pendingMigrationConfiguration = null
-                    return@synchronized AudioConfigurationLoadResult(snapshot = migrated, migrated = true)
-                }
-                val fallback = committed ?: VersionedAudioConfiguration(unavailableConfiguration(), baseRevision)
-                return@synchronized AudioConfigurationLoadResult(
-                    snapshot = fallback,
-                    migrated = false,
-                    persistenceError = if (nextRevision == null) {
-                        "Audio settings revision is exhausted; migration was not saved."
-                    } else {
-                        "Audio settings migration could not be saved."
-                    },
-                )
-            }
-            committed?.let { snapshot ->
+            sharedState.lastCommittedSnapshot?.let { snapshot ->
                 return@synchronized AudioConfigurationLoadResult(
                     snapshot = snapshot,
-                    migrated = false,
                     persistenceError = "Audio settings could not be saved. The last saved settings are still active.",
                 )
             }
         }
+        val raw = storage.readConfiguration()
         val revision = storage.readRevision().coerceAtLeast(0L)
         if (raw is CorruptAudioConfiguration) {
             val snapshot = sharedState.lastCommittedSnapshot?.takeIf { it.revision == revision }
@@ -97,56 +65,17 @@ class AudioConfigurationRepository internal constructor(
             if (sharedState.lastCommittedSnapshot == null) sharedState.lastCommittedSnapshot = snapshot
             return@synchronized AudioConfigurationLoadResult(
                 snapshot = snapshot,
-                migrated = false,
                 persistenceError = "Audio settings data is invalid and was preserved. Select audio sources again to replace it.",
             )
         }
-        if (raw == null) {
-            val migrated = AudioConfigurationNormalizer.migrateLegacy(storage.readLegacyConfiguration())
-            val nextRevision = nextRevision(revision)
-            if (nextRevision == null) {
-                val snapshot = VersionedAudioConfiguration(migrated, revision)
-                sharedState.lastCommittedSnapshot = snapshot
-                return@synchronized AudioConfigurationLoadResult(
-                    snapshot = snapshot,
-                    migrated = false,
-                    persistenceError = "Audio settings revision is exhausted; migration was not saved.",
-                )
-            }
-            val migrationSnapshot = VersionedAudioConfiguration(migrated, revision)
-            sharedState.lastCommittedSnapshot = migrationSnapshot
-            if (!storage.writeConfiguration(migrated.toStorageMap(), nextRevision)) {
-                sharedState.hasUncommittedWriteFailure = true
-                sharedState.retryMigrationAfterFailure = true
-                sharedState.pendingMigrationConfiguration = migrated
-                return@synchronized AudioConfigurationLoadResult(
-                    snapshot = migrationSnapshot,
-                    migrated = false,
-                    persistenceError = "Audio settings migration could not be saved.",
-                )
-            }
-            val migratedSnapshot = VersionedAudioConfiguration(migrated, nextRevision)
-            sharedState.lastCommittedSnapshot = migratedSnapshot
-            sharedState.hasUncommittedWriteFailure = false
-            sharedState.retryMigrationAfterFailure = false
-            sharedState.pendingMigrationConfiguration = null
-            return@synchronized AudioConfigurationLoadResult(snapshot = migratedSnapshot, migrated = true)
-        }
-
-        val normalized = AudioConfigurationNormalizer.normalize(raw)
-        val snapshot = VersionedAudioConfiguration(normalized, revision)
+        val snapshot = VersionedAudioConfiguration(AudioConfigurationNormalizer.normalize(raw), revision)
         sharedState.lastCommittedSnapshot = snapshot
         sharedState.hasUncommittedWriteFailure = false
-        sharedState.retryMigrationAfterFailure = false
-        sharedState.pendingMigrationConfiguration = null
-        AudioConfigurationLoadResult(
-            snapshot,
-            migrated = false,
-        )
+        AudioConfigurationLoadResult(snapshot)
     }
 
     fun save(
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         expectedRevision: Long,
     ): AudioConfigurationSaveResult = synchronized(PROCESS_LOCK) {
         val currentRevision = if (sharedState.hasUncommittedWriteFailure) {
@@ -170,13 +99,9 @@ class AudioConfigurationRepository internal constructor(
         }
         if (!storage.writeConfiguration(normalized.toStorageMap(), nextRevision)) {
             sharedState.hasUncommittedWriteFailure = true
-            sharedState.retryMigrationAfterFailure = false
-            sharedState.pendingMigrationConfiguration = null
             return@synchronized AudioConfigurationSaveResult.Failed("Audio settings could not be saved.")
         }
         sharedState.hasUncommittedWriteFailure = false
-        sharedState.retryMigrationAfterFailure = false
-        sharedState.pendingMigrationConfiguration = null
         val snapshot = VersionedAudioConfiguration(normalized, nextRevision)
         sharedState.lastCommittedSnapshot = snapshot
         AudioConfigurationSaveResult.Saved(snapshot)
@@ -186,8 +111,6 @@ class AudioConfigurationRepository internal constructor(
         val raw = storage.readConfiguration()
         val configuration = if (raw is CorruptAudioConfiguration) {
             sharedState.lastCommittedSnapshot?.configuration ?: unavailableConfiguration()
-        } else if (raw == null) {
-            AudioConfigurationNormalizer.migrateLegacy(storage.readLegacyConfiguration())
         } else {
             AudioConfigurationNormalizer.normalize(raw)
         }
@@ -205,8 +128,6 @@ class AudioConfigurationRepository internal constructor(
     private class RepositoryState(
         var lastCommittedSnapshot: VersionedAudioConfiguration? = null,
         var hasUncommittedWriteFailure: Boolean = false,
-        var retryMigrationAfterFailure: Boolean = false,
-        var pendingMigrationConfiguration: AudioConfigurationV3? = null,
     )
 }
 
@@ -218,64 +139,46 @@ private class SharedPreferencesAudioConfigurationStorage(context: Context) : Aud
         runCatching { parseJson(value) }.getOrElse { CorruptAudioConfiguration("Audio settings are malformed.") }
     }
 
-    override fun readLegacyConfiguration(): Map<String, Any?> {
-        val oldSchema = preferences.getInt(KEY_SCHEMA_VERSION, 0)
-        val voiceLanguage = if (oldSchema < 3) {
-            runCatching { runBlocking { AppearanceStore(appContext).prefs.first().voiceLang } }.getOrNull()
-        } else {
-            null
-        }
-        return buildMap {
-            put("schemaVersion", oldSchema)
-            put("recognitionMode", preferences.getString("recognition_mode", null))
-            put("language", preferences.getString("language", null))
-            put("voiceSelection", preferences.getString("voice_selection", null))
-            if (preferences.contains("rate")) put("rate", preferences.getFloat("rate", 1.0f))
-            if (preferences.contains("auto_play_replies")) put("autoPlayReplies", preferences.getBoolean("auto_play_replies", false))
-            put("inputProvider", preferences.getString("input_provider", null))
-            put("inputLanguage", preferences.getString("input_language", null))
-            put("outputProvider", preferences.getString("output_provider", null))
-            put("voice", preferences.getString("voice", null))
-            if (preferences.contains("speed")) put("speed", preferences.getFloat("speed", 1.0f))
-            if (preferences.contains("auto_play")) put("autoPlay", preferences.getBoolean("auto_play", false))
-            voiceLanguage?.let { put("legacyVoiceLang", it) }
-        }
-    }
-
     override fun readRevision(): Long = preferences.getLong(KEY_REVISION, 0L)
 
     override fun writeConfiguration(value: Map<String, Any?>, revision: Long): Boolean =
         preferences.edit()
             .putString(KEY_CONFIGURATION, JSONObject(value).toString())
-            .putInt(KEY_SCHEMA_VERSION, 3)
             .putLong(KEY_REVISION, revision)
             .commit()
 
     private companion object {
         const val PREFERENCES_NAME = "voice_settings"
-        const val KEY_CONFIGURATION = "audio_configuration_v3"
+        const val KEY_CONFIGURATION = "audio_configuration_v4"
         const val KEY_REVISION = "audio_configuration_revision"
-        const val KEY_SCHEMA_VERSION = "schema_version"
     }
 }
 
-private fun AudioConfigurationV3.toStorageMap(): Map<String, Any?> = mapOf(
-    "schemaVersion" to 3,
+internal fun AudioConfigurationV4.toStorageMap(): Map<String, Any?> = mapOf(
+    "schemaVersion" to 4,
     "recognition" to mapOf(
         "source" to recognition.source.value,
         "offlineModelId" to recognition.offlineModelId,
+        "cloud" to recognition.cloud.toStorageMap(),
     ),
     "speech" to mapOf(
         "source" to speech.source.value,
         "offlineModelId" to speech.offlineModelId,
         "voice" to speech.voice?.toStorageMap(),
+        "cloud" to speech.cloud.toStorageMap(),
+    ),
+    "conversation" to mapOf(
+        "mode" to conversation.mode,
+        "interaction" to conversation.interaction,
+        "cloud" to conversation.cloud.toStorageMap(),
+        "voice" to conversation.voice?.toStorageMap(),
     ),
     "language" to language,
     "rate" to rate,
     "autoPlayReplies" to autoPlayReplies,
 )
 
-private fun unavailableConfiguration(): AudioConfigurationV3 = AudioConfigurationV3(
+private fun unavailableConfiguration(): AudioConfigurationV4 = AudioConfigurationV4(
     recognition = com.lingxi.code.voice.audio.AudioRecognitionPreference(
         source = com.lingxi.code.voice.audio.AudioSource("invalidStoredConfiguration"),
     ),
@@ -288,6 +191,7 @@ private fun AudioVoiceSelection.toStorageMap(): Map<String, Any?> = buildMap {
     put("source", source.value)
     put("id", id)
     modelId?.let { put("modelId", it) }
+    profileId?.let { put("profileId", it) }
 }
 
 private fun parseJson(text: String): Map<String, Any?> = JSONObject(text).toStringMap()
@@ -302,3 +206,7 @@ private fun Any?.toPlainValue(): Any? = when (this) {
     is JSONArray -> (0 until length()).map { get(it).toPlainValue() }
     else -> this
 }
+
+private fun com.lingxi.code.voice.audio.AudioCloudBinding.toStorageMap(): Map<String, Any?> = mapOf(
+    "binding" to binding, "profileId" to profileId, "modelId" to modelId,
+)

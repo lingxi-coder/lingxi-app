@@ -102,6 +102,10 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   plugin_admin: true,
   hook_admin: true,
   audio_response: true,
+  start_realtime_audio: true,
+  realtime_audio_input: true,
+  stop_realtime_audio: true,
+  get_audio_session_context: true,
   update_audio_capabilities: true,
 };
 
@@ -197,6 +201,8 @@ export const ALL_CLIENT_EVENT_TYPES: Record<ClientEvent['type'], true> = {
   api_retry: true,
   audio_request: true,
   audio_cancel: true,
+  realtime_audio_event: true,
+  audio_session_context: true,
   audio_capabilities_changed: true,
 };
 

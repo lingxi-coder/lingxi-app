@@ -163,10 +163,11 @@ else
   log "Generating Swift bindings into ${GEN_DIR} …"
   rm -rf "${GEN_DIR}"
   mkdir -p "${GEN_DIR}"
-# Generate through the pinned UniFFI 0.32 public pipeline.
-cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features cli \
-  --bin uniffi-bindgen -- \
-  generate \
+  # The preceding build produces this exact generator with the host library.
+  # Invoke it directly so generation does not queue a second Cargo build.
+  BINDGEN_PATH="${CARGO_TARGET_DIR}/debug/uniffi-bindgen"
+  [[ -x "${BINDGEN_PATH}" ]] || { echo "ERROR: bindings generator not produced: ${BINDGEN_PATH}" >&2; exit 1; }
+  "${BINDGEN_PATH}" generate \
   --library "${HOST_DYLIB_PATH}" \
   --language swift \
   --out-dir "${GEN_DIR}"

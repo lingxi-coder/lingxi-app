@@ -14,6 +14,7 @@ import {
   SessionLaunchCache,
 } from './credential-broker.js';
 import { CODEX_PROVIDER_ID, parseCodexSession } from './codex-auth.js';
+import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
 import { TerminalManager } from './terminal.js';
@@ -222,12 +223,26 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     ? 'credential store: macOS credential broker'
     : 'credential store: shared engine secure storage');
   const settings = new SettingsStore(userData);
+  const audioSessionContext = (owner?: import('@lingxi/bridge-client').AudioOwnerDto) => {
+    const sessionId = owner?.type === 'session' ? owner.session_id : settings.getPublic().activeSession?.sessionId;
+    return sessionId ? bridge?.get(sessionId)?.audioSessionContext : undefined;
+  };
+  const providerAudio = new ProviderAudioHost({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    cwd: () => settings.getPublic().activeSession?.projectPath ?? settings.getWorkspace() ?? app.getPath('home'),
+    session: () => audioSessionContext(),
+    realtimeSupported: () => { const sessionId = settings.getPublic().activeSession?.sessionId; return !!sessionId && bridge?.get(sessionId)?.realtimeAudioSupported === true; },
+    resolveCredential: (credentialId) => resolveProviderCredential(credentialId, { credentialBroker }),
+  });
   nativeAudio = process.platform === 'darwin'
     ? new NativeAudioManager({
         isPackaged: app.isPackaged,
         resourcesPath: process.resourcesPath,
         userDataPath: userData,
         diagnostics,
+        providerAudio,
+        getAudioSessionContext: audioSessionContext,
         requestMicrophoneAccess: () => requestMicrophoneAccess(),
         getAudioConfiguration: () => {
           const error = settings.getAudioConfigurationError();

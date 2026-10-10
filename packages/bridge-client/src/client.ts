@@ -390,6 +390,9 @@ export class BridgeClient extends EventEmitter {
     // `frameSizeError` for why an oversize frame costs the whole connection.
     const oversize = frameSizeError(serialized, frameMethod(frame));
     if (oversize) throw oversize;
+    if (frameMethod(frame) === 'realtime_audio_input' && this.ws.bufferedAmount + Buffer.byteLength(serialized) > 512 * 1024) {
+      throw new Error('Realtime audio input queue is full; restart the audio session');
+    }
     this.ws.send(serialized);
   }
 

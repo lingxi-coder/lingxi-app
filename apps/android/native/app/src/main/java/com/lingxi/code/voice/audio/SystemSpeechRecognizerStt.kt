@@ -43,7 +43,7 @@ interface RealtimeSpeechSession {
  * Designed for a talk-mode path where a higher layer opens the mic itself;
  * here the provider just delegates to the system service for transcription.
  *
- * The [SttProvider] method remains a one-shot compatibility path. Interactive
+ * The [SttProvider] method runs a one-shot listen. Interactive
  * hold-to-talk uses [openRealtimeSession], enables partial results, and keeps
  * the recognizer alive until stop/cancel/terminal delivery.
  */

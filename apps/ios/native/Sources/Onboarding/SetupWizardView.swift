@@ -395,7 +395,7 @@ struct SetupWizardView: View {
                     .font(.caption.bold())
                     .foregroundStyle(Color(okl: 0.68, 0.04, 280))
                     .padding(.top, 8)
-                ForEach(VoiceRecognitionMode.allCases) { mode in
+                ForEach(voiceCapability.recognitionModes) { mode in
                     voiceModeButton(mode)
                 }
 

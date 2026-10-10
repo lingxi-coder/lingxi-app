@@ -41,6 +41,10 @@ final class EngineConversationSource: ConversationSource {
     private let handleBuilder: HandleBuilder
     private let permissionModeRepository: PermissionModeConfigurationRepository
     private var handle: MobileEngineHandle?
+    private let audioContextOwnerID = UUID().uuidString
+    private var audioContextGeneration: UInt64 = 0
+    private var audioContextTask: Task<Void, Never>?
+    private var audioSourceActive = false
     /// One shared bootstrap attempt for every entry point that needs the
     /// engine. Access to this property remains main-actor-confined, which
     /// prevents interleaving callers from constructing competing handles;
@@ -194,6 +198,15 @@ final class EngineConversationSource: ConversationSource {
         self.model.activeModelId = config.model
         self.model.bypassPermissionsWarningSuppressed = self.permissionModeRepository
             .bypassWarningSuppressed()
+    }
+
+    deinit {
+        audioContextTask?.cancel()
+        let ownerID = audioContextOwnerID
+        Task { @MainActor in
+            IOSAudioProviderService.shared.clearSessionContext(ownerID: ownerID)
+            IOSRealtimeAudioService.shared.detach(ownerID: ownerID)
+        }
     }
 
     // MARK: ConversationSource
@@ -415,6 +428,7 @@ final class EngineConversationSource: ConversationSource {
     /// committed transcript immediately; a resume keeps it visible until the
     /// authoritative `SessionResumed` replay replaces it.
     private func resetTranscriptForSessionSwitch(isNew: Bool) {
+        invalidateAudioSessionContext()
         invalidateTurnContext()
         replayProjectionState = nil
         hasConfirmedSessionState = false
@@ -1513,6 +1527,13 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func setSettingsActive(_ active: Bool) {
+        audioSourceActive = active
+        if active {
+            IOSAudioProviderService.shared.claimSessionContext(ownerID: audioContextOwnerID)
+            refreshAudioSessionContext()
+        } else {
+            invalidateAudioSessionContext()
+        }
         if active {
             guard Self.settingsOwner !== self else { return }
             Self.settingsOwner?.settingsGeneration &+= 1
@@ -1537,6 +1558,48 @@ final class EngineConversationSource: ConversationSource {
             settingsGeneration &+= 1
             Self.settingsOwner = nil
             DesktopSettingsRepository.shared.configure(submitter: nil)
+        }
+    }
+
+    private func invalidateAudioSessionContext() {
+        audioContextGeneration &+= 1
+        audioContextTask?.cancel()
+        audioContextTask = nil
+        IOSAudioProviderService.shared.clearSessionContext(ownerID: audioContextOwnerID)
+        IOSRealtimeAudioService.shared.detach(ownerID: audioContextOwnerID)
+    }
+
+    /// Query the already connected engine. Opening audio settings never builds
+    /// an engine merely to discover a cloud route.
+    private func refreshAudioSessionContext() {
+        guard audioSourceActive, hasConfirmedSessionState, !model.sessionTransitionPending,
+              let handle, !model.activeSessionId.isEmpty else { return }
+        audioContextGeneration &+= 1
+        let generation = audioContextGeneration
+        let sessionID = model.activeSessionId
+        let modelID = model.activeModelId
+        audioContextTask?.cancel()
+        audioContextTask = Task { @MainActor [weak self, handle] in
+            let json = await handle.audioSessionContext()
+            guard !Task.isCancelled, let self, self.audioSourceActive,
+                  self.audioContextGeneration == generation, self.handle === handle,
+                  self.model.activeSessionId == sessionID, self.model.activeModelId == modelID,
+                  !self.model.sessionTransitionPending else { return }
+            guard let data = json.data(using: .utf8),
+                  let context = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  context["sessionId"] as? String == sessionID,
+                  let profileID = context["profileId"] as? String, !profileID.isEmpty,
+                  let accountScope = context["accountScope"] as? String, !accountScope.isEmpty else {
+                self.invalidateAudioSessionContext()
+                return
+            }
+            IOSAudioProviderService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID)
+            IOSRealtimeAudioService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID)
+            IOSAudioProviderService.shared.setSessionContext(
+                sessionID: sessionID, profileID: profileID, accountScope: accountScope,
+                region: context["region"] as? String, ownerID: self.audioContextOwnerID
+            )
+            await IOSAudioProviderService.shared.refresh(snapshot: AudioConfigurationStore.shared.snapshot)
         }
     }
 
@@ -1614,6 +1677,7 @@ final class EngineConversationSource: ConversationSource {
             let builtHandle = try await buildTask.value
             if handleBuildAttemptID == attemptID {
                 handle = builtHandle
+                refreshAudioSessionContext()
                 VisualizationWebHost.shared.attach(builtHandle.visualizationHost(origin: VisualizationWebHost.origin))
                 self.listener = listener
                 self.permissionSink = permissionSink
@@ -3769,6 +3833,7 @@ final class EngineConversationSource: ConversationSource {
             model.activeSessionId = sessionId
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
+            refreshAudioSessionContext()
             if confirmedNewSession {
                 model.sessionRefreshRevision &+= 1
             }
@@ -3793,6 +3858,7 @@ final class EngineConversationSource: ConversationSource {
             model.activeSessionId = sessionId
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
+            refreshAudioSessionContext()
             // BUG FIX: a restored message is NOT one render row. In the
             // Anthropic protocol a `tool_result` block lives in the USER
             // turn, so mapping each `MessageDto` to a single `.message`
@@ -4850,6 +4916,7 @@ final class EngineConversationSource: ConversationSource {
     private func applyActiveModel(_ id: String) {
         guard !id.isEmpty else { return }
         model.activeModelId = id
+        refreshAudioSessionContext()
         if let opt = MockData.models.first(where: { $0.id == id || $0.name == id }) {
             model.model = opt
         }

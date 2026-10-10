@@ -556,8 +556,16 @@ function validateAudioIdentity(v: unknown): void {
 function validateAudioOperation(v: unknown): void {
   const o = rec(v);
   switch (o['type']) {
+    case 'capture':
+      exactObjectKeys(o, ['type', 'sample_rate_hz', 'format']);
+      assert.ok(isNumber(o['sample_rate_hz']) && isString(o['format']));
+      break;
     case 'start_recording':
       assert.ok(isNumber(o['sample_rate_hz']) && isString(o['format']));
+      break;
+    case 'play':
+      exactObjectKeys(o, ['type', 'pcm_base64', 'sample_rate_hz']);
+      assert.ok(isString(o['pcm_base64']) && isNumber(o['sample_rate_hz']));
       break;
     case 'stop_recording':
       assert.ok(isString(o['handle']));
@@ -908,6 +916,18 @@ function validateCommand(name: string, v: unknown): void {
     case 'hook_admin':
       validateConfigurationAdminCommand(o['command']);
       break;
+    case 'get_audio_session_context':
+    case 'stop_realtime_audio':
+      exactObjectKeys(o, ['type']);
+      break;
+    case 'start_realtime_audio':
+      exactObjectKeys(o, ['type', 'request_json']);
+      assert.ok(isString(o['request_json']));
+      break;
+    case 'realtime_audio_input':
+      exactObjectKeys(o, ['type', 'input_json']);
+      assert.ok(isString(o['input_json']));
+      break;
     case 'audio_response':
       validateAudioIdentity(o['identity']);
       validateAudioResult(o['result']);
@@ -927,6 +947,7 @@ function validateEvent(name: string, v: unknown): void {
   const o = rec(e);
   switch (o['type']) {
     case 'query_model_change':
+    case 'visualization_block':
     case 'assistant_block_start':
     case 'assistant_block_identity':
     case 'tombstone':
@@ -1395,6 +1416,16 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['delay_ms']),
       );
       break;
+    case 'audio_session_context':
+      exactObjectKeys(o, ['type', 'session_id', 'profile_id', 'account_scope']);
+      assert.ok(isString(o['session_id']) && isString(o['profile_id']) && isString(o['account_scope']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
+    case 'realtime_audio_event':
+      exactObjectKeys(o, ['type', 'session_id', 'event_json']);
+      assert.ok(isString(o['session_id']) && isString(o['event_json']));
+      assert.deepEqual(validateClientEvent(v), v);
+      break;
     case 'audio_request':
       assert.deepEqual(validateClientEvent(v), v);
       break;
@@ -1516,26 +1547,9 @@ test('every command snapshot parses as ClientCommand', () => {
   }
 });
 
-test('workflow model metadata and paused task status pass the wire guards', () => {
+test('current worker model metadata and paused task status pass while obsolete app creation is rejected', () => {
   validateTaskStatus({ type: 'paused' });
-  validateCommand('create_app.json', {
-    type: 'create_app',
-    name: 'Demo',
-    origin: 'chat',
-    brief: 'Demo app',
-    workflow_model: 'deepseek/deepseek-flash',
-    mode: 'scaffolded',
-  });
-  // The "+" button's shape: an empty shell, no surface, correlated by a
-  // client-generated request id.
-  validateCommand('create_app.json', {
-    type: 'create_app',
-    name: '',
-    origin: 'library',
-    brief: '',
-    mode: 'shell',
-    request_id: 'req-1',
-  });
+  assert.throws(() => validateCommand('obsolete_create_app.json', { type: 'create_app', name: 'Demo', mode: 'shell' }), /unknown ClientCommand type/);
   validateSessionAgent({
     agent_id: 'design',
     name: 'design',
@@ -1766,4 +1780,12 @@ test('every error snapshot parses as ClientError', () => {
   for (const file of files) {
     validateError(loadSnapshot('error', file));
   }
+});
+
+test('audio bridge guards reject missing fields and stale context/frame properties', () => {
+  for (const type of ['start_realtime_audio', 'realtime_audio_input']) assert.throws(() => validateCommand('missing-audio-fields.json', { type }));
+  assert.throws(() => validateCommand('stale-audio-context-command.json', { type: 'get_audio_session_context', model: 'guessed/profile' }));
+  assert.throws(() => validateEvent('missing-audio-context.json', { type: 'audio_session_context', session_id: 's', profile_id: 'p' }));
+  assert.throws(() => validateEvent('missing-realtime-event.json', { type: 'realtime_audio_event', session_id: 's' }));
+  assert.throws(() => validateEvent('stale-realtime-event.json', { type: 'realtime_audio_event', session_id: 's', event_json: '{}', audio: 'stale' }));
 });

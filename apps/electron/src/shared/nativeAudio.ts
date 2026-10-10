@@ -1,3 +1,4 @@
+import type { AudioUsageRecord } from './audioUsage.js';
 import type {
   AudioCapabilitySnapshotDto,
   AudioErrorKindDto,
@@ -8,7 +9,8 @@ import type {
   AudioOwnerDto,
 } from '@lingxi/bridge-client';
 import type { MicrophonePermissionStatus } from './microphoneAccess.js';
-import type { AudioConfigurationV3 } from './generatedAudioConfiguration.js';
+import { normalizeAudioConfiguration } from './generatedAudioConfiguration.js';
+import type { AudioConfigurationV4, AudioProviderContext, AudioProviderCapability } from './generatedAudioConfiguration.js';
 import {
   isSendableAudioBase64,
   isSendableAudioText,
@@ -89,7 +91,7 @@ export interface NativeAudioModelSnapshot {
 }
 
 export interface NativeAudioRecognitionSnapshot {
-  requestedMode: 'automatic' | 'localOnly';
+  requestedSource: 'automatic' | 'system' | 'offline' | 'provider';
   effectiveBackend: 'apple' | 'sherpa' | 'unavailable';
   effectiveLanguage: string;
   detail: string;
@@ -103,6 +105,8 @@ export interface NativeAudioPlaybackSnapshot {
 }
 
 export type NativeAudioTraceOperation =
+  | 'capture'
+  | 'play'
   | 'start_recording'
   | 'stop_recording'
   | 'listen'
@@ -125,7 +129,15 @@ export interface NativeAudioOperationTrace {
   fallbackReason?: string;
 }
 
+export interface NativeProviderAudioModel { id: string | null; label?: string; voices: Array<{ id: string; label?: string }> }
+
 export interface NativeAudioSnapshot {
+  usageLedger?: AudioUsageRecord[];
+  executedRoute?: { operationId: string; configurationRevision: number; source: 'provider'; kind: 'recognition' | 'speech'; profileId: string; providerId: string; modelId: string | null; voiceId?: string; sessionId?: string };
+  sessionContext?: AudioProviderContext & { sessionId: string; accountScope?: string };
+  providerCapabilities?: AudioProviderCapability[];
+  providerCatalog?: Array<{ profileId: string; kind: 'recognition' | 'speech'; models: NativeProviderAudioModel[] }>;
+  realtimeReadiness?: { supported: boolean; ready: boolean; reason?: string; profileId?: string; providerId?: string; defaultModelId?: string; modelIds?: (string | null)[]; models?: NativeProviderAudioModel[] };
   helper: {
     state: 'stopped' | 'starting' | 'running' | 'failed';
     message?: string;
@@ -160,6 +172,7 @@ export interface NativeAudioRecognitionProgress {
 }
 
 export type NativeAudioEvent =
+  | { type: 'capture_chunk'; owner: NativeAudioOwner; identity: AudioOperationIdDto; sequence: number; pcmBase64: string; sampleRateHz: number }
   | { type: 'input_level'; owner: NativeAudioOwner; level: number }
   | { type: 'snapshot_changed'; snapshot: NativeAudioSnapshot }
   | { type: 'helper_state'; snapshot: NativeAudioSnapshot; state: NativeAudioSnapshot['helper']['state']; message?: string }
@@ -170,14 +183,9 @@ export type NativeAudioEvent =
   | { type: 'error'; snapshot: NativeAudioSnapshot; owner?: NativeAudioOwner; error: NativeAudioError };
 
 export type NativeAudioCommand =
-  | { type: 'get_snapshot' }
+  | { type: 'get_snapshot'; configuration?: AudioConfigurationV4 }
   | { type: 'cancel_operation'; identity: AudioOperationIdDto }
   | { type: 'request_authorization'; permissions: Array<'microphone' | 'speech'> }
-  | { type: 'start_listening'; owner: NativeAudioOwner; recognitionMode: 'automatic' | 'localOnly'; language?: string; sampleRateHz?: number; format?: 'wav' | 'm4a' }
-  | { type: 'finish_listening'; owner: NativeAudioOwner }
-  | { type: 'cancel'; owner: NativeAudioOwner }
-  | { type: 'speak'; owner: NativeAudioOwner; text: string; voiceId?: string; rate?: number }
-  | { type: 'stop_speaking'; owner: NativeAudioOwner }
   | { type: 'list_models' }
   | { type: 'install_model'; modelId: string }
   | { type: 'cancel_model'; modelId: string }
@@ -192,11 +200,8 @@ export type NativeAudioHelperCommand = NativeAudioCommand | {
 export type NativeAudioResponse =
   | { type: 'snapshot'; snapshot: NativeAudioSnapshot }
   | { type: 'authorization'; snapshot: NativeAudioSnapshot }
-  | { type: 'listening_started'; snapshot: NativeAudioSnapshot }
   | { type: 'listening_finished'; snapshot: NativeAudioSnapshot; transcript?: { text: string; language?: string; confidence?: number }; recording?: { audioBase64: string; mimeType: string } }
   | { type: 'cancelled'; snapshot: NativeAudioSnapshot }
-  | { type: 'speaking_started'; snapshot: NativeAudioSnapshot }
-  | { type: 'speaking_stopped'; snapshot: NativeAudioSnapshot }
   | { type: 'models'; snapshot: NativeAudioSnapshot; models: NativeAudioModelSnapshot[] }
   | { type: 'model_operation'; snapshot: NativeAudioSnapshot; model: NativeAudioModelSnapshot }
   | { type: 'error'; snapshot: NativeAudioSnapshot; error: NativeAudioError };
@@ -220,8 +225,9 @@ export type NativeAudioHelperCommandEnvelope =
       id: string;
       kind: 'engine_request';
       request: AudioOperationRequestDto;
-      configuration: AudioConfigurationV3;
+      configuration: AudioConfigurationV4;
       configurationRevision: number;
+      streamPcm?: boolean;
     };
 
 export type NativeAudioHelperEnvelope =
@@ -360,7 +366,7 @@ function validateAudioOperationTrace(value: unknown): NativeAudioOperationTrace 
   ], 'audio operation trace');
   const operation = boundedString(input['operation'], 'audio trace operation', 32);
   if (![
-    'start_recording', 'stop_recording', 'listen', 'synthesize', 'speak', 'status', 'end_owner',
+    'capture', 'play', 'start_recording', 'stop_recording', 'listen', 'synthesize', 'speak', 'status', 'end_owner',
   ].includes(operation)) throw new Error('invalid audio trace operation');
   return {
     identity: validateNativeAudioOperationIdentity(input['identity']),
@@ -487,15 +493,15 @@ export function validateNativeAudioSnapshot(value: unknown): NativeAudioSnapshot
   if (typeof input['recognizerAvailable'] === 'boolean') snapshot.recognizerAvailable = input['recognizerAvailable'];
   if (input['recognition'] !== undefined) {
     const recognition = object(input['recognition'], 'audio recognition');
-    exactKeys(recognition, ['requestedMode', 'effectiveBackend', 'effectiveLanguage', 'detail', 'fallbackReason'], 'audio recognition');
-    const requestedMode = boundedString(recognition['requestedMode'], 'audio requested mode', 16);
+    exactKeys(recognition, ['requestedSource', 'effectiveBackend', 'effectiveLanguage', 'detail', 'fallbackReason'], 'audio recognition');
+    const requestedSource = boundedString(recognition['requestedSource'], 'audio requested mode', 16);
     const effectiveBackend = boundedString(recognition['effectiveBackend'], 'audio recognition backend', 16);
-    if (requestedMode !== 'automatic' && requestedMode !== 'localOnly') throw new Error('invalid audio recognition mode');
+    if (!['automatic', 'system', 'offline', 'provider'].includes(requestedSource)) throw new Error('invalid audio recognition mode');
     if (effectiveBackend !== 'apple' && effectiveBackend !== 'sherpa' && effectiveBackend !== 'unavailable') {
       throw new Error('invalid audio recognition backend');
     }
     snapshot.recognition = {
-      requestedMode,
+      requestedSource: requestedSource as NativeAudioRecognitionSnapshot['requestedSource'],
       effectiveBackend,
       effectiveLanguage: boundedString(recognition['effectiveLanguage'], 'audio recognition language', MAX_LANGUAGE_LENGTH),
       detail: boundedString(recognition['detail'], 'audio recognition detail', 2_048),
@@ -519,6 +525,9 @@ export function validateNativeAudioCommand(value: unknown): NativeAudioCommand {
   const type = boundedString(input['type'], 'audio command type', 32);
   switch (type) {
     case 'get_snapshot':
+      exactKeys(input, ['type', 'configuration'], 'audio command');
+      if (input['configuration'] !== undefined && object(input['configuration'], 'audio preview configuration')['schemaVersion'] !== 4) throw new Error('invalid audio preview configuration version');
+      return { type, ...(input['configuration'] === undefined ? {} : { configuration: normalizeAudioConfiguration(input['configuration']) }) };
     case 'list_models':
       exactKeys(input, ['type'], 'audio command');
       return { type };
@@ -538,36 +547,6 @@ export function validateNativeAudioCommand(value: unknown): NativeAudioCommand {
         }),
       };
     }
-    case 'start_listening':
-      exactKeys(input, ['type', 'owner', 'recognitionMode', 'language', 'sampleRateHz', 'format'], 'audio command');
-      return {
-        type,
-        owner: validateOwner(input['owner']),
-        recognitionMode: input['recognitionMode'] === 'localOnly' ? 'localOnly' : 'automatic',
-        ...(input['language'] === undefined ? {} : { language: boundedString(input['language'], 'audio language', MAX_LANGUAGE_LENGTH) }),
-        ...(input['sampleRateHz'] === undefined ? {} : { sampleRateHz: boundedInteger(input['sampleRateHz'], 'audio sample rate', MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ) }),
-        ...(input['format'] === undefined ? {} : {
-          format: (() => {
-            const format = boundedString(input['format'], 'audio format', 16);
-            if (format !== 'wav' && format !== 'm4a') throw new Error('invalid audio format');
-            return format;
-          })(),
-        }),
-      };
-    case 'finish_listening':
-    case 'cancel':
-    case 'stop_speaking':
-      exactKeys(input, ['type', 'owner'], 'audio command');
-      return { type, owner: validateOwner(input['owner']) };
-    case 'speak':
-      exactKeys(input, ['type', 'owner', 'text', 'voiceId', 'rate'], 'audio command');
-      return {
-        type,
-        owner: validateOwner(input['owner']),
-        text: boundedString(input['text'], 'audio speech text', MAX_TEXT_LENGTH),
-        ...(input['voiceId'] === undefined ? {} : { voiceId: boundedString(input['voiceId'], 'audio voice id', MAX_VOICE_ID_LENGTH) }),
-        ...(input['rate'] === undefined ? {} : { rate: boundedNumber(input['rate'], 'audio rate', MIN_RATE, MAX_RATE) }),
-      };
     case 'install_model':
     case 'cancel_model':
     case 'remove_model':
@@ -586,10 +565,7 @@ export function validateNativeAudioResponse(value: unknown): NativeAudioResponse
   switch (type) {
     case 'snapshot':
     case 'authorization':
-    case 'listening_started':
     case 'cancelled':
-    case 'speaking_started':
-    case 'speaking_stopped':
       return { type, snapshot };
     case 'listening_finished':
       return {
@@ -662,6 +638,7 @@ function validateAudioOperation(value: unknown): AudioOperationDto {
   const input = object(value, 'audio operation');
   const type = boundedString(input['type'], 'audio operation type', 32);
   switch (type) {
+    case 'capture':
     case 'start_recording':
       exactKeys(input, ['type', 'sample_rate_hz', 'format'], 'audio operation');
       return {
@@ -669,6 +646,10 @@ function validateAudioOperation(value: unknown): AudioOperationDto {
         sample_rate_hz: boundedInteger(input['sample_rate_hz'], 'audio sample rate', MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ),
         format: boundedString(input['format'], 'audio format', 32),
       };
+    case 'play':
+      exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz'], 'audio operation');
+      if (!isSendableAudioBase64(input['pcm_base64'])) throw new Error('invalid audio PCM payload');
+      return { type, pcm_base64: input['pcm_base64'] as string, sample_rate_hz: boundedInteger(input['sample_rate_hz'], 'audio sample rate', MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ) };
     case 'stop_recording':
       exactKeys(input, ['type', 'handle'], 'audio operation');
       return { type, handle: boundedString(input['handle'], 'audio recording handle', 128) };
@@ -837,6 +818,12 @@ export function validateNativeAudioEngineResponse(value: unknown): NativeAudioEn
 export function validateNativeAudioEvent(value: unknown): NativeAudioEvent {
   const input = object(value, 'audio event');
   const type = boundedString(input['type'], 'audio event type', 32);
+  if (type === 'capture_chunk') {
+    exactKeys(input, ['type', 'owner', 'identity', 'sequence', 'pcmBase64', 'sampleRateHz'], 'audio capture chunk');
+    const pcmBase64 = boundedString(input['pcmBase64'], 'capture PCM', 88_000);
+    if (!isSendableAudioBase64(pcmBase64)) throw new Error('invalid capture PCM');
+    return { type, owner: validateOwner(input['owner']), identity: validateNativeAudioOperationIdentity(input['identity']), sequence: boundedInteger(input['sequence'], 'capture sequence', 0, Number.MAX_SAFE_INTEGER), pcmBase64, sampleRateHz: boundedInteger(input['sampleRateHz'], 'capture sample rate', MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ) };
+  }
   if (type === 'input_level') {
     exactKeys(input, ['type', 'owner', 'level'], 'audio input level event');
     return {

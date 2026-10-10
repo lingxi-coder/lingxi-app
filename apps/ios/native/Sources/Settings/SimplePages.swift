@@ -226,6 +226,7 @@ struct VoicePage: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            VoiceConversationSettingsSection(capability: capability)
             VoiceRecognitionSettingsSection(capability: capability)
             VoiceSpeechSettingsSection(capability: capability)
             if !capability.offlinePackStates.isEmpty {
@@ -237,11 +238,13 @@ struct VoicePage: View {
                 permissionAction: handlePermissionAction
             )
 
+            VoiceAudioStatusSettingsSection(capability: capability)
             if let error = capability.errorMessage {
                 BlurbText(text: error)
             }
         }
-        .task { capability.reloadFromDefaults() }
+        .task { capability.reloadFromDefaults(); await capability.refreshCloudCapabilities() }
+        .task(id: capability.configurationRevision) { await capability.refreshCloudCapabilities() }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             capability.reloadFromDefaults()
@@ -252,7 +255,7 @@ struct VoicePage: View {
     }
 
     private func handlePermissionAction() {
-        let speechDenied = capability.mode != .onDevice && (capability.speechAuthorization == .denied
+        let speechDenied = (capability.mode == .automatic || capability.mode == .system) && (capability.speechAuthorization == .denied
             || capability.speechAuthorization == .restricted
         )
         let microphoneDenied = capability.microphonePermissionStatus == .denied
@@ -261,6 +264,134 @@ struct VoicePage: View {
             openURL(settingsURL)
         } else {
             Task { await capability.requestPermissions() }
+        }
+    }
+}
+
+private struct VoiceConversationSettingsSection: View {
+    let capability: VoiceCapabilityModel
+    private var preference: AudioConversationPreference { capability.conversationPreference }
+
+    var body: some View {
+        SettingsSection(label: String(localized: "audio_conversation_section")) {
+            SettingsRow(label: String(localized: "audio_agent_conversation"), sub: String(localized: "audio_agent_conversation_detail"), chevron: false) {
+                if capability.cloudService.realtimeCapability?.supported == true || preference.mode == "realtime" {
+                    Picker("audio_conversation_section", selection: Binding(get: { preference.mode }, set: { mode in
+                        var next = preference; next.mode = mode; capability.setConversationPreference(next)
+                    })) {
+                        Text(String(localized: "audio_agent_conversation")).tag("agent")
+                        Text(String(localized: "audio_realtime_conversation")).tag("realtime")
+                    }.labelsHidden().frame(maxWidth: 190)
+                }
+            }
+            Group {
+                SettingsRow(label: String(localized: "audio_provider_binding"), sub: capability.cloudService.profileID(for: preference.cloud), chevron: false) {
+                    Picker("audio_provider_binding", selection: Binding(get: { preference.cloud.binding }, set: { binding in
+                        var next = preference; next.cloud = AudioCloudBinding(binding: binding); next.voice = nil; capability.setConversationPreference(next)
+                    })) {
+                        Text(String(localized: "audio_follow_session")).tag("follow_session")
+                        Text(String(localized: "audio_explicit_profile")).tag("explicit_profile")
+                    }.labelsHidden().frame(maxWidth: 190)
+                }
+                if preference.cloud.binding == "explicit_profile" {
+                    SettingsRow(label: String(localized: "audio_provider_profile"), chevron: false) {
+                        Picker("audio_provider_profile", selection: Binding(get: { preference.cloud.profileId ?? "" }, set: { profileID in
+                            var next = preference; next.cloud.profileId = profileID.isEmpty ? nil : profileID; next.cloud.modelId = nil; next.voice = nil; capability.setConversationPreference(next)
+                        })) {
+                            Text(String(localized: "audio_choose_profile")).tag("")
+                            ForEach(capability.cloudProfiles, id: \.id) { Text($0.displayName).tag($0.id) }
+                        }.labelsHidden().frame(maxWidth: 190)
+                    }
+                }
+                SettingsRow(label: String(localized: "audio_model"), sub: String(localized: "audio_independent_model"), chevron: false) {
+                    Picker("audio_model", selection: Binding(get: { preference.cloud.modelId ?? "" }, set: { modelID in
+                        var next = preference; next.cloud.modelId = modelID.isEmpty ? nil : modelID; next.voice = nil; capability.setConversationPreference(next)
+                    })) {
+                        Text(String(localized: "audio_catalog_default")).tag("")
+                        ForEach((capability.cloudService.realtimeCapability?.models ?? []).compactMap { $0 }, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden().frame(maxWidth: 190)
+                }
+                if let voices = capability.cloudService.realtimeCapability?.voices, !voices.isEmpty {
+                    SettingsRow(label: String(localized: "voice_voice_name"), chevron: false) {
+                        Picker("voice_voice_name", selection: Binding(get: { preference.voice?.id ?? "" }, set: { id in
+                            var next = preference
+                            next.voice = id.isEmpty ? nil : AudioVoiceSelection(source: .provider, id: id,
+                                modelId: preference.cloud.modelId ?? capability.cloudService.realtimeCapability?.modelID,
+                                profileId: capability.cloudService.profileID(for: preference.cloud))
+                            capability.setConversationPreference(next)
+                        })) {
+                            Text(String(localized: "audio_catalog_default")).tag("")
+                            ForEach(voices, id: \.self) { Text($0).tag($0) }
+                            if let selected = preference.voice?.id, !voices.contains(selected) { Text(selected).tag(selected) }
+                        }.labelsHidden().frame(maxWidth: 190)
+                    }
+                }
+                SettingsRow(label: String(localized: "audio_realtime_interaction"), sub: String(localized: "audio_realtime_turn_based_detail"), chevron: false) {
+                    Picker("audio_realtime_interaction", selection: Binding(get: { preference.interaction }, set: { value in
+                        var next = preference; next.interaction = value; capability.setConversationPreference(next)
+                    })) {
+                        Text(String(localized: "audio_realtime_turn_based")).tag("turn_based")
+                        if preference.interaction == "interruptible" {
+                            Text(String(localized: "audio_realtime_interruptible")).tag("interruptible").disabled(true)
+                        }
+                    }.labelsHidden().frame(maxWidth: 190)
+                }
+            }
+            SettingsRow(label: String(localized: "audio_realtime_conversation"), sub: capability.cloudService.realtimeCapability?.reason ?? (IOSRealtimeAudioService.shared.isAttached ? nil : String(localized: "audio_realtime_unavailable")), value: capability.availabilityLabel(capability.cloudService.realtimeCapability?.readiness ?? "unavailable"), chevron: false, isLast: true)
+        }
+    }
+}
+
+private struct VoiceCloudBindingRows: View {
+    let capability: VoiceCapabilityModel
+    let kind: AudioProviderKind
+
+    private var binding: AudioCloudBinding { capability.cloudBinding(for: kind) }
+
+    var body: some View {
+        SettingsRow(label: String(localized: "audio_provider_binding"), sub: capability.cloudService.profileID(for: binding), chevron: false) {
+            Picker("audio_provider_binding", selection: Binding(get: { binding.binding }, set: { value in
+                capability.setCloudBinding(AudioCloudBinding(binding: value, profileId: value == "explicit_profile" ? binding.profileId : nil, modelId: nil), for: kind)
+            })) {
+                Text(String(localized: "audio_follow_session")).tag("follow_session")
+                Text(String(localized: "audio_explicit_profile")).tag("explicit_profile")
+            }.labelsHidden().frame(maxWidth: 190)
+        }
+        if binding.binding == "explicit_profile" {
+            SettingsRow(label: String(localized: "audio_provider_profile"), chevron: false) {
+                Picker("audio_provider_profile", selection: Binding(get: { binding.profileId ?? "" }, set: {
+                    capability.setCloudBinding(AudioCloudBinding(binding: "explicit_profile", profileId: $0.isEmpty ? nil : $0), for: kind)
+                })) {
+                    Text(String(localized: "audio_choose_profile")).tag("")
+                    ForEach(capability.cloudProfiles, id: \.id) { Text($0.displayName).tag($0.id) }
+                }.labelsHidden().frame(maxWidth: 190)
+            }
+        }
+        SettingsRow(label: String(localized: "audio_model"), sub: String(localized: "audio_independent_model"), chevron: false) {
+            Picker("audio_model", selection: Binding(get: { binding.modelId ?? "" }, set: {
+                capability.setCloudBinding(AudioCloudBinding(binding: binding.binding, profileId: binding.profileId, modelId: $0.isEmpty ? nil : $0), for: kind)
+            })) {
+                Text(String(localized: "audio_catalog_default")).tag("")
+                ForEach((capability.cloudService.capabilities[kind]?.route.modelIds ?? []).compactMap { $0 }, id: \.self) { Text($0).tag($0) }
+                if let selected = binding.modelId, !(capability.cloudService.capabilities[kind]?.route.modelIds.contains(selected) ?? false) {
+                    Text(selected).tag(selected)
+                }
+            }.labelsHidden().frame(maxWidth: 190)
+        }
+        if let reason = capability.cloudService.capabilities[kind]?.reason ?? capability.cloudService.lastError {
+            SettingsRow(label: String(localized: "audio_availability"), sub: reason, chevron: false)
+        }
+    }
+}
+
+private struct VoiceAudioStatusSettingsSection: View {
+    let capability: VoiceCapabilityModel
+
+    var body: some View {
+        SettingsSection(label: String(localized: "audio_status_section")) {
+            SettingsRow(label: String(localized: "audio_input_status"), value: capability.availabilityLabel(capability.recognitionRoutePreview.reason), chevron: false)
+            SettingsRow(label: String(localized: "audio_output_status"), value: capability.availabilityLabel(capability.speechRoutePreview.reason), chevron: false)
+            SettingsRow(label: String(localized: "audio_interruption"), sub: String(localized: "audio_interruption_detail"), chevron: false, isLast: true)
         }
     }
 }
@@ -279,13 +410,14 @@ private struct VoiceRecognitionSettingsSection: View {
                 chevron: false
             ) {
                 Picker("voice_recognition_mode", selection: modeBinding) {
-                    ForEach(VoiceRecognitionMode.allCases) { mode in
+                    ForEach(capability.recognitionModes) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
                 .labelsHidden()
                 .frame(maxWidth: 170)
             }
+            VoiceCloudBindingRows(capability: capability, kind: .recognition)
             SettingsRow(
                 label: String(localized: "voice_recognition_language"),
                 sub: "\(String(localized: "voice_effective_language")) · \(capability.effectiveLanguageLabel)",
@@ -329,7 +461,7 @@ private struct VoiceSpeechSettingsSection: View {
         ) {
             SettingsRow(label: "Playback source", chevron: false) {
                 Picker("Playback source", selection: speechModeBinding) {
-                    ForEach(VoiceSpeechMode.allCases) { mode in
+                    ForEach(capability.speechModes) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
@@ -339,10 +471,20 @@ private struct VoiceSpeechSettingsSection: View {
             SettingsRow(
                 label: "Preview route",
                 sub: capability.speechRoutePreview.fallbackReason,
-                value: capability.speechRoutePreview.effective?.source.rawValue
-                    ?? capability.speechRoutePreview.reason,
+                value: capability.speechSourceLabel,
                 chevron: false
             )
+            VoiceCloudBindingRows(capability: capability, kind: .speech)
+            if capability.speechMode == .cloud {
+                if let voices = capability.cloudService.capabilities[.speech]?.voices, !voices.isEmpty {
+                    SettingsRow(label: String(localized: "voice_voice_name"), chevron: false) {
+                        Picker("voice_voice_name", selection: Binding(get: { capability.cloudVoiceID }, set: capability.setCloudVoice)) {
+                            Text(String(localized: "audio_catalog_default")).tag("")
+                            ForEach(voices, id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden()
+                    }
+                }
+            } else {
             SettingsRow(label: String(localized: "voice_voice_name"), chevron: false) {
                 Picker("voice_voice_name", selection: voiceBinding) {
                     ForEach(capability.voices) { voice in
@@ -363,6 +505,8 @@ private struct VoiceSpeechSettingsSection: View {
                 value: capability.effectiveVoiceLabel,
                 chevron: false
             )
+            }
+            if capability.speechMode != .cloud || capability.cloudPreviewSupported {
             SettingsRow(
                 label: String(localized: "voice_preview"),
                 chevron: false,
@@ -375,7 +519,8 @@ private struct VoiceSpeechSettingsSection: View {
                 ) {
                     Task { await capability.preview() }
                 }
-                .disabled(capability.isPreviewing || capability.selectedVoice == nil)
+                .disabled(capability.isPreviewing)
+            }
             }
         }
     }
@@ -470,12 +615,19 @@ private struct VoicePlaybackSettingsSection: View {
         ) {
             SettingsRow(
                 label: String(localized: "voice_speech_rate"),
+                sub: capability.speechMode == .cloud ? String(localized: "audio_cloud_rate_fixed") : nil,
                 value: capability.speed.formatted(.number.precision(.fractionLength(1))) + "x",
                 chevron: false
             ) {
-                Slider(value: speedBinding, in: 0.5...2, step: 0.1)
-                    .frame(width: 110)
-                    .tint(theme.accent)
+                if capability.speechMode == .cloud {
+                    if capability.speed != 1 {
+                        Button(String(localized: "audio_cloud_rate_reset")) { capability.setSpeed(1) }
+                    }
+                } else {
+                    Slider(value: speedBinding, in: 0.5...2, step: 0.1)
+                        .frame(width: 110)
+                        .tint(theme.accent)
+                }
             }
             SettingsRow(
                 label: String(localized: "voice_auto_play"),

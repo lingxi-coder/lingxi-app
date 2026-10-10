@@ -86,17 +86,8 @@ export class SettingsStore {
     if (!this.settingsWritable) throw new Error(this.audioConfigurationError ?? 'Device settings cannot be safely updated.');
     mkdirSync(dirname(this.settingsPath), { recursive: true, mode: 0o700 });
     const temporary = `${this.settingsPath}.tmp`;
-    const completesAudioMigration = Boolean(
-      this.settings.voice
-      && this.settings.audioConfigRecovery !== undefined
-      && this.settings.audioConfigMigrationComplete !== true,
-    );
-    const persisted = completesAudioMigration
-      ? { ...this.settings, audioConfigMigrationComplete: true as const }
-      : this.settings;
-    writeFileSync(temporary, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(temporary, `${JSON.stringify(this.settings, null, 2)}\n`, { mode: 0o600 });
     renameSync(temporary, this.settingsPath);
-    if (completesAudioMigration) this.settings.audioConfigMigrationComplete = true;
   }
 
   getPublic(): PublicSettings {

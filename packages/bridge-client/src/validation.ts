@@ -306,6 +306,7 @@ function audioOperation(value: unknown): AudioOperationRequestDto['operation'] {
   const input = object(value, 'audio operation');
   const type = string(input['type'], 'audio operation type');
   switch (type) {
+    case 'capture':
     case 'start_recording':
       exactKeys(input, ['type', 'sample_rate_hz', 'format'], 'audio operation');
       return {
@@ -313,6 +314,9 @@ function audioOperation(value: unknown): AudioOperationRequestDto['operation'] {
         sample_rate_hz: integer(input['sample_rate_hz'], 'audio sample rate'),
         format: string(input['format'], 'audio recording format'),
       };
+    case 'play':
+      exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz'], 'audio operation');
+      return { type, pcm_base64: string(input['pcm_base64'], 'audio PCM'), sample_rate_hz: integer(input['sample_rate_hz'], 'audio sample rate') };
     case 'stop_recording':
       exactKeys(input, ['type', 'handle'], 'audio operation');
       return { type, handle: string(input['handle'], 'audio recording handle') };
@@ -1203,6 +1207,12 @@ export function validateClientEvent(value: unknown): ClientEvent {
         string(item['path'], 'session row path');
       }
       return input as ClientEvent;
+    case 'realtime_audio_event':
+      exactKeys(input, ['type', 'session_id', 'event_json'], 'client event');
+      return { type, session_id: string(input['session_id'], 'realtime session id'), event_json: string(input['event_json'], 'realtime event JSON') };
+    case 'audio_session_context':
+      exactKeys(input, ['type', 'session_id', 'profile_id', 'account_scope'], 'client event');
+      return { type, session_id: string(input['session_id'], 'audio session id'), profile_id: string(input['profile_id'], 'audio profile id'), account_scope: string(input['account_scope'], 'audio account scope') };
     case 'audio_request':
       exactKeys(input, ['type', 'request'], 'client event');
       return { type, request: audioOperationRequest(input['request']) };
@@ -1222,7 +1232,7 @@ export function validateServerHello(value: unknown): ServerHello {
   const capabilities = object(input['capabilities'], 'ServerHello capabilities');
   exactKeys(
     capabilities,
-    ['supports_streaming', 'supports_tools', 'supports_skills', 'supports_commands', 'client_protocol_version', 'audio'],
+    ['supports_streaming', 'supports_tools', 'supports_skills', 'supports_commands', 'client_protocol_version', 'audio', 'realtime_audio'],
     'ServerHello capabilities',
   );
   return {
@@ -1230,6 +1240,7 @@ export function validateServerHello(value: unknown): ServerHello {
     server_name: string(input['server_name'], 'server_name'),
     capabilities: {
       supports_streaming: boolean(capabilities['supports_streaming'], 'supports_streaming'),
+      ...(capabilities['realtime_audio'] === undefined ? {} : { realtime_audio: boolean(capabilities['realtime_audio'], 'realtime_audio') }),
       supports_tools: boolean(capabilities['supports_tools'], 'supports_tools'),
       supports_skills: boolean(capabilities['supports_skills'], 'supports_skills'),
       supports_commands: boolean(capabilities['supports_commands'], 'supports_commands'),

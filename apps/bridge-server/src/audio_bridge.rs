@@ -370,10 +370,16 @@ enum ExpectedResult {
 fn expected_result(operation: &AudioOperation) -> ExpectedResult {
     match operation {
         AudioOperation::StartRecording { .. } => ExpectedResult::RecordingStarted,
-        AudioOperation::StopRecording { .. } => ExpectedResult::Recording,
-        AudioOperation::Listen { .. } => ExpectedResult::Transcript,
+        AudioOperation::StopRecording { .. } | AudioOperation::Capture { .. } => {
+            ExpectedResult::Recording
+        }
+        AudioOperation::Listen { .. } | AudioOperation::Transcribe { .. } => {
+            ExpectedResult::Transcript
+        }
         AudioOperation::Synthesize { .. } => ExpectedResult::Synthesized,
-        AudioOperation::Speak { .. } => ExpectedResult::PlaybackCompleted,
+        AudioOperation::Speak { .. } | AudioOperation::Play { .. } => {
+            ExpectedResult::PlaybackCompleted
+        }
         AudioOperation::Status { .. } => ExpectedResult::Status,
         AudioOperation::EndOwner => ExpectedResult::OwnerEnded,
     }
@@ -428,6 +434,9 @@ fn operation_kind(operation: &AudioOperation) -> Option<AudioOperationKind> {
         AudioOperation::StartRecording { .. } | AudioOperation::StopRecording { .. } => {
             Some(AudioOperationKind::Record)
         }
+        AudioOperation::Capture { .. } => Some(AudioOperationKind::Capture),
+        AudioOperation::Play { .. } => Some(AudioOperationKind::Play),
+        AudioOperation::Transcribe { .. } => Some(AudioOperationKind::Transcribe),
         AudioOperation::Listen { .. } => Some(AudioOperationKind::Listen),
         AudioOperation::Synthesize { .. } => Some(AudioOperationKind::Synthesize),
         AudioOperation::Speak { .. } => Some(AudioOperationKind::Speak),
@@ -467,6 +476,25 @@ fn initiator_to_dto(initiator: &AudioInitiator) -> AudioInitiatorDto {
 
 fn operation_to_dto(operation: AudioOperation) -> AudioOperationDto {
     match operation {
+        AudioOperation::Capture {
+            sample_rate_hz,
+            format,
+        } => AudioOperationDto::Capture {
+            sample_rate_hz,
+            format,
+        },
+        AudioOperation::Play { audio } => AudioOperationDto::Play {
+            pcm_base64: STANDARD.encode(audio.pcm),
+            sample_rate_hz: audio.sample_rate_hz,
+        },
+        AudioOperation::Transcribe {
+            recording,
+            language,
+        } => AudioOperationDto::Transcribe {
+            audio_base64: STANDARD.encode(recording.audio_bytes),
+            mime_type: recording.mime_type,
+            language,
+        },
         AudioOperation::StartRecording {
             sample_rate_hz,
             format,
@@ -533,6 +561,9 @@ fn snapshot_from_dto(snapshot: &AudioCapabilitySnapshotDto) -> AudioCapabilitySn
 
 fn kind_from_dto(kind: AudioOperationKindDto) -> AudioOperationKind {
     match kind {
+        AudioOperationKindDto::Capture => AudioOperationKind::Capture,
+        AudioOperationKindDto::Play => AudioOperationKind::Play,
+        AudioOperationKindDto::Transcribe => AudioOperationKind::Transcribe,
         AudioOperationKindDto::Record => AudioOperationKind::Record,
         AudioOperationKindDto::Listen => AudioOperationKind::Listen,
         AudioOperationKindDto::Synthesize => AudioOperationKind::Synthesize,
@@ -542,6 +573,9 @@ fn kind_from_dto(kind: AudioOperationKindDto) -> AudioOperationKind {
 
 fn kind_to_dto(kind: AudioOperationKind) -> AudioOperationKindDto {
     match kind {
+        AudioOperationKind::Capture => AudioOperationKindDto::Capture,
+        AudioOperationKind::Play => AudioOperationKindDto::Play,
+        AudioOperationKind::Transcribe => AudioOperationKindDto::Transcribe,
         AudioOperationKind::Record => AudioOperationKindDto::Record,
         AudioOperationKind::Listen => AudioOperationKindDto::Listen,
         AudioOperationKind::Synthesize => AudioOperationKindDto::Synthesize,

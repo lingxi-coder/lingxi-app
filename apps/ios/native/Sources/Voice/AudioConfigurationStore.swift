@@ -1,9 +1,8 @@
-import AVFoundation
 import Foundation
 import Observation
 
 struct AudioConfigurationSnapshot: Equatable, Sendable {
-    let configuration: AudioConfigurationV3
+    let configuration: AudioConfigurationV4
     let revision: UInt64
 }
 
@@ -27,77 +26,64 @@ enum AudioConfigurationStoreError: Error, Equatable, LocalizedError {
     }
 }
 
-/// Device-local, serialized v3 audio preferences with a revision attached to
-/// each successful commit. Older preference keys remain available for recovery.
+/// Device-local, serialized v4 audio preferences with a revision attached to
+/// each successful commit. Only the current v4 storage key is read.
 @Observable
 @MainActor
 final class AudioConfigurationStore {
     static let shared = AudioConfigurationStore()
 
-    static let storageKey = "voice.audioConfiguration.v3"
+    static let storageKey = "voice.audioConfiguration.v4"
     static let didChangeNotification = Notification.Name("LingxiAudioConfigurationStoreDidChange")
     private static let maximumSafeRevision: UInt64 = 9_007_199_254_740_991
 
     private struct PersistedValue: Codable {
-        let configuration: AudioConfigurationV3
+        let configuration: AudioConfigurationV4
         let revision: UInt64
-        let migrationComplete: Bool
     }
 
     private let defaults: UserDefaults
-    private let voiceCatalog: [AudioVoiceCatalogEntry]
     private let writeValue: (Data) -> Bool
 
-    private(set) var configuration: AudioConfigurationV3
+    private(set) var configuration: AudioConfigurationV4
     private(set) var revision: UInt64 {
         didSet {
             guard oldValue != revision else { return }
             NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
         }
     }
-    private(set) var migrationComplete: Bool
     private(set) var lastError: AudioConfigurationStoreError?
 
     init(
         defaults: UserDefaults = .standard,
-        voiceCatalog: [AudioVoiceCatalogEntry]? = nil,
         writeValue: ((Data) -> Bool)? = nil
     ) {
         self.defaults = defaults
-        let voiceCatalog = voiceCatalog ?? Self.currentVoiceCatalog()
-        self.voiceCatalog = voiceCatalog
         self.writeValue = writeValue ?? { data in
             defaults.set(data, forKey: Self.storageKey)
             return defaults.data(forKey: Self.storageKey) == data
         }
 
-        let storedData = defaults.data(forKey: Self.storageKey)
-        if let storedData,
-           let stored = try? JSONDecoder().decode(PersistedValue.self, from: storedData) {
+        if let data = defaults.data(forKey: Self.storageKey),
+           let stored = try? JSONDecoder().decode(PersistedValue.self, from: data),
+           stored.configuration.schemaVersion == 4, stored.revision <= Self.maximumSafeRevision {
             configuration = Self.normalized(stored.configuration)
             revision = stored.revision
-            migrationComplete = stored.migrationComplete
             lastError = nil
-            if !stored.migrationComplete {
-                do {
-                    try persist(configuration, revision: revision, migrationComplete: true)
-                    migrationComplete = true
-                } catch {}
-            }
+        } else if let data = defaults.data(forKey: Self.storageKey), Self.hasNonCurrentSchema(data) {
+            configuration = AudioConfigurationNormalizer.defaults
+            revision = 0
+            lastError = nil
+            do { try persist(configuration, revision: revision) } catch {}
         } else if defaults.object(forKey: Self.storageKey) != nil {
             configuration = Self.unavailableAfterCorruption()
             revision = 0
-            migrationComplete = false
             lastError = .corruptedStore
         } else {
-            configuration = Self.legacyConfiguration(defaults: defaults, voiceCatalog: voiceCatalog)
+            configuration = AudioConfigurationNormalizer.defaults
             revision = 0
-            migrationComplete = false
             lastError = nil
-            do {
-                try persist(configuration, revision: revision, migrationComplete: true)
-                migrationComplete = true
-            } catch {}
+            do { try persist(configuration, revision: revision) } catch {}
         }
     }
 
@@ -107,7 +93,7 @@ final class AudioConfigurationStore {
 
     @discardableResult
     func save(
-        _ requested: AudioConfigurationV3,
+        _ requested: AudioConfigurationV4,
         expectedRevision: UInt64
     ) throws -> AudioConfigurationSnapshot {
         guard expectedRevision == revision else {
@@ -125,10 +111,9 @@ final class AudioConfigurationStore {
 
         let normalized = Self.normalized(requested)
         let nextRevision = revision + 1
-        try persist(normalized, revision: nextRevision, migrationComplete: true)
+        try persist(normalized, revision: nextRevision)
         configuration = normalized
         revision = nextRevision
-        migrationComplete = true
         lastError = nil
         return snapshot
     }
@@ -139,25 +124,26 @@ final class AudioConfigurationStore {
             if defaults.object(forKey: Self.storageKey) != nil { lastError = .corruptedStore }
             return
         }
-        guard let stored = try? JSONDecoder().decode(PersistedValue.self, from: data) else {
+        if Self.hasNonCurrentSchema(data) {
+            do { try save(AudioConfigurationNormalizer.defaults, expectedRevision: revision) } catch {}
+            return
+        }
+        guard let stored = try? JSONDecoder().decode(PersistedValue.self, from: data), stored.configuration.schemaVersion == 4, stored.revision <= Self.maximumSafeRevision else {
             lastError = .corruptedStore
             return
         }
         configuration = Self.normalized(stored.configuration)
         revision = stored.revision
-        migrationComplete = stored.migrationComplete
         lastError = nil
     }
 
     private func persist(
-        _ configuration: AudioConfigurationV3,
-        revision: UInt64,
-        migrationComplete: Bool
+        _ configuration: AudioConfigurationV4,
+        revision: UInt64
     ) throws {
         let value = PersistedValue(
             configuration: configuration,
-            revision: revision,
-            migrationComplete: migrationComplete
+            revision: revision
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -173,35 +159,23 @@ final class AudioConfigurationStore {
         }
     }
 
-    private static func normalized(_ configuration: AudioConfigurationV3) -> AudioConfigurationV3 {
-        let voice: Any
-        if let selected = configuration.speech.voice {
-            var value: [String: Any] = ["source": selected.source.rawValue, "id": selected.id]
-            if let modelId = selected.modelId { value["modelId"] = modelId }
-            voice = value
-        } else {
-            voice = NSNull()
-        }
-        return AudioConfigurationNormalizer.normalize([
-            "schemaVersion": configuration.schemaVersion,
-            "recognition": [
-                "source": configuration.recognition.source.rawValue,
-                "offlineModelId": configuration.recognition.offlineModelId as Any? ?? NSNull(),
-            ],
-            "speech": [
-                "source": configuration.speech.source.rawValue,
-                "offlineModelId": configuration.speech.offlineModelId as Any? ?? NSNull(),
-                "voice": voice,
-            ],
-            "language": configuration.language,
-            "rate": configuration.rate.isFinite ? configuration.rate : audioDefaultRate,
-            "autoPlayReplies": configuration.autoPlayReplies,
-        ])
+    private static func hasNonCurrentSchema(_ data: Data) -> Bool {
+        guard let envelope = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
+        return (envelope["configuration"] as? [String: Any])?["schemaVersion"] as? Int != 4
     }
 
-    private static func unavailableAfterCorruption() -> AudioConfigurationV3 {
+    private static func normalized(_ configuration: AudioConfigurationV4) -> AudioConfigurationV4 {
+        var finite = configuration
+        if !finite.rate.isFinite { finite.rate = audioDefaultRate }
+        guard let data = try? JSONEncoder().encode(finite),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return unavailableAfterCorruption() }
+        return AudioConfigurationNormalizer.normalize(object)
+    }
+
+    private static func unavailableAfterCorruption() -> AudioConfigurationV4 {
         let unavailable = AudioSource(rawValue: "corrupted_store")
-        return AudioConfigurationV3(
+        return AudioConfigurationV4(
             recognition: AudioRecognitionPreference(source: unavailable),
             speech: AudioSpeechPreference(source: unavailable),
             language: audioLanguageAuto,
@@ -210,56 +184,4 @@ final class AudioConfigurationStore {
         )
     }
 
-    private static func legacyConfiguration(
-        defaults: UserDefaults,
-        voiceCatalog: [AudioVoiceCatalogEntry]
-    ) -> AudioConfigurationV3 {
-        let keys = VoicePreferencesSnapshot.Keys.self
-        let mode = defaults.string(forKey: keys.recognitionMode)
-            ?? defaults.string(forKey: keys.legacyRecognitionMode)
-        let voice = defaults.string(forKey: keys.voiceSelection)
-            ?? defaults.string(forKey: keys.legacySystemVoice)
-        let language = defaults.string(forKey: keys.language)
-            ?? defaults.string(forKey: keys.legacyLanguage)
-        let rate: Any = defaults.object(forKey: keys.rate)
-            ?? defaults.object(forKey: keys.legacyRate)
-            ?? audioDefaultRate
-        let autoPlay: Any = defaults.object(forKey: keys.autoPlayReplies)
-            ?? defaults.object(forKey: keys.legacyAutoPlay)
-            ?? false
-        let schemaVersion = defaults.object(forKey: keys.schemaVersion) ?? 0
-        var legacy: [String: Any] = [
-            "schemaVersion": schemaVersion,
-            "rate": rate,
-            "autoPlayReplies": autoPlay,
-        ]
-        if let mode { legacy["recognitionMode"] = mode }
-        if let voice { legacy["voiceSelection"] = voice }
-        if let language { legacy["language"] = language }
-        return AudioConfigurationNormalizer.migrateLegacy(legacy, voiceCatalog: voiceCatalog)
-    }
-
-    private static func currentVoiceCatalog() -> [AudioVoiceCatalogEntry] {
-        let system = AVSpeechSynthesisVoice.speechVoices().map { voice in
-            AudioVoiceCatalogEntry(
-                source: .system,
-                id: voice.identifier,
-                label: voice.name
-            )
-        }
-        let offline = GeneratedVoiceModelCatalog.all
-            .filter { $0.kind == .tts }
-            .flatMap { model in
-                model.voices.map { voice in
-                    AudioVoiceCatalogEntry(
-                        source: .offline,
-                        id: voice.id,
-                        modelId: model.id,
-                        label: voice.displayName,
-                        aliases: ["\(model.id):\(voice.id)"]
-                    )
-                }
-            }
-        return system + offline
-    }
 }

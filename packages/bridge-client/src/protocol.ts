@@ -169,6 +169,8 @@ export interface AudioOperationRequestDto {
 
 /** Operation variants shared by engine requests and device-local services. */
 export type AudioOperationDto =
+  | { type: 'capture'; sample_rate_hz: number; format: string }
+  | { type: 'play'; pcm_base64: string; sample_rate_hz: number }
   | { type: 'start_recording'; sample_rate_hz: number; format: string }
   | { type: 'stop_recording'; handle: string }
   | { type: 'listen'; language?: string }
@@ -707,6 +709,10 @@ export type ClientCommand =
   | { type: 'hook_admin'; command: HookAdminCommandDto }
   // ── AudioService (engine -> device operations and capability publication) ──
   | { type: 'audio_response'; identity: AudioOperationIdDto; result: AudioOperationResultDto }
+  | { type: 'start_realtime_audio'; request_json: string }
+  | { type: 'realtime_audio_input'; input_json: string }
+  | { type: 'stop_realtime_audio' }
+  | { type: 'get_audio_session_context' }
   | { type: 'update_audio_capabilities'; capabilities: AudioCapabilitySnapshotDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1809,6 +1815,8 @@ export type ClientEvent =
   // ── AudioService (engine -> device operations/cancellation/capabilities) ──
   | { type: 'audio_request'; request: AudioOperationRequestDto }
   | { type: 'audio_cancel'; identity: AudioOperationIdDto }
+  | { type: 'realtime_audio_event'; session_id: string; event_json: string }
+  | { type: 'audio_session_context'; session_id: string; profile_id: string; account_scope: string }
   | { type: 'audio_capabilities_changed'; capabilities: AudioCapabilitySnapshotDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1830,6 +1838,7 @@ export type ClientError =
 /** Capability flags advertised in the handshake (wire.rs `Capabilities`). */
 export interface Capabilities {
   supports_streaming: boolean;
+  realtime_audio?: boolean;
   supports_tools: boolean;
   supports_skills: boolean;
   supports_commands: boolean;

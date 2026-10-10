@@ -21,6 +21,7 @@ import com.lingxi.code.voice.audio.DeviceAudioOperation
 import com.lingxi.code.voice.audio.DeviceAudioResult
 import com.lingxi.code.voice.audio.RealtimeSpeechCallbacks
 import com.lingxi.code.voice.audio.RealtimeSpeechSession
+import com.lingxi.code.voice.audio.RealtimeAgentCallbacks
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -46,6 +47,9 @@ private sealed interface FlowListenTerminal {
 }
 
 internal interface FlowVoiceAudioService {
+    suspend fun openRealtimeAgent(owner: AudioOwnerKey, configuration: com.lingxi.code.voice.audio.AudioConfigurationV4,
+        callbacks: RealtimeAgentCallbacks): RealtimeSpeechSession =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Realtime Agent conversation is unavailable")
     fun configurationSnapshot(): VersionedAudioConfiguration
     suspend fun perform(owner: AudioOwnerKey, operation: DeviceAudioOperation): DeviceAudioResult
     suspend fun openRealtimeListen(
@@ -56,6 +60,8 @@ internal interface FlowVoiceAudioService {
 }
 
 private class AndroidFlowVoiceAudioService(private val context: Context) : FlowVoiceAudioService {
+    override suspend fun openRealtimeAgent(owner: AudioOwnerKey, configuration: com.lingxi.code.voice.audio.AudioConfigurationV4,
+        callbacks: RealtimeAgentCallbacks): RealtimeSpeechSession = AndroidAudioServiceProvider.openRealtimeAgent(context, owner, configuration, callbacks)
     override fun configurationSnapshot(): VersionedAudioConfiguration =
         AndroidAudioServiceProvider.get(context).configurationSnapshot()
 
@@ -79,6 +85,7 @@ private class AndroidFlowVoiceAudioService(private val context: Context) : FlowV
 internal data class FlowVoiceState(
     val phase: OrbPhase = OrbPhase.Idle,
     val userCaption: String = "",
+    val assistantCaption: String = "",
     val didSend: Boolean = false,
     val isFinalizing: Boolean = false,
     val error: DeviceAudioError? = null,
@@ -103,6 +110,7 @@ internal class FlowVoiceController(
     private var listenSessionGeneration: Long? = null
     private var stopRequestedGeneration: Long? = null
     private var pinnedConfiguration: VersionedAudioConfiguration? = null
+    private var sessionBinding: Pair<String, String>? = null
     private var pendingPermissionListen: PendingPermissionListen? = null
 
     private data class PendingPermissionListen(
@@ -140,6 +148,33 @@ internal class FlowVoiceController(
                     phase = OrbPhase.Listening,
                     configurationRevision = snapshot.revision,
                 )
+
+                if (snapshot.configuration.conversation.mode == "realtime") {
+                    val realtimeClosed = CompletableDeferred<Unit>()
+                    val opened = audioService.openRealtimeAgent(owner, snapshot.configuration, object : RealtimeAgentCallbacks {
+                        override fun onReady() { if (isCurrent(token)) mutableState.value = mutableState.value.copy(phase = OrbPhase.Listening) }
+                        override fun onTranscript(text: String, assistant: Boolean, final: Boolean) {
+                            if (!isCurrent(token)) return
+                            mutableState.value = if (assistant) mutableState.value.copy(assistantCaption = text,
+                                phase = OrbPhase.Speaking, isFinalizing = false)
+                            else mutableState.value.copy(userCaption = text, phase = if (final) OrbPhase.Thinking else OrbPhase.Listening,
+                                didSend = final, isFinalizing = false)
+                        }
+                        override fun onPlayback(playing: Boolean) { if (isCurrent(token)) mutableState.value = mutableState.value.copy(
+                            phase = if (playing) OrbPhase.Speaking else OrbPhase.Listening, isFinalizing = false) }
+                        override fun onError(message: String) { if (isCurrent(token)) mutableState.value = mutableState.value.copy(
+                            phase = OrbPhase.Idle, error = DeviceAudioError(DeviceAudioErrorKind.Unavailable, message)) }
+                        override fun onClosed() {
+                            if (isCurrent(token)) mutableState.value = mutableState.value.copy(phase = OrbPhase.Idle, isFinalizing = false)
+                            realtimeClosed.complete(Unit)
+                        }
+                    })
+                    if (!isCurrent(token)) { opened.cancel(); return@launch }
+                    listenSession = opened; listenSessionGeneration = token
+                    if (stopRequestedGeneration == token) opened.stop()
+                    realtimeClosed.await()
+                    return@launch
+                }
 
                 val closed = CompletableDeferred<Unit>()
                 val closeCallbackHandled = AtomicBoolean(false)
@@ -260,6 +295,7 @@ internal class FlowVoiceController(
     }
 
     fun updateReply(text: String, streaming: Boolean) {
+        if (pinnedConfiguration?.configuration?.conversation?.mode == "realtime") return
         val current = mutableState.value
         if (current.phase != OrbPhase.Thinking && current.phase != OrbPhase.Speaking) return
         if (streaming) {
@@ -306,6 +342,12 @@ internal class FlowVoiceController(
         val token = generation.get()
         stopRequestedGeneration = token
         if (listenSessionGeneration == token) listenSession?.stop()
+    }
+
+    fun updateSessionBinding(modelId: String, profileId: String) {
+        val previous = sessionBinding
+        sessionBinding = modelId to profileId
+        if (previous != null && previous != sessionBinding) pause()
     }
 
     /** Backgrounding ends device work. The overlay stays visible and waits for an explicit listen. */

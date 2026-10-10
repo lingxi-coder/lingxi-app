@@ -18,7 +18,7 @@ import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.SettingsMock
 import com.lingxi.code.model.Skill
 import com.lingxi.code.voice.audio.AudioConfigurationNormalizer
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,7 +50,7 @@ data class SettingsUiState(
     val llmCatalogLoaded: Boolean = false,
     val searchProviders: List<GenericProvider> = emptyList(),
     val fetchProviders: List<GenericProvider> = emptyList(),
-    val voice: AudioConfigurationV3 = AudioConfigurationNormalizer.defaults,
+    val voice: AudioConfigurationV4 = AudioConfigurationNormalizer.defaults,
     val voiceRevision: Long = 0,
     val voiceSaving: Boolean = false,
     val voiceSaveError: String? = null,
@@ -255,7 +255,7 @@ class SettingsStore(
     private val voiceUpdates = Mutex()
 
     /** Updates one or more voice fields against the latest serialized snapshot. */
-    fun updateVoice(update: (AudioConfigurationV3) -> AudioConfigurationV3) {
+    fun updateVoice(update: (AudioConfigurationV4) -> AudioConfigurationV4) {
         viewModelScope.launch {
             voiceUpdates.withLock {
                 val current = _state.value
@@ -301,7 +301,7 @@ class SettingsStore(
     }
 
     /** Replaces the configuration for non-editor callers; editors should use [updateVoice]. */
-    fun setVoice(voice: AudioConfigurationV3) = updateVoice { voice }
+    fun setVoice(voice: AudioConfigurationV4) = updateVoice { voice }
 
     fun setVoiceCapability(snapshot: VoiceCapabilitySnapshot) =
         _state.update { it.copy(voiceCapability = snapshot) }

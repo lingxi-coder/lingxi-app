@@ -1,3 +1,4 @@
+import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type {
   AgentDto,
   AskUserQuestionRequestDto,
@@ -22,7 +23,7 @@ import type {
   SkillAdminCommandDto,
   WritableScopeDto,
 } from '@lingxi/bridge-client';
-import type { AudioConfigurationV3 } from '../../shared/generatedAudioConfiguration.js';
+import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
 import type {
   MicrophonePermissionStatus as VoicePermissionStatus,
 } from '../../shared/microphoneAccess.js';
@@ -142,6 +143,8 @@ export interface UseBridge {
   readonly pendingAskUserQuestion: AskUserQuestionRequestDto | null;
   readonly error: string | null;
   readonly audioSnapshot: NativeAudioSnapshot;
+  readonly audioRealtimeState: NativeRealtimeAudioState;
+  audioRealtimeCommand(command: NativeRealtimeAudioCommand): Promise<void>;
   clearError(): void;
   dismissCommandResult(): void;
   sendTrackedPrompt(
@@ -297,7 +300,7 @@ export interface UseBridge {
   copyText(text: string): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   audioRequest(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
-  audioExecute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV3): Promise<NativeAudioOperationResponse>;
+  audioExecute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4): Promise<NativeAudioOperationResponse>;
   audioCancel(): Promise<void>;
   audioFinishListen(): Promise<void>;
   refresh(): Promise<void>;

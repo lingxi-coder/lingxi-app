@@ -3,6 +3,7 @@
   "packages": [
     "agent",
     "apply-seccomp",
+    "audio-runtime",
     "branding",
     "bridge",
     "client",

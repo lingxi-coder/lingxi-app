@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import {
   audioConfigurationDefaults,
   isAudioFallbackAllowed,
-  migrateLegacyAudioConfiguration,
   normalizeAudioConfiguration,
   resolveAudioRoute,
 } from "../scripts/audio-config-lib.mjs";
@@ -15,14 +14,12 @@ import { checkGeneratedAudioConfiguration } from "../scripts/audio-config-lib.mj
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = JSON.parse(fs.readFileSync(path.join(root, "audio-config-fixtures.json"), "utf8"));
 
-test("v3 defaults, normalization, and legacy migration match shared fixtures", () => {
+test("v4 defaults, normalization, and unsupported version rejection match shared fixtures", () => {
   assert.deepEqual(audioConfigurationDefaults(), fixture.normalization[0].expected);
   for (const item of fixture.normalization) {
     assert.deepEqual(normalizeAudioConfiguration(item.input), item.expected, item.name);
   }
-  for (const item of fixture.migrations) {
-    assert.deepEqual(migrateLegacyAudioConfiguration(item.input), item.expected, item.name);
-  }
+
 });
 
 test("route resolution matches shared deterministic requested/effective fixtures", () => {

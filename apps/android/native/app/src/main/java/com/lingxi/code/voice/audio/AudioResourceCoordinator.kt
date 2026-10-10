@@ -28,7 +28,7 @@ internal data class AudioOperationIdentity(
     val serviceEpoch: Long,
 )
 
-internal enum class AudioResource { Capture, Playback, SystemRender, OfflineRender }
+internal enum class AudioResource { Capture, Playback, SystemRender, OfflineRender, ProviderRender }
 
 internal data class AudioLease(
     val leaseId: Long,
@@ -84,9 +84,10 @@ internal class AudioResourceCoordinator(initialEpoch: Long) {
         var preempt: List<AudioLease> = emptyList()
 
         when (resource) {
+            AudioResource.ProviderRender -> Unit
             AudioResource.OfflineRender -> {
                 if (leases.any {
-                        it.modelId == modelId && it.resource in setOf(AudioResource.OfflineRender, AudioResource.Playback)
+                        it.modelId == modelId && it.resource in setOf(AudioResource.OfflineRender, AudioResource.Playback, AudioResource.Capture)
                     }
                 ) {
                     return AudioLeaseDecision.Busy
@@ -96,6 +97,9 @@ internal class AudioResourceCoordinator(initialEpoch: Long) {
                 if (systemRendering || deviceIo.isNotEmpty()) return AudioLeaseDecision.Busy
             }
             AudioResource.Capture -> {
+                if (modelId != null && leases.any { it.resource == AudioResource.OfflineRender && it.modelId == modelId }) {
+                    return AudioLeaseDecision.Busy
+                }
                 if (systemRendering || deviceIo.any { it.resource == AudioResource.Capture }) {
                     return AudioLeaseDecision.Busy
                 }

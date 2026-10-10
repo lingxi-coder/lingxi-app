@@ -1,5 +1,6 @@
 package com.lingxi.code.settings
 
+import com.lingxi.code.voice.offline.localizedDisplayName
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -40,14 +41,17 @@ import com.lingxi.code.components.tint
 import com.lingxi.code.theme.AppLanguage
 import com.lingxi.code.theme.AppLanguageStore
 import com.lingxi.code.theme.LingXiTheme
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import com.lingxi.code.voice.audio.AudioProviderKind
 import com.lingxi.code.voice.audio.AudioReadiness
 import com.lingxi.code.voice.audio.AudioRecognitionPreference
 import com.lingxi.code.voice.audio.AudioSource
 import com.lingxi.code.voice.audio.AudioSpeechPreference
 import com.lingxi.code.voice.audio.AudioVoiceSelection
-import com.lingxi.code.voice.offline.OfflineModelCatalog
+import com.lingxi.code.voice.audio.AudioCloudBinding
+import com.lingxi.code.voice.audio.ProviderAudioCapability
+import com.lingxi.code.voice.audio.ProviderAudioProfileOption
+import com.lingxi.code.voice.offline.GeneratedVoiceModelCatalog
 import com.lingxi.code.voice.offline.ModelState
 import com.lingxi.code.voice.offline.VoiceModelDownloader
 import kotlinx.coroutines.launch
@@ -95,17 +99,18 @@ private tailrec fun Context.findComponentActivity(): ComponentActivity? = when (
  * at call time, so an Agent listen/speak call uses the same language, voice and
  * speed selected here.
  *
- * @param voice the live device-local v3 audio config.
+ * @param voice the live device-local v4 audio config.
  * @param onChange writes a mutated config back into the store.
  */
 @Composable
 fun VoicePage(
-    voice: AudioConfigurationV3,
+    voice: AudioConfigurationV4,
     capability: VoiceCapabilitySnapshot,
     revision: Long = 0,
     saving: Boolean = false,
     saveError: String? = null,
-    onChange: ((AudioConfigurationV3) -> AudioConfigurationV3) -> Unit,
+    onProviderSettings: () -> Unit = {},
+    onChange: ((AudioConfigurationV4) -> AudioConfigurationV4) -> Unit,
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
@@ -118,6 +123,29 @@ fun VoicePage(
     }
 
     Column(Modifier.fillMaxWidth()) {
+        SettingsSection(label = "Voice conversation", footer = "Agent voice uses the current conversation, tools and permissions.") {
+            RadioList(options = buildList {
+                add(RadioOption("agent", "Agent conversation", "Recognize speech, run the current Agent, and speak its reply"))
+                if (capability.realtimeConversationSupported) add(RadioOption("realtime", "Realtime conversation", "Native audio with the current Agent"))
+            }, selected = voice.conversation.mode, onSelect = { mode -> onChange { it.copy(conversation = it.conversation.copy(mode = mode)) } })
+            if (voice.conversation.mode == "realtime") {
+                ProviderAudioControls(voice.conversation.cloud, capability.providerRealtime, capability.providerRealtimeProfiles,
+                    onProviderSettings) { cloud -> onChange { it.copy(conversation = it.conversation.copy(cloud = cloud, voice = null)) } }
+                val realtimeVoices = capability.providerRealtime?.voices.orEmpty().filter { it.selection.modelId == capability.providerRealtime?.modelId }
+                if (realtimeVoices.isNotEmpty()) RadioList(options = listOf(RadioOption("", "Catalog default voice")) + realtimeVoices.map { RadioOption(it.selection.id, it.label) },
+                    selected = voice.conversation.voice?.id.orEmpty(), onSelect = { id ->
+                        onChange { it.copy(conversation = it.conversation.copy(voice = realtimeVoices.firstOrNull { it.selection.id == id }?.selection)) }
+                    })
+                RadioList(options = listOf(RadioOption("turn_based", "Take turns", "Release the microphone to commit speech; microphone pauses during playback")),
+                    selected = voice.conversation.interaction, onSelect = { interaction -> onChange { it.copy(conversation = it.conversation.copy(interaction = interaction)) } })
+            }
+            SettingsRow(label = "Audio interaction", value = if (capability.fullDuplex) "Full duplex" else "Take turns",
+                sub = if (capability.acousticEchoCancellation) "Acoustic echo cancellation available" else "Stop playback before microphone capture", chevron = false)
+            if (voice.conversation.mode == "realtime" && !capability.realtimeConversationSupported) {
+                SettingsRow(label = "Realtime unavailable", sub = capability.realtimeConversationReason,
+                    onTap = { onChange { it.copy(conversation = it.conversation.copy(mode = "agent")) } }, isLast = true)
+            }
+        }
         SettingsSection(
             label = stringResource(R.string.settings_voice_listen_section),
             footer = stringResource(R.string.settings_voice_listen_footer),
@@ -139,7 +167,9 @@ fun VoicePage(
                         stringResource(R.string.settings_voice_mode_local_only),
                         stringResource(R.string.settings_voice_mode_local_only_sub),
                     ),
-                ),
+                ) + if (capability.providerRecognition?.supported == true || capability.providerRecognitionProfiles.isNotEmpty()) {
+                    listOf(RadioOption(AudioSource.PROVIDER.value, "Provider", "Follow this session's exact provider profile or select an override"))
+                } else emptyList(),
                 selected = voice.recognition.source.value,
                 onSelect = { source ->
                     onChange { current ->
@@ -152,8 +182,12 @@ fun VoicePage(
                     }
                 },
             )
+            if (voice.recognition.source == AudioSource.PROVIDER) {
+                ProviderAudioControls(voice.recognition.cloud, capability.providerRecognition, capability.providerRecognitionProfiles,
+                    onProviderSettings) { cloud -> onChange { it.copy(recognition = it.recognition.copy(cloud = cloud)) } }
+            }
             if (voice.recognition.source == AudioSource.OFFLINE) {
-                val sttModels = OfflineModelCatalog.all.filter { it.kind == com.lingxi.code.voice.offline.ModelKind.Stt }
+                val sttModels = GeneratedVoiceModelCatalog.all.filter { it.kind == com.lingxi.code.voice.offline.GeneratedModelKind.Stt }
                 RadioList(
                     options = listOf(
                         RadioOption("", "Language default model", "Select the first installed model for this language"),
@@ -244,12 +278,14 @@ fun VoicePage(
                     RadioOption(AudioSource.AUTOMATIC.value, stringResource(R.string.settings_voice_mode_automatic), "Resolve system first, then an installed offline model"),
                     RadioOption(AudioSource.SYSTEM.value, stringResource(R.string.settings_voice_backend_system), stringResource(R.string.settings_voice_android_system_sub)),
                     RadioOption(AudioSource.OFFLINE.value, stringResource(R.string.settings_voice_mode_local_only), stringResource(R.string.settings_voice_mode_local_only_sub)),
-                ),
+                ) + if (capability.providerSpeech?.supported == true || capability.providerSpeechProfiles.isNotEmpty()) {
+                    listOf(RadioOption(AudioSource.PROVIDER.value, "Provider", "Follow this session's exact provider profile or select an override"))
+                } else emptyList(),
                 selected = voice.speech.source.value,
                 onSelect = { source ->
                     onChange { current ->
                         current.copy(
-                            speech = AudioSpeechPreference(
+                            speech = current.speech.copy(
                                 source = AudioSource(source),
                                 offlineModelId = if (source == AudioSource.OFFLINE.value) current.speech.offlineModelId else null,
                                 voice = current.speech.voice?.takeIf { it.source.value == source },
@@ -258,8 +294,12 @@ fun VoicePage(
                     }
                 },
             )
+            if (voice.speech.source == AudioSource.PROVIDER) {
+                ProviderAudioControls(voice.speech.cloud, capability.providerSpeech, capability.providerSpeechProfiles,
+                    onProviderSettings) { cloud -> onChange { it.copy(speech = it.speech.copy(cloud = cloud, voice = null)) } }
+            }
             if (voice.speech.source == AudioSource.OFFLINE) {
-                val ttsModels = OfflineModelCatalog.all.filter { it.kind == com.lingxi.code.voice.offline.ModelKind.Tts }
+                val ttsModels = GeneratedVoiceModelCatalog.all.filter { it.kind == com.lingxi.code.voice.offline.GeneratedModelKind.Tts }
                 RadioList(
                     options = listOf(
                         RadioOption("", "Language default model", "Select the first installed model for this language"),
@@ -285,6 +325,7 @@ fun VoicePage(
                 AudioSource.OFFLINE -> offlineVoices.filter {
                     voice.speech.offlineModelId == null || it.selection?.modelId == voice.speech.offlineModelId
                 }
+                AudioSource.PROVIDER -> capability.voiceOptions.filter { it.source == VoiceOptionSource.Provider }
                 else -> emptyList()
             }
             RadioList(
@@ -308,7 +349,8 @@ fun VoicePage(
                             current.copy(
                                 speech = current.speech.copy(
                                     source = selection.source,
-                                    offlineModelId = selection.modelId,
+                                    offlineModelId = selection.modelId.takeIf { selection.source == AudioSource.OFFLINE },
+                                    cloud = if (selection.source == AudioSource.PROVIDER) current.speech.cloud.copy(modelId = selection.modelId) else current.speech.cloud,
                                     voice = selection,
                                 ),
                             )
@@ -323,7 +365,8 @@ fun VoicePage(
             )
             SettingsRow(
                 label = stringResource(R.string.settings_voice_effective_voice),
-                value = capability.effectiveVoice?.label ?: stringResource(R.string.settings_voice_unavailable_short),
+                value = capability.effectiveVoice?.label ?: if (voice.speech.source == AudioSource.PROVIDER && capability.providerSpeech?.readiness == "ready" && voice.speech.voice == null) "Catalog default voice"
+                    else stringResource(R.string.settings_voice_unavailable_short),
                 sub = capability.speechReason ?: capability.effectiveVoice?.details,
                 chevron = false,
                 isLast = true,
@@ -363,25 +406,41 @@ fun VoicePage(
             label = stringResource(R.string.settings_voice_playback_options),
             footer = stringResource(R.string.settings_voice_playback_footer),
         ) {
-            SettingsRow(
-                label = stringResource(R.string.voice_speech_rate),
-                value = String.format(Locale.US, "%.1fx", voice.rate),
-                chevron = false,
-            ) {
-                Slider(
-                    value = voice.rate.toFloat(),
-                    onValueChange = { v ->
-                        onChange { current -> current.copy(rate = snapVoiceSpeed(v).toDouble()) }
-                    },
-                    valueRange = 0.5f..2.0f,
-                    steps = 14,
-                    colors = SliderDefaults.colors(
-                        thumbColor = t.accent,
-                        activeTrackColor = t.accent,
-                        inactiveTrackColor = t.surfaceActive,
-                    ),
-                    modifier = Modifier.width(120.dp),
+            if (voice.speech.source == AudioSource.PROVIDER) {
+                SettingsRow(
+                    label = stringResource(R.string.voice_speech_rate),
+                    value = "1.0x",
+                    sub = "Provider speech supports fixed 1.0x speed.",
+                    chevron = false,
                 )
+                if (voice.rate != 1.0) {
+                    SettingsRow(
+                        label = "Reset speech speed to 1.0x",
+                        sub = "Saved speed: ${String.format(Locale.US, "%.1fx", voice.rate)}. Reset to use provider speech.",
+                        onTap = { onChange { current -> current.copy(rate = 1.0) } },
+                    )
+                }
+            } else {
+                SettingsRow(
+                    label = stringResource(R.string.voice_speech_rate),
+                    value = String.format(Locale.US, "%.1fx", voice.rate),
+                    chevron = false,
+                ) {
+                    Slider(
+                        value = voice.rate.toFloat(),
+                        onValueChange = { v ->
+                            onChange { current -> current.copy(rate = snapVoiceSpeed(v).toDouble()) }
+                        },
+                        valueRange = 0.5f..2.0f,
+                        steps = 14,
+                        colors = SliderDefaults.colors(
+                            thumbColor = t.accent,
+                            activeTrackColor = t.accent,
+                            inactiveTrackColor = t.surfaceActive,
+                        ),
+                        modifier = Modifier.width(120.dp),
+                    )
+                }
             }
             SettingsRow(label = stringResource(R.string.voice_auto_play), chevron = false, isLast = true) {
                 LXToggle(
@@ -438,6 +497,25 @@ fun VoicePage(
             )
         }
     }
+}
+
+@Composable
+private fun ProviderAudioControls(
+    cloud: AudioCloudBinding, capability: ProviderAudioCapability?, profiles: List<ProviderAudioProfileOption>,
+    onProviderSettings: () -> Unit, onChange: (AudioCloudBinding) -> Unit,
+) {
+    RadioList(options = listOf(RadioOption("follow_session", "Current session provider", "Uses the actual profile selected by this session"),
+        RadioOption("explicit_profile", "Audio provider override", "Select a profile for this audio operation only")),
+        selected = cloud.binding, onSelect = { onChange(cloud.copy(binding = it, modelId = null)) })
+    if (cloud.binding == "explicit_profile") {
+        RadioList(options = profiles.map { RadioOption(it.profileId, it.label, it.capability.reason ?: it.capability.readiness) },
+            selected = cloud.profileId.orEmpty(), onSelect = { onChange(cloud.copy(profileId = it, modelId = null)) })
+    }
+    val models = capability?.modelIds.orEmpty()
+    if (models.isNotEmpty()) RadioList(options = listOf(RadioOption("", "Catalog default audio model")) + models.filterNotNull().map { RadioOption(it, it) },
+        selected = cloud.modelId.orEmpty(), onSelect = { onChange(cloud.copy(modelId = it.ifBlank { null })) })
+    SettingsRow(label = "Provider route", value = listOfNotNull(capability?.profileId, capability?.modelId).joinToString(" · ").ifBlank { "Needs configuration" },
+        sub = capability?.reason ?: capability?.readiness, onTap = onProviderSettings, isLast = true)
 }
 
 /**
@@ -510,6 +588,6 @@ private fun availabilityLabel(available: Boolean): String =
     if (available) stringResource(R.string.settings_status_on) else stringResource(R.string.settings_voice_unavailable_short)
 
 private fun cancelVoicePack(language: String) {
-    com.lingxi.code.voice.offline.OfflineModelCatalog.packFor(language)
+    com.lingxi.code.voice.offline.GeneratedVoiceModelCatalog.packFor(language)
         .forEach(VoiceModelDownloader::cancel)
 }

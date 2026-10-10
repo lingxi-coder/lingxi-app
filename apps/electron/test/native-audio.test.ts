@@ -8,6 +8,7 @@ import { NativeAudioManager } from '../src/main/audio/nativeAudioManager';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
 import {
   defaultNativeAudioSnapshot,
+  validateNativeAudioCommand,
   validateNativeAudioEvent,
   validateNativeAudioSnapshot,
   type NativeAudioSnapshot,
@@ -749,59 +750,6 @@ test('Listen deadline includes packaged microphone permission and prevents late 
     finishPermission('granted');
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(helper.writes.length, 1, 'a late permission grant must not trigger helper snapshot or native operation requests');
-  } finally {
-    await manager.dispose();
-    helper.stdin.end();
-    helper.stdout.end();
-    helper.stderr.end();
-  }
-});
-
-test('native audio manager routes command responses and enforces single owner', async () => {
-  const helper = new FakeHelperProcess();
-  const manager = new NativeAudioManager({
-    isPackaged: false,
-    resourcesPath: '/resources',
-    userDataPath: '/tmp/lingxi-audio-tests',
-    helperPath: '/tmp/LingXiAudioHelper',
-    diagnostics: new DiagnosticBuffer(),
-    spawnHelper: () => helper as any,
-  });
-  try {
-    const listening = manager.request({
-      type: 'start_listening',
-      owner: { kind: 'dictation', id: 'dictation-1' },
-      recognitionMode: 'automatic',
-      language: 'en-US',
-    });
-    const first = await nextEnvelope(helper);
-    helper.stdout.write(`${JSON.stringify({
-      id: first.id,
-      type: 'response',
-      result: {
-        type: 'listening_started',
-        snapshot: snapshot({
-          owner: { kind: 'dictation', id: 'dictation-1' },
-          activity: 'listening',
-        }),
-      },
-    })}\n`);
-    assert.equal((await listening).type, 'listening_started');
-
-    const busy = await manager.request({
-      type: 'start_listening',
-      owner: { kind: 'flow', id: 'flow-1' },
-      recognitionMode: 'automatic',
-      language: 'en-US',
-    });
-    assert.deepEqual(busy, {
-      type: 'error',
-      snapshot: snapshot({
-        owner: { kind: 'dictation', id: 'dictation-1' },
-        activity: 'listening',
-      }),
-      error: { code: 'busy', message: 'another audio operation is already active on this device' },
-    });
   } finally {
     await manager.dispose();
     helper.stdin.end();
@@ -2603,5 +2551,60 @@ test('helper stdout preserves UTF-8 characters split across byte chunks', async 
   } finally {
     await manager.dispose();
     helper.stdin.end(); helper.stdout.end(); helper.stderr.end();
+  }
+});
+
+test('cloud synthesis pins config and exact session without calling the device synthesizer', async () => {
+  const config = audioConfigurationDefaults(); config.speech.source = 'provider'; config.speech.cloud.modelId = 'audio-model';
+  const admitted = hostedDeferred<void>();
+  const finish = hostedDeferred<void>();
+  let received: typeof config | undefined;
+  const manager = new NativeAudioManager({
+    isPackaged: false, resourcesPath: '/unused', userDataPath: '/tmp', diagnostics: new DiagnosticBuffer(), helperPath: '/unused-helper',
+    spawnHelper: () => { assert.fail('cloud synthesis must not start the local synthesizer'); },
+    getAudioConfiguration: () => config,
+    getAudioSessionContext: () => ({ sessionId: 's', profileId: 'profile-with-same-vendor', accountScope: 'a' }),
+    providerAudio: { execute: async (_kind: string, frozen: typeof config, _payload: unknown, session: { profileId: string }) => {
+      received = frozen; assert.equal(session.profileId, 'profile-with-same-vendor'); admitted.resolve(); await finish.promise;
+      return { type: 'synthesized', pcm_base64: 'AAAA', sample_rate_hz: 24_000 };
+    } } as any,
+  });
+  const promise = manager.executeAudioRequest({ identity: { id: '00000000-0000-4000-8000-000000000099', generation: 1, service_epoch: 0 }, owner: { type: 'ui', instance_id: 'preview' }, operation: { type: 'synthesize', text: 'hello' }, max_payload_bytes: 1024 });
+  await admitted.promise; config.speech.cloud.modelId = 'later-edit'; finish.resolve();
+  assert.equal((await promise).type, 'synthesized'); assert.equal(received?.speech.cloud.modelId, 'audio-model');
+});
+
+test('cloud cancellation aborts the same host operation and cannot fall through to device synthesis', async () => {
+  const config = audioConfigurationDefaults(); config.speech.source = 'provider';
+  const admitted = hostedDeferred<void>();
+  const identity = { id: '00000000-0000-4000-8000-000000000098', generation: 1, service_epoch: 0 };
+  const manager = new NativeAudioManager({
+    isPackaged: false, resourcesPath: '/unused', userDataPath: '/tmp', diagnostics: new DiagnosticBuffer(), helperPath: '/unused-helper', getAudioConfiguration: () => config,
+    spawnHelper: () => { assert.fail('provider failure cannot start local synthesis'); },
+    providerAudio: { execute: async (_kind: string, _config: unknown, _payload: unknown, _session: unknown, signal: AbortSignal) => {
+      admitted.resolve(); await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      return { type: 'failed', error: { kind: 'cancelled', message: 'cancelled' } };
+    } } as any,
+  });
+  const promise = manager.executeAudioRequest({ identity, owner: { type: 'ui', instance_id: 'preview' }, operation: { type: 'synthesize', text: 'hello' }, max_payload_bytes: 1024 });
+  await admitted.promise; await manager.cancelAudioRequest(identity);
+  const result = await promise; assert.equal(result.type, 'failed'); if (result.type === 'failed') assert.equal(result.error.kind, 'cancelled');
+  assert.equal(manager.getSnapshot().activeOperationCount, 0);
+});
+
+function hostedDeferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((yes) => { resolve = yes; }); return { promise, resolve }; }
+
+test('realtime capture chunks require exact bounded owner/identity/sequence and exclude snapshots', () => {
+  const chunk = { type: 'capture_chunk', owner: { kind: 'session', id: 's' }, identity: { id: '00000000-0000-4000-8000-000000000099', generation: 3, service_epoch: 9 }, sequence: 0, pcmBase64: 'AAA=', sampleRateHz: 24_000 };
+  assert.deepEqual(validateNativeAudioEvent(chunk), chunk);
+  assert.throws(() => validateNativeAudioEvent({ ...chunk, sequence: -1 }), /sequence/);
+  assert.throws(() => validateNativeAudioEvent({ ...chunk, pcmBase64: 'A'.repeat(90_000) }), /PCM/);
+  assert.throws(() => validateNativeAudioEvent({ ...chunk, snapshot: snapshot() }), /capture chunk/);
+});
+
+
+test('obsolete owner commands are rejected before helper dispatch', () => {
+  for (const type of ['start_listening', 'speak', 'cancel', 'stop_speaking', 'finish_listening']) {
+    assert.throws(() => validateNativeAudioCommand({ type, owner: { kind: 'dictation', id: 'old' }, recognitionMode: 'localOnly' }), /unknown|unsupported|invalid/);
   }
 });

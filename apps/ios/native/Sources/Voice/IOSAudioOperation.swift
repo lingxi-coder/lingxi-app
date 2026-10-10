@@ -38,6 +38,9 @@ struct IOSAudioOperationRequest: Sendable {
 enum IOSAudioOperation: Sendable {
     case startRecording(sampleRateHz: UInt32, format: String)
     case stopRecording(handle: String)
+    case capture(sampleRateHz: UInt32, format: String)
+    case play(pcm: Data, sampleRateHz: UInt32)
+    case transcribe(audio: Data, mimeType: String, language: String?)
     case listen(language: String?)
     case synthesize(text: String, language: String?, rate: Float?, voice: String?)
     case speak(text: String, language: String?, rate: Float?, voice: String?)
@@ -84,7 +87,7 @@ struct IOSAudioCapabilityState: Sendable {
     let supportedOperations: Set<Operation>
     let readiness: [Operation: Readiness]
 
-    enum Operation: Hashable, Sendable { case record, listen, synthesize, speak }
+    enum Operation: Hashable, Sendable { case record, capture, play, transcribe, listen, synthesize, speak }
     enum Readiness: Equatable, Sendable { case ready, needsPermission, busy, missingModel, unavailable }
 }
 

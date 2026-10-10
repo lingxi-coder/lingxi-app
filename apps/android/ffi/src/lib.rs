@@ -49,6 +49,7 @@
 //! the Android-local exports) so the symbols land in the final library.
 
 #![forbid(unsafe_code)]
+
 // Documentation debt, not a decision that docs do not matter: this crate had
 // 201 undocumented public item(s) when `missing_docs` was measured across the
 // workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
@@ -67,6 +68,15 @@
 // deletable items — see docs/HANDOFF-dead-code-adjudication-2026-09-17.md,
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
+
+#[cfg(feature = "uniffi")]
+mod audio_provider;
+#[cfg(feature = "uniffi")]
+pub use audio_provider::{
+    build_android_audio_provider_host, build_android_session_audio_provider_host, AndroidAudioProviderHost,
+    start_android_realtime_audio, AndroidRealtimeAudioListener, AndroidRealtimeAudioSession,
+};
+
 
 // `Platform` is named only inside the `cfg(target_os = "android")` constructor
 // body; importing it unconditionally warns on the host build, so scope it.

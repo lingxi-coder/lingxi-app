@@ -568,15 +568,16 @@ fun RootScreen(
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
     }
 
-    // FlowMode orb voice driver: a one-shot tap-to-talk listener, plus the live
-    // assistant reply text derived from the same conversation state ChatScreen
-    // renders (the orb is just another view of the real session).
+    // Flow uses this actual Agent conversation; its audio controller pins each admitted route.
     val flowVoiceController = rememberFlowVoiceController()
     val orbAssistantText = (state.streamingMessage ?: state.messages.lastOrNull())
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
     LaunchedEffect(chatViewModel, state.session.id, activeSessionMode, sourceScope) {
         flowVoiceController.pause()
         voiceSpeechPlayer.stop()
+    }
+    LaunchedEffect(flowVoiceController, state.model.id, state.model.providerId) {
+        flowVoiceController.updateSessionBinding(state.model.id, state.model.providerId)
     }
     DisposableEffect(lifecycleOwner, flowVoiceController) {
         val observer = LifecycleEventObserver { _, event ->
@@ -612,6 +613,11 @@ fun RootScreen(
         chatViewModel.setNotificationPreferences(settingsState.notifs)
     }
     val currentEngineSource by chatViewModel.engineSource.collectAsStateWithLifecycle()
+    LaunchedEffect(currentEngineSource, settingsState.voice, settingsState.llmProviders, state.session.id, state.model.id, appInForeground) {
+        val audioSource = currentEngineSource as? com.lingxi.code.conversation.EngineConversationSource
+        if (audioSource != null) audioSource.activateAudioContext() else com.lingxi.code.voice.audio.AndroidAudioSessionContext.clear()
+        resolvedSettingsStore.setVoiceCapability(com.lingxi.code.settings.probeVoiceCapabilitySnapshot(context, settingsState.voice))
+    }
     var pendingForkRequest by remember { mutableStateOf<PendingForkRequest?>(null) }
     val currentAutoPlayReplies = rememberUpdatedState(settingsState.voice.autoPlayReplies)
     val currentFlowActive = rememberUpdatedState(flowActive)
@@ -1724,11 +1730,21 @@ fun RootScreen(
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     // Ordinary mic and Flow Mode are separate controls.
                     onMicClick = {
+                        if (settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE) {
+                            chatViewModel.reportHostError(settingsState.voiceCapability.recognitionReason ?: "Audio input needs configuration. Open audio settings.")
+                            onOpenSettings()
+                            return@ChatScreen
+                        }
                         if (!voiceActive) voiceSpeechPlayer.stop()
                         voiceActive = !voiceActive
                         if (voiceActive) onVoiceHoldStart() else onVoiceHoldRelease()
                     },
                     onMicHoldStart = {
+                        if (settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE) {
+                            chatViewModel.reportHostError(settingsState.voiceCapability.recognitionReason ?: "Audio input needs configuration. Open audio settings.")
+                            onOpenSettings()
+                            return@ChatScreen
+                        }
                         voiceSpeechPlayer.stop()
                         voiceActive = true
                         onVoiceHoldStart()
@@ -1738,10 +1754,21 @@ fun RootScreen(
                         onVoiceHoldRelease()
                     },
                     onFlowModeClick = {
+                        val realtime = settingsState.voice.conversation.mode == "realtime"
+                        if ((realtime && settingsState.voiceCapability.providerRealtime?.readiness != "ready") ||
+                            (!realtime && (settingsState.voiceCapability.recognitionReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE ||
+                            settingsState.voiceCapability.speechReadiness == com.lingxi.code.voice.audio.AudioReadiness.UNAVAILABLE))) {
+                            chatViewModel.reportHostError(settingsState.voiceCapability.recognitionReason ?: settingsState.voiceCapability.speechReason ?: "Voice conversation needs configuration.")
+                            onOpenSettings()
+                            return@ChatScreen
+                        }
                         flowActive = !flowActive
                         if (flowActive) voiceSpeechPlayer.stop()
                     },
                     flowModeActive = flowActive,
+                    voiceInputSupported = settingsState.voiceCapability.recognitionSupported,
+                    voiceConversationSupported = if (settingsState.voice.conversation.mode == "realtime") settingsState.voiceCapability.realtimeConversationSupported
+                        else settingsState.voiceCapability.recognitionSupported && settingsState.voiceCapability.speechSupported,
                     flowModePanel = {
                         FlowModeOverlay(
                             visible = flowActive,

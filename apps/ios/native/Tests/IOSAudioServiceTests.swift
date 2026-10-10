@@ -662,15 +662,15 @@ final class IOSAudioServiceTests: XCTestCase {
 
         XCTAssertGreaterThan(snapshot.0, 0)
         XCTAssertEqual(snapshot.1, maxAudioPayloadBytes())
-        XCTAssertEqual(snapshot.2, 4)
-        XCTAssertEqual(snapshot.3, 4)
+        XCTAssertEqual(snapshot.2, 6)
+        XCTAssertEqual(snapshot.3, 6)
     }
 
     func testCapabilityCacheRefreshesAfterConfigurationChangeAndStaysStable() async throws {
         let defaultsName = "IOSAudioServiceCapabilityTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: defaultsName)!
         defaults.removePersistentDomain(forName: defaultsName)
-        let store = AudioConfigurationStore(defaults: defaults, voiceCatalog: [])
+        let store = AudioConfigurationStore(defaults: defaults)
         let service = IOSAudioService(
             configurationStore: store,
             serviceEpoch: 78,

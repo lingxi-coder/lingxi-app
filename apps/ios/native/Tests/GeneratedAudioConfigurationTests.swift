@@ -18,12 +18,6 @@ final class GeneratedAudioConfigurationTests: XCTestCase {
             XCTAssertEqual(actual, expected, fixture["name"] as? String ?? "normalization fixture")
         }
 
-        for fixture in try XCTUnwrap(fixtures["migrations"] as? [[String: Any]]) {
-            let actual = AudioConfigurationNormalizer.migrateLegacy(fixture["input"])
-            let expected = AudioConfigurationNormalizer.normalize(fixture["expected"])
-            XCTAssertEqual(actual, expected, fixture["name"] as? String ?? "migration fixture")
-        }
-
         for fixture in try XCTUnwrap(fixtures["routes"] as? [[String: Any]]) {
             let actual = resolveRoute(from: try XCTUnwrap(fixture["input"] as? [String: Any]))
             let expected = try XCTUnwrap(fixture["expected"] as? [String: Any])
@@ -31,14 +25,9 @@ final class GeneratedAudioConfigurationTests: XCTestCase {
         }
     }
 
-    func testSystemDefaultMigrationResolvesToProviderDefaultVoice() throws {
-        let configuration = AudioConfigurationNormalizer.migrateLegacy([
-            "schemaVersion": 2,
-            "voiceSelection": "system:default",
-        ])
-        let voice = try XCTUnwrap(configuration.speech.voice)
-        XCTAssertEqual(voice.source, .system)
-        XCTAssertEqual(voice.id, "default")
+    func testStructuredSystemDefaultUsesProviderDefaultVoice() throws {
+        let configuration = AudioConfigurationV4(recognition: AudioRecognitionPreference(source: .automatic), speech: AudioSpeechPreference(source: .system))
+        XCTAssertNil(configuration.speech.voice)
 
         let route = resolveAudioRoute(AudioRouteRequest(
             kind: .speech,
@@ -106,6 +95,19 @@ final class GeneratedAudioConfigurationTests: XCTestCase {
         let preferenceValues = value["preference"] as? [String: Any] ?? [:]
         let preferenceSource = AudioSource(rawValue: preferenceValues["source"] as? String ?? "automatic")
         let modelID = preferenceValues["offlineModelId"] as? String
+        let cloudValue = preferenceValues["cloud"] as? [String: Any] ?? [:]
+        let cloud = AudioCloudBinding(binding: cloudValue["binding"] as? String ?? "follow_session", profileId: cloudValue["profileId"] as? String, modelId: cloudValue["modelId"] as? String)
+        let sessionContext = (value["sessionContext"] as? [String: Any]).flatMap { context in
+            (context["profileId"] as? String).map { AudioProviderContext(profileId: $0) }
+        }
+        let providerCapabilities = (value["providerCapabilities"] as? [[String: Any]] ?? []).map { capability in
+            AudioProviderCapability(
+                profileId: capability["profileId"] as? String ?? "", providerId: capability["providerId"] as? String ?? "",
+                kind: AudioProviderKind(rawValue: capability["kind"] as? String ?? "") ?? .recognition,
+                supported: capability["supported"] as? Bool ?? false, readiness: capability["readiness"] as? String ?? "unavailable",
+                defaultModelId: capability["defaultModelId"] as? String, modelIds: (capability["modelIds"] as? [Any] ?? []).map { $0 as? String }
+            )
+        }
         let models = (value["offlineModels"] as? [[String: Any]] ?? []).map { model in
             AudioOfflineModelAvailability(
                 id: model["id"] as? String ?? "",
@@ -124,7 +126,8 @@ final class GeneratedAudioConfigurationTests: XCTestCase {
             let preference = AudioSpeechPreference(
                 source: preferenceSource,
                 offlineModelId: modelID,
-                voice: selection(preferenceValues["voice"])
+                voice: selection(preferenceValues["voice"]),
+                cloud: cloud
             )
             return resolveAudioRoute(AudioRouteRequest(
                 kind: kind,
@@ -133,11 +136,13 @@ final class GeneratedAudioConfigurationTests: XCTestCase {
                 systemStatus: readiness,
                 offlineModels: models,
                 systemVoiceIds: systemVoiceIDs,
-                voiceOverride: voiceOverride
+                voiceOverride: voiceOverride,
+                sessionContext: sessionContext,
+                providerCapabilities: providerCapabilities
             ))
         }
 
-        let preference = AudioRecognitionPreference(source: preferenceSource, offlineModelId: modelID)
+        let preference = AudioRecognitionPreference(source: preferenceSource, offlineModelId: modelID, cloud: cloud)
         return resolveAudioRoute(AudioRouteRequest(
             kind: kind,
             preference: preference,
@@ -145,7 +150,9 @@ final class GeneratedAudioConfigurationTests: XCTestCase {
             systemStatus: readiness,
             offlineModels: models,
             systemVoiceIds: systemVoiceIDs,
-            voiceOverride: voiceOverride
+            voiceOverride: voiceOverride,
+                sessionContext: sessionContext,
+                providerCapabilities: providerCapabilities
         ))
     }
 
@@ -156,7 +163,8 @@ final class GeneratedAudioConfigurationTests: XCTestCase {
         return AudioVoiceSelection(
             source: AudioSource(rawValue: value["source"] as? String ?? ""),
             id: id,
-            modelId: value["modelId"] as? String
+            modelId: value["modelId"] as? String,
+            profileId: value["profileId"] as? String
         )
     }
 
@@ -175,6 +183,8 @@ final class GeneratedAudioConfigurationTests: XCTestCase {
             XCTAssertEqual(actual.effective?.source.rawValue, expectedEffective["source"] as? String, message)
             XCTAssertEqual(actual.effective?.modelId, expectedEffective["modelId"] as? String, message)
             XCTAssertEqual(actual.effective?.voiceId, expectedEffective["voiceId"] as? String, message)
+            XCTAssertEqual(actual.effective?.profileId, expectedEffective["profileId"] as? String, message)
+            XCTAssertEqual(actual.effective?.providerId, expectedEffective["providerId"] as? String, message)
         } else {
             XCTAssertNil(actual.effective, message)
         }

@@ -1,3 +1,4 @@
+import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../shared/visualization.js';
 import { CH_GIT_REQUEST, CH_GIT_EVENT } from '../shared/git.js';
@@ -42,7 +43,7 @@ import type {
 } from '../shared/nativeAudio.js';
 import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
-import type { AudioConfigurationV3 } from '../shared/generatedAudioConfiguration.js';
+import type { AudioConfigurationV4 } from '../shared/generatedAudioConfiguration.js';
 import type { PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
@@ -168,8 +169,10 @@ export interface WorkspaceFileSearchResult { files: string[]; directories?: stri
 
 export type Unsubscribe = () => void;
 export interface NativeAudioApi {
+  realtime(command: NativeRealtimeAudioCommand): Promise<void>;
+  onRealtimeState(callback: (state: NativeRealtimeAudioState) => void): () => void;
   request(command: NativeAudioCommand): Promise<NativeAudioCommandResult>;
-  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV3): Promise<NativeAudioOperationResponse>;
+  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4): Promise<NativeAudioOperationResponse>;
   cancel(): Promise<void>;
   finishListen(): Promise<void>;
   onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
@@ -388,7 +391,8 @@ const api: LingxiApi = {
     onGuestEvent: (callback) => subscribe('lingxi:visualization:guestEvent', callback),
   },
   audio: {
-    request: (command) => ipcRenderer.invoke(CH_NATIVE_AUDIO_REQUEST, command) as Promise<NativeAudioCommandResult>,
+    realtime: (command) => ipcRenderer.invoke(CH_REALTIME_AUDIO_COMMAND, command) as Promise<void>,
+    onRealtimeState: (callback) => subscribe(CH_REALTIME_AUDIO_STATE, callback),    request: (command) => ipcRenderer.invoke(CH_NATIVE_AUDIO_REQUEST, command) as Promise<NativeAudioCommandResult>,
     execute: (operation, configurationRevision, configurationOverride) => ipcRenderer.invoke(CH_NATIVE_AUDIO_OPERATION, operation, configurationRevision, configurationOverride) as Promise<NativeAudioOperationResponse>,
     cancel: () => ipcRenderer.invoke(CH_NATIVE_AUDIO_CANCEL) as Promise<void>,
     finishListen: () => ipcRenderer.invoke(CH_NATIVE_AUDIO_FINISH_LISTEN) as Promise<void>,

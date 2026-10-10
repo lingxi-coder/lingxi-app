@@ -19,7 +19,7 @@ import Foundation
 
         func render(
             text: String,
-            configuration: AudioConfigurationV3,
+            configuration: AudioConfigurationV4,
             route: AudioRouteResolution,
             maxPayloadBytes: UInt64
         ) async throws -> AudioPcmOutput {

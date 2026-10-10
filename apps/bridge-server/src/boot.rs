@@ -1631,37 +1631,56 @@ pub async fn assemble_with_credentials(
         }
     }
 
+    let (audio_services, audio_credential_ids, _) = runtime.audio_provider_services();
+    let host = audio_provider::AudioProviderHost::from_provider_services(
+        audio_services,
+        audio_credential_ids,
+    );
+    let realtime_audio = Arc::new(
+        crate::realtime_audio::RealtimeAudioController::new(
+            runtime.orchestrator.clone(),
+            Arc::new(host),
+        )
+        .with_execution_owners(connection.realtime_execution_owners(
+            gate.clone(),
+            computer_access_broker.clone(),
+            ask_user_question_broker.clone(),
+        )),
+    );
+
     // The full command-routing seam over the real engine handles.
     let handle: Arc<dyn OrchestratorHandle> = runtime.orchestrator.clone();
     let dispatcher: Arc<dyn SlashCommandDispatcher> =
         Arc::new(RegistrySlashDispatcherClone::wrap(&runtime));
-    let router = Arc::new(
-        EngineCommandRouter::new(
-            handle,
-            runtime.auth.clone(),
-            runtime.task_registry.clone()
-                as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
-            Some(dispatcher),
-            Some(runtime.shared_command_registry.clone()),
-        )
-        .with_cron_firer(cron_firer)
-        .with_session_cron(runtime.session_lifecycle.cron_scheduler.clone())
-        .with_credentials(runtime.credentials.clone())
-        .with_catalog_registry(runtime.catalog_registry.clone())
-        .with_provider_model_catalog_listings(provider_model_catalog_listings)
-        .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
-        .with_http(runtime.http.clone())
-        .with_session_store(session_store.with_transcript_writer(runtime.orchestrator.session_transcript_writer()))
-        .with_session_agent_observer(session_agent_observer)
-        .with_team_registry(runtime.coordinator.clone())
-        .with_settings_context(settings_context)
-        .with_mcp_paths(mcp_paths)
-        .with_mcp_registry(runtime.mcp_registry.clone())
-        .with_plugin_runtime(runtime.plugin_runtime.clone())
-        .with_hook_registry(runtime.hook_registry.clone())
-        .with_repo_root_reloader(runtime.repo_root_reloader.clone())
-        .with_file_changed_watcher(runtime.file_changed_watcher.controller()),
-    );
+    let mut router = EngineCommandRouter::new(
+        handle,
+        runtime.auth.clone(),
+        runtime.task_registry.clone()
+            as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+        Some(dispatcher),
+        Some(runtime.shared_command_registry.clone()),
+    )
+    .with_cron_firer(cron_firer)
+    .with_session_cron(runtime.session_lifecycle.cron_scheduler.clone())
+    .with_credentials(runtime.credentials.clone())
+    .with_catalog_registry(runtime.catalog_registry.clone())
+    .with_provider_model_catalog_listings(provider_model_catalog_listings)
+    .with_ephemeral_provider_credentials(provider_credentials_ephemeral)
+    .with_http(runtime.http.clone())
+    .with_session_store(
+        session_store.with_transcript_writer(runtime.orchestrator.session_transcript_writer()),
+    )
+    .with_session_agent_observer(session_agent_observer)
+    .with_team_registry(runtime.coordinator.clone())
+    .with_settings_context(settings_context)
+    .with_mcp_paths(mcp_paths)
+    .with_mcp_registry(runtime.mcp_registry.clone())
+    .with_plugin_runtime(runtime.plugin_runtime.clone())
+    .with_hook_registry(runtime.hook_registry.clone())
+    .with_repo_root_reloader(runtime.repo_root_reloader.clone())
+    .with_file_changed_watcher(runtime.file_changed_watcher.controller());
+    router = router.with_realtime_audio(realtime_audio);
+    let router = Arc::new(router);
 
     let connection = connection
         .bind(gate, driver)

@@ -1,7 +1,7 @@
 package com.lingxi.code.voice
 
 import com.lingxi.code.settings.VersionedAudioConfiguration
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import com.lingxi.code.voice.audio.AudioOwnerKey
 import com.lingxi.code.voice.audio.DeviceAudioErrorKind
 import com.lingxi.code.voice.audio.DeviceAudioOperation
@@ -21,7 +21,7 @@ class FlowVoiceControllerTest {
     fun permissionGrantResumesThePendingListen() = runTest {
         var permissionGranted = false
         var requestCount = 0
-        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV3(), revision = 40L))
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), revision = 40L))
         val controller = FlowVoiceController(
             audioService = service,
             hasMicrophonePermission = { permissionGranted },
@@ -48,7 +48,7 @@ class FlowVoiceControllerTest {
     @Test
     fun permissionGrantAfterPauseDoesNotStartAStaleListen() = runTest {
         var permissionGranted = false
-        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV3(), revision = 40L))
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), revision = 40L))
         val controller = FlowVoiceController(
             audioService = service,
             hasMicrophonePermission = { permissionGranted },
@@ -71,7 +71,7 @@ class FlowVoiceControllerTest {
 
     @Test
     fun stoppingRealtimeListenReturnsItsFinalTranscriptAndPreservesPinnedConfiguration() = runTest {
-        val snapshot = VersionedAudioConfiguration(AudioConfigurationV3(language = "en-US"), revision = 41L)
+        val snapshot = VersionedAudioConfiguration(AudioConfigurationV4(language = "en-US"), revision = 41L)
         val service = FakeFlowAudioService(snapshot)
         service.onListenOpened = { session ->
             session.ready()
@@ -102,7 +102,7 @@ class FlowVoiceControllerTest {
 
     @Test
     fun stopRequestedBeforeSessionAdmissionStopsItAsSoonAsItOpens() = runTest {
-        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV3(), revision = 44L))
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), revision = 44L))
         val admission = CompletableDeferred<RealtimeSpeechSession>()
         service.pendingAdmission = admission
         service.onListenOpened = { session ->
@@ -133,7 +133,7 @@ class FlowVoiceControllerTest {
 
     @Test
     fun realtimeListenErrorIsSurfacedWithoutSendingATranscript() = runTest {
-        val snapshot = VersionedAudioConfiguration(AudioConfigurationV3(), revision = 42L)
+        val snapshot = VersionedAudioConfiguration(AudioConfigurationV4(), revision = 42L)
         val service = FakeFlowAudioService(snapshot)
         service.onListenOpened = { session ->
             session.ready()
@@ -160,7 +160,7 @@ class FlowVoiceControllerTest {
 
     @Test
     fun lateCallbacksFromReplacedListenAreIgnored() = runTest {
-        val snapshot = VersionedAudioConfiguration(AudioConfigurationV3(), revision = 43L)
+        val snapshot = VersionedAudioConfiguration(AudioConfigurationV4(), revision = 43L)
         val service = FakeFlowAudioService(snapshot)
         service.onListenOpened = { it.ready() }
         val controller = FlowVoiceController(
@@ -190,7 +190,7 @@ class FlowVoiceControllerTest {
 
     @Test
     fun pauseCancelsRealtimeListenAndIgnoresItsLateTranscript() = runTest {
-        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV3(), revision = 45L))
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), revision = 45L))
         service.onListenOpened = { it.ready() }
         val controller = FlowVoiceController(
             audioService = service,
@@ -214,11 +214,11 @@ class FlowVoiceControllerTest {
     @Test
     fun interactionPinsListenConfigurationThroughReplyAndRefreshesNextListen() = runTest {
         val first = VersionedAudioConfiguration(
-            configuration = AudioConfigurationV3(language = "en-US", rate = 0.8, autoPlayReplies = false),
+            configuration = AudioConfigurationV4(language = "en-US", rate = 0.8, autoPlayReplies = false),
             revision = 31L,
         )
         val second = VersionedAudioConfiguration(
-            configuration = AudioConfigurationV3(language = "fr-FR", rate = 1.4, autoPlayReplies = true),
+            configuration = AudioConfigurationV4(language = "fr-FR", rate = 1.4, autoPlayReplies = true),
             revision = 32L,
         )
         val service = FakeFlowAudioService(first)
@@ -257,6 +257,44 @@ class FlowVoiceControllerTest {
         controller.dispose()
     }
 
+    @Test
+    fun changingProfileWithTheSameModelCancelsNativeRealtimeAndSuppressesLateTranscript() = runTest {
+        val config = AudioConfigurationV4(conversation = com.lingxi.code.voice.audio.AudioConversationPreference(mode = "realtime"))
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(config, 50L))
+        service.onListenOpened = { it.ready() }
+        val controller = FlowVoiceController(service, { true }, {}, UnconfinedTestDispatcher(testScheduler))
+        val sent = mutableListOf<String>()
+        controller.updateSessionBinding("shared-model", "profile-a")
+        controller.listen(sent::add) {}
+        runCurrent()
+        val session = service.sessions.single()
+        controller.updateSessionBinding("shared-model", "profile-a")
+        assertTrue(!session.cancelled)
+        controller.updateSessionBinding("shared-model", "profile-b")
+        session.finish("late old profile")
+        runCurrent()
+        assertTrue(session.cancelled)
+        assertTrue(sent.isEmpty())
+        assertEquals("", controller.state.value.userCaption)
+        assertEquals(OrbPhase.Idle, controller.state.value.phase)
+        controller.dispose()
+    }
+
+    @Test
+    fun changingModelCancelsActiveAgentFlowListen() = runTest {
+        val service = FakeFlowAudioService(VersionedAudioConfiguration(AudioConfigurationV4(), 51L))
+        service.onListenOpened = { it.ready() }
+        val controller = FlowVoiceController(service, { true }, {}, UnconfinedTestDispatcher(testScheduler))
+        controller.updateSessionBinding("model-a", "profile")
+        controller.listen({}) {}
+        runCurrent()
+        controller.updateSessionBinding("model-b", "profile")
+        runCurrent()
+        assertTrue(service.sessions.single().cancelled)
+        assertEquals(OrbPhase.Idle, controller.state.value.phase)
+        controller.dispose()
+    }
+
     private class FakeFlowAudioService(var snapshot: VersionedAudioConfiguration) : FlowVoiceAudioService {
         val operations = mutableListOf<DeviceAudioOperation>()
         val owners = mutableListOf<AudioOwnerKey>()
@@ -267,6 +305,16 @@ class FlowVoiceControllerTest {
             session.ready()
             session.finish("recognized")
         }
+
+        override suspend fun openRealtimeAgent(owner: AudioOwnerKey, configuration: AudioConfigurationV4,
+            callbacks: com.lingxi.code.voice.audio.RealtimeAgentCallbacks): RealtimeSpeechSession = openRealtimeListen(
+                owner, DeviceAudioOperation.Listen(null, configuration), object : RealtimeSpeechCallbacks {
+                    override fun onReady() = callbacks.onReady()
+                    override fun onPartial(text: String) = callbacks.onTranscript(text, false, false)
+                    override fun onFinal(text: String) = callbacks.onTranscript(text, false, true)
+                    override fun onError(code: String, message: String, retriable: Boolean) = callbacks.onError(message)
+                    override fun onClosed() = callbacks.onClosed()
+                })
 
         override fun configurationSnapshot() = snapshot
 

@@ -46,6 +46,36 @@ class RuntimeSourceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     inspect_metadata(self.metadata, dependency, self.inventory)
 
+    def test_declared_development_root_keeps_one_source_identity(self):
+        for package in self.metadata["packages"]:
+            package["source"] = None
+        result = inspect_metadata(self.metadata, self.dependency, self.inventory,
+                                  development_root="/tmp/locked-harness")
+        self.assertTrue(result["development"])
+        self.assertEqual(result["source"], f"path+{Path("/tmp/locked-harness").resolve()}")
+        self.metadata["packages"][1]["manifest_path"] = "/tmp/another-runtime/crates/core/Cargo.toml"
+        with self.assertRaisesRegex(ValueError, "different source"):
+            inspect_metadata(self.metadata, self.dependency, self.inventory,
+                             development_root="/tmp/locked-harness")
+
+    def test_development_patch_converges_canonical_pins_but_rejects_foreign_edges(self):
+        for package in self.metadata["packages"]:
+            package["source"] = None
+        edge = {"name":"core", "source":f"git+{self.repository}?rev={'b' * 40}"}
+        self.metadata["packages"].append({"name":"host", "dependencies":[edge]})
+        inspect_metadata(self.metadata, self.dependency, self.inventory, development_root="/tmp/locked-harness")
+        edge["source"] = "git+https://github.com/elsewhere/runtime?rev=" + "b" * 40
+        with self.assertRaisesRegex(ValueError, "another source"):
+            inspect_metadata(self.metadata, self.dependency, self.inventory, development_root="/tmp/locked-harness")
+
+    def test_development_root_rejects_mixed_git_and_local_identity(self):
+        for package in self.metadata["packages"]:
+            package["source"] = None
+        self.metadata["packages"][1]["source"] = self.source
+        with self.assertRaisesRegex(ValueError, "different source"):
+            inspect_metadata(self.metadata, self.dependency, self.inventory,
+                             development_root="/tmp/locked-harness")
+
     def test_rejects_local_copy(self):
         self.metadata["packages"][1]["source"] = None
         with self.assertRaisesRegex(ValueError, "different source"):

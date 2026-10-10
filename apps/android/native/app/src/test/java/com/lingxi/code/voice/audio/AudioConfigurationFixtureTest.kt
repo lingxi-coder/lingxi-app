@@ -1,5 +1,7 @@
 package com.lingxi.code.voice.audio
 
+import com.lingxi.code.settings.toStorageMap
+
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -16,16 +18,10 @@ class AudioConfigurationFixtureTest {
     }
 
     @Test
-    fun generatedNormalizerMatchesSharedNormalizationAndMigrationFixtures() {
-        val cases = fixtures["normalization"] as List<Map<String, Any?>> +
-            (fixtures["migrations"] as List<Map<String, Any?>>)
-
+    fun generatedNormalizerMatchesSharedCurrentConfigurationFixtures() {
+        val cases = fixtures["normalization"] as List<Map<String, Any?>>
         cases.forEach { testCase ->
-            val actual = if (testCase in (fixtures["normalization"] as List<*>)) {
-                AudioConfigurationNormalizer.normalize(testCase["input"])
-            } else {
-                AudioConfigurationNormalizer.migrateLegacy(testCase["input"])
-            }
+            val actual = AudioConfigurationNormalizer.normalize(testCase["input"])
             assertEquals(
                 "shared config fixture '${testCase["name"]}'",
                 normalizeJsonNumbers(testCase["expected"]),
@@ -62,6 +58,15 @@ class AudioConfigurationFixtureTest {
                 systemStatus = AudioReadiness.valueOf((input["systemStatus"] as String).uppercase()),
                 offlineModels = models,
                 systemVoiceIds = input["systemVoiceIds"] as? List<String>,
+                cloud = (preference["cloud"] as? Map<String, Any?>)?.let {
+                    AudioCloudBinding(it["binding"] as? String ?: "follow_session", it["profileId"] as? String, it["modelId"] as? String)
+                } ?: AudioCloudBinding(),
+                sessionContext = (input["sessionContext"] as? Map<String, Any?>)?.let { AudioProviderContext(it["profileId"] as String) },
+                providerCapabilities = (input["providerCapabilities"] as? List<Map<String, Any?>>).orEmpty().map {
+                    AudioProviderCapability(it["profileId"] as String, it["providerId"] as String,
+                        AudioProviderKind.valueOf((it["kind"] as String).uppercase()), it["supported"] as Boolean,
+                        it["readiness"] as String, it["defaultModelId"] as? String, it["modelIds"] as List<String?>)
+                },
             )
 
             val actual = resolveAudioRoute(request).toFixtureMap()
@@ -94,27 +99,15 @@ class AudioConfigurationFixtureTest {
         source = AudioSource(this["source"] as String),
         id = this["id"] as String,
         modelId = this["modelId"] as? String,
+        profileId = this["profileId"] as? String,
     )
 
-    private fun AudioConfigurationV3.toFixtureMap(): Map<String, Any?> = mapOf(
-        "schemaVersion" to schemaVersion,
-        "recognition" to mapOf(
-            "source" to recognition.source.value,
-            "offlineModelId" to recognition.offlineModelId,
-        ),
-        "speech" to mapOf(
-            "source" to speech.source.value,
-            "offlineModelId" to speech.offlineModelId,
-            "voice" to speech.voice?.toFixtureMap(),
-        ),
-        "language" to language,
-        "rate" to rate,
-        "autoPlayReplies" to autoPlayReplies,
-    )
+    private fun AudioConfigurationV4.toFixtureMap(): Map<String, Any?> = toStorageMap()
 
     private fun AudioVoiceSelection.toFixtureMap(): Map<String, Any?> = buildMap {
         put("source", source.value)
         modelId?.let { put("modelId", it) }
+        profileId?.let { put("profileId", it) }
         put("id", id)
     }
 
@@ -125,11 +118,13 @@ class AudioConfigurationFixtureTest {
             "voice" to requested.voice?.toFixtureMap(),
         ),
         "effective" to effective?.let {
-            mapOf(
-                "source" to it.source.value,
-                "modelId" to it.modelId,
-                "voiceId" to it.voiceId,
-            )
+            buildMap {
+                put("source", it.source.value)
+                put("modelId", it.modelId)
+                put("voiceId", it.voiceId)
+                it.profileId?.let { put("profileId", it) }
+                it.providerId?.let { put("providerId", it) }
+            }
         },
         "status" to when (status) {
             AudioRouteStatus.READY -> "ready"
@@ -138,6 +133,7 @@ class AudioConfigurationFixtureTest {
             AudioRouteStatus.INVALID_REQUEST -> "invalidRequest"
         },
         "reason" to reason,
+        "fallbackReason" to fallbackReason,
         "fallbackReason" to fallbackReason,
     )
 

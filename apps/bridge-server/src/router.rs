@@ -188,6 +188,14 @@ impl SessionStoreContext {
 /// handles.
 #[async_trait]
 pub trait CommandRouter: Send + Sync + 'static {
+    /// Advertise realtime only when a concrete connection controller is installed.
+    fn realtime_audio_supported(&self) -> bool {
+        false
+    }
+    /// Reject new input immediately during connection/session teardown.
+    fn abort_realtime_audio(&self) {}
+    /// Wait for the native session to release tools and provider transport.
+    async fn stop_realtime_audio(&self) {}
     /// Route one decoded [`ClientCommand`], emitting any reply event(s) through
     /// `sink`. Pure side-effecting: it never blocks the caller for a turn (the
     /// turn path lives on [`crate::server::TurnDriver`]).
@@ -288,6 +296,7 @@ pub struct EngineCommandRouter {
     /// exact manager used by the runtime; tests/embedded clients may omit it.
     catalog_registry: harness_runtime::desktop::FusionCatalogRegistry,
     credentials: Option<Arc<secret::CredentialManager>>,
+    realtime_audio: Option<Arc<crate::realtime_audio::RealtimeAudioController>>,
     /// Settings-visible provider model directory assembled from the full
     /// provider config, including providers not currently routable.
     provider_model_catalog_listings: Vec<lingxi_core::host::ModelListing>,
@@ -459,6 +468,7 @@ impl EngineCommandRouter {
             team_registry: None,
             catalog_registry: harness_runtime::desktop::FusionCatalogRegistry::default(),
             credentials: None,
+            realtime_audio: None,
             provider_model_catalog_listings: Vec::new(),
             provider_credentials_ephemeral: false,
             http: None,
@@ -481,6 +491,15 @@ impl EngineCommandRouter {
         registry: harness_runtime::desktop::FusionCatalogRegistry,
     ) -> Self {
         self.catalog_registry = registry;
+        self
+    }
+
+    /// Install the real host-owned native Agent realtime controller.
+    pub fn with_realtime_audio(
+        mut self,
+        controller: Arc<crate::realtime_audio::RealtimeAudioController>,
+    ) -> Self {
+        self.realtime_audio = Some(controller);
         self
     }
 
@@ -657,6 +676,19 @@ impl EngineCommandRouter {
 
 #[async_trait]
 impl CommandRouter for EngineCommandRouter {
+    fn realtime_audio_supported(&self) -> bool {
+        self.realtime_audio.is_some()
+    }
+    fn abort_realtime_audio(&self) {
+        if let Some(controller) = &self.realtime_audio {
+            controller.abort_now();
+        }
+    }
+    async fn stop_realtime_audio(&self) {
+        if let Some(controller) = &self.realtime_audio {
+            controller.stop().await;
+        }
+    }
     async fn runtime_snapshot(&self) -> Result<Vec<ClientEvent>, String> {
         if self.team_registry.is_none() {
             return Err("desktop runtime snapshot is unavailable".into());
@@ -713,6 +745,31 @@ impl CommandRouter for EngineCommandRouter {
     #[allow(clippy::too_many_lines)]
     async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
         match command {
+            ClientCommand::StartRealtimeAudio { request_json } => {
+                if let Some(controller) = &self.realtime_audio {
+                    controller.start(request_json, sink).await;
+                } else {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: "native realtime audio is unavailable on this connection".into(),
+                    })
+                    .await;
+                }
+            }
+            ClientCommand::RealtimeAudioInput { input_json } => {
+                if let Some(controller) = &self.realtime_audio {
+                    controller.input(input_json, sink).await;
+                } else {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: "native realtime audio is unavailable on this connection".into(),
+                    })
+                    .await;
+                }
+            }
+            ClientCommand::StopRealtimeAudio => {
+                self.stop_realtime_audio().await;
+            }
             ClientCommand::UiRender {
                 request_id,
                 request_json,
@@ -1109,6 +1166,29 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Model ──────────────────────────────────────────────────────
+            ClientCommand::GetAudioSessionContext => {
+                let context = match &self.realtime_audio {
+                    Some(controller) => controller.session_context().await,
+                    None => Err("audio runtime is unavailable".into()),
+                };
+                match context {
+                    Ok((session_id, profile)) => {
+                        sink.emit(ClientEvent::AudioSessionContext {
+                            session_id,
+                            account_scope: format!("profile:{profile}"),
+                            profile_id: profile,
+                        })
+                        .await;
+                    }
+                    Err(message) => {
+                        sink.emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Rejected,
+                            message,
+                        })
+                        .await;
+                    }
+                }
+            }
             ClientCommand::SetModel { model } => {
                 let listings = self.handle.list_model_listings().await;
                 let (model_id, profile) = lingxi_core::host::parse_model_ref(&model, &listings);

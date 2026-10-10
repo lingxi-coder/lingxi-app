@@ -16,6 +16,7 @@ import type { HostNotifier } from './notifications.js';
 export type { HostPermissionRequest } from '../shared/permission.js';
 
 export interface DesktopAudioService {
+  refreshHostedCapabilities?(): Promise<void>;
   getCapabilities(): AudioCapabilitySnapshotDto;
   initializeCapabilities(): Promise<void>;
   executeAudioRequest(request: AudioOperationRequestDto): Promise<AudioOperationResultDto>;

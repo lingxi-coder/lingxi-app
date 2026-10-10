@@ -549,12 +549,12 @@ pub trait AndroidSecureStorage: Send + Sync {
 /// shared [`lingxi_core::host::SecureStorage`] seam: serde-encodes `SecureStorageData` to a
 /// blob on store, decodes on retrieve, and reports the Keystore as an encrypted
 /// backend so the engine persists secrets there.
-#[cfg(all(feature = "uniffi", target_os = "android"))]
+#[cfg(feature = "uniffi")]
 pub(super) struct AndroidSecureStorageBridge {
     pub(super) inner: Box<dyn AndroidSecureStorage>,
 }
 
-#[cfg(all(feature = "uniffi", target_os = "android"))]
+#[cfg(feature = "uniffi")]
 #[async_trait::async_trait]
 impl lingxi_core::host::SecureStorage for AndroidSecureStorageBridge {
     async fn store(
@@ -619,7 +619,7 @@ impl lingxi_core::host::SecureStorage for AndroidSecureStorageBridge {
 }
 
 /// Fan a flat [`SecureStorageFfiError`] back out onto [`lingxi_core::host::SecureStorageError`].
-#[cfg(all(feature = "uniffi", target_os = "android"))]
+#[cfg(feature = "uniffi")]
 pub(super) fn securestorage_error_from_ffi(
     e: SecureStorageFfiError,
 ) -> lingxi_core::host::SecureStorageError {

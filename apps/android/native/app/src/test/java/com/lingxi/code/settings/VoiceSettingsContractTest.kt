@@ -1,7 +1,6 @@
 package com.lingxi.code.settings
 
-import com.lingxi.code.voice.audio.AudioConfigurationNormalizer
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import com.lingxi.code.voice.audio.AudioReadiness
 import com.lingxi.code.voice.audio.AudioRecognitionPreference
 import com.lingxi.code.voice.audio.AudioSource
@@ -14,33 +13,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoiceSettingsContractTest {
-    @Test
-    fun migratesLegacyOfflineRecognitionAndVoiceIntoV3Preferences() {
-        val config = AudioConfigurationNormalizer.migrateLegacy(
-            mapOf(
-                "schemaVersion" to 2,
-                "recognitionMode" to "localOnly",
-                "inputLanguage" to "auto",
-                "voiceSelection" to "sherpa:sherpa.melo-zh-en:melo-zh-en",
-                "speed" to 1.4,
-                "autoPlay" to true,
-                "legacyVoiceLang" to "en",
-            ),
-        )
-
-        assertEquals(3, config.schemaVersion)
-        assertEquals(AudioSource.OFFLINE, config.recognition.source)
-        assertEquals(AudioSource.OFFLINE, config.speech.source)
-        assertEquals("sherpa.melo-zh-en", config.speech.offlineModelId)
-        assertEquals("en-US", config.language)
-        assertEquals(1.4, config.rate, 1e-4)
-        assertTrue(config.autoPlayReplies)
-    }
 
     @Test
     fun automaticRecognitionUsesSystemWhenAvailableEvenWithOfflineModelsInstalled() {
         val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = AudioConfigurationV3(
+            preferences = AudioConfigurationV4(
                 recognition = AudioRecognitionPreference(source = AudioSource.AUTOMATIC),
                 language = "zh-CN",
             ),
@@ -58,7 +35,7 @@ class VoiceSettingsContractTest {
     @Test
     fun explicitOfflineRecognitionRequiresItsInstalledCompatibleModel() {
         val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = AudioConfigurationV3(
+            preferences = AudioConfigurationV4(
                 recognition = AudioRecognitionPreference(source = AudioSource.OFFLINE),
                 language = "zh-CN",
             ),
@@ -74,7 +51,7 @@ class VoiceSettingsContractTest {
     fun explicitUnknownOfflineVoiceRemainsUnavailableInsteadOfFallingBack() {
         val voice = AudioVoiceSelection(AudioSource.OFFLINE, "missing", "sherpa.kitten-nano-en")
         val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = AudioConfigurationV3(
+            preferences = AudioConfigurationV4(
                 speech = AudioSpeechPreference(
                     source = AudioSource.OFFLINE,
                     offlineModelId = voice.modelId,
@@ -95,7 +72,7 @@ class VoiceSettingsContractTest {
     @Test
     fun microphoneDenialDoesNotHidePlaybackVoiceSupport() {
         val capability = VoiceSettingsCapabilityResolver.resolve(
-            preferences = AudioConfigurationV3(language = "en-US"),
+            preferences = AudioConfigurationV4(language = "en-US"),
             platform = platformSnapshot(
                 microphonePermission = VoicePermissionStatus.Denied,
                 recognizerAvailable = true,

@@ -400,6 +400,20 @@ export class SessionRuntime {
   }
 
   private readonly pendingPromptHydrations = new Map<symbol, number | undefined>();
+  private verifiedRealtimeAudio = false;
+  get realtimeAudioSupported(): boolean { return this.verifiedRealtimeAudio && this.connectionState.status === 'connected'; }
+  private readonly realtimeAudioSubscribers = new Set<(eventJson: string) => void>();
+  onRealtimeAudioEvent(callback: (eventJson: string) => void): () => void {
+    this.realtimeAudioSubscribers.add(callback); return () => this.realtimeAudioSubscribers.delete(callback);
+  }
+  startRealtimeAudio(requestJson: string): void { this.requireClient().sendCommand({ type: 'start_realtime_audio', request_json: requestJson }); }
+  realtimeAudioInput(inputJson: string): void { this.requireClient().sendCommand({ type: 'realtime_audio_input', input_json: inputJson }); }
+  stopRealtimeAudio(): void { this.client?.sendCommand({ type: 'stop_realtime_audio' }); }
+
+  private cachedAudioSessionContext?: { sessionId: string; profileId: string; accountScope: string };
+
+  get audioSessionContext() { return this.cachedAudioSessionContext ? { ...this.cachedAudioSessionContext } : undefined; }
+
   private selectedModelReference: string | undefined;
   private pendingCredentialSettings: { promise: Promise<void>; resolve(): void; reject(error: Error): void } | undefined;
 
@@ -476,6 +490,7 @@ export class SessionRuntime {
     if (opts.audioService) {
       this.lastAudioCapabilities = JSON.stringify(opts.audioService.getCapabilities());
       this.unsubscribeAudioService = opts.audioService.onEvent((event) => {
+        if (event.type === 'capture_chunk' || event.type === 'input_level') return;
         const capabilities = event.snapshot?.capabilities;
         if (!capabilities) return;
         const serialized = JSON.stringify(capabilities);
@@ -1227,16 +1242,20 @@ export class SessionRuntime {
       clientName: 'lingxi-electron/0.1.0',
       ...(initialAudioCapabilities ? { audioCapabilities: initialAudioCapabilities } : {}),
     });
+    this.cachedAudioSessionContext = undefined;
+    this.verifiedRealtimeAudio = false;
     this.client = client;
     this.wireClient(client, generation);
     const handshakeStartedAt = Date.now();
     const hello = await client.connect();
+    this.verifiedRealtimeAudio = hello.capabilities.realtime_audio === true;
     this.startupDiagnostic('bridge_connect_phase', {
       durationMs: Date.now() - handshakeStartedAt,
       generation,
       phase: 'websocket_handshake',
     });
     if (generation !== this.generation || this.disposed) return;
+    client.sendCommand({ type: 'get_audio_session_context' });
     const currentAudioCapabilities = this.opts.audioService?.getCapabilities();
     if (
       currentAudioCapabilities
@@ -1567,6 +1586,20 @@ export class SessionRuntime {
           this.diagnostics.add('warn', 'bridge', 'dropped invalid Mod UI invalidation');
         }
         return;
+      }
+      if (event.type === 'realtime_audio_event') {
+        if (event.session_id === this.sessionId) for (const callback of this.realtimeAudioSubscribers) callback(event.event_json);
+        return;
+      }
+      if (event.type === 'audio_session_context') {
+        if (event.session_id === this.sessionId) {
+          this.cachedAudioSessionContext = { sessionId: event.session_id, profileId: event.profile_id, accountScope: event.account_scope };
+          void this.opts.audioService?.refreshHostedCapabilities?.().catch(() => undefined);
+        }
+      }
+      if (event.type === 'model_changed') {
+        this.cachedAudioSessionContext = undefined;
+        client.sendCommand({ type: 'get_audio_session_context' });
       }
       if (event.type === 'audio_request') {
         void this.dispatchAudioRequest(client, generation, event.request);

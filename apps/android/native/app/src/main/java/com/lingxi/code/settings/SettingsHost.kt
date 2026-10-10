@@ -96,11 +96,13 @@ fun SettingsHost(
     val t = LingXiTheme.palette
     val state by resolvedStore.state.collectAsStateWithLifecycle()
     val modelStates by VoiceModelDownloader.states.collectAsStateWithLifecycle()
+    val audioRoutingSession = engineSource?.activeSessionState?.collectAsStateWithLifecycle()?.value
+    val audioRoutingModel = engineSource?.modelState?.collectAsStateWithLifecycle()?.value
     val probedVoiceCapability by produceState(
         initialValue = state.voiceCapability,
         key1 = context.applicationContext,
         key2 = state.voice,
-        key3 = modelStates,
+        key3 = listOf(modelStates, state.llmProviders, audioRoutingSession, audioRoutingModel),
     ) {
         value = probeVoiceCapabilitySnapshot(
             context = context.applicationContext,
@@ -281,6 +283,7 @@ fun SettingsHost(
                         revision = state.voiceRevision,
                         saving = state.voiceSaving,
                         saveError = state.voiceSaveError,
+                        onProviderSettings = { navController.navigate(SettingsRoutes.providerList(ProviderKind.Llm.name)) },
                         onChange = resolvedStore::updateVoice,
                     )
                 }

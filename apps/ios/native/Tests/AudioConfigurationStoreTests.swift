@@ -4,41 +4,65 @@ import XCTest
 
 @MainActor
 final class AudioConfigurationStoreTests: XCTestCase {
-    func testLegacyLocalOnlyMigratesOnceAndPreservesRecoveryKeys() throws {
+    func testFreshDefaultsIgnoreObsoleteStorageAndPreferenceKeys() throws {
         let defaults = makeDefaults()
-        defaults.set(2, forKey: VoicePreferencesSnapshot.Keys.schemaVersion)
-        defaults.set("localOnly", forKey: VoicePreferencesSnapshot.Keys.recognitionMode)
-        defaults.set("zh-CN", forKey: VoicePreferencesSnapshot.Keys.language)
-        defaults.set(true, forKey: VoicePreferencesSnapshot.Keys.autoPlayReplies)
-
+        defaults.set(Data("{\"configuration\":{\"schemaVersion\":3},\"revision\":17}".utf8), forKey: "voice.audioConfiguration.v3")
+        defaults.set("localOnly", forKey: "voiceRecognitionMode")
+        defaults.set("system:old.voice", forKey: "systemVoiceIdentifier")
         let store = AudioConfigurationStore(defaults: defaults)
-
-        XCTAssertTrue(store.migrationComplete)
-        XCTAssertNil(store.lastError)
-        XCTAssertEqual(store.configuration.recognition.source, .offline)
-        XCTAssertNil(store.configuration.recognition.offlineModelId)
-        XCTAssertEqual(store.configuration.speech.source, .automatic)
-        XCTAssertNil(store.configuration.speech.voice)
-        XCTAssertEqual(store.configuration.language, "zh-CN")
-        XCTAssertTrue(store.configuration.autoPlayReplies)
-        XCTAssertEqual(defaults.string(forKey: VoicePreferencesSnapshot.Keys.recognitionMode), "localOnly")
-
-        let restored = AudioConfigurationStore(defaults: defaults)
-        XCTAssertEqual(restored.snapshot, store.snapshot)
-        XCTAssertEqual(restored.revision, store.revision)
+        XCTAssertEqual(store.configuration, AudioConfigurationNormalizer.defaults)
+        XCTAssertEqual(store.revision, 0)
+        let data = try XCTUnwrap(defaults.data(forKey: AudioConfigurationStore.storageKey))
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(value.keys), ["configuration", "revision"])
     }
 
-    func testLegacyUnknownVoiceRemainsAnExplicitUnavailableSelection() throws {
+    func testNonCurrentSchemaStartsFreshV4WithoutReadingOldFieldsOrRevision() throws {
         let defaults = makeDefaults()
-        defaults.set(2, forKey: VoicePreferencesSnapshot.Keys.schemaVersion)
-        defaults.set("automatic", forKey: VoicePreferencesSnapshot.Keys.recognitionMode)
-        defaults.set("system:missing.voice", forKey: VoicePreferencesSnapshot.Keys.voiceSelection)
+        let value: [String: Any] = ["configuration": ["schemaVersion": 3, "language": "ja-JP", "rate": 1.4], "revision": 17]
+        defaults.set(try JSONSerialization.data(withJSONObject: value), forKey: AudioConfigurationStore.storageKey)
+        let store = AudioConfigurationStore(defaults: defaults)
+        XCTAssertEqual(store.configuration, AudioConfigurationNormalizer.defaults)
+        XCTAssertEqual(store.revision, 0)
+        XCTAssertEqual(AudioConfigurationStore(defaults: defaults).snapshot, store.snapshot)
+    }
 
-        let store = AudioConfigurationStore(defaults: defaults, voiceCatalog: [])
+    func testFailedInitialWriteKeepsCurrentDefaultsWithoutMigrationState() {
+        let store = AudioConfigurationStore(defaults: makeDefaults(), writeValue: { _ in false })
+        XCTAssertEqual(store.configuration, AudioConfigurationNormalizer.defaults)
+        XCTAssertEqual(store.revision, 0)
+        XCTAssertEqual(store.lastError, .persistenceFailure)
+    }
 
-        XCTAssertEqual(store.configuration.speech.source, .system)
-        XCTAssertEqual(store.configuration.speech.voice?.source, .system)
-        XCTAssertEqual(store.configuration.speech.voice?.id, "missing.voice")
+    func testFailedSaveDoesNotPublishConfigurationOrRevision() throws {
+        var acceptsWrites = true
+        let store = AudioConfigurationStore(defaults: makeDefaults(), writeValue: { _ in acceptsWrites })
+        let original = store.snapshot
+        var changed = original.configuration
+        changed.language = "ja-JP"
+        acceptsWrites = false
+        XCTAssertThrowsError(try store.save(changed, expectedRevision: original.revision))
+        XCTAssertEqual(store.snapshot, original)
+        XCTAssertEqual(store.lastError, .persistenceFailure)
+    }
+
+    func testCorruptCurrentValueIsPreservedAndUnavailable() {
+        let defaults = makeDefaults()
+        let data = Data([0xFF, 0x01])
+        defaults.set(data, forKey: AudioConfigurationStore.storageKey)
+        let store = AudioConfigurationStore(defaults: defaults)
+        XCTAssertEqual(store.lastError, .corruptedStore)
+        XCTAssertEqual(store.configuration.recognition.source.rawValue, "corrupted_store")
+        XCTAssertEqual(defaults.data(forKey: AudioConfigurationStore.storageKey), data)
+    }
+    func testV4SaveRetainsIndependentProfilesModelsAndScopedVoice() throws {
+        let store = AudioConfigurationStore(defaults: makeDefaults())
+        var configuration = store.configuration
+        configuration.recognition = AudioRecognitionPreference(source: .provider, cloud: AudioCloudBinding(binding: "explicit_profile", profileId: "openai:a", modelId: "stt-model"))
+        configuration.speech = AudioSpeechPreference(source: .provider, voice: AudioVoiceSelection(source: .provider, id: "voice-a", modelId: "tts-model", profileId: "openai:b"), cloud: AudioCloudBinding(binding: "explicit_profile", profileId: "openai:b", modelId: "tts-model"))
+        configuration.conversation = AudioConversationPreference(mode: "realtime", interaction: "interruptible", cloud: AudioCloudBinding(binding: "explicit_profile", profileId: "gemini:c", modelId: "live-model"), voice: AudioVoiceSelection(source: .provider, id: "live-voice", modelId: "live-model", profileId: "gemini:c"))
+        let saved = try store.save(configuration, expectedRevision: store.revision)
+        XCTAssertEqual(saved.configuration, configuration)
     }
 
     func testConfigurationWritesAreRevisionCheckedAndPublishedOnlyAfterSave() throws {
@@ -59,18 +83,6 @@ final class AudioConfigurationStoreTests: XCTestCase {
             )
         }
         XCTAssertEqual(store.snapshot, saved)
-    }
-
-    func testFailedInitialMigrationWriteDoesNotMarkMigrationComplete() {
-        let defaults = makeDefaults()
-        defaults.set(2, forKey: VoicePreferencesSnapshot.Keys.schemaVersion)
-        defaults.set("on-device", forKey: VoicePreferencesSnapshot.Keys.recognitionMode)
-        let store = AudioConfigurationStore(defaults: defaults, writeValue: { _ in false })
-
-        XCTAssertFalse(store.migrationComplete)
-        XCTAssertEqual(store.lastError, .persistenceFailure)
-        XCTAssertEqual(store.configuration.recognition.source, .offline)
-        XCTAssertNil(defaults.data(forKey: AudioConfigurationStore.storageKey))
     }
 
     func testInvalidRateDoesNotEraseExplicitSourceModelOrVoice() throws {
@@ -99,38 +111,6 @@ final class AudioConfigurationStoreTests: XCTestCase {
         XCTAssertEqual(saved.configuration.speech.source, .offline)
         XCTAssertEqual(saved.configuration.speech.offlineModelId, "sherpa.explicit-tts")
         XCTAssertEqual(saved.configuration.speech.voice?.id, "future-voice")
-    }
-
-    func testCorruptV3ValueIsPreservedInsteadOfRemigratingStaleLegacy() {
-        let defaults = makeDefaults()
-        let rawValue = Data([0xFF, 0x01, 0x02])
-        defaults.set(rawValue, forKey: AudioConfigurationStore.storageKey)
-        defaults.set("localOnly", forKey: VoicePreferencesSnapshot.Keys.recognitionMode)
-
-        let store = AudioConfigurationStore(defaults: defaults)
-
-        XCTAssertEqual(store.lastError, .corruptedStore)
-        XCTAssertFalse(store.migrationComplete)
-        XCTAssertEqual(store.configuration.recognition.source.rawValue, "corrupted_store")
-        XCTAssertEqual(defaults.data(forKey: AudioConfigurationStore.storageKey), rawValue)
-        XCTAssertEqual(defaults.string(forKey: VoicePreferencesSnapshot.Keys.recognitionMode), "localOnly")
-    }
-
-    func testUnrepresentableV3SourcesDoNotOverwriteLegacyRecoveryValues() throws {
-        let defaults = makeDefaults()
-        defaults.set("localOnly", forKey: VoicePreferencesSnapshot.Keys.recognitionMode)
-        defaults.set("system:known.voice", forKey: VoicePreferencesSnapshot.Keys.voiceSelection)
-        let store = AudioConfigurationStore(defaults: defaults)
-        var requested = store.configuration
-        requested.recognition = AudioRecognitionPreference(source: AudioSource(rawValue: "future-stt"))
-        requested.speech = AudioSpeechPreference(source: AudioSource(rawValue: "future-tts"))
-
-        _ = try store.save(requested, expectedRevision: store.revision)
-
-        XCTAssertEqual(defaults.string(forKey: VoicePreferencesSnapshot.Keys.recognitionMode), "localOnly")
-        XCTAssertEqual(defaults.string(forKey: VoicePreferencesSnapshot.Keys.voiceSelection), "system:known.voice")
-        XCTAssertEqual(store.configuration.recognition.source.rawValue, "future-stt")
-        XCTAssertEqual(store.configuration.speech.source.rawValue, "future-tts")
     }
 
     private func makeDefaults() -> UserDefaults {

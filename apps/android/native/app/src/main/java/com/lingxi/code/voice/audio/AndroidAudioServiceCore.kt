@@ -34,11 +34,14 @@ internal data class DeviceAudioRequest(
 )
 
 internal sealed interface DeviceAudioOperation {
+    data class Capture(val sampleRateHz: Int, val format: String) : DeviceAudioOperation
+    data class Play(val pcm: ByteArray, val sampleRateHz: Int) : DeviceAudioOperation
+    data class Transcribe(val capture: DeviceAudioCapture, val language: String?) : DeviceAudioOperation
     data class StartRecording(val sampleRateHz: Int, val format: String) : DeviceAudioOperation
     data class StopRecording(val handle: String) : DeviceAudioOperation
     data class Listen(
         val language: String?,
-        val configuration: AudioConfigurationV3? = null,
+        val configuration: AudioConfigurationV4? = null,
         val configurationRevision: Long? = null,
     ) : DeviceAudioOperation
     data class Synthesize(
@@ -46,7 +49,7 @@ internal sealed interface DeviceAudioOperation {
         val language: String?,
         val rate: Float?,
         val voice: String?,
-        val configuration: AudioConfigurationV3? = null,
+        val configuration: AudioConfigurationV4? = null,
         val configurationRevision: Long? = null,
     ) : DeviceAudioOperation
     data class Speak(
@@ -56,7 +59,7 @@ internal sealed interface DeviceAudioOperation {
         val voice: String?,
         val foregroundUserInitiated: Boolean = false,
         val flowDuplex: Boolean = false,
-        val configuration: AudioConfigurationV3? = null,
+        val configuration: AudioConfigurationV4? = null,
         val configurationRevision: Long? = null,
     ) : DeviceAudioOperation
     data class OffloadMediaPlay(val label: String, val target: String) : DeviceAudioOperation
@@ -110,6 +113,15 @@ internal class AudioOperationException(val kind: DeviceAudioErrorKind, message: 
 
 /** Android media calls stay behind this seam so lease and cancellation rules can be tested on the JVM. */
 internal interface AndroidAudioDeviceDriver {
+    suspend fun streamCapture(lease: AudioLease, format: RealtimePcmFormat, onChunk: suspend (ByteArray) -> Unit): Unit =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Streaming PCM capture is unsupported")
+    fun pauseStreamCapture(lease: AudioLease, paused: Boolean) = Unit
+    fun streamingPlaybackPositionMs(lease: AudioLease): Long? = null
+    suspend fun streamPlayback(lease: AudioLease, format: RealtimePcmFormat, chunks: kotlinx.coroutines.channels.ReceiveChannel<ByteArray>): Unit =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Streaming PCM playback is unsupported")
+    suspend fun captureWav(lease: AudioLease, maxPayloadBytes: Int, untilSilence: Boolean, onReady: () -> Unit): DeviceAudioCapture =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "PCM microphone capture is unsupported")
+    fun finishWavCapture(lease: AudioLease) = Unit
     suspend fun startRecording(
         lease: AudioLease,
         sampleRateHz: Int,
@@ -131,7 +143,7 @@ internal interface AndroidAudioDeviceDriver {
     suspend fun stop(lease: AudioLease)
 }
 
-internal enum class DeviceAudioOperationKind { RECORD, LISTEN, SYNTHESIZE, SPEAK }
+internal enum class DeviceAudioOperationKind { RECORD, LISTEN, SYNTHESIZE, SPEAK, CAPTURE, PLAY, TRANSCRIBE }
 internal enum class DeviceAudioReadiness { READY, NEEDS_PERMISSION, BUSY, MISSING_MODEL, UNAVAILABLE }
 
 internal data class DeviceAudioCapabilities(
@@ -158,28 +170,31 @@ internal data class DeviceAudioServiceDiagnostics(
     val activeLeaseCount: Int,
     val pendingOperationCount: Int,
     val recentOperations: List<DeviceAudioOperationDiagnostic>,
+    val usage: List<AndroidAudioUsageRecord> = emptyList(),
 )
 
 internal interface AudioServiceSpeechRuntime {
-    fun configuration(): AudioConfigurationV3
+    suspend fun transcribeEncoded(capture: DeviceAudioCapture, language: String?, configuration: AudioConfigurationV4): SttResult =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Recorded-file recognition is unsupported")
+    fun configuration(): AudioConfigurationV4
     fun configurationSnapshot(): VersionedAudioConfiguration
     fun microphonePermissionGranted(): Boolean
     fun resolveRecognition(
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         language: String? = null,
         systemStatusOverride: AudioReadiness? = null,
     ): AudioRouteResolution
     fun resolveSpeech(
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         language: String? = null,
         voice: String? = null,
         rate: Float? = null,
         systemStatusOverride: AudioReadiness? = null,
     ): AudioRouteResolution
-    suspend fun transcribe(language: String?, configuration: AudioConfigurationV3): SttResult
+    suspend fun transcribe(language: String?, configuration: AudioConfigurationV4): SttResult
     fun openRealtimeSession(
         language: String?,
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         callbacks: RealtimeSpeechCallbacks,
     ): RealtimeSpeechSession
     suspend fun render(
@@ -188,34 +203,36 @@ internal interface AudioServiceSpeechRuntime {
         voice: String?,
         rate: Float?,
         maxPcmBytes: Int,
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
     ): Pair<ByteArray, Int>
 }
 
 internal class AndroidRuntimeSpeechBridge(private val runtime: AndroidVoiceRuntime) : AudioServiceSpeechRuntime {
-    override fun configuration(): AudioConfigurationV3 = runtime.configurationSnapshot().configuration
+    override suspend fun transcribeEncoded(capture: DeviceAudioCapture, language: String?, configuration: AudioConfigurationV4): SttResult =
+        runtime.transcribeEncoded(capture, language, configuration)
+    override fun configuration(): AudioConfigurationV4 = runtime.configurationSnapshot().configuration
     override fun configurationSnapshot(): VersionedAudioConfiguration = runtime.configurationSnapshot()
     override fun microphonePermissionGranted(): Boolean = runtime.microphonePermissionGranted()
     override fun resolveRecognition(
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         language: String?,
         systemStatusOverride: AudioReadiness?,
     ): AudioRouteResolution = runtime.resolveRecognition(configuration, language, systemStatusOverride).route
 
     override fun resolveSpeech(
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         language: String?,
         voice: String?,
         rate: Float?,
         systemStatusOverride: AudioReadiness?,
     ): AudioRouteResolution = runtime.resolveSpeech(configuration, language, voice, rate, systemStatusOverride).route
 
-    override suspend fun transcribe(language: String?, configuration: AudioConfigurationV3): SttResult =
+    override suspend fun transcribe(language: String?, configuration: AudioConfigurationV4): SttResult =
         runtime.transcribe(language, configuration)
 
     override fun openRealtimeSession(
         language: String?,
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         callbacks: RealtimeSpeechCallbacks,
     ): RealtimeSpeechSession = runtime.openRealtimeSession(language, callbacks, configuration)
 
@@ -225,7 +242,7 @@ internal class AndroidRuntimeSpeechBridge(private val runtime: AndroidVoiceRunti
         voice: String?,
         rate: Float?,
         maxPcmBytes: Int,
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
     ): Pair<ByteArray, Int> = runtime.renderSpeech(text, language, voice, rate, maxPcmBytes, configuration)
 }
 
@@ -235,6 +252,7 @@ internal class AndroidAudioServiceCore(
     private val driver: AndroidAudioDeviceDriver,
     private val maxPayloadBytes: Long,
     private val initialEpoch: Long = 1L,
+    private val provider: ProviderAudioBridge? = null,
 ) {
     private data class OperationState(
         val request: DeviceAudioRequest,
@@ -293,6 +311,7 @@ internal class AndroidAudioServiceCore(
     private val cancellationLock = Any()
     private val seenOperations = LinkedHashSet<AudioOperationIdentity>()
     private val operationDiagnostics = ConcurrentLinkedDeque<DeviceAudioOperationDiagnostic>()
+    private val providerCapabilities = ConcurrentHashMap<String, Pair<AudioConfigurationV4, ProviderAudioCapability>>()
     private val recordingSessions = ConcurrentHashMap<String, RecordingSession>()
     private val leaseOperations = ConcurrentHashMap<Long, OperationState>()
     private val playbackByOwner = ConcurrentHashMap<AudioOwnerKey, AudioLease>()
@@ -372,6 +391,7 @@ internal class AndroidAudioServiceCore(
             state.terminal.set(true)
             failure(DeviceAudioErrorKind.NativeFailure, error.message ?: "Android audio operation failed")
         } finally {
+            withContext(NonCancellable) { runCatching { provider?.cancel(request.identity.id) } }
             if (!work.isCompleted) {
                 work.cancel(CancellationException("audio operation ended"))
                 withContext(NonCancellable) { work.join() }
@@ -429,7 +449,9 @@ internal class AndroidAudioServiceCore(
                 requireMicrophonePermission()
                 val currentSnapshot = runtime.configurationSnapshot()
                 val snapshot = operation.configuration ?: currentSnapshot.configuration
-                val route = runtime.resolveRecognition(snapshot, operation.language)
+                val route = if (snapshot.recognition.source == AudioSource.PROVIDER) {
+                    providerRoute(state, snapshot, "recognition")
+                } else runtime.resolveRecognition(snapshot, operation.language)
                 state.configurationRevision = operation.configurationRevision ?: currentSnapshot.revision
                 state.requestedSource = route.requested.source.value
                 state.effectiveSource = route.effective?.source?.value
@@ -473,7 +495,9 @@ internal class AndroidAudioServiceCore(
                     }
                 }
                 val nativeSession = try {
-                    runtime.openRealtimeSession(operation.language, snapshot, guardedCallbacks)
+                    if (snapshot.recognition.source == AudioSource.PROVIDER) {
+                        openProviderCapture(state, lease, snapshot, guardedCallbacks)
+                    } else runtime.openRealtimeSession(operation.language, snapshot, guardedCallbacks)
                 } catch (unavailable: AudioOperationException) {
                     if (unavailable.kind != DeviceAudioErrorKind.Unavailable ||
                         snapshot.recognition.source != AudioSource.AUTOMATIC || route.effective?.source != AudioSource.SYSTEM ||
@@ -529,6 +553,7 @@ internal class AndroidAudioServiceCore(
                 }
                 throw error
             } finally {
+                withContext(NonCancellable) { runCatching { provider?.cancel(request.identity.id) } }
                 if (state.runtimeSession == null) terminal.complete(Unit)
                 state.lease?.let { releaseAfterStop(it) }
             }
@@ -584,9 +609,23 @@ internal class AndroidAudioServiceCore(
         val config = runtime.configuration()
         val recognition = runtime.resolveRecognition(config)
         val speech = runtime.resolveSpeech(config)
+        val cloudRecognition = providerCapabilities["recognition"]?.takeIf { it.first == config }?.second
+        val cloudSpeech = providerCapabilities["speech"]?.takeIf { it.first == config }?.second
         val micGranted = runtime.microphonePermissionGranted()
         val activeLeases = coordinator.allLeases()
         val readiness = buildMap {
+            put(DeviceAudioOperationKind.CAPTURE, when {
+                !micGranted -> DeviceAudioReadiness.NEEDS_PERMISSION
+                activeLeases.any { it.resource in setOf(AudioResource.Capture, AudioResource.Playback, AudioResource.SystemRender) } -> DeviceAudioReadiness.BUSY
+                else -> DeviceAudioReadiness.READY
+            })
+            put(DeviceAudioOperationKind.PLAY, if (activeLeases.any { it.resource in setOf(AudioResource.Capture, AudioResource.Playback, AudioResource.SystemRender) }) DeviceAudioReadiness.BUSY else DeviceAudioReadiness.READY)
+            put(DeviceAudioOperationKind.TRANSCRIBE, when {
+                config.recognition.source == AudioSource.PROVIDER -> if (cloudRecognition?.readiness == "ready") DeviceAudioReadiness.READY else DeviceAudioReadiness.UNAVAILABLE
+                config.recognition.source == AudioSource.SYSTEM -> DeviceAudioReadiness.UNAVAILABLE
+                runtime.resolveRecognition(config, systemStatusOverride = AudioReadiness.UNAVAILABLE).status == AudioRouteStatus.READY -> DeviceAudioReadiness.READY
+                else -> DeviceAudioReadiness.MISSING_MODEL
+            })
             put(DeviceAudioOperationKind.RECORD, when {
                 !micGranted -> DeviceAudioReadiness.NEEDS_PERMISSION
                 activeLeases.any { it.resource in setOf(AudioResource.Capture, AudioResource.Playback, AudioResource.SystemRender) } -> DeviceAudioReadiness.BUSY
@@ -595,18 +634,21 @@ internal class AndroidAudioServiceCore(
             put(DeviceAudioOperationKind.LISTEN, when {
                 !micGranted -> DeviceAudioReadiness.NEEDS_PERMISSION
                 activeLeases.any { it.resource in setOf(AudioResource.Capture, AudioResource.Playback, AudioResource.SystemRender) } -> DeviceAudioReadiness.BUSY
+                config.recognition.source == AudioSource.PROVIDER -> if (cloudRecognition?.readiness == "ready") DeviceAudioReadiness.READY else DeviceAudioReadiness.UNAVAILABLE
                 recognition.status == AudioRouteStatus.READY -> DeviceAudioReadiness.READY
                 recognition.reason.startsWith("offlineModel") -> DeviceAudioReadiness.MISSING_MODEL
                 else -> DeviceAudioReadiness.UNAVAILABLE
             })
             put(DeviceAudioOperationKind.SYNTHESIZE, when {
                 activeLeases.any { it.resource == AudioResource.SystemRender } -> DeviceAudioReadiness.BUSY
+                config.speech.source == AudioSource.PROVIDER -> if (cloudSpeech?.readiness == "ready") DeviceAudioReadiness.READY else DeviceAudioReadiness.UNAVAILABLE
                 speech.status == AudioRouteStatus.READY -> DeviceAudioReadiness.READY
                 speech.reason.startsWith("offlineModel") -> DeviceAudioReadiness.MISSING_MODEL
                 else -> DeviceAudioReadiness.UNAVAILABLE
             })
             put(DeviceAudioOperationKind.SPEAK, when {
                 activeLeases.any { it.resource in setOf(AudioResource.Capture, AudioResource.Playback, AudioResource.SystemRender) } -> DeviceAudioReadiness.BUSY
+                config.speech.source == AudioSource.PROVIDER -> if (cloudSpeech?.readiness == "ready") DeviceAudioReadiness.READY else DeviceAudioReadiness.UNAVAILABLE
                 speech.status == AudioRouteStatus.READY -> DeviceAudioReadiness.READY
                 speech.reason.startsWith("offlineModel") -> DeviceAudioReadiness.MISSING_MODEL
                 else -> DeviceAudioReadiness.UNAVAILABLE
@@ -615,7 +657,11 @@ internal class AndroidAudioServiceCore(
         return DeviceAudioCapabilities(
             serviceEpoch = epoch,
             supportRevision = supportRevision,
-            supported = DeviceAudioOperationKind.entries.toSet(),
+            supported = DeviceAudioOperationKind.entries.filterNot {
+                (config.recognition.source == AudioSource.SYSTEM && it == DeviceAudioOperationKind.TRANSCRIBE) ||
+                (config.recognition.source == AudioSource.PROVIDER && cloudRecognition?.supported == false && it in listOf(DeviceAudioOperationKind.LISTEN, DeviceAudioOperationKind.TRANSCRIBE)) ||
+                    (config.speech.source == AudioSource.PROVIDER && cloudSpeech?.supported == false && it in listOf(DeviceAudioOperationKind.SYNTHESIZE, DeviceAudioOperationKind.SPEAK))
+            }.toSet(),
             readiness = readiness,
             maxPayloadBytes = maxPayloadBytes,
         )
@@ -623,11 +669,97 @@ internal class AndroidAudioServiceCore(
 
     fun configurationSnapshot(): VersionedAudioConfiguration = runtime.configurationSnapshot()
 
+    suspend fun openRealtimeAgent(
+        request: DeviceAudioRequest, configuration: AudioConfigurationV4, callbacks: RealtimeAgentCallbacks,
+    ): RealtimeSpeechSession {
+        if (!request.identity.isValid() || request.maxPayloadBytes !in 1..maxPayloadBytes) {
+            throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "Realtime audio identity or payload limit is invalid.")
+        }
+        if (configuration.conversation.interaction != "turn_based") {
+            throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "This device has no verified acoustic echo cancellation. Choose turn based realtime conversation.")
+        }
+        val scope = CoroutineScope(serviceOperationScope.coroutineContext + SupervisorJob(serviceOperationScope.coroutineContext[Job]))
+        val ready = CompletableDeferred<RealtimeSpeechSession>()
+        lateinit var state: OperationState
+        val work = scope.async(start = CoroutineStart.LAZY) {
+            try {
+                requireMicrophonePermission()
+                val capability = provider?.capabilities(request, configuration, "realtime")
+                    ?: throw AudioOperationException(DeviceAudioErrorKind.Unavailable, "Realtime Agent audio is unavailable.")
+                requireLive(state)
+                if (!capability.supported) throw AudioOperationException(DeviceAudioErrorKind.Unsupported, capability.reason ?: "The current Agent provider does not support realtime conversation.")
+                if (capability.readiness != "ready") throw AudioOperationException(DeviceAudioErrorKind.Unavailable, capability.reason ?: "Configure the selected realtime audio profile in provider settings.")
+                state.requestedSource = AudioSource.PROVIDER.value
+                state.effectiveSource = AudioSource.PROVIDER.value
+                state.configurationRevision = runtime.configurationSnapshot().revision
+                val capture = acquire(state, AudioResource.Capture, foregroundUserInitiated = true, flowDuplex = true)
+                val operationScope = CoroutineScope(currentCoroutineContext())
+                val guarded = object : RealtimeAgentCallbacks {
+                    override fun onReady() { if (state.isLive()) callbacks.onReady() }
+                    override fun onTranscript(text: String, assistant: Boolean, final: Boolean) { if (state.isLive()) callbacks.onTranscript(text, assistant, final) }
+                    override fun onPlayback(playing: Boolean) { if (state.isLive()) callbacks.onPlayback(playing) }
+                    override fun onError(message: String) { if (state.isLive()) callbacks.onError(message) }
+                    override fun onClosed() = callbacks.onClosed()
+                }
+                val lane = AndroidRealtimeAgentLane(operationScope, checkNotNull(provider), driver, request, configuration, capture,
+                    acquirePlayback = {
+                        val decision = admission.acquire(request.identity.copy(id = java.util.UUID.randomUUID().toString()), request.owner,
+                            AudioResource.Playback, flowDuplex = true)
+                        val lease = (decision as? AudioLeaseDecision.Granted)?.lease
+                            ?: throw AudioOperationException(DeviceAudioErrorKind.Busy, "Realtime playback is busy.")
+                        leaseOperations[lease.leaseId] = state
+                        playbackByOwner[request.owner] = lease
+                        lease
+                    }, releasePlayback = { lease ->
+                        playbackByOwner.remove(request.owner, lease)
+                        releaseAfterStop(lease)
+                    }, isLive = { state.isLive() && coordinator.isActive(capture) }, callbacks = guarded)
+                lane.run {
+                    ready.complete(object : RealtimeSpeechSession {
+                        override fun stop() = lane.commitInput()
+                        override fun cancel() = state.cancel()
+                        override fun close() = cancel()
+                    })
+                }
+            } catch (error: Throwable) {
+                if (!ready.isCompleted) ready.completeExceptionally(error)
+                if (error !is CancellationException && state.isLive()) callbacks.onError(error.message ?: "Realtime conversation failed.")
+                throw error
+            } finally {
+                withContext(NonCancellable) {
+                    runCatching { provider?.cancel(request.identity.id) }
+                    state.lease?.let { releaseAfterStop(it) }
+                }
+                callbacks.onClosed()
+            }
+        }
+        state = OperationState(request, work)
+        val registered = operationMutex.withLock {
+            !invalidating && request.identity.serviceEpoch == epoch && request.owner !in endingOwners && registerOperation(state)
+        }
+        if (!registered) { scope.cancel(); throw CancellationException("Realtime audio owner or identity is stale") }
+        recordDiagnostic(state, "realtime_started")
+        work.invokeOnCompletion {
+            state.terminal.set(true); recordDiagnostic(state, "settled")
+            state.done.complete(Unit); operations.remove(request.identity, state); scope.cancel()
+        }
+        work.start()
+        return try { ready.await() } catch (error: Throwable) {
+            state.cancel(); withContext(NonCancellable) { state.done.await() }; throw error
+        }
+    }
+
+    @Synchronized fun rememberProviderCapability(configuration: AudioConfigurationV4, kind: String, capability: ProviderAudioCapability) {
+        val previous = providerCapabilities.put(kind, configuration to capability)
+        if (previous != (configuration to capability)) supportRevision += 1
+    }
+
     fun diagnostics(): DeviceAudioServiceDiagnostics = DeviceAudioServiceDiagnostics(
             serviceEpoch = epoch,
             activeLeaseCount = coordinator.allLeases().size,
             pendingOperationCount = operations.size + pendingMediaCompletions.get().coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
         recentOperations = operationDiagnostics.toList(),
+        usage = AndroidAudioUsageJournal.snapshot(),
     )
 
     suspend fun invalidate(): Long = operationMutex.withLock {
@@ -676,6 +808,9 @@ internal class AndroidAudioServiceCore(
             throw AudioOperationException(DeviceAudioErrorKind.Cancelled, "audio service instance has changed")
         }
         return when (val operation = state.request.operation) {
+            is DeviceAudioOperation.Capture -> capture(state, operation)
+            is DeviceAudioOperation.Play -> playPcm(state, operation)
+            is DeviceAudioOperation.Transcribe -> transcribeEncoded(state, operation)
             is DeviceAudioOperation.StartRecording -> startRecording(state, operation)
             is DeviceAudioOperation.StopRecording -> stopRecording(state, operation)
             is DeviceAudioOperation.Listen -> listen(state, operation)
@@ -685,6 +820,61 @@ internal class AndroidAudioServiceCore(
             is DeviceAudioOperation.OffloadMediaControl -> offloadMediaControl(state, operation)
             is DeviceAudioOperation.Status -> status(state, operation)
             DeviceAudioOperation.EndOwner -> endOwner(state)
+        }
+    }
+
+    private suspend fun capture(state: OperationState, operation: DeviceAudioOperation.Capture): DeviceAudioResult {
+        if (operation.sampleRateHz != 16_000 || operation.format !in listOf("wav", "audio/wav")) {
+            throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Bounded Android capture supports mono PCM16 WAV at 16000 Hz.")
+        }
+        requireMicrophonePermission()
+        val lease = acquire(state, AudioResource.Capture)
+        return try {
+            val recording = driver.captureWav(lease, payloadLimitInt(state.request.maxPayloadBytes), untilSilence = true) {}
+            requireLive(state)
+            DeviceAudioResult.Recording(recording.bytes, recording.mimeType)
+        } finally { releaseAfterStop(lease) }
+    }
+
+    private suspend fun playPcm(state: OperationState, operation: DeviceAudioOperation.Play): DeviceAudioResult {
+        if (operation.pcm.isEmpty() || operation.pcm.size % 2 != 0 || operation.sampleRateHz !in 1..MAX_AUDIO_SAMPLE_RATE_HZ) {
+            throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "Playback requires valid mono PCM16 and a supported sample rate.")
+        }
+        validatePcm(operation.pcm, operation.sampleRateHz, payloadLimitInt(state.request.maxPayloadBytes))
+        val lease = acquire(state, AudioResource.Playback)
+        playbackByOwner[state.request.owner] = lease
+        return try {
+            val duration = driver.play(lease, operation.pcm, operation.sampleRateHz)
+            requireLive(state)
+            DeviceAudioResult.PlaybackCompleted(duration)
+        } finally { playbackByOwner.remove(state.request.owner, lease); releaseAfterStop(lease) }
+    }
+
+    private suspend fun transcribeEncoded(state: OperationState, operation: DeviceAudioOperation.Transcribe): DeviceAudioResult {
+        if (operation.capture.bytes.isEmpty() || operation.capture.bytes.size > state.request.maxPayloadBytes) {
+            throw AudioOperationException(DeviceAudioErrorKind.MediaTooLarge, "Recorded audio is empty or exceeds the payload limit.")
+        }
+        val snapshot = runtime.configurationSnapshot()
+        state.configurationRevision = snapshot.revision
+        val configuration = snapshot.configuration
+        val result = if (configuration.recognition.source == AudioSource.PROVIDER) {
+            providerRoute(state, configuration, "recognition")
+            checkNotNull(provider).transcribe(state.request, configuration, operation.capture)
+        } else {
+            if (configuration.recognition.source == AudioSource.SYSTEM) throw AudioOperationException(DeviceAudioErrorKind.Unsupported,
+                "Android SpeechRecognizer only accepts live microphone audio. Choose an installed offline model or provider for recorded audio.")
+            val route = runtime.resolveRecognition(configuration, operation.language, AudioReadiness.UNAVAILABLE)
+            requireReadyRoute(route)
+            val lease = acquire(state, AudioResource.OfflineRender, modelId = route.effective?.modelId)
+            try { runtime.transcribeEncoded(operation.capture, operation.language, configuration) } finally { releaseAfterStop(lease) }
+        }
+        requireLive(state)
+        return when (result) {
+            is SttResult.Ok -> {
+                if (result.text.isBlank()) throw AudioOperationException(DeviceAudioErrorKind.NoSpeech, "No speech was recognized.")
+                DeviceAudioResult.Transcript(result.text, result.language, result.confidence)
+            }
+            is SttResult.Err -> throw result.toAudioOperationException()
         }
     }
 
@@ -793,7 +983,9 @@ internal class AndroidAudioServiceCore(
         val currentSnapshot = runtime.configurationSnapshot()
         val snapshot = operation.configuration ?: currentSnapshot.configuration
         state.configurationRevision = operation.configurationRevision ?: currentSnapshot.revision
-        val resolution = runtime.resolveRecognition(snapshot, operation.language)
+        val resolution = if (snapshot.recognition.source == AudioSource.PROVIDER) {
+            providerRoute(state, snapshot, "recognition")
+        } else runtime.resolveRecognition(snapshot, operation.language)
         state.requestedSource = resolution.requested.source.value
         state.effectiveSource = resolution.effective?.source?.value
         state.fallbackReason = resolution.fallbackReason
@@ -805,7 +997,11 @@ internal class AndroidAudioServiceCore(
         var lease = acquire(state, AudioResource.Capture, modelId = modelId)
         state.lease = lease
         return try {
-            var result = runtime.transcribe(operation.language, snapshot)
+            var result = if (snapshot.recognition.source == AudioSource.PROVIDER) {
+                val capture = driver.captureWav(lease, payloadLimitInt(state.request.maxPayloadBytes), untilSilence = true) {}
+                requireLive(state)
+                checkNotNull(provider).transcribe(state.request, snapshot, capture)
+            } else runtime.transcribe(operation.language, snapshot)
             if (
                 result is SttResult.Err && result.code == "no_provider_configured" &&
                 snapshot.recognition.source == AudioSource.AUTOMATIC &&
@@ -858,7 +1054,9 @@ internal class AndroidAudioServiceCore(
         val currentSnapshot = runtime.configurationSnapshot()
         val snapshot = operation.configuration ?: currentSnapshot.configuration
         state.configurationRevision = operation.configurationRevision ?: currentSnapshot.revision
-        val resolution = runtime.resolveSpeech(snapshot, operation.language, operation.voice, operation.rate)
+        val resolution = if (snapshot.speech.source == AudioSource.PROVIDER) {
+            providerRoute(state, snapshot, "speech")
+        } else runtime.resolveSpeech(snapshot, operation.language, operation.voice, operation.rate)
         state.requestedSource = resolution.requested.source.value
         state.effectiveSource = resolution.effective?.source?.value
         state.fallbackReason = resolution.fallbackReason
@@ -868,6 +1066,12 @@ internal class AndroidAudioServiceCore(
         val lease = acquire(state, resource, modelId = resolution.effective?.modelId)
         state.lease = lease
         try {
+            if (snapshot.speech.source == AudioSource.PROVIDER) {
+                val rendered = checkNotNull(provider).synthesize(state.request, snapshot, operation.text)
+                requireLive(state)
+                validatePcm(rendered.first, rendered.second, payloadLimitInt(state.request.maxPayloadBytes))
+                return DeviceAudioResult.Synthesized(rendered.first, rendered.second)
+            }
             val rendered = renderWithAutomaticFallback(
                 state = state,
                 text = operation.text,
@@ -897,7 +1101,9 @@ internal class AndroidAudioServiceCore(
         val currentSnapshot = runtime.configurationSnapshot()
         val snapshot = operation.configuration ?: currentSnapshot.configuration
         state.configurationRevision = operation.configurationRevision ?: currentSnapshot.revision
-        val resolution = runtime.resolveSpeech(snapshot, operation.language, operation.voice, operation.rate)
+        val resolution = if (snapshot.speech.source == AudioSource.PROVIDER) {
+            providerRoute(state, snapshot, "speech")
+        } else runtime.resolveSpeech(snapshot, operation.language, operation.voice, operation.rate)
         state.requestedSource = resolution.requested.source.value
         state.effectiveSource = resolution.effective?.source?.value
         state.fallbackReason = resolution.fallbackReason
@@ -913,6 +1119,14 @@ internal class AndroidAudioServiceCore(
         state.lease = lease
         playbackByOwner[state.request.owner] = lease
         try {
+            if (snapshot.speech.source == AudioSource.PROVIDER) {
+                val rendered = checkNotNull(provider).synthesize(state.request, snapshot, operation.text)
+                requireLive(state)
+                validatePcm(rendered.first, rendered.second, payloadLimitInt(state.request.maxPayloadBytes))
+                val duration = driver.play(lease, rendered.first, rendered.second)
+                requireLive(state)
+                return DeviceAudioResult.PlaybackCompleted(duration)
+            }
             val rendered = renderWithAutomaticFallback(
                 state = state,
                 text = operation.text,
@@ -1085,7 +1299,7 @@ internal class AndroidAudioServiceCore(
         language: String?,
         voice: String?,
         rate: Float?,
-        configuration: AudioConfigurationV3,
+        configuration: AudioConfigurationV4,
         initialRoute: AudioRouteResolution,
         initialLease: AudioLease,
         playbackLease: Boolean,
@@ -1325,7 +1539,53 @@ internal class AndroidAudioServiceCore(
     private fun renderResource(route: AudioRouteResolution): AudioResource = when (route.effective?.source) {
         AudioSource.SYSTEM -> AudioResource.SystemRender
         AudioSource.OFFLINE -> AudioResource.OfflineRender
+        AudioSource.PROVIDER -> AudioResource.ProviderRender
         else -> throw routeFailure(route)
+    }
+
+    private suspend fun providerRoute(state: OperationState, configuration: AudioConfigurationV4, kind: String): AudioRouteResolution {
+        val bridge = provider ?: throw AudioOperationException(DeviceAudioErrorKind.Unavailable,
+            "Provider audio is unavailable. Open provider settings to configure an audio-capable profile.")
+        val capability = bridge.capabilities(state.request, configuration, kind)
+        rememberProviderCapability(configuration, kind, capability)
+        requireLive(state)
+        if (!capability.supported) throw AudioOperationException(DeviceAudioErrorKind.Unsupported,
+            capability.reason ?: "The selected session provider does not support $kind audio. Choose an explicit audio provider in settings.")
+        if (capability.readiness != "ready") throw AudioOperationException(DeviceAudioErrorKind.Unavailable,
+            capability.reason ?: "Provider audio needs configuration. Open provider settings and check the selected profile and credential.")
+        val source = if (kind == "recognition") configuration.recognition.source else configuration.speech.source
+        return AudioRouteResolution(RequestedAudioRoute(source, null, configuration.speech.voice.takeIf { kind == "speech" }),
+            EffectiveAudioRoute(AudioSource.PROVIDER, capability.modelId, configuration.speech.voice?.id.takeIf { kind == "speech" },
+                capability.profileId, capability.providerId), AudioRouteStatus.READY, "ready")
+    }
+
+    private fun openProviderCapture(
+        state: OperationState, lease: AudioLease, configuration: AudioConfigurationV4, callbacks: RealtimeSpeechCallbacks,
+    ): RealtimeSpeechSession {
+        val captureJob = serviceOperationScope.launch {
+            try {
+                val capture = driver.captureWav(lease, payloadLimitInt(state.request.maxPayloadBytes), untilSilence = false) {
+                    if (state.isLive()) callbacks.onReady()
+                }
+                requireLive(state)
+                when (val result = checkNotNull(provider).transcribe(state.request, configuration, capture)) {
+                    is SttResult.Ok -> if (result.text.isBlank()) callbacks.onError("no_speech", "No speech was recognized.", false)
+                        else callbacks.onFinal(result.text)
+                    is SttResult.Err -> callbacks.onError(result.code, result.message, result.retriable)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (state.isLive()) callbacks.onError("provider_audio_failed", error.message ?: "Provider transcription failed.", true)
+            } finally {
+                callbacks.onClosed()
+            }
+        }
+        return object : RealtimeSpeechSession {
+            override fun stop() = driver.finishWavCapture(lease)
+            override fun cancel() { driver.finishWavCapture(lease); captureJob.cancel() }
+            override fun close() = cancel()
+        }
     }
 
     private fun requireReadyRoute(route: AudioRouteResolution) {
@@ -1402,6 +1662,9 @@ internal class AndroidAudioServiceCore(
     }
 
     private fun operationName(operation: DeviceAudioOperation): String = when (operation) {
+        is DeviceAudioOperation.Capture -> "capture"
+        is DeviceAudioOperation.Play -> "play"
+        is DeviceAudioOperation.Transcribe -> "transcribe"
         is DeviceAudioOperation.StartRecording -> "record"
         is DeviceAudioOperation.StopRecording -> "stop_recording"
         is DeviceAudioOperation.Listen -> "listen"

@@ -943,6 +943,13 @@ private final class RecordingSpeechPlayer: VoiceSpeechPlaying {
         return .completed
     }
 
+    func openStream(configuration: VoiceSpeechConfiguration, managesAudioSession: Bool) async throws -> any VoiceSpeechStreamingSession {
+        let stream = RecordingStreamingSpeechSession()
+        stream.onEnqueue = { [weak self] text in self?.requests.append(VoiceSpeechRequest(text: text, voiceIdentifier: configuration.voiceIdentifier, languageIdentifier: configuration.languageIdentifier, speed: configuration.speed, route: configuration.route, maxPayloadBytes: configuration.maxPayloadBytes, configurationRevision: configuration.configurationRevision)) }
+        stream.onStop = { [weak self] in self?.stop() }
+        return stream
+    }
+
     func stop() {
         stopCalls += 1
     }
@@ -961,6 +968,19 @@ private final class BlockingSpeechPlayer: VoiceSpeechPlaying {
         return .completed
     }
 
+    func openStream(configuration: VoiceSpeechConfiguration, managesAudioSession: Bool) async throws -> any VoiceSpeechStreamingSession {
+        let stream = RecordingStreamingSpeechSession()
+        stream.onEnqueue = { [weak self] text in self?.requests.append(VoiceSpeechRequest(text: text, voiceIdentifier: configuration.voiceIdentifier, languageIdentifier: configuration.languageIdentifier, speed: configuration.speed, route: configuration.route, maxPayloadBytes: configuration.maxPayloadBytes, configurationRevision: configuration.configurationRevision)) }
+        stream.onFinish = { [weak self] in
+            guard let self else { return .interrupted }
+            await withCheckedContinuation { self.continuation = $0 }
+            try Task.checkCancellation()
+            return .completed
+        }
+        stream.onStop = { [weak self] in self?.stop() }
+        return stream
+    }
+
     func stop() {
         stopCalls += 1
         continuation?.resume()
@@ -975,6 +995,13 @@ private final class InterruptingSpeechPlayer: VoiceSpeechPlaying {
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome {
         requests.append(request)
         return .interrupted
+    }
+
+    func openStream(configuration: VoiceSpeechConfiguration, managesAudioSession: Bool) async throws -> any VoiceSpeechStreamingSession {
+        let stream = RecordingStreamingSpeechSession()
+        stream.onEnqueue = { [weak self] text in self?.requests.append(VoiceSpeechRequest(text: text, voiceIdentifier: configuration.voiceIdentifier, languageIdentifier: configuration.languageIdentifier, speed: configuration.speed, route: configuration.route, maxPayloadBytes: configuration.maxPayloadBytes, configurationRevision: configuration.configurationRevision)) }
+        stream.outcome = .interrupted
+        return stream
     }
 
     func stop() {}
@@ -1034,16 +1061,22 @@ private final class RecordingStreamingSpeechSession: VoiceSpeechStreamingSession
     private(set) var finishCalls = 0
     private(set) var stopCalls = 0
 
-    func enqueue(_ text: String) { enqueued.append(text) }
+    var onEnqueue: ((String) -> Void)?
+    var onFinish: (() async throws -> VoiceSpeechPlaybackOutcome)?
+    var onStop: (() -> Void)?
+    var outcome: VoiceSpeechPlaybackOutcome = .completed
+
+    func enqueue(_ text: String) { enqueued.append(text); onEnqueue?(text) }
     func pause() { pauseCalls += 1 }
     func resume() { resumeCalls += 1 }
 
     func finish() async throws -> VoiceSpeechPlaybackOutcome {
         finishCalls += 1
-        return .completed
+        if let onFinish { return try await onFinish() }
+        return outcome
     }
 
-    func stop() async { stopCalls += 1 }
+    func stop() async { stopCalls += 1; onStop?() }
 }
 
 /// Suspends the FIRST `openStream` until `releaseOpen()`, so a test can land a

@@ -254,6 +254,20 @@ class ProviderSettingsRepository(
     fun visionDelegationEnabled(): Boolean =
         prefs.getBoolean(PREF_VISION_DELEGATION_ENABLED, true)
 
+    /** Audio support can be inspected before a credential exists; only Rust resolves secrets. */
+    fun audioProviderProfilesJson(): String = JSONObject().apply {
+        loadProviderState().first.forEach { provider ->
+            if (!usesBuiltInProfile(provider)) userProfileJson(provider)?.let { put(profileNameFor(provider), it) }
+        }
+    }.toString()
+
+    fun audioProviderRegion(): String = prefs.getString("audio_provider_region", "international") ?: "international"
+
+    fun recordAudioProviderRegion(settingsJson: String) {
+        val value = JSONObject(settingsJson).optString("providerRegion", "international")
+        prefs.edit().putString("audio_provider_region", value).apply()
+    }
+
     fun setVisionDelegationEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(PREF_VISION_DELEGATION_ENABLED, enabled).apply()
     }

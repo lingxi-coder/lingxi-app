@@ -1,6 +1,6 @@
 import type { ImageRefDto, AudioOperationDto, AudioOperationResultDto } from '@lingxi/bridge-client';
 
-import type { AudioConfigurationV3 } from '../../../shared/generatedAudioConfiguration.js';
+import type { AudioConfigurationV4 } from '../../../shared/generatedAudioConfiguration.js';
 import { resolveAudioLanguage } from '../../../shared/generatedAudioConfiguration.js';
 import { StreamingSpeechSegmenter } from './segmenter.js';
 
@@ -29,7 +29,7 @@ export const DEFAULT_VOICE_FLOW_STATE: VoiceFlowState = {
 };
 
 export interface VoiceFlowPreferences {
-  configuration: AudioConfigurationV3;
+  configuration: AudioConfigurationV4;
   revision: number;
 }
 
@@ -94,7 +94,7 @@ function requiresConfiguration(result: AudioOperationResultDto): boolean {
   return ['permission_denied', 'model_missing', 'voice_missing', 'unavailable', 'unsupported', 'invalid_request'].includes(result.error.kind);
 }
 
-function voiceOverride(configuration: AudioConfigurationV3): string | undefined {
+function voiceOverride(configuration: AudioConfigurationV4): string | undefined {
   const voice = configuration.speech.voice;
   if (!voice) return undefined;
   return voice.source === 'offline'

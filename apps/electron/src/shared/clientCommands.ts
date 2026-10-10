@@ -73,6 +73,10 @@ export const CLIENT_COMMAND_DISPOSITIONS = {
   plugin_admin: 'exposed',
   hook_admin: 'exposed',
   audio_response: 'host_private',
+  start_realtime_audio: 'host_private',
+  realtime_audio_input: 'host_private',
+  stop_realtime_audio: 'host_private',
+  get_audio_session_context: 'host_private',
   update_audio_capabilities: 'host_private',
 } as const satisfies Record<ClientCommand['type'], DesktopDisposition>;
 
@@ -184,6 +188,8 @@ export const CLIENT_EVENT_DISPOSITIONS = {
   api_retry: 'exposed',
   audio_request: 'host_private',
   audio_cancel: 'host_private',
+  realtime_audio_event: 'host_private',
+  audio_session_context: 'host_private',
   audio_capabilities_changed: 'host_private',
 } as const satisfies Record<ClientEvent['type'], DesktopDisposition>;
 

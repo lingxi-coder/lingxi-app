@@ -419,12 +419,15 @@ class EngineConversationSource private constructor(
     }
 
     override fun close() {
+        com.lingxi.code.voice.audio.AndroidAudioSessionContext.detach(handle)
         ConversationHeadlessRecovery.unregister(recoverySpec.scopeKey, this)
         eventRelay.close()
         workflowRelay.close()
         eventScope.cancel()
         runCatching { handle.destroy() }
     }
+
+    fun activateAudioContext() { com.lingxi.code.voice.audio.AndroidAudioSessionContext.attach(handle) }
 
     override fun engineSourceForBackgroundRetention(): EngineConversationSource = this
 
@@ -547,6 +550,12 @@ class EngineConversationSource private constructor(
                     sessionActivationFrom(event, strings)?.let { activeSession.value = it }
                     // Out-of-band MCP listing: fold `McpServers` into its StateFlow.
                     if (event is ClientEvent.McpServers) mcp.value = event.servers.map { it.toMcpServer() }
+                    if (event is ClientEvent.SettingsSnapshot) {
+                        runCatching {
+                            val repository = ProviderSettingsRepository(context)
+                            try { repository.recordAudioProviderRegion(event.effectiveJson) } finally { repository.close() }
+                        }
+                    }
                     if (event is ClientEvent.TurnStarted) permissionIngress.confirmTurnStarted()
                     if (event is ClientEvent.PermissionRequestResolved) {
                         permissionIngress.resolve(event.requestId)

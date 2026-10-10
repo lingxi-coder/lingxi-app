@@ -42,8 +42,6 @@ pub mod screen_view;
 pub mod tasks_view;
 pub mod theme_picker_view;
 pub mod view;
-pub mod web_config_view;
-pub mod web_picker_view;
 pub mod workflows_view;
 
 use std::collections::BTreeMap;
@@ -78,7 +76,7 @@ use crate::vim::{VimOutcome, VimState};
 pub use rewind_picker_view::RewindRow;
 pub use view::{
     BottomPaneView, CommandAction, ConnectAction, FusionSetupAction, PermissionAction,
-    PluginAction, RewindScope, TaskAction, ViewAction, ViewOutcome, WebAction,
+    PluginAction, RewindScope, TaskAction, ViewAction, ViewOutcome,
 };
 
 /// How long an idle Ctrl-C stays "armed" before a second press quits.
@@ -161,25 +159,20 @@ pub enum BottomPaneOutcome {
     Detach,
     /// A view asks the owner to run a command effect on its behalf.
     RunCommand(CommandAction),
-    /// A view asks the owner to run a `/web` effect on its behalf. A test
-    /// keeps the view open; a save dismisses the `/web` flow (see the
-    /// `RunWebAction` arm of [`ViewStack::apply`]).
-    RunWebAction(WebAction),
-    /// A view asks the owner to run a `/connect` effect on its behalf. Unlike
-    /// `RunWebAction`, the whole `/connect` view stack has already been
+    /// A view asks the owner to run a `/connect` effect on its behalf. The whole `/connect` view stack has already been
     /// cleared by [`ViewStack::apply`] by the time this surfaces (see
     /// [`ViewOutcome::RunConnectAction`]).
     RunConnectAction(ConnectAction),
     /// A view asks the owner to run a `/permissions` effect (persist an
-    /// added/removed rule) on its behalf. The editor stays OPEN (like a `/web`
-    /// test), so the user can make several edits before closing.
+    /// added/removed rule) on its behalf. The editor stays OPEN
+    /// so the user can make several edits before closing.
     RunPermissionAction(PermissionAction),
     /// A view asks the owner to run a `/tasks` stop effect. The picker stays
     /// OPEN (like `RunPermissionAction`); the kill result is reported into the
     /// transcript.
     RunTaskAction(TaskAction),
     /// A view asks the owner to run a `/plugin` effect (toggle the on-disk
-    /// `enabledPlugins` allowlist). The manager stays OPEN, like a `/web` test.
+    /// `enabledPlugins` allowlist). The manager stays OPEN, for further edits.
     RunPluginAction(PluginAction),
     /// The `/fusion setup` wizard finished: persist the chosen model roles.
     /// The wizard has already been dismissed by [`ViewStack::apply`].
@@ -969,18 +962,11 @@ impl BottomPane {
         self.view_stack.push(Box::new(ModelPickerView::new(rows)));
     }
 
-    /// Open the `/web` provider picker over `snapshot` (the current
-    /// configured/active web-search state).
     /// Open the `/fusion setup` wizard over `snapshot` (the live model catalog
     /// plus the currently configured roles, resolved by the CLI).
     pub fn show_fusion_setup(&mut self, snapshot: crate::fusion::setup::FusionSetupSnapshot) {
         self.view_stack
             .push(Box::new(fusion_setup_view::FusionSetupView::new(snapshot)));
-    }
-
-    pub fn show_web_picker(&mut self, snapshot: crate::web::picker::WebConfigSnapshot) {
-        self.view_stack
-            .push(Box::new(web_picker_view::WebPickerView::new(snapshot)));
     }
 
     /// Open the `/permissions` rule editor over `snapshot` (the current
@@ -1632,7 +1618,6 @@ impl BottomPane {
                 profile,
             },
             ViewOutcome::RunCommand(action) => BottomPaneOutcome::RunCommand(action),
-            ViewOutcome::RunWebAction(action) => BottomPaneOutcome::RunWebAction(action),
             ViewOutcome::RunFusionSetupAction(action) => {
                 BottomPaneOutcome::RunFusionSetupAction(action)
             }
@@ -2428,7 +2413,7 @@ impl Renderable for BottomPane {
 
     /// The cursor claim, in priority order: a full-frame view's, then a
     /// centered modal that claims one (a text-entry field like the `/connect`
-    /// key or `/web` config input — so the caret sits IN the field), then the
+    /// key input — so the caret sits IN the field), then the
     /// composer. List modals claim no cursor, so the composer keeps it exactly
     /// as before.
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
@@ -2650,27 +2635,9 @@ impl ViewStack {
     fn apply(&mut self, outcome: ViewOutcome) -> ViewOutcome {
         match outcome {
             ViewOutcome::Pending => ViewOutcome::Pending,
-            // A `/web` TEST keeps its view open (retest in place); a
-            // successful SAVE closes the whole `/web` flow. The async effect
-            // can't reach back into the view stack, and the config screen
-            // holds a snapshot cloned at construction time — leaving it open
-            // after a save showed stale status ("Paste Tavily API key") and
-            // made Enter look like a no-op (the iocraft backend called
-            // `close_screen()` here). The "✓ Saved" result lands in the
-            // transcript; reopening `/web` shows fresh state.
-            ViewOutcome::RunWebAction(action) => {
-                if matches!(
-                    action,
-                    WebAction::SaveSecret { .. } | WebAction::SaveSettings { .. }
-                ) {
-                    self.views.clear();
-                }
-                ViewOutcome::RunWebAction(action)
-            }
-            // A `/connect` effect, in contrast, CLOSES the whole flow: the
-            // picker → method-choice → key-entry chain is fully dismissed
-            // (unlike `/web`'s config screen, which stays open to show test/
-            // save status in place). When another parent surface launched the
+            // A `/connect` effect CLOSES the whole flow: the
+            // picker → method-choice → key-entry chain is fully dismissed.
+            // When another parent surface launched the
             // flow (for example the agents pane's `l` shortcut), preserve that
             // parent and dismiss only the contiguous connect child stack.
             ViewOutcome::RunConnectAction(action) => {
@@ -2679,8 +2646,7 @@ impl ViewStack {
                 }
                 ViewOutcome::RunConnectAction(action)
             }
-            // A `/permissions` add/remove keeps the editor OPEN (like a `/web`
-            // test) so the user can make several edits in one session; the
+            // A `/permissions` add/remove keeps the editor OPEN so the user can make several edits in one session; the
             // persist result lands in the transcript, and the in-view buckets
             // already updated optimistically. Only `Esc` (→ `Cancelled`)
             // closes it.
@@ -2927,44 +2893,15 @@ mod tests {
         assert_eq!(stack.len(), 1, "pending view stays open");
     }
 
-    /// (review) The effect-outcome stack bookkeeping: a `/web` SAVE dismisses
-    /// the whole flow, a `/web` TEST keeps the view open, and any `/connect`
-    /// effect always dismisses the connect flow.
+    /// Effects either keep their editor open or dismiss the connect flow.
     #[test]
     fn effect_outcomes_close_or_keep_the_view_stack_per_kind() {
-        use tool_web::web_search_config::WebSearchProvider;
         let drive = |outcome: ViewOutcome| {
             let mut stack = ViewStack::new();
             stack.push(Box::new(StubView::returning(vec![outcome])));
             stack.route_key(key(KeyCode::Enter));
             stack.len()
         };
-        // SaveSecret / SaveSettings clear the whole /web stack.
-        assert_eq!(
-            drive(ViewOutcome::RunWebAction(WebAction::SaveSecret {
-                provider: WebSearchProvider::Tavily,
-                secret: "k".to_string(),
-            })),
-            0,
-            "SaveSecret clears the /web stack"
-        );
-        assert_eq!(
-            drive(ViewOutcome::RunWebAction(WebAction::SaveSettings {
-                provider: WebSearchProvider::Searxng,
-                searxng_url: Some("http://x".to_string()),
-            })),
-            0,
-            "SaveSettings clears the /web stack"
-        );
-        // TestSearch keeps the config view open (retest in place).
-        assert_eq!(
-            drive(ViewOutcome::RunWebAction(WebAction::TestSearch {
-                provider: WebSearchProvider::Tavily,
-                typed_key: None,
-            })),
-            1,
-            "TestSearch keeps the view open"
-        );
         // A /connect effect dismisses connect-flow children but preserves the
         // non-connect parent that launched them.
         assert_eq!(

@@ -50,7 +50,7 @@ use crate::bottom_pane::screen_view::ScreenView;
 use crate::bottom_pane::theme_picker_view::ThemePickerView;
 use crate::bottom_pane::{
     BottomPane, BottomPaneOutcome, BottomPaneStatus, CommandAction, ConnectAction,
-    FusionSetupAction, PermissionAction, PluginAction, TaskAction, WebAction,
+    FusionSetupAction, PermissionAction, PluginAction, TaskAction,
 };
 use crate::history_cell::message::AssistantTextCell;
 use crate::history_cell::message::ThinkingCell;
@@ -133,10 +133,6 @@ pub enum ChatOutcome {
     /// clipboard (best-effort, [`crate::copy::copy_to_clipboard_native`]).
     /// The confirmation message is already in the transcript.
     CopyToClipboard(String),
-    /// A `/web` view asked the caller to run a secret/settings save or a test
-    /// search. The caller runs it asynchronously and reports the result back
-    /// through `TurnEvent::SystemNotice`.
-    WebAction(WebAction),
     /// The `/fusion setup` wizard finished: persist the chosen model roles to
     /// `~/.lingxi/settings.json`. The caller runs the write asynchronously and
     /// reports the result back through `TurnEvent::SystemNotice`.
@@ -600,12 +596,6 @@ pub struct ChatWidget {
     /// cell. Lets `TextDelta` append incrementally instead of rescanning the
     /// whole transcript on every streamed chunk.
     focus_active_assistant_lines: usize,
-    /// Composition-root-shared `/web` config snapshot slot (`None` until the
-    /// embedder wires one via [`Self::set_web_snapshot`]). [`Self::cmd_web`]
-    /// reads a clone to seed the picker; the async `on_web_action` effect
-    /// closure (CLI `run_ratatui`) updates it in place after a save/test so
-    /// the NEXT `/web` open reflects the latest persisted state.
-    web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
     /// Composition-root-shared `/fusion setup` settings snapshot (`None` until
     /// the embedder wires one). Holds only the PERSISTED half — the candidate
     /// models come from [`Self::session`] at open time so a provider connected
@@ -782,7 +772,6 @@ impl ChatWidget {
             startup_view_mode_focus: false,
             focus_projection: crate::bottom_pane::view::FocusProjection::default(),
             focus_active_assistant_lines: 0,
-            web_snapshot: None,
             fusion_settings: None,
             permission_snapshot: None,
             plugin_snapshot: None,
@@ -2200,7 +2189,7 @@ impl ChatWidget {
                 self.bottom_pane
                     .set_permission_mode(permission::permission_mode_from_cli_string(&mode));
             }
-            // A `/web` async effect (secret/settings save, test search)
+            // An asynchronous command effect
             // finished off-loop; surface its result as a transcript line —
             // red for a failure, dim grey otherwise (`RenderedMessage::
             // SystemText`'s existing severity mapping).
@@ -2524,17 +2513,6 @@ impl ChatWidget {
             s.dirty = true;
         }
         self.status_line = Some(slot);
-    }
-
-    /// Wire the composition root's shared `/web` config snapshot slot, preloaded
-    /// from real config + credential-store presence at startup. [`Self::cmd_web`]
-    /// reads a clone of it to seed the picker; the async `on_web_action` effect
-    /// closure keeps it current across saves/tests.
-    pub fn set_web_snapshot(
-        &mut self,
-        slot: std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>,
-    ) {
-        self.web_snapshot = Some(slot);
     }
 
     /// Wire the composition root's shared `/fusion setup` settings snapshot,
@@ -3895,21 +3873,6 @@ impl ChatWidget {
     pub(crate) fn cmd_theme(&mut self, _args: &str) -> ChatOutcome {
         self.bottom_pane
             .show_view(Box::new(ThemePickerView::new(self.theme_setting)));
-        ChatOutcome::Continue
-    }
-
-    /// `/web`: open the WebSearch provider picker, seeded from the shared
-    /// snapshot (real config + credential-store presence, preloaded at
-    /// startup and kept current by the async `on_web_action` effect closure).
-    /// Falls back to the default (unconfigured) snapshot when no slot is
-    /// wired (headless / tests).
-    pub(crate) fn cmd_web(&mut self, _args: &str) -> ChatOutcome {
-        let snapshot = self
-            .web_snapshot
-            .as_ref()
-            .map(|m| m.lock().unwrap().clone())
-            .unwrap_or_default();
-        self.bottom_pane.show_web_picker(snapshot);
         ChatOutcome::Continue
     }
 
@@ -5967,7 +5930,6 @@ impl ChatWidget {
             }
             BottomPaneOutcome::RunCommand(action) => self.run_command(action),
             BottomPaneOutcome::PastedImage(path) => self.push_image(&path),
-            BottomPaneOutcome::RunWebAction(action) => ChatOutcome::WebAction(action),
             BottomPaneOutcome::RunFusionSetupAction(action) => {
                 ChatOutcome::FusionSetupAction(action)
             }
@@ -11755,7 +11717,7 @@ mod tests {
 
     /// `/permissions` opens the interactive rule editor, and an add keystroke
     /// round-trips through the view stack to a `ChatOutcome::PermissionAction`
-    /// while KEEPING the editor open (edit-in-place, like a `/web` test).
+    /// while KEEPING the editor open (edit-in-place).
     #[test]
     fn permissions_command_opens_editor_and_add_round_trips_to_chat_outcome() {
         use crate::bottom_pane::permissions_editor_view::PermissionsEditorView;

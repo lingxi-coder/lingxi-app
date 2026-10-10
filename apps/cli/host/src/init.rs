@@ -158,8 +158,6 @@ pub struct Runtime {
     /// `/connect` screen's `pump_store_provider_key` persists a collected
     /// provider key via `CredentialManager::set_provider_key`.
     pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
-    /// Shared HTTP transport for TUI-owned `/web` test-search requests.
-    pub http: std::sync::Arc<dyn lingxi_core::host::HttpTransport>,
     /// Shared analytics bus projected from the desktop runtime.
     pub analytics_bus: std::sync::Arc<telemetry::AnalyticsBus>,
     /// Structured-output capture slot, projected from
@@ -890,6 +888,8 @@ pub(crate) fn resolve_desktop_config_at(
     let _ = argv.no_stream;
 
     DesktopConfig {
+        // Inline visualization is a bridge/desktop surface; the CLI never renders it.
+        inline_visualization: false,
         diagnostics: Some(Arc::new(CliDesktopDiagnostics)),
         composition: None,
         defer_session_start: false,
@@ -911,8 +911,6 @@ pub(crate) fn resolve_desktop_config_at(
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
         mod_render_surface: None,
-        // The terminal does not render inline visualizations.
-        inline_visualization: false,
         // Real CLI session: the machine's keychain and env ARE legitimate
         // credential sources here.
         isolated_credential_storage: false,
@@ -1488,7 +1486,6 @@ pub async fn build_runtime_from_config(
         model_provenance: rt.model_provenance,
         catalog_registry: rt.catalog_registry,
         provider_key_store: rt.credentials,
-        http: rt.http,
         analytics_bus: rt.analytics_bus,
         structured_output_slot: rt.structured_output_slot,
         bash_runner: rt.bash_runner,

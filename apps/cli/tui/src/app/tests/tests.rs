@@ -39,7 +39,6 @@ fn test_app(messages: Vec<RenderedMessage>) -> RataApp<'static> {
             on_submit: Box::new(|_, _, _, _| {}),
             on_queue_prompt: Box::new(|_, _, _, _| {}),
             on_switch_model: Box::new(|_, _| {}),
-            on_web_action: Box::new(|_| {}),
             on_fusion_setup_action: Box::new(|_| {}),
             on_connect_action: Box::new(|_| {}),
             on_permission_action: Box::new(|_| {}),

@@ -43,7 +43,7 @@ use crate::renderable::Renderable;
 /// A read-only snapshot of the permission rules used to seed the editor: the
 /// three writable settings files (user / project / local), PLUS the enterprise
 /// managed (policy) tier, which is shown read-only. Built at startup into a
-/// shared slot (like the `/web` config snapshot) and re-read after each edit so
+/// shared slot and re-read after each edit so
 /// the next `/permissions` open reflects the latest state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionsSnapshot {

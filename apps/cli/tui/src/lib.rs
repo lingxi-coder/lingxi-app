@@ -62,7 +62,6 @@ pub mod term_image;
 pub mod terminal;
 pub mod transcript;
 pub mod vim;
-pub mod web;
 
 use std::io::Stdout;
 

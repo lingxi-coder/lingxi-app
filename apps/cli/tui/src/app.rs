@@ -15,7 +15,7 @@
 
 use crate::bottom_pane::permissions_editor_view::PermissionsSnapshot;
 use crate::bottom_pane::{
-    ConnectAction, FusionSetupAction, PermissionAction, PluginAction, TaskAction, WebAction,
+    ConnectAction, FusionSetupAction, PermissionAction, PluginAction, TaskAction,
 };
 use crate::chat_widget::{ChatOutcome, ChatWidget};
 use crate::session::SessionInfo;
@@ -94,10 +94,6 @@ pub struct AppCallbacks<'cb> {
     /// Executed on [`ChatOutcome::SwitchModel`] with the picked
     /// `(request_model, profile)` pair.
     pub on_switch_model: Box<dyn FnMut(String, Option<String>) + 'cb>,
-    /// Executed on [`ChatOutcome::WebAction`]: the caller runs the `/web`
-    /// effect (persist a key/settings, or a test search) asynchronously and
-    /// reports the result back via a [`TurnEvent::SystemNotice`].
-    pub on_web_action: Box<dyn FnMut(WebAction) + 'cb>,
     /// Executed on [`ChatOutcome::FusionSetupAction`]: the caller merges the
     /// chosen Fusion model roles into `~/.lingxi/settings.json` asynchronously
     /// and reports the result back via a [`TurnEvent::SystemNotice`].
@@ -688,26 +684,19 @@ impl<'cb> RataApp<'cb> {
                     ChatOutcome::SwitchModel(model, profile) => {
                         (self.callbacks.on_switch_model)(model, profile);
                     }
-                    // A `/web` config effect: the caller persists/tests
-                    // off-loop and pushes the result back as a
-                    // `TurnEvent::SystemNotice`.
-                    ChatOutcome::WebAction(action) => {
-                        (self.callbacks.on_web_action)(action);
-                    }
                     // A finished `/fusion setup`: persist the model roles
-                    // off-loop, same shape as `WebAction` above.
+                    // off-loop.
                     ChatOutcome::FusionSetupAction(action) => {
                         (self.callbacks.on_fusion_setup_action)(action);
                     }
                     // A `/connect` effect: store a key or kick off a
-                    // Copilot/OAuth sign-in off-loop, same shape as
-                    // `WebAction` above.
+                    // Copilot/OAuth sign-in off-loop.
                     ChatOutcome::ConnectAction(action) => {
                         (self.callbacks.on_connect_action)(action);
                     }
                     // A `/permissions` effect: persist the added/removed rule
                     // off-loop (and push a live allow rule); the result returns
-                    // via `TurnEvent::SystemNotice`, same shape as `WebAction`.
+                    // via `TurnEvent::SystemNotice`.
                     ChatOutcome::PermissionAction(action) => {
                         (self.callbacks.on_permission_action)(action);
                     }
@@ -824,12 +813,6 @@ impl<'cb> RataApp<'cb> {
 /// snapshot at compose time. Pass `None` when the embedder has no slot — the
 /// copy degrades to the unknown-subscription default (TS-conservative).
 ///
-/// `web_snapshot` is the composition root's shared `/web` config snapshot
-/// slot (preloaded from real config + credential-store presence at startup);
-/// `/web` reads a clone to seed the picker and the `on_web_action` effect
-/// closure updates it after a save/test. Pass `None` when the embedder has no
-/// slot — `/web` opens with the default (unconfigured) snapshot.
-///
 /// `connect_auth_methods`/`connect_availability` are the composition root's
 /// real per-provider login-method + availability maps (derived from the live
 /// multi-provider catalog at startup); `/connect` reads clones to build its
@@ -849,7 +832,6 @@ pub fn run_app(
     computer_access_rx: Receiver<ComputerAccessExchange>,
     subscription: Option<lingxi_core::host::subscription::SharedSubscription>,
     status_line: Option<crate::status_line::SharedStatusLine>,
-    web_snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::web::picker::WebConfigSnapshot>>>,
     fusion_settings: Option<
         std::sync::Arc<std::sync::Mutex<crate::fusion::setup::FusionSettingsSnapshot>>,
     >,
@@ -886,7 +868,6 @@ pub fn run_app(
     on_submit: impl FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken),
     on_queue_prompt: impl FnMut(String, String, Vec<std::path::PathBuf>, CancellationToken),
     on_switch_model: impl FnMut(String, Option<String>),
-    on_web_action: impl FnMut(WebAction),
     on_fusion_setup_action: impl FnMut(FusionSetupAction),
     on_connect_action: impl FnMut(ConnectAction),
     on_permission_action: impl FnMut(PermissionAction),
@@ -949,7 +930,6 @@ pub fn run_app(
             on_submit: Box::new(on_submit),
             on_queue_prompt: Box::new(on_queue_prompt),
             on_switch_model: Box::new(on_switch_model),
-            on_web_action: Box::new(on_web_action),
             on_fusion_setup_action: Box::new(on_fusion_setup_action),
             on_connect_action: Box::new(on_connect_action),
             on_permission_action: Box::new(on_permission_action),
@@ -997,9 +977,6 @@ pub fn run_app(
     }
     if let Some(slot) = status_line {
         app.chat_widget.set_status_line(slot);
-    }
-    if let Some(slot) = web_snapshot {
-        app.chat_widget.set_web_snapshot(slot);
     }
     if let Some(slot) = fusion_settings {
         app.chat_widget.set_fusion_settings(slot);

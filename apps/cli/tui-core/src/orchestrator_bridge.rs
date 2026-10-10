@@ -341,7 +341,7 @@ pub enum TurnEvent {
         seven_day_resets_at: Option<u64>,
     },
     /// A one-off system notice for the transcript, fired by an app-level
-    /// async effect that isn't itself a turn (e.g. the `/web` picker's
+    /// async effect that isn't itself a turn (e.g. a settings picker's
     /// secret/settings save or test-search result). NOT emitted by
     /// [`BridgeOutputStream`] — the embedding CLI sends it directly on the
     /// same `TurnEvent` channel so the result lands in the transcript on the

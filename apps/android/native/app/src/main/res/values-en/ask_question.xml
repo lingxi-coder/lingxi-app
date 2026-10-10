@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="chat_asked_questions">
+        <item quantity="one">Asked %1$d question</item>
+        <item quantity="other">Asked %1$d questions</item>
+    </plurals>
+    <string name="chat_question_no_answer">No answer provided</string>
+    <string name="chat_question_expanded">Expanded</string>
+    <string name="chat_question_collapsed">Collapsed</string>
+</resources>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="chat_asked_questions">
+        <item quantity="one">%1$d 件の質問</item>
+        <item quantity="other">%1$d 件の質問</item>
+    </plurals>
+    <string name="chat_question_no_answer">未回答</string>
+    <string name="chat_question_expanded">展開済み</string>
+    <string name="chat_question_collapsed">折りたたみ済み</string>
+</resources>

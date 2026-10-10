@@ -101,15 +101,15 @@ struct AskUserQuestionCard: View {
     }
 
     private var header: some View {
-        HStack(spacing: 11) {
-            Image(systemName: "questionmark.bubble")
-                .font(.system(size: 18, weight: .medium))
+        HStack(spacing: 8) {
+            Image("CodexQuestion")
+                .resizable()
+                .renderingMode(.template)
                 .foregroundStyle(t.text2)
-                .frame(width: 34, height: 34)
-                .background(t.surfaceActive, in: Circle())
+                .frame(width: 20, height: 20)
                 .accessibilityHidden(true)
             Text("chat_ask_user_question_title")
-                .font(.headline)
+                .font(.body)
                 .foregroundStyle(t.text)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -150,22 +150,15 @@ struct AskUserQuestionCard: View {
                 }
             } label: {
                 HStack(spacing: 12) {
-                    Text("\(index + 1)")
-                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(answer == nil ? t.text3 : t.text2)
-                        .frame(width: 38, height: 38)
-                        .background(t.surfaceActive, in: Circle())
-                        .overlay(Circle().stroke(t.border, lineWidth: 0.8))
                     VStack(alignment: .leading, spacing: answer == nil ? 0 : 3) {
                         Text(current.question)
-                            .font(.body.weight(expanded ? .medium : .regular))
-                            .foregroundStyle(t.text)
+                            .font(.body)
+                            .foregroundStyle(t.text3)
                             .fixedSize(horizontal: false, vertical: true)
                         if let answer {
                             Text(answer)
-                                .font(.subheadline)
-                                .foregroundStyle(t.text3)
-                                .lineLimit(2)
+                                .font(.body)
+                                .foregroundStyle(t.text4)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -175,7 +168,6 @@ struct AskUserQuestionCard: View {
                         .foregroundStyle(t.text3)
                         .accessibilityHidden(true)
                 }
-                .padding(.horizontal, 12)
                 .padding(.vertical, 10)
                 .contentShape(rowShape)
             }
@@ -184,14 +176,10 @@ struct AskUserQuestionCard: View {
 
             if expanded {
                 questionOptions(current, at: index)
-                    .padding(.leading, 62)
-                    .padding(.trailing, 12)
                     .padding(.bottom, 14)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .background(expanded ? t.surfaceActive.opacity(0.42) : t.surface, in: rowShape)
-        .overlay { rowShape.stroke(t.border.opacity(expanded ? 0.95 : 0.65), lineWidth: 0.8) }
         .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88), value: expanded)
     }
 
@@ -327,5 +315,53 @@ struct AskUserQuestionCard: View {
             // remains actionable so the user can retry.
             if !accepted { submitting = false }
         }
+    }
+}
+
+/// A completed request stays expanded by default; its owner retains disclosure state.
+struct AnsweredQuestionsView: View {
+    @Environment(\.theme) private var t
+    @Environment(\.colorScheme) private var colorScheme
+    let rows: [ConversationAnsweredQuestion]
+    let isExpanded: Bool
+    let onToggle: () -> Void
+
+    private var summaryColor: Color { colorScheme == .dark ? t.text2 : t.text3 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(action: onToggle) {
+                HStack(spacing: 8) {
+                    Image("CodexQuestion")
+                        .resizable().renderingMode(.template)
+                        .frame(width: 18, height: 18)
+                        .accessibilityHidden(true)
+                    Text("chat_asked_questions \(rows.count)")
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .regular))
+                        .accessibilityHidden(true)
+                }
+                .font(.system(size: 14))
+                .foregroundStyle(summaryColor)
+                .frame(minHeight: 44)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(String(localized: isExpanded ? "chat_question_expanded" : "chat_question_collapsed"))
+            if isExpanded {
+                ForEach(rows.indices, id: \.self) { index in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(rows[index].question).foregroundStyle(summaryColor.opacity(0.85))
+                        Text(rows[index].answer ?? String(localized: "chat_question_no_answer")).foregroundStyle(summaryColor.opacity(0.5))
+                    }
+                    .font(.system(size: 14))
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

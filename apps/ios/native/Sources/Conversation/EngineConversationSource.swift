@@ -3123,6 +3123,7 @@ final class EngineConversationSource: ConversationSource {
                     trace.tool = "Shell"
                     trace.status = resolvedShellStatus.asToolStatus
                     trace.display = derivedDisplay
+                    trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                     trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(resultJson, isError: isError, tool: tool)
                     trace.elapsedMs = finished?.durationMs ?? trace.elapsedMs
@@ -3134,6 +3135,7 @@ final class EngineConversationSource: ConversationSource {
                     trace.tool = tool
                     trace.status = wasCancelled ? .cancelled : (isError ? .failed : .completed)
                     trace.display = derivedDisplay
+                    trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                     trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(
                         resultJson,
@@ -4692,6 +4694,7 @@ final class EngineConversationSource: ConversationSource {
                         var merged = existing
                         merged.status = status
                         merged.display = lowered
+                        merged.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                         merged.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                         merged.outputSummary = fallback
                         pendingRun?.tools[index] = merged
@@ -4705,7 +4708,8 @@ final class EngineConversationSource: ConversationSource {
                             elapsedMs: nil,
                             header: nil,
                             display: lowered,
-                            spawnedAgentID: ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
+                            spawnedAgentID: ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson),
+                            questionAnswers: isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                         )
                         pendingRun?.tools.append(trace)
                     }

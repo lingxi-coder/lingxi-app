@@ -43,9 +43,26 @@ enum ConversationRenderLayout {
     }
 
     static func transcriptItems(_ items: [ConversationRenderItem]) -> [ConversationRenderItem] {
-        items.filter { item in
-            if case .run = item { return false }
-            return true
+        items.compactMap { item in
+            guard case let .run(run) = item else { return item }
+            let questions = run.tools.filter { $0.status == .completed && $0.questionAnswers != nil }
+            guard !questions.isEmpty else { return nil }
+            // Completed answers are conversation content. Reuse their stable
+            // activity identities without exposing the rest of the run ledger.
+            let ids = Set(questions.map(\.id))
+            var summary = run
+            summary.status = .completed
+            summary.tools = questions
+            summary.reasoning = ""
+            summary.notices = []
+            summary.shellCards = []
+            summary.activeWorkers = 0
+            summary.workers = []
+            summary.activities = run.activities.filter { activity in
+                if case let .tool(id) = activity { return ids.contains(id) }
+                return false
+            }
+            return .run(summary)
         }
     }
 
@@ -885,6 +902,7 @@ struct ConversationToolTrace: Identifiable, Equatable {
     /// presentation metadata only; it anchors the transcript agent row to the
     /// originating tool instead of letting it drift to the tail.
     var spawnedAgentID: String? = nil
+    var questionAnswers: [ConversationAnsweredQuestion]? = nil
 }
 
 enum ConversationShellStatus: Equatable {
@@ -1283,5 +1301,26 @@ private extension String {
 
     func ifBlank(_ fallback: String) -> String {
         trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallback : self
+    }
+}
+
+/// Verbatim structured content decoded once at live/history result boundaries.
+struct ConversationAnsweredQuestion: Equatable {
+    let question: String
+    let answer: String?
+
+    static func parse(tool: String, json: String) -> [Self]? {
+        guard tool == "AskUserQuestion",
+              let data = json.data(using: .utf8),
+              let output = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let questions = output["questions"] as? [[String: Any]], !questions.isEmpty,
+              let answers = output["answers"] as? [String: String] else { return nil }
+        var rows: [Self] = []
+        for value in questions {
+            guard let question = value["question"] as? String else { return nil }
+            let answer = answers[question]
+            rows.append(Self(question: question, answer: answer?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? answer : nil))
+        }
+        return rows
     }
 }

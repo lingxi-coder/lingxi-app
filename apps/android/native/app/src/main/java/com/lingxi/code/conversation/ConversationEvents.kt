@@ -35,6 +35,7 @@ sealed interface ReplyEvent {
         /** LEGACY input scrape — the fallback when [header] is null (older engine). */
         val inputSummary: String? = null,
         val planMarkdown: String? = null,
+        val questionAnswers: List<AnsweredQuestion>? = null,
         val elapsedMs: Long? = null,
         /**
          * The engine's PRE-DERIVED call header, carried straight through from
@@ -201,6 +202,7 @@ fun clientEventToReply(
                 status = if (event.isError) AgentToolStatus.Failed else AgentToolStatus.Completed,
                 display = event.display?.toUi(),
                 planMarkdown = if (!event.isError) toolPlanMarkdown(event.tool, event.resultJson) else null,
+                questionAnswers = if (!event.isError) parseQuestionAnswers(event.tool, event.resultJson) else null,
             )
         }
     is ClientEvent.UsageUpdate -> ReplyEvent.Usage(

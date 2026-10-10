@@ -16,6 +16,28 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }
 
+    func testAnsweredQuestionDisclosureMatchesReference() {
+        let baseArguments = app.launchArguments
+        for theme in ["light", "dark"] {
+            app.terminate()
+            app.launchArguments = baseArguments + ["-theme", theme]
+            app.launchEnvironment["LINGXI_UI_TEST_ANSWERED_QUESTION"] = "1"
+            app.launch()
+            let answer = app.staticTexts["同时纳入原生实时对话"]
+            XCTAssertTrue(answer.waitForExistence(timeout: 10), app.debugDescription)
+            let toggle = app.buttons["conversation.tool-call.ui-answered-question"]
+            XCTAssertTrue(toggle.isHittable, app.debugDescription)
+            let image = XCTAttachment(screenshot: app.screenshot())
+            image.name = "iOS-answered-question-\(theme)"
+            image.lifetime = .keepAlways
+            add(image)
+            toggle.tap()
+            XCTAssertFalse(answer.exists)
+            toggle.tap()
+            XCTAssertTrue(answer.waitForExistence(timeout: 3))
+        }
+    }
+
     func testScheduledTaskCenterShowsStatusesAndPreservesDraft() {
         openDrawer()
         app.buttons["drawer.tab.cron"].tap()
@@ -471,6 +493,8 @@ final class LingxiCodeUITests: XCTestCase {
         screenshot.name = "提问表单-满配选项"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+        submit.tap()
+        XCTAssertTrue(waitUntilGone(panel, timeout: 5), app.debugDescription)
     }
 
     /// A subagent's dispatch prompt is the first USER bubble of its child

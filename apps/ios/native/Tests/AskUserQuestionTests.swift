@@ -215,3 +215,15 @@ visionDelegationEnabled: true)
     }
 
 #endif
+
+final class AskUserQuestionSummaryTests: XCTestCase {
+    func testPreservesQuestionOrderAndMissingAnswers() {
+        let rows = ConversationAnsweredQuestion.parse(tool: "AskUserQuestion", json: #"{"questions":[{"question":"语音？"},{"question":"Other?"}],"answers":{"语音？":"实时\n打断"}}"#)
+        XCTAssertEqual(rows, [ConversationAnsweredQuestion(question: "语音？", answer: "实时\n打断"), ConversationAnsweredQuestion(question: "Other?", answer: nil)])
+    }
+    func testRejectsMalformedAndUnrelatedResults() {
+        XCTAssertNil(ConversationAnsweredQuestion.parse(tool: "Other", json: #"{"questions":[{"question":"Q"}],"answers":{}}"#))
+        XCTAssertNil(ConversationAnsweredQuestion.parse(tool: "AskUserQuestion", json: #"{"questions":[{"question":"Q"}],"answers":{"Q":3}}"#))
+        XCTAssertNil(ConversationAnsweredQuestion.parse(tool: "AskUserQuestion", json: "not json"))
+    }
+}

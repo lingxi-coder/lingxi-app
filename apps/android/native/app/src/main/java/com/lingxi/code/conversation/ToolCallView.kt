@@ -76,6 +76,10 @@ internal fun ToolCallView(
     /** Trailing metadata for the LIVE timeline (elapsed time). Null in the transcript. */
     trailing: String? = null,
 ) {
+    if (call.questionAnswers != null && call.status == AgentToolStatus.Completed) {
+        AnsweredQuestionsView(call.questionAnswers, !expanded, onToggleExpanded, modifier)
+        return
+    }
     if (call.planMarkdown != null) {
         PlanDocumentCard(call.planMarkdown, call.status == AgentToolStatus.Running)
         return

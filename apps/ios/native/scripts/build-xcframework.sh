@@ -151,8 +151,11 @@ if [[ "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" == "1" ]]; then
   done
   log "Reusing validated Swift bindings in ${GEN_DIR} …"
 else
-  log "Building host cdylib for bindgen introspection…"
-  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi
+  # Build the library and generator with one feature graph before replacing
+  # any existing bindings. A stale lockfile or generator build failure must
+  # leave the last matching generated sources available.
+  log "Building host cdylib and bindings generator…"
+  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features cli
 
   HOST_DYLIB_PATH="${CARGO_TARGET_DIR}/debug/${HOST_DYLIB}"
   [[ -f "${HOST_DYLIB_PATH}" ]] || { echo "ERROR: host dylib not produced: ${HOST_DYLIB_PATH}" >&2; exit 1; }

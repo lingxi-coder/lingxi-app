@@ -276,7 +276,7 @@ fun buildVoiceEngine(
                 model = model,
                 sessionMode = sessionMode.toDto(),
                 visionDelegationEnabled = visionDelegationEnabled,
-                appFilesRoot = appContext.filesDir.absolutePath,
+                appFilesRoot = appContext.filesDir.canonicalPath,
                 projectCwd = projectWorkspace?.hostPath,
                 providerConfig = AndroidProviderConfigFfi(
                     providerProfilesJson = providerProfilesJson,

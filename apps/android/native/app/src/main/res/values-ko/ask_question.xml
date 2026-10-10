@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="chat_asked_questions">
+        <item quantity="one">질문 %1$d개</item>
+        <item quantity="other">질문 %1$d개</item>
+    </plurals>
+    <string name="chat_question_no_answer">응답 없음</string>
+    <string name="chat_question_expanded">펼쳐짐</string>
+    <string name="chat_question_collapsed">접힘</string>
+</resources>

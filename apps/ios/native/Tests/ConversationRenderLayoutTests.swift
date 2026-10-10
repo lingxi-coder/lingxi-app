@@ -2,6 +2,22 @@ import XCTest
 @testable import LingxiCode
 
 final class ConversationRenderLayoutTests: XCTestCase {
+    func testCompletedQuestionAnswersRemainInTranscriptWithoutRunActivity() throws {
+        var completed = run(id: "question-run", status: .completed)
+        var ask = tool(id: "ask", name: "AskUserQuestion")
+        ask.status = .completed
+        ask.questionAnswers = [.init(question: "Question?", answer: "Answer")]
+        completed.tools = [tool(id: "read", name: "Read"), ask]
+        completed.reasoning = "Private activity"
+        completed.activities = [.reasoning(id: "thought", text: completed.reasoning), .tool(id: "read"), .tool(id: "ask")]
+        let items = ConversationRenderLayout.transcriptItems([.run(completed)])
+        guard case let .run(summary) = try XCTUnwrap(items.first) else { return XCTFail("missing question summary") }
+        XCTAssertEqual(summary.tools, [ask])
+        XCTAssertEqual(summary.activities, [.tool(id: "ask")])
+        XCTAssertTrue(summary.reasoning.isEmpty)
+        XCTAssertTrue(ConversationRenderLayout.timelineGroups(items).first?.isToolGroup == true)
+    }
+
     func testRunCardsNeverEnterDurableTranscript() {
         let completed = run(id: "completed", status: .completed)
         let running = run(id: "running", status: .running)

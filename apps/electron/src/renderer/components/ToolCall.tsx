@@ -1,8 +1,9 @@
 /**
  * One tool call in the transcript.
  *
- * The row renders the engine's PRE-DERIVED view and nothing else. It never
- * looks at `input_json` or `result_json`; `view` (a `ToolHeaderDto`) and
+ * Ordinary rows render the engine's PRE-DERIVED view. Completed questionnaires
+ * additionally retain their verbatim structured question/answer content;
+ * `view` (a `ToolHeaderDto`) and
  * `result` (a `ToolResultDisplayDto`) arrived already composed, which is the
  * whole point of the change — four clients each summarising the same payload
  * had drifted into four different answers.
@@ -23,6 +24,7 @@
  */
 
 import { memo, type CSSProperties } from 'react';
+import { AskUserQuestionSummary, questionAnswers } from './AskUserQuestionSummary';
 import type { ToolIconDto } from '@lingxi/bridge-client';
 
 import { standaloneJsonForDisplay } from '../markdown';
@@ -242,7 +244,15 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       </div>
     )}
   </>;
-  const rowContent = (
+  const answeredQuestions = questionAnswers(item);
+  const rowContent = answeredQuestions ? (
+    <AskUserQuestionSummary id={item.id} rows={answeredQuestions} open={open ?? true}
+      onToggle={() => onSetOpen(item.id, !(open ?? true))}
+      keepMounted={Boolean(modUiSessionId)}
+      renderBody={(body) => <ModUiParentSite sessionId={modUiSessionId ?? ''}
+        surface="desktop" component="ToolResult" instanceId={`tool-result:${item.id}`}
+        props={nativeToolResultProps(item)} engineFallback={body}>{body}</ModUiParentSite>} />
+  ) : (
     <div
       className="transcript-tool-row"
       data-status={item.status}

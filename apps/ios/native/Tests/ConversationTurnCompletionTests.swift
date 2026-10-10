@@ -132,7 +132,7 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertTrue(source.model.streaming)
             XCTAssertEqual(source.model.messages.suffix(2).map(\.text), ["first", "pending"])
             XCTAssertEqual(submitted.count, 2)
-            guard case let .sendPrompt(text, _, images, _) = submitted.last else {
+            guard case let .sendPrompt(text, _, images, _, _) = submitted.last else {
                 return XCTFail("pending send must use SendPrompt")
             }
             XCTAssertEqual(text, "pending")

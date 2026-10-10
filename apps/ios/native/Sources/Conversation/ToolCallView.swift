@@ -31,7 +31,10 @@ struct ToolCallView: View {
     var onToggle: () -> Void = {}
 
     var body: some View {
-        if let document = trace.planDocument {
+        if let rows = trace.questionAnswers, trace.status == .completed {
+            AnsweredQuestionsView(rows: rows, isExpanded: !isExpanded, onToggle: onToggle)
+                .accessibilityIdentifier("conversation.tool-call.\(trace.id)")
+        } else if let document = trace.planDocument {
             PlanDocumentCard(document: document)
         } else {
             toolContent

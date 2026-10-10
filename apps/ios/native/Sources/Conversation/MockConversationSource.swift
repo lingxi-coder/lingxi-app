@@ -169,6 +169,17 @@ final class MockConversationSource: ConversationSource {
                     sessionID: "ui-session"
                 )
             }
+            if ProcessInfo.processInfo.environment["LINGXI_UI_TEST_ANSWERED_QUESTION"] == "1" {
+                let trace = ConversationToolTrace(
+                    id: "ui-answered-question", tool: "AskUserQuestion", status: .completed,
+                    inputSummary: nil, outputSummary: nil, elapsedMs: 12,
+                    questionAnswers: [.init(question: "这次统一语音服务，要不要同时纳入 provider 原生实时语音对话（双向音频、打断、会话管理）？",
+                                             answer: "同时纳入原生实时对话")])
+                source.model.items = [.run(ConversationExecutionRun(
+                    id: "ui-ask-run", sessionId: "ui-session", turnId: 1,
+                    status: .completed, tools: [trace], activities: [.tool(id: trace.id)]))]
+                source.model.messages = []
+            }
             if askQuestion {
                 source.model.pendingQuestions = [Self.uiTestAskQuestion]
             }
@@ -297,6 +308,24 @@ final class MockConversationSource: ConversationSource {
     #endif
 
     #if canImport(harness_runtimeFFI)
+        func submitEngineCommand(_ command: ClientCommand) async throws {
+            switch command {
+            case let .answerAskUserQuestion(requestId, answers):
+                guard let question = model.pendingQuestions.first(where: { $0.requestId == requestId }) else { return }
+                let trace = ConversationToolTrace(
+                    id: "mock-ask:\(requestId)", tool: "AskUserQuestion", status: .completed,
+                    inputSummary: nil, outputSummary: nil, elapsedMs: nil,
+                    questionAnswers: question.questions.map { .init(question: $0.question, answer: answers[$0.question]) })
+                model.items.append(.run(ConversationExecutionRun(
+                    id: "mock-question:\(requestId)", sessionId: model.activeSessionId ?? "mock-session", turnId: nil,
+                    status: .completed, tools: [trace], activities: [.tool(id: trace.id)])))
+                model.pendingQuestions.removeAll { $0.requestId == requestId }
+            case let .cancelAskUserQuestion(requestId):
+                model.pendingQuestions.removeAll { $0.requestId == requestId }
+            default: break
+            }
+        }
+
         func providerCatalog() async throws -> [ProviderCatalogEntry] {
             mockProviderCatalog
         }

@@ -825,7 +825,7 @@ import SwiftUI
             await flushTasks()
 
             XCTAssertEqual(submittedCommands.count, 2, "B should submit exactly once after cancellation returns")
-            if case let .sendPrompt(text, _, _, turnId)? = submittedCommands.last {
+            if case let .sendPrompt(text, _, _, turnId, _)? = submittedCommands.last {
                 XCTAssertEqual(text, "B prompt")
                 XCTAssertEqual(turnId, 2)
             } else {

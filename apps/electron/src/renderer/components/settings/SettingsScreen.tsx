@@ -23,6 +23,8 @@ import { Projects } from './pages/Projects';
 import { ProviderCredentials } from './pages/ProviderCredentials';
 import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
+import { extensionHubStyle } from './pages/ExtensionHub';
+import { ExtensionGlyph } from './pages/ExtensionHubIcons';
 import { Voice } from './pages/Voice';
 import { provenanceDescription, provenanceLabel, type Provenance } from './rows';
 import { projectDirFromSnapshot, projectDisplayName } from './useEngineSettings';
@@ -198,7 +200,9 @@ export interface PageContentProps {
   theme: ThemeMode;
   onTheme(value: ThemeMode): void;
   /** Jumps the shell to another nav page by id — how `General`'s cross-page entries actually navigate, rather than just naming a destination they can't reach. */
-  onNavigate(pageId: string): void;
+  onNavigate(pageId: string, pluginId?: string): void;
+  initialPluginId?: string;
+  scopeControls?: ReactNode;
   initialProviderId?: string;
   pendingModelReference?: string;
   /**
@@ -486,8 +490,10 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
   );
 }
 
-function NavIcon({ name }: { name: string }) {
+function NavIcon({ name, pageId }: { name: string; pageId: string }) {
   const t = useT();
+  const extensionGlyph = pageId === 'plugins' ? 'plugin' : pageId === 'skills' ? 'skills' : pageId === 'mcp' ? 'mcp' : pageId === 'tools-agent' ? 'tools' : null;
+  if (extensionGlyph) return <ExtensionGlyph name={extensionGlyph} color={t.text3} />;
   return <Icon name={name} size={15} color="currentColor" stroke={1.7} style={{ color: t.text3 }} />;
 }
 
@@ -496,6 +502,11 @@ export function SettingsScreen({
 }: SettingsScreenProps) {
   const t = useT();
   const [page, setPage] = useState<string>(() => resolveInitialPage(initialPageId, initialProviderId));
+  const [initialPluginId, setInitialPluginId] = useState<string>();
+  const navigatePage = (pageId: string, pluginId?: string) => {
+    setInitialPluginId(pluginId);
+    setPage(pageId);
+  };
   const [query, setQuery] = useState('');
   const [editingLayer, setEditingLayer] = useState<EditableLayer>('user');
   const [layerLockCount, setLayerLockCount] = useState(0);
@@ -573,8 +584,8 @@ export function SettingsScreen({
       }
       if (event.key !== 'Tab') return;
       const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
-      ) ?? [])];
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, a[href]',
+      ) ?? [])].filter((element) => element.getClientRects().length > 0 && !element.closest('[inert], [aria-hidden="true"]'));
       const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const target = dialogFocusTarget(focusable, active, event.shiftKey);
       if (target) {
@@ -637,7 +648,12 @@ export function SettingsScreen({
           editingLayer={editingLayer}
           theme={theme}
           onTheme={onTheme}
-          onNavigate={setPage}
+          onNavigate={navigatePage}
+          initialPluginId={initialPluginId}
+          scopeControls={activePage.layered ? <>
+            <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />
+            <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
+          </> : undefined}
           initialProviderId={initialProviderId}
           pendingModelReference={pendingModelReference}
           onClose={onClose}
@@ -649,7 +665,21 @@ export function SettingsScreen({
   }
   const showLayerSwitcher = activePage.layered && canWriteHere;
   const isExtensionHubPage = ['plugins', 'mcp', 'skills'].includes(activePage.id);
-  const pageTitle = isExtensionHubPage ? 'Plugins' : activePage.label;
+  const pageTitle = activePage.label;
+
+  if (isExtensionHubPage) return <div ref={panelRef} className="no-drag extension-customize-window" role="dialog" aria-modal="true" aria-label="设置" tabIndex={-1} style={{ ...extensionHubStyle(t), background: t.sidebarBg, color: t.text }}>
+    <div className="settings-window-drag-region drag-region" aria-hidden="true" />
+    <div className="extension-window-navigation no-drag"><button ref={backRef} type="button" className="extension-hub-icon-button" aria-label="Back to app" onClick={onClose}><ExtensionGlyph name="arrowLeft" size={18} /></button></div>
+    <nav className="extension-customize-rail" aria-label="App navigation">
+      <button type="button" className="extension-hub-icon-button" aria-label="Home" onClick={onClose}><ExtensionGlyph name="home" size={20} /></button>
+      <span className="extension-hub-icon-button is-active" aria-label="Customize" aria-current="page"><ExtensionGlyph name="plugin" size={20} /></span>
+      <button type="button" className="extension-hub-icon-button" aria-label="Settings" onClick={() => { const link = panelRef.current?.querySelector<HTMLButtonElement>('[aria-label="All settings"]'); if (link) link.click(); else navigatePage('general'); }}><ExtensionGlyph name="cog" size={20} /></button>
+    </nav>
+    <div className="extension-customize-shell">
+      {settingsReadError && <div role="alert" data-testid="settings-snapshot-error">{settingsReadError}</div>}
+      {body}
+    </div>
+  </div>;
 
   return (
     <div
@@ -731,7 +761,7 @@ export function SettingsScreen({
                         fontSize: 13, fontWeight: active ? 600 : 500, fontFamily: 'inherit', cursor: 'pointer',
                       }}
                     >
-                      <NavIcon name={navPage.icon} />
+                      <NavIcon name={navPage.icon} pageId={navPage.id} />
                       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{navPage.label}</span>
                       {!navPage.implemented && (
                         <span style={{ fontSize: 9.5, color: t.text4, fontWeight: 600 }}>WIP</span>
@@ -749,7 +779,6 @@ export function SettingsScreen({
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
               <div>
                 <div style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
-                {isExtensionHubPage && <div style={{ marginTop: 5, fontSize: 13.5, color: t.text3 }}>Manage plugins, skills, and MCPs</div>}
               </div>
               {showLayerSwitcher && (
                 <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} locked={layerLocked} />

@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SkillAdminCommandDto, SkillDto } from '@lingxi/bridge-client';
-import { Icon } from '../../Icon';
+import { ExtensionGlyph } from './ExtensionHubIcons';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { Toggle } from '../primitives';
 import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { boolFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubTabs, extensionHubStyle, useExtensionHubDialogFocus } from './ExtensionHub';
+import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus } from './ExtensionHub';
+import { MarkdownContent } from '../../MarkdownContent';
 import {
   asBoolean,
   asString,
@@ -19,7 +20,6 @@ import {
   nextConfigurationOperationId,
   noteStyle,
   parseEventEnvelope,
-  searchInputStyle,
   secondaryMetaStyle,
   SourcePill,
   textareaStyle,
@@ -130,7 +130,7 @@ function defaultCreateScope(editingLayer: EditableLayer): 'user' | 'project' {
   return editingLayer === 'project' ? 'project' : 'user';
 }
 
-export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate }: PageContentProps) {
+export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, scopeControls }: PageContentProps) {
   const t = useT();
   const model = skillsPageModel({ skills: bridge.skillsEvent?.skills });
   const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills]);
@@ -152,7 +152,13 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const [restoreName, setRestoreName] = useState('');
   const [syncDraft, setSyncDraft] = useState(syncEnabled);
   const [pendingSelection, setPendingSelection] = useState<SkillSelection | null>(null);
-  const [pendingHubPage, setPendingHubPage] = useState<string | null>(null);
+  const [pendingHubPage, setPendingHubPage] = useState<{ pageId: string; pluginId?: string } | null>(null);
+  const [sourceFilter, setSourceFilter] = useState('user');
+  const [showAllInstalled, setShowAllInstalled] = useState(false);
+  const [showAllSource, setShowAllSource] = useState(false);
+  const [editingDocument, setEditingDocument] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [tryingSkill, setTryingSkill] = useState(false);
   const [savingSync, setSavingSync] = useState(false);
   const [loadingDocument, setLoadingDocument] = useState(false);
   const [reloading, setReloading] = useState(false);
@@ -174,7 +180,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const trashedSkills = catalog.trash ?? [];
   const visibleQuery = search.trim().toLowerCase();
   const filteredSkills = visibleQuery
-    ? activeSkills.filter((entry) => `${entry.name} ${entry.directory} ${entry.source}`.toLowerCase().includes(visibleQuery))
+    ? activeSkills.filter((entry) => `${entry.name} ${entry.description ?? ''} ${entry.whenToUse ?? ''} ${entry.directory} ${entry.source}`.toLowerCase().includes(visibleQuery))
     : activeSkills;
   const filteredTrash = visibleQuery
     ? trashedSkills.filter((entry) => `${entry.name} ${entry.directory}`.toLowerCase().includes(visibleQuery))
@@ -251,6 +257,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     creatingSkill.current = false;
     setPageError(null);
     setPendingSelection(null);
+    setEditingDocument(false);
     setSelection(next);
   };
 
@@ -276,19 +283,19 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   };
 
   const syncHasChanges = syncDraft !== syncEnabled;
-  const requestHubNavigation = (pageId: string) => {
+  const requestHubNavigation = (pageId: string, pluginId?: string) => {
     if (detailDirty || syncHasChanges) {
-      setPendingHubPage(pageId);
+      setPendingHubPage({ pageId, pluginId });
       return;
     }
-    onNavigate(pageId);
+    onNavigate(pageId, pluginId);
   };
   const discardAndNavigate = () => {
     if (!pendingHubPage) return;
     discardDrafts();
     setSyncDraft(syncEnabled);
     setSelection({ kind: 'list' });
-    onNavigate(pendingHubPage);
+    onNavigate(pendingHubPage.pageId, pendingHubPage.pluginId);
     setPendingHubPage(null);
   };
   const navigationPrompt = pendingHubPage && (
@@ -542,43 +549,46 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       ? selectedTrash?.name ?? 'Deleted Skill'
       : selectedSkill?.name ?? 'Skill details';
 
-  return (
-    <div className="extension-hub-page" style={extensionHubStyle(t)}>
-      <ExtensionHubTabs bridge={bridge} active="skills" onNavigate={requestHubNavigation} />
-      <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
-      {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-      <div className="extension-hub-toolbar">
-        <input className="extension-hub-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search skills" aria-label="搜索 skills" style={searchInputStyle(t)} />
-        <div className="extension-hub-toolbar-actions">
-          <button type="button" onClick={() => requestSelection({ kind: 'create' })} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>Add <Icon name="chevron" size={12} /></button>
-          <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? 'Reloading skills' : 'Reload skills'}><Icon name="refresh" size={16} /></button>
-        </div>
-      </div>
-      {selection.kind === 'list' && navigationPrompt}
-      <div className="extension-hub-group-title">Skills · {filteredSkills.length}</div>
-      <div className="extension-hub-list">
-        {filteredSkills.map((entry) => (
-          <div className="extension-hub-row" key={entry.id}>
-            <span className="extension-hub-icon"><Icon name="sparkle" size={18} color={t.text3} /></span>
-            <button className="extension-hub-row-copy extension-hub-row-open" type="button" onClick={() => requestSelection({ kind: 'skill', id: entry.id })}>
-              <span className="extension-hub-row-title">{entry.name}</span>
-              <span className="extension-hub-row-description">{entry.description ?? entry.whenToUse ?? entry.directory}</span>
-            </button>
-            <div className="extension-hub-row-side">
-              <span className="extension-hub-row-scope">{entry.source === 'project' ? 'Project' : 'Personal'}</span>
-              <button className="extension-hub-icon-button" type="button" aria-label={`View ${entry.name} details`} onClick={() => requestSelection({ kind: 'skill', id: entry.id })}><Icon name="more" size={16} /></button>
-            </div>
-          </div>
-        ))}
-        {filteredSkills.length === 0 && <div style={{ padding: '24px 18px', color: t.text3, fontSize: 13 }}>No skills match this search.</div>}
-      </div>
+  const sourceLabels: Record<string, string> = { user: 'Personal', project: 'Project', builtin: 'System', system: 'System', plugin: 'Plugins', managed: 'Managed' };
+  const sources = [...new Set(activeSkills.map((entry) => entry.source))];
+  const activeSource = sources.includes(sourceFilter) ? sourceFilter : sources[0];
+  const sourceSkills = filteredSkills.filter((entry) => entry.source === activeSource);
+  const skillRows = (entries: SkillCatalogItem[]) => <div className="extension-hub-list">{entries.map((entry) => <button className="extension-hub-row extension-hub-row-open" type="button" key={entry.id} onClick={() => requestSelection({ kind: 'skill', id: entry.id })}>
+    <ExtensionIcon kind="skill" />
+    <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{entry.name}</span><span className="extension-hub-row-description">{entry.description || entry.whenToUse || 'Custom instructions for your workflow'}</span></span>
+    <span className="extension-skill-installed" aria-label={entry.parseError ? 'Needs attention' : 'Installed'}><ExtensionGlyph name={entry.parseError ? 'circleAlert' : 'check'} size={18} /></span>
+  </button>)}</div>;
+  const skillDescription = selectedSkill?.description || selectedSkill?.whenToUse;
+  const previewMarkdown = selectedDocument?.markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trim() ?? '';
 
+  return (
+    <ExtensionHubLayout bridge={bridge} active="skills" onNavigate={requestHubNavigation} onClose={onClose} scopeControls={scopeControls}>
+      <ExtensionHubHeader title="Skills" description="Extend LingXi with task-specific skills" search={search} onSearch={setSearch} actions={<>
+        <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? 'Reloading skills' : 'Reload skills'}><ExtensionGlyph name="refresh" size={16} /></button>
+        <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label="Skill settings" aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
+        <button type="button" onClick={() => requestSelection({ kind: 'create' })} className="extension-hub-primary">Add <ExtensionGlyph name="plus" size={14} /></button>
+      </>} />
+      <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel="Skills" />
+      {pageError && selection.kind === 'list' && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+      {selection.kind === 'list' && navigationPrompt}
+      <section className="extension-catalog-section extension-skills-installed">
+        <h2 className="extension-hub-group-title">Installed</h2>
+        {skillRows(showAllInstalled || search ? filteredSkills : filteredSkills.slice(0, 6))}
+        {!filteredSkills.length && <div className="extension-hub-empty">{search ? 'No skills match your search.' : 'Add your first skill to give LingXi a new workflow.'}</div>}
+        {filteredSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllInstalled(!showAllInstalled)}>{showAllInstalled ? 'Show less' : `See ${filteredSkills.length - 6} more skills`}</button>}
+      </section>
+      {sources.length > 0 && <section className="extension-catalog-section extension-skills-sources">
+        <nav className="extension-catalog-tabs" aria-label="Skill sources">{sources.map((source) => <button key={source} type="button" aria-pressed={activeSource === source} onClick={() => { setSourceFilter(source); setShowAllSource(false); }}>{sourceLabels[source] ?? source}</button>)}</nav>
+        {skillRows(showAllSource || search ? sourceSkills : sourceSkills.slice(0, 6))}
+        {!sourceSkills.length && <div className="extension-hub-empty">No matching skills in this source.</div>}
+        {sourceSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllSource(!showAllSource)}>{showAllSource ? 'Show less' : `See ${sourceSkills.length - 6} more skills`}</button>}
+      </section>}
       {filteredTrash.length > 0 && <details className="extension-hub-marketplaces">
         <summary>Trash · {filteredTrash.length}</summary>
         <div className="extension-hub-list">
           {filteredTrash.map((entry) => (
             <button className="extension-hub-row extension-hub-row-open" key={entry.id} type="button" onClick={() => requestSelection({ kind: 'trash', id: entry.id })}>
-              <span className="extension-hub-icon"><Icon name="archive" size={18} color={t.text3} /></span>
+              <span className="extension-hub-icon"><ExtensionGlyph name="archive" size={18} color={t.text3} /></span>
               <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{entry.name}</span><span className="extension-hub-row-description">{entry.directory}</span></span>
             </button>
           ))}
@@ -586,13 +596,14 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       </details>}
 
       {selection.kind !== 'list' && <div className="extension-detail-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) requestSelection({ kind: 'list' }); }}>
-        <section ref={dialogRef} tabIndex={-1} className="extension-detail-dialog" role="dialog" aria-modal="true" aria-label={`${detailTitle} details`} style={extensionHubStyle(t)}>
-          <header className="extension-detail-head">
-            <span className="extension-hub-icon"><Icon name="sparkle" size={20} color={t.text3} /></span>
-            <div className="extension-detail-head-copy">
-              <div className="extension-detail-title-line"><span className="extension-detail-title">{detailTitle}</span><span className="extension-detail-kind">Skill</span></div>
-            </div>
-            <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label="Close details" onClick={() => requestSelection({ kind: 'list' })}><Icon name="x" size={17} /></button>
+        <section ref={dialogRef} tabIndex={-1} className="extension-detail-dialog extension-skill-dialog" role="dialog" aria-modal="true" aria-label={`${detailTitle} details`} style={extensionHubStyle(t)}>
+          <header className="extension-detail-head extension-skill-head">
+            <div className="extension-skill-topline"><ExtensionIcon kind="skill" /><div className="extension-hub-toolbar-actions">
+              {selectedSkill && <details className="extension-hub-menu"><summary className="extension-hub-icon-button" aria-label="Skill actions"><ExtensionGlyph name="more" size={16} /></summary><div className="extension-hub-menu-popover"><button type="button" disabled={!selectedDocument} onClick={(event) => { setEditingDocument(true); event.currentTarget.closest('details')?.removeAttribute('open'); }}>{selectedDocument?.writable ? 'Edit skill' : 'View source'}</button></div></details>}
+              <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label="Close details" onClick={() => requestSelection({ kind: 'list' })}><ExtensionGlyph name="x" size={16} /></button>
+            </div></div>
+            <div className="extension-detail-title-line"><h2 className="extension-detail-title">{detailTitle}</h2><span className="extension-detail-kind">Skill</span></div>
+            {skillDescription && <p className="extension-skill-description">{skillDescription}</p>}
           </header>
           <div className="extension-detail-content">
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
@@ -607,12 +618,23 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
                 </div>
               </div>
             )}
-            {detail}
+            {selection.kind === 'skill' && !editingDocument ? <>
+              {selectedDocument?.parseError && <div role="alert" style={noteStyle(t, 'danger')}>{selectedDocument.parseError}</div>}
+              <div className="extension-skill-preview">{loadingDocument ? <div role="status">Loading SKILL.md…</div> : selectedDocument ? <MarkdownContent text={previewMarkdown || 'This skill has no instructions yet.'} /> : <div className="extension-hub-empty">The skill document is not available.</div>}</div>
+            </> : detail}
           </div>
+          {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
+            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} title={selectedDocument?.readonlyReason} onClick={handleTrashSkill}>Uninstall</button>
+            <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
+              if (!selectedSkill) return;
+              setTryingSkill(true);
+              void bridge.runSlashCommand(`/${selectedSkill.name}`).then(onClose).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to start this skill.')).finally(() => setTryingSkill(false));
+            }}><ExtensionGlyph name="chat" size={16} />Try now</button>
+          </footer>}
         </section>
       </div>}
 
-      {selection.kind === 'list' && <details className="extension-hub-secondary-settings">
+      {showSettings && selection.kind === 'list' && <details open className="extension-hub-secondary-settings">
         <summary>Claude.ai sync</summary>
         <Card>
           <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
@@ -654,6 +676,6 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
           ))}
         </Card>
       </details>}
-    </div>
+    </ExtensionHubLayout>
   );
 }

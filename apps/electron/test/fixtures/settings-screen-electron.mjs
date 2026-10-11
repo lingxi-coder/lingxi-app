@@ -265,18 +265,22 @@ async function runLayerReseedScenario(webContents) {
     'window.__settingsScreenTest.setLayeredSnapshot({ user: { pluginConfigs: { "a@b": { from: "user" } } }, project: { pluginConfigs: { "a@b": { from: "project" } } } })',
   );
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("plugins")');
+  await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === 'Personal').click()`);
   await webContents.executeJavaScript(`(() => {
     const row = document.querySelector('.configuration-entry .extension-hub-row-open');
     if (!row) throw new Error('missing installed plugin configuration row');
     row.click();
   })()`);
-  await waitFor(webContents, 'Boolean(document.querySelector(".extension-detail-dialog"))');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-plugin-page"))');
+  await webContents.executeJavaScript(`document.querySelector('.extension-plugin-configuration summary').click()`);
   const configInitial = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
   await webContents.executeJavaScript('window.__settingsScreenTest.setFieldValue(\'[aria-label="a@b 配置"]\', "not even json")');
   const configDirty = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
   await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
-  await waitFor(webContents, '!document.querySelector(".extension-detail-dialog") && Boolean(document.querySelector(".configuration-entry .extension-hub-row-open"))');
+  await waitFor(webContents, '!document.querySelector(".extension-plugin-page")');
+  await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === 'Personal').click()`);
   await webContents.executeJavaScript(`document.querySelector('.configuration-entry .extension-hub-row-open').click()`);
+  await webContents.executeJavaScript(`document.querySelector('.extension-plugin-configuration summary').click()`);
   await waitFor(webContents, 'Boolean(document.querySelector(\'[aria-label="a@b 配置"]\'))');
   const configAfterSwitch = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
 
@@ -447,6 +451,7 @@ async function runVisualAdminScenario(window, webContents) {
       await delay(50);
     }
     if (page === 'plugins') {
+      await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === 'Personal').click()`);
       await webContents.executeJavaScript(`(() => {
         const row = document.querySelector('.configuration-entry .extension-hub-row-open');
         if (!row) throw new Error('missing installed plugin configuration row');
@@ -672,7 +677,7 @@ async function runConfigurationNavigation(window, webContents) {
     const initialList = page === 'skills'
       ? await run(`Boolean(document.querySelector('.extension-hub-page')) && !document.querySelector('.extension-detail-dialog')`)
       : await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
-    const searchLabel = page === 'skills' ? '搜索 skills' : '搜索 MCP 服务器';
+    const searchLabel = page === 'skills' ? 'Search skills' : 'Search tools';
     const query = page === 'skills' ? 'release-notes' : 'context7';
     await run(`window.__settingsScreenTest.setFieldValue(${JSON.stringify(`[aria-label="${searchLabel}"]`)}, ${JSON.stringify(query)})`);
     await delay(40);
@@ -723,6 +728,105 @@ async function runConfigurationNavigation(window, webContents) {
   return results;
 }
 
+async function runCustomizeScenario(window, webContents) {
+  window.setSize(1512, 982);
+  const run = (code) => webContents.executeJavaScript(code);
+  const click = async (selector) => {
+    await run(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) throw new Error('missing ' + ${JSON.stringify(selector)}); el.click(); })()`);
+    await delay(40);
+  };
+  const button = async (text) => {
+    await run(`(() => { const el = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === ${JSON.stringify(text)}); if (!el) throw new Error('missing button ' + ${JSON.stringify(text)}); el.click(); })()`);
+    await delay(40);
+  };
+  const capture = async (name) => {
+    const dir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+    if (!dir) return;
+    window.showInactive();
+    await delay(120);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${process.env.LINGXI_SETTINGS_SCREEN_THEME || 'light'}-customize-${name}.png`), (await window.capturePage()).toPNG());
+  };
+  const names = ['Accessibility', 'Agent Browser', 'Apple Design', 'Artifacts Builder', 'Code Review', 'Frontend Design', 'Release Notes', 'Project Review'];
+  const descriptions = ['Audit and improve web accessibility following WCAG guidelines.', 'Browser automation for everyday tasks and testing.', 'Build clear interfaces with thoughtful motion and typography.', 'Create interactive artifacts for your workflow.', 'Review changes for correctness and maintainability.', 'Design distinctive, production-ready interfaces.', 'Turn commits into release notes for your users.', 'Review changes in the current project.'];
+  const entries = names.map((name, index) => ({ id: `skill-${index}`, name, source: index === 7 ? 'project' : 'user', rootDir: '/test/skills', directory: `/test/skills/${index}`, writable: true, description: descriptions[index] }));
+  const markdown = '---\ndescription: Audit and improve accessibility.\n---\nComprehensive accessibility guidelines for usable interfaces.\n\n### Principles\n\n| Principle | Description |\n| --- | --- |\n| Perceivable | Present information in ways users can perceive. |\n| Operable | Make all functionality available from a keyboard. |\n| Understandable | Use clear labels and predictable interactions. |\n| Robust | Support assistive technologies. |\n\n### Review checklist\n\n- Check keyboard navigation and visible focus.\n- Verify text contrast and meaningful labels.\n- Test reduced motion and zoom.\n\n### Conformance\n\n| Level | Requirement |\n| --- | --- |\n| A | Essential accessibility |\n| AA | Standard compliance |\n';
+  const installed = [
+    { id: 'secure@acme', name: 'Secure Tools', display_name: 'Secure Tools', version: '1.2.0', description: 'Project automation with secure configuration.' },
+    { id: 'design@acme', name: 'Design', version: '1.0.0', description: 'Design tools for your workspace.' },
+  ];
+  const available = [
+    { id: 'review@acme', name: 'Code Review', marketplace: 'Popular', description: 'Review pull requests and find actionable improvements.', version: '2.0.0' },
+    { id: 'browser@acme', name: 'Browser Tools', marketplace: 'Popular', description: 'Navigate, test, and automate the web.' },
+    { ...installed[0], marketplace: 'Popular', installed: true },
+    { id: 'docs@acme', name: 'Documents', marketplace: 'Popular', description: 'Create and organize documents in your workspace.' },
+    { id: 'notes@acme', name: 'Release Notes', marketplace: 'Popular', description: 'Turn your changes into clear release notes.' },
+    { id: 'diagram@acme', name: 'Diagrams', marketplace: 'Popular', description: 'Explore ideas with visual diagrams.' },
+    { ...installed[1], marketplace: 'New & Noteworthy', installed: true },
+    { id: 'terminal@acme', name: 'Terminal Tools', marketplace: 'New & Noteworthy', description: 'Work with your local development tools.' },
+  ];
+  await run(`window.__settingsScreenTest.setExtensionCatalogs(${JSON.stringify({ skills: { entries, trash: [] }, document: { ...entries[0], revision: 'a'.repeat(64), markdown }, plugins: { installed, available, revisions: { user: 'a'.repeat(64), project: 'b'.repeat(64) } } })})`);
+  await run('window.__settingsScreenTest.selectPage("plugins")');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-hub-list"))');
+  await capture('plugins');
+  const publicCatalog = await run('document.querySelectorAll(".extension-hub-main .extension-hub-row").length === 8');
+  const twoColumns = await run('getComputedStyle(document.querySelector(".extension-hub-list")).gridTemplateColumns.split(" ").length === 2');
+  await click('.extension-hub-row-open');
+  const inlineDetail = await run('Boolean(document.querySelector(".extension-plugin-page")) && !document.querySelector(".extension-detail-dialog")');
+  await capture('plugin-detail');
+  await button('Install plugin');
+  const beforeConfirm = await run('window.__settingsScreenTest.state().extensionCalls');
+  await button('确认执行');
+  const afterConfirm = await run('window.__settingsScreenTest.state().extensionCalls');
+  await click('.extension-breadcrumb button');
+  await click('[data-nav-page="skills"]');
+  await capture('skills');
+  const installedPreview = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 6');
+  await click('.extension-skills-installed .extension-see-more');
+  const expanded = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 8');
+  await button('Project');
+  const sourceFilter = await run('document.querySelectorAll(".extension-skills-sources .extension-hub-row").length === 1 && document.querySelector(".extension-skills-sources").textContent.includes("Project Review")');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="Search skills"]\', "contrast-missing")');
+  await delay(40);
+  const emptySearch = await run('document.querySelectorAll(".extension-hub-main .extension-hub-row").length === 0 && document.body.textContent.includes("No skills match")');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="Search skills"]\', "")');
+  await delay(40);
+  await click('.extension-skills-installed .extension-hub-row');
+  await capture('skill-detail');
+  const renderedMarkdown = await run('Boolean(document.querySelector(".extension-skill-preview table")) && !document.querySelector(".extension-skill-preview").textContent.includes("description:") && !document.querySelector(".extension-skill-dialog textarea")');
+  const modalCentered = await run('(() => {const rect=document.querySelector(".extension-skill-dialog").getBoundingClientRect();return Math.abs(rect.x + rect.width / 2 - innerWidth / 2) < 2;})()');
+  await webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+  await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+  const trappedFocus = await run('document.querySelector(".extension-skill-dialog").contains(document.activeElement)');
+  await click('[aria-label="Skill actions"]');
+  await button('Edit skill');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="Accessibility markdown"]\', "# Edited instructions")');
+  await delay(40);
+  await click('[aria-label="Close details"]');
+  const dirtyGuard = await run('Boolean(document.querySelector(".extension-skill-dialog")) && document.body.textContent.includes("丢弃并切换")');
+  await button('继续编辑');
+  const retainedDraft = await run('document.querySelector(\'[aria-label="Accessibility markdown"]\').value === "# Edited instructions"');
+  await click('[aria-label="Close details"]');
+  await button('丢弃并切换');
+  await click('[data-nav-page="mcp"]');
+  await capture('tools');
+  const tools = await run('document.querySelector(".extension-hub-heading h1").textContent === "Tools" && Boolean(document.querySelector(".configuration-entry"))');
+  await run('[...document.querySelectorAll(".extension-sidebar-installed button")].find(el => el.textContent.includes("Secure Tools")).click()');
+  await delay(60);
+  const sidebarDeepLink = await run('document.querySelector(".extension-plugin-title-row h1")?.textContent === "Secure Tools"');
+  await click('.extension-plugin-configuration summary');
+  await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="secure@acme 配置"]\', \'{"option":"draft"}\')');
+  await delay(40);
+  await click('[data-nav-page="skills"]');
+  const pluginDraftGuard = await run('document.body.textContent.includes("Discard and switch") && Boolean(document.querySelector(".extension-plugin-page"))');
+  await button('Discard and switch');
+  window.setSize(760, 720);
+  await delay(80);
+  await capture('narrow');
+  const narrow = await run('getComputedStyle(document.querySelector(".extension-hub-list")).gridTemplateColumns.split(" ").length === 1 && document.querySelector(".extension-hub-main").scrollWidth <= document.querySelector(".extension-hub-main").clientWidth + 1');
+  return { publicCatalog, twoColumns, inlineDetail, beforeConfirm, afterConfirm, installedPreview, expanded, sourceFilter, emptySearch, renderedMarkdown, modalCentered, trappedFocus, dirtyGuard, retainedDraft, tools, sidebarDeepLink, pluginDraftGuard, narrow };
+}
+
 async function main() {
   await app.whenReady();
   const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
@@ -733,6 +837,7 @@ async function main() {
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest?.state().settingsSnapshotReady && document.querySelector(\'[role="dialog"]\'))');
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
     const result = scenario === 'provider-region' ? await runProviderRegionScenario(window, webContents)
+      : scenario === 'customize' ? await runCustomizeScenario(window, webContents)
       : scenario === 'configuration-navigation' ? await runConfigurationNavigation(window, webContents)
       : scenario === 'provider-session-isolation' ? await runProviderSessionIsolation(webContents)
       : scenario === 'custom-providers' ? await runCustomProvidersScenario(window, webContents)

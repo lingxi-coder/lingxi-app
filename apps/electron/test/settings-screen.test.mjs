@@ -358,3 +358,14 @@ test('provider region saves a layer and applies only through reconnect', async (
   assert.equal(result.pending, true);
   assert.equal(result.restarted, true);
 });
+
+test('Customize catalogs, plugin lifecycle, skill preview, draft guards, and responsive layout work together', async () => {
+  const { beforeConfirm, afterConfirm, ...checks } = await runScenario('customize');
+  for (const [name, passed] of Object.entries(checks)) assert.equal(passed, true, name);
+  assert.equal(beforeConfirm.filter(({ command }) => command.action === 'apply_operation').length, 0);
+  const preview = beforeConfirm.find(({ command }) => command.action === 'preview_operation');
+  assert.deepEqual(JSON.parse(preview.command.payload_json), { action: 'install', plugin: 'review@acme', scope: 'user' });
+  const applied = afterConfirm.find(({ command }) => command.action === 'apply_operation');
+  assert.equal(applied.command.revision, 'a'.repeat(64));
+  assert.deepEqual(JSON.parse(applied.command.payload_json), { action: 'install', plugin: 'review@acme', scope: 'user', confirmed: true });
+});

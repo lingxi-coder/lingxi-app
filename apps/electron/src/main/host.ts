@@ -797,8 +797,11 @@ export class HostController {
     this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
-        const project = this.requireProject(projectPath);
-        return this.removeProjectInternal(project);
+        // Remove the saved list entry even if its directory has moved or now
+        // resolves through a symlink to a different path. Cleanup uses this key.
+        if (typeof projectPath !== 'string') throw new Error('invalid project path');
+        if (!this.settings.hasProject(projectPath)) throw new Error('project is not in the project list');
+        return this.removeProjectInternal(projectPath);
       });
     });
     this.ipc.handle(CH_SESSION_PIN_SET, (event: IpcMainInvokeEvent, input: unknown, pinned: unknown) => {
@@ -1680,18 +1683,31 @@ export class HostController {
     });
   }
 
+  private hasRetainedProjectForDirectory(project: string): boolean {
+    let directory: string;
+    try { directory = canonicalWorkspace(project); }
+    catch { return false; }
+    return this.settings.getPublic().projects.some((other) => {
+      if (other === project) return false;
+      try { return canonicalWorkspace(other) === directory; }
+      catch { return false; }
+    });
+  }
+
   private async removeProjectInternal(project: string): Promise<BootstrapState> {
     if (this.isProjectClosing(project)) throw new Error('project is closing');
     if (this.bridge.hasActiveWork(project)) throw new Error('cancel active turns and pending interactions before removing a project');
-    // Set the host-side guard before invoking the manager. The manager then
-    // synchronously removes matching runtimes from its routable map before its
-    // first await, so a racing prompt cannot enter a disposing runtime.
-    if (this.scheduled) {
+    // Schedules live in the directory, so another saved path to the same
+    // directory must keep its tasks running when only this entry is removed.
+    if (this.scheduled && !this.hasRetainedProjectForDirectory(project)) {
       const jobs = await this.scheduled.manage(project, { action: 'list' });
       for (const job of jobs) if (job.automation?.status === 'active') {
         await this.scheduled.manage(project, { action: 'pause', id: job.id, automation: { ...job.automation, status: 'paused', statusReason: 'Project was removed. Add the project again to resume.' } });
       }
     }
+    // Set the host-side guard before invoking the manager. The manager then
+    // synchronously removes matching runtimes from its routable map before its
+    // first await, so a racing prompt cannot enter a disposing runtime.
     this.closingProjects.add(project);
     try {
       if (this.bridge.hasActiveWork(project)) throw new Error('cancel active work and pending interactions before removing a project');

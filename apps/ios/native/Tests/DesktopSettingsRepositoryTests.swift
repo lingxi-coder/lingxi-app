@@ -134,6 +134,64 @@ final class DesktopSettingsRepositoryTests: XCTestCase {
         XCTAssertEqual(repository.errorMessage, "revision conflict")
     }
 
+    func testSkillCatalogRetainsLoneSurrogateDistinctFromReplacementAndPairedText() throws {
+        let json = #"{"entries":[{"id":"command:re\ud800view","name":"re\ud800view","source":"plugin","writable":false,"revision":null},{"id":"command:re\ufffdview","name":"re\ufffdview","source":"plugin","writable":false,"revision":null},{"id":"ordinary","name":"pair\ud83d\ude03","source":"bundled","writable":false,"revision":"sha"},{"id":"plain","name":"plain","source":"user","writable":true}],"trash":[{"trashId":"trash:\ud800","name":"old","source":"trash","revision":null}]}"#
+        let catalog = try XCTUnwrap(SkillAdminCatalog.parse(json))
+
+        let lone = try XCTUnwrap(catalog.entries.first { $0.name.codeUnits == [0x0072, 0x0065, 0xd800, 0x0076, 0x0069, 0x0065, 0x0077] })
+        let replacement = try XCTUnwrap(catalog.entries.first { $0.identity.codeUnits == Array("command:re�view".utf16) })
+        XCTAssertNotEqual(lone.identity, replacement.identity)
+        XCTAssertEqual(lone.name.codeUnits, [0x0072, 0x0065, 0xd800, 0x0076, 0x0069, 0x0065, 0x0077])
+        XCTAssertEqual(lone.name.displayValue, "re�view")
+        XCTAssertNil(lone.revision)
+
+        let paired = try XCTUnwrap(catalog.entries.first { $0.id == SkillAdminIdentity(codeUnits: Array("ordinary".utf16)).id })
+        XCTAssertEqual(paired.name.codeUnits, Array("pair😃".utf16))
+        XCTAssertEqual(paired.name.displayValue, "pair😃")
+        XCTAssertEqual(catalog.entries.first { $0.id == SkillAdminIdentity(codeUnits: Array("plain".utf16)).id }?.name.displayValue, "plain")
+        XCTAssertEqual(catalog.trash.first?.identity.codeUnits, Array("trash:".utf16) + [0xd800])
+        XCTAssertNil(catalog.trash.first?.revision)
+    }
+
+    func testSkillCatalogUsesLastDuplicateIdentityAndRejectsMalformedJSON() throws {
+        let duplicateKeyJSON = #"{"entries":[{"id":"discarded","id":"command:re\ud800view","name":"re\ud800view","source":"plugin","writable":false}],"trash":[]}"#
+        let catalog = try XCTUnwrap(SkillAdminCatalog.parse(duplicateKeyJSON))
+        XCTAssertEqual(catalog.entries.first?.identity.codeUnits, Array("command:re".utf16) + [0xd800] + Array("view".utf16))
+
+        XCTAssertNil(SkillAdminCatalog.parse(#"{"entries":[{"id":"bad\x20","name":"bad","source":"user","writable":true}],"trash":[]}"#))
+        XCTAssertNil(SkillAdminCatalog.parse(#"{"entries":[{"id":"bad","name":"bad","source":"user","writable":true},],"trash":[]}"#))
+    }
+
+    func testSkillDocumentCorrelationAndAdminSubmissionKeepExactIdentityUnits() async throws {
+        let loneUnits = Array("command:re".utf16) + [0xd800] + Array("view".utf16)
+        let replacementUnits = Array("command:re�view".utf16)
+        let loneIdentity = SkillAdminIdentity(codeUnits: loneUnits)
+        let replacementIdentity = SkillAdminIdentity(codeUnits: replacementUnits)
+        let loneDocumentJSON = #"{"id":"command:re\ud800view","name":"re\ud800view","source":"plugin","markdown":"lone","writable":false,"revision":"r1"}"#
+        let replacementDocumentJSON = #"{"id":"command:re\ufffdview","name":"re\ufffdview","source":"plugin","markdown":"replacement","writable":false,"revision":"r2"}"#
+        let loneDocument = try XCTUnwrap(SkillAdminDocument.parse(loneDocumentJSON))
+        let replacementDocument = try XCTUnwrap(SkillAdminDocument.parse(replacementDocumentJSON))
+
+        XCTAssertTrue(loneDocument.matches(selectedIdentity: loneIdentity))
+        XCTAssertFalse(replacementDocument.matches(selectedIdentity: loneIdentity))
+        XCTAssertTrue(replacementDocument.matches(selectedIdentity: replacementIdentity))
+
+        let repository = DesktopSettingsRepository()
+        var submitted: [ClientCommand] = []
+        repository.configure { command in submitted.append(command) }
+        repository.consume(.skillCatalog(catalogJson: #"{"entries":[{"id":"command:re\ud800view","name":"re\ud800view","source":"plugin","writable":false}],"trash":[]}"#))
+        repository.consume(.skillDocument(documentJson: loneDocumentJSON))
+        XCTAssertEqual(repository.skillCatalog?.entries.first?.identity, loneIdentity)
+        XCTAssertEqual(repository.skillDocument?.identity, loneIdentity)
+
+        await repository.admin(domain: "skill", action: "get_document", skillTarget: loneIdentity)
+        let command = try XCTUnwrap(submitted.compactMap { item -> SkillAdminCommandDto? in
+            guard case let .skillAdmin(command) = item else { return nil }
+            return command
+        }.last)
+        XCTAssertEqual(command.target?.codeUnits, loneUnits)
+    }
+
     func testAdvancedProvidersRejectInlineSecretsBeforeSubmission() async {
         let repository = DesktopSettingsRepository()
         var mutations = 0

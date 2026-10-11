@@ -229,15 +229,14 @@ struct DesktopMCPAdminPage: View {
 
 struct DesktopSkillsAdminPage: View {
     @State private var repository = DesktopSettingsRepository.shared
-    @State private var target: String?
+    @State private var target: SkillAdminIdentity?
     @State private var scope = "user"
     @State private var name = ""
     @State private var markdown = ""
     @State private var revision: String?
     @State private var writable = false
-    private var catalog: [String: Any] { DesktopSettingsRepository.object(repository.catalogs["skill"] ?? "{}") ?? [:] }
-    private var entries: [[String: Any]] { catalog["entries"] as? [[String: Any]] ?? [] }
-    private var trash: [[String: Any]] { catalog["trash"] as? [[String: Any]] ?? [] }
+    private var entries: [SkillAdminCatalogEntry] { repository.skillCatalog?.entries ?? [] }
+    private var trash: [SkillAdminTrashEntry] { repository.skillCatalog?.trash ?? [] }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
@@ -246,14 +245,13 @@ struct DesktopSkillsAdminPage: View {
                 Button("settings_parity_create_skill") { target = nil; name = ""; markdown = ""; revision = nil; writable = true }
                     .disabled(!repository.connected)
             }
-            ForEach(entries.compactMap { $0["id"] as? String }, id: \.self) { id in
-                let row = entries.first { $0["id"] as? String == id }
+            ForEach(entries) { entry in
                 Button {
-                    target = id
+                    target = entry.identity
                     writable = false
-                    Task { await repository.admin(domain: "skill", action: "get_document", target: id) }
+                    Task { await repository.admin(domain: "skill", action: "get_document", skillTarget: entry.identity) }
                 } label: {
-                    HStack { Text(row?["name"] as? String ?? id); Spacer(); Text(row?["source"] as? String ?? "").foregroundStyle(.secondary) }
+                    HStack { Text(entry.name.displayValue); Spacer(); Text(entry.source).foregroundStyle(.secondary) }
                 }
             }
             if writable || target != nil {
@@ -271,35 +269,35 @@ struct DesktopSkillsAdminPage: View {
                         Button("settings_parity_project_layer") { move(to: "project") }.disabled(scope == "project")
                     }.disabled(repository.saving)
                     Button("settings_parity_skill_trash", role: .destructive) {
-                        Task { await repository.admin(domain: "skill", action: "trash_skill", target: target, scope: scope, revision: revision, mutation: true) }
+                        Task { await repository.admin(domain: "skill", action: "trash_skill", skillTarget: target, scope: scope, revision: revision, mutation: true) }
                     }.disabled(repository.saving)
                 }
             }
             if !trash.isEmpty {
                 Text("Trash").font(.headline)
-                ForEach(trash.compactMap { $0["trashId"] as? String }, id: \.self) { id in
-                    Button("Restore \(trash.first { $0["trashId"] as? String == id }?["name"] as? String ?? id)") {
-                        Task { await repository.admin(domain: "skill", action: "restore_skill", target: id,
-                                                      scope: trash.first { $0["trashId"] as? String == id }?["source"] as? String ?? "user", mutation: true) }
+                ForEach(trash) { entry in
+                    Button("Restore \(entry.name.displayValue)") {
+                        Task { await repository.admin(domain: "skill", action: "restore_skill", skillTarget: entry.identity,
+                                                      scope: entry.source, mutation: true) }
                     }.disabled(repository.saving)
                 }
             }
             LayeredSettingsPage(keys: ["syncClaudeAiSkills"])
         }.task(id: repository.sourceGeneration) { await load() }
         .onChange(of: repository.sourceGeneration) { _, _ in target = nil; markdown = ""; revision = nil; writable = false }
-        .onChange(of: repository.catalogs["skill"]) { _, _ in
-            if let target, !entries.contains(where: { $0["id"] as? String == target }) {
+        .onChange(of: repository.skillCatalog) { _, catalog in
+            if let target, catalog?.entries.contains(where: { $0.identity == target }) != true {
                 self.target = nil; writable = false; markdown = ""; revision = nil
             }
         }
-        .onChange(of: repository.documents["skill"]) { _, json in
-            guard let json, let doc = DesktopSettingsRepository.object(json), doc["id"] as? String == target || target == nil else { return }
-            target = doc["id"] as? String
-            name = doc["name"] as? String ?? ""
-            markdown = doc["markdown"] as? String ?? ""
-            scope = doc["source"] as? String ?? "user"
-            revision = doc["revision"] as? String
-            writable = doc["writable"] as? Bool ?? false
+        .onChange(of: repository.skillDocument) { _, document in
+            guard let document, document.matches(selectedIdentity: target) else { return }
+            target = document.identity
+            name = document.name.displayValue
+            markdown = document.markdown
+            scope = document.source
+            revision = document.revision
+            writable = document.writable
         }
     }
     private func load() async { await repository.admin(domain: "skill", action: "get_catalog") }
@@ -307,10 +305,10 @@ struct DesktopSkillsAdminPage: View {
         let id = target
         let expectedRevision = revision
         target = nil; writable = false
-        Task { await repository.admin(domain: "skill", action: "move_skill", target: id, scope: destination, revision: expectedRevision, mutation: true) }
+        Task { await repository.admin(domain: "skill", action: "move_skill", skillTarget: id, scope: destination, revision: expectedRevision, mutation: true) }
     }
     private func save() async {
-        await repository.admin(domain: "skill", action: target == nil ? "create_skill" : "save_document", target: target, scope: scope, revision: revision,
+        await repository.admin(domain: "skill", action: target == nil ? "create_skill" : "save_document", skillTarget: target, scope: scope, revision: revision,
                                payload: DesktopSettingsRepository.json(["name": name, "markdown": markdown]), mutation: true)
     }
 }

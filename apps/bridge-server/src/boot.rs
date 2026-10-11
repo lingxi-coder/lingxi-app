@@ -640,6 +640,11 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         managed_oauth_only: false,
         anthropic_key_fd_present: false,
         cwd,
+        // Bridge-server is a local host; it exposes no remote workspace,
+        // diskless session, or pre-resolved Windows network-drive roots.
+        remote_workspace: false,
+        diskless: false,
+        trusted_network_directories: Vec::new(),
         lingxi_home,
         default_model,
         // Only a `--model` arg is an explicit per-session choice; the built-in
@@ -655,6 +660,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         custom_betas: Vec::new(),
         // The Electron host does not expose CLI `--settings` / flagSettings.
         flag_settings: None,
+        flag_settings_source: None,
         provider_profiles,
         routing,
         mcp_paths: if trusted {

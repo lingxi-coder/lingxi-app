@@ -201,9 +201,14 @@ class SettingsEngineBridge {
             check(mutable.value.pending == null) { "Wait for the current configuration operation" }
             mutable.value = mutable.value.copy(pending = id, notice = "Waiting for engine confirmation…")
         }
+        val skillTarget = target?.let { value ->
+            ClientTextDto(codeUnits = value.map { it.code.toUShort() })
+        }
         val command = when (domain) {
             "mcp" -> ClientCommand.McpAdmin(McpAdminCommandDto(action,id,target,scope,revision,payload))
-            "skills" -> ClientCommand.SkillAdmin(SkillAdminCommandDto(action,id,target,scope,revision,payload))
+            "skills" -> ClientCommand.SkillAdmin(
+                SkillAdminCommandDto(action, id, skillTarget, scope, revision, payload)
+            )
             "plugins" -> ClientCommand.PluginAdmin(PluginAdminCommandDto(action,id,target,scope,revision,payload))
             "hooks" -> ClientCommand.HookAdmin(HookAdminCommandDto(action,id,target,scope,revision,payload))
             else -> error("Unknown configuration domain")

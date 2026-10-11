@@ -918,7 +918,12 @@ pub(crate) fn resolve_desktop_config_at(
     } else {
         setting_source_flags(argv.setting_sources.as_deref())
     };
-    let flag_settings = parse_flag_settings(argv.settings.as_deref());
+    let flag_settings_source = read_flag_settings_source_checked(argv.settings.as_deref())
+        .ok()
+        .flatten();
+    let flag_settings = flag_settings_source
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
 
     let mut default_model = DesktopConfig::default().default_model;
     // Persisted `model` from settings.json (written by the `/model` picker) so the
@@ -1042,6 +1047,11 @@ pub(crate) fn resolve_desktop_config_at(
         anthropic_key_fd_present: std::env::var("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR")
             .is_ok_and(|v| !v.trim().is_empty()),
         cwd: cwd.clone(),
+        // The CLI is a local host. Native Windows mapped-drive roots need a
+        // separate filesystem-boundary resolver before they can be advertised.
+        remote_workspace: false,
+        diskless: false,
+        trusted_network_directories: Vec::new(),
         lingxi_home,
         default_model,
         // Only a `--model` flag is an EXPLICIT choice; the persisted
@@ -1069,6 +1079,7 @@ pub(crate) fn resolve_desktop_config_at(
         fallback_model,
         custom_betas: argv.betas.clone().unwrap_or_default(),
         flag_settings: flag_settings.clone(),
+        flag_settings_source: flag_settings_source.clone(),
         provider_profiles: if restricted {
             flag_settings
                 .as_ref()
@@ -1374,6 +1385,15 @@ pub(crate) fn parse_flag_settings(
 pub(crate) fn parse_flag_settings_checked(
     settings: Option<&str>,
 ) -> Result<Option<lingxi_core::settings::SettingsJson>, &'static str> {
+    Ok(read_flag_settings_source_checked(settings)?
+        .and_then(|text| serde_json::from_str(&text).ok()))
+}
+
+/// Read the exact parsed source text for `--settings`, preserving unknown
+/// fields such as the permission classifier's `autoMode` categories.
+fn read_flag_settings_source_checked(
+    settings: Option<&str>,
+) -> Result<Option<String>, &'static str> {
     let Some(raw) = settings.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -1393,7 +1413,13 @@ pub(crate) fn parse_flag_settings_checked(
             Err(_) => return Ok(None),
         }
     };
-    Ok(serde_json::from_str(&text).ok())
+    let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&text).ok();
+    let is_settings_object = source
+        .as_ref()
+        .and_then(|source| source.at_pointer(""))
+        .and_then(|root| root.object_entries())
+        .is_some();
+    Ok(is_settings_object.then_some(text))
 }
 
 /// Build the full runtime from parsed argv + the chosen output stream.
@@ -2943,6 +2969,13 @@ mod tests {
 
     #[test]
     fn parse_flag_settings_accepts_inline_json_and_file_paths() {
+        let source = r#"{"autoMode":{"allow":["\ud800"]}}"#;
+        assert_eq!(
+            read_flag_settings_source_checked(Some(source))
+                .unwrap()
+                .as_deref(),
+            Some(source)
+        );
         let inline = parse_flag_settings(Some(r#"{"workflowSizeGuideline":"large"}"#)).unwrap();
         assert_eq!(inline.workflow_size_guideline.as_deref(), Some("large"));
 

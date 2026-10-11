@@ -15,12 +15,303 @@ use client::protocol::events::ErrorKindDto;
 use client::protocol::listings::ConfigurationDomainDto;
 use client::protocol::listings::ConfigurationEffectDto;
 use client::protocol::listings::ConfigurationOperationStatusDto;
+use client::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashMap;
 
-/// Convert a source-preserving string only at the UI catalog rendering edge.
-fn display_source_text(value: &Utf16JsonProjection) -> String {
-    value.string_at("").unwrap_or_default().to_owned()
+fn source_string(value: impl Into<Utf16JsonProjection>) -> Utf16JsonProjection {
+    value.into()
+}
+
+#[cfg(test)]
+mod skill_identity_source_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use lingxi_core::host::auth::{AuthError, AuthHandle, LoginInfo};
+    use lingxi_core::host::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
+    use std::sync::{Arc, Mutex};
+
+    struct TestAuth;
+
+    #[async_trait]
+    impl AuthHandle for TestAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
+        async fn login(&self) -> Result<LoginInfo, AuthError> {
+            unreachable!("Skill Admin identity test does not log in")
+        }
+
+        async fn logout(&self) -> Result<(), AuthError> {
+            Ok(())
+        }
+
+        async fn current_user(&self) -> Option<LoginInfo> {
+            None
+        }
+    }
+
+    struct TestTasks;
+
+    #[async_trait]
+    impl TaskRegistryHandle for TestTasks {
+        async fn create(&self, _input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("Skill Admin identity test does not create tasks")
+        }
+
+        async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            unreachable!("Skill Admin identity test does not get tasks")
+        }
+
+        async fn list(
+            &self,
+            _filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            Ok(Vec::new())
+        }
+
+        async fn update(
+            &self,
+            _id: &str,
+            _patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("Skill Admin identity test does not update tasks")
+        }
+
+        async fn set_status(
+            &self,
+            _id: &str,
+            _status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("Skill Admin identity test does not change task status")
+        }
+
+        async fn kill(&self, _id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            unreachable!("Skill Admin identity test does not stop tasks")
+        }
+
+        async fn output(
+            &self,
+            _id: &str,
+            _offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            unreachable!("Skill Admin identity test does not read task output")
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingSink(Mutex<Vec<ClientEvent>>);
+
+    #[async_trait]
+    impl ClientEventSink for CapturingSink {
+        async fn emit(&self, event: ClientEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    impl CapturingSink {
+        fn take_one(&self) -> ClientEvent {
+            let mut events = self.0.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            events.pop().unwrap()
+        }
+    }
+
+    #[test]
+    fn command_skill_ids_keep_source_name_units_through_catalog_and_load_prefix() {
+        let lone = vec![u16::from(b'r'), u16::from(b'e'), 0xd800, u16::from(b'v')];
+        let replacement = vec![u16::from(b'r'), u16::from(b'e'), 0xfffd, u16::from(b'v')];
+        let name = |units: Vec<u16>| {
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("valid exact source name")
+        };
+        let lone_name = name(lone.clone());
+        let replacement_name = name(replacement.clone());
+        let lone_id = source_with_prefix("command:", &lone_name);
+        let replacement_id = source_with_prefix("command:", &replacement_name);
+
+        let entry = source_object(vec![
+            ("id".into(), lone_id.clone()),
+            ("name".into(), lone_name),
+        ]);
+        let catalog_json = entry.to_json_string().unwrap();
+        let catalog = Utf16JsonProjection::parse(&catalog_json).unwrap();
+        let id_units = catalog.string_units("/id").unwrap();
+        assert_eq!(catalog.string_units("/name"), Some(lone));
+        assert_ne!(
+            id_units,
+            replacement_id.string_units("").unwrap(),
+            "display-colliding names must retain distinct catalog ids"
+        );
+
+        let target = ClientTextDto::from_code_units(id_units);
+        let loaded_name = strip_source_prefix(&target.code_units, "command:")
+            .expect("catalog command id has a source prefix");
+        assert_eq!(
+            loaded_name,
+            [u16::from(b'r'), u16::from(b'e'), 0xd800, u16::from(b'v')]
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_command_id_loads_the_exact_colliding_plugin_document() {
+        use command_api::{
+            CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("project");
+        let home_dir = temp.path().join("home");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let lone_units = [u16::from(b'r'), u16::from(b'e'), 0xd800, u16::from(b'v')];
+        let replacement_units = [u16::from(b'r'), u16::from(b'e'), 0xfffd, u16::from(b'v')];
+        let name = |units: &[u16]| {
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+                .unwrap()
+        };
+        let make_plugin_command = |units: &[u16], directory: &std::path::Path, markdown: &str| {
+            std::fs::create_dir_all(directory).unwrap();
+            let file_path = directory.join("SKILL.md");
+            std::fs::write(&file_path, markdown).unwrap();
+            SlashCommand {
+                name: name(units),
+                description: "collision fixture".into(),
+                source: CommandSource::Plugin,
+                kind: SlashCommandKind::Plugin {
+                    plugin_id: lingxi_core::types::PluginId::new(),
+                    file_path,
+                    frontmatter: CommandFrontmatter::default(),
+                    prompt_template: markdown.into(),
+                },
+                skill_root: Some(directory.to_path_buf()),
+                ..SlashCommand::default()
+            }
+        };
+        let lone_markdown = "document selected by lone surrogate";
+        let replacement_markdown = "document selected by literal replacement character";
+        let lone_dir = temp.path().join("lone-plugin-skill");
+        let replacement_dir = temp.path().join("replacement-plugin-skill");
+        let mut registry = CommandRegistry::new();
+        registry.register_command(make_plugin_command(&lone_units, &lone_dir, lone_markdown));
+        registry.register_command(make_plugin_command(
+            &replacement_units,
+            &replacement_dir,
+            replacement_markdown,
+        ));
+
+        let settings = crate::settings_bridge::SettingsContext {
+            paths: crate::settings_bridge::SettingsPaths {
+                lingxi_home: home_dir,
+                project_dir,
+            },
+            active: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+            managed: std::collections::BTreeMap::new(),
+        };
+        let router = EngineCommandRouter::new(
+            Arc::new(orchestrator::test_support::MockOrchestratorHandle::new()),
+            Arc::new(TestAuth),
+            Arc::new(TestTasks) as Arc<dyn TaskRegistryHandle>,
+            None,
+            Some(Arc::new(tokio::sync::RwLock::new(registry))),
+        )
+        .with_settings_context(settings);
+        let sink = CapturingSink::default();
+
+        router.emit_skill_catalog(&sink).await;
+        let ClientEvent::SkillCatalog { catalog_json } = sink.take_one() else {
+            panic!("catalog request must emit the production SkillCatalog event");
+        };
+        let catalog = Utf16JsonProjection::parse(&catalog_json).unwrap();
+        let entries = catalog.array_len("/entries").unwrap();
+        let catalog_id_units = (0..entries)
+            .find_map(|index| {
+                let name_units = catalog.string_units(&format!("/entries/{index}/name"))?;
+                (name_units == lone_units.to_vec()).then(|| {
+                    catalog
+                        .string_units(&format!("/entries/{index}/id"))
+                        .unwrap()
+                })
+            })
+            .expect("catalog must contain the lone-surrogate plugin skill");
+        assert_eq!(
+            catalog_id_units,
+            [
+                "command:".encode_utf16().collect::<Vec<_>>(),
+                lone_units.to_vec()
+            ]
+            .concat()
+        );
+
+        router
+            .apply_skill_admin(
+                SkillAdminCommandDto {
+                    action: "get_document".to_string(),
+                    operation_id: None,
+                    target: Some(ClientTextDto::from_code_units(catalog_id_units.clone())),
+                    scope: None,
+                    revision: None,
+                    payload_json: None,
+                },
+                &sink,
+            )
+            .await;
+        let ClientEvent::SkillDocument { document_json } = sink.take_one() else {
+            panic!("catalog-selected ID must load a production SkillDocument");
+        };
+        let document = Utf16JsonProjection::parse(&document_json).unwrap();
+        assert_eq!(document.string_units("/id"), Some(catalog_id_units));
+        assert_eq!(document.string_units("/name"), Some(lone_units.to_vec()));
+        assert_eq!(document.string_at("/markdown"), Some(lone_markdown));
+    }
+}
+
+fn source_projection(value: &ClientTextDto) -> Utf16JsonProjection {
+    let units = value.code_units.clone();
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("ClientTextDto display is derived from its exact units")
+}
+
+fn source_with_affixes(
+    prefix: &str,
+    value: &Utf16JsonProjection,
+    suffix: &str,
+) -> Utf16JsonProjection {
+    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.extend(
+        value
+            .string_units("")
+            .expect("catalog source text fields are root strings"),
+    );
+    units.extend(suffix.encode_utf16());
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("affixing text preserves the source string")
+}
+
+fn source_with_prefix(prefix: &str, value: &Utf16JsonProjection) -> Utf16JsonProjection {
+    source_with_affixes(prefix, value, "")
+}
+
+fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProjection {
+    Utf16JsonProjection::object(fields).expect("generated skill objects have unique fields")
+}
+
+fn strip_source_prefix<'a>(units: &'a [u16], prefix: &str) -> Option<&'a [u16]> {
+    let prefix_units = prefix.encode_utf16().collect::<Vec<_>>();
+    units.strip_prefix(prefix_units.as_slice())
+}
+
+fn source_text_from_units(units: &[u16]) -> Utf16JsonProjection {
+    let units = units.to_vec();
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display is derived from exact source units")
 }
 
 /// Decode a `ClientCommand::UpsertMcpServer.config_json` wire string into the
@@ -168,120 +459,184 @@ impl EngineCommandRouter {
         };
         match skills_admin::catalog_json(&context) {
             Ok(catalog_json) => {
-                let catalog_json = match serde_json::from_str::<serde_json::Value>(&catalog_json) {
-                    Ok(mut catalog) => {
-                        let runtime_skills = self.handle.list_skills().await;
-                        let entries = catalog
-                            .get_mut("entries")
-                            .and_then(serde_json::Value::as_array_mut);
-                        if let Some(entries) = entries {
-                            let known = entries
-                                .iter()
-                                .filter_map(|entry| {
-                                    entry.get("directory").and_then(serde_json::Value::as_str)
-                                })
-                                .map(ToOwned::to_owned)
-                                .collect::<std::collections::BTreeSet<_>>();
-                            for skill in runtime_skills {
-                                let directory = skill.source_dir.to_string_lossy().into_owned();
-                                if known.contains(&directory) {
-                                    continue;
-                                }
-                                let source = if directory.starts_with('<') {
-                                    "mcp"
-                                } else if directory.starts_with(
-                                    &context
-                                        .lingxi_home
-                                        .join("plugins")
-                                        .to_string_lossy()
-                                        .into_owned(),
-                                ) {
-                                    "plugin"
-                                } else {
-                                    "runtime"
-                                };
-                                entries.push(serde_json::json!({
-                                    "id": format!("runtime:{}", skill.name),
-                                    "name": skill.name,
-                                    "source": source,
-                                    "rootDir": directory,
-                                    "directory": directory,
-                                    "writable": false,
-                                    "readonlyReason": format!("{source} skills are runtime-derived and read-only."),
-                                    "diagnosticsJson": "{\"status\":\"runtime\"}"
-                                }));
-                            }
-                            if let Some(registry) = self.slash_registry.as_ref() {
-                                let registry = registry.read().await;
-                                for command in registry.list_all() {
-                                    match &command.kind {
-                                        command_api::SlashCommandKind::Plugin {
-                                            plugin_id,
-                                            file_path,
-                                            ..
-                                        } if command.skill_root.is_some() => {
-                                            let command_name = display_source_text(&command.name);
-                                            let description =
-                                                display_source_text(&command.description);
-                                            let directory = command
-                                                .skill_root
-                                                .as_deref()
-                                                .or_else(|| file_path.parent())
-                                                .unwrap_or(file_path)
-                                                .to_string_lossy()
-                                                .into_owned();
-                                            let revision =
-                                                std::fs::read(file_path).ok().map(|bytes| {
-                                                    crate::config_admin::sha256_hex(&bytes)
-                                                });
-                                            entries.push(serde_json::json!({
-                                                "id": format!("command:{command_name}"),
-                                                "name": command_name,
-                                                "source": "plugin",
-                                                "pluginOwner": plugin_id.to_string(),
-                                                "rootDir": directory,
-                                                "directory": directory,
-                                                "writable": false,
-                                                "readonlyReason": "Plugin skills are managed by their owning plugin.",
-                                                "revision": revision,
-                                                "description": description,
-                                                "whenToUse": command.when_to_use,
-                                                "diagnosticsJson": "{\"ok\":true,\"issues\":[]}",
-                                            }));
-                                        }
-                                        command_api::SlashCommandKind::Mcp {
-                                            connection_id,
-                                            prompt_name,
-                                            ..
-                                        } => {
-                                            let command_name = display_source_text(&command.name);
-                                            let description =
-                                                display_source_text(&command.description);
-                                            let prompt_name = display_source_text(prompt_name);
-                                            let directory =
-                                                format!("<mcp:{connection_id}:{prompt_name}>");
-                                            entries.push(serde_json::json!({
-                                                "id": format!("command:{command_name}"),
-                                                "name": command_name,
-                                                "source": "mcp",
-                                                "rootDir": directory,
-                                                "directory": directory,
-                                                "writable": false,
-                                                "readonlyReason": "MCP skills are provided by the connected server.",
-                                                "description": description,
-                                                "whenToUse": command.when_to_use,
-                                                "diagnosticsJson": "{\"status\":\"runtime\"}",
-                                            }));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                        catalog.to_string()
+                let mut source_catalog = match Utf16JsonProjection::parse(&catalog_json) {
+                    Ok(catalog) => catalog,
+                    Err(_) => {
+                        sink.emit(ClientEvent::SkillCatalog { catalog_json }).await;
+                        return;
                     }
-                    Err(_) => catalog_json,
                 };
+                let runtime_skills = self.handle.list_skills().await;
+                let entry_count = source_catalog.array_len("/entries").unwrap_or_default();
+                let mut entries = (0..entry_count)
+                    .filter_map(|index| {
+                        source_catalog
+                            .subprojection(&format!("/entries/{index}"))
+                            .ok()
+                    })
+                    .collect::<Vec<_>>();
+                let known = entries
+                    .iter()
+                    .filter_map(|entry| entry.string_at("/directory").map(ToOwned::to_owned))
+                    .collect::<std::collections::BTreeSet<_>>();
+                for skill in runtime_skills {
+                    let directory = skill.source_dir.to_string_lossy().into_owned();
+                    if known.contains(&directory) {
+                        continue;
+                    }
+                    let source = if directory.starts_with('<') {
+                        "mcp"
+                    } else if directory.starts_with(
+                        &context
+                            .lingxi_home
+                            .join("plugins")
+                            .to_string_lossy()
+                            .into_owned(),
+                    ) {
+                        "plugin"
+                    } else {
+                        "runtime"
+                    };
+                    entries.push(source_object(vec![
+                        (
+                            "id".into(),
+                            source_string(format!("runtime:{}", skill.name)),
+                        ),
+                        ("name".into(), source_string(skill.name)),
+                        ("source".into(), source_string(source)),
+                        ("rootDir".into(), source_string(directory.clone())),
+                        ("directory".into(), source_string(directory)),
+                        (
+                            "writable".into(),
+                            Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                        ),
+                        (
+                            "readonlyReason".into(),
+                            source_string(format!(
+                                "{source} skills are runtime-derived and read-only."
+                            )),
+                        ),
+                        (
+                            "diagnosticsJson".into(),
+                            source_string("{\"status\":\"runtime\"}"),
+                        ),
+                    ]));
+                }
+                if let Some(registry) = self.slash_registry.as_ref() {
+                    let registry = registry.read().await;
+                    for command in registry.list_all() {
+                        match &command.kind {
+                            command_api::SlashCommandKind::Plugin {
+                                plugin_id,
+                                file_path,
+                                ..
+                            } if command.skill_root.is_some() => {
+                                let directory = command
+                                    .skill_root
+                                    .as_deref()
+                                    .or_else(|| file_path.parent())
+                                    .unwrap_or(file_path)
+                                    .to_string_lossy()
+                                    .into_owned();
+                                let revision = std::fs::read(file_path)
+                                    .ok()
+                                    .map(|bytes| crate::config_admin::sha256_hex(&bytes));
+                                entries.push(source_object(vec![
+                                    ("id".into(), source_with_prefix("command:", &command.name)),
+                                    ("name".into(), command.name.clone()),
+                                    ("source".into(), source_string("plugin")),
+                                    ("pluginOwner".into(), source_string(plugin_id.to_string())),
+                                    ("rootDir".into(), source_string(directory.clone())),
+                                    ("directory".into(), source_string(directory)),
+                                    (
+                                        "writable".into(),
+                                        Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                                    ),
+                                    (
+                                        "readonlyReason".into(),
+                                        source_string(
+                                            "Plugin skills are managed by their owning plugin.",
+                                        ),
+                                    ),
+                                    (
+                                        "revision".into(),
+                                        revision.map(|value| source_string(value)).unwrap_or_else(
+                                            || {
+                                                Utf16JsonProjection::parse("null")
+                                                    .expect("null JSON")
+                                            },
+                                        ),
+                                    ),
+                                    ("description".into(), command.description.clone()),
+                                    (
+                                        "whenToUse".into(),
+                                        command
+                                            .when_to_use
+                                            .clone()
+                                            .map(|value| source_string(value))
+                                            .unwrap_or_else(|| {
+                                                Utf16JsonProjection::parse("null")
+                                                    .expect("null JSON")
+                                            }),
+                                    ),
+                                    (
+                                        "diagnosticsJson".into(),
+                                        source_string("{\"ok\":true,\"issues\":[]}"),
+                                    ),
+                                ]));
+                            }
+                            command_api::SlashCommandKind::Mcp {
+                                connection_id,
+                                prompt_name,
+                                ..
+                            } => {
+                                let directory = source_with_affixes(
+                                    &format!("<mcp:{connection_id}:"),
+                                    prompt_name,
+                                    ">",
+                                );
+                                entries.push(source_object(vec![
+                                    ("id".into(), source_with_prefix("command:", &command.name)),
+                                    ("name".into(), command.name.clone()),
+                                    ("source".into(), source_string("mcp")),
+                                    ("rootDir".into(), directory.clone()),
+                                    ("directory".into(), directory),
+                                    (
+                                        "writable".into(),
+                                        Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                                    ),
+                                    (
+                                        "readonlyReason".into(),
+                                        source_string(
+                                            "MCP skills are provided by the connected server.",
+                                        ),
+                                    ),
+                                    ("description".into(), command.description.clone()),
+                                    (
+                                        "whenToUse".into(),
+                                        command
+                                            .when_to_use
+                                            .clone()
+                                            .map(|value| source_string(value))
+                                            .unwrap_or_else(|| {
+                                                Utf16JsonProjection::parse("null")
+                                                    .expect("null JSON")
+                                            }),
+                                    ),
+                                    (
+                                        "diagnosticsJson".into(),
+                                        source_string("{\"status\":\"runtime\"}"),
+                                    ),
+                                ]));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Ok(entries) = Utf16JsonProjection::array(entries) {
+                    let _ = source_catalog.set_field("entries", entries);
+                }
+                let catalog_json = source_catalog.to_json_string().unwrap_or(catalog_json);
                 sink.emit(ClientEvent::SkillCatalog { catalog_json }).await
             }
             Err(message) => {
@@ -293,7 +648,11 @@ impl EngineCommandRouter {
             }
         }
     }
-    pub(super) async fn emit_skill_document(&self, skill_id: &str, sink: &dyn ClientEventSink) {
+    pub(super) async fn emit_skill_document(
+        &self,
+        skill_id: &ClientTextDto,
+        sink: &dyn ClientEventSink,
+    ) {
         let Some(context) = self.skills_admin_context() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
@@ -301,8 +660,9 @@ impl EngineCommandRouter {
             }).await;
             return;
         };
-        if let Some(name) = skill_id.strip_prefix("command:") {
-            let name = Utf16JsonProjection::from(name);
+        let target_units = skill_id.code_units.as_slice();
+        if let Some(name_units) = strip_source_prefix(target_units, "command:") {
+            let name = source_text_from_units(name_units);
             let command = match self.slash_registry.as_ref() {
                 Some(registry) => registry.read().await.resolve(&name).cloned(),
                 None => None,
@@ -313,8 +673,7 @@ impl EngineCommandRouter {
                         plugin_id,
                         file_path,
                         ..
-                    } if command.skill_root.is_some() => {
-                        let command_name = display_source_text(&command.name);
+                    } if command.skill_root.is_some() => Some({
                         let markdown = std::fs::read_to_string(&file_path).unwrap_or_default();
                         let directory = command
                             .skill_root
@@ -323,59 +682,83 @@ impl EngineCommandRouter {
                             .unwrap_or(&file_path)
                             .to_string_lossy()
                             .into_owned();
-                        serde_json::json!({
-                            "id": skill_id,
-                            "name": command_name,
-                            "source": "plugin",
-                            "pluginOwner": plugin_id.to_string(),
-                            "directory": directory,
-                            "rootDir": directory,
-                            "markdown": markdown,
-                            "writable": false,
-                            "revision": crate::config_admin::sha256_hex(markdown.as_bytes()),
-                            "readonlyReason": "Plugin skills are managed by their owning plugin.",
-                            "diagnosticsJson": "{\"ok\":true,\"issues\":[]}",
-                        })
-                    }
+                        let revision = crate::config_admin::sha256_hex(markdown.as_bytes());
+                        source_object(vec![
+                            ("id".into(), source_projection(skill_id)),
+                            ("name".into(), command.name.clone()),
+                            ("source".into(), source_string("plugin")),
+                            ("pluginOwner".into(), source_string(plugin_id.to_string())),
+                            ("directory".into(), source_string(directory.clone())),
+                            ("rootDir".into(), source_string(directory)),
+                            ("markdown".into(), source_string(markdown)),
+                            (
+                                "writable".into(),
+                                Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                            ),
+                            ("revision".into(), source_string(revision)),
+                            (
+                                "readonlyReason".into(),
+                                source_string("Plugin skills are managed by their owning plugin."),
+                            ),
+                            (
+                                "diagnosticsJson".into(),
+                                source_string("{\"ok\":true,\"issues\":[]}"),
+                            ),
+                        ])
+                    }),
                     command_api::SlashCommandKind::Mcp {
                         connection_id,
                         prompt_name,
                         ..
-                    } => {
-                        let command_name = display_source_text(&command.name);
-                        let prompt_name = display_source_text(&prompt_name);
-                        let directory = format!("<mcp:{connection_id}:{prompt_name}>");
-                        serde_json::json!({
-                            "id": skill_id,
-                            "name": command_name,
-                            "source": "mcp",
-                            "directory": directory,
-                            "rootDir": directory,
-                            "markdown": "",
-                            "writable": false,
-                            "revision": crate::config_admin::sha256_hex(&[]),
-                            "readonlyReason": "MCP skills are provided by the connected server.",
-                            "diagnosticsJson": "{\"status\":\"runtime\"}",
-                        })
-                    }
-                    _ => serde_json::Value::Null,
+                    } => Some({
+                        let directory = source_with_affixes(
+                            &format!("<mcp:{connection_id}:"),
+                            &prompt_name,
+                            ">",
+                        );
+                        source_object(vec![
+                            ("id".into(), source_projection(skill_id)),
+                            ("name".into(), command.name.clone()),
+                            ("source".into(), source_string("mcp")),
+                            ("directory".into(), directory.clone()),
+                            ("rootDir".into(), directory),
+                            ("markdown".into(), source_string("")),
+                            (
+                                "writable".into(),
+                                Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                            ),
+                            (
+                                "revision".into(),
+                                source_string(crate::config_admin::sha256_hex(&[])),
+                            ),
+                            (
+                                "readonlyReason".into(),
+                                source_string("MCP skills are provided by the connected server."),
+                            ),
+                            (
+                                "diagnosticsJson".into(),
+                                source_string("{\"status\":\"runtime\"}"),
+                            ),
+                        ])
+                    }),
+                    _ => None,
                 };
-                if !document.is_null() {
-                    sink.emit(ClientEvent::SkillDocument {
-                        document_json: document.to_string(),
-                    })
-                    .await;
-                    return;
+                if let Some(document) = document {
+                    if let Ok(document_json) = document.to_json_string() {
+                        sink.emit(ClientEvent::SkillDocument { document_json })
+                            .await;
+                        return;
+                    }
                 }
             }
         }
-        if let Some(name) = skill_id.strip_prefix("runtime:") {
+        if let Some(name_units) = strip_source_prefix(target_units, "runtime:") {
             if let Some(skill) = self
                 .handle
                 .list_skills()
                 .await
                 .into_iter()
-                .find(|skill| skill.name == name)
+                .find(|skill| skill.name.encode_utf16().eq(name_units.iter().copied()))
             {
                 let directory = skill.source_dir.to_string_lossy().into_owned();
                 let source = if directory.starts_with('<') {
@@ -391,22 +774,37 @@ impl EngineCommandRouter {
                 } else {
                     "runtime"
                 };
-                let document_json = serde_json::json!({
-                    "id": skill_id,
-                    "name": skill.name,
-                    "source": source,
-                    "directory": directory,
-                    "rootDir": directory,
-                    "markdown": "",
-                    "writable": false,
-                    "revision": crate::config_admin::sha256_hex(&[]),
-                    "readonlyReason": format!("{source} skills are runtime-derived and read-only."),
-                    "diagnosticsJson": "{\"status\":\"runtime\"}"
-                })
-                .to_string();
-                sink.emit(ClientEvent::SkillDocument { document_json })
-                    .await;
-                return;
+                let document = source_object(vec![
+                    ("id".into(), source_projection(skill_id)),
+                    ("name".into(), source_string(skill.name)),
+                    ("source".into(), source_string(source)),
+                    ("directory".into(), source_string(directory.clone())),
+                    ("rootDir".into(), source_string(directory)),
+                    ("markdown".into(), source_string("")),
+                    (
+                        "writable".into(),
+                        Utf16JsonProjection::parse("false").expect("boolean JSON"),
+                    ),
+                    (
+                        "revision".into(),
+                        source_string(crate::config_admin::sha256_hex(&[])),
+                    ),
+                    (
+                        "readonlyReason".into(),
+                        source_string(format!(
+                            "{source} skills are runtime-derived and read-only."
+                        )),
+                    ),
+                    (
+                        "diagnosticsJson".into(),
+                        source_string("{\"status\":\"runtime\"}"),
+                    ),
+                ]);
+                if let Ok(document_json) = document.to_json_string() {
+                    sink.emit(ClientEvent::SkillDocument { document_json })
+                        .await;
+                    return;
+                }
             }
         }
         match skills_admin::document_json(skill_id, &context) {
@@ -463,7 +861,7 @@ impl EngineCommandRouter {
         match command.action.as_str() {
             "get_catalog" => self.emit_skill_catalog(sink).await,
             "get_document" => {
-                let Some(skill_id) = command.target.as_deref() else {
+                let Some(skill_id) = command.target.as_ref() else {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Protocol,
                         message: "skill document target is required".to_string(),
@@ -1334,13 +1732,7 @@ impl EngineCommandRouter {
                             if let Some(watcher) = self.file_changed_watcher.as_ref() {
                                 if let Some(settings) = self.settings.as_ref() {
                                     watcher.replace_matchers(
-                                        matchers
-                                            .into_iter()
-                                            .filter_map(|matcher| {
-                                                let units = matcher.string_units("")?;
-                                                String::from_utf16(&units).ok()
-                                            })
-                                            .collect(),
+                                        matchers,
                                         settings.paths.project_dir.clone(),
                                     );
                                 }

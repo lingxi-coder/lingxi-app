@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,17 @@ const API_KEY: &str = "native-provider-error-295-dummy";
 const MODEL: &str = "claude-sonnet-4-5";
 const PROMPT: &str = "Return the fixed provider error fixture response.";
 const ENTRYPOINT: &str = "--print --output-format json";
+
+// These integration cases launch cold CLI subprocesses and bind independent
+// loopback listeners. Serialize them so their startup and request-body writes
+// do not compete against the stub's bounded socket read deadline.
+static PROVIDER_ERROR_CLI_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn provider_error_cli_test_lock() -> MutexGuard<'static, ()> {
+    PROVIDER_ERROR_CLI_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[derive(Deserialize)]
 struct Native295Receipt {
@@ -119,7 +130,30 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {
-        let read = stream.read(&mut chunk)?;
+        let read = stream.read(&mut chunk).map_err(|error| {
+            let framing = find_bytes(&request, b"\r\n\r\n")
+                .map(|header_end| {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = request_header_value(&headers, "content-length");
+                    let expected_body_bytes = content_length
+                        .and_then(|value| value.parse::<usize>().ok());
+                    format!(
+                        "; request_line={:?}; content_length={content_length:?}; received_body_bytes={}; expected_body_bytes={expected_body_bytes:?}; transfer_encoding={:?}; expect={:?}",
+                        headers.lines().next().unwrap_or_default(),
+                        request.len().saturating_sub(header_end + 4),
+                        request_header_value(&headers, "transfer-encoding"),
+                        request_header_value(&headers, "expect"),
+                    )
+                })
+                .unwrap_or_else(|| "; request headers are incomplete".to_string());
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; received {} request bytes{framing}",
+                    request.len()
+                ),
+            )
+        })?;
         if read == 0 {
             break;
         }
@@ -456,8 +490,8 @@ fn assert_generated_field_constraints(
 ) {
     let duration_ms = raw_unsigned_integer(raw, b"\"duration_ms\"");
     assert_eq!(
-        frame.unsigned_integer_at("/duration_ms"),
-        Some(duration_ms),
+        frame.number_at("/duration_ms"),
+        Some(duration_ms as f64),
         "case {case_id} duration projection matches its untouched raw integer"
     );
     let uuid_value = frame.string_at("/uuid").expect("result UUID exists");
@@ -538,6 +572,7 @@ fn selected_native_cases(receipt: &Native295Receipt) -> Vec<&Native295Case> {
 
 #[test]
 fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
+    let _test_lock = provider_error_cli_test_lock();
     let receipt = native_receipt();
     assert_eq!(receipt.native_version, NATIVE_VERSION);
     assert_eq!(receipt.native_sha256, NATIVE_SHA256);
@@ -609,9 +644,17 @@ fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
         let native_frame = Utf16JsonProjection::parse(native_stdout_text.trim_end()).unwrap();
         assert_eq!(native_frame.string_at("/type"), Some("result"));
         assert_eq!(native_frame.string_at("/subtype"), Some("success"));
-        assert_eq!(native_frame.bool_at("/is_error"), Some(true));
         assert_eq!(
-            native_frame.unsigned_integer_at("/api_error_status"),
+            native_frame
+                .at_pointer("/is_error")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            Some(raw_unsigned_integer(
+                &native_stdout,
+                b"\"api_error_status\""
+            )),
             Some(u64::from(case.status))
         );
         assert_eq!(
@@ -626,9 +669,12 @@ fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
             native_frame.string_at("/session_id"),
             Some(case.session_id.as_str())
         );
-        assert_eq!(native_frame.unsigned_integer_at("/num_turns"), Some(1));
         assert_eq!(
-            native_frame.unsigned_integer_at("/duration_api_ms"),
+            Some(raw_unsigned_integer(&native_stdout, b"\"num_turns\"")),
+            Some(1)
+        );
+        assert_eq!(
+            Some(raw_unsigned_integer(&native_stdout, b"\"duration_api_ms\"")),
             Some(0)
         );
         assert_generated_field_constraints(
@@ -668,7 +714,9 @@ fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
             case.id
         );
         assert_eq!(
-            actual_request.bool_at("/stream"),
+            actual_request
+                .at_pointer("/stream")
+                .and_then(|value| value.as_bool()),
             Some(native_request.stream),
             "default print-json request must use Native streaming transport: {}",
             case.id
@@ -721,9 +769,17 @@ fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
         let actual_frame = Utf16JsonProjection::parse(actual_stdout_text.trim_end()).unwrap();
         assert_eq!(actual_frame.string_at("/type"), Some("result"));
         assert_eq!(actual_frame.string_at("/subtype"), Some("success"));
-        assert_eq!(actual_frame.bool_at("/is_error"), Some(true));
         assert_eq!(
-            actual_frame.unsigned_integer_at("/api_error_status"),
+            actual_frame
+                .at_pointer("/is_error")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            Some(raw_unsigned_integer(
+                &output.stdout,
+                b"\"api_error_status\""
+            )),
             Some(u64::from(case.status))
         );
         assert_eq!(
@@ -738,9 +794,12 @@ fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
             actual_frame.string_at("/session_id"),
             Some(case.session_id.as_str())
         );
-        assert_eq!(actual_frame.unsigned_integer_at("/num_turns"), Some(1));
         assert_eq!(
-            actual_frame.unsigned_integer_at("/duration_api_ms"),
+            Some(raw_unsigned_integer(&output.stdout, b"\"num_turns\"")),
+            Some(1)
+        );
+        assert_eq!(
+            Some(raw_unsigned_integer(&output.stdout, b"\"duration_api_ms\"")),
             Some(0)
         );
         assert_eq!(
@@ -768,6 +827,7 @@ fn print_json_provider_errors_match_native_295_raw_result_and_fixed_fields() {
 
 #[test]
 fn explicit_no_stream_uses_batched_messages_create_with_native_295_response() {
+    let _test_lock = provider_error_cli_test_lock();
     let receipt = native_receipt();
     let case = selected_native_cases(&receipt)
         .into_iter()
@@ -784,18 +844,26 @@ fn explicit_no_stream_uses_batched_messages_create_with_native_295_response() {
     assert_eq!(output.status.code(), Some(case.exit_code));
     assert_eq!(requests.len(), 1);
     assert_eq!(
-        request_body_json(&requests[0]).bool_at("/stream"),
+        request_body_json(&requests[0])
+            .at_pointer("/stream")
+            .and_then(|value| value.as_bool()),
         Some(false),
         "--no-stream must preserve the batched messages_create path"
     );
     let stdout = std::str::from_utf8(&output.stdout).expect("CLI stdout is UTF-8");
     let result = Utf16JsonProjection::parse(stdout.trim_end()).expect("one JSON result frame");
     assert_eq!(result.string_at("/type"), Some("result"));
-    assert_eq!(result.bool_at("/is_error"), Some(true));
+    assert_eq!(
+        result
+            .at_pointer("/is_error")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
 }
 
 #[test]
 fn default_print_text_uses_streaming_provider_request_with_native_295_response() {
+    let _test_lock = provider_error_cli_test_lock();
     let receipt = native_receipt();
     let case = selected_native_cases(&receipt)
         .into_iter()
@@ -817,7 +885,9 @@ fn default_print_text_uses_streaming_provider_request_with_native_295_response()
     assert_eq!(output.status.code(), Some(case.exit_code));
     assert_eq!(requests.len(), 1);
     assert_eq!(
-        request_body_json(&requests[0]).bool_at("/stream"),
+        request_body_json(&requests[0])
+            .at_pointer("/stream")
+            .and_then(|value| value.as_bool()),
         Some(true),
         "default text print must use streaming provider transport"
     );

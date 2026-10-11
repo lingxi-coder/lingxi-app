@@ -364,6 +364,28 @@ struct ToolResultFrameSource<'a> {
 }
 
 #[derive(Serialize)]
+struct CompactUserMessageSource<'a> {
+    role: &'static str,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    content: &'a Utf16JsonProjection,
+}
+
+#[derive(Serialize)]
+struct CompactUserFrameSource<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    message: CompactUserMessageSource<'a>,
+    session_id: &'a str,
+    parent_tool_use_id: Option<&'static str>,
+    uuid: &'a str,
+    timestamp: &'a str,
+    #[serde(rename = "isReplay")]
+    is_replay: bool,
+    #[serde(rename = "isSynthetic", skip_serializing_if = "Option::is_none")]
+    is_synthetic: Option<bool>,
+}
+
+#[derive(Serialize)]
 struct ResultSuccessFrameSource<'a> {
     duration_api_ms: u64,
     stop_reason: &'a str,
@@ -1128,6 +1150,28 @@ impl StreamJsonStream {
             frame["isSynthetic"] = json!(true);
         }
         frame
+    }
+
+    fn build_compact_user_frame_source<'a>(
+        session_id: &'a str,
+        uuid: &'a str,
+        timestamp: &'a str,
+        content: &'a Utf16JsonProjection,
+        synthetic: bool,
+    ) -> CompactUserFrameSource<'a> {
+        CompactUserFrameSource {
+            frame_type: "user",
+            message: CompactUserMessageSource {
+                role: "user",
+                content,
+            },
+            session_id,
+            parent_tool_use_id: None,
+            uuid,
+            timestamp,
+            is_replay: !synthetic,
+            is_synthetic: synthetic.then_some(true),
+        }
     }
 
     fn build_compact_error_frame(
@@ -2175,13 +2219,13 @@ impl OutputStream for StreamJsonStream {
         ));
     }
 
-    async fn emit_compact_summary(&self, summary_uuid: &str, summary: &str) {
+    async fn emit_compact_summary(&self, summary_uuid: &str, summary: &Utf16JsonProjection) {
         if self.suppress_frames {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.enqueue(&Self::build_compact_user_frame(
+        self.enqueue_source(&Self::build_compact_user_frame_source(
             &session_id,
             summary_uuid,
             &timestamp,
@@ -3702,20 +3746,38 @@ mod tests {
 
     #[test]
     fn compact_summary_matches_261_synthetic_user_bytes() {
-        let frame = StreamJsonStream::build_compact_user_frame(
+        let content = source_text("summary\ntext");
+        let frame = StreamJsonStream::build_compact_user_frame_source(
             "s",
             "summary",
             "timestamp",
-            "summary\ntext",
+            &content,
             true,
         );
         assert_eq!(
-            serialize_ndjson_line(&frame),
+            serialize_source_ndjson_line(&frame),
             concat!(
                 r#"{"type":"user","message":{"role":"user","content":"summary\ntext"},"session_id":"s","parent_tool_use_id":null,"uuid":"summary","timestamp":"timestamp","isReplay":false,"isSynthetic":true}"#,
                 "\n"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn compact_summary_sink_preserves_lone_surrogate_in_raw_json() {
+        let stream = StreamJsonStream::new(make_params("s"));
+        let mut receiver = stream.drain_rx.lock().await.take().unwrap();
+        stream
+            .emit_compact_summary("summary", &source_lone_surrogate())
+            .await;
+        let OutboundMsg::Line(line) = receiver.try_recv().unwrap() else {
+            panic!("expected compact summary frame");
+        };
+        assert!(line.contains(r#""content":"\ud800""#), "{line}");
+        let frame = Utf16JsonProjection::parse(line.trim_end()).unwrap();
+        assert_eq!(frame.string_units("/message/content"), Some(vec![0xd800]));
+        assert_eq!(frame.string_at("/uuid"), Some("summary"));
+        assert_eq!(frame.string_at("/session_id"), Some("s"));
     }
 
     #[tokio::test]

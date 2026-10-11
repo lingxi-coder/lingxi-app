@@ -14,7 +14,22 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.bindings.client.ClientCommand
+import com.lingxi.code.bindings.client.ClientEvent
+import com.lingxi.code.conversation.ConversationSource
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -87,6 +102,61 @@ class DesktopSettingsUiTest {
     @Test fun disconnectedSettingsExplainRequiredConnection() {
         rule.setContent { LingXiTheme(darkTheme = true) { EngineSettingsPage(SettingsRoutes.CUSTOM_PROVIDERS,SettingsEngineBridge()) } }
         rule.onNodeWithText(label(R.string.settings_parity_disconnected)).assertIsDisplayed()
+    }
+
+    @Test fun skillCatalogSelectionSendsExactUtf16IdentityForGetDocument() {
+        val catalogJson = """{"entries":[{"id":"\uD800","name":"Lone unit","source":"user"},{"id":"\uFFFD","name":"Replacement","source":"user"}],"trash":[]}"""
+        val entries = JSONObject(catalogJson).getJSONArray("entries")
+        val loneId = entries.getJSONObject(0).getString("id")
+        val replacementId = entries.getJSONObject(1).getString("id")
+        assertEquals(listOf(0xD800), loneId.map { it.code })
+        assertEquals(listOf(0xFFFD), replacementId.map { it.code })
+
+        val commands = Channel<ClientCommand>(Channel.UNLIMITED)
+        val source = object : ConversationSource {
+            override val clientEvents = MutableSharedFlow<ClientEvent>()
+            override suspend fun submitClientCommand(command: ClientCommand) {
+                commands.send(command)
+            }
+        }
+        val bridge = SettingsEngineBridge()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val binding = scope.launch { bridge.bind(source) }
+        try {
+            // Drain SettingsEngineBridge.bind's initial RefreshListings command.
+            runBlocking { withTimeout(5_000) { commands.receive() } }
+            bridge.accept(ClientEvent.SkillCatalog(catalogJson))
+            rule.setContent {
+                LingXiTheme(darkTheme = false) {
+                    Column(Modifier.verticalScroll(rememberScrollState())) { SkillManager(bridge) }
+                }
+            }
+            rule.waitForIdle()
+            val catalogRequest = runBlocking { withTimeout(5_000) { commands.receive() } }
+            assertTrue(catalogRequest is ClientCommand.SkillAdmin)
+            assertEquals("get_catalog", (catalogRequest as ClientCommand.SkillAdmin).command.action)
+
+            rule.onNodeWithText("Lone unit · user").performScrollTo().performClick()
+            val loneRequest = runBlocking { withTimeout(5_000) { commands.receive() } }
+            assertTrue(loneRequest is ClientCommand.SkillAdmin)
+            val loneAdmin = loneRequest as ClientCommand.SkillAdmin
+            assertEquals("get_document", loneAdmin.command.action)
+            val loneTarget = loneAdmin.command.target
+            assertEquals(listOf(0xD800.toUShort()), loneTarget?.codeUnits)
+
+            rule.onNodeWithText("Replacement · user").performScrollTo().performClick()
+            val replacementRequest = runBlocking { withTimeout(5_000) { commands.receive() } }
+            assertTrue(replacementRequest is ClientCommand.SkillAdmin)
+            val replacementAdmin = replacementRequest as ClientCommand.SkillAdmin
+            assertEquals("get_document", replacementAdmin.command.action)
+            val replacementTarget = replacementAdmin.command.target
+            assertEquals(listOf(0xFFFD.toUShort()), replacementTarget?.codeUnits)
+            assertNotEquals(loneTarget?.codeUnits, replacementTarget?.codeUnits)
+        } finally {
+            binding.cancel()
+            scope.cancel()
+            commands.close()
+        }
     }
     @Test fun toolSwitchEditsDraftAndCanInherit() {
         val draft = mutableStateOf("false")

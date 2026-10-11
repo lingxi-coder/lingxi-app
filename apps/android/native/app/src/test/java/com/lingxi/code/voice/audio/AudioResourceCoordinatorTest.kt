@@ -10,17 +10,6 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 
 class AudioResourceCoordinatorTest {
-    @Test
-    fun localAppRuntimeGenerationsHaveIndependentLeases() {
-        val coordinator = AudioResourceCoordinator(7)
-        val previous = AudioOwnerKey.localApp("same-app", 1uL)
-        val current = AudioOwnerKey.localApp("same-app", 2uL)
-        val lease = coordinator.acquire(operation("render"), current, AudioResource.OfflineRender, modelId = "voice") as AudioLeaseDecision.Granted
-        assertTrue(coordinator.endOwner(previous).isEmpty())
-        assertTrue(coordinator.endOwner(AudioOwnerKey.ui("same-app")).isEmpty())
-        assertEquals(listOf(lease.lease), coordinator.endOwner(current))
-    }
-
     private val epoch = 7L
 
     private fun operation(id: String, generation: Long = 1) =

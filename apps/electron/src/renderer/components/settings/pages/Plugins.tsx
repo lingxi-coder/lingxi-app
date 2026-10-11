@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import { Icon } from '../../Icon';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ExtensionGlyph } from './ExtensionHubIcons';
 import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { objectFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubTabs, extensionHubStyle, useExtensionHubDialogFocus } from './ExtensionHub';
+import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus } from './ExtensionHub';
 import {
   adminRecordCommand,
   asRecord,
@@ -17,7 +17,6 @@ import {
   noteStyle,
   parseEventEnvelope,
   prettyJson,
-  searchInputStyle,
   secondaryMetaStyle,
   SourcePill,
   textareaStyle,
@@ -95,7 +94,7 @@ function editableMarketplaces(snapshot: PageContentProps['snapshot'], editingLay
   return objectFromLayer(snapshot, editingLayer, 'additionalMarketplaces');
 }
 
-export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate }: PageContentProps) {
+export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, scopeControls, initialPluginId }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { pluginAdmin?: unknown }).pluginAdmin === 'function';
   const catalog = useMemo(() => parseEventEnvelope<PluginCatalogEnvelope>(bridge.pluginCatalogEvent?.catalog_json, { installed: [], revisions: {} }), [bridge.pluginCatalogEvent?.catalog_json]);
@@ -108,7 +107,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const availablePlugins = catalog.available ?? [];
   const marketplaceNames = [...new Set([...Object.keys(marketplaces), ...(catalog.marketplaces ?? []).map((entry) => entry.name)])].sort();
 
-  const [selection, setSelection] = useState<PluginSelection>({ kind: 'list' });
+  const [selection, setSelection] = useState<PluginSelection>(initialPluginId ? { kind: 'plugin', id: initialPluginId } : { kind: 'list' });
   const [search, setSearch] = useState('');
   const [draftEnabled, setDraftEnabled] = useState(enabledPlugins);
   const [draftConfigs, setDraftConfigs] = useState(pluginConfigs);
@@ -121,9 +120,10 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
   const [secretNotice, setSecretNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [showAvailable, setShowAvailable] = useState(false);
+  const [catalogTab, setCatalogTab] = useState<'public' | 'personal'>('public');
   const [addMenuOpen, setAddMenuOpen] = useState(false);
-  const [pendingHubPage, setPendingHubPage] = useState<string | null>(null);
+  const [pendingHubPage, setPendingHubPage] = useState<{ pageId: string; pluginId?: string } | null>(null);
+  const detailPageRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     if (adminAvailable) void callPluginAdmin(bridge, adminRecordCommand('get_catalog'));
@@ -150,12 +150,13 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     || JSON.stringify(draftConfigs) !== JSON.stringify(pluginConfigs)
     || JSON.stringify(draftMarketplaces) !== JSON.stringify(marketplaces);
 
-  const requestHubNavigation = (pageId: string) => {
+  const requestHubNavigation = (pageId: string, pluginId?: string) => {
     if (dirty) {
-      setPendingHubPage(pageId);
+      setPendingHubPage({ pageId, pluginId });
       return;
     }
-    onNavigate(pageId);
+    if (pageId === 'plugins') requestSelection(pluginId ? { kind: 'plugin', id: pluginId } : { kind: 'list' });
+    else onNavigate(pageId, pluginId);
   };
   const discardAndNavigate = () => {
     if (!pendingHubPage) return;
@@ -164,8 +165,8 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     setDraftMarketplaces(marketplaces);
     setPreparedOperation(null);
     setPendingSelection(null);
-    setSelection({ kind: 'list' });
-    onNavigate(pendingHubPage);
+    setSelection(pendingHubPage.pageId === 'plugins' && pendingHubPage.pluginId ? { kind: 'plugin', id: pendingHubPage.pluginId } : { kind: 'list' });
+    if (pendingHubPage.pageId !== 'plugins') onNavigate(pendingHubPage.pageId, pendingHubPage.pluginId);
     setPendingHubPage(null);
   };
   const navigationPrompt = pendingHubPage && (
@@ -181,11 +182,11 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
   const filteredPlugins = search.trim()
     ? pluginIds.filter((id) => {
       const entry = (catalog.installed ?? []).find((candidate) => (candidate.id || candidate.name) === id);
-      return `${id} ${entry?.display_name ?? ''} ${entry?.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase());
+      return `${id} ${entry?.name ?? ''} ${entry?.display_name ?? ''} ${entry?.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase());
     })
     : pluginIds;
   const filteredAvailable = search.trim()
-    ? availablePlugins.filter((entry) => `${entry.id} ${entry.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase()))
+    ? availablePlugins.filter((entry) => `${entry.id} ${entry.name} ${entry.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase()))
     : availablePlugins;
   const filteredMarketplaces = search.trim() ? marketplaceNames.filter((name) => name.toLowerCase().includes(search.trim().toLowerCase())) : marketplaceNames;
 
@@ -206,7 +207,11 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     setAddMenuOpen(false);
   };
 
-  const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list', () => requestSelection({ kind: 'list' }));
+  const isPluginDetail = selection.kind === 'plugin' || selection.kind === 'available';
+  const dialogRef = useExtensionHubDialogFocus(selection.kind !== 'list' && !isPluginDetail, () => requestSelection({ kind: 'list' }));
+  useEffect(() => {
+    if (isPluginDetail) detailPageRef.current?.closest('.extension-hub-main')?.scrollTo({ top: 0 });
+  }, [isPluginDetail, selection]);
 
   const preview = () => {
     setPageError(null);
@@ -300,132 +305,94 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     });
   };
 
+  const detailName = selectedPlugin ? manifest?.display_name ?? manifest?.name ?? selectedPlugin : selectedAvailable?.name ?? '';
+  const detailDescription = manifest?.description ?? selectedAvailable?.description ?? '';
+  const publicGroups = [...new Set(filteredAvailable.map((entry) => entry.marketplace))];
+  const relatedSkills = parseEventEnvelope<{ entries?: Array<{ id: string; name: string; description?: string; pluginOwner?: string }> }>(bridge.skillCatalogEvent?.catalog_json, {}).entries?.filter((entry) => entry.pluginOwner === (selectedPlugin ?? selectedAvailable?.id ?? '')) ?? [];
+  const refreshCatalog = () => {
+    setPageError(null);
+    setBusy(true);
+    void callPluginAdmin(bridge, adminRecordCommand('get_catalog'))
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to refresh plugins.'))
+      .finally(() => setBusy(false));
+  };
+
   return (
-    <>
-      <div className="extension-hub-page" style={extensionHubStyle(t)}>
-        <ExtensionHubTabs bridge={bridge} active="plugins" onNavigate={requestHubNavigation} />
-        <div className="extension-hub-toolbar">
-          <input className="extension-hub-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search plugins" aria-label="搜索插件与市场" style={searchInputStyle(t)} />
-          <div className="extension-hub-toolbar-actions">
-            <button type="button" onClick={() => setShowAvailable((value) => !value)} style={ghostButtonStyle(t)}>Browse directory</button>
-            <div className="extension-hub-menu">
-              <button type="button" onClick={() => setAddMenuOpen((value) => !value)} aria-expanded={addMenuOpen} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>Add <Icon name="chevron" size={12} /></button>
-              {addMenuOpen && <div className="extension-hub-menu-popover">
-                <button type="button" onClick={() => { setShowAvailable(true); setAddMenuOpen(false); }}>Browse available plugins</button>
-                <button type="button" onClick={() => requestSelection({ kind: 'marketplace-add' })}>Add a marketplace</button>
-                <button type="button" onClick={() => requestSelection({ kind: 'policies' })}>View policies</button>
-              </div>}
+    <ExtensionHubLayout bridge={bridge} active="plugins" onNavigate={requestHubNavigation} onClose={onClose} scopeControls={scopeControls} selectedPlugin={selectedPlugin} onSelectPlugin={(id) => requestSelection({ kind: 'plugin', id })}>
+      {!isPluginDetail && <>
+        <ExtensionHubHeader title="Plugins" description="Connect plugins to let LingXi work across your tools" search={search} onSearch={setSearch} actions={<>
+          <button type="button" onClick={refreshCatalog} disabled={busy} className="extension-hub-icon-button" aria-label="Refresh plugins"><ExtensionGlyph name="refresh" size={16} /></button>
+          <button type="button" onClick={() => requestSelection({ kind: 'policies' })} className="extension-hub-icon-button" aria-label="Plugin settings"><ExtensionGlyph name="cog" size={16} /></button>
+          <details className="extension-hub-menu" open={addMenuOpen} onToggle={(event) => setAddMenuOpen(event.currentTarget.open)}>
+            <summary className="extension-hub-primary">Add <ExtensionGlyph name="chevron" size={13} /></summary>
+            <div className="extension-hub-menu-popover">
+              <button type="button" onClick={() => { setCatalogTab('public'); setAddMenuOpen(false); }}>Browse available plugins</button>
+              <button type="button" onClick={() => requestSelection({ kind: 'marketplace-add' })}>Add a marketplace</button>
             </div>
-          </div>
-        </div>
-
-        {selection.kind === 'list' && navigationPrompt}
-
-        {selection.kind === 'list' && <>
-          <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel="Plugins" />
-          {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-          {secretNotice && <div role="status" style={noteStyle(t, secretNotice.includes('重启') ? 'warn' : 'neutral')}>{secretNotice}</div>}
-          {preparedOperation && (
-            <div style={noteStyle(t, 'warn')}>
-              <div>{preparedOperation.summary}</div>
-              {preparedOperation.payload.action !== 'save_config' && (
-                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button type="button" disabled={busy} onClick={confirmLifecycle} style={ghostButtonStyle(t, busy)}>确认执行</button>
-                  <button type="button" disabled={busy} onClick={() => setPreparedOperation(null)} style={ghostButtonStyle(t, busy, true)}>取消</button>
-                </div>
-              )}
-            </div>
-          )}
-        </>}
-
-        <details className="extension-hub-caveat" data-testid="plugin-dependency-caveat">
-          <summary>Before changing plugin status</summary>
-          <div style={{ ...noteStyle(t, 'warn'), marginTop: 8 }}>{pluginDependencyCaveat()}</div>
-        </details>
-
-        <div className="extension-hub-group-title">Installed plugins</div>
-        <div className="extension-hub-list">
-          {filteredPlugins.map((id) => {
-            const entry = (catalog.installed ?? []).find((candidate) => (candidate.id || candidate.name) === id);
-            const enabled = draftEnabled[id] !== false;
-            return (
-              <div key={id} className="extension-hub-row configuration-entry">
-                <span className="extension-hub-icon" style={{ '--hub-icon-bg': t.surfaceHover } as CSSProperties}><Icon name="puzzle" size={19} color={t.text3} /></span>
-                <button type="button" className="extension-hub-row-copy extension-hub-row-open" onClick={() => requestSelection({ kind: 'plugin', id })}>
-                  <span className="extension-hub-row-title">{entry?.display_name ?? id}</span>
-                  <span className="extension-hub-row-description">{entry?.description ?? id}</span>
-                </button>
-                <div className="extension-hub-row-side">
-                  <span className="extension-hub-row-scope">{editingLayer === 'user' ? 'Personal' : editingLayer === 'project' ? 'Project' : 'Local'}</span>
-                  <button
-                    type="button"
-                    className="extension-hub-toggle"
-                    role="switch"
-                    aria-checked={enabled}
-                    aria-label={`${enabled ? 'Disable' : 'Enable'} ${entry?.display_name ?? id}`}
-                    disabled={busy}
-                    onClick={() => previewLifecycle({ action: enabled ? 'disable' : 'enable', plugin: id, scope: editingLayer })}
-                  />
-                  <button type="button" className="extension-hub-icon-button" aria-label={`Configure ${entry?.display_name ?? id}`} onClick={() => requestSelection({ kind: 'plugin', id })}>
-                    <Icon name="more" size={16} />
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-          {filteredPlugins.length === 0 && <div style={{ padding: '24px 18px', color: t.text3, fontSize: 13 }}>No installed plugins match this search.</div>}
-        </div>
-
-        {showAvailable && <>
-          <div className="extension-hub-group-title">Available and updates</div>
+          </details>
+        </>} />
+        {navigationPrompt}
+        <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel="Plugins" />
+        {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
+        <nav className="extension-catalog-tabs" aria-label="Plugin catalog">
+          <button type="button" aria-pressed={catalogTab === 'public'} onClick={() => setCatalogTab('public')}>Public</button>
+          <button type="button" aria-pressed={catalogTab === 'personal'} onClick={() => setCatalogTab('personal')}>Personal</button>
+        </nav>
+        {catalogTab === 'public' && publicGroups.map((marketplace) => <section className="extension-catalog-section" key={marketplace}>
+          <h2 className="extension-hub-group-title">{marketplace} <ExtensionGlyph name="chevronR" size={14} /></h2>
           <div className="extension-hub-list">
-            {filteredAvailable.map((entry) => (
-              <button key={entry.id} type="button" className="extension-hub-row extension-hub-row-open" onClick={() => requestSelection({ kind: 'available', id: entry.id })}>
-                <span className="extension-hub-icon"><Icon name="puzzle" size={19} color={t.text3} /></span>
-                <span className="extension-hub-row-copy">
-                  <span className="extension-hub-row-title">{entry.name}</span>
-                  <span className="extension-hub-row-description">{entry.description ?? entry.id}</span>
-                </span>
-                <span className="extension-hub-row-side">{entry.upgrade_available ? 'Update available' : entry.installed ? 'Installed' : entry.marketplace}</span>
+            {filteredAvailable.filter((entry) => entry.marketplace === marketplace).map((entry) => <div key={entry.id} className={`extension-hub-row${entry.installed ? ' is-installed' : ''}`}>
+              <ExtensionIcon />
+              <button type="button" className="extension-hub-row-copy extension-hub-row-open" onClick={() => requestSelection({ kind: pluginIds.includes(entry.id) ? 'plugin' : 'available', id: entry.id })}>
+                <span className="extension-hub-row-title">{entry.name}</span><span className="extension-hub-row-description">{entry.description || entry.name}</span>
               </button>
-            ))}
-            {filteredAvailable.length === 0 && <div style={{ padding: '20px 18px', color: t.text3, fontSize: 13 }}>No available plugins match this search.</div>}
+              <button type="button" className="extension-hub-icon-button" aria-label={`${entry.installed ? 'Manage' : 'Install'} ${entry.name}`} onClick={() => requestSelection({ kind: pluginIds.includes(entry.id) ? 'plugin' : 'available', id: entry.id })}><ExtensionGlyph name={entry.installed ? 'more' : 'plus'} size={20} /></button>
+            </div>)}
           </div>
-        </>}
-
+        </section>)}
+        {(catalogTab === 'personal' || !publicGroups.length) && <section className="extension-catalog-section">
+          <h2 className="extension-hub-group-title">Installed</h2>
+          <div className="extension-hub-list">
+            {filteredPlugins.map((id) => {
+              const entry = (catalog.installed ?? []).find((candidate) => (candidate.id || candidate.name) === id);
+              return <div key={id} className="extension-hub-row configuration-entry">
+                <ExtensionIcon />
+                <button type="button" className="extension-hub-row-copy extension-hub-row-open" onClick={() => requestSelection({ kind: 'plugin', id })}>
+                  <span className="extension-hub-row-title">{entry?.display_name ?? entry?.name ?? id}</span><span className="extension-hub-row-description">{entry?.description ?? 'Installed plugin'}</span>
+                </button>
+                <button type="button" className="extension-hub-icon-button" aria-label={`Configure ${entry?.display_name ?? id}`} onClick={() => requestSelection({ kind: 'plugin', id })}><ExtensionGlyph name="more" size={16} /></button>
+              </div>;
+            })}
+          </div>
+          {!filteredPlugins.length && <div className="extension-hub-empty">{search ? 'No plugins match your search.' : 'No plugins installed yet. Add a marketplace to find your next plugin.'}</div>}
+        </section>}
+        {catalogTab === 'public' && !publicGroups.length && !search && <button type="button" className="extension-see-more" onClick={() => requestSelection({ kind: 'marketplace-add' })}>Add a marketplace to discover more plugins <ExtensionGlyph name="chevronR" size={14} /></button>}
         {marketplaceNames.length > 0 && <details className="extension-hub-marketplaces">
           <summary>Marketplaces · {marketplaceNames.length}</summary>
-          <div className="extension-hub-list">
-            {filteredMarketplaces.map((name) => (
-              <button key={name} type="button" className="extension-hub-row extension-hub-row-open" onClick={() => requestSelection({ kind: 'marketplace', name })}>
-                <span className="extension-hub-icon"><Icon name="box" size={18} color={t.text3} /></span>
-                <span className="extension-hub-row-copy"><span className="extension-hub-row-title">{name}</span><span className="extension-hub-row-description">{asString(asRecord(draftMarketplaces[name]).source, 'Marketplace source')}</span></span>
-              </button>
-            ))}
-          </div>
+          <div className="extension-hub-list">{filteredMarketplaces.map((name) => <button key={name} type="button" className="extension-hub-row extension-hub-row-open" onClick={() => requestSelection({ kind: 'marketplace', name })}><ExtensionIcon /><span className="extension-hub-row-copy"><span className="extension-hub-row-title">{name}</span><span className="extension-hub-row-description">{asString(asRecord(draftMarketplaces[name]).source, 'Marketplace source')}</span></span></button>)}</div>
         </details>}
-
-        {selection.kind !== 'list' && <div className="extension-detail-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) requestSelection({ kind: 'list' }); }}>
-          <section ref={dialogRef} tabIndex={-1} className="extension-detail-dialog" role="dialog" aria-modal="true" aria-label="Plugin details" style={extensionHubStyle(t)}>
-            <header className="extension-detail-head">
-              <span className="extension-hub-icon"><Icon name="puzzle" size={20} color={t.text3} /></span>
+      </>}
+        {selection.kind !== 'list' && <div className={isPluginDetail ? "extension-plugin-detail" : "extension-detail-backdrop"} onMouseDown={(event) => { if (!isPluginDetail && event.target === event.currentTarget) requestSelection({ kind: 'list' }); }}>
+          <section ref={isPluginDetail ? detailPageRef : dialogRef} tabIndex={-1} className={isPluginDetail ? "extension-plugin-page" : "extension-detail-dialog"} role={isPluginDetail ? undefined : "dialog"} aria-modal={isPluginDetail ? undefined : true} aria-label="Plugin details" style={extensionHubStyle(t)}>
+            {isPluginDetail ? <>
+              <nav className="extension-breadcrumb" aria-label="Breadcrumb"><button type="button" onClick={() => requestSelection({ kind: 'list' })}>Plugins</button><ExtensionGlyph name="chevronR" size={15} /><span>{detailName}</span></nav>
+              <header className="extension-plugin-hero">
+                <ExtensionIcon large />
+                <div className="extension-plugin-title-row"><h1>{detailName}</h1><div className="extension-hub-toolbar-actions">
+                  {selectedPlugin ? <button type="button" className="extension-hub-toggle" role="switch" aria-checked={draftEnabled[selectedPlugin] !== false} aria-label={`${draftEnabled[selectedPlugin] !== false ? 'Disable' : 'Enable'} ${detailName}`} disabled={busy} onClick={() => previewLifecycle({ action: draftEnabled[selectedPlugin] !== false ? 'disable' : 'enable', plugin: selectedPlugin, scope: editingLayer })} /> : <button type="button" disabled={busy || !adminAvailable} className="extension-hub-primary" onClick={() => selectedAvailable && previewLifecycle({ action: selectedAvailable.installed ? 'update' : 'install', plugin: selectedAvailable.id, scope: editingLayer })}><ExtensionGlyph name="plus" size={16} />{selectedAvailable?.installed ? 'Update plugin' : 'Install plugin'}</button>}
+                </div></div>
+                <p>{detailDescription}</p>
+              </header>
+            </> : <header className="extension-detail-head">
+              <span className="extension-hub-icon"><ExtensionGlyph name="plugin" size={20} color={t.text3} /></span>
               <div className="extension-detail-head-copy">
                 <div className="extension-detail-title-line">
                   <span className="extension-detail-title">{selectedPlugin ? manifest?.display_name ?? selectedPlugin : selectedAvailable?.name ?? selectedMarketplace ?? (selection.kind === 'marketplace-add' ? 'Add marketplace' : 'Plugin policies')}</span>
-                  <span className="extension-detail-kind">{selection.kind === 'plugin' ? 'Plugin' : selection.kind === 'available' ? 'Directory' : 'Settings'}</span>
+                  <span className="extension-detail-kind">Settings</span>
                 </div>
               </div>
-              {selectedPlugin && <button
-                type="button"
-                className="extension-hub-toggle"
-                role="switch"
-                aria-checked={draftEnabled[selectedPlugin] !== false}
-                aria-label={`${draftEnabled[selectedPlugin] !== false ? 'Disable' : 'Enable'} ${manifest?.display_name ?? selectedPlugin}`}
-                disabled={busy}
-                onClick={() => previewLifecycle({ action: draftEnabled[selectedPlugin] !== false ? 'disable' : 'enable', plugin: selectedPlugin, scope: editingLayer })}
-              />}
-              <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label="Close details" onClick={() => requestSelection({ kind: 'list' })}><Icon name="x" size={17} /></button>
-            </header>
+              <button type="button" className="extension-hub-icon-button" data-dialog-initial-focus aria-label="Close details" onClick={() => requestSelection({ kind: 'list' })}><ExtensionGlyph name="x" size={16} /></button>
+            </header>}
             <div className="extension-detail-content">
             {navigationPrompt}
             <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel="Plugins" />
@@ -451,16 +418,20 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
                 )}
               </div>
             )}
+            {isPluginDetail && <>
+              <div className="extension-plugin-showcase"><ExtensionIcon large /><div><strong>{detailName}</strong><p>{detailDescription || 'Extend your workspace with this plugin.'}</p></div></div>
+              {relatedSkills.length > 0 && <section><h2 className="extension-detail-section-title">Skills <span>{relatedSkills.length}</span></h2>{relatedSkills.map((skill) => <button type="button" key={skill.id} className="extension-hub-row extension-hub-row-open" onClick={() => requestHubNavigation('skills')}><ExtensionIcon kind="skill" /><span className="extension-hub-row-copy"><span className="extension-hub-row-title">{skill.name}</span><span className="extension-hub-row-description">{skill.description}</span></span><ExtensionGlyph name="chevronR" size={16} /></button>)}</section>}
+              <section><h2 className="extension-detail-section-title">Information</h2><dl className="extension-plugin-information">
+                <dt>Version</dt><dd>{manifest?.version ?? selectedAvailable?.version ?? '—'}</dd>
+                <dt>Source</dt><dd>{selectedAvailable?.marketplace ?? 'Installed locally'}</dd>
+                <dt>Status</dt><dd>{selectedPlugin ? draftEnabled[selectedPlugin] === false ? 'Disabled' : 'Enabled' : selectedAvailable?.installed ? 'Installed' : 'Available to install'}</dd>
+                {manifest?.path && <><dt>Location</dt><dd>{manifest.path}</dd></>}
+              </dl></section>
+            </>}
             {selection.kind === 'plugin' && selectedPlugin && (
-              <>
-                <div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
-                    <SourcePill t={t} label={editingLayer} />
-                    {manifest?.version && <SourcePill t={t} label={manifest.version} />}
-                  </div>
-                  {manifest?.path && <div className="mono" style={secondaryMetaStyle(t)}>{manifest.path}</div>}
-                </div>
-                {manifest?.description && <div style={noteStyle(t)}>{manifest.description}</div>}
+              <details className="extension-plugin-configuration">
+                <summary>Configuration <ExtensionGlyph name="chevron" size={14} /></summary>
+                <div className="extension-plugin-config-body">
                 <Row title="运行状态" desc={pluginDependencyCaveat()} align="center">
                   <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: draftEnabled[selectedPlugin] === false ? 'enable' : 'disable', plugin: selectedPlugin, scope: editingLayer })} style={ghostButtonStyle(t, busy)}>
                     预检{draftEnabled[selectedPlugin] === false ? '启用' : '停用'}
@@ -557,23 +528,8 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
                     </div>
                   </Field>
                 ))}
-              </>
-            )}
-            {selection.kind === 'available' && selectedAvailable && (
-              <>
-                <div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: t.text }}>{selectedAvailable.name}</div>
-                    <SourcePill t={t} label={selectedAvailable.marketplace} />
-                    {selectedAvailable.version && <SourcePill t={t} label={selectedAvailable.version} />}
-                  </div>
-                  <div className="mono" style={secondaryMetaStyle(t)}>{selectedAvailable.id}</div>
                 </div>
-                {selectedAvailable.description && <div style={noteStyle(t)}>{selectedAvailable.description}</div>}
-                <button type="button" disabled={busy} onClick={() => previewLifecycle({ action: selectedAvailable.installed ? 'update' : 'install', plugin: selectedAvailable.id, scope: editingLayer })} style={ghostButtonStyle(t, busy)}>
-                  预检{selectedAvailable.installed ? '升级' : '安装'}
-                </button>
-              </>
+              </details>
             )}
             {selection.kind === 'marketplace' && selectedMarketplace && (
               <>
@@ -621,17 +577,16 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
                 </Field>
               </>
             )}
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {dirty && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button type="button" disabled={!dirty || busy} onClick={preview} style={ghostButtonStyle(t, !dirty || busy)}>预检配置</button>
               <button type="button" disabled={!dirty || busy} onClick={save} style={ghostButtonStyle(t, !dirty || busy)}>保存配置</button>
               <button type="button" disabled={!dirty || busy} onClick={() => { setDraftEnabled(enabledPlugins); setDraftConfigs(pluginConfigs); setDraftMarketplaces(marketplaces); }} style={ghostButtonStyle(t, !dirty || busy, true)}>取消修改</button>
-            </div>
+            </div>}
             </div>
           </section>
         </div>}
-      </div>
 
-      <details className="extension-hub-page extension-hub-secondary-settings" style={extensionHubStyle(t)}>
+      {!isPluginDetail && <details className="extension-hub-page extension-hub-secondary-settings" style={extensionHubStyle(t)}>
         <summary>Settings data sources</summary>
         <Card title="来源说明">
           <FieldProvenanceNotice snapshot={snapshot} fieldKey="enabledPlugins" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
@@ -640,7 +595,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
             非敏感配置写入当前层的 pluginConfigs；敏感字段仅通过系统 Credential Broker 保存，catalog 只返回 configured 状态。管理员市场策略只读。
           </div>
         </Card>
-      </details>
-    </>
+      </details>}
+    </ExtensionHubLayout>
   );
 }

@@ -1,4 +1,4 @@
-// DeviceControlImpl.swift — iOS Local App status, haptics, and deep links.
+// DeviceControlImpl.swift — iOS device status, haptics, and deep links.
 
 import Foundation
 
@@ -8,7 +8,7 @@ import Foundation
     import EventKit
     import Network
 
-    /// Native iOS implementation of the shared Local App device-control seam.
+    /// Native iOS implementation of the shared device-control seam.
     final class DeviceControlImpl: IosDeviceControl, @unchecked Sendable {
         func statusJson() async throws -> String {
             let network = await Self.networkKind()

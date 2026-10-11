@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type { WritableScopeDto } from '@lingxi/bridge-client';
-import { Icon } from '../../Icon';
+import { ExtensionGlyph } from './ExtensionHubIcons';
 import { Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
 import { parseJsonObjectInput } from '../jsonInput';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubTabs, extensionHubStyle } from './ExtensionHub';
+import { ExtensionHubLayout, ExtensionHubHeader } from './ExtensionHub';
 import {
   adminRecordCommand,
   asRecord,
@@ -19,7 +19,6 @@ import {
   noteStyle,
   parseEventEnvelope,
   prettyJson,
-  searchInputStyle,
   secondaryMetaStyle,
   SourcePill,
   textareaStyle,
@@ -175,7 +174,7 @@ function JsonPropertyEditor({
   );
 }
 
-export function McpServers({ bridge, onNavigate }: PageContentProps) {
+export function McpServers({ bridge, onNavigate, onClose }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { mcpAdmin?: unknown }).mcpAdmin === 'function';
   const snapshot = useMemo(() => parseSnapshot(bridge), [bridge.mcpConfigurationSnapshotEvent?.snapshot_json, bridge.mcpServersEvent?.servers]);
@@ -192,7 +191,7 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
   const [environmentRows, setEnvironmentRows] = useState<Array<{ key: string; value: string }>>([{ key: '', value: '' }]);
   const [pageError, setPageError] = useState<string | null>(null);
   const [pendingSelection, setPendingSelection] = useState<Selection | null>(null);
-  const [pendingHubPage, setPendingHubPage] = useState<string | null>(null);
+  const [pendingHubPage, setPendingHubPage] = useState<{ pageId: string; pluginId?: string } | null>(null);
 
   useEffect(() => {
     if (adminAvailable) void callMcpAdmin(bridge, adminRecordCommand('get_snapshot'));
@@ -231,12 +230,12 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
   const dirty = selection.kind !== 'list' && (selected
     ? draftConfigText !== prettyJson(selected.config)
     : draftName.trim().length > 0 || draftConfigText !== '{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
-  const requestHubNavigation = (pageId: string) => {
+  const requestHubNavigation = (pageId: string, pluginId?: string) => {
     if (dirty) {
-      setPendingHubPage(pageId);
+      setPendingHubPage({ pageId, pluginId });
       return;
     }
-    onNavigate(pageId);
+    onNavigate(pageId, pluginId);
   };
   const discardAndNavigate = () => {
     if (!pendingHubPage) return;
@@ -245,7 +244,7 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
     setDraftScope('user');
     setDraftName('');
     setDraftConfigText('{\n  "command": "npx",\n  "args": ["-y", "package-name"]\n}');
-    onNavigate(pendingHubPage);
+    onNavigate(pendingHubPage.pageId, pendingHubPage.pluginId);
     setPendingHubPage(null);
   };
   const navigationPrompt = pendingHubPage && (
@@ -390,9 +389,11 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
   };
 
   return (
-    <>
-      <div className="extension-hub-page" style={extensionHubStyle(t)}>
-        <ExtensionHubTabs bridge={bridge} active="mcp" onNavigate={requestHubNavigation} />
+    <ExtensionHubLayout bridge={bridge} active="mcp" onNavigate={requestHubNavigation} onClose={onClose}>
+        <ExtensionHubHeader title="Tools" description="Connect MCP servers to bring your tools into LingXi" search={search} onSearch={setSearch} actions={<>
+          <button type="button" aria-label="Refresh MCP servers" onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : 'Unable to refresh tools.'))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
+          <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary">Add <ExtensionGlyph name="plus" size={14} /></button>
+        </>} />
         {/* 同名不同义的提醒放在页首，而不是藏在作用域下拉旁边：读到下拉的时候，
             人已经在拿设置页的「本地」去理解这里的「本地」了。 */}
         <details className="extension-hub-scope-note" data-testid="mcp-scope-vs-layers">
@@ -404,14 +405,8 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
         <div className="configuration-page">
           {selection.kind === 'list' ? <div className="configuration-list">
             <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
-            <div className="extension-hub-toolbar">
-              <input className="extension-hub-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search MCP servers" aria-label="搜索 MCP 服务器" style={searchInputStyle(t)} />
-              <div className="extension-hub-toolbar-actions">
-                <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>Add <Icon name="chevron" size={12} /></button>
-                <button type="button" aria-label="Refresh MCP servers" onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers())} className="extension-hub-icon-button"><Icon name="refresh" size={16} /></button>
-              </div>
-            </div>
             {navigationPrompt}
+            {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
             <div className="extension-hub-group-title">Servers</div>
             <div className="extension-hub-list">
               {filtered.map((entry) => {
@@ -420,14 +415,14 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
                 const allowed = approved && !rejected;
                 const runtime = (snapshot.runtime_servers ?? []).find((server) => server.name === entry.name);
                 return <div key={entry.id} className="extension-hub-row configuration-entry">
-                  <span className="extension-hub-icon"><Icon name="server" size={18} color={t.text3} /></span>
+                  <span className="extension-hub-icon"><ExtensionGlyph name="mcp" size={18} color={t.text3} /></span>
                   <button type="button" className="extension-hub-row-copy extension-hub-row-open" onClick={() => requestSelection({ kind: 'server', id: entry.id })}>
                     <span className="extension-hub-row-title">{entry.name}</span>
                     <span className="extension-hub-row-description">{inferTransport(entry.config)} · {runtime ? asString(runtime.status, 'available') : entry.path}</span>
                   </button>
                   <div className="extension-hub-row-side">
                     <span className="extension-hub-row-scope">{entry.scope === 'user' ? 'Personal' : entry.scope === 'project' ? 'Project' : 'Local'}</span>
-                    <button type="button" className="extension-hub-icon-button" aria-label={`Configure ${entry.name}`} onClick={() => requestSelection({ kind: 'server', id: entry.id })}><Icon name="cog" size={16} /></button>
+                    <button type="button" className="extension-hub-icon-button" aria-label={`Configure ${entry.name}`} onClick={() => requestSelection({ kind: 'server', id: entry.id })}><ExtensionGlyph name="cog" size={16} /></button>
                     {entry.scope === 'project' && <button type="button" className="extension-hub-toggle" role="switch" aria-checked={allowed} aria-label={`${allowed ? 'Disable' : 'Approve'} ${entry.name}`} disabled={!approval.revision_sha256} onClick={() => setApproval(entry.name, allowed ? 'reject' : 'approve')} />}
                   </div>
                 </div>;
@@ -492,10 +487,10 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
                     {argumentRows.map((argument, index) => (
                       <div className="mcp-repeater-row" key={`arg-${index}`}>
                         <input value={argument} onChange={(event) => updateArgument(index, event.target.value)} style={inputStyle(t)} aria-label={`mcp-argument-${index}`} />
-                        <button type="button" className="extension-hub-icon-button" aria-label={`Remove argument ${index + 1}`} onClick={() => removeArgument(index)}><Icon name="trash" size={15} /></button>
+                        <button type="button" className="extension-hub-icon-button" aria-label={`Remove argument ${index + 1}`} onClick={() => removeArgument(index)}><ExtensionGlyph name="trash" size={15} /></button>
                       </div>
                     ))}
-                    <button type="button" className="mcp-add-row" onClick={addArgument}><Icon name="plus" size={14} /> Add argument</button>
+                    <button type="button" className="mcp-add-row" onClick={addArgument}><ExtensionGlyph name="plus" size={14} /> Add argument</button>
                   </div>
                   <div className="mcp-repeater">
                     <div className="mcp-repeater-label">Environment variables</div>
@@ -503,10 +498,10 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
                       <div className="mcp-repeater-row mcp-env-row" key={`env-${index}`}>
                         <input value={row.key} onChange={(event) => updateEnvironment(index, 'key', event.target.value)} style={inputStyle(t)} aria-label={`mcp-env-key-${index}`} placeholder="Key" />
                         <input value={row.value} onChange={(event) => updateEnvironment(index, 'value', event.target.value)} style={inputStyle(t)} aria-label={`mcp-env-value-${index}`} placeholder="Value" />
-                        <button type="button" className="extension-hub-icon-button" aria-label={`Remove environment variable ${index + 1}`} onClick={() => removeEnvironment(index)}><Icon name="trash" size={15} /></button>
+                        <button type="button" className="extension-hub-icon-button" aria-label={`Remove environment variable ${index + 1}`} onClick={() => removeEnvironment(index)}><ExtensionGlyph name="trash" size={15} /></button>
                       </div>
                     ))}
-                    <button type="button" className="mcp-add-row" onClick={addEnvironment}><Icon name="plus" size={14} /> Add environment variable</button>
+                    <button type="button" className="mcp-add-row" onClick={addEnvironment}><ExtensionGlyph name="plus" size={14} /> Add environment variable</button>
                   </div>
                 </>
               ) : transport !== 'custom' ? (
@@ -598,7 +593,6 @@ export function McpServers({ bridge, onNavigate }: PageContentProps) {
             </Row>
           ))}
         </details>}
-      </div>
-    </>
+    </ExtensionHubLayout>
   );
 }

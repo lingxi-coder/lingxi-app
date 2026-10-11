@@ -40,8 +40,8 @@ import Foundation
 
         /// Capture, downscaled and re-encoded natively.
         ///
-        /// A local app's bridge response and a provider's vision endpoint
-        /// both need far less than a 12 MP original, and Rust has no image
+        /// A provider's vision endpoint
+        /// needs far less than a 12 MP original, and Rust has no image
         /// codec on this build to shrink it after the fact — so the scaling
         /// lives here, where UIKit already has the decoded image.
         func capturePhotoSized(
@@ -88,8 +88,7 @@ import Foundation
             return try await withCheckedThrowingContinuation { cont in
                 // One slot, one picker — exactly like `LocationImpl`. Without
                 // this guard a second concurrent capture (a double-tapped
-                // button is two bridge requests, and the engine's camera tool
-                // shares this object with the local-app bridge) overwrites
+                // button is two requests) overwrites
                 // `continuation`, so the FIRST one is dropped unresumed: the
                 // Swift runtime logs a leaked-continuation misuse and the
                 // caller's `await` — which no timeout covers on the camera

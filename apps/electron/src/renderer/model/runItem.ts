@@ -87,9 +87,8 @@ export interface NarrationRunItem {
   readonly role?: 'user' | 'assistant';
   /**
    * Epoch ms the user submitted this prompt, stamped by the renderer when it
-   * echoes the message. The engine's `MessageDto` carries no timestamp, so
-   * restored history has none — the row shows the copy affordance without a
-   * clock rather than inventing one.
+   * echoes the message, or restored from the persisted transcript timestamp.
+   * Rows without a recorded timestamp omit the clock.
    */
   readonly sentAt?: number;
   /** Local prompt awaiting a turn boundary; absent on restored history. */

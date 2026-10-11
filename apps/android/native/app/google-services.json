@@ -1,0 +1,170 @@
+{
+  "project_info": {
+    "project_number": "535003056752",
+    "project_id": "lingxi-d6627",
+    "storage_bucket": "lingxi-d6627.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:535003056752:android:190846e43bf0a13f75c2b5",
+        "android_client_info": {
+          "package_name": "com.lingxi.code"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "535003056752-98o921fja6vn8hu4bmqb097215kti3sc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB7J-xVC8nADFU_oZefhckEakWFf0_Me9o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "535003056752-98o921fja6vn8hu4bmqb097215kti3sc.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "535003056752-l23qteth7diqh6djlpu7vigk9l4srlin.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.lingxi.code.full"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:535003056752:android:d80e04e1f189dbad75c2b5",
+        "android_client_info": {
+          "package_name": "com.lingxi.code.debug"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "535003056752-jr2d289hms43v60mjkselnmctvavmavi.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.lingxi.code.debug",
+            "certificate_hash": "2186fe940cea55018f2cd17d4fd14bcb20034359"
+          }
+        },
+        {
+          "client_id": "535003056752-98o921fja6vn8hu4bmqb097215kti3sc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB7J-xVC8nADFU_oZefhckEakWFf0_Me9o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "535003056752-98o921fja6vn8hu4bmqb097215kti3sc.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "535003056752-l23qteth7diqh6djlpu7vigk9l4srlin.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.lingxi.code.full"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:535003056752:android:23ab9a5e7137001d75c2b5",
+        "android_client_info": {
+          "package_name": "com.lingxi.code.direct"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "535003056752-98o921fja6vn8hu4bmqb097215kti3sc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB7J-xVC8nADFU_oZefhckEakWFf0_Me9o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "535003056752-98o921fja6vn8hu4bmqb097215kti3sc.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "535003056752-l23qteth7diqh6djlpu7vigk9l4srlin.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.lingxi.code.full"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:535003056752:android:6b1723deaf8d20e575c2b5",
+        "android_client_info": {
+          "package_name": "com.lingxi.code.direct.debug"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "535003056752-t6m35c164c07leulcb3u8bf894n44on1.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.lingxi.code.direct.debug",
+            "certificate_hash": "2186fe940cea55018f2cd17d4fd14bcb20034359"
+          }
+        },
+        {
+          "client_id": "535003056752-98o921fja6vn8hu4bmqb097215kti3sc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB7J-xVC8nADFU_oZefhckEakWFf0_Me9o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "535003056752-98o921fja6vn8hu4bmqb097215kti3sc.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "535003056752-l23qteth7diqh6djlpu7vigk9l4srlin.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.lingxi.code.full"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

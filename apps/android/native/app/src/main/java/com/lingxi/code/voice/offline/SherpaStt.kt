@@ -277,6 +277,17 @@ class SherpaStt private constructor(
         }
     }
 
+    suspend fun transcribePcm(pcm: ByteArray, sampleRate: Int): String? = withContext(Dispatchers.IO) {
+        require(pcm.size % 2 == 0 && sampleRate > 0)
+        coroutineContext.ensureActive()
+        val samples = FloatArray(pcm.size / 2) { index ->
+            ((pcm[index * 2].toInt() and 255) or (pcm[index * 2 + 1].toInt() shl 8)).toShort().toFloat() / 32768f
+        }
+        val text = decode(samples, sampleRate).trim().ifEmpty { null }
+        coroutineContext.ensureActive()
+        text
+    }
+
     private fun decode(pcm: FloatArray, sampleRate: Int): String {
         online?.let { rec ->
             val s = rec.createStream("")
@@ -302,8 +313,8 @@ class SherpaStt private constructor(
 
     companion object {
         /** Build the recognizer for an STT [entry] whose files are unpacked in [modelDir]. */
-        fun load(entry: OfflineModelEntry, modelDir: File): SherpaStt = when (val p = entry.runtimeParams) {
-            is SherpaRuntimeParams.Asr.OnlineTransducer -> {
+        fun load(entry: GeneratedOfflineModelEntry, modelDir: File): SherpaStt = when (val p = entry.runtimeParams) {
+            is GeneratedSherpaRuntimeParams.Asr.OnlineTransducer -> {
                 val cfg = OnlineRecognizerConfig().apply {
                     featConfig = FeatureConfig().apply { sampleRate = entry.sampleRateHz; featureDim = 80 }
                     modelConfig = OnlineModelConfig().apply {
@@ -321,7 +332,7 @@ class SherpaStt private constructor(
                 }
                 SherpaStt(online = OnlineRecognizer(assetManager = null, config = cfg), offline = null)
             }
-            is SherpaRuntimeParams.Asr.OfflineMoonshine -> {
+            is GeneratedSherpaRuntimeParams.Asr.OfflineMoonshine -> {
                 val cfg = OfflineRecognizerConfig().apply {
                     featConfig = FeatureConfig().apply { sampleRate = entry.sampleRateHz; featureDim = 80 }
                     modelConfig = OfflineModelConfig().apply {

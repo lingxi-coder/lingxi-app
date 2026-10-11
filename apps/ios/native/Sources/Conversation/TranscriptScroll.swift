@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// The transcript scroller. `ChatView` is its only caller; the local-app
-/// generation surface it once shared this with is gone.
+/// The transcript scroller. `ChatView` is its only caller.
 ///
 /// What lives here is the bottom anchor, the "stay pinned while the reader is
 /// at the bottom" rule, the jump-to-latest control, and the scroll-on-focus
@@ -34,8 +33,8 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     /// Identifier for UI tests, applied to the scroll view.
     var accessibilityIdentifier: String?
 
-    /// Maximum readable content width. Local-app surfaces retain the compact
-    /// default; the desktop-style conversation opts into its wider column.
+    /// Maximum readable content width. The compact default applies unless the
+    /// desktop-style conversation opts into its wider column.
     var maxContentWidth: CGFloat = 720
 
     /// Session plus transcript identity. A new transcript must not inherit an

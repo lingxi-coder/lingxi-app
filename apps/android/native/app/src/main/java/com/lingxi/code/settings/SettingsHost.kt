@@ -77,7 +77,6 @@ fun SettingsHost(
     onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
     onPermissionModeChanged: suspend (String) -> Unit = {},
     onTypescriptLspModeChanged: suspend (String) -> Unit = {},
-    onSetLocalAppPluginEnabled: suspend (String, Boolean) -> Unit = { _, _ -> },
     // 把当前会话切到另一个项目。设置页自己做不了：项目层/本地层写到哪个目录由引擎
     // 进程的 cwd 决定，换 cwd 就要重建会话源，那套状态机住在 RootScreen 里。
     // null 表示本宿主不提供切换能力，此时层选择器下不画切换入口。
@@ -97,11 +96,13 @@ fun SettingsHost(
     val t = LingXiTheme.palette
     val state by resolvedStore.state.collectAsStateWithLifecycle()
     val modelStates by VoiceModelDownloader.states.collectAsStateWithLifecycle()
+    val audioRoutingSession = engineSource?.activeSessionState?.collectAsStateWithLifecycle()?.value
+    val audioRoutingModel = engineSource?.modelState?.collectAsStateWithLifecycle()?.value
     val probedVoiceCapability by produceState(
         initialValue = state.voiceCapability,
         key1 = context.applicationContext,
         key2 = state.voice,
-        key3 = modelStates,
+        key3 = listOf(modelStates, state.llmProviders, audioRoutingSession, audioRoutingModel),
     ) {
         value = probeVoiceCapabilitySnapshot(
             context = context.applicationContext,
@@ -282,6 +283,7 @@ fun SettingsHost(
                         revision = state.voiceRevision,
                         saving = state.voiceSaving,
                         saveError = state.voiceSaveError,
+                        onProviderSettings = { navController.navigate(SettingsRoutes.providerList(ProviderKind.Llm.name)) },
                         onChange = resolvedStore::updateVoice,
                     )
                 }
@@ -328,11 +330,6 @@ fun SettingsHost(
                     SkillsPage(
                         state = state,
                         store = resolvedStore,
-                        onSetLocalAppPluginEnabled = { pluginId, enabled ->
-                            resolvedStore.viewModelScope.launch {
-                                onSetLocalAppPluginEnabled(pluginId, enabled)
-                            }
-                        },
                         onDetail = { id -> navController.navigate(SettingsRoutes.skillDetail(id)) },
                     )
                 }

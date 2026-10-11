@@ -102,13 +102,6 @@ if [[ "${LINGXI_SIM_ARM64_ONLY:-0}" == "1" ]]; then
   "${LINUX_RUNTIME_BUILD}" --simulator-only
 elif [[ "${LINGXI_REUSE_STAGED_LINUX_RUNTIME:-0}" == "1" ]]; then
   "${SCRIPT_DIR}/verify-linux-runtime.sh"
-  if [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
-    "${SCRIPT_DIR}/validate-local-app-build-assets.sh" \
-      --configuration FullDebug --platform iphoneos --rootfs-only \
-      --rootfs-manifest "${IOS_DIR}/build/linux-runtime/openminis/manifest.json"
-  fi
-elif [[ "${LINGXI_LOCAL_APP_RUNTIME:-1}" == "1" ]]; then
-  "${LINUX_RUNTIME_BUILD}" --local-app-runtime
 else
   "${LINUX_RUNTIME_BUILD}"
 fi
@@ -158,8 +151,11 @@ if [[ "${LINGXI_REUSE_GENERATED_BINDINGS:-0}" == "1" ]]; then
   done
   log "Reusing validated Swift bindings in ${GEN_DIR} …"
 else
-  log "Building host cdylib for bindgen introspection…"
-  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features uniffi
+  # Build the library and generator with one feature graph before replacing
+  # any existing bindings. A stale lockfile or generator build failure must
+  # leave the last matching generated sources available.
+  log "Building host cdylib and bindings generator…"
+  cargo build --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features cli
 
   HOST_DYLIB_PATH="${CARGO_TARGET_DIR}/debug/${HOST_DYLIB}"
   [[ -f "${HOST_DYLIB_PATH}" ]] || { echo "ERROR: host dylib not produced: ${HOST_DYLIB_PATH}" >&2; exit 1; }
@@ -167,10 +163,11 @@ else
   log "Generating Swift bindings into ${GEN_DIR} …"
   rm -rf "${GEN_DIR}"
   mkdir -p "${GEN_DIR}"
-# Generate through the pinned UniFFI 0.32 public pipeline.
-cargo run --locked --manifest-path "${CARGO_DIR}/Cargo.toml" -p "${CRATE}" --features cli \
-  --bin uniffi-bindgen -- \
-  generate \
+  # The preceding build produces this exact generator with the host library.
+  # Invoke it directly so generation does not queue a second Cargo build.
+  BINDGEN_PATH="${CARGO_TARGET_DIR}/debug/uniffi-bindgen"
+  [[ -x "${BINDGEN_PATH}" ]] || { echo "ERROR: bindings generator not produced: ${BINDGEN_PATH}" >&2; exit 1; }
+  "${BINDGEN_PATH}" generate \
   --library "${HOST_DYLIB_PATH}" \
   --language swift \
   --out-dir "${GEN_DIR}"

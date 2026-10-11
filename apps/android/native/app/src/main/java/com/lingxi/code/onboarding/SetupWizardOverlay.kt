@@ -1,5 +1,6 @@
 package com.lingxi.code.onboarding
 
+import com.lingxi.code.voice.offline.localizedDisplayName
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.imePadding
@@ -37,9 +38,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.draw.clip
 import com.lingxi.code.voice.offline.ModelState
-import com.lingxi.code.voice.offline.OfflineModelEntry
-import com.lingxi.code.voice.offline.VOICE_PACKS
-import com.lingxi.code.voice.offline.VoicePack
+import com.lingxi.code.voice.offline.GeneratedOfflineModelEntry
+import com.lingxi.code.voice.offline.GeneratedVoiceModelCatalog
+import com.lingxi.code.voice.offline.GeneratedVoicePack
 import com.lingxi.code.voice.offline.VoicePackProgress
 import com.lingxi.code.voice.offline.VoiceModelDownloader
 import com.lingxi.code.voice.offline.voicePackProgress
@@ -401,7 +402,7 @@ private fun VoicePackStep(
     WizH(stringResource(R.string.onboarding_voice_pack_title))
     WizSub(stringResource(R.string.onboarding_voice_pack_subtitle))
     Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-        VOICE_PACKS.forEach { pack ->
+        GeneratedVoiceModelCatalog.packs.forEach { pack ->
             VoicePackRow(
                 pack = pack,
                 progress = voicePackProgress(states, pack),
@@ -431,7 +432,7 @@ private fun VoicePackStep(
 
 @Composable
 private fun VoicePackRow(
-    pack: VoicePack,
+    pack: GeneratedVoicePack,
     progress: VoicePackProgress,
     selected: Boolean,
     onSelect: () -> Unit,
@@ -513,7 +514,7 @@ private fun VoicePackRow(
 }
 
 /**
- * [OfflineModelEntry.displayName] and [VoicePack.title]/[.subtitle] stay the
+ * [GeneratedOfflineModelEntry.displayName] and [GeneratedVoicePack.title]/[.subtitle] stay the
  * literal zh-Hans copy on the model (`voice/offline/VoiceModels.kt` is a
  * plain, engine-agnostic catalog with no Android/Compose dependency — kept
  * that way so [com.lingxi.code.voice.offline.VoiceModelDownloaderTest] stays
@@ -524,7 +525,7 @@ private fun VoicePackRow(
  * resolve the real localized text at render time.
  */
 @Composable
-private fun voiceModelZhLabel(entry: OfflineModelEntry): String = when (entry.id) {
+private fun voiceModelZhLabel(entry: GeneratedOfflineModelEntry): String = when (entry.id) {
     "sherpa.zipformer-zh-14m-mobile" -> stringResource(R.string.voice_model_name_zipformer_zh_14m)
     "sherpa.moonshine-tiny-en" -> stringResource(R.string.voice_model_name_moonshine_tiny_en)
     "sherpa.melo-zh-en" -> stringResource(R.string.voice_model_name_melo_zh_en)
@@ -533,11 +534,11 @@ private fun voiceModelZhLabel(entry: OfflineModelEntry): String = when (entry.id
 }
 
 @Composable
-private fun VoicePack.localizedTitle(): String =
+private fun GeneratedVoicePack.localizedTitle(): String =
     if (language == "zh") stringResource(R.string.voice_pack_title_zh) else title
 
 @Composable
-private fun VoicePack.localizedSubtitle(): String =
+private fun GeneratedVoicePack.localizedSubtitle(): String =
     if (language == "zh") stringResource(R.string.voice_pack_subtitle_zh) else subtitle
 
 @Composable

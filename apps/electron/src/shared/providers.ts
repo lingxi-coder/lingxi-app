@@ -52,7 +52,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
     authMethod: 'api_key', keyLabel: 'OpenAI API key', keyPlaceholder: 'sk-…',
     defaultApiBase: 'https://api.openai.com/v1',
     credentialManagementUrl: 'https://platform.openai.com/api-keys',
-    defaultModel: 'openai/gpt-5.6-sol', available: true,
+    defaultModel: 'openai/gpt-6.1-sol', available: true,
     // OpenAI hosts a dedicated `POST /v1/audio/transcriptions` endpoint
     // (Whisper / gpt-4o-transcribe family), documented at
     // developers.openai.com/api/docs/guides/speech-to-text — reachable with
@@ -161,7 +161,7 @@ export const PROVIDERS: readonly ProviderDefinition[] = [
     authMethod: 'oauth', keyLabel: 'ChatGPT 账号', keyPlaceholder: '',
     defaultApiBase: 'https://chatgpt.com/backend-api/codex',
     credentialManagementUrl: 'https://chatgpt.com',
-    defaultModel: 'openai-chatgpt/gpt-5.6-sol', available: true,
+    defaultModel: 'openai-chatgpt/gpt-6.1-sol', available: true,
     // Codex subscription credentials do not grant access to the audio API.
     transcriptionCapable: false,
   },

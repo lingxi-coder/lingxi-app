@@ -227,10 +227,8 @@ const NativeCommandOutputRow = memo(function NativeCommandOutputRow({
  *
  * The box is ALWAYS laid out — revealing it on hover only toggles opacity — so
  * the affordance cannot change the message's height and drag the transcript out
- * from under the pointer while it is being read. A prompt restored from a
- * resumed session has no `sentAt` (the engine's `MessageDto` carries no
- * timestamp), so its row shows the copy button alone rather than guessing a
- * time.
+ * from under the pointer while it is being read. Restored prompts use their
+ * persisted timestamp; rows without a recorded time show only the copy button.
  */
 const UserMessageActions = memo(function UserMessageActions({ text, sentAt }: { text: string; sentAt?: number }) {
   const t = useT();

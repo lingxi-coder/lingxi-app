@@ -64,7 +64,6 @@ STAGING_PARENT="${ANDROID_DIR}/app/build/nativeStaging/${VARIANT}"
 KOTLIN_OUT="${LINGXI_KOTLIN_OUT:-${ANDROID_DIR}/app/src/main/java}"   # bindgen writes <pkg-path>/*.kt under here
 
 PROFILE="release"
-PROFILE_DIR="release"
 
 # Rust target triple → Android ABI directory name. (Portable to bash 3.2 — macOS
 # ships no associative arrays, so map via a case function instead of `declare -A`.)
@@ -315,9 +314,11 @@ done
 # ---------------------------------------------------------------------------
 # `--library` introspection needs the UNSTRIPPED cdylib: llvm-strip drops the
 # custom UniFFI metadata section, which makes bindgen fail with
-# "no UniFFI metadata groups found in the library". Point bindgen at the
-# cargo target artifact and keep the stripped copy only for APK packaging.
-INTROSPECT_LIB="${CARGO_TARGET_DIR}/aarch64-linux-android/${PROFILE_DIR}/${SONAME}"
+# "no UniFFI metadata groups found in the library". Point bindgen at this
+# invocation's unstripped staging copy and strip it only for APK packaging.
+# Bindings must describe the library this invocation will publish. A shared
+# Cargo target directory may be rebuilt by another checkout while bindgen runs.
+INTROSPECT_LIB="${JNILIBS_DIR}/arm64-v8a/${SONAME}"
 
 # The bindgen bin's `--library` metadata extractor expects to find a cdylib name
 # it can compute; build the bin first (cli feature), then run it.

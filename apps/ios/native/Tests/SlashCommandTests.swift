@@ -212,7 +212,7 @@ import XCTest
             ))
             XCTAssertNotNil(source.send("/unknown"))
             await flushTasks()
-            guard case let .sendPrompt(text, _, _, unknownTurnId) = try XCTUnwrap(submitted.first) else {
+            guard case let .sendPrompt(text, _, _, unknownTurnId, _) = try XCTUnwrap(submitted.first) else {
                 return XCTFail("expected sendPrompt for unknown slash")
             }
             XCTAssertEqual(text.codeUnits, Array("/unknown".utf16))

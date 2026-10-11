@@ -44,7 +44,7 @@ interface ConversationSource {
         get() = null
 
     /**
-     * Out-of-band engine events consumed by feature stores such as Local Apps.
+     * Out-of-band engine events consumed by profile-global feature stores.
      *
      * Conversation rendering still observes its purpose-built state flows; this
      * generic stream exists so profile-global features can share the exact same

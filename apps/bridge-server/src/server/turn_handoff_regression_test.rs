@@ -1,12 +1,12 @@
 //! Ownership, queued lifecycle, and session-transition admission regressions.
 use super::connection_regression_test::{
-    Socket, captured_sink, connect_authenticated, hello, images, next_frame,
+    captured_sink, connect_authenticated, hello, images, next_frame, Socket,
 };
 use super::*;
 use futures_util::SinkExt;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
@@ -134,7 +134,10 @@ async fn cancellation_cleanup_fences_successor_question_admission() {
     let checking = tokio::spawn(async move {
         gate.check(
             "Write",
-            &serde_json::json!({"file_path":"/tmp/bridge-handoff"}),
+            &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"file_path":"/tmp/bridge-handoff"}),
+            )
+            .unwrap(),
         )
         .await
     });
@@ -210,11 +213,11 @@ impl ClientEventSink for FirstTextBarrier {
 async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
     use client::adapter::AdapterOutputStream;
     use orchestrator::test_support::{
-        MockApiClient, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
         content_block_start_text, content_block_stop, message_delta_stop, message_start,
-        message_stop, noop_hook_executor, text_delta,
+        message_stop, noop_hook_executor, text_delta, MockApiClient, MockStreamingApiClient,
+        NoOpPermissionGate, StaticMemoryProvider,
     };
-    use orchestrator::{ConversationOrchestrator, OrchestratorConfig, scripted};
+    use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
     for (attachments, turn_id) in [
         (images(), None),
         (Vec::new(), Some(22)),
@@ -246,17 +249,18 @@ async fn queued_complete_inputs_emit_one_correlated_start_before_output() {
                 message_stop()
             ],
         ]));
-        let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            streaming.clone(),
-            Arc::new(tool_api::registry::ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(output.clone()),
-            Arc::new(StaticMemoryProvider::empty()),
-            "/tmp".into(),
-        ));
+        let orchestrator =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                streaming.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(output.clone()),
+                Arc::new(StaticMemoryProvider::empty()),
+                "/tmp".into(),
+            ));
         let driver = Arc::new(
             crate::driver::OrchestratorTurnDriver::new(orchestrator).with_message_output(output),
         );

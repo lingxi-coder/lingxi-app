@@ -56,7 +56,7 @@ struct TypeScriptLspModePage: View {
     let host: SettingsHost
 
     private let options = [
-        RadioOption(value: "auto", label: "自动（推荐）", sub: "仅在受管 Local App 工作区启用。"),
+        RadioOption(value: "auto", label: "自动（推荐）", sub: "不会自动启用，需要时请选择“始终开启”。"),
         RadioOption(value: "off", label: "关闭", sub: "不启动语言服务器，也不暴露 LSP 工具。"),
         RadioOption(value: "on", label: "始终开启", sub: "也允许在普通 JavaScript / JSX 工作区使用。"),
     ]

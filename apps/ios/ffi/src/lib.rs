@@ -50,6 +50,7 @@
 //! the iOS-local exports) so the symbols land in the final `staticlib`/cdylib.
 
 #![forbid(unsafe_code)]
+
 // Documentation debt, not a decision that docs do not matter: this crate had
 // 140 undocumented public item(s) when `missing_docs` was measured across the
 // workspace (2026-09-16). The lint stays `warn` at the workspace level so a NEW
@@ -70,9 +71,18 @@
 #![allow(dead_code)]
 
 #[cfg(feature = "uniffi")]
+mod audio_provider;
+#[cfg(feature = "uniffi")]
+pub use audio_provider::{
+    build_ios_audio_provider_host, build_ios_session_audio_provider_host, IosAudioProviderHost,
+    start_ios_realtime_audio, IosRealtimeAudioListener, IosRealtimeAudioSession,
+};
+
+
+#[cfg(feature = "uniffi")]
 pub use harness_runtime::mobile::{
     max_audio_payload_bytes, ClientEventListener, CronDueOccurrenceDto, CronFireStatusDto,
-    CronTaskDto, FiredCronJobDto, LocalAppBackgroundRunDto, MobileConfig, MobileCronStoreHandle,
+    CronTaskDto, FiredCronJobDto, MobileConfig, MobileCronStoreHandle,
     MobileEngineError, MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto,
     MobileSessionMode, ModelBillingModeDto, ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto,
     ModelPricingTierDto, PermissionRequestSink, ProviderCatalogEntryDto, ProviderConnectionTestDto,
@@ -311,7 +321,7 @@ mod stub_capabilities {
 
 // ---------------------------------------------------------------------------
 // Device status / haptics / deep links — one native callback object fans out
-// to the three shared Platform seams used by Local Apps.
+// to the three shared Platform seams.
 
 // F3-04: re-export `harness-runtime::mobile`'s UniFFI scaffolding so the shared host's FFI
 // symbols (the re-exported `MobileEngineHandle` / `MobileEngineError`) land in

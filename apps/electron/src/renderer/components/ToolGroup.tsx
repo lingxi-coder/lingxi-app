@@ -1,3 +1,4 @@
+import { questionAnswers } from './AskUserQuestionSummary';
 import type { CSSProperties } from 'react';
 import type { TranscriptToolGroup } from './transcriptRows';
 import { toolDisplayHeader } from '../model/runItem';
@@ -16,6 +17,11 @@ interface ToolGroupProps {
 
 export function ToolGroup({ group, modUiSessionId, open, toolOpen, onSetOpen }: ToolGroupProps) {
   const t = useT();
+  if (group.tools.some((tool) => questionAnswers(tool))) {
+    return <div className="transcript-tool-group">
+      {group.tools.map((tool) => <ToolCall key={tool.id} item={tool} modUiSessionId={modUiSessionId} open={toolOpen(tool.id)} onSetOpen={onSetOpen} />)}
+    </div>;
+  }
   const active = group.tools.filter((tool) => tool.status === 'running');
   if (active.length > 0) {
     return <div className="transcript-tool-group" aria-label="Running tools">

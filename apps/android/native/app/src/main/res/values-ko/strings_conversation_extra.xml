@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Korean for values/strings_conversation_extra.xml (see that file's header). -->
+<resources>
+    <string name="chat_question_card_title">어시스턴트가 몇 가지 확인하고 싶은 것이 있습니다</string>
+    <string name="chat_question_progress">%1$d/%2$d번째 질문</string>
+    <string name="chat_question_answered_progress">답변 %1$d/%2$d</string>
+    <string name="chat_question_tap_to_answer">답변을 선택하세요</string>
+    <string name="chat_question_previous">이전</string>
+    <string name="chat_question_next">다음</string>
+    <string name="chat_question_other_placeholder">기타</string>
+    <string name="chat_question_submit">제출</string>
+    <string name="chat_task_status_pending">백그라운드 작업 %1$s이(가) 대기열에 추가되었습니다</string>
+    <string name="chat_task_status_running">백그라운드 작업 %1$s 실행 중</string>
+    <string name="chat_task_status_paused">백그라운드 작업 %1$s이(가) 일시중지되었습니다</string>
+    <string name="chat_task_status_completed">백그라운드 작업 %1$s이(가) 완료되었습니다</string>
+    <string name="chat_task_status_failed">백그라운드 작업 %1$s이(가) 실패했습니다</string>
+    <string name="chat_task_status_failed_reason">백그라운드 작업 %1$s이(가) 실패했습니다: %2$s</string>
+    <string name="chat_task_status_cancelled">백그라운드 작업 %1$s이(가) 취소되었습니다</string>
+</resources>

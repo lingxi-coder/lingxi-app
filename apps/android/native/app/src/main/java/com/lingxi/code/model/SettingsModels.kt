@@ -117,40 +117,6 @@ data class Skill(
     val builtin: Boolean,
 )
 
-data class LocalAppPluginStatus(
-    val pluginId: String,
-    val displayName: String,
-    val version: String,
-    val bundleDigest: String,
-    val enabled: Boolean,
-    val skillsCount: Int,
-    val agentsCount: Int,
-    val workflowsCount: Int,
-    val templatesCount: Int,
-    val validationError: String? = null,
-)
-
-data class ManagedLocalAppToolSchema(
-    val name: String,
-    val permissionSummary: String,
-)
-
-data class ManagedLocalAppMcpSource(
-    val stableServerName: String,
-    val appName: String,
-    val appId: String,
-    val buildDigestSummary: String,
-    val catalogDigestSummary: String,
-    val toolCount: Int,
-    val authoringRevision: String,
-    val uiVerification: String,
-    val mcpVerification: String,
-    val schemaSummary: String,
-    val annotationSummary: String,
-    val permissionCeiling: String,
-    val toolSchemas: List<ManagedLocalAppToolSchema> = emptyList(),
-)
-
 data class MCPServer(
     val id: String,
     val name: String,
@@ -160,7 +126,6 @@ data class MCPServer(
     val enabled: Boolean,
     val transport: String,
     val auth: String? = null,
-    val managedLocalApp: ManagedLocalAppMcpSource? = null,
 )
 
 data class DreamConfig(
@@ -400,132 +365,6 @@ object SettingsMock {
             enabled = true,
             builtin = false,
         ),
-    )
-
-    /**
-     * The mobile bundled catalog. This mirrors the engine's compiled registry
-     * (`skill-api`'s `BUILTIN_MOBILE`) instead of inventing Android-only
-     * placeholder rows, so the settings surface exposes the same eight Local
-     * Apps skills as slash discovery.
-     *
-     * [resolve] carries the same (string resource id, zh-Hans fallback)
-     * contract as [skills] and MUST be passed by any production caller — the
-     * descriptions are user-facing prose, and a resolver-less call renders
-     * Simplified Chinese on an English / Japanese / Korean / zh-TW device.
-     *
-     * `name` is deliberately NOT localized: it is the skill's canonical
-     * identifier, the same string the `/create-local-app` trigger and the
-     * engine's registry use. Translating it would break that correspondence.
-     */
-    fun bundledSkills(resolve: (id: Int, fallback: String) -> String = { _, fallback -> fallback }): List<Skill> = listOf(
-        Skill(
-            "create-local-app",
-            "create-local-app",
-            "官方",
-            resolve(
-                R.string.settings_skill_bundled_create_local_app_desc,
-                "编排设计、依赖、生成、构建和验证本地应用",
-            ),
-            listOf("/create-local-app"),
-            enabled = true,
-            builtin = true,
-        ),
-        Skill(
-            "frontend-design",
-            "frontend-design",
-            "官方",
-            resolve(
-                R.string.settings_skill_bundled_frontend_design_desc,
-                "为目标平台和 form factor 设计原生前端方向",
-            ),
-            listOf("/frontend-design"),
-            enabled = true,
-            builtin = true,
-        ),
-        Skill(
-            "ionic-react-local-app",
-            "ionic-react-local-app",
-            "官方",
-            resolve(
-                R.string.settings_skill_bundled_ionic_react_local_app_desc,
-                "在固定的 Ionic React 脚手架中实现本地应用，并遵守原生 WebView 桥接约束",
-            ),
-            listOf("/ionic-react-local-app"),
-            enabled = true,
-            builtin = true,
-        ),
-        Skill(
-            "canvas-2d-local-app",
-            "canvas-2d-local-app",
-            "官方",
-            resolve(
-                R.string.settings_skill_bundled_canvas_2d_local_app_desc,
-                "用确定性 Canvas 2D 场景和原生感覆盖层构建本地应用",
-            ),
-            listOf("/canvas-2d-local-app"),
-            enabled = true,
-            builtin = true,
-        ),
-        Skill(
-            "threejs-local-app",
-            "threejs-local-app",
-            "官方",
-            resolve(
-                R.string.settings_skill_bundled_threejs_local_app_desc,
-                "用 Three.js 构建本地应用，明确处理生命周期、输入和资源释放",
-            ),
-            listOf("/threejs-local-app"),
-            enabled = true,
-            builtin = true,
-        ),
-        Skill(
-            "frontend-qa",
-            "frontend-qa",
-            "官方",
-            resolve(
-                R.string.settings_skill_bundled_frontend_qa_desc,
-                "用 Browser 与原生 WebView 验证界面和交互",
-            ),
-            listOf("/frontend-qa"),
-            enabled = true,
-            builtin = true,
-        ),
-        Skill(
-            "accessibility",
-            "accessibility",
-            "官方",
-            resolve(
-                R.string.settings_skill_bundled_accessibility_desc,
-                "检查语义、键盘、触控、对比度和动态字体",
-            ),
-            listOf("/accessibility"),
-            enabled = true,
-            builtin = true,
-        ),
-        Skill(
-            "react-best-practices",
-            "react-best-practices",
-            "官方",
-            resolve(
-                R.string.settings_skill_bundled_react_best_practices_desc,
-                "检查 React 状态、效果、性能和完整状态",
-            ),
-            listOf("/react-best-practices"),
-            enabled = true,
-            builtin = true,
-        ),
-    )
-
-    fun localAppPlugin() = LocalAppPluginStatus(
-        pluginId = "lingxi-local-app",
-        displayName = "LingXi Local App",
-        version = "1.0.0",
-        bundleDigest = "builtin",
-        enabled = true,
-        skillsCount = 27,
-        agentsCount = 7,
-        workflowsCount = 3,
-        templatesCount = 5,
     )
 
     fun mcpServers(resolve: (id: Int, fallback: String) -> String = { _, fallback -> fallback }): List<MCPServer> = listOf(

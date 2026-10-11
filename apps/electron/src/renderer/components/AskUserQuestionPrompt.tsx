@@ -145,7 +145,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
         <span className="inline-interaction-heading-icon" aria-hidden="true">
           <Icon name="question" size={19} stroke={1.7} />
         </span>
-        <h2 id="lingxi-ask-heading">Question</h2>
+        <h2 id="lingxi-ask-heading">{request.questions.length} {request.questions.length === 1 ? 'question' : 'questions'}</h2>
         <span className="ask-dialog-progress">{answeredCount} of {request.questions.length} answered</span>
         <button
           type="button"

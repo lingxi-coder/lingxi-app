@@ -10,7 +10,7 @@ class SessionModeRoutingTest {
 
     @Test
     fun `in-place resume requires both workspace and mode to match`() {
-        val workspace = ConversationScope.LocalApp("notes")
+        val workspace = ConversationScope.Project("notes")
 
         assertTrue(
             isBoundToScopeMode(

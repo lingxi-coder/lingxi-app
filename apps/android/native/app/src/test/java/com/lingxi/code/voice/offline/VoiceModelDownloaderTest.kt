@@ -17,7 +17,7 @@ class VoiceModelDownloaderTest {
     @Test
     fun cancellingDuringExtractionDoesNotPublishOrLeaveStaging() {
         val root = Files.createTempDirectory("voice-extract-cancel").toFile()
-        val model = OfflineModelCatalog.all.first()
+        val model = GeneratedVoiceModelCatalog.all.first()
         val archive = root.resolve("model.tar.bz2")
         val destination = root.resolve(model.id)
         val staging = root.resolve(".${model.id}.installing")
@@ -68,7 +68,7 @@ class VoiceModelDownloaderTest {
         val previous = contextField.get(VoiceModelDownloader)
         contextField.set(VoiceModelDownloader, null)
         try {
-            val model = OfflineModelCatalog.all.first()
+            val model = GeneratedVoiceModelCatalog.all.first()
             val staging = root.resolve("files/voice_models/.${model.id}.installing")
             staging.mkdirs()
             staging.resolve("stale").writeText("interrupted")
@@ -183,7 +183,7 @@ class VoiceModelDownloaderTest {
 
     @Test
     fun aggregate_progress_uses_real_per_model_totals() {
-        val pack = VOICE_PACKS.first { it.language == "zh" }
+        val pack = GeneratedVoiceModelCatalog.packs.first { it.language == "zh" }
         val first = pack.models[0]
         val second = pack.models[1]
         val state = aggregatePackState(
@@ -200,7 +200,7 @@ class VoiceModelDownloaderTest {
 
     @Test
     fun pack_progress_identifies_each_model_without_looking_like_a_restart() {
-        val pack = VOICE_PACKS.first { it.language == "zh" }
+        val pack = GeneratedVoiceModelCatalog.packs.first { it.language == "zh" }
         val first = pack.models[0]
         val second = pack.models[1]
         val installingFirst = voicePackProgress(
@@ -233,8 +233,8 @@ class VoiceModelDownloaderTest {
 
     @Test
     fun onboarding_packs_use_complete_mobile_sized_models() {
-        val chinese = VOICE_PACKS.first { it.language == "zh" }
-        val english = VOICE_PACKS.first { it.language == "en" }
+        val chinese = GeneratedVoiceModelCatalog.packs.first { it.language == "zh" }
+        val english = GeneratedVoiceModelCatalog.packs.first { it.language == "en" }
 
         assertEquals(221_351_135L, chinese.totalBytes)
         assertEquals(134_187_246L, english.totalBytes)
@@ -244,11 +244,11 @@ class VoiceModelDownloaderTest {
         assertTrue(english.models.all { it.files.isNotEmpty() && it.sha256.length == 64 })
         assertEquals(
             listOf("dict"),
-            chinese.models.first { it.kind == ModelKind.Tts }.requiredDirectories,
+            chinese.models.first { it.kind == GeneratedModelKind.Tts }.requiredDirectories,
         )
         assertEquals(
             listOf("espeak-ng-data"),
-            english.models.first { it.kind == ModelKind.Tts }.requiredDirectories,
+            english.models.first { it.kind == GeneratedModelKind.Tts }.requiredDirectories,
         )
     }
 

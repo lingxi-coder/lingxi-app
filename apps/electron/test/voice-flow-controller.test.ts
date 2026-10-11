@@ -7,7 +7,7 @@ import {
   type VoiceFlowTrackedSpeechEvent,
   type VoiceFlowTurnToken,
 } from '../src/renderer/audio/flow/controller';
-import { audioConfigurationDefaults, type AudioConfigurationV3 } from '../src/shared/generatedAudioConfiguration';
+import { audioConfigurationDefaults, type AudioConfigurationV4 } from '../src/shared/generatedAudioConfiguration';
 import type { AudioOperationDto, AudioOperationResultDto } from '@lingxi/bridge-client';
 import { canvasColorWithAlpha } from '../src/renderer/components/voice/VoiceOrbCanvas';
 import { shouldAutoplayTrackedReply } from '../src/renderer/audio/autoplay';

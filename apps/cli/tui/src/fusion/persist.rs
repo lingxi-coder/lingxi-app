@@ -6,7 +6,7 @@
 
 use lingxi_core::host::fusion_setup::FusionModelRoles;
 
-/// `~/.lingxi/settings.json` — the same file `/web`, `/config` and the startup
+/// `~/.lingxi/settings.json` — the same file `/config` and the startup
 /// settings load read and write.
 #[must_use]
 pub fn fusion_settings_path() -> Option<std::path::PathBuf> {

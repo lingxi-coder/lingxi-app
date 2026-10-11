@@ -1,0 +1,22 @@
+/* Question/answer rhythm follows Codex's borderless request_user_input summary. */
+.ask-question-summary { min-width: 0; padding: 2px 0; font-size: 14px; line-height: 1.65; }
+.ask-question-summary-list { display: grid; gap: 16px; margin-top: 10px; }
+.ask-question-summary-pair { display: grid; gap: 4px; }
+.ask-question-summary-pair p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-question-summary-trigger:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
+section.ask-user-question-inline { border-radius: 0; box-shadow: none; background: var(--dialog-window); }
+section.ask-user-question-inline .inline-interaction-header { padding: 8px 0; gap: 8px; }
+section.ask-user-question-inline .inline-interaction-header h2 { font-weight: 400; color: var(--dialog-text-3); }
+section.ask-user-question-inline .inline-interaction-heading-icon { width: 20px; height: 20px; background: transparent; color: var(--dialog-text-3); }
+section.ask-user-question-inline .ask-dialog-progress { background: transparent; padding: 0; font-weight: 400; }
+section.ask-user-question-inline .ask-dialog-body { padding: 8px 0; }
+section.ask-user-question-inline .ask-dialog-question-card { background: transparent; box-shadow: none; border-radius: 0; }
+section.ask-user-question-inline .ask-dialog-question-trigger { grid-template-columns: minmax(0, 1fr) 20px; padding: 6px 0; gap: 8px; border-bottom: 0; }
+section.ask-user-question-inline .ask-dialog-question-index,
+section.ask-user-question-inline .ask-dialog-question-header { display: none; }
+section.ask-user-question-inline .ask-dialog-question-copy { gap: 4px; }
+section.ask-user-question-inline .ask-dialog-question-title { color: var(--dialog-text-3); font-weight: 400; line-height: 1.65; }
+section.ask-user-question-inline .ask-dialog-answer-summary { color: var(--dialog-text-3); opacity: .65; font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+section.ask-user-question-inline .ask-dialog-options { padding: 8px 0; }
+
+section.ask-user-question-inline .ask-dialog-question-card[data-expanded='true'] .ask-dialog-question-trigger { border-bottom: 0; }

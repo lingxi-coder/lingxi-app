@@ -238,6 +238,7 @@ private class MessageBuild(
                     val existing = ref.build.blocks[ref.blockIndex] as MessageContent.Tool
                     ref.build.blocks[ref.blockIndex] = MessageContent.Tool(
                         existing.call.copy(display = display, status = status,
+                            questionAnswers = if (!block.isError) parseQuestionAnswers(block.tool, block.resultJson) else null,
                             planMarkdown = existing.call.planMarkdown ?: toolPlanMarkdown(block.tool, block.resultJson)),
                     )
                 } else {
@@ -250,6 +251,7 @@ private class MessageBuild(
                                 id = block.id,
                                 tool = block.tool,
                                 planMarkdown = toolPlanMarkdown(block.tool, block.resultJson),
+                                questionAnswers = if (!block.isError) parseQuestionAnswers(block.tool, block.resultJson) else null,
                                 display = display,
                                 status = status,
                             ),

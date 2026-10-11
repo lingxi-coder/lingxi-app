@@ -8,16 +8,16 @@ struct IOSAudioOperationIdentity: Hashable, Sendable {
 
 enum IOSAudioOwner: Hashable, Sendable {
     case session(sessionID: String)
-    case localApp(appID: String, runtimeGeneration: UInt64)
     case ui(instanceID: String)
     case system(instanceID: String)
+    case localApp(appID: String, runtimeGeneration: UInt64)
 
     var stableKey: String {
         switch self {
         case let .session(sessionID): "session:\(sessionID)"
-        case let .localApp(appID, generation): "local-app:\(appID):\(generation)"
         case let .ui(instanceID): "ui:\(instanceID)"
         case let .system(instanceID): "system:\(instanceID)"
+        case let .localApp(appID, generation): "local-app:\(generation):\(appID)"
         }
     }
 }
@@ -40,6 +40,9 @@ struct IOSAudioOperationRequest: Sendable {
 enum IOSAudioOperation: Sendable {
     case startRecording(sampleRateHz: UInt32, format: String)
     case stopRecording(handle: String)
+    case capture(sampleRateHz: UInt32, format: String)
+    case play(pcm: Data, sampleRateHz: UInt32)
+    case transcribe(audio: Data, mimeType: String, language: String?)
     case listen(language: String?)
     case synthesize(text: String, language: String?, rate: Float?, voice: String?)
     case speak(text: String, language: String?, rate: Float?, voice: String?)
@@ -86,7 +89,7 @@ struct IOSAudioCapabilityState: Sendable {
     let supportedOperations: Set<Operation>
     let readiness: [Operation: Readiness]
 
-    enum Operation: Hashable, Sendable { case record, listen, synthesize, speak }
+    enum Operation: Hashable, Sendable { case record, capture, play, transcribe, listen, synthesize, speak }
     enum Readiness: Equatable, Sendable { case ready, needsPermission, busy, missingModel, unavailable }
 }
 

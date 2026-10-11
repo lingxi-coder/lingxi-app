@@ -10,10 +10,32 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 
 class AudioResourceCoordinatorTest {
+    @Test
+    fun localAppRuntimeGenerationsHaveIndependentLeases() {
+        val coordinator = AudioResourceCoordinator(7)
+        val previous = AudioOwnerKey.localApp("same-app", 1uL)
+        val current = AudioOwnerKey.localApp("same-app", 2uL)
+        val lease = coordinator.acquire(operation("render"), current, AudioResource.OfflineRender, modelId = "voice") as AudioLeaseDecision.Granted
+        assertTrue(coordinator.endOwner(previous).isEmpty())
+        assertTrue(coordinator.endOwner(AudioOwnerKey.ui("same-app")).isEmpty())
+        assertEquals(listOf(lease.lease), coordinator.endOwner(current))
+    }
+
     private val epoch = 7L
 
     private fun operation(id: String, generation: Long = 1) =
         AudioOperationIdentity(id, generation, epoch)
+
+    @Test
+    fun recordedRecognitionAndLiveCaptureCannotUseTheSameOfflineRecognizerConcurrently() {
+        val coordinator = AudioResourceCoordinator(epoch)
+        val owner = AudioOwnerKey.ui("audio")
+        val decode = coordinator.acquire(operation("decode"), owner, AudioResource.OfflineRender, modelId = "recognizer") as AudioLeaseDecision.Granted
+        assertEquals(AudioLeaseDecision.Busy, coordinator.acquire(operation("live"), owner, AudioResource.Capture, modelId = "recognizer"))
+        coordinator.release(decode.lease)
+        coordinator.acquire(operation("capture"), owner, AudioResource.Capture, modelId = "recognizer")
+        assertEquals(AudioLeaseDecision.Busy, coordinator.acquire(operation("decode-again"), owner, AudioResource.OfflineRender, modelId = "recognizer"))
+    }
 
     @Test
     fun foregroundUserCapturePreemptsPlaybackOnlyAfterNativeStop_andLateReleaseCannotClearCapture() = runTest {
@@ -209,6 +231,10 @@ class AudioResourceCoordinatorTest {
 
         assertTrue(recordings.lookup("recording-1", AudioOwnerKey.session("session-1"), epoch) is RecordingLookup.Found)
         assertTrue(recordings.lookup("recording-1", AudioOwnerKey.session("session-2"), epoch) is RecordingLookup.WrongOwner)
+        for (otherOwner in listOf(AudioOwnerKey.ui("session-1"), AudioOwnerKey.system("session-1"))) {
+            assertTrue(recordings.lookup("recording-1", otherOwner, epoch) is RecordingLookup.WrongOwner)
+            assertTrue("owner kind isolates recordings even when IDs match", recordings.endOwner(otherOwner, epoch).isEmpty())
+        }
         assertTrue(recordings.lookup("recording-1", stableSessionOwner, epoch + 1) is RecordingLookup.StaleEpoch)
 
         val ended = recordings.endOwner(AudioOwnerKey.session("session-2"), epoch)

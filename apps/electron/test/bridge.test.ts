@@ -20,6 +20,12 @@ import { CH_EVENT, CH_MOD_UI_FRAME, CH_MOD_UI_INVALIDATE } from '../src/main/bri
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
 
+function audioContextEventClient(): EventEmitter & { sendCommand(command: unknown): void } {
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+  client.sendCommand = (command) => assert.deepEqual(command, { type: 'get_audio_session_context' });
+  return client;
+}
+
 function temporaryDirectory(): string {
   return mkdtempSync(join(tmpdir(), 'lingxi-electron-bridge-test-'));
 }
@@ -284,10 +290,12 @@ test('owned resume loads the restored model provider credential before becoming 
   assert.equal(settled, true);
   assert.deepEqual(commands.map((command) => (command as { type: string }).type), [
     'resume_session',
+    'get_audio_session_context',
     'refresh_listings',
     'set_provider_credential',
   ]);
-  assert.equal((commands[2] as { credential: string }).credential, 'or-resumed-secret');
+  assert.deepEqual(commands[1], { type: 'get_audio_session_context' });
+  assert.equal((commands[3] as { credential: string }).credential, 'or-resumed-secret');
 });
 
 test('owned resume resolves a cold custom routing alias before becoming ready', async () => {
@@ -339,10 +347,12 @@ test('owned resume resolves a cold custom routing alias before becoming ready', 
   assert.equal(settled, true);
   assert.deepEqual(commands.map((command) => (command as { type: string }).type), [
     'resume_session',
+    'get_audio_session_context',
     'refresh_listings',
     'set_provider_credential',
   ]);
-  assert.equal((commands[2] as { credential: string }).credential, 'or-resumed-secret');
+  assert.deepEqual(commands[1], { type: 'get_audio_session_context' });
+  assert.equal((commands[3] as { credential: string }).credential, 'or-resumed-secret');
 });
 
 test('session runtime manager launches a restored session with its catalog model hint', async () => {
@@ -376,7 +386,7 @@ test('session runtime manager launches a restored session with its catalog model
 
 test('session runtime replay resets at resume and reconstructs later transcript events', () => {
   const sessionId = '12121212-3434-4567-8899-aaaaaaaaaaaa';
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   const runtime = new SessionRuntime({
     sessionId,
     projectPath: '/workspace',
@@ -400,7 +410,7 @@ test('session runtime replay resets at resume and reconstructs later transcript 
 
 test('resumed usage and cumulative status reach the renderer and survive replay without an active turn', () => {
   const sessionId = '12121212-3434-4567-8899-aaaaaaaaaaaa';
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   const runtime = new SessionRuntime({
     sessionId,
     projectPath: '/workspace',
@@ -446,7 +456,7 @@ test('resumed usage and cumulative status reach the renderer and survive replay 
 
 test('Mod pinned statuses replay only the latest value per plugin', () => {
   const sessionId = '12121212-3434-4567-8899-bbbbbbbbbbbb';
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   const runtime = new SessionRuntime({
     sessionId,
     projectPath: '/workspace',
@@ -469,7 +479,7 @@ test('Mod pinned statuses replay only the latest value per plugin', () => {
 
 test('server fallback block and tombstone events are turn-owned and replay in source order', () => {
   const sessionId = '12121212-3434-4567-8899-cccccccccccc';
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   const runtime = new SessionRuntime({
     sessionId,
     projectPath: '/workspace',
@@ -512,7 +522,7 @@ test('server fallback block and tombstone events are turn-owned and replay in so
 });
 test('restored snapshots survive interleaved events but late live usage is rejected', () => {
   const sessionId = '12121212-3434-4567-8899-aaaaaaaaaaaa';
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   const runtime = new SessionRuntime({ sessionId, projectPath: '/workspace',
     launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }) });
   (runtime as any).wireClient(client, 0);
@@ -787,6 +797,7 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   let launchCalls = 0;
   BridgeClient.prototype.connect = async function () {
+    this.sendCommand = (command) => assert.deepEqual(command, { type: 'get_audio_session_context' });
     return {
       server_name: 'lingxi-bridge-server/0.9.0',
       protocol_version: '0.2.0',
@@ -1674,7 +1685,9 @@ test('provider switching during an active turn hot-loads the destination credent
   assert.deepEqual(commands.map((command) => command['type']), [
     'set_provider_credential',
     'set_model',
+    'get_audio_session_context',
     'set_model',
+    'get_audio_session_context',
   ]);
   assert.equal(commands[0]?.['credential'], 'or-session-secret');
   assert.deepEqual(manager.activeCredentialProviderIds, ['deepseek', 'openrouter']);
@@ -2041,7 +2054,7 @@ test('unexpected bridge close cancels pending audio and ends only its accepted o
   (runtime as any).wireClient(client, 4);
   const request = {
     identity: { id: 'close-pending', generation: 1, service_epoch: 3 },
-    owner: { type: 'local_app', app_id: 'desktop-companion', runtime_generation: 7 },
+    owner: { type: 'system', instance_id: 'desktop-companion' },
     max_payload_bytes: 1_000_000,
     operation: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' },
   };
@@ -2054,7 +2067,7 @@ test('unexpected bridge close cancels pending audio and ends only its accepted o
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.ok(calls.some((call: any) => call.cancel?.id === request.identity.id));
-  assert.ok(calls.some((call: any) => call.end?.type === 'local_app' && call.end.runtime_generation === 7));
+  assert.ok(calls.some((call: any) => call.end?.type === 'system' && call.end.instance_id === 'desktop-companion'));
   assert.deepEqual(commands, [], 'a disconnected bridge must not receive a late success response');
   await runtime.dispose();
 });
@@ -2198,7 +2211,7 @@ test('successful scheduled creation commits the draft owner, while rejection kee
 
 test('custom provider IDs follow the latest engine settings snapshot', () => {
   const manager = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }) });
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   (manager as any).wireClient(client, 0);
   client.emit('event', { type: 'settings_snapshot', effective_json: JSON.stringify({ providers: {
     'my-provider': { type: 'openai' }, 'Invalid ID': {}, null_profile: null,
@@ -2266,7 +2279,7 @@ test('cold alias model selection hydrates primary and fallback before sending a 
   client.emit('event', { type: 'turn_ended' });
   await runtime.dispatchCommand({ type: 'set_model', model: 'fast' });
   assert.equal(calls.filter((entry) => entry === 'refresh_listings').length, 1);
-  assert.equal(calls.at(-1), 'set_model');
+  assert.deepEqual(calls.slice(-2), ['set_model', 'get_audio_session_context']);
 });
 
 test('cancel during alias credential hydration never sends the delayed prompt', async () => {
@@ -2276,7 +2289,7 @@ test('cancel during alias credential hydration never sends the delayed prompt', 
     launchConfig: () => ({ workspace: '/workspace', trusted: true }),
     resolveProviderCredential: () => key.promise,
   });
-  const client = new EventEmitter() as EventEmitter & { cancel(): void; sendPrompt(): void };
+  const client = audioContextEventClient() as EventEmitter & { sendCommand(command: unknown): void; cancel(): void; sendPrompt(): void };
   client.cancel = () => undefined;
   client.sendPrompt = () => { sent = true; };
   (runtime as any).activeWorkspace = '/workspace';
@@ -2315,11 +2328,12 @@ test('cold set_model resolves a declared model alias before dispatch', async () 
     }));
   };
   await runtime.dispatchCommand({ type: 'set_model', model: 'fast' });
-  assert.deepEqual(calls, ['refresh_listings', 'key:custom', 'set_model']);
+  assert.deepEqual(calls, ['refresh_listings', 'key:custom', 'set_model', 'get_audio_session_context']);
 });
 
 test('a turn starting during cold model loading does not interrupt switching or release the waiting prompt early', async () => {
   const nextKey = deferred<string>();
+  const modelDispatched = deferred<void>();
   const calls: string[] = [];
   const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void; sendPrompt(): void; cancel(): void };
   const runtime = new SessionRuntime({
@@ -2336,6 +2350,7 @@ test('a turn starting during cold model loading does not interrupt switching or 
   client.sendPrompt = () => { calls.push('prompt'); };
   client.sendCommand = (command) => {
     calls.push(command.type);
+    if (command.type === 'set_model') modelDispatched.resolve();
     if (command.type === 'refresh_listings') queueMicrotask(() => client.emit('event', {
       type: 'settings_snapshot', provenance_json: '{}', effective_json: JSON.stringify({ providers: { old: { models: ['model'] }, next: { models: ['model'] } } }),
     }));
@@ -2346,7 +2361,7 @@ test('a turn starting during cold model loading does not interrupt switching or 
   assert.deepEqual(calls, ['refresh_listings', 'key:next']);
   (runtime as any).activeTurn = true;
   nextKey.resolve('next-key');
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await modelDispatched.promise;
   assert.equal(calls.includes('prompt'), false);
   client.emit('event', { type: 'model_changed', model: 'next/model' });
   await switching;
@@ -2417,7 +2432,7 @@ test('bridge error diagnostics identify the session and preserve sanitized failu
     sessionId: '11111111-2222-4333-8444-555555555555', projectPath: '/workspace',
     launchConfig: () => ({ workspace: '/workspace', trusted: true }), diagnostics,
   });
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   (runtime as any).wireClient(client, 0);
   client.emit('event', { type: 'error', kind: { type: 'internal' }, message: 'Fusion failed token=private-value' });
   client.emit('event', { type: 'slash_command_result', is_error: true, display: 'invalid fusion configuration' });
@@ -2438,7 +2453,7 @@ test('Codex refreshed credentials are persisted privately and never replayed or 
   const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }), diagnostics,
     onOpenAiOAuthUpdated: async (session) => { saved.push(session); },
   });
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   (runtime as any).wireClient(client, 0);
   const broadcasts: unknown[] = [];
   (runtime as any).broadcast = (...args: unknown[]) => broadcasts.push(args);
@@ -2458,7 +2473,7 @@ test('Codex persistence failure reports a fixed message without broker secrets',
   });
   let stopped = false;
   runtime.stop = async () => { stopped = true; };
-  const client = new EventEmitter();
+  const client = audioContextEventClient();
   (runtime as any).wireClient(client, 0);
   client.emit('event', { type: 'openai_oauth_updated', session: { access_token: 'access-private', expires_at: 123, fedramp: false } });
   await (runtime as any).oauthPersistence;
@@ -2779,7 +2794,7 @@ test('a session with a coordinator worker still running survives cache pressure'
   const open = async () => {
     const manager = new SessionRuntimeManager({ maxCachedRuntimes: 1, launchConfig: (r) => ({ workspace: r.projectPath, sessionId: r.sessionId, trusted: true }) });
     const first = await manager.openSession(refs[0]!);
-    const client = new EventEmitter();
+    const client = audioContextEventClient();
     (first as any).wireClient(client, (first as any).generation);
     return { manager, first, client };
   };

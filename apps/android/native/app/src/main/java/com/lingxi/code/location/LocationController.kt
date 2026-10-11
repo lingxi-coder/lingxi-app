@@ -47,7 +47,7 @@ interface LocationClient {
 /**
  * Process-global bridge from the Rust-driven location callback to Android's
  * runtime-permission UI and [LocationManager]. The engine has already approved
- * the local app's declared capability before this system permission is touched.
+ * the location request before this system permission is touched.
  */
 internal class LocationResultHost(
     val owner: Any,

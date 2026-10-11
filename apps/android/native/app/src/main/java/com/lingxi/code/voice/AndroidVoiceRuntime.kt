@@ -9,7 +9,7 @@ import android.speech.tts.TextToSpeech
 import androidx.core.content.ContextCompat
 import com.lingxi.code.settings.AudioConfigurationRepository
 import com.lingxi.code.settings.VersionedAudioConfiguration
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import com.lingxi.code.voice.audio.AudioOperationException
 import com.lingxi.code.voice.audio.AudioOfflineModelAvailability
 import com.lingxi.code.voice.audio.AudioProviderKind
@@ -31,9 +31,9 @@ import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
 import com.lingxi.code.voice.audio.SystemTextToSpeechTts
 import com.lingxi.code.voice.audio.resolveAudioLanguage
 import com.lingxi.code.voice.audio.resolveAudioRoute
-import com.lingxi.code.voice.offline.ModelKind
+import com.lingxi.code.voice.offline.GeneratedModelKind
 import com.lingxi.code.voice.offline.ModelState
-import com.lingxi.code.voice.offline.OfflineModelCatalog
+import com.lingxi.code.voice.offline.GeneratedVoiceModelCatalog
 import com.lingxi.code.voice.offline.SherpaVoice
 import com.lingxi.code.voice.offline.VoiceModelDownloader
 import java.util.Locale
@@ -52,6 +52,8 @@ internal data class SpeechVoiceOverrideResolution(
 )
 
 internal interface SherpaVoiceRuntimeBridge {
+    suspend fun transcribePcm(modelId: String, language: String, pcm: ByteArray, sampleRateHz: Int): String? =
+        throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Offline recorded audio is unavailable")
     suspend fun transcribe(modelId: String, language: String): String?
     fun openRealtimeSession(modelId: String, language: String, callbacks: RealtimeSpeechCallbacks): RealtimeSpeechSession
     suspend fun renderSpeech(
@@ -64,6 +66,8 @@ internal interface SherpaVoiceRuntimeBridge {
 }
 
 internal object DefaultSherpaVoiceRuntimeBridge : SherpaVoiceRuntimeBridge {
+    override suspend fun transcribePcm(modelId: String, language: String, pcm: ByteArray, sampleRateHz: Int): String? =
+        SherpaVoice.transcribePcm(language, modelId, pcm, sampleRateHz)
     override suspend fun transcribe(modelId: String, language: String): String? =
         SherpaVoice.transcribe(language, modelId)
 
@@ -89,7 +93,7 @@ internal object DefaultSherpaVoiceRuntimeBridge : SherpaVoiceRuntimeBridge {
     )
 }
 
-/** Resolves each operation from one immutable device-local v3 settings snapshot. */
+/** Resolves each operation from one immutable device-local v4 settings snapshot. */
 internal class AndroidVoiceRuntime(
     context: Context,
     private val audioConfigurationRepository: AudioConfigurationRepository = AudioConfigurationRepository(context),
@@ -101,9 +105,28 @@ internal class AndroidVoiceRuntime(
 
     fun configurationSnapshot(): VersionedAudioConfiguration = audioConfigurationRepository.load().snapshot
 
+    suspend fun transcribeEncoded(
+        capture: com.lingxi.code.voice.audio.DeviceAudioCapture, languageOverride: String?, configuration: AudioConfigurationV4,
+    ): SttResult {
+        if (capture.mimeType !in listOf("audio/wav", "audio/x-wav")) {
+            throw AudioOperationException(DeviceAudioErrorKind.Unsupported, "Offline recorded-file recognition accepts PCM16 WAV audio.")
+        }
+        val resolution = resolveRecognition(configuration, languageOverride, AudioReadiness.UNAVAILABLE)
+        val model = resolution.route.effective?.takeIf { it.source == AudioSource.OFFLINE }?.modelId
+            ?: throw routeException(resolution.route)
+        val file = java.io.File.createTempFile("audio-transcribe-", ".wav", appContext.cacheDir)
+        return try {
+            file.writeBytes(capture.bytes)
+            val (pcm, sampleRateHz) = com.lingxi.code.voice.audio.readPcm16Wav(file, capture.bytes.size)
+            val text = sherpaBridge.transcribePcm(model, baseLanguage(resolution.languageTag), pcm, sampleRateHz)
+            if (text.isNullOrBlank()) SttResult.Err("no_speech", "No speech was recognized.", false)
+            else SttResult.Ok(text, resolution.languageTag, null)
+        } finally { file.delete() }
+    }
+
     suspend fun transcribe(
         languageOverride: String? = null,
-        configuration: AudioConfigurationV3? = null,
+        configuration: AudioConfigurationV4? = null,
     ): SttResult {
         if (!hasMicrophonePermission()) {
             return SttResult.Err("permission_denied", "Microphone permission is not granted.", retriable = false)
@@ -133,7 +156,7 @@ internal class AndroidVoiceRuntime(
     fun openRealtimeSession(
         languageOverride: String? = null,
         callbacks: RealtimeSpeechCallbacks,
-        configuration: AudioConfigurationV3? = null,
+        configuration: AudioConfigurationV4? = null,
     ): RealtimeSpeechSession {
         if (!hasMicrophonePermission()) {
             throw AudioOperationException(DeviceAudioErrorKind.PermissionDenied, "Microphone permission is not granted.")
@@ -157,7 +180,7 @@ internal class AndroidVoiceRuntime(
         voiceOverride: String? = null,
         speedOverride: Float? = null,
         maxPcmBytes: Int,
-        configuration: AudioConfigurationV3? = null,
+        configuration: AudioConfigurationV4? = null,
     ): Pair<ByteArray, Int> {
         if (text.isBlank()) throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "speech text must not be blank")
         if (maxPcmBytes < 0) throw AudioOperationException(DeviceAudioErrorKind.InvalidRequest, "audio payload limit must not be negative")
@@ -177,8 +200,8 @@ internal class AndroidVoiceRuntime(
             )
             AudioSource.OFFLINE -> {
                 val modelId = checkNotNull(effective.modelId) { "offline speech model is missing" }
-                val model = OfflineModelCatalog.byId(modelId)
-                if (model?.kind != ModelKind.Tts || VoiceModelDownloader.states.value[modelId] !is ModelState.Ready) {
+                val model = GeneratedVoiceModelCatalog.byId(modelId)
+                if (model?.kind != GeneratedModelKind.Tts || VoiceModelDownloader.states.value[modelId] !is ModelState.Ready) {
                     throw AudioOperationException(DeviceAudioErrorKind.ModelMissing, "selected offline speech model is unavailable")
                 }
                 val voiceId = effective.voiceId ?: model.voices.firstOrNull()?.id
@@ -206,7 +229,7 @@ internal class AndroidVoiceRuntime(
     }
 
     internal fun resolveRecognition(
-        preferences: AudioConfigurationV3,
+        preferences: AudioConfigurationV4,
         languageOverride: String? = null,
         systemStatusOverride: AudioReadiness? = null,
     ): AudioOperationResolution {
@@ -228,7 +251,7 @@ internal class AndroidVoiceRuntime(
     }
 
     internal fun resolveSpeech(
-        preferences: AudioConfigurationV3,
+        preferences: AudioConfigurationV4,
         languageOverride: String? = null,
         voiceOverride: String? = null,
         speedOverride: Float? = null,
@@ -255,12 +278,12 @@ internal class AndroidVoiceRuntime(
     }
 
     private fun offlineModelAvailability(): List<AudioOfflineModelAvailability> =
-        OfflineModelCatalog.all.map { model ->
+        GeneratedVoiceModelCatalog.all.map { model ->
             AudioOfflineModelAvailability(
                 id = model.id,
                 kind = when (model.kind) {
-                    ModelKind.Stt -> AudioProviderKind.RECOGNITION
-                    ModelKind.Tts -> AudioProviderKind.SPEECH
+                    GeneratedModelKind.Stt -> AudioProviderKind.RECOGNITION
+                    GeneratedModelKind.Tts -> AudioProviderKind.SPEECH
                 },
                 languages = model.languages.toList(),
                 installed = VoiceModelDownloader.states.value[model.id] is ModelState.Ready,
@@ -319,7 +342,7 @@ internal class AndroidVoiceRuntime(
 
 internal fun resolveSpeechVoiceOverride(
     raw: String?,
-    preferences: AudioConfigurationV3,
+    preferences: AudioConfigurationV4,
 ): SpeechVoiceOverrideResolution {
     val text = raw?.trim()?.takeIf { it.isNotEmpty() }
         ?: return SpeechVoiceOverrideResolution(preferences.speech, null)
@@ -335,6 +358,8 @@ internal fun resolveSpeechVoiceOverride(
             id = text,
             modelId = preferences.speech.offlineModelId ?: preferences.speech.voice?.modelId,
         )
+        AudioSource.PROVIDER -> AudioVoiceSelection(AudioSource.PROVIDER, text,
+            preferences.speech.cloud.modelId, preferences.speech.cloud.profileId)
         else -> AudioVoiceSelection(AudioSource.SYSTEM, text)
     }
     return SpeechVoiceOverrideResolution(preferences.speech, selection)
@@ -343,16 +368,22 @@ internal fun resolveSpeechVoiceOverride(
 /** Parses the explicit keys emitted by audio settings and Computer Use requests. */
 internal fun parseExplicitVoiceSelection(raw: String): AudioVoiceSelection? {
     val text = raw.trim()
+    if (text.startsWith("provider:")) {
+        val payload = text.removePrefix("provider:")
+        val voiceSplit = payload.lastIndexOf(':')
+        if (voiceSplit <= 0 || voiceSplit == payload.lastIndex) return null
+        val modelSplit = payload.lastIndexOf(':', voiceSplit - 1)
+        if (modelSplit <= 0) return null
+        return AudioVoiceSelection(AudioSource.PROVIDER, payload.substring(voiceSplit + 1),
+            payload.substring(modelSplit + 1, voiceSplit).ifEmpty { null }, payload.substring(0, modelSplit))
+    }
     if (text.startsWith("system:")) {
         return text.removePrefix("system:")
             .takeIf(String::isNotEmpty)
             ?.let { AudioVoiceSelection(AudioSource.SYSTEM, it) }
     }
-    val payload = when {
-        text.startsWith("offline:") -> text.removePrefix("offline:")
-        text.startsWith("sherpa:") -> text.removePrefix("sherpa:")
-        else -> return null
-    }
+    if (!text.startsWith("offline:")) return null
+    val payload = text.removePrefix("offline:")
     val split = payload.lastIndexOf(':')
     if (split <= 0 || split == payload.lastIndex) return null
     val modelId = payload.substring(0, split)

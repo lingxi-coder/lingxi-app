@@ -16,6 +16,9 @@ type ScheduledRunResult = { sessionId: string; summary: string };
 
 const MAX_RECENT_SCHEDULED_RUNS = 500;
 
+/** Catalog file the Rust scheduler writes for one scope's workspace. */
+const catalogPath = (workspace: string): string => join(workspace, '.lingxi', 'scheduled_tasks.json');
+
 /** Catalog discovery only: Rust remains the sole authority for due-time claims. */
 export class ScheduledTaskService {
   private readonly controllers = new Map<string, { ref: SessionRef; release: () => void }>();
@@ -108,7 +111,7 @@ export class ScheduledTaskService {
       }
       await Promise.allSettled([...paths].map(async (path) => {
         try {
-          const document = JSON.parse(await readFile(join(path, '.lingxi', 'scheduled_tasks.json'), 'utf8')) as { tasks?: { automation?: { status?: string } }[] };
+          const document = JSON.parse(await readFile(catalogPath(path), 'utf8')) as { tasks?: { automation?: { status?: string } }[] };
           if (document.tasks?.some((task) => !task.automation || task.automation.status === 'active')) { const runtime = await this.controller(path); await this.cacheJobs(path, await runtime.manageCron({ action: 'list' })); }
           else { this.controllers.get(path)?.release(); this.controllers.delete(path); }
         } catch (error) {
@@ -136,6 +139,18 @@ export class ScheduledTaskService {
     }
     const path = this.resolveScope(scopeId);
     if ((request.action === 'create' || request.action === 'update') && request.automation?.runMode === 'selected_session') await this.validateTarget(path, request.automation.targetSessionId);
+    // A read must not boot an engine to learn that the scope has nothing to
+    // read. Every project scope would otherwise start a sidecar (~3-4s, and
+    // they contend) before the Scheduled panel could paint, including the
+    // projects that never had a task.
+    if ((request.action === 'list' || request.action === 'history') && !this.controllers.has(path) && (await this.persistedTaskCount(path)) === 0) {
+      // The persisted catalog is the whole answer here, so retire any cached
+      // jobs from before it emptied: `scopes()` advertises cached jobs for
+      // projects that are gone, and a stale entry would keep offering tasks
+      // that no longer exist once this project is removed.
+      if (this.scopeCache.get(path)?.jobs.length) await this.cacheJobs(path, []);
+      return [];
+    }
     const runtime = await this.controller(path);
     const jobs = await runtime.manageCron(request);
     await this.cacheJobs(path, jobs);
@@ -143,6 +158,21 @@ export class ScheduledTaskService {
       this.controllers.get(path)?.release(); this.controllers.delete(path);
     }
     return jobs;
+  }
+
+  /** Persisted task count for a scope; `undefined` when the catalog is
+   * unreadable, so a damaged file still reports through the engine path. */
+  private async persistedTaskCount(path: string): Promise<number | undefined> {
+    try {
+      const document = JSON.parse(await readFile(catalogPath(path), 'utf8')) as { tasks?: unknown };
+      // Only `{ "tasks": [] }` is a definitive empty scope. A body with no
+      // `tasks` array is corrupt state that the engine reports as an error
+      // ("expected an object with a `tasks` array") and must never be
+      // reinterpreted as "no tasks" here.
+      return Array.isArray(document.tasks) ? document.tasks.length : undefined;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : undefined;
+    }
   }
 
   private cacheJobs(path: string, jobs: CronJobDto[]): Promise<void> {
@@ -165,7 +195,7 @@ export class ScheduledTaskService {
       const scopes = await Promise.all(this.scopes().filter((scope) => !scope.unavailable).map(async (scope) => {
         const path = this.resolveScope(scope.id);
         try {
-          const doc = JSON.parse(await readFile(join(path, '.lingxi', 'scheduled_tasks.json'), 'utf8')) as { tasks?: { id: string; automation?: CronAutomationDto }[] };
+          const doc = JSON.parse(await readFile(catalogPath(path), 'utf8')) as { tasks?: { id: string; automation?: CronAutomationDto }[] };
           return (doc.tasks ?? []).flatMap((task) => (task.automation?.runs ?? []).filter((run) => ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(run.status)).map((run) => ({ path, task, run })));
         } catch { return []; }
       }));

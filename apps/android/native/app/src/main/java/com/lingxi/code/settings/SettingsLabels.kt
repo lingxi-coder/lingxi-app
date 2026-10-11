@@ -84,7 +84,7 @@ internal fun settingsLabel(text: String): String = when (text) {
     "Advanced" -> stringResource(R.string.settings_section_advanced)
     "Save" -> stringResource(R.string.settings_save)
     "Cancel" -> stringResource(R.string.common_cancel)
-    "Remove" -> stringResource(R.string.local_apps_dependency_change_remove)
+    "Remove" -> stringResource(R.string.settings_parity_remove)
     "Language" -> stringResource(R.string.settings_language_title)
     "Notifications" -> stringResource(R.string.settings_notifications)
     "Voice & audio" -> stringResource(R.string.settings_voice_audio)

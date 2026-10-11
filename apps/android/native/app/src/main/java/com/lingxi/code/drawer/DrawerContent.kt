@@ -71,19 +71,6 @@ data class DrawerProductionData(
     val projects: List<Project>? = null,
     val crons: List<Cron>? = null,
     val projectStatusMessage: String? = null,
-    val localAppWorkspaces: List<DrawerLocalAppWorkspace> = emptyList(),
-)
-
-/**
- * The active local-app conversation scope, surfaced at the top of the 对话
- * tab: the app's display name plus its workspace-scoped session catalog (the
- * cached `ListAppSessions` reply, init session first). Non-null only while
- * the engine source is bound to a local app's workspace.
- */
-data class DrawerAppScope(
-    val appId: String,
-    val appName: String,
-    val sessions: List<SessionRow>,
 )
 
 /**
@@ -128,26 +115,7 @@ fun DrawerContent(
     onReauthorizeProject: (String) -> Unit = {},
     onOpenCron: (String) -> Unit = {},
     onCreateCron: () -> Unit = {},
-    /**
-     * Create a local app and land the conversation in it. The drawer only
-     * announces the intent; the create is asynchronous and the hand-off arrives
-     * later on `LocalAppsViewModel.createdAppLandings` (`RootScreen.kt`), so
-     * this callback closes the drawer itself rather than waiting for a landing
-     * that may be seconds away — or, if the create fails, never come.
-     */
-    onCreateApp: () -> Unit = {},
-    /** Browse the app library. */
-    onOpenApps: () -> Unit = {},
-    /** The active local-app scope's name + sessions, or null outside app scope. */
-    appScope: DrawerAppScope? = null,
-    /** Resume one of the active app's sessions (same engine scope). */
-    onSelectAppScopeSession: (SessionRef) -> Unit = {},
-    /** Start a fresh session in the active app's workspace. */
-    onNewAppScopeSession: () -> Unit = {},
-    onSelectLocalAppSession: (String, SessionRef) -> Unit = { _, session -> onSelectAppScopeSession(session) },
-    onNewLocalAppSession: (String) -> Unit = { onNewAppScopeSession() },
     onContinueSession: (ConversationScope, SessionRow, SessionMode) -> Unit = { _, _, _ -> },
-    onOpenLocalAppDetails: (String) -> Unit = {},
     onSelectSection: (DrawerSection) -> Unit = { ui.section = it },
     isWorkspaceCollapsed: (SessionMode, String) -> Boolean = { _, _ -> false },
     onToggleWorkspaceCollapsed: (SessionMode, String) -> Unit = { _, _ -> },
@@ -164,51 +132,25 @@ fun DrawerContent(
 
     val globalName = stringResource(R.string.drawer_workspace_global)
     val projects = productionData.projects.orEmpty()
-    val localAppWorkspaces = remember(productionData.localAppWorkspaces, appScope) {
-        val activeScopeWorkspace = appScope?.let { scope ->
-            DrawerLocalAppWorkspace(
-                appId = scope.appId,
-                name = scope.appName,
-                sessions = scope.sessions.map { row ->
-                    com.lingxi.code.localapps.LocalAppSessionRow(
-                        uuid = row.uuid,
-                        title = row.title,
-                        relativeTime = row.relativeTime,
-                        messageCount = row.messageCount,
-                        mode = row.mode,
-                        modifiedAtEpochSeconds = row.modifiedAtEpochSeconds,
-                        isInit = row.isInit,
-                    )
-                },
-            )
-        }
-        val merged = productionData.localAppWorkspaces.toMutableList()
-        if (activeScopeWorkspace != null && merged.none { it.appId == activeScopeWorkspace.appId }) {
-            merged += activeScopeWorkspace
-        }
-        merged.toList()
-    }
-    val chatWorkspaceGroups = remember(engineSessions.rows, projects, localAppWorkspaces, query) {
+    val chatWorkspaceGroups = remember(engineSessions.rows, projects, query) {
         filterWorkspaceGroups(
             buildWorkspaceGroups(
                 mode = SessionMode.Chat,
                 globalName = globalName,
                 globalSessions = engineSessions.rows,
                 projects = projects,
-                localApps = localAppWorkspaces,
                 pinnedAtEpochMillis = { workspaceKey -> pinnedAtEpochMillis(SessionMode.Chat, workspaceKey) },
             ),
             query,
         )
     }
-    val codeWorkspaceGroups = remember(engineSessions.rows, projects, localAppWorkspaces, query) {
+    val codeWorkspaceGroups = remember(engineSessions.rows, projects, query) {
         filterWorkspaceGroups(
             buildWorkspaceGroups(
                 mode = SessionMode.Code,
                 globalName = globalName,
                 globalSessions = engineSessions.rows,
                 projects = projects,
-                localApps = localAppWorkspaces,
                 pinnedAtEpochMillis = { workspaceKey -> pinnedAtEpochMillis(SessionMode.Code, workspaceKey) },
             ),
             query,
@@ -252,7 +194,6 @@ fun DrawerContent(
         ) {
             when (ui.section) {
                 DrawerSection.Chat -> {
-                    DrawerAppQuickActions(onCreateApp = onCreateApp, onOpenApps = onOpenApps)
                     WorkspaceGroupsSection(
                         groups = chatWorkspaceGroups,
                         mode = SessionMode.Chat,
@@ -265,18 +206,13 @@ fun DrawerContent(
                         onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Chat, it) },
                         onSelectGlobalSession = { onResumeSession(it.uuid) },
                         onSelectProjectSession = onSelectProjectSession,
-                        onSelectLocalAppSession = onSelectLocalAppSession,
                         onNewGlobalSession = onNewGlobalSession,
                         onNewProjectSession = onNewProjectSession,
-                        onNewLocalAppSession = onNewLocalAppSession,
                         onContinueSession = onContinueSession,
-                        onOpenLocalAppLibrary = { onOpenApps() },
-                        onOpenLocalAppDetails = onOpenLocalAppDetails,
                     )
                 }
 
                 DrawerSection.Code -> {
-                    DrawerAppQuickActions(onCreateApp = onCreateApp, onOpenApps = onOpenApps)
                     WorkspaceGroupsSection(
                         groups = codeWorkspaceGroups,
                         mode = SessionMode.Code,
@@ -289,13 +225,9 @@ fun DrawerContent(
                         onToggleWorkspacePinned = { onToggleWorkspacePinned(SessionMode.Code, it) },
                         onSelectGlobalSession = { onResumeSession(it.uuid) },
                         onSelectProjectSession = onSelectProjectSession,
-                        onSelectLocalAppSession = onSelectLocalAppSession,
                         onNewGlobalSession = onNewGlobalSession,
                         onNewProjectSession = onNewProjectSession,
-                        onNewLocalAppSession = onNewLocalAppSession,
                         onContinueSession = onContinueSession,
-                        onOpenLocalAppLibrary = { onOpenApps() },
-                        onOpenLocalAppDetails = onOpenLocalAppDetails,
                     )
                 }
 
@@ -481,93 +413,6 @@ private fun SectionTabs(
         SectionTab(DrawerSection.Chat, LXIconName.Message, stringResource(R.string.drawer_tab_chats), chats, section, onSelect, Modifier.weight(1f))
         SectionTab(DrawerSection.Code, LXIconName.Folder, stringResource(R.string.drawer_tab_projects), projects, section, onSelect, Modifier.weight(1f))
         SectionTab(DrawerSection.Cron, LXIconName.Clock, stringResource(R.string.drawer_tab_crons), crons, section, onSelect, Modifier.weight(1f))
-    }
-}
-
-/**
- * The minimum height of a tappable drawer row.
- *
- * 48dp is Android's documented minimum touch target, the same number the local
- * app run surface states for its own controls (`RunPillTapTarget`,
- * LocalAppsScreen.kt). Stated as a height rather than left to the rows'
- * padding: both rows below size themselves from `fontSize` plus a small
- * vertical inset, which lands them near 38dp and 32dp — comfortably legible and
- * comfortably under the minimum.
- */
-private val DrawerRowTapTarget = 48.dp
-
-/**
- * The create-app quick actions rendered above the workspace list in the
- * Chat/Code drawer tabs — the Android analog of iOS's `conversationActions`
- * (`Drawer.swift:637-655`), which renders for every section except cron.
- *
- * Before this, the only in-app create/browse entry lived inside the orphaned
- * `DrawerSection.Apps` tab, whose enum case `47d92dc28` deleted, leaving these
- * two rows with zero call sites — a first-time user with no local apps yet had
- * no in-app way to create one. Reusing them here (rather than resurrecting the
- * dedicated tab) mirrors iOS, which never had a standalone Apps tab either.
- *
- * Two affordances, deliberately unequal — the same split iOS's drawer makes
- * (`Drawer.swift`, `dashedButton(drawer_create_app)` beside the library button):
- *
- * - [onCreateApp] is PRIMARY and keeps the filled, accented row. Creating an app
- *   is what a user opens this tab to do, and the create now finishes in the
- *   app's own conversation rather than on a library page.
- * - [onOpenApps] is the browse affordance and stays wired to the library.
- *
- * Both rows are held to [DrawerRowTapTarget]; neither reaches it on its own.
- */
-@Composable
-private fun DrawerAppQuickActions(onCreateApp: () -> Unit, onOpenApps: () -> Unit) {
-    val t = LingXiTheme.palette
-    Column(
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 10.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-            // 11dp of vertical padding around a 13sp label measured about 38dp
-            // — under the 48dp minimum, and this is the row a user opens this
-            // tab to press. [DrawerRowTapTarget] raises the whole node, so the
-            // background, the border and the `clickable` hit rect all grow with
-            // it (the constraint is applied OUTSIDE them in this chain); the
-            // padding stays as the visual inset for anything taller.
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = DrawerRowTapTarget)
-                .clip(RoundedCornerShape(10.dp))
-                .background(t.surfaceActive)
-                .border(0.5.dp, t.border, RoundedCornerShape(10.dp))
-                .clickable(onClick = onCreateApp)
-                .testTag(UiTags.DRAWER_CREATE_APP)
-                .padding(horizontal = 14.dp, vertical = 11.dp),
-        ) {
-            LXIcon(name = LXIconName.Plus, size = 15.dp, color = t.accent, stroke = 1.8f)
-            Text(stringResource(R.string.drawer_create_app), color = t.text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-        }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
-            // The smaller of the two — 8dp of padding around a 12sp label, about
-            // 32dp — and the one with no background at all, so nothing on screen
-            // hints at where it can be pressed. Same [DrawerRowTapTarget] as the
-            // create row above and as the run surface's `RunPillTapTarget`
-            // (LocalAppsScreen.kt): 48dp is Android's documented minimum, and a
-            // secondary affordance is not a reason to fall under it.
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = DrawerRowTapTarget)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(onClick = onOpenApps)
-                .testTag(UiTags.DRAWER_OPEN_APPS_LIBRARY)
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-        ) {
-            LXIcon(name = LXIconName.Book, size = 13.dp, color = t.text3, stroke = 1.8f)
-            Text(stringResource(R.string.drawer_apps_library), color = t.text3, fontSize = 12.sp)
-        }
     }
 }
 

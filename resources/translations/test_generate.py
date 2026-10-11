@@ -65,31 +65,6 @@ def test_android_resources(tmp_path):
     xml = open(tmp_path / "values-en" / "strings.xml").read()
     assert '<string name="app_name">Lingxi</string>' in xml
 
-def test_bundled_local_app_descriptions_are_canonical_and_generated(tmp_path):
-    locales = load_locales(os.path.dirname(__file__))
-    keys = [
-        "settings_skill_bundled_ionic_react_local_app_desc",
-        "settings_skill_bundled_canvas_2d_local_app_desc",
-        "settings_skill_bundled_threejs_local_app_desc",
-    ]
-    for locale in ["zh-Hans", "zh-Hant", "en", "ja", "ko"]:
-        for key in keys:
-            assert locales[locale][key]
-
-    ios_out = tmp_path / "ios"
-    android_out = tmp_path / "android"
-    write_ios(locales, ios_out)
-    write_android(locales, android_out)
-
-    catalog = json.loads((ios_out / "Localizable.xcstrings").read_text(encoding="utf-8"))
-    for key in keys:
-        assert set(catalog["strings"][key]["localizations"]) == {"zh-Hans", "zh-Hant", "en", "ja", "ko"}
-
-    for values_dir in ["values", "values-zh-rTW", "values-en", "values-ja", "values-ko"]:
-        xml = (android_out / values_dir / "strings.xml").read_text(encoding="utf-8")
-        for key in keys:
-            assert f'<string name="{key}">' in xml
-
 def test_android_escaping(tmp_path):
     locales = {
         "zh-Hans": {
@@ -158,40 +133,13 @@ def test_generate_check_clean_repo_gate():
     assert result.returncode == 0
     assert "OK:" in result.stdout
 
-def test_generate_check_rejects_selector_only_orphans(tmp_path):
-    selector_only_keys = {
-        "local_apps_permission_runtime_profile_selection",
-        "local_apps_runtime_profile_prompt_title",
-        "local_apps_runtime_profile_recommended",
-        "local_apps_runtime_profile_available",
-        "local_apps_runtime_profile_unavailable",
-        "local_apps_runtime_profile_select",
-        "local_apps_runtime_profile_unavailable_action",
-        "local_apps_runtime_profile_revision_surface",
-        "local_apps_runtime_profile_contract",
-        "local_apps_runtime_profile_cache_download",
-    }
-    translation_root = Path(__file__).resolve().parent
-    locales = load_locales(translation_root)
-    for locale, values in locales.items():
-        assert selector_only_keys.isdisjoint(values), f"{locale} keeps removed selector-only keys"
-
-    repo_root = translation_root.parents[1]
-    generated = [
-        repo_root / "apps/ios/native/Resources/Localizable.xcstrings",
-        *sorted((repo_root / "apps/android/native/app/src/main/res").glob("values*/strings.xml")),
-    ]
-    for path in generated:
-        text = path.read_text(encoding="utf-8")
-        for key in selector_only_keys:
-            assert key not in text, f"removed selector-only key {key} remains in {path}"
-
+def test_generate_check_rejects_orphan_catalog_keys(tmp_path):
     sandbox_locales, ios_out, android_out = _gate_sandbox(tmp_path)
     write_ios(sandbox_locales, ios_out)
     write_android(sandbox_locales, android_out)
     catalog_path = ios_out / "Localizable.xcstrings"
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    catalog["strings"]["local_apps_runtime_profile_select"] = {}
+    catalog["strings"]["orphan_key"] = {}
     catalog_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
     problems = stale_problems(sandbox_locales, ios_out, android_out)
     assert any("Localizable.xcstrings" in problem and "out of date" in problem for problem in problems)

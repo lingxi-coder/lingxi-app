@@ -25,6 +25,15 @@ import XCTest
     @MainActor
 final class SessionResumeTests: XCTestCase {
 
+        private func agentRow(index: UInt64, message: MessageDto) -> SessionAgentMessageRowDto {
+            SessionAgentMessageRowDto(messageIndex: index, messageUuid: "fixture-row-\(index)", message: message, apiErrorJson: nil)
+        }
+
+        private func agentRows(_ messages: [MessageDto]) -> [SessionAgentMessageRowDto] {
+            messages.enumerated().map { agentRow(index: UInt64($0.offset), message: $0.element) }
+        }
+
+
         /// A minimal `EngineConfig` for an `EngineConversationSource` under test —
         /// keyless and rooted at a throwaway temp dir. The source is NEVER asked to
         /// build a handle here; we only drive `applyForTesting`, so no engine is
@@ -187,8 +196,7 @@ visionDelegationEnabled: true)
                     }
                     func deliverMessage() {
                         source.applyForTesting(.sessionAgentMessage(
-                            sessionId: "session-a", agentId: agentID, messageIndex: 0,
-                            message: MessageDto(role: "assistant", blocks: [.text(text: "Staging failed")])
+                            sessionId: "session-a", agentId: agentID, row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [.text(text: "Staging failed")]))
                         ))
                     }
                     update("running", at: 1_000)
@@ -270,7 +278,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: "agent:child-1",
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "child result")])],
+                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "child result")])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -304,8 +312,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                messageIndex: 0,
-                message: MessageDto(role: "assistant", blocks: [.text(text: "live tail")])
+                row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [.text(text: "live tail")]))
             ))
             XCTAssertFalse(source.model.agentTranscripts[agentID]?.loaded ?? true)
 
@@ -337,14 +344,13 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                messageIndex: 1,
-                message: same
+                row: agentRow(index: 1, message: same)
             ))
             source.selectAgent(agentID)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [same],
+                messages: agentRows([same]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -365,7 +371,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [repeated, repeated],
+                messages: agentRows([repeated, repeated]),
                 nextMessageIndex: 2,
                 revision: 1
             ))
@@ -376,7 +382,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [repeated, repeated],
+                messages: agentRows([repeated, repeated]),
                 nextMessageIndex: 2,
                 revision: 1
             ))
@@ -405,7 +411,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [initial],
+                messages: agentRows([initial]),
                 nextMessageIndex: 1,
                 revision: 10
             ))
@@ -421,7 +427,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [compacted],
+                messages: agentRows([compacted]),
                 nextMessageIndex: 1,
                 revision: 11
             ))
@@ -458,7 +464,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [fresh],
+                messages: agentRows([fresh]),
                 nextMessageIndex: 1,
                 revision: 20
             ))
@@ -467,7 +473,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [delayed],
+                messages: agentRows([delayed]),
                 nextMessageIndex: 1,
                 revision: 19
             ))
@@ -498,15 +504,14 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [history],
+                messages: agentRows([history]),
                 nextMessageIndex: 1,
                 revision: 10
             ))
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                messageIndex: 1,
-                message: MessageDto(role: "assistant", blocks: [.text(text: "live tail")])
+                row: agentRow(index: 1, message: MessageDto(role: "assistant", blocks: [.text(text: "live tail")]))
             ))
 
             // A hidden/lifecycle record can advance the raw revision before
@@ -515,7 +520,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [history],
+                messages: agentRows([history]),
                 nextMessageIndex: 1,
                 revision: 11
             ))
@@ -537,10 +542,9 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                messageIndex: 0,
-                message: MessageDto(role: "assistant", blocks: [
+                row: agentRow(index: 0, message: MessageDto(role: "assistant", blocks: [
                     .toolUse(id: "tool-1", tool: "Read", inputJson: #"{"path":"a.txt"}"#, header: nil)
-                ])
+                ]))
             ))
             let liveRun = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
                 guard case let .run(run) = item else { return nil }
@@ -551,10 +555,9 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                messageIndex: 1,
-                message: MessageDto(role: "user", blocks: [
+                row: agentRow(index: 1, message: MessageDto(role: "user", blocks: [
                     .toolResult(id: "tool-1", tool: "Read", resultJson: #"{"content":"ok"}"#, isError: false, oldString: nil, newString: nil, filePath: nil, display: nil)
-                ])
+                ]))
             ))
 
             let runs = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
@@ -598,7 +601,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [use, result],
+                messages: agentRows([use, result]),
                 nextMessageIndex: 2,
                 revision: 1
             ))
@@ -606,8 +609,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                messageIndex: 1,
-                message: use
+                row: agentRow(index: 1, message: use)
             ))
 
             let runs = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
@@ -632,8 +634,7 @@ visionDelegationEnabled: true)
                 source.applyForTesting(.sessionAgentMessage(
                     sessionId: "session-a",
                     agentId: agentID,
-                    messageIndex: UInt64(index),
-                    message: MessageDto(role: "assistant", blocks: [.text(text: text)])
+                    row: agentRow(index: UInt64(index), message: MessageDto(role: "assistant", blocks: [.text(text: text)]))
                 ))
             }
             let runs = source.model.selectedAgentItems.compactMap { item -> ConversationExecutionRun? in
@@ -717,7 +718,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-old",
                 agentId: agentID,
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "stale")])],
+                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "stale")])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -746,8 +747,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: "agent:child-1",
-                messageIndex: 0,
-                message: live
+                row: agentRow(index: 0, message: live)
             ))
             XCTAssertEqual(source.model.selectedAgentMessages.map(\.text), ["live tail"])
             XCTAssertEqual(source.model.selectedAgentSummary?.status, "idle", "transcript delivery must preserve authoritative lifecycle state")
@@ -760,10 +760,10 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: "agent:child-1",
-                messages: [
+                messages: agentRows([
                     MessageDto(role: "assistant", blocks: [.text(text: "history")]),
                     live
-                ],
+                ]),
                 nextMessageIndex: 2,
                 revision: 2
             ))
@@ -800,13 +800,12 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentMessage(
                 sessionId: "session-a",
                 agentId: agentID,
-                messageIndex: 1,
-                message: same
+                row: agentRow(index: 1, message: same)
             ))
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: "session-a",
                 agentId: agentID,
-                messages: [same],
+                messages: agentRows([same]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -1084,7 +1083,7 @@ visionDelegationEnabled: true)
             source.applyForTesting(.sessionAgentTranscript(
                 sessionId: sessionID,
                 agentId: agentID,
-                messages: [MessageDto(role: "assistant", blocks: [.text(text: "Design notes")])],
+                messages: agentRows([MessageDto(role: "assistant", blocks: [.text(text: "Design notes")])]),
                 nextMessageIndex: 1,
                 revision: 1
             ))
@@ -1518,6 +1517,10 @@ visionDelegationEnabled: true)
                     Thread.isMainThread,
                     "synchronous engine construction must not block the setup UI"
                 )
+                XCTAssertGreaterThanOrEqual(
+                    Thread.current.stackSize, 8 * 1024 * 1024,
+                    "MCP bootstrap must not run on a small cooperative worker stack"
+                )
                 constructed.fulfill()
                 return handle
             })
@@ -1720,6 +1723,8 @@ visionDelegationEnabled: true)
             self.submitHandler = submitHandler
             super.init(noHandle: .init())
         }
+
+        override func visualizationHost(origin: String) -> VisualizationHost? { nil }
 
         override func submit(command: ClientCommand) async throws {
             try await submitHandler(command)

@@ -62,7 +62,7 @@ pub struct FusionSetupSnapshot {
 
 /// The persisted half of the wizard's input: what `settings.json` says today.
 /// Shared with the composition root (`Arc<Mutex<_>>`) so a save updates what the
-/// NEXT `/fusion setup` opens on, exactly like the `/web` snapshot.
+/// NEXT `/fusion setup` opens on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FusionSettingsSnapshot {
     /// The panel and analyst roles.

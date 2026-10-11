@@ -72,6 +72,9 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
     )
 
     private fun DeviceAudioOperationKind.toDto(): AudioOperationKindDto = when (this) {
+        DeviceAudioOperationKind.CAPTURE -> AudioOperationKindDto.CAPTURE
+        DeviceAudioOperationKind.PLAY -> AudioOperationKindDto.PLAY
+        DeviceAudioOperationKind.TRANSCRIBE -> AudioOperationKindDto.TRANSCRIBE
         DeviceAudioOperationKind.RECORD -> AudioOperationKindDto.RECORD
         DeviceAudioOperationKind.LISTEN -> AudioOperationKindDto.LISTEN
         DeviceAudioOperationKind.SYNTHESIZE -> AudioOperationKindDto.SYNTHESIZE
@@ -87,15 +90,18 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
     }
 
     private fun AudioOwnerDto.toOwnerOrNull(): AudioOwnerKey? = when (this) {
+        is AudioOwnerDto.LocalApp -> appId.takeIf { it.isNotBlank() }?.let { AudioOwnerKey.localApp(it, runtimeGeneration) }
         is AudioOwnerDto.Session -> AudioOwnerKey.session(sessionId).takeIf { sessionId.isNotBlank() }
-        is AudioOwnerDto.LocalApp -> runtimeGeneration.toSafeLongOrNull()
-            ?.takeIf { appId.isNotBlank() }
-            ?.let { AudioOwnerKey.localApp(appId, it) }
         is AudioOwnerDto.Ui -> instanceId.takeIf { it.isNotBlank() }?.let(AudioOwnerKey::ui)
         is AudioOwnerDto.System -> instanceId.takeIf { it.isNotBlank() }?.let(AudioOwnerKey::system)
     }
 
     private fun AudioOperationDto.toDeviceOperation(): DeviceAudioOperation? = when (this) {
+        is AudioOperationDto.Capture -> sampleRateHz.toLong().takeIf { it <= Int.MAX_VALUE }?.let { DeviceAudioOperation.Capture(it.toInt(), format) }
+        is AudioOperationDto.Play -> decodeBoundedAudio(pcmBase64)?.let { audio ->
+            sampleRateHz.toLong().takeIf { it <= Int.MAX_VALUE }?.let { DeviceAudioOperation.Play(audio, it.toInt()) }
+        }
+        is AudioOperationDto.Transcribe -> decodeBoundedAudio(audioBase64)?.let { DeviceAudioOperation.Transcribe(DeviceAudioCapture(it, mimeType), language) }
         is AudioOperationDto.StartRecording -> sampleRateHz.toLong()
             .takeIf { it <= Int.MAX_VALUE }
             ?.let { DeviceAudioOperation.StartRecording(it.toInt(), format) }
@@ -105,6 +111,12 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
         is AudioOperationDto.Speak -> DeviceAudioOperation.Speak(text, language, rate, voice)
         is AudioOperationDto.Status -> DeviceAudioOperation.Status(handle)
         AudioOperationDto.EndOwner -> DeviceAudioOperation.EndOwner
+    }
+
+    private fun decodeBoundedAudio(encoded: String): ByteArray? {
+        val limit = AndroidAudioServiceProvider.get(appContext).capabilities().maxPayloadBytes
+        if (encoded.length.toLong() > ((limit + 2) / 3) * 4) return null
+        return runCatching { java.util.Base64.getDecoder().decode(encoded) }.getOrNull()?.takeIf { it.size <= limit }
     }
 
     private fun failed(kind: AudioErrorKindDto, message: String) = AndroidAudioResultDtoMapper.failed(kind, message)

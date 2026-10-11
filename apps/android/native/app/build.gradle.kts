@@ -7,9 +7,16 @@ val mobileLinuxContract = JsonSlurper().parse(rootProject.file("../../../docs/mo
 val mobileLinuxSdkVersion = mobileLinuxContract["sdk_version"] as String
 
 plugins {
+    id("com.google.gms.google-services")
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }
 
 android {
@@ -78,10 +85,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
     }
 
     buildFeatures {
@@ -167,6 +170,12 @@ listOf("play", "direct").forEach { distribution ->
 }
 
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:35.0.0"))
+    implementation("com.google.firebase:firebase-auth")
+    implementation("androidx.credentials:credentials:1.5.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")
     // Installer + native helpers only: libandroid_aar.so already owns Rust FFI.
     implementation("io.github.lingxi-coder:mobile-linux-installer:$mobileLinuxSdkVersion")
     implementation("io.github.lingxi-coder:mobile-linux-native-support:$mobileLinuxSdkVersion")
@@ -195,8 +204,8 @@ dependencies {
     // active session survive process death (low-memory kill while backgrounded).
     implementation("androidx.lifecycle:lifecycle-viewmodel-savedstate:2.10.0")
 
-    // Local-app WebView security boundary: document-start bridge injection and
-    // origin-scoped, main-frame-only WebMessageListener delivery.
+    // Inline-visualization WebView security boundary: document-start bridge
+    // injection and origin-scoped, main-frame-only WebMessageListener delivery.
     implementation("androidx.webkit:webkit:1.12.1")
 
     // Activity + Compose

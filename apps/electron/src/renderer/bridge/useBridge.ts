@@ -1,3 +1,4 @@
+import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type {
   AudioOperationDto,
   ClientEvent,
@@ -18,7 +19,7 @@ import type {
   WritableScopeDto,
 } from '@lingxi/bridge-client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AudioConfigurationV3 } from '../../shared/generatedAudioConfiguration.js';
+import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
 import { hostMicrophonePermissionReader } from '../../shared/microphoneAccess.js';
 import type {
   MicrophonePermissionStatus as VoicePermissionStatus,
@@ -205,6 +206,7 @@ export function useBridge(): UseBridge {
   const [error, setError] = useState<string | null>(null);
   const [visualizationOffer, setVisualizationOffer] = useState<(VisualizationFollowup & { readonly sessionId: string }) | null>(null);
   const clearError = useCallback(() => setError(null), []);
+  const [audioRealtimeState, setAudioRealtimeState] = useState<NativeRealtimeAudioState>({ phase: 'paused', detail: '实时会话已停止', generation: 0 });
   const [audioSnapshot, setAudioSnapshot] = useState<NativeAudioSnapshot>(defaultNativeAudioSnapshot());
   // Settings are file-layer state, not per-conversation state, so this is
   // one value for the whole app rather than something keyed into `runtimeStates`.
@@ -300,14 +302,16 @@ export function useBridge(): UseBridge {
     }).catch(() => {
       if (!cancelled) setAudioSnapshot(defaultNativeAudioSnapshot());
     });
+    const offRealtime = host.audio.onRealtimeState((state) => { if (!cancelled && (!state.sessionId || state.sessionId === activeSessionIdRef.current)) setAudioRealtimeState((current) => state.generation >= current.generation ? state : current); });
     const offAudio = host.audio.onEvent((event) => {
-      if (!cancelled && event.type !== 'input_level') setAudioSnapshot(event.snapshot);
+      if (!cancelled && event.type !== 'input_level' && event.type !== 'capture_chunk') setAudioSnapshot(event.snapshot);
     });
     return () => {
       cancelled = true;
       offAudio();
+      offRealtime();
     };
-  }, [host]);
+  }, [host, activeSessionId, sessionReady]);
 
   // Settings are captured per-CONNECTION on the engine side (`SettingsContext`
   // is built once per `assemble_with_provider_keys` call), so a snapshot from
@@ -1752,8 +1756,9 @@ export function useBridge(): UseBridge {
       };
     }
     try {
+      const sessionId = activeSessionIdRef.current;
       const response = await host.audio.request(value);
-      setAudioSnapshot(response.snapshot);
+      if (sessionId === activeSessionIdRef.current && !(value.type === 'get_snapshot' && value.configuration)) setAudioSnapshot(response.snapshot);
       return response;
     } catch (cause) {
       capture(cause);
@@ -1768,12 +1773,18 @@ export function useBridge(): UseBridge {
   const audioExecute = useCallback(async (
     operation: AudioOperationDto,
     configurationRevision?: number,
-    configurationOverride?: AudioConfigurationV3,
+    configurationOverride?: AudioConfigurationV4,
   ): Promise<NativeAudioOperationResponse> => {
     if (!host?.audio) throw new Error('native audio is unavailable on this host');
+    const sessionId = activeSessionIdRef.current;
     const response = await host.audio.execute(operation, configurationRevision, configurationOverride);
-    setAudioSnapshot(response.snapshot);
+    if (sessionId === activeSessionIdRef.current) setAudioSnapshot(response.snapshot);
     return response;
+  }, [host]);
+
+  const audioRealtimeCommand = useCallback(async (command: NativeRealtimeAudioCommand) => {
+    try { if (!host?.audio) throw new Error('native realtime audio is unavailable'); await host.audio.realtime(command); }
+    catch (error) { setAudioRealtimeState((current) => ({ ...current, phase: 'configurationRequired', detail: messageFrom(error) })); throw error; }
   }, [host]);
 
   const audioCancel = useCallback(async () => {
@@ -2154,6 +2165,8 @@ export function useBridge(): UseBridge {
     bootstrap: presentedBootstrap,
     settingsSnapshotEvent,
     audioSnapshot,
+    audioRealtimeState,
+    audioRealtimeCommand,
     mcpServersEvent,
     skillsEvent,
     skillCatalogEvent,

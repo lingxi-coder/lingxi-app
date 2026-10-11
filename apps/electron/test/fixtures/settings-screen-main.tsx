@@ -35,6 +35,10 @@ function Fixture() {
   // Ref, not state: `state()` reads it and a state update here would have to
   // join the reporter effect's dep list just to be observable.
   const navCalls = useRef<string[]>([]);
+  const extensionCalls = useRef<Array<{ domain: string; command: Record<string, unknown> }>>([]);
+  const [extensionCatalogs, setExtensionCatalogs] = useState<{ plugins?: object; skills?: object; document?: object }>({});
+  const pluginAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'plugin', command }); }, []);
+  const skillAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'skill', command }); }, []);
   const failNextCredential = useRef(false);
   const holdSettingsWrite = useRef(false);
   const releaseSettingsWrite = useRef<(() => void) | null>(null);
@@ -254,19 +258,28 @@ function Fixture() {
     updateWorkspaceDirectories: noopAsyncVoid,
     upsertMcpServer: noopAsyncVoid,
     removeMcpServer: noopAsyncVoid,
-    skillAdmin: noopAsyncVoid,
+    skillAdmin,
     mcpAdmin: noopAsyncVoid,
-    pluginAdmin: noopAsyncVoid,
+    pluginAdmin,
     setPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: true, masked: '••••••••', restartRequired: false }),
     clearPluginSecret: async () => ({ pluginId: 'secure@acme', key: 'TOKEN', configured: false, restartRequired: false }),
-    runSlashCommand: noopAsyncVoid,
+    runSlashCommand: async (command: string) => { navCalls.current.push(`slash:${command}`); },
   };
+
+  if (extensionCatalogs.plugins) bridge.pluginCatalogEvent.catalog_json = JSON.stringify(extensionCatalogs.plugins);
+  if (extensionCatalogs.skills) bridge.skillCatalogEvent.catalog_json = JSON.stringify(extensionCatalogs.skills);
+  if (extensionCatalogs.document) bridge.skillDocumentEvent.document_json = JSON.stringify(extensionCatalogs.document);
 
   useEffect(() => {
     window.__settingsScreenTest = {
-      selectPage: (id: string) => {
+      selectPage: async (id: string) => {
+        if (!document.querySelector(`[data-nav-page="${id}"]`)) {
+          (document.querySelector('[aria-label="All settings"]') as HTMLButtonElement | null)?.click();
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        }
         (document.querySelector(`[data-nav-page="${id}"]`) as HTMLButtonElement | null)?.click();
       },
+      setExtensionCatalogs,
       setHasProject,
       setConnected,
       setSessionLoading,
@@ -374,6 +387,7 @@ function Fixture() {
         hasProjectPicker: Boolean(document.querySelector('[data-testid="layer-project-picker"]')),
         projectSwitchWarning: document.querySelector('[data-testid="layer-project-switch-warning"]')?.textContent ?? null,
         navCalls: [...navCalls.current],
+        extensionCalls: [...extensionCalls.current],
         hasBanner: Boolean(document.querySelector('[data-testid="settings-pending-banner"]')),
         placeholderKind: document.querySelector('[data-testid="page-placeholder"]')?.getAttribute('data-placeholder-kind') ?? null,
         hasSnapshotError: Boolean(document.querySelector('[data-testid="settings-snapshot-error"]')),
@@ -411,7 +425,8 @@ function Fixture() {
 declare global {
   interface Window {
     __settingsScreenTest?: {
-      selectPage(id: string): void;
+      selectPage(id: string): Promise<void>;
+      setExtensionCatalogs(catalogs: { plugins?: object; skills?: object; document?: object }): void;
       setHasProject(value: boolean): void;
       setConnected(value: boolean): void;
       setSessionLoading(value: boolean): void;
@@ -451,6 +466,7 @@ declare global {
         hasProjectPicker: boolean;
         projectSwitchWarning: string | null;
         navCalls: string[];
+        extensionCalls: Array<{ domain: string; command: Record<string, unknown> }>;
         hasBanner: boolean;
         placeholderKind: string | null;
         hasSnapshotError: boolean;

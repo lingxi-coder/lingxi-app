@@ -77,7 +77,7 @@ class SherpaTts private constructor(
     }
 
     companion object {
-        fun load(entry: OfflineModelEntry, modelDir: File): SherpaTts {
+        fun load(entry: GeneratedOfflineModelEntry, modelDir: File): SherpaTts {
             // Optional companion assets the multi-lingual packs ship (guarded by
             // presence): espeak-ng-data (English phonemes), dict + lexicons (zh),
             // and number/date rule FSTs.
@@ -87,13 +87,13 @@ class SherpaTts private constructor(
 
             val modelCfg = OfflineTtsModelConfig().apply {
                 when (val p = entry.runtimeParams) {
-                    is SherpaRuntimeParams.Tts.Vits -> vits = OfflineTtsVitsModelConfig().apply {
+                    is GeneratedSherpaRuntimeParams.Tts.Vits -> vits = OfflineTtsVitsModelConfig().apply {
                         model = File(modelDir, "model.int8.onnx").absolutePath
                         tokens = File(modelDir, "tokens.txt").absolutePath
                         lexicon = File(modelDir, "lexicon.txt").absolutePath
                         dir("dict")?.let { dictDir = it }
                     }
-                    is SherpaRuntimeParams.Tts.Kitten -> kitten = OfflineTtsKittenModelConfig().apply {
+                    is GeneratedSherpaRuntimeParams.Tts.Kitten -> kitten = OfflineTtsKittenModelConfig().apply {
                         model = File(modelDir, "model.fp16.onnx").absolutePath
                         voices = File(modelDir, "voices.bin").absolutePath
                         tokens = File(modelDir, "tokens.txt").absolutePath
@@ -102,8 +102,8 @@ class SherpaTts private constructor(
                     else -> error("SherpaTts.load: ${entry.id} is not a TTS model")
                 }
                 numThreads = when (val p = entry.runtimeParams) {
-                    is SherpaRuntimeParams.Tts.Vits -> p.numThreads
-                    is SherpaRuntimeParams.Tts.Kitten -> p.numThreads
+                    is GeneratedSherpaRuntimeParams.Tts.Vits -> p.numThreads
+                    is GeneratedSherpaRuntimeParams.Tts.Kitten -> p.numThreads
                     else -> 2
                 }
                 provider = "cpu"

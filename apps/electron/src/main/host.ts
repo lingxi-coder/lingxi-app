@@ -1,3 +1,7 @@
+import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
+import type { AccountService } from './account.js';
+import { RealtimeAudioController } from './audio/realtimeAudioController.js';
+import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED } from '../shared/scheduled.js';
 import type { ScheduledTaskService } from './scheduled.js';
 import type { HostNotifier } from './notifications.js';
@@ -373,6 +377,8 @@ export class HostController {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly workspaceFiles = new WorkspaceFileSearch();
+  private realtimeAudioController?: RealtimeAudioController;
+  private realtimeAudioWindow?: WebContents;
   private readonly sessionCatalog: ProjectSessionCatalog;
   private readonly catalogs = new Map<string, ProjectSessionCatalogState>();
   private readonly catalogRequestGenerations = new Map<string, number>();
@@ -404,6 +410,16 @@ export class HostController {
     private readonly codexLogin: typeof loginCodex = loginCodex,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
+  }
+
+  private account?: AccountService;
+  private offAccount?: () => void;
+  attachAccount(service: AccountService): void {
+    this.offAccount?.();
+    this.account = service;
+    this.offAccount = service.onChanged(state => {
+      for (const target of this.targets.keys()) if (!target.isDestroyed()) target.send(CH_ACCOUNT_CHANGED, state);
+    });
   }
 
   attachScheduled(service: ScheduledTaskService): void { this.scheduled = service; }
@@ -484,6 +500,7 @@ export class HostController {
       this.terminalDeliveries.delete(webContents);
     };
     const detachAudio = () => {
+      if (this.realtimeAudioWindow === webContents) void this.realtimeAudioController?.stop();
       void this.nativeAudio?.cancelUiAudioOperations(String(webContents.id), true).catch((error) => {
         this.diagnostics.add('warn', 'host', `desktop UI audio teardown failed: ${sanitizeDiagnostic(error)}`);
       });
@@ -510,8 +527,14 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
+    this.ipc.handle(CH_ACCOUNT, (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (!this.account) throw new Error('Account service is unavailable');
+      return this.account.execute(command);
+    });
     if (this.nativeAudio && !this.offNativeAudio) {
       this.offNativeAudio = this.nativeAudio.onEvent((audioEvent) => {
+        if (audioEvent.type === 'capture_chunk') return;
         for (const webContents of this.targets.keys()) {
           if (webContents.isDestroyed()) continue;
           if (audioEvent.type === 'input_level' && audioEvent.owner.kind === 'ui'
@@ -791,8 +814,11 @@ export class HostController {
     this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
-        const project = this.requireProject(projectPath);
-        return this.removeProjectInternal(project);
+        // Remove the saved list entry even if its directory has moved or now
+        // resolves through a symlink to a different path. Cleanup uses this key.
+        if (typeof projectPath !== 'string') throw new Error('invalid project path');
+        if (!this.settings.hasProject(projectPath)) throw new Error('project is not in the project list');
+        return this.removeProjectInternal(projectPath);
       });
     });
     this.ipc.handle(CH_SESSION_PIN_SET, (event: IpcMainInvokeEvent, input: unknown, pinned: unknown) => {
@@ -1098,6 +1124,35 @@ export class HostController {
         configurationRevision as number | undefined,
         configurationOverride,
       );
+    });
+    this.ipc.handle(CH_REALTIME_AUDIO_COMMAND, async (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (command !== 'start' && command !== 'commit' && command !== 'stop') throw new Error('invalid realtime audio command');
+      if (!this.nativeAudio) throw new Error('native audio is unavailable on this host');
+      this.realtimeAudioController ??= new RealtimeAudioController({
+        audio: this.nativeAudio,
+        recordUsage: (metadata, usage) => this.nativeAudio?.recordAudioUsage(metadata, usage),
+        currentRuntime: () => { const sessionId = this.settings.getPublic().activeSession?.sessionId; return sessionId ? this.bridge.get(sessionId) : undefined; },
+        publish: (state) => { if (this.realtimeAudioWindow && !this.realtimeAudioWindow.isDestroyed()) this.realtimeAudioWindow.send(CH_REALTIME_AUDIO_STATE, state); },
+      });
+      if (command === 'start') {
+        const error = this.settings.getAudioConfigurationError();
+        if (error) throw new Error(error);
+        if (this.realtimeAudioWindow && this.realtimeAudioWindow !== event.sender) throw new Error('another desktop window owns realtime audio');
+        this.realtimeAudioWindow = event.sender;
+        const configuration = this.settings.getPublic().voice;
+        if (!configuration) throw new Error('configure realtime audio before starting');
+        const capability = (await this.nativeAudio.request({ type: 'get_snapshot' })).snapshot.realtimeReadiness;
+        if (!capability?.ready) throw new Error(capability?.reason ?? '实时音频尚未就绪，请检查语音设置。');
+        const voice = configuration.conversation.voice;
+        if (voice && (voice.source !== 'provider' || voice.profileId !== capability.profileId || (voice.modelId ?? null) !== (configuration.conversation.cloud.modelId ?? capability.defaultModelId ?? null))) throw new Error('实时音色属于其他 profile 或音频模型，请重新选择。');
+        const session = this.settings.getPublic().activeSession;
+        const context = session ? this.bridge.get(session.sessionId)?.audioSessionContext : undefined;
+        await this.realtimeAudioController.start(configuration, capability.profileId && capability.providerId ? { kind: 'realtime', configurationRevision: this.settings.getPublic().voiceRevision ?? 0, profileId: capability.profileId, providerId: capability.providerId, sessionId: context?.sessionId, accountScope: configuration.conversation.cloud.binding === 'explicit_profile' ? `profile:${capability.profileId}` : context?.accountScope } : undefined);
+      } else if (this.realtimeAudioWindow === event.sender) {
+        if (command === 'commit') await this.realtimeAudioController.commit();
+        else { await this.realtimeAudioController.stop(); this.realtimeAudioWindow = undefined; }
+      }
     });
     this.ipc.handle(CH_NATIVE_AUDIO_CANCEL, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
@@ -1645,18 +1700,31 @@ export class HostController {
     });
   }
 
+  private hasRetainedProjectForDirectory(project: string): boolean {
+    let directory: string;
+    try { directory = canonicalWorkspace(project); }
+    catch { return false; }
+    return this.settings.getPublic().projects.some((other) => {
+      if (other === project) return false;
+      try { return canonicalWorkspace(other) === directory; }
+      catch { return false; }
+    });
+  }
+
   private async removeProjectInternal(project: string): Promise<BootstrapState> {
     if (this.isProjectClosing(project)) throw new Error('project is closing');
     if (this.bridge.hasActiveWork(project)) throw new Error('cancel active turns and pending interactions before removing a project');
-    // Set the host-side guard before invoking the manager. The manager then
-    // synchronously removes matching runtimes from its routable map before its
-    // first await, so a racing prompt cannot enter a disposing runtime.
-    if (this.scheduled) {
+    // Schedules live in the directory, so another saved path to the same
+    // directory must keep its tasks running when only this entry is removed.
+    if (this.scheduled && !this.hasRetainedProjectForDirectory(project)) {
       const jobs = await this.scheduled.manage(project, { action: 'list' });
       for (const job of jobs) if (job.automation?.status === 'active') {
         await this.scheduled.manage(project, { action: 'pause', id: job.id, automation: { ...job.automation, status: 'paused', statusReason: 'Project was removed. Add the project again to resume.' } });
       }
     }
+    // Set the host-side guard before invoking the manager. The manager then
+    // synchronously removes matching runtimes from its routable map before its
+    // first await, so a racing prompt cannot enter a disposing runtime.
     this.closingProjects.add(project);
     try {
       if (this.bridge.hasActiveWork(project)) throw new Error('cancel active work and pending interactions before removing a project');
@@ -1778,7 +1846,11 @@ export class HostController {
   }
 
   dispose(): void {
+    void this.realtimeAudioController?.stop();
     this.scheduled?.dispose();
+    this.offAccount?.();
+    this.account?.dispose();
+    this.ipc.removeHandler(CH_ACCOUNT);
     this.ipc.removeHandler(CH_SCHEDULED);
     this.codexLoginAbort?.abort();
     this.offTerminals?.();
@@ -1797,7 +1869,7 @@ export class HostController {
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
-      CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN,
+      CH_REALTIME_AUDIO_COMMAND, CH_NATIVE_AUDIO_REQUEST, CH_NATIVE_AUDIO_OPERATION, CH_NATIVE_AUDIO_CANCEL, CH_NATIVE_AUDIO_FINISH_LISTEN,
     ]) this.ipc.removeHandler(channel);
     this.offNativeAudio?.();
     this.offNativeAudio = undefined;

@@ -127,13 +127,18 @@ test('static assets are fetched once and unknown paths are 404', async () => {
 test('only the shell on the visualization partition may attach, with forced preferences', () => {
   let prevented = 0;
   const event = { preventDefault: () => { prevented += 1; } };
-  const prefs: Record<string, unknown> = { nodeIntegration: true, preloadURL: 'file:///evil.js', sandbox: false };
+  const prefs: Record<string, unknown> = {
+    nodeIntegration: true, preloadURL: 'file:///evil.js', sandbox: false, partition: VISUALIZATION_PARTITION,
+  };
   assert.equal(guardVisualizationWebview(event, prefs, { src: VISUALIZATION_SHELL_URL, partition: VISUALIZATION_PARTITION }, '/p.js', false), true);
   assert.equal(prevented, 0);
   assert.equal(prefs['nodeIntegration'], false);
   assert.equal(prefs['sandbox'], true);
   assert.equal(prefs['preload'], '/p.js');
   assert.equal('preloadURL' in prefs, false);
+  // Electron routes the guest's session through this preference.
+  assert.equal(prefs['partition'], VISUALIZATION_PARTITION);
+  assert.equal(prefs['disablePopups'], true);
 
   for (const params of [
     { src: 'https://example.com', partition: VISUALIZATION_PARTITION },

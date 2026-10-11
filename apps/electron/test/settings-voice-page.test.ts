@@ -9,10 +9,10 @@ import {
   voiceSelectionFromValue,
   voiceSelectionOptionValue,
 } from '../src/renderer/components/settings/pages/Voice';
-import { audioConfigurationDefaults, type AudioConfigurationV3 } from '../src/shared/generatedAudioConfiguration';
+import { audioConfigurationDefaults, type AudioConfigurationV4 } from '../src/shared/generatedAudioConfiguration';
 import { defaultNativeAudioSnapshot, type NativeAudioSnapshot } from '../src/shared/nativeAudio';
 
-function prefs(overrides: Partial<AudioConfigurationV3> = {}): AudioConfigurationV3 {
+function prefs(overrides: Partial<AudioConfigurationV4> = {}): AudioConfigurationV4 {
   return { ...audioConfigurationDefaults(), ...overrides };
 }
 
@@ -39,7 +39,7 @@ function deferred<T>() {
 
 test('automatic recognition preview resolves the available system backend and locale', () => {
   const model = voicePageModel(prefs(), snapshot({
-    recognition: { requestedMode: 'automatic', effectiveBackend: 'apple', effectiveLanguage: 'zh-CN', detail: 'ready' },
+    recognition: { requestedSource: 'automatic', effectiveBackend: 'apple', effectiveLanguage: 'zh-CN', detail: 'ready' },
   }));
   assert.equal(model.recognitionRoute.effective?.source, 'system');
   assert.equal(model.recognitionRoute.effective?.modelId, null);
@@ -98,7 +98,7 @@ test('a voice save leaves later edits dirty until they are saved too', async () 
   const saveResponse = deferred<void>();
   const submitted = prefs({ rate: 1.1 });
   let editRevision = 4;
-  let persisted: AudioConfigurationV3 | null = null;
+  let persisted: AudioConfigurationV4 | null = null;
   const saving = saveVoiceDraftIfUnchanged(
     submitted,
     4,
@@ -117,15 +117,16 @@ test('a voice save leaves later edits dirty until they are saved too', async () 
   assert.equal(editRevision, 5);
 });
 
-test('a unique legacy system voice name resolves for display without mutating the saved config', () => {
+test('a system voice name is unavailable even when the catalog has a matching display label', () => {
   const saved = prefs({
     speech: { source: 'system', offlineModelId: null, voice: { source: 'system', id: 'Tingting' } },
   });
 
   const model = voicePageModel(saved, snapshot());
 
-  assert.equal(model.speechRoute.status, 'ready');
-  assert.equal(model.displayConfiguration.speech.voice?.id, 'com.apple.voice.compact.zh-CN.Tingting');
+  assert.equal(model.speechRoute.status, 'unavailable');
+  assert.equal(model.speechRoute.reason, 'systemVoiceUnknown');
+  assert.equal(model.displayConfiguration.speech.voice?.id, 'Tingting');
   assert.deepEqual(saved.speech.voice, { source: 'system', id: 'Tingting' });
 });
 
@@ -173,7 +174,7 @@ test('voice preview carries an unsaved offline route when no specific voice is s
   assert.deepEqual(request.configuration.speech, draft.speech);
 });
 
-test('the page saves explicit v3 preferences and executes model/audio work through host routes', () => {
+test('the page saves explicit v4 preferences and executes model/audio work through host routes', () => {
   const source = readFileSync(new URL('../src/renderer/components/settings/pages/Voice.tsx', import.meta.url), 'utf8');
   for (const command of ['install_model', 'cancel_model', 'remove_model', 'request_authorization']) assert.match(source, new RegExp(command));
   assert.match(source, /audioExecute/);
@@ -189,4 +190,15 @@ test('the page saves explicit v3 preferences and executes model/audio work throu
   assert.match(source, /保存语音偏好/);
   assert.match(source, /实际：/);
   assert.doesNotMatch(source, /speechSynthesis|navigator\.mediaDevices/);
+});
+
+
+test('provider preview preserves an incompatible saved local rate for host admission instead of silently resetting it', () => {
+  const draft = audioConfigurationDefaults();
+  draft.rate = 1.35;
+  draft.speech.source = 'provider';
+  const request = voicePreviewRequest(draft, 'en-US');
+  assert.equal(request.operation.rate, 1.35);
+  assert.equal(request.configuration.rate, 1.35);
+  assert.equal(draft.rate, 1.35);
 });

@@ -482,7 +482,14 @@ async fn seed_orchestrator_session_replays_history_and_id() {
     let mut virtual_user = jsonl_line("user", &serde_json::json!("synthetic follow-up"));
     virtual_user
         .extra
-        .insert("isVirtual".into(), serde_json::json!(true));
+        .set_field(
+            "isVirtual",
+            harness_runtime::headless::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+                true
+            ))
+            .unwrap(),
+        )
+        .unwrap();
     let virtual_id =
         lingxi_core::types::MessageId::from_uuid(Uuid::parse_str(&virtual_user.uuid).unwrap());
     let messages = vec![

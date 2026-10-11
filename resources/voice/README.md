@@ -1,19 +1,36 @@
 # Shared audio configuration and service contract
 
-`audio-config-schema.json` defines the device-local schema v3. Recognition and
-speech independently select `automatic`, `system`, or `offline`; a null offline
+`audio-config-schema.json` defines schema v4. Recognition and speech
+independently select `automatic`, `system`, `offline`, or `provider`; a null offline
 model means the first installed language-compatible catalog entry. Fixed
-voices belong to an explicit source and, for offline voices, a model. Persisted
+voices belong to an explicit source and, for offline voices, a model. Provider
+voices belong to an exact profile and audio model. Persisted
 automatic speech has no fixed voice. Unknown explicit selections remain
-unavailable instead of becoming automatic. `localOnly` / `on-device` migrates
-to offline recognition and never falls back to system recognition.
+unavailable instead of becoming automatic. Only schemaVersion 4 is read. Missing, invalid, or older versions use fresh v4
+defaults; old fields, string voices, and display-name aliases are not read.
+System voices require their stable identifiers.
+
+Each cloud route defaults to `follow_session`, which uses the host-resolved
+current session profile and account scope. `explicit_profile` uses the selected
+profile. Null cloud model IDs use that operation's audio catalog default,
+independently of the chat model. A ready SDK descriptor with a null model ID
+represents a native endpoint with no model selector; its model scope remains null
+and usage without a reported model stays unknown. Unsupported or unavailable provider routes fail
+without switching to local audio. The provider host owns credentials, catalog
+validation, transport, normalized media, and usage. Renderers receive no secrets.
+
+Conversation preferences independently select Agent Flow or provider realtime,
+with their own cloud binding and voice. Desktop realtime uses the authenticated
+current Agent for history, tools, and permissions. It requires the installed
+realtime handshake and a ready provider operation; the device currently offers
+turn-based interaction because acoustic echo cancellation is not verified.
 
 The config contains recognition and speech preferences, one language (`auto`
 uses the device locale when an operation starts), rate `0.5`–`2.0`, and
 `autoPlayReplies`. Defaults are automatic sources, `auto`, rate `1.0`, and
 autoplay off. Writes use a store-owned revision and compare-and-set; revision
 is metadata outside the config object. A failed write or revision conflict
-leaves migration retryable. Each operation uses one immutable config snapshot.
+leaves the saved configuration unchanged. Each operation uses one immutable config snapshot.
 For a single speech call, `default` or `auto` as the voice clears the saved
 fixed voice for that call while retaining its selected source and model.
 
@@ -32,11 +49,12 @@ node resources/voice/scripts/generate-audio-config.mjs
 Check generated audio config and the unchanged shared model catalog with:
 
 ```sh
+node resources/voice/scripts/check-audio-config.mjs
 node resources/voice/scripts/check-model-catalog.mjs
 node --test resources/voice/test/audio-configuration.test.mjs resources/voice/test/model-catalog.test.mjs
 ```
 
-`audio-config-fixtures.json` is the shared normalization, migration, and route
+`audio-config-fixtures.json` is the shared current normalization, rejected old versions, and route
 fixture. The generated TS test is
 `resources/voice/test/audio-configuration-generated.test.ts`; iOS and Android
 execute the same JSON fixture in `GeneratedAudioConfigurationTests.swift` and
@@ -53,6 +71,11 @@ interfaces and adapt them to engine-mobile's internal `NativeAudioService`
 using those shared DTOs (`apps/ios/ffi/src/lib.rs` and
 `apps/android/ffi/src/lib.rs`). Keep that FFI boundary platform-
 local rather than exporting the internal callback trait directly.
+
+`Capture` returns bounded microphone media without recognition; `Play` accepts
+bounded PCM16 mono. Both use the same device leases and lifecycle as local
+operations. Provider listening composes capture and host transcription; provider
+speech composes host synthesis and device playback.
 
 `Listen` always captures live speech. `Synthesize` returns bounded, nonempty
 PCM16 mono and never plays it; `Speak` completes only after playback finishes.

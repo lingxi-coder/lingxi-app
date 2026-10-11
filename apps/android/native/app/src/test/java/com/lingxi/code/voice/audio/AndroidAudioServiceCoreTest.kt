@@ -23,6 +23,111 @@ class AndroidAudioServiceCoreTest {
     private val owner = AudioOwnerKey.session("session-a")
 
     @Test
+    fun unsupportedProviderFailsBeforeMicrophoneOrLocalFallback() = runTest {
+        val driver = FakeDriver()
+        val provider = FakeProvider(supported = false)
+        val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch, provider)
+        val result = service.execute(request("provider-unsupported", DeviceAudioOperation.Listen(null,
+            AudioConfigurationV4(recognition = AudioRecognitionPreference(AudioSource.PROVIDER))))) as DeviceAudioResult.Failed
+        assertEquals(DeviceAudioErrorKind.Unsupported, result.error.kind)
+        assertEquals(0, driver.wavCaptures)
+        assertEquals(0, provider.transcriptions)
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
+
+    @Test
+    fun cloudFileRecognitionCapturesWavAndDispatchesAdmittedConfiguration() = runTest {
+        val driver = FakeDriver()
+        val provider = FakeProvider()
+        val configuration = AudioConfigurationV4(recognition = AudioRecognitionPreference(AudioSource.PROVIDER,
+            cloud = AudioCloudBinding("explicit_profile", "audio-profile", "audio-model")))
+        val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch, provider)
+        val result = service.execute(request("provider-listen", DeviceAudioOperation.Listen("en-US", configuration))) as DeviceAudioResult.Transcript
+        assertEquals("cloud transcript", result.text)
+        assertEquals(1, driver.wavCaptures)
+        assertEquals("audio/wav", provider.capture?.mimeType)
+        assertEquals(configuration, provider.configuration)
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
+
+    @Test
+    fun cloudSynthesisReturnsPcmWithoutPlaybackAndSpeakUsesNativePlayback() = runTest {
+        val driver = FakeDriver().apply { completePlayback = true }
+        val provider = FakeProvider()
+        val configuration = AudioConfigurationV4(speech = AudioSpeechPreference(AudioSource.PROVIDER))
+        val service = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch, provider)
+        val rendered = service.execute(request("provider-render", DeviceAudioOperation.Synthesize("hello", null, null, null, configuration))) as DeviceAudioResult.Synthesized
+        assertEquals(24_000, rendered.sampleRateHz)
+        assertFalse(driver.playStarted.isCompleted)
+        val spoken = service.execute(request("provider-speak", DeviceAudioOperation.Speak("hello", null, null, null, configuration = configuration))) as DeviceAudioResult.PlaybackCompleted
+        assertEquals(42L, spoken.durationMs)
+        assertEquals(2, provider.syntheses)
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
+
+    @Test
+    fun providerCancellationDoesNotReturnLateTranscriptAndReleasesCapture() = runTest {
+        val provider = FakeProvider().apply { blockTranscription = true }
+        val service = AndroidAudioServiceCore(FakeRuntime(), FakeDriver(), 64, epoch, provider)
+        val pending = request("provider-cancel", DeviceAudioOperation.Listen(null,
+            AudioConfigurationV4(recognition = AudioRecognitionPreference(AudioSource.PROVIDER))))
+        val result = async { service.execute(pending) }
+        provider.transcriptionStarted.await()
+        service.cancel(pending.identity)
+        assertEquals(DeviceAudioErrorKind.Cancelled, (result.await() as DeviceAudioResult.Failed).error.kind)
+        assertTrue(provider.cancelled.contains(pending.identity.id))
+        assertEquals(0, service.diagnostics().activeLeaseCount)
+    }
+
+    @Test
+    fun nativeCaptureHonorsWavFormatAndPlaybackUsesSuppliedPcm() = runTest {
+        val driver = FakeDriver().apply { completePlayback = true }
+        val core = AndroidAudioServiceCore(FakeRuntime(), driver, 64, epoch)
+        val capture = core.execute(request("bounded-capture", DeviceAudioOperation.Capture(16_000, "wav"))) as DeviceAudioResult.Recording
+        assertEquals("audio/wav", capture.mimeType)
+        val played = core.execute(request("bounded-play", DeviceAudioOperation.Play(byteArrayOf(1, 0), 16_000))) as DeviceAudioResult.PlaybackCompleted
+        assertEquals(42L, played.durationMs)
+        val invalid = core.execute(request("capture-format", DeviceAudioOperation.Capture(16_000, "mp3"))) as DeviceAudioResult.Failed
+        assertEquals(DeviceAudioErrorKind.Unsupported, invalid.error.kind)
+        assertEquals(1, driver.wavCaptures)
+    }
+
+    @Test
+    fun providerTranscribesSuppliedRecordingWithoutMicrophonePermissionOrCapture() = runTest {
+        val configuration = AudioConfigurationV4(recognition = AudioRecognitionPreference(AudioSource.PROVIDER))
+        val provider = FakeProvider()
+        val driver = FakeDriver()
+        val core = AndroidAudioServiceCore(FakeRuntime(savedConfiguration = configuration, micGranted = false), driver, 64, epoch, provider)
+        val recording = DeviceAudioCapture(byteArrayOf(1, 2, 3), "audio/m4a")
+        val transcript = core.execute(request("encoded-cloud", DeviceAudioOperation.Transcribe(recording, "en-US"))) as DeviceAudioResult.Transcript
+        assertEquals("cloud transcript", transcript.text)
+        assertEquals(recording, provider.capture)
+        assertEquals(0, driver.wavCaptures)
+    }
+
+    private class FakeProvider(private val supported: Boolean = true) : ProviderAudioBridge {
+        var transcriptions = 0
+        var syntheses = 0
+        var capture: DeviceAudioCapture? = null
+        var configuration: AudioConfigurationV4? = null
+        var blockTranscription = false
+        val transcriptionStarted = CompletableDeferred<Unit>()
+        val cancelled = mutableListOf<String>()
+        override suspend fun capabilities(request: DeviceAudioRequest, configuration: AudioConfigurationV4, kind: String) =
+            ProviderAudioCapability(supported, if (supported) "ready" else "unsupported", "test capability", "audio-profile", "openai", "audio-model")
+        override suspend fun transcribe(request: DeviceAudioRequest, configuration: AudioConfigurationV4, capture: DeviceAudioCapture): SttResult {
+            transcriptions++; this.capture = capture; this.configuration = configuration
+            transcriptionStarted.complete(Unit)
+            if (blockTranscription) awaitCancellation()
+            return SttResult.Ok("cloud transcript", "en-US", null)
+        }
+        override suspend fun synthesize(request: DeviceAudioRequest, configuration: AudioConfigurationV4, text: String): Pair<ByteArray, Int> {
+            syntheses++; return byteArrayOf(1, 0, 2, 0) to 24_000
+        }
+        override suspend fun cancel(operationId: String) { cancelled += operationId }
+    }
+
+    @Test
     fun recordingLimitReleasesCaptureAndStatusAllowsRestart() = runTest {
         val driver = FakeDriver().apply { blockNativeStop = true }
         val service = AndroidAudioServiceCore(FakeRuntime(), driver, maxPayloadBytes = 64, initialEpoch = epoch)
@@ -671,6 +776,8 @@ class AndroidAudioServiceCoreTest {
         private val failSystemListen: Boolean = false,
         private val renderSampleRateHz: Int = 24_000,
         private val systemListenErrorCode: String? = null,
+        private val savedConfiguration: AudioConfigurationV4? = null,
+        private val micGranted: Boolean = true,
     ) : AudioServiceSpeechRuntime {
         val renderStarted = CompletableDeferred<Unit>()
         val renderCleaned = CompletableDeferred<Unit>()
@@ -678,13 +785,13 @@ class AndroidAudioServiceCoreTest {
         val renderCleanupGate = CompletableDeferred<Unit>()
         var blockRender = false
 
-        override fun configuration() = AudioConfigurationNormalizer.defaults.let {
+        override fun configuration() = savedConfiguration ?: AudioConfigurationNormalizer.defaults.let {
             it.copy(speech = it.speech.copy(voice = savedVoice))
         }
         override fun configurationSnapshot() = VersionedAudioConfiguration(configuration(), snapshotRevision)
-        override fun microphonePermissionGranted() = true
+        override fun microphonePermissionGranted() = micGranted
         override fun resolveRecognition(
-            configuration: AudioConfigurationV3,
+            configuration: AudioConfigurationV4,
             language: String?,
             systemStatusOverride: AudioReadiness?,
         ): AudioRouteResolution {
@@ -707,7 +814,7 @@ class AndroidAudioServiceCoreTest {
         }
         override fun openRealtimeSession(
             language: String?,
-            configuration: AudioConfigurationV3,
+            configuration: AudioConfigurationV4,
             callbacks: RealtimeSpeechCallbacks,
         ): RealtimeSpeechSession {
             callbacks.onReady()
@@ -731,7 +838,7 @@ class AndroidAudioServiceCoreTest {
             }
         }
         override fun resolveSpeech(
-            configuration: AudioConfigurationV3,
+            configuration: AudioConfigurationV4,
             language: String?,
             voice: String?,
             rate: Float?,
@@ -756,7 +863,7 @@ class AndroidAudioServiceCoreTest {
             )
         }
 
-        override suspend fun transcribe(language: String?, configuration: AudioConfigurationV3) =
+        override suspend fun transcribe(language: String?, configuration: AudioConfigurationV4) =
             if (systemListenErrorCode != null) {
                 SttResult.Err(systemListenErrorCode, "recognizer unavailable", true)
             } else if (failSystemListen && configuration.recognition.source == AudioSource.AUTOMATIC) {
@@ -771,7 +878,7 @@ class AndroidAudioServiceCoreTest {
             voice: String?,
             rate: Float?,
             maxPcmBytes: Int,
-            configuration: AudioConfigurationV3,
+            configuration: AudioConfigurationV4,
         ): Pair<ByteArray, Int> {
             renderStarted.complete(Unit)
             return try {
@@ -799,6 +906,12 @@ class AndroidAudioServiceCoreTest {
     }
 
     private class FakeDriver(val events: MutableList<String> = mutableListOf()) : AndroidAudioDeviceDriver {
+        var wavCaptures = 0
+        var completePlayback = false
+        override suspend fun captureWav(lease: AudioLease, maxPayloadBytes: Int, untilSilence: Boolean, onReady: () -> Unit): DeviceAudioCapture {
+            wavCaptures++; onReady()
+            return DeviceAudioCapture(pcm16ToWav(byteArrayOf(1, 0), 16_000), "audio/wav")
+        }
         val playStarted = CompletableDeferred<Unit>()
         val permissionWaitStarted = CompletableDeferred<Unit>()
         val nativeStopStarted = CompletableDeferred<Unit>()
@@ -846,6 +959,7 @@ class AndroidAudioServiceCoreTest {
 
         override suspend fun play(lease: AudioLease, pcm: ByteArray, sampleRateHz: Int): Long {
             playStarted.complete(Unit)
+            if (completePlayback) return 42L
             val stopped = CompletableDeferred<Unit>()
             playbackStop = stopped
             try {

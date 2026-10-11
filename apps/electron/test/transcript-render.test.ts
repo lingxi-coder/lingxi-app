@@ -26,6 +26,7 @@ import * as React from 'react';
 (globalThis as { React?: typeof React }).React = React;
 
 import { renderToStaticMarkup } from 'react-dom/server';
+import { conversationFromMessages } from '../src/renderer/bridge/conversation';
 
 import type {
   AskUserQuestionRequestDto,
@@ -312,7 +313,7 @@ test('a user message carries its clock and copy affordance under the bubble', ()
 });
 
 test('the actions row keeps its box without a clock and never joins an assistant row', () => {
-  // Restored history has no `sentAt`; the reserved row must still be emitted so
+  // History without a recorded `sentAt` must still reserve its actions row so
   // a live prompt appearing beside it cannot change the message's height.
   const restored = renderStage({ type: 'narration', id: 'i1', role: 'user', text: 'Restored.' });
   assert.match(restored, /class="user-message-actions"/);
@@ -892,7 +893,6 @@ test('a multi-key permission payload is labelled, redacted, and never dropped', 
   assert.match(html, /\[REDACTED\]/);
 });
 
-
 test('thinking is an in-place live status without reasoning content or a disclosure', () => {
   const html = render(React.createElement(Stage, {
     running: true,
@@ -924,7 +924,6 @@ test('completed, historical and stopped thinking is hidden regardless of legacy 
     }
   }
 });
-
 
 test('a main-only roster does not suppress the empty conversation', () => {
   const html = render(React.createElement(Stage, {
@@ -1066,4 +1065,14 @@ test('the error mark is a ringed icon, not the old bare dot', () => {
   // keeps the pin/archive actions in the same trailing slot.
   assert.match(sidebar, /attention && \(pinnedSection \|\| attention\.label !== 'Session error'\) \? <span/, 'the inline dot skips the error state outside the pinned section');
   assert.match(sidebar, /!pinnedSection && attention\?\.label === 'Session error' && \(/, 'and the ringed mark is suppressed exactly there');
+});
+
+test('a cold-restored user message renders its original clock under the bubble', () => {
+  const sentAt = new Date(2026, 7, 26, 23, 35).getTime();
+  const item = conversationFromMessages([{
+    role: 'user', sent_at_ms: sentAt, blocks: [{ type: 'text', text: 'Restored prompt.' }],
+  }]).items[0];
+  assert.equal(item.type, 'narration');
+  if (item.type !== 'narration') return;
+  assert.match(renderStage(item), /class="user-message-clock">11:35 PM</);
 });

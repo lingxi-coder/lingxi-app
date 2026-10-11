@@ -41,13 +41,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Validate mobile Linux authorization, rootfs, and store policy
-        run: bash scripts/local-apps/smoke.sh
+        run: bash scripts/mobile-linux/smoke.sh
 
       - name: Test mobile Linux rootfs tooling
         run: bash scripts/tests/test-rootfs-tooling.sh
-
-      - name: Test local-app dependency and source-policy gates
-        run: bash scripts/tests/test-local-app-supply-chain.sh
 
   # ---------------------------------------------------------------------------
   # 1. node-clients — shared TS SDK + Electron typecheck (ubuntu).
@@ -161,7 +158,7 @@ jobs:
 
       - name: Stage verified SDK release rootfs assets
         run: |
-          python3 scripts/local-apps/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
+          python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
           sdk_root="$(python3 scripts/lib/mobile_linux_source.py --root)"
           runtime_root="$(python3 scripts/lib/runtime_source.py --root)"
           for variant in play direct; do
@@ -242,7 +239,7 @@ jobs:
 
       - name: Stage verified SDK release rootfs assets
         run: |
-          python3 scripts/local-apps/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
+          python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
           python3 apps/android/native/scripts/stage-mobile-linux-assets.py \
             --input "$RUNNER_TEMP/sdk-rootfs" \
             --output apps/android/native/app/build/generated/mobileLinux/play/assets/mobile-linux \
@@ -299,9 +296,8 @@ jobs:
 
       - name: Build native support and verified release rootfs
         run: |
-          python3 scripts/local-apps/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
-          bash apps/ios/native/scripts/build-linux-runtime.sh --local-app-runtime \
-            --rootfs-archive "$RUNNER_TEMP/sdk-rootfs/arm64-v8a/rootfs.tar.gz"
+          python3 scripts/mobile-linux/fetch-sdk-rootfs.py --output "$RUNNER_TEMP/sdk-rootfs"
+          bash apps/ios/native/scripts/build-linux-runtime.sh
           bash apps/ios/native/scripts/install-sherpa-runtime.sh
 
       # Build the gitignored Generated/ Swift bindings + the

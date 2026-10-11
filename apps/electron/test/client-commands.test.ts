@@ -88,7 +88,6 @@ test('the allowlists are the exposed subset of the exhaustive desktop dispositio
   assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_invalidate, 'host_private');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.ui_notify, 'exposed');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.session_agent_tombstone, 'exposed');
-  assert.equal(CLIENT_EVENT_DISPOSITIONS.app_event, 'not_applicable');
 });
 
 test('engine audio response and capability commands stay private to main', () => {

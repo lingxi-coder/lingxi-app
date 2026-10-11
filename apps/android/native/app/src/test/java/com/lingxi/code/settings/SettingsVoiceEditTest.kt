@@ -1,7 +1,7 @@
 package com.lingxi.code.settings
 
 import com.lingxi.code.voice.audio.AudioConfigurationNormalizer
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -82,7 +82,6 @@ class SettingsVoiceEditTest {
 
         override fun readConfiguration(): Any? = synchronized(lock) { configuration }
 
-        override fun readLegacyConfiguration(): Map<String, Any?> = emptyMap()
 
         override fun readRevision(): Long = revision
 
@@ -105,7 +104,7 @@ class SettingsVoiceEditTest {
 
 }
 
-private fun audioConfigurationMap(configuration: AudioConfigurationV3): Map<String, Any?> = mapOf(
+private fun audioConfigurationMap(configuration: AudioConfigurationV4): Map<String, Any?> = mapOf(
         "schemaVersion" to configuration.schemaVersion,
         "recognition" to mapOf(
             "source" to configuration.recognition.source.value,

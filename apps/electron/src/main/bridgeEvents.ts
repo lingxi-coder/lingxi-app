@@ -11,7 +11,6 @@ export function audioIdentityKey(identity: AudioOperationIdDto): string {
 export function audioOwnerKey(owner: AudioOwnerDto): string {
   switch (owner.type) {
     case 'session': return `session:${owner.session_id}`;
-    case 'local_app': return `local_app:${owner.app_id}:${owner.runtime_generation}`;
     case 'ui': return `ui:${owner.instance_id}`;
     case 'system': return `system:${owner.instance_id}`;
   }

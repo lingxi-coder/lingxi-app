@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   audioConfigurationDefaults,
-  migrateLegacyAudioConfiguration,
   normalizeAudioConfiguration,
   resolveAudioRoute,
   type AudioRouteRequest,
@@ -11,18 +10,15 @@ import {
 
 const fixture = JSON.parse(readFileSync(new URL('../audio-config-fixtures.json', import.meta.url), 'utf8')) as {
   normalization: Array<{ name: string; input: unknown; expected: unknown }>;
-  migrations: Array<{ name: string; input: unknown; expected: unknown }>;
   routes: Array<{ name: string; input: AudioRouteRequest; expected: unknown }>;
 };
 
-test('generated TypeScript defaults, normalization, and migration match the shared fixture', () => {
+test('generated TypeScript defaults, normalization, and unsupported version rejection match the shared fixture', () => {
   assert.deepEqual(audioConfigurationDefaults(), fixture.normalization[0]?.expected);
   for (const item of fixture.normalization) {
     assert.deepEqual(normalizeAudioConfiguration(item.input), item.expected, item.name);
   }
-  for (const item of fixture.migrations) {
-    assert.deepEqual(migrateLegacyAudioConfiguration(item.input), item.expected, item.name);
-  }
+
 });
 
 test('generated TypeScript requested/effective routes match the shared fixture', () => {

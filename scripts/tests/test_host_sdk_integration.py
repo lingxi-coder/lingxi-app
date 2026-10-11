@@ -23,7 +23,6 @@ def module(name, path):
 
 native = module("native", HOST / "apps/android/native/scripts/mobile-linux-native.py")
 apk = module("apk", HOST / "apps/android/native/scripts/verify-mobile-linux-apk.py")
-policy = module("policy", (Path(__file__).resolve().parent / "../local-apps/verify-local-app-host.py"))
 assets = module("assets", HOST / "apps/android/native/scripts/stage-mobile-linux-assets.py")
 
 
@@ -53,7 +52,7 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assets.mkdir()
         shutil.copy2(self.source / "native-manifest.json", self.assets / "native-manifest.json")
         shutil.copy2(self.root / "sdk-source.json", self.assets / "mobile-linux-sdk-source.json")
-        for name in ("runtime-pins.json", "local-app-runtime-pins.json", "licenses/NOTICE.md",
+        for name in ("runtime-pins.json", "licenses/NOTICE.md",
                      "licenses/GPL-3.0-only.txt", "licenses/GPL-2.0-or-later.txt"):
             path = self.assets / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,9 +149,6 @@ class NativeIntegrationTests(unittest.TestCase):
             (root / "sdk-artifacts.json").write_text(json.dumps({"source_revision": revision, "source_dirty": dirty}))
             with self.assertRaisesRegex(ValueError, "clean Cargo-locked"):
                 native.verify_maven(root, "a" * 40)
-
-    def test_current_host_policy(self):
-        policy.validate_host_policy(HOST)
 
 
 class ActiveRootfsEvidenceTests(unittest.TestCase):

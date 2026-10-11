@@ -729,7 +729,7 @@ mod unix {
                 _: lingxi_core::types::AgentId,
                 _: String,
                 _: String,
-                _: String,
+                _: Utf16JsonProjection,
             ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
                 unreachable!()
             }
@@ -875,7 +875,7 @@ mod unix {
             .await
             .unwrap();
             assert!(
-                matches!(result, PermissionDecision::Deny { reason } if reason.contains("stdin closed"))
+                matches!(result, PermissionDecision::Deny { reason } if reason.string_at("").unwrap().contains("stdin closed"))
             );
         }
 
@@ -889,8 +889,14 @@ mod unix {
                 cancelled.clone(),
             );
             let pending = tokio::spawn(async move {
-                gate.check("Bash", &serde_json::json!({"command":"touch result.txt"}))
-                    .await
+                gate.check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command":"touch result.txt"}),
+                    )
+                    .unwrap(),
+                )
+                .await
             });
             tokio::task::yield_now().await;
             cancelled.cancel();
@@ -899,7 +905,7 @@ mod unix {
                 .unwrap()
                 .unwrap();
             assert!(
-                matches!(result, PermissionDecision::Deny { reason } if reason.contains("cancelled"))
+                matches!(result, PermissionDecision::Deny { reason } if reason.string_at("").unwrap().contains("cancelled"))
             );
         }
         #[test]
@@ -953,7 +959,12 @@ mod unix {
             let _held = connection.writer.lock().await;
             let error = tokio::time::timeout(
                 WRITE_TIMEOUT + std::time::Duration::from_secs(1),
-                connection.send_message(serde_json::json!({"to":"main","message":"hello"})),
+                connection.send_message(
+                    harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"to":"main","message":"hello"}),
+                    )
+                    .unwrap(),
+                ),
             )
             .await
             .expect("write lock wait must not consume the 120s reply deadline")
@@ -973,7 +984,12 @@ mod unix {
             let caller = connection.clone();
             let pending = tokio::spawn(async move {
                 caller
-                    .send_message(serde_json::json!({"to":"main","message":"hello"}))
+                    .send_message(
+                        harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"to":"main","message":"hello"}),
+                        )
+                        .unwrap(),
+                    )
                     .await
             });
             tokio::task::yield_now().await;
@@ -995,8 +1011,12 @@ mod unix {
             let connection = Connection::new(writer, tokio_util::sync::CancellationToken::new());
             let error = tokio::time::timeout(
                 WRITE_TIMEOUT + std::time::Duration::from_secs(1),
-                connection
-                    .send_message(serde_json::json!({"to":"main","message":"x".repeat(900_000)})),
+                connection.send_message(
+                    harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"to":"main","message":"x".repeat(900_000)}),
+                    )
+                    .unwrap(),
+                ),
             )
             .await
             .unwrap()
@@ -1025,7 +1045,7 @@ mod unix {
             let pending = tokio::spawn(async move {
                 writing
                     .write(&WorkerToParent::Output {
-                        text: "x".repeat(900_000),
+                        text: "x".repeat(900_000).into(),
                     })
                     .await
             });
@@ -1048,7 +1068,12 @@ mod unix {
             let caller = connection.clone();
             let pending = tokio::spawn(async move {
                 caller
-                    .send_message(serde_json::json!({"to":"main","message":"hello"}))
+                    .send_message(
+                        harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"to":"main","message":"hello"}),
+                        )
+                        .unwrap(),
+                    )
                     .await
             });
             let mut lines = BufReader::new(parent).lines();
@@ -1070,7 +1095,8 @@ mod unix {
             let caller = connection.clone();
             let expected =
                 serde_json::json!({"to":"peer", "message":"hello", "summary":"greeting"});
-            let input = expected.clone();
+            let input = harness_runtime::headless::Utf16JsonProjection::from_serde_value(&expected)
+                .unwrap();
             let pending = tokio::spawn(async move { caller.send_message(input).await });
             let mut lines = BufReader::new(parent).lines();
             let frame: WorkerToParent =
@@ -1078,7 +1104,11 @@ mod unix {
             let WorkerToParent::SendMessage { id, input } = frame else {
                 panic!("expected message frame")
             };
-            assert_eq!(input, expected);
+            assert_eq!(
+                input,
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(&expected)
+                    .unwrap()
+            );
             connection
                 .replies
                 .lock()
@@ -1086,13 +1116,19 @@ mod unix {
                 .remove(&id)
                 .unwrap()
                 .send(PaneMessageResult {
-                    result: serde_json::json!({"success":false,"message":"recipient unavailable"}),
+                    result: harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"success":false,"message":"recipient unavailable"}),
+                    )
+                    .unwrap(),
                     is_error: true,
                 })
                 .unwrap();
             let reply = pending.await.unwrap().unwrap();
             assert!(reply.is_error);
-            assert_eq!(reply.result["message"], "recipient unavailable");
+            assert_eq!(
+                reply.result.string_at("/message"),
+                Some("recipient unavailable".into())
+            );
             assert!(connection.replies.lock().unwrap().is_empty());
         }
 
@@ -1157,7 +1193,7 @@ mod unix {
                 let WorkerToParent::Output { text } = serde_json::from_str(&line).unwrap() else {
                     panic!("expected output frame")
                 };
-                actual.push_str(&text);
+                actual.push_str(&text.string_at("").unwrap());
             }
             drain.await.unwrap();
             assert_eq!(actual, expected);

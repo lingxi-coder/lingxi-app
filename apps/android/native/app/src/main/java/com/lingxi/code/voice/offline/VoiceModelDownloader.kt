@@ -243,7 +243,7 @@ object VoiceModelDownloader {
 
     fun modelDir(id: String): File = File(appContext!!.filesDir, "voice_models/$id")
 
-    fun isReady(entry: OfflineModelEntry): Boolean {
+    fun isReady(entry: GeneratedOfflineModelEntry): Boolean {
         if (appContext == null) return false
         val dir = modelDir(entry.id)
         return entry.files.isNotEmpty() &&
@@ -255,21 +255,21 @@ object VoiceModelDownloader {
     private fun reconcileFromDisk() {
         restoreInterruptedInstallations()
         removeObsoletePartials()
-        _states.value = OfflineModelCatalog.all.associate {
+        _states.value = GeneratedVoiceModelCatalog.all.associate {
             it.id to if (isReady(it)) ModelState.Ready else (_states.value[it.id] ?: ModelState.NotInstalled)
         }
     }
 
     private fun removeObsoletePartials() {
         val ctx = appContext ?: return
-        val currentArchives = OfflineModelCatalog.all.mapTo(mutableSetOf()) { "${it.id}.tar.bz2" }
+        val currentArchives = GeneratedVoiceModelCatalog.all.mapTo(mutableSetOf()) { "${it.id}.tar.bz2" }
         File(ctx.cacheDir, "voice_dl").listFiles()
             ?.filter { it.isFile && it.name.endsWith(".tar.bz2") && it.name !in currentArchives }
             ?.forEach(File::delete)
     }
 
     private fun restoreInterruptedInstallations() {
-        OfflineModelCatalog.all.forEach { entry ->
+        GeneratedVoiceModelCatalog.all.forEach { entry ->
             val destination = modelDir(entry.id)
             val backup = File(destination.parentFile, ".${entry.id}.previous")
             val staging = File(destination.parentFile, ".${entry.id}.installing")
@@ -284,7 +284,7 @@ object VoiceModelDownloader {
     /** Start (or resume) downloading every model in a language pack. */
     @Synchronized
     fun startPack(language: String) {
-        val entries = OfflineModelCatalog.packFor(language)
+        val entries = GeneratedVoiceModelCatalog.packFor(language)
         if (entries.isEmpty()) return
         if (entries.any { entry ->
                 when (_states.value[entry.id]) {
@@ -331,7 +331,7 @@ object VoiceModelDownloader {
     }
 
     @Synchronized
-    fun start(entry: OfflineModelEntry) {
+    fun start(entry: GeneratedOfflineModelEntry) {
         when (_states.value[entry.id]) {
             is ModelState.Ready, is ModelState.Queued, is ModelState.Downloading,
             is ModelState.Verifying, is ModelState.Extracting -> return
@@ -359,7 +359,7 @@ object VoiceModelDownloader {
     }
 
     @Synchronized
-    fun cancel(entry: OfflineModelEntry) {
+    fun cancel(entry: GeneratedOfflineModelEntry) {
         jobs.remove(entry.id)?.cancel()
         set(entry.id, if (isReady(entry)) ModelState.Ready else ModelState.NotInstalled)
     }
@@ -371,13 +371,13 @@ object VoiceModelDownloader {
         if (jobs[id] === job && job.isActive) set(id, state)
     }
 
-    private fun markQueued(entry: OfflineModelEntry) {
+    private fun markQueued(entry: GeneratedOfflineModelEntry) {
         val ctx = appContext ?: return
         val partial = File(ctx.cacheDir, "voice_dl/${entry.id}.tar.bz2").takeIf { it.isFile }?.length() ?: 0L
         set(entry.id, ModelState.Queued(partial, entry.approxSizeBytes.coerceAtLeast(partial)))
     }
 
-    private suspend fun runQueuedDownload(entry: OfflineModelEntry) {
+    private suspend fun runQueuedDownload(entry: GeneratedOfflineModelEntry) {
         downloadSlot.withPermit {
             val ctx = appContext ?: return@withPermit
             val partial = File(ctx.cacheDir, "voice_dl/${entry.id}.tar.bz2").takeIf { it.isFile }?.length() ?: 0L
@@ -386,7 +386,7 @@ object VoiceModelDownloader {
         }
     }
 
-    private suspend fun runDownload(entry: OfflineModelEntry) {
+    private suspend fun runDownload(entry: GeneratedOfflineModelEntry) {
         val job = coroutineContext[Job]!!
         val ctx = appContext ?: return
         val tmp = File(ctx.cacheDir, "voice_dl/${entry.id}.tar.bz2")
@@ -458,7 +458,7 @@ object VoiceModelDownloader {
         }
     }
 
-    internal fun install(archive: File, entry: OfflineModelEntry, destDir: File, checkCancellation: () -> Unit) {
+    internal fun install(archive: File, entry: GeneratedOfflineModelEntry, destDir: File, checkCancellation: () -> Unit) {
         val ctx = appContext
         val staging = File(destDir.parentFile, ".${entry.id}.installing")
         staging.deleteRecursively()
@@ -521,7 +521,7 @@ object VoiceModelDownloader {
      * attribution files. Large alternate-precision models and sample WAVs are
      * intentionally left out to avoid doubling the installed size.
      */
-    private fun extract(archive: File, entry: OfflineModelEntry, destDir: File, checkCancellation: () -> Unit) {
+    private fun extract(archive: File, entry: GeneratedOfflineModelEntry, destDir: File, checkCancellation: () -> Unit) {
         val ctx = appContext
         val root = destDir.canonicalFile
         root.mkdirs()

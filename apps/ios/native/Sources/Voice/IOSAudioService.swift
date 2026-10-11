@@ -31,6 +31,11 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     private let speechImplementation: SystemVoiceSpeechPlayer
     private let bargeInImplementation: VoiceBargeInRecognizer
     private let coordinator: VoiceAudioSessionCoordinator
+    private let pcmPlayback: any IOSPcmPlaybackDriving
+    private let providerService: IOSAudioProviderService
+    private var cloudCallbacks: [IOSAudioOperationIdentity: IOSAudioProviderService.PinnedOperation] = [:]
+    private var activeCloudOperations: [IOSAudioOwner: IOSAudioProviderService.PinnedOperation] = [:]
+    private var finishedCaptures: Set<IOSAudioOperationIdentity> = []
     private let onInvalidation: (@MainActor (VoiceAudioSessionCoordinator.Invalidation) async -> Void)?
     private weak var capabilityCache: IOSAudioCapabilitySnapshotCache?
     private var invalidationTask: Task<Void, Never>?
@@ -74,12 +79,16 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         speechImplementation: SystemVoiceSpeechPlayer? = nil,
         bargeInImplementation: VoiceBargeInRecognizer? = nil,
         coordinator: VoiceAudioSessionCoordinator? = nil,
+        pcmPlayback: (any IOSPcmPlaybackDriving)? = nil,
+        providerService: IOSAudioProviderService? = nil,
         serviceEpoch: UInt64? = nil,
         maximumPayloadBytes: UInt64? = nil,
         onInvalidation: (@MainActor (VoiceAudioSessionCoordinator.Invalidation) async -> Void)? = nil
     ) {
         let coordinator = coordinator ?? VoiceAudioSessionCoordinator.shared
         self.coordinator = coordinator
+        self.pcmPlayback = pcmPlayback ?? IOSPcmPlayback(coordinator: coordinator)
+        self.providerService = providerService ?? .shared
         self.configurationStore = configurationStore ?? .shared
         self.stt = stt ?? SttImpl(coordinator: coordinator)
         self.tts = tts ?? TtsImpl()
@@ -134,7 +143,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     }
 
     var hasActivePlayback: Bool {
-        activePlaybackIdentity != nil || speechImplementation.hasActivePlayback
+        activePlaybackIdentity != nil || speechImplementation.hasActivePlayback || pcmPlayback.isPlaying
     }
 
     func installMaximumPayloadBytes(_ value: UInt64) {
@@ -198,7 +207,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     }
 
     func capabilityState() -> IOSAudioCapabilityState {
-        let all: Set<IOSAudioCapabilityState.Operation> = [.record, .listen, .synthesize, .speak]
+        var all: Set<IOSAudioCapabilityState.Operation> = [.record, .capture, .play, .listen, .synthesize, .speak]
         let microphone = AVAudioApplication.shared.recordPermission
         let microphoneReadiness: IOSAudioCapabilityState.Readiness = switch microphone {
         case .granted: .ready
@@ -214,15 +223,19 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             kind: .speech,
             snapshot: configurationStore.snapshot
         )
+        if configurationStore.configuration.recognition.source == .provider,
+           providerService.capabilities[.recognition]?.route.supported == true { all.insert(.transcribe) }
         let recognitionReadiness = Self.readiness(for: recognitionRoute)
         let speechReadiness = Self.readiness(for: speechRoute)
         let rawRecordingActive = recordings.contains { handle, recording in
             recorder.isRecordingOwned(handle: handle, ownerID: recording.owner.stableKey)
         } || pending.values.contains {
             if case .startRecording = $0.request.operation { return !$0.isTerminal }
+            if case .capture = $0.request.operation { return !$0.isTerminal }
             return false
         }
-        let isListeningActive = activeListenIdentity != nil || pending.values.contains {
+        let realtimeActive = IOSRealtimeAudioService.shared.isActive
+        let isListeningActive = realtimeActive || activeListenIdentity != nil || pending.values.contains {
             if case .listen = $0.request.operation { return !$0.isTerminal }
             return false
         } || bargeInImplementation.activeSessionCount > 0
@@ -230,8 +243,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             if case .synthesize = $0.request.operation { return !$0.isTerminal }
             return false
         }
-        let isPlaybackActive = activePlaybackIdentity != nil || speechImplementation.hasActivePlayback || pending.values.contains {
+        let isPlaybackActive = realtimeActive || activePlaybackIdentity != nil || speechImplementation.hasActivePlayback || pcmPlayback.isPlaying || pending.values.contains {
             if case .speak = $0.request.operation { return !$0.isTerminal }
+            if case .play = $0.request.operation { return !$0.isTerminal }
             return false
         }
         let usesSystemSpeech = speechRoute.effective?.source == .system
@@ -264,6 +278,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                     playback: isPlaybackActive,
                     systemRender: usesSystemSpeech && isSynthesizingActive
                 ),
+                .capture: (rawRecordingActive || isListeningActive || isPlaybackActive) ? .busy : microphoneReadiness,
+                .play: isPlaybackBusy ? .busy : .ready,
+                .transcribe: recognitionReadiness,
                 .listen: isListeningBusy ? .busy : listenReadiness,
                 .synthesize: isSynthesizingBusy ? .busy : speechReadiness,
                 .speak: isPlaybackBusy ? .busy : speechReadiness,
@@ -405,15 +422,15 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         }
         guard operation.terminalError == nil else { return }
         let ownsNativeIO: Bool = switch operation.request.operation {
-        case .startRecording:
+        case .startRecording, .capture:
             recorder.isRecordingOwned(handle: nil, ownerID: operation.request.ownerKey)
         case .listen:
-            activeListenIdentity == identity && stt.hasActiveNativeOperation
-        case .speak:
-            activePlaybackIdentity == identity && speechImplementation.hasActivePlayback
+            activeListenIdentity == identity && (stt.hasActiveNativeOperation || recorder.isRecordingOwned(handle: nil, ownerID: operation.request.ownerKey))
+        case .speak, .play:
+            activePlaybackIdentity == identity && (speechImplementation.hasActivePlayback || pcmPlayback.isPlaying)
         case .synthesize:
             activeSystemRenderIdentity == identity || modelRenderOwners.values.contains(identity)
-        case .stopRecording, .status, .endOwner:
+        case .transcribe, .stopRecording, .status, .endOwner:
             false
         }
         operation.terminalError = terminalError
@@ -421,22 +438,25 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         pending[identity] = operation
         lastOperationDiagnostics = operation.diagnostics
         operation.task.cancel()
+        if let cloud = cloudCallbacks[identity] { try? await cloud.host.cancel(operationId: cloud.id) }
 
         switch operation.request.operation {
-        case .startRecording:
+        case .startRecording, .capture:
             await recorder.cancel(startOperationID: identity.id)
         case .listen:
             if activeListenIdentity == identity {
+                await recorder.cancel(startOperationID: identity.id)
                 stt.cancelRecognition()
                 activeListenIdentity = nil
                 activeListenOwner = nil
             }
-        case .speak:
+        case .speak, .play:
             if activePlaybackIdentity == identity {
+                pcmPlayback.stop()
                 await speechImplementation.stopAndWait()
                 clearPlaybackIfCurrent(identity)
             }
-        case .stopRecording, .synthesize, .status, .endOwner:
+        case .transcribe, .stopRecording, .synthesize, .status, .endOwner:
             break
         }
 
@@ -503,6 +523,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         await recorder.end(ownerID: owner.stableKey)
         recordings = recordings.filter { $0.value.owner != owner }
         if activePlaybackOwner == owner {
+            pcmPlayback.stop()
             await speechImplementation.stopAndWait()
             activePlaybackIdentity = nil
             activePlaybackOwner = nil
@@ -538,6 +559,35 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         automaticEndpointAfterSilence: Duration?,
         configurationSnapshot: AudioConfigurationSnapshot
     ) async throws -> String {
+        if configurationSnapshot.configuration.recognition.source == .provider {
+            let cloud = try await providerService.pin(kind: .recognition, snapshot: configurationSnapshot)
+            let owner = IOSAudioOwner.ui(instanceID: "voice-capture")
+            guard activeListenIdentity == nil else { throw AudioServiceFailure.busy }
+            let identity = Self.newIdentity(epoch: serviceEpoch, generation: 1)
+            activeCloudOperations[owner] = cloud
+            activeListenIdentity = identity
+            activeListenOwner = owner
+            defer {
+                activeCloudOperations.removeValue(forKey: owner)
+                if activeListenIdentity == identity {
+                    activeListenIdentity = nil
+                    activeListenOwner = nil
+                }
+                publishCapabilitySnapshot()
+            }
+            let result = await execute(IOSAudioOperationRequest(
+                identity: identity, owner: owner, initiator: nil, timeoutBudgetMs: 60_000,
+                maxPayloadBytes: maximumPayloadBytes ?? maxAudioPayloadBytes(),
+                operation: .capture(sampleRateHz: 24_000, format: "m4a")
+            ), configurationSnapshot: configurationSnapshot, automaticEndpointAfterSilence: automaticEndpointAfterSilence)
+            switch result {
+            case let .recording(data, mimeType):
+                try Task.checkCancellation()
+                return try await providerService.transcribe(cloud, recording: IOSAudioRecording(audioBytes: data, mimeType: mimeType)).text
+            case let .failed(error): throw Self.error(from: error)
+            default: throw AudioServiceFailure.nativeFailure("The audio service did not return a microphone recording.")
+            }
+        }
         let identity = Self.newIdentity(epoch: serviceEpoch, generation: 1)
         let request = IOSAudioOperationRequest(
             identity: identity,
@@ -592,10 +642,16 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
     }
 
     func finishUITranscription() {
+        for operation in pending.values where operation.request.owner == .ui(instanceID: "voice-capture") {
+            if case .capture = operation.request.operation { finishedCaptures.insert(operation.request.identity) }
+        }
         stt.finishRecording()
     }
 
     func cancelUITranscription() {
+        if let cloud = activeCloudOperations[.ui(instanceID: "voice-capture")] {
+            Task { @MainActor in try? await cloud.host.cancel(operationId: cloud.id) }
+        }
         guard let activeListenIdentity,
               pending[activeListenIdentity]?.request.owner == .ui(instanceID: "voice-capture")
         else { return }
@@ -607,6 +663,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
 
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome {
         let snapshot = configurationStore.snapshot
+        if snapshot.configuration.speech.source == .provider || request.route?.effective?.source == .provider {
+            return try await speakCloud(request, snapshot: Self.cloudSnapshot(snapshot, route: request.route, language: request.languageIdentifier, rate: request.speed))
+        }
         let route = request.route ?? AudioConfigurationRuntime.route(
             kind: .speech,
             snapshot: snapshot,
@@ -648,6 +707,10 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
 
     func stop() {
         let identity = activePlaybackIdentity
+        for (owner, cloud) in activeCloudOperations where owner != .ui(instanceID: "voice-capture") {
+            Task { @MainActor in try? await cloud.host.cancel(operationId: cloud.id) }
+        }
+        pcmPlayback.stop()
         speechImplementation.stop()
         if let identity { clearPlaybackIfCurrent(identity) }
         if let identity { finishStandaloneDiagnostic(identity, phase: "cancelled") }
@@ -658,6 +721,25 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         configuration: VoiceSpeechConfiguration,
         managesAudioSession: Bool
     ) async throws -> any VoiceSpeechStreamingSession {
+        if configuration.route?.effective?.source == .provider || configurationStore.configuration.speech.source == .provider {
+            let snapshot = Self.cloudSnapshot(configurationStore.snapshot, route: configuration.route, language: configuration.languageIdentifier, rate: configuration.speed)
+            let cloud = try await providerService.pin(kind: .speech, snapshot: snapshot, voice: snapshot.configuration.speech.voice?.id)
+            let identity = Self.newIdentity(epoch: serviceEpoch, generation: 1)
+            let owner = IOSAudioOwner.ui(instanceID: "flow-speech")
+            guard activePlaybackOwner == nil, !speechImplementation.hasActivePlayback else { throw AudioServiceFailure.busy }
+            activePlaybackIdentity = identity
+            activePlaybackOwner = owner
+            activeCloudOperations[owner] = cloud
+            return IOSCloudSpeechStream(
+                cloud: cloud,
+                maximumBytes: configuration.maxPayloadBytes ?? maximumPayloadBytes ?? maxAudioPayloadBytes(),
+                playback: pcmPlayback
+            ) { [weak self] in
+                self?.activeCloudOperations.removeValue(forKey: owner)
+                self?.clearPlaybackIfCurrent(identity)
+                self?.publishCapabilitySnapshot()
+            }
+        }
         let route = configuration.route ?? AudioConfigurationRuntime.route(
             kind: .speech,
             snapshot: configurationStore.snapshot,
@@ -699,6 +781,43 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             publishCapabilitySnapshot()
             throw error
         }
+    }
+
+    private static func cloudSnapshot(_ snapshot: AudioConfigurationSnapshot, route: AudioRouteResolution?, language: String?, rate: Double) -> AudioConfigurationSnapshot {
+        var configuration = snapshot.configuration
+        if let effective = route?.effective, effective.source == .provider, let profileID = effective.profileId {
+            configuration.speech.source = .provider
+            configuration.speech.cloud = AudioCloudBinding(binding: "explicit_profile", profileId: profileID, modelId: effective.modelId)
+            configuration.speech.voice = nil
+            if let voice = effective.voiceId {
+                configuration.speech.voice = AudioVoiceSelection(source: .provider, id: voice, modelId: effective.modelId, profileId: profileID)
+            }
+        }
+        if let language { configuration.language = language }
+        configuration.rate = rate
+        return AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision)
+    }
+
+    private func speakCloud(_ request: VoiceSpeechRequest, snapshot: AudioConfigurationSnapshot) async throws -> VoiceSpeechPlaybackOutcome {
+        let owner = IOSAudioOwner.ui(instanceID: "voice-speech")
+        guard activePlaybackOwner == nil, !speechImplementation.hasActivePlayback else { throw AudioServiceFailure.busy }
+        let cloud = try await providerService.pin(
+            kind: .speech, snapshot: snapshot,
+            voice: snapshot.configuration.speech.voice?.source == .provider ? snapshot.configuration.speech.voice?.id : nil
+        )
+        let identity = Self.newIdentity(epoch: serviceEpoch, generation: 1)
+        activePlaybackIdentity = identity
+        activePlaybackOwner = owner
+        activeCloudOperations[owner] = cloud
+        defer {
+            activeCloudOperations.removeValue(forKey: owner)
+            clearPlaybackIfCurrent(identity)
+            publishCapabilitySnapshot()
+        }
+        let output = try await providerService.synthesize(cloud, text: request.text, maximumBytes: request.maxPayloadBytes ?? maximumPayloadBytes ?? maxAudioPayloadBytes())
+        try Task.checkCancellation()
+        _ = try await pcmPlayback.play(pcm: output.pcm, sampleRateHz: output.sampleRateHz, maximumBytes: request.maxPayloadBytes ?? maximumPayloadBytes ?? maxAudioPayloadBytes())
+        return .completed
     }
 
     // MARK: VoiceBargeInRecognizing facade
@@ -770,6 +889,22 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                 recordings[handle] = RecordingOwner(owner: request.owner, startIdentity: request.identity)
                 return .recordingStarted(handle: handle)
 
+            case let .capture(sampleRateHz, format):
+                let recording = try await captureOwned(request, sampleRateHz: sampleRateHz, format: format, automaticEndpointAfterSilence: automaticEndpointAfterSilence)
+                return .recording(data: recording.audioBytes, mimeType: recording.mimeType)
+
+            case let .play(pcm, sampleRateHz):
+                guard activePlaybackOwner == nil, !speechImplementation.hasActivePlayback else {
+                    throw AudioServiceFailure.busy
+                }
+                activePlaybackIdentity = request.identity
+                activePlaybackOwner = request.owner
+                let duration = try await pcmPlayback.play(
+                    pcm: pcm, sampleRateHz: sampleRateHz, maximumBytes: request.maxPayloadBytes
+                )
+                clearPlaybackIfCurrent(request.identity)
+                return .playbackCompleted(durationMs: duration)
+
             case let .stopRecording(handle):
                 guard recordings[handle]?.owner == request.owner else { throw AudioServiceFailure.notRecording }
                 do {
@@ -787,9 +922,41 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                     throw error
                 }
 
+            case let .transcribe(audio, mimeType, language):
+                guard !audio.isEmpty, UInt64(audio.count) <= request.maxPayloadBytes else { throw AudioServiceFailure.invalidRequest }
+                var snapshot = pinnedSnapshot ?? configurationStore.snapshot
+                guard snapshot.configuration.recognition.source == .provider else { throw AudioServiceFailure.unsupported }
+                if let language { var configuration = snapshot.configuration; configuration.language = language; snapshot = AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision) }
+                let cloud = try await providerService.pin(kind: .recognition, snapshot: snapshot, owner: request.owner, operationID: request.identity.id, maximumBytes: request.maxPayloadBytes, timeoutBudgetMs: request.timeoutBudgetMs)
+                cloudCallbacks[request.identity] = cloud
+                recordCloudRoute(cloud, snapshot: snapshot, kind: .recognition, identity: request.identity)
+                defer { cloudCallbacks.removeValue(forKey: request.identity) }
+                let transcript = try await providerService.transcribe(cloud, recording: IOSAudioRecording(audioBytes: audio, mimeType: mimeType))
+                return .transcript(text: transcript.text, language: transcript.language ?? language, confidence: transcript.confidence)
+
             case let .listen(language):
                 guard activeListenIdentity == nil else { throw AudioServiceFailure.busy }
                 let snapshot = pinnedSnapshot ?? configurationStore.snapshot
+                if snapshot.configuration.recognition.source == .provider {
+                    activeListenIdentity = request.identity
+                    activeListenOwner = request.owner
+                    defer {
+                        cloudCallbacks.removeValue(forKey: request.identity)
+                        if activeListenIdentity == request.identity { activeListenIdentity = nil; activeListenOwner = nil }
+                    }
+                    var configuration = snapshot.configuration
+                    if let language { configuration.language = language }
+                    let cloudSnapshot = AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision)
+                    let cloud = try await providerService.pin(kind: .recognition, snapshot: cloudSnapshot, owner: request.owner, operationID: request.identity.id, maximumBytes: request.maxPayloadBytes, timeoutBudgetMs: request.timeoutBudgetMs)
+                    cloudCallbacks[request.identity] = cloud
+                    recordCloudRoute(cloud, snapshot: cloudSnapshot, kind: .recognition, identity: request.identity)
+                    let captureRequest = IOSAudioOperationRequest(identity: request.identity, owner: request.owner, initiator: request.initiator,
+                        timeoutBudgetMs: request.timeoutBudgetMs.map { max(1, $0 / 2) }, maxPayloadBytes: request.maxPayloadBytes,
+                        operation: .capture(sampleRateHz: 24_000, format: "m4a"))
+                    let recording = try await captureOwned(captureRequest, sampleRateHz: 24_000, format: "m4a", automaticEndpointAfterSilence: automaticEndpointAfterSilence ?? .milliseconds(1_200))
+                    let transcript = try await providerService.transcribe(cloud, recording: recording)
+                    return .transcript(text: transcript.text, language: transcript.language ?? language, confidence: transcript.confidence)
+                }
                 let route = if let pinnedRoute {
                     pinnedRoute
                 } else {
@@ -835,6 +1002,17 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                         throw AudioServiceFailure.invalidRequest
                     }
                     configuration.rate = Double(rate)
+                }
+                if voice == "default" || voice == "auto" { configuration.speech.voice = nil }
+                if configuration.speech.source == .provider {
+                    let cloudSnapshot = AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision)
+                    let selectedVoice = voice.flatMap { $0 == "auto" || $0 == "default" ? nil : $0 } ?? configuration.speech.voice?.id
+                    let cloud = try await providerService.pin(kind: .speech, snapshot: cloudSnapshot, voice: selectedVoice, owner: request.owner, operationID: request.identity.id, maximumBytes: request.maxPayloadBytes, timeoutBudgetMs: request.timeoutBudgetMs)
+                    cloudCallbacks[request.identity] = cloud
+                    recordCloudRoute(cloud, snapshot: cloudSnapshot, kind: .speech, identity: request.identity)
+                    defer { cloudCallbacks.removeValue(forKey: request.identity) }
+                    let output = try await providerService.synthesize(cloud, text: text, maximumBytes: request.maxPayloadBytes)
+                    return .synthesized(pcm: output.pcm, sampleRateHz: output.sampleRateHz)
                 }
                 let route = await MainActor.run {
                     AudioConfigurationRuntime.route(
@@ -898,6 +1076,21 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                     }
                     configuration.rate = Double(rate)
                 }
+                if voice == "default" || voice == "auto" { configuration.speech.voice = nil }
+                if configuration.speech.source == .provider {
+                    activePlaybackIdentity = request.identity
+                    activePlaybackOwner = request.owner
+                    defer { cloudCallbacks.removeValue(forKey: request.identity); clearPlaybackIfCurrent(request.identity) }
+                    let cloudSnapshot = AudioConfigurationSnapshot(configuration: configuration, revision: snapshot.revision)
+                    let selectedVoice = voice.flatMap { $0 == "auto" || $0 == "default" ? nil : $0 } ?? configuration.speech.voice?.id
+                    let cloud = try await providerService.pin(kind: .speech, snapshot: cloudSnapshot, voice: selectedVoice, owner: request.owner, operationID: request.identity.id, maximumBytes: request.maxPayloadBytes, timeoutBudgetMs: request.timeoutBudgetMs)
+                    cloudCallbacks[request.identity] = cloud
+                    recordCloudRoute(cloud, snapshot: cloudSnapshot, kind: .speech, identity: request.identity)
+                    let output = try await providerService.synthesize(cloud, text: text, maximumBytes: request.maxPayloadBytes)
+                    try Task.checkCancellation()
+                    let duration = try await pcmPlayback.play(pcm: output.pcm, sampleRateHz: output.sampleRateHz, maximumBytes: request.maxPayloadBytes)
+                    return .playbackCompleted(durationMs: duration)
+                }
                 let route = await MainActor.run {
                     AudioConfigurationRuntime.route(
                         kind: .speech,
@@ -913,9 +1106,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
                 let voiceIdentifier: String
                 switch effective?.source {
                 case .system:
-                    voiceIdentifier = effective?.voiceId.map { "system:\($0)" } ?? "system:default"
+                    voiceIdentifier = effective?.voiceId ?? ""
                 case .offline:
-                    voiceIdentifier = "sherpa:\(effective?.modelId ?? "unknown"):\(effective?.voiceId ?? "unknown")"
+                    voiceIdentifier = effective?.voiceId ?? ""
                 default:
                     throw AudioServiceFailure.unavailable
                 }
@@ -956,6 +1149,48 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         }
     }
 
+    private func captureOwned(_ request: IOSAudioOperationRequest, sampleRateHz: UInt32, format: String, automaticEndpointAfterSilence: Duration?) async throws -> IOSAudioRecording {
+                let handle = try await recorder.startRecordingOwned(
+                    operationID: request.identity.id,
+                    ownerID: request.ownerKey,
+                    sampleRateHz: sampleRateHz,
+                    format: format,
+                    maximumBytes: request.maxPayloadBytes
+                )
+                recordings[handle] = RecordingOwner(owner: request.owner, startIdentity: request.identity)
+                defer {
+                    recordings.removeValue(forKey: handle)
+                    finishedCaptures.remove(request.identity)
+                }
+                let durationMs = Self.captureDurationMs(
+                    timeoutBudgetMs: request.timeoutBudgetMs,
+                    maximumBytes: request.maxPayloadBytes
+                )
+                let deadline = ContinuousClock.now.advanced(by: .milliseconds(durationMs))
+                var lastSpeech: ContinuousClock.Instant?
+                do {
+                    while recorder.isRecordingOwned(handle: handle, ownerID: request.ownerKey),
+                          !finishedCaptures.contains(request.identity), ContinuousClock.now < deadline {
+                        if let silence = automaticEndpointAfterSilence {
+                            if let level = recorder.recordingLevel(handle: handle, ownerID: request.ownerKey), level > -35 {
+                                lastSpeech = .now
+                            }
+                            if let lastSpeech, lastSpeech.duration(to: .now) >= silence { break }
+                        }
+                        try await Task.sleep(for: .milliseconds(40))
+                    }
+                    try Task.checkCancellation()
+                    let recording = try await recorder.stopRecordingOwned(
+                        handle: handle, ownerID: request.ownerKey, maximumBytes: request.maxPayloadBytes
+                    )
+                    return recording
+                } catch {
+                    await recorder.cancel(startOperationID: request.identity.id)
+                    throw error
+                }
+
+    }
+
     private func expire(_ identity: IOSAudioOperationIdentity) async {
         guard let operation = pending[identity], !operation.isTerminal, operation.terminalError == nil else { return }
         await cancel(
@@ -980,9 +1215,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         guard await coordinator.owns(event.lease) else { return }
         let affected = pending.values.compactMap { operation -> IOSAudioOperationIdentity? in
             switch (event.lease.purpose, operation.request.operation) {
-            case (.recording, .startRecording), (.recording, .stopRecording),
+            case (.recording, .startRecording), (.recording, .stopRecording), (.recording, .capture),
                  (.recognition, .listen), (.flowDuplex, .listen),
-                 (.playback, .speak):
+                 (.playback, .speak), (.playback, .play):
                 return operation.request.identity
             case (.playback, .synthesize):
                 return activeSystemRenderIdentity == operation.request.identity
@@ -1003,6 +1238,7 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             case .recognition:
                 stt.cancelRecognition()
             case .playback:
+                pcmPlayback.stop()
                 await speechImplementation.stopAndWait()
             case .flowDuplex:
                 stt.cancelRecognition()
@@ -1035,6 +1271,15 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         guard activePlaybackIdentity == identity else { return }
         activePlaybackIdentity = nil
         activePlaybackOwner = nil
+    }
+
+    private func recordCloudRoute(_ cloud: IOSAudioProviderService.PinnedOperation, snapshot: AudioConfigurationSnapshot, kind: AudioProviderKind, identity: IOSAudioOperationIdentity) {
+        let voice = kind == .speech ? snapshot.configuration.speech.voice : nil
+        recordRouteResolution(AudioRouteResolution(
+            requested: .init(source: .provider, offlineModelId: nil, voice: voice),
+            effective: .init(source: .provider, modelId: cloud.modelID, voiceId: voice?.id, profileId: cloud.profileID),
+            status: .ready, reason: "ready", fallbackReason: nil
+        ), for: identity, phase: "running")
     }
 
     private func recordRouteResolution(
@@ -1201,6 +1446,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         switch operation {
         case .startRecording: "record.start"
         case .stopRecording: "record.stop"
+        case .capture: "capture"
+        case .transcribe: "transcribe"
+        case .play: "play"
         case .listen: "listen"
         case .synthesize: "synthesize"
         case .speak: "speak"
@@ -1214,9 +1462,9 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
         snapshot: AudioConfigurationSnapshot
     ) -> AudioSource? {
         switch operation {
-        case .listen: snapshot.configuration.recognition.source
+        case .listen, .transcribe: snapshot.configuration.recognition.source
         case .synthesize, .speak: snapshot.configuration.speech.source
-        case .startRecording, .stopRecording, .status, .endOwner: nil
+        case .startRecording, .stopRecording, .capture, .play, .status, .endOwner: nil
         }
     }
 
@@ -1237,6 +1485,15 @@ final class IOSAudioService: VoiceSpeechPlaying, VoiceBargeInRecognizing {
             && identity.generation <= 9_007_199_254_740_991
             && identity.serviceEpoch <= 9_007_199_254_740_991
     }
+
+    static func captureDurationMs(timeoutBudgetMs: UInt64?, maximumBytes: UInt64) -> Int64 {
+        // AAC at 32 kbit/s. Leave headroom for the container and completion.
+        let payloadMs = min(UInt64(60_000), maximumBytes / 4 * 9 / 10)
+        let timeoutMs = timeoutBudgetMs.map { $0 > 200 ? $0 - 200 : $0 / 2 } ?? 60_000
+        return Int64(max(1, min(payloadMs, timeoutMs)))
+    }
+
+    var playbackPositionMs: UInt64 { pcmPlayback.positionMs }
 
     private static func freshServiceEpoch() -> UInt64 {
         UInt64.random(in: 1 ... 9_007_199_254_740_991)

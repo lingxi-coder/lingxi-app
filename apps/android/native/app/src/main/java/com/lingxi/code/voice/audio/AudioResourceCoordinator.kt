@@ -12,14 +12,13 @@ import kotlinx.coroutines.withContext
 internal data class AudioOwnerKey(
     val kind: Kind,
     val id: String,
-    val generation: Long? = null,
+    val runtimeGeneration: ULong? = null,
 ) {
-    enum class Kind { Session, LocalApp, Ui, System }
+    enum class Kind { Session, Ui, System, LocalApp }
 
     companion object {
+        fun localApp(appId: String, generation: ULong) = AudioOwnerKey(Kind.LocalApp, appId, generation)
         fun session(sessionId: String) = AudioOwnerKey(Kind.Session, sessionId)
-        fun localApp(appId: String, runtimeGeneration: Long) =
-            AudioOwnerKey(Kind.LocalApp, appId, runtimeGeneration)
         fun ui(instanceId: String) = AudioOwnerKey(Kind.Ui, instanceId)
         fun system(instanceId: String) = AudioOwnerKey(Kind.System, instanceId)
     }
@@ -31,7 +30,7 @@ internal data class AudioOperationIdentity(
     val serviceEpoch: Long,
 )
 
-internal enum class AudioResource { Capture, Playback, SystemRender, OfflineRender }
+internal enum class AudioResource { Capture, Playback, SystemRender, OfflineRender, ProviderRender }
 
 internal data class AudioLease(
     val leaseId: Long,
@@ -87,9 +86,10 @@ internal class AudioResourceCoordinator(initialEpoch: Long) {
         var preempt: List<AudioLease> = emptyList()
 
         when (resource) {
+            AudioResource.ProviderRender -> Unit
             AudioResource.OfflineRender -> {
                 if (leases.any {
-                        it.modelId == modelId && it.resource in setOf(AudioResource.OfflineRender, AudioResource.Playback)
+                        it.modelId == modelId && it.resource in setOf(AudioResource.OfflineRender, AudioResource.Playback, AudioResource.Capture)
                     }
                 ) {
                     return AudioLeaseDecision.Busy
@@ -99,6 +99,9 @@ internal class AudioResourceCoordinator(initialEpoch: Long) {
                 if (systemRendering || deviceIo.isNotEmpty()) return AudioLeaseDecision.Busy
             }
             AudioResource.Capture -> {
+                if (modelId != null && leases.any { it.resource == AudioResource.OfflineRender && it.modelId == modelId }) {
+                    return AudioLeaseDecision.Busy
+                }
                 if (systemRendering || deviceIo.any { it.resource == AudioResource.Capture }) {
                     return AudioLeaseDecision.Busy
                 }

@@ -1,19 +1,39 @@
 package com.lingxi.code.settings
 
 import com.lingxi.code.voice.audio.AudioConfigurationNormalizer
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import com.lingxi.code.voice.audio.AudioSource
 import com.lingxi.code.voice.audio.AudioSpeechPreference
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AudioConfigurationRepositoryTest {
+    @Test
+    fun emptyStoreUsesCurrentDefaultsWithoutWritingOrAdvancingRevision() {
+        val storage = MemoryStorage()
+        val repository = AudioConfigurationRepository(storage)
+        assertEquals(VersionedAudioConfiguration(AudioConfigurationNormalizer.defaults, 0L), repository.load().snapshot)
+        assertEquals(0, storage.writeCount)
+        val saved = repository.save(AudioConfigurationNormalizer.defaults.copy(language = "en-US"), 0L)
+        assertTrue(saved is AudioConfigurationSaveResult.Saved)
+        assertEquals(1L, (saved as AudioConfigurationSaveResult.Saved).snapshot.revision)
+        assertEquals(4, (storage.configuration as Map<*, *>)["schemaVersion"])
+    }
+
+    @Test
+    fun nonCurrentConfigurationIsIgnoredWithoutReadingItsFieldsOrRewritingIt() {
+        val raw = mapOf("schemaVersion" to 3, "language" to "fr-FR", "rate" to 1.5,
+            "recognition" to mapOf("source" to "offline", "offlineModelId" to "previous-model"))
+        val storage = MemoryStorage(configuration = raw, revision = 7L)
+        val repository = AudioConfigurationRepository(storage)
+        assertEquals(VersionedAudioConfiguration(AudioConfigurationNormalizer.defaults, 7L), repository.load().snapshot)
+        assertEquals(raw, storage.configuration)
+        assertEquals(0, storage.writeCount)
+    }
+
     private class MemoryStorage(
         var configuration: Any? = null,
-        val legacy: Map<String, Any?> = emptyMap(),
         var revision: Long = 0,
         var writesSucceed: Boolean = true,
         var mutateBeforeFailedWrite: Boolean = false,
@@ -21,7 +41,6 @@ class AudioConfigurationRepositoryTest {
         var writeCount = 0
 
         override fun readConfiguration(): Any? = configuration
-        override fun readLegacyConfiguration(): Map<String, Any?> = legacy
         override fun readRevision(): Long = revision
 
         override fun writeConfiguration(value: Map<String, Any?>, revision: Long): Boolean {
@@ -37,81 +56,6 @@ class AudioConfigurationRepositoryTest {
             this.revision = revision
             return true
         }
-    }
-
-    @Test
-    fun migrationIsPersistedOnceAndKeepsExplicitOfflineSelection() {
-        val storage = MemoryStorage(
-            legacy = mapOf(
-                "schemaVersion" to 2,
-                "recognitionMode" to "localOnly",
-                "language" to " zh-CN ",
-                "voiceSelection" to "sherpa:sherpa.melo-zh-en:melo-zh-en",
-                "autoPlayReplies" to true,
-            ),
-        )
-        val repository = AudioConfigurationRepository(storage)
-
-        val first = repository.load()
-        val second = repository.load()
-
-        assertTrue(first.migrated)
-        assertEquals(1L, first.snapshot.revision)
-        assertEquals(AudioSource.OFFLINE, first.snapshot.configuration.recognition.source)
-        assertEquals("zh-CN", first.snapshot.configuration.language)
-        assertEquals(AudioSource.OFFLINE, first.snapshot.configuration.speech.source)
-        assertEquals("sherpa.melo-zh-en", first.snapshot.configuration.speech.offlineModelId)
-        assertTrue(first.snapshot.configuration.autoPlayReplies)
-        assertFalse(second.migrated)
-        assertEquals(first.snapshot, second.snapshot)
-        assertEquals(1, storage.writeCount)
-    }
-
-    @Test
-    fun failedMigrationRemainsRetryableAndDoesNotAdvanceRevision() {
-        val storage = MemoryStorage(
-            legacy = mapOf("schemaVersion" to 2, "recognitionMode" to "localOnly"),
-            writesSucceed = false,
-        )
-        val repository = AudioConfigurationRepository(storage)
-
-        val failed = repository.load()
-
-        assertFalse(failed.migrated)
-        assertEquals(0L, failed.snapshot.revision)
-        assertEquals("Audio settings migration could not be saved.", failed.persistenceError)
-        assertNull(storage.configuration)
-
-        storage.writesSucceed = true
-        val retry = repository.load()
-
-        assertTrue(retry.migrated)
-        assertEquals(1L, retry.snapshot.revision)
-        assertEquals(2, storage.writeCount)
-    }
-
-    @Test
-    fun failedMigrationCommitThatMutatesPreferencesMemoryRetriesFromCommittedRevision() {
-        val storage = MemoryStorage(
-            legacy = mapOf("schemaVersion" to 2, "recognitionMode" to "localOnly"),
-            writesSucceed = false,
-            mutateBeforeFailedWrite = true,
-        )
-        val repository = AudioConfigurationRepository(storage)
-
-        val failed = repository.load()
-        assertFalse(failed.migrated)
-        assertEquals(0L, failed.snapshot.revision)
-        assertEquals(1L, storage.revision)
-        assertTrue(storage.configuration != null)
-
-        storage.writesSucceed = true
-        val retry = repository.load()
-
-        assertTrue("the migration must be durably retried, not inferred from mutated memory", retry.migrated)
-        assertEquals(1L, retry.snapshot.revision)
-        assertEquals(AudioSource.OFFLINE, retry.snapshot.configuration.recognition.source)
-        assertEquals(2, storage.writeCount)
     }
 
     @Test
@@ -244,7 +188,7 @@ class AudioConfigurationRepositoryTest {
         val repository = AudioConfigurationRepository(storage)
 
         val result = repository.save(
-            AudioConfigurationV3(
+            AudioConfigurationV4(
                 speech = AudioSpeechPreference(source = AudioSource.OFFLINE, offlineModelId = "missing-model"),
                 language = " fr-FR ",
                 rate = 4.0,
@@ -260,19 +204,5 @@ class AudioConfigurationRepositoryTest {
         assertEquals("missing-model", saved.configuration.speech.offlineModelId)
     }
 
-    private fun AudioConfigurationV3.toMapForTest(): Map<String, Any?> = mapOf(
-        "schemaVersion" to schemaVersion,
-        "recognition" to mapOf(
-            "source" to recognition.source.value,
-            "offlineModelId" to recognition.offlineModelId,
-        ),
-        "speech" to mapOf(
-            "source" to speech.source.value,
-            "offlineModelId" to speech.offlineModelId,
-            "voice" to speech.voice?.let { mapOf("source" to it.source.value, "id" to it.id, "modelId" to it.modelId) },
-        ),
-        "language" to language,
-        "rate" to rate,
-        "autoPlayReplies" to autoPlayReplies,
-    )
+    private fun AudioConfigurationV4.toMapForTest(): Map<String, Any?> = toStorageMap()
 }

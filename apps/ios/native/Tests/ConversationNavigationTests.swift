@@ -56,22 +56,4 @@ final class ConversationNavigationTests: XCTestCase {
         XCTAssertEqual(navigation.path.last, .sessionDetails(sessionID: "session-details-1"))
         XCTAssertEqual(navigation.path.last?.id, "session-details:session-details-1")
     }
-
-    func testLocalAppsNavigationUsesTheAppsSidebarAndFocusesTheDetail() {
-        let navigation = AppNavigationModel()
-
-        navigation.showLocalApps()
-
-        XCTAssertEqual(navigation.drawerSection, .apps)
-        XCTAssertTrue(navigation.localAppsShowsLibrary)
-        XCTAssertEqual(navigation.columnVisibility, .all)
-        XCTAssertEqual(navigation.compactColumn, .sidebar)
-
-        navigation.showActiveAppSessions()
-        navigation.focusDetail()
-
-        XCTAssertFalse(navigation.localAppsShowsLibrary)
-        XCTAssertEqual(navigation.columnVisibility, .detailOnly)
-        XCTAssertEqual(navigation.compactColumn, .detail)
-    }
 }

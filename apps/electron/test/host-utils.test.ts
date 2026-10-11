@@ -27,6 +27,7 @@ import {
   workspaceTrust,
   type VoicePreferences,
 } from '../src/main/host-utils';
+import { defaultVoicePreferences } from '../src/shared/voicePreferences';
 import { SettingsStore } from '../src/main/settings';
 
 const temporaryDirectories: string[] = [];
@@ -503,31 +504,10 @@ test('parseSettings leaves voice absent when never persisted, matching every oth
   assert.equal(parsed.voice, undefined);
 });
 
-test('parseSettings normalizes a persisted voice value, repairing garbage rather than dropping it', () => {
-  const parsed = parseSettings({
-    version: 1,
-    projects: [],
-    pinnedSessions: [],
-    trustedWorkspaces: {},
-    // Legacy recognition spellings migrate to explicit offline selection;
-    // the legacy voice name remains explicit system preference.
-    voice: { recognitionMode: 'onDevice', rate: 99, voiceSelection: 'Alex' },
-  });
-  const expected: VoicePreferences = {
-    schemaVersion: 3,
-    recognition: { source: 'offline', offlineModelId: null },
-    speech: { source: 'system', offlineModelId: null, voice: { source: 'system', id: 'Alex' } },
-    language: 'auto',
-    rate: 2,
-    autoPlayReplies: false,
-  };
-  assert.deepEqual(parsed.voice, expected);
-});
-
 test('publicSettings passes voice through as an independent copy', () => {
   const parsed = parseSettings({
     version: 1, projects: [], pinnedSessions: [], trustedWorkspaces: {},
-    voice: { recognition: { source: 'offline' } },
+    voice: { schemaVersion: 4, recognition: { source: 'offline' } },
   });
   const pub1 = publicSettings(parsed);
   assert.deepEqual(pub1.voice, parsed.voice);
@@ -540,11 +520,12 @@ test('SettingsStore.update writes and reloads voice preferences, normalized', ()
   const store = new SettingsStore(userData);
   assert.equal(store.getPublic().voice, undefined, 'a fresh store has no voice preferences yet');
 
-  const result = store.update({ voice: { recognition: { source: 'offline' }, language: 'ZH-cn', rate: 0.1 }, voiceRevision: 0 });
+  const result = store.update({ voice: { schemaVersion: 4, recognition: { source: 'offline' }, language: 'ZH-cn', rate: 0.1 }, voiceRevision: 0 });
   const expected: VoicePreferences = {
-    schemaVersion: 3,
-    recognition: { source: 'offline', offlineModelId: null },
-    speech: { source: 'automatic', offlineModelId: null, voice: null },
+    schemaVersion: 4,
+    recognition: { source: 'offline', offlineModelId: null, cloud: { binding: 'follow_session', profileId: null, modelId: null } },
+    speech: { source: 'automatic', offlineModelId: null, cloud: { binding: 'follow_session', profileId: null, modelId: null }, voice: null },
+    conversation: { mode: 'agent', interaction: 'turn_based', cloud: { binding: 'follow_session', profileId: null, modelId: null }, voice: null },
     language: 'ZH-cn',
     rate: 0.5,
     autoPlayReplies: false,
@@ -555,15 +536,16 @@ test('SettingsStore.update writes and reloads voice preferences, normalized', ()
 
   // A later update() replaces the whole snapshot, matching how both mobile
   // platforms persist it (never a partial per-field merge).
-  const replaced = store.update({ voice: { rate: 1.75 }, voiceRevision: 1 });
+  const replaced = store.update({ voice: { schemaVersion: 4, rate: 1.75 }, voiceRevision: 1 });
   assert.deepEqual(replaced.voice, {
-    schemaVersion: 3,
-    recognition: { source: 'automatic', offlineModelId: null },
-    speech: { source: 'automatic', offlineModelId: null, voice: null },
+    schemaVersion: 4,
+    recognition: { source: 'automatic', offlineModelId: null, cloud: { binding: 'follow_session', profileId: null, modelId: null } },
+    speech: { source: 'automatic', offlineModelId: null, cloud: { binding: 'follow_session', profileId: null, modelId: null }, voice: null },
+    conversation: { mode: 'agent', interaction: 'turn_based', cloud: { binding: 'follow_session', profileId: null, modelId: null }, voice: null },
     language: 'auto',
     rate: 1.75,
     autoPlayReplies: false,
-  }, 'the earlier localOnly/ZH-cn values must be replaced wholesale, not merged into');
+  }, 'the earlier offline/ZH-cn values must be replaced wholesale, not merged into');
 });
 
 test('an unreadable existing settings file disables audio and is preserved on save attempts', () => {
@@ -594,4 +576,21 @@ test('only a controller session asks the engine to run the automation scheduler'
   assert.ok(!buildBridgeArguments(base).includes('--scheduled-controller'));
   assert.ok(!buildBridgeArguments({ ...base, scheduledController: false }).includes('--scheduled-controller'));
   assert.ok(buildBridgeArguments({ ...base, scheduledController: true }).includes('--scheduled-controller'));
+});
+
+test('old audio configuration and migration markers are discarded on ordinary v4 persistence', () => {
+  const userData = temporaryDirectory();
+  const settingsPath = join(userData, 'settings.v1.json');
+  writeFileSync(settingsPath, JSON.stringify({ version: 1, voice: { schemaVersion: 3, recognition: { source: 'offline', offlineModelId: 'old-stt' }, language: 'fr-FR', rate: 1.75 }, audioConfigMigrationComplete: true, audioConfigRecovery: { old: true } }));
+  const parsed = parseSettings(JSON.parse(readFileSync(settingsPath, 'utf8')));
+  assert.deepEqual(parsed.voice, defaultVoicePreferences());
+  assert.equal('audioConfigRecovery' in parsed, false);
+  assert.equal('audioConfigMigrationComplete' in parsed, false);
+  const store = new SettingsStore(userData);
+  store.update({ voice: store.getPublic().voice, voiceRevision: 0 });
+  const saved = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.deepEqual(saved.voice, defaultVoicePreferences());
+  assert.equal(saved.audioConfigurationRevision, 1);
+  assert.equal('audioConfigRecovery' in saved, false);
+  assert.equal('audioConfigMigrationComplete' in saved, false);
 });

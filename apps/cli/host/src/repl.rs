@@ -1002,7 +1002,15 @@ mod retained_shutdown_tests {
             .unwrap();
             runtime.session_state.flush().await.unwrap();
             assert_eq!(
-                finish_repl_lifecycle(&runtime, &PlainSink::new(), code).await,
+                finish_repl_lifecycle(
+                    &runtime,
+                    &PlainSink::new(
+                        harness_runtime::headless::io::Output::new(tokio::io::sink()),
+                        harness_runtime::headless::io::Output::new(tokio::io::sink())
+                    ),
+                    code
+                )
+                .await,
                 code
             );
             assert!(runtime.orchestrator.current_should_exit());

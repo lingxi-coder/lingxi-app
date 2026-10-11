@@ -112,6 +112,10 @@ internal class AndroidAudioDeviceDriverImpl(
 
     private val appContext = context.applicationContext
     private val recordings = ConcurrentHashMap<Long, RecordingState>()
+    private val wavCaptures = ConcurrentHashMap<Long, AndroidWavCapture>()
+    private val streamCaptures = ConcurrentHashMap<Long, AndroidRealtimePcmCapture>()
+    private val streamCapturePause = ConcurrentHashMap<Long, Boolean>()
+    private val streamPlayback = ConcurrentHashMap<Long, AndroidRealtimePcmPlayback>()
     private val playback = ConcurrentHashMap<Long, PlaybackState>()
     private val mediaPlayback = ConcurrentHashMap<Long, MediaPlaybackState>()
     private val recorderLock = Mutex()
@@ -128,6 +132,43 @@ internal class AndroidAudioDeviceDriverImpl(
                 Handler(Looper.getMainLooper()),
             )
         }
+    }
+
+    override suspend fun streamCapture(lease: AudioLease, format: RealtimePcmFormat, onChunk: suspend (ByteArray) -> Unit) {
+        val capture = AndroidRealtimePcmCapture()
+        streamCaptures[lease.leaseId] = capture
+        capture.paused.set(streamCapturePause[lease.leaseId] ?: false)
+        try { capture.run(format, onChunk) } finally { streamCaptures.remove(lease.leaseId, capture); streamCapturePause.remove(lease.leaseId) }
+    }
+
+    override fun pauseStreamCapture(lease: AudioLease, paused: Boolean) {
+        streamCapturePause[lease.leaseId] = paused
+        streamCaptures[lease.leaseId]?.paused?.set(paused)
+    }
+    override fun streamingPlaybackPositionMs(lease: AudioLease): Long? = streamPlayback[lease.leaseId]?.positionMs()
+
+    override suspend fun streamPlayback(lease: AudioLease, format: RealtimePcmFormat, chunks: kotlinx.coroutines.channels.ReceiveChannel<ByteArray>) {
+        val playback = AndroidRealtimePcmPlayback(appContext)
+        streamPlayback[lease.leaseId] = playback
+        try { playback.run(format, chunks) } finally { streamPlayback.remove(lease.leaseId, playback) }
+    }
+
+    override suspend fun captureWav(
+        lease: AudioLease, maxPayloadBytes: Int, untilSilence: Boolean, onReady: () -> Unit,
+    ): DeviceAudioCapture {
+        val capture = AndroidWavCapture(appContext)
+        if (wavCaptures.putIfAbsent(lease.leaseId, capture) != null) {
+            throw AudioOperationException(DeviceAudioErrorKind.Busy, "Microphone capture is already active.")
+        }
+        return try {
+            capture.capture(maxPayloadBytes, untilSilence, onReady)
+        } finally {
+            wavCaptures.remove(lease.leaseId, capture)
+        }
+    }
+
+    override fun finishWavCapture(lease: AudioLease) {
+        wavCaptures[lease.leaseId]?.stop()
     }
 
     override suspend fun startRecording(
@@ -395,6 +436,10 @@ internal class AndroidAudioDeviceDriverImpl(
         }
 
     override suspend fun stop(lease: AudioLease) {
+        wavCaptures[lease.leaseId]?.stop()
+        streamCaptures[lease.leaseId]?.stop()
+        streamCapturePause.remove(lease.leaseId)
+        streamPlayback[lease.leaseId]?.stop()
         recordings[lease.leaseId]?.let { state ->
             recorderLock.withLock { stopAndDelete(state) }
         }

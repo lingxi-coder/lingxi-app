@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="chat_asked_questions">
+        <item quantity="one">已詢問 %1$d 個問題</item>
+        <item quantity="other">已詢問 %1$d 個問題</item>
+    </plurals>
+    <string name="chat_question_no_answer">未回答</string>
+    <string name="chat_question_expanded">已展開</string>
+    <string name="chat_question_collapsed">已收合</string>
+</resources>

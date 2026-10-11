@@ -1,3 +1,5 @@
+import type { AccountApi } from '../../shared/account.js';
+import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../../shared/visualization';
 import type { GitApi } from '../../shared/git.js';
@@ -30,7 +32,7 @@ import type {
 } from '../../shared/nativeAudio.js';
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
-import type { AudioConfigurationV3 } from '../../shared/generatedAudioConfiguration.js';
+import type { AudioConfigurationV4 } from '../../shared/generatedAudioConfiguration.js';
 
 export interface WorkspaceFilePreview {
   kind: 'text' | 'binary';
@@ -114,8 +116,10 @@ export interface BootstrapState {
 export interface WorkspaceFileSearchResult { files: string[]; directories?: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
 export interface NativeAudioApi {
+  realtime(command: NativeRealtimeAudioCommand): Promise<void>;
+  onRealtimeState(callback: (state: NativeRealtimeAudioState) => void): () => void;
   request(command: NativeAudioCommand): Promise<NativeAudioResponse>;
-  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV3): Promise<NativeAudioOperationResponse>;
+  execute(operation: AudioOperationDto, configurationRevision?: number, configurationOverride?: AudioConfigurationV4): Promise<NativeAudioOperationResponse>;
   cancel(): Promise<void>;
   finishListen(): Promise<void>;
   onEvent(cb: (event: NativeAudioEvent) => void): Unsubscribe;
@@ -151,6 +155,7 @@ export interface LingxiApi {
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
+  account: AccountApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;

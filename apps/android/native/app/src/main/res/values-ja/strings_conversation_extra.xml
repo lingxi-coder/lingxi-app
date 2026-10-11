@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Japanese for values/strings_conversation_extra.xml (see that file's header). -->
+<resources>
+    <string name="chat_question_card_title">アシスタントがいくつか確認したいことがあります</string>
+    <string name="chat_question_progress">第 %1$d/%2$d 問</string>
+    <string name="chat_question_answered_progress">回答済み %1$d/%2$d</string>
+    <string name="chat_question_tap_to_answer">回答を選択</string>
+    <string name="chat_question_previous">前へ</string>
+    <string name="chat_question_next">次へ</string>
+    <string name="chat_question_other_placeholder">その他</string>
+    <string name="chat_question_submit">送信</string>
+    <string name="chat_task_status_pending">バックグラウンドタスク %1$s をキューに追加しました</string>
+    <string name="chat_task_status_running">バックグラウンドタスク %1$s を実行中です</string>
+    <string name="chat_task_status_paused">バックグラウンドタスク %1$s を一時停止しました</string>
+    <string name="chat_task_status_completed">バックグラウンドタスク %1$s が完了しました</string>
+    <string name="chat_task_status_failed">バックグラウンドタスク %1$s が失敗しました</string>
+    <string name="chat_task_status_failed_reason">バックグラウンドタスク %1$s が失敗しました: %2$s</string>
+    <string name="chat_task_status_cancelled">バックグラウンドタスク %1$s をキャンセルしました</string>
+</resources>

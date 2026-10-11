@@ -112,6 +112,7 @@ import Foundation
                     ]
                     let rec = try AVAudioRecorder(url: url, settings: settings)
                     rec.delegate = self
+                    rec.isMeteringEnabled = true
                     // Rate-limit file growth before it reaches the transport
                     // ceiling; the final file-size check remains authoritative.
                     let byteLimit = Double(maximumBytes)
@@ -191,6 +192,14 @@ import Foundation
                 throw failure
             } catch {
                 throw AudioServiceFailure.nativeFailure("read recording: \(error.localizedDescription)")
+            }
+        }
+
+        func recordingLevel(handle: String, ownerID: String) -> Float? {
+            lock.withLock {
+                guard recordingHandle == handle, recordingOwnerID == ownerID, let recorder, recorder.isRecording else { return nil }
+                recorder.updateMeters()
+                return recorder.averagePower(forChannel: 0)
             }
         }
 

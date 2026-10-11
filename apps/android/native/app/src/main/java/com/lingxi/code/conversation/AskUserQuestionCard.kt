@@ -5,7 +5,6 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -107,8 +105,8 @@ fun AskUserQuestionCard(
 
     Card(
         shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(
@@ -116,25 +114,17 @@ fun AskUserQuestionCard(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    modifier = Modifier.size(38.dp),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "?",
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                }
+                Icon(
+                    painter = androidx.compose.ui.res.painterResource(R.drawable.ic_codex_question),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
                 Text(
                     text = androidx.compose.ui.res.stringResource(R.string.chat_ask_user_question_title),
                     color = MaterialTheme.colorScheme.onSurface,
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Normal,
                     modifier = Modifier.weight(1f).padding(start = 10.dp).semantics { heading() },
                 )
                 if (questions.size > 1) {
@@ -164,7 +154,6 @@ fun AskUserQuestionCard(
                 questions.forEachIndexed { index, question ->
                     val answer = answerSummary(index, selections, freeTexts)
                     AskQuestionAccordionRow(
-                        index = index,
                         question = question,
                         expanded = expandedQuestion == index,
                         answer = answer,
@@ -206,7 +195,6 @@ fun AskUserQuestionCard(
 
 @Composable
 private fun AskQuestionAccordionRow(
-    index: Int,
     question: AskQuestionDto,
     expanded: Boolean,
     answer: String?,
@@ -231,34 +219,20 @@ private fun AskQuestionAccordionRow(
                 .clickable(onClick = onExpand)
                 .padding(horizontal = 8.dp, vertical = 10.dp),
         ) {
-            Surface(
-                shape = CircleShape,
-                color = if (answer != null) colors.primaryContainer else colors.surfaceContainerHigh,
-                modifier = Modifier.size(40.dp),
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(
-                        text = (index + 1).toString(),
-                        style = MaterialTheme.typography.titleSmall,
-                        color = if (answer != null) colors.onPrimaryContainer else colors.onSurfaceVariant,
-                        fontWeight = FontWeight.Medium,
-                    )
-                }
-            }
             Column(
                 verticalArrangement = Arrangement.spacedBy(3.dp),
-                modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+                modifier = Modifier.weight(1f),
             ) {
                 Text(
                     text = question.question,
                     style = MaterialTheme.typography.bodyLarge,
                     color = colors.onSurface,
-                    fontWeight = if (expanded) FontWeight.Medium else FontWeight.Normal,
+                    fontWeight = FontWeight.Normal,
                 )
                 Text(
                     text = answer ?: androidx.compose.ui.res.stringResource(R.string.chat_question_tap_to_answer),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (answer != null) colors.primary else colors.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = colors.onSurfaceVariant.copy(alpha = 0.65f),
                 )
             }
             Icon(
@@ -271,7 +245,7 @@ private fun AskQuestionAccordionRow(
         AnimatedVisibility(visible = expanded) {
             Column(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth().padding(start = 50.dp, end = 4.dp, bottom = 10.dp),
+                modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 10.dp),
             ) {
                 question.options.forEach { option ->
                     val active = option.label in selected

@@ -82,7 +82,7 @@ impl SlashCommand {
 /// Commands claude-code 2.1.205 dropped are dropped here too (`/doctor` — now
 /// a bundled skill, `/files`, `/commit`, `/init-verifiers`); `/stats` and
 /// `/cost` live on as `/usage` aliases, `/vim` as a hidden
-/// moved-to-`/config` redirect. `/web`, `/connect`, `/image`, `/worktree`,
+/// moved-to-`/config` redirect. `/connect`, `/image`, `/worktree`,
 /// and `/fusion` are deliberate LingXi divergences (multi-provider support
 /// plus a slash façade over worktree lifecycle tools and Fusion
 /// multi-model deliberation).
@@ -130,16 +130,6 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_ide,
-    },
-    SlashCommand {
-        name: "/web",
-        aliases: &[],
-        description: "Configure web search",
-        dynamic_description: None,
-        hint: "",
-        args: ArgSpec::None,
-        advertised: true,
-        run: ChatWidget::cmd_web,
     },
     SlashCommand {
         name: "/connect",

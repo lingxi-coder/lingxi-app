@@ -56,6 +56,7 @@ protocol AudioRecordingDriving: AnyObject, Sendable {
         maximumBytes: UInt64
     ) async throws -> String
     func stopRecordingOwned(handle: String, ownerID: String, maximumBytes: UInt64) async throws -> IOSAudioRecording
+    func recordingLevel(handle: String, ownerID: String) -> Float?
     func isRecordingOwned(handle: String?, ownerID: String) -> Bool
     func cancel(startOperationID: String) async
     func end(ownerID: String) async
@@ -63,6 +64,7 @@ protocol AudioRecordingDriving: AnyObject, Sendable {
 }
 
 extension AudioRecordingDriving {
+    func recordingLevel(handle: String, ownerID: String) -> Float? { nil }
     func installActivityChangeHandler(_: (@Sendable () -> Void)?) {}
 }
 

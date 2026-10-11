@@ -1,3 +1,5 @@
+import { audioFeatureGate, audioConversationGate } from '../audio/audioFeatureGate';
+import { defaultNativeAudioSnapshot } from '../../shared/nativeAudio';
 import { composerGoalState } from './goalPresentation';
 import { GoalStatus } from './GoalStatus';
 import { createPortal } from 'react-dom';
@@ -1697,6 +1699,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const activeSessionId = bridge.activeSession?.sessionId ?? null;
   const audio = nativeAudioApi();
   const voicePrefs = bridge.bootstrap?.settings.voice ?? audioConfigurationDefaults();
+  const inputAudioGate = audioFeatureGate(voicePrefs, bridge.audioSnapshot ?? defaultNativeAudioSnapshot(), 'listen');
+  const conversationAudioGate = audioConversationGate(voicePrefs, bridge.audioSnapshot ?? defaultNativeAudioSnapshot());
   const voicePrefsRef = useRef({ configuration: voicePrefs, revision: bridge.bootstrap?.settings.voiceRevision ?? 0 });
   voicePrefsRef.current = { configuration: voicePrefs, revision: bridge.bootstrap?.settings.voiceRevision ?? 0 };
   const modelPickerVisibility = bridge.bootstrap?.settings.modelPickerVisibility;
@@ -2269,6 +2273,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   }, [audio, bridge.audioCancel]);
 
   const startStandardListening = async () => {
+    if (!inputAudioGate.ready && inputAudioGate.reason) setImageNotice(inputAudioGate.reason);
     if (!audio || typeof bridge.audioExecute !== 'function') {
       setVoiceState('unsupported');
       return;
@@ -2319,13 +2324,15 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 
   const stopFlowMode = useCallback(async () => {
     setFlowMode(false);
-    await flowControllerRef.current?.stop();
-  }, []);
+    if (voicePrefsRef.current.configuration.conversation.mode === 'realtime') await bridge.audioRealtimeCommand('stop');
+    else await flowControllerRef.current?.stop();
+  }, [bridge.audioRealtimeCommand]);
 
   const retryFlowMode = useCallback(() => {
-    if (!flowModeRef.current) setFlowMode(true);
-    void flowControllerRef.current?.retry();
-  }, []);
+    if (!flowModeRef.current) { setFlowMode(true); return; }
+    if (voicePrefsRef.current.configuration.conversation.mode === 'realtime') void bridge.audioRealtimeCommand('start').catch(() => undefined);
+    else void flowControllerRef.current?.retry();
+  }, [bridge.audioRealtimeCommand]);
 
   useEffect(() => {
     if (!audio) {
@@ -2365,6 +2372,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   }, [audio, bridge.audioCancel, bridge.audioExecute, bridge.audioFinishListen, bridge.cancelTrackedPrompt, bridge.sendTrackedPrompt, bridge.subscribeTrackedSpeech]);
 
   useEffect(() => {
+    if (voicePrefs.conversation.mode === 'realtime') {
+      void bridge.audioRealtimeCommand(flowMode ? 'start' : 'stop').catch(() => undefined);
+      return;
+    }
     const controller = flowControllerRef.current;
     if (!controller) return;
     if (flowMode) {
@@ -2372,7 +2383,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       return;
     }
     void controller.stop();
-  }, [flowMode]);
+  }, [flowMode, voicePrefs.conversation.mode, bridge.audioRealtimeCommand]);
 
   useEffect(() => {
     if (!audio) {
@@ -3008,8 +3019,15 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '12px var(--conversation-gutter) 20px', background: t.stageBg }}>
       {flowMode && (
         <VoiceFlowPanel
-          state={flowState}
-          onOrb={() => { void flowControllerRef.current?.orb(); }}
+          state={voicePrefs.conversation.mode === 'realtime' ? bridge.audioRealtimeState : flowState}
+          realtimeTurnBased={voicePrefs.conversation.mode === 'realtime'}
+          onOrb={() => {
+            if (voicePrefs.conversation.mode === 'realtime') {
+              const phase = bridge.audioRealtimeState.phase;
+              if (phase === 'listening') void bridge.audioRealtimeCommand('commit').catch(() => undefined);
+              else if (phase === 'paused' || phase === 'failed' || phase === 'configurationRequired') void bridge.audioRealtimeCommand('start').catch(() => undefined);
+            } else void flowControllerRef.current?.orb();
+          }}
           onRetry={retryFlowMode}
           onOpenSettings={() => onOpenSettingsPage('voice')}
           onClose={() => { void stopFlowMode(); }}
@@ -3461,8 +3479,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
               </>
             )}
           </div>
+          {inputAudioGate.visible && (
           <button type="button" disabled={!ready || flowMode} className="composer-icon-action" aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerPrimaryActionStyle(t, ready && !flowMode), color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={18} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.8} /></button>
-          {!canStop && !hasPrompt && <button
+          )}
+          {conversationAudioGate.visible && !canStop && !hasPrompt && <button
             type="button"
             disabled={!ready}
             className="composer-icon-action"

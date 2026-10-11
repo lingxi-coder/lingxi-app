@@ -1,3 +1,4 @@
+import { LingxiAccount } from './LingxiAccount';
 import type { AuthStateDto } from '@lingxi/bridge-client';
 
 import { Card, Row } from '../rows';
@@ -33,6 +34,7 @@ export function Account({ bridge, onNavigate }: PageContentProps) {
 
   return (
     <>
+      <LingxiAccount />
       <Card title="账户状态">
         <Row title="引擎登录" desc="登录和登出通过引擎命令执行；这里展示当前 auth_state。">
           <div style={{ display: 'grid', gap: 8, justifyItems: 'end' }}>

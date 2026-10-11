@@ -16,7 +16,7 @@ func resolveAudioLanguageForNativeDevice(
 }
 
 /// Resolves an immutable device-local configuration snapshot at operation
-/// admission. This keeps UI capture and engine callbacks on the same v3 route
+/// admission. This keeps UI capture and engine callbacks on the same v4 route
 /// semantics without having either surface mutate preferences as a side effect.
 @MainActor
 enum AudioConfigurationRuntime {
@@ -76,7 +76,9 @@ enum AudioConfigurationRuntime {
                 preference: snapshot.configuration.recognition,
                 language: language,
                 systemStatus: readiness,
-                offlineModels: offlineModels
+                offlineModels: offlineModels,
+                sessionContext: IOSAudioProviderService.shared.routeContext,
+                providerCapabilities: IOSAudioProviderService.shared.routeCapabilities
             ))
         case .speech:
             let voices = AVSpeechSynthesisVoice.speechVoices()
@@ -93,7 +95,9 @@ enum AudioConfigurationRuntime {
                 systemStatus: readiness,
                 offlineModels: offlineModels,
                 systemVoiceIds: voices.map(\.identifier),
-                voiceOverride: parseVoiceOverride(voiceOverride)
+                voiceOverride: parseVoiceOverride(voiceOverride, preference: snapshot.configuration.speech),
+                sessionContext: IOSAudioProviderService.shared.routeContext,
+                providerCapabilities: IOSAudioProviderService.shared.routeCapabilities
             ))
         }
     }
@@ -105,21 +109,16 @@ enum AudioConfigurationRuntime {
         guard isDefaultVoiceOverride(voiceOverride) else { return saved }
         return AudioSpeechPreference(
             source: saved.source,
-            offlineModelId: saved.offlineModelId
+            offlineModelId: saved.offlineModelId,
+            cloud: saved.cloud
         )
     }
 
-    static func parseVoiceOverride(_ value: String?) -> AudioVoiceSelection? {
+    static func parseVoiceOverride(_ value: String?, preference: AudioSpeechPreference) -> AudioVoiceSelection? {
         guard let value else { return nil }
         let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if isDefaultVoiceOverride(normalizedValue) { return nil }
-        if normalizedValue.hasPrefix("system:") {
-            return AudioVoiceSelection(source: .system, id: String(normalizedValue.dropFirst("system:".count)))
-        }
-        if let selection = VoiceRuntimeResolver.parseSherpaVoice(normalizedValue) {
-            return AudioVoiceSelection(source: .offline, id: selection.voiceID, modelId: selection.modelID)
-        }
-        return AudioVoiceSelection(source: .system, id: normalizedValue)
+        return AudioVoiceSelection(source: preference.source == .offline ? .offline : .system, id: normalizedValue, modelId: preference.source == .offline ? preference.offlineModelId ?? preference.voice?.modelId : nil)
     }
 
     private static func isDefaultVoiceOverride(_ value: String?) -> Bool {

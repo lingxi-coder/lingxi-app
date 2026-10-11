@@ -34,7 +34,7 @@ import Foundation
         /// Finish independently if neither a fix nor a denial arrives, before
         /// the engine's own 30s budget abandons the native callback.
         private var timeout: Task<Void, Never>?
-        /// Must stay under `LOCATION_TIMEOUT` in `local_apps_host_device`.
+        /// Must stay under the engine's own location-callback budget.
         nonisolated private static let timeoutNanoseconds: UInt64 = 20_000_000_000
 
         /// Engine construction runs in a detached task. This initializer must

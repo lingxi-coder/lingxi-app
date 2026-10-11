@@ -1,16 +1,48 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "languageAuto": "auto",
   "minimumRate": 0.5,
   "maximumRate": 2.0,
   "defaultRate": 1.0,
-  "sources": ["automatic", "system", "offline"],
+  "sources": [
+    "automatic",
+    "system",
+    "offline",
+    "provider"
+  ],
   "defaults": {
-    "schemaVersion": 3,
-    "recognition": { "source": "automatic", "offlineModelId": null },
-    "speech": { "source": "automatic", "offlineModelId": null, "voice": null },
+    "schemaVersion": 4,
+    "recognition": {
+      "source": "automatic",
+      "offlineModelId": null,
+      "cloud": {
+        "binding": "follow_session",
+        "profileId": null,
+        "modelId": null
+      }
+    },
+    "speech": {
+      "source": "automatic",
+      "offlineModelId": null,
+      "voice": null,
+      "cloud": {
+        "binding": "follow_session",
+        "profileId": null,
+        "modelId": null
+      }
+    },
     "language": "auto",
     "rate": 1.0,
-    "autoPlayReplies": false
+    "autoPlayReplies": false,
+    "conversation": {
+      "mode": "agent",
+      "cloud": {
+        "binding": "follow_session",
+        "profileId": null,
+        "modelId": null
+      },
+      "voice": null,
+      "interaction": "turn_based"
+    }
   }
 }

@@ -27,7 +27,7 @@ internal fun GeneralSettingsPage(onNavigate: (String) -> Unit, onReplayOnboardin
         "Linux runtime" to SettingsRoutes.LINUX_RUNTIME,
         "Computer use" to SettingsRoutes.COMPUTER_USE,
         "Scheduled tasks" to SettingsRoutes.CRON,
-        "Bundled skills & local apps" to SettingsRoutes.SKILLS,
+        "Skills" to SettingsRoutes.SKILLS,
     )
     SettingsSection(label = settingsLabel("Device & mobile capabilities")) {
         pages.filter { it.second != SettingsRoutes.COMPUTER_USE || com.lingxi.code.computeruse.ComputerUseFeatureProvider.available }.forEach { (title, route) -> TextButton(onClick = { onNavigate(route) }) { Text(settingsLabel(title)) } }
@@ -38,6 +38,7 @@ internal fun GeneralSettingsPage(onNavigate: (String) -> Unit, onReplayOnboardin
 @Composable
 internal fun NativeAccountPage(state: SettingsUiState, onCredentials: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        com.lingxi.code.account.LingxiAccountSection()
         Text(settingsLabel("Provider accounts"))
         Text(settingsLabel("This installation connects using your configured provider credentials. Manage credentials to connect or change an account."))
         state.llmProviders.forEach { provider -> Text(settingsLabel("${provider.name} · ${provider.status}")) }

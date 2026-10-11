@@ -32,7 +32,6 @@ struct SettingsPages: View {
         case .typescriptLsp:              TypeScriptLspModePage(store: store, host: host)
         case .skills:                     DesktopSkillsAdminPage()
         case .skillDetail(let id):        SkillDetailPage(store: store, host: host, skillId: id)
-        case .localAppPlugin:             LocalAppPluginPage(host: host)
         case .mcpList:                    DesktopMCPAdminPage(host: host)
         case .mcpEdit(let id):            MCPEditPage(store: store, host: host, mcpId: id)
         case .dream:                      DreamPage(store: store)

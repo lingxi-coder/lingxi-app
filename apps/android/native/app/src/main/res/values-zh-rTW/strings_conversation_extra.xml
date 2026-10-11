@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Traditional Chinese for values/strings_conversation_extra.xml (see that file's header). -->
+<resources>
+    <string name="chat_question_card_title">助手想確認幾個問題</string>
+    <string name="chat_question_progress">第 %1$d/%2$d 題</string>
+    <string name="chat_question_answered_progress">已回答 %1$d/%2$d</string>
+    <string name="chat_question_tap_to_answer">選擇一個答案</string>
+    <string name="chat_question_previous">上一題</string>
+    <string name="chat_question_next">下一題</string>
+    <string name="chat_question_other_placeholder">其他</string>
+    <string name="chat_question_submit">提交</string>
+    <string name="chat_task_status_pending">背景任務 %1$s 已排隊</string>
+    <string name="chat_task_status_running">背景任務 %1$s 執行中</string>
+    <string name="chat_task_status_paused">背景任務 %1$s 已暫停</string>
+    <string name="chat_task_status_completed">背景任務 %1$s 已完成</string>
+    <string name="chat_task_status_failed">背景任務 %1$s 已失敗</string>
+    <string name="chat_task_status_failed_reason">背景任務 %1$s 已失敗：%2$s</string>
+    <string name="chat_task_status_cancelled">背景任務 %1$s 已取消</string>
+</resources>

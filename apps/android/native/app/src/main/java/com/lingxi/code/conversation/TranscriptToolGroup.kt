@@ -72,6 +72,12 @@ internal fun toolIconName(verb: ToolVerbUi?) = when (verb) {
 
 @Composable
 internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String>, onToggle: (String) -> Unit) {
+    if (group.calls.any { it.questionAnswers != null }) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            group.calls.forEach { call -> ToolCallView(call, call.id in expandedIds, { onToggle(call.id) }) }
+        }
+        return
+    }
     val t = LingXiTheme.palette
     val open = group.id in expandedIds
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {

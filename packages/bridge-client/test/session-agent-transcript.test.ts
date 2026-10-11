@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { validateClientEvent } from '../src/validation.js';
 
-const message = { role: 'assistant', blocks: [{ type: 'text', text: 'answer' }] };
+const message = { sent_at_ms: 1_791_417_600_000, role: 'assistant', blocks: [{ type: 'text', text: 'answer' }] };
 const apiErrorJson = '{ "type": "api_error", "error": { "message": "rate limited" } }';
 
 test('session-agent transcript snapshots retain UUID-addressed rows and raw API error envelopes', () => {
@@ -77,4 +77,14 @@ test('session-agent live rows and UUID tombstones use the strict current wire sh
     message,
     api_error_json: '{broken',
   }), /API error JSON/);
+});
+
+test('session-agent messages reject malformed persisted timestamps', () => {
+  for (const sent_at_ms of ['today', NaN, Infinity, 1.5]) {
+    assert.throws(() => validateClientEvent({
+      type: 'session_agent_message', session_id: 'session-a', agent_id: 'main',
+      message_index: 0, message_uuid: '11111111-1111-4111-8111-111111111111',
+      message: { ...message, sent_at_ms },
+    }), /message time/);
+  }
 });

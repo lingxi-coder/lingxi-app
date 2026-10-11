@@ -3,6 +3,7 @@
   "packages": [
     "agent",
     "apply-seccomp",
+    "audio-runtime",
     "branding",
     "bridge",
     "client",
@@ -20,9 +21,9 @@
     "json-projection",
     "jsonrpc",
     "llm-runtime",
-    "local-apps",
     "lsp",
     "mcp",
+    "mcp-wire",
     "memory",
     "migrations",
     "mock_stdio_mcp",

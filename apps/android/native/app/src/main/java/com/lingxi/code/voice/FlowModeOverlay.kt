@@ -368,8 +368,8 @@ private fun FlowModeContent(
     val caption = when (phase) {
         OrbPhase.Listening -> ""
         OrbPhase.Thinking -> voiceState.userCaption
-        OrbPhase.Speaking -> assistantText
-        OrbPhase.Idle -> if (voiceState.didSend) assistantText else ""
+        OrbPhase.Speaking -> voiceState.assistantCaption.ifBlank { assistantText }
+        OrbPhase.Idle -> if (voiceState.didSend) voiceState.assistantCaption.ifBlank { assistantText } else ""
     }
     val isAi = phase == OrbPhase.Speaking || (phase == OrbPhase.Idle && voiceState.didSend)
 

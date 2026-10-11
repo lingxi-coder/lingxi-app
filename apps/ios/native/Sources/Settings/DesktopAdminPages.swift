@@ -108,7 +108,6 @@ struct DesktopPluginsPage: View {
                 }
             }
             DisclosureGroup("Advanced plugin configuration") { ForEach(["enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"], id: \.self) { PluginConfigurationEditor(key: $0, layer: layer) } }
-            Button("Mobile app plugin") { host.push(.localAppPlugin) }
         }.task(id: repository.sourceGeneration) { await load() }
         .onChange(of: repository.documents["plugin"]) { _, json in
             guard let json, let doc = DesktopSettingsRepository.object(json),
@@ -162,8 +161,7 @@ struct DesktopMCPAdminPage: View {
         default: String(localized: "mcp_scope_user_desc")
         }
     }
-    private var managed: Bool { host.managedMcpInventory(serverName: name) != nil }
-    private var writable: Bool { repository.connected && !repository.saving && draftRevision != nil && !managed }
+    private var writable: Bool { repository.connected && !repository.saving && draftRevision != nil }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
@@ -183,9 +181,6 @@ struct DesktopMCPAdminPage: View {
                         Text(server.name)
                         Spacer()
                         Text(String(describing: server.status)).foregroundStyle(.secondary)
-                        if host.managedMcpInventory(serverName: server.id) != nil {
-                            Button("Inventory") { host.push(.mcpEdit(server.id)) }
-                        }
                     }.padding(.vertical, 4)
                 }
             }
@@ -200,7 +195,6 @@ struct DesktopMCPAdminPage: View {
                 .disabled(selectedName != nil || !writable).autocorrectionDisabled().textInputAutocapitalization(.never)
             TextEditor(text: $draft).font(.system(.body, design: .monospaced)).frame(minHeight: 180)
                 .disabled(!writable).autocorrectionDisabled().textInputAutocapitalization(.never)
-            if managed { Label("This app-managed server is read-only.", systemImage: "lock") }
             HStack {
                 Button("settings_parity_save_server") { Task { await save(remove: false) } }.disabled(!writable || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if selectedName != nil {

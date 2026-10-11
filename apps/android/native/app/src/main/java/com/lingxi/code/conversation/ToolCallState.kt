@@ -311,6 +311,7 @@ data class ToolCallUi(
     val status: AgentToolStatus = AgentToolStatus.Running,
     val fallbackSummary: String? = null,
     val planMarkdown: String? = null,
+    val questionAnswers: List<AnsweredQuestion>? = null,
 )
 
 /** One ordered piece of a settled transcript message. */

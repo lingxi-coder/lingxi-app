@@ -140,39 +140,6 @@ test('task refresh replaces stale rows and outputs instead of merging forever', 
   assert.equal(refreshed.taskOutput['stale'], undefined);
 });
 
-test('desktop state ignores Local App mobile-only events without crashing', () => {
-  const before = reduceDesktopEvents(emptyDesktopState(), [
-    {
-      type: 'app_event',
-      event: {
-        type: 'plugin_inventory_changed',
-        inventory: {
-          pluginId: 'lingxi-local-app',
-          displayName: 'LingXi Local App',
-          source: 'builtin',
-          version: '2.0.0-dev',
-          bundleSha256: 'a'.repeat(64),
-          state: 'loaded',
-          manifestDefaultEnabled: true,
-          counts: { skills: 27, agents: 1, workflows: 6, templates: 4 },
-        },
-      },
-    },
-    {
-      type: 'app_event',
-      event: {
-        type: 'verification_summary_changed',
-        app_id: 'habits-1a2b',
-        publication_state: 'published_unverified',
-        mcp_verification: { status: 'passed', summary: 'MCP verification passed.' },
-        ui_verification: { status: 'unavailable', summary: 'UI runner unavailable.', code: 'verification_unavailable' },
-      },
-    },
-  ] as ClientEvent[]);
-
-  assert.deepEqual(before, emptyDesktopState());
-});
-
 test('new desktop sessions start in Auto and honor authoritative permission changes', () => {
   const initial = emptyDesktopState();
   assert.equal(initial.permissionMode, 'auto');

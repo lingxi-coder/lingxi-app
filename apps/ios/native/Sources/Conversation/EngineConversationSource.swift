@@ -41,6 +41,10 @@ final class EngineConversationSource: ConversationSource {
     private let handleBuilder: HandleBuilder
     private let permissionModeRepository: PermissionModeConfigurationRepository
     private var handle: MobileEngineHandle?
+    private let audioContextOwnerID = UUID().uuidString
+    private var audioContextGeneration: UInt64 = 0
+    private var audioContextTask: Task<Void, Never>?
+    private var audioSourceActive = false
     /// One shared bootstrap attempt for every entry point that needs the
     /// engine. Access to this property remains main-actor-confined, which
     /// prevents interleaving callers from constructing competing handles;
@@ -194,6 +198,15 @@ final class EngineConversationSource: ConversationSource {
         self.model.activeModelId = config.model
         self.model.bypassPermissionsWarningSuppressed = self.permissionModeRepository
             .bypassWarningSuppressed()
+    }
+
+    deinit {
+        audioContextTask?.cancel()
+        let ownerID = audioContextOwnerID
+        Task { @MainActor in
+            IOSAudioProviderService.shared.clearSessionContext(ownerID: ownerID)
+            IOSRealtimeAudioService.shared.detach(ownerID: ownerID)
+        }
     }
 
     // MARK: ConversationSource
@@ -415,6 +428,7 @@ final class EngineConversationSource: ConversationSource {
     /// committed transcript immediately; a resume keeps it visible until the
     /// authoritative `SessionResumed` replay replaces it.
     private func resetTranscriptForSessionSwitch(isNew: Bool) {
+        invalidateAudioSessionContext()
         invalidateTurnContext()
         replayProjectionState = nil
         hasConfirmedSessionState = false
@@ -1543,6 +1557,13 @@ final class EngineConversationSource: ConversationSource {
     }
 
     func setSettingsActive(_ active: Bool) {
+        audioSourceActive = active
+        if active {
+            IOSAudioProviderService.shared.claimSessionContext(ownerID: audioContextOwnerID)
+            refreshAudioSessionContext()
+        } else {
+            invalidateAudioSessionContext()
+        }
         if active {
             guard Self.settingsOwner !== self else { return }
             Self.settingsOwner?.settingsGeneration &+= 1
@@ -1567,6 +1588,48 @@ final class EngineConversationSource: ConversationSource {
             settingsGeneration &+= 1
             Self.settingsOwner = nil
             DesktopSettingsRepository.shared.configure(submitter: nil)
+        }
+    }
+
+    private func invalidateAudioSessionContext() {
+        audioContextGeneration &+= 1
+        audioContextTask?.cancel()
+        audioContextTask = nil
+        IOSAudioProviderService.shared.clearSessionContext(ownerID: audioContextOwnerID)
+        IOSRealtimeAudioService.shared.detach(ownerID: audioContextOwnerID)
+    }
+
+    /// Query the already connected engine. Opening audio settings never builds
+    /// an engine merely to discover a cloud route.
+    private func refreshAudioSessionContext() {
+        guard audioSourceActive, hasConfirmedSessionState, !model.sessionTransitionPending,
+              let handle, !model.activeSessionId.isEmpty else { return }
+        audioContextGeneration &+= 1
+        let generation = audioContextGeneration
+        let sessionID = model.activeSessionId
+        let modelID = model.activeModelId
+        audioContextTask?.cancel()
+        audioContextTask = Task { @MainActor [weak self, handle] in
+            let json = await handle.audioSessionContext()
+            guard !Task.isCancelled, let self, self.audioSourceActive,
+                  self.audioContextGeneration == generation, self.handle === handle,
+                  self.model.activeSessionId == sessionID, self.model.activeModelId == modelID,
+                  !self.model.sessionTransitionPending else { return }
+            guard let data = json.data(using: .utf8),
+                  let context = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  context["sessionId"] as? String == sessionID,
+                  let profileID = context["profileId"] as? String, !profileID.isEmpty,
+                  let accountScope = context["accountScope"] as? String, !accountScope.isEmpty else {
+                self.invalidateAudioSessionContext()
+                return
+            }
+            IOSAudioProviderService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID)
+            IOSRealtimeAudioService.shared.attach(engine: handle, ownerID: self.audioContextOwnerID)
+            IOSAudioProviderService.shared.setSessionContext(
+                sessionID: sessionID, profileID: profileID, accountScope: accountScope,
+                region: context["region"] as? String, ownerID: self.audioContextOwnerID
+            )
+            await IOSAudioProviderService.shared.refresh(snapshot: AudioConfigurationStore.shared.snapshot)
         }
     }
 
@@ -1602,8 +1665,6 @@ final class EngineConversationSource: ConversationSource {
             mobileLinux: config.mobileLinux.map {
                 makeIosMobileLinuxConfig($0, appSandboxRoot: config.appSandboxRoot)
             },
-            localAppsFullRuntime: LocalAppsRuntimeDistribution.usesFullRuntime,
-            localAppsRuntimeRoot: LocalAppsRuntimeDistribution.runtimeRoot,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
             hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
         )
@@ -1617,7 +1678,24 @@ final class EngineConversationSource: ConversationSource {
         let audio = IOSAudioServiceCallbackAdapter.shared
         let buildTask = Task.detached(priority: .userInitiated) {
             [handleBuilder, launchConfig, listener, audio, permissionSink] in
-            let handle = try handleBuilder(launchConfig, listener, audio, permissionSink)
+            // The synchronous FFI constructor block_on's MCP initialization.
+            // Its native frames can exhaust a cooperative worker's small stack,
+            // and blocking that worker also prevents unrelated tasks progressing.
+            // Keep the shared build task, but suspend it while a short-lived
+            // native thread performs just the blocking constructor.
+            let handle: MobileEngineHandle = try await withCheckedThrowingContinuation { continuation in
+                let thread = Thread {
+                    autoreleasepool {
+                        continuation.resume(with: Result {
+                            try handleBuilder(launchConfig, listener, audio, permissionSink)
+                        })
+                    }
+                }
+                thread.name = "LingXi engine bootstrap"
+                thread.qualityOfService = .userInitiated
+                thread.stackSize = 8 * 1024 * 1024
+                thread.start()
+            }
             // Bootstrap listings are part of construction: never publish a
             // handle that failed halfway through initialization.
             try await handle.submit(command: .listModels)
@@ -1646,6 +1724,7 @@ final class EngineConversationSource: ConversationSource {
             let builtHandle = try await buildTask.value
             if handleBuildAttemptID == attemptID {
                 handle = builtHandle
+                refreshAudioSessionContext()
                 VisualizationWebHost.shared.attach(builtHandle.visualizationHost(origin: VisualizationWebHost.origin))
                 self.listener = listener
                 self.permissionSink = permissionSink
@@ -1677,7 +1756,7 @@ final class EngineConversationSource: ConversationSource {
             permissions: permissions,
             // Native Keychain secure store enables OAuth token persistence.
             secureStorage: SecureStorageImpl(),
-            // One-shot location for local apps that declared it. The cron
+            // One-shot device location. The cron
             // bridge passes nothing here (the FFI defaults it to nil):
             // a background wake has no user present to answer an
             // authorization sheet.
@@ -2185,12 +2264,15 @@ final class EngineConversationSource: ConversationSource {
     private func applyAgentTranscript(
         sessionID: String,
         agentId: String,
-        messages: [MessageDto],
+        rows: [SessionAgentMessageRowDto],
         nextMessageIndex: UInt64? = nil,
         revision: UInt64 = 0
     ) {
         guard agentId != ConversationModel.mainAgentID else { return }
         guard sessionID == model.activeSessionId else { return }
+        // Deleted rows leave gaps in the host's numbering, so the position in
+        // the array is not the wire index.
+        let messages = rows.map(\.message)
         let watermark = nextMessageIndex ?? UInt64(messages.count)
         if let current = model.agentTranscripts[agentId],
            current.loaded,
@@ -2211,7 +2293,7 @@ final class EngineConversationSource: ConversationSource {
             sessionID: sessionID,
             identityPrefix: "\(sessionID)|agent|\(agentId)",
             occurrenceOffsets: [:],
-            wireIndices: messages.indices.map { Optional(UInt64($0)) }
+            wireIndices: rows.map { Optional($0.messageIndex) }
         )
         var transcript = ConversationAgentTranscript(
             messages: restored.messages,
@@ -3156,6 +3238,7 @@ final class EngineConversationSource: ConversationSource {
                     trace.tool = "Shell"
                     trace.status = resolvedShellStatus.asToolStatus
                     trace.display = derivedDisplay
+                    trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                     trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(resultJson, isError: isError, tool: tool)
                     trace.elapsedMs = finished?.durationMs ?? trace.elapsedMs
@@ -3167,6 +3250,7 @@ final class EngineConversationSource: ConversationSource {
                     trace.tool = tool
                     trace.status = wasCancelled ? .cancelled : (isError ? .failed : .completed)
                     trace.display = derivedDisplay
+                    trace.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                     trace.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                     trace.outputSummary = ConversationExecutionParsing.summarizeToolResult(
                         resultJson,
@@ -3753,18 +3837,18 @@ final class EngineConversationSource: ConversationSource {
             applyAgentTranscript(
                 sessionID: sessionId,
                 agentId: agentId,
-                messages: messages,
+                rows: messages,
                 nextMessageIndex: nextMessageIndex,
                 revision: revision
             )
 
-        case let .sessionAgentMessage(sessionId, agentId, messageIndex, message):
+        case let .sessionAgentMessage(sessionId, agentId, row):
             guard sessionId == model.activeSessionId,
                   !model.sessionTransitionPending else { return }
             appendAgentMessage(
                 agentId: agentId,
-                message: message,
-                messageIndex: messageIndex
+                message: row.message,
+                messageIndex: row.messageIndex
             )
 
         case let .sessionStarted(sessionId, mode):
@@ -3800,6 +3884,7 @@ final class EngineConversationSource: ConversationSource {
             model.activeSessionId = sessionId
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
+            refreshAudioSessionContext()
             if confirmedNewSession {
                 model.sessionRefreshRevision &+= 1
             }
@@ -3824,6 +3909,7 @@ final class EngineConversationSource: ConversationSource {
             model.activeSessionId = sessionId
             hasConfirmedSessionState = true
             setPendingSessionTransition(nil)
+            refreshAudioSessionContext()
             // BUG FIX: a restored message is NOT one render row. In the
             // Anthropic protocol a `tool_result` block lives in the USER
             // turn, so mapping each `MessageDto` to a single `.message`
@@ -3878,9 +3964,8 @@ final class EngineConversationSource: ConversationSource {
             // Out-of-band MCP listing → the UI `MCPServer` model. The wire
             // intentionally carries health/name/transport only; endpoint
             // and command details are merged from the real config file by
-            // the settings host, never fabricated here. `local_apps` is an
-            // engine-owned provider, not a user-editable MCP configuration.
-            model.mcpServers = servers.filter { $0.name != "local_apps" }.map { dto in
+            // the settings host, never fabricated here.
+            model.mcpServers = servers.map { dto in
                 let status: ConnStatus
                 switch dto.status {
                 case .connected: status = .connected
@@ -4731,6 +4816,7 @@ final class EngineConversationSource: ConversationSource {
                         var merged = existing
                         merged.status = status
                         merged.display = lowered
+                        merged.questionAnswers = isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                         merged.spawnedAgentID = ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
                         merged.outputSummary = fallback
                         pendingRun?.tools[index] = merged
@@ -4744,7 +4830,8 @@ final class EngineConversationSource: ConversationSource {
                             elapsedMs: nil,
                             header: nil,
                             display: lowered,
-                            spawnedAgentID: ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson)
+                            spawnedAgentID: ConversationExecutionParsing.spawnedAgentID(tool: tool, resultJson: resultJson),
+                            questionAnswers: isError ? nil : ConversationAnsweredQuestion.parse(tool: tool, json: resultJson)
                         )
                         pendingRun?.tools.append(trace)
                     }
@@ -4885,6 +4972,7 @@ final class EngineConversationSource: ConversationSource {
     private func applyActiveModel(_ id: String) {
         guard !id.isEmpty else { return }
         model.activeModelId = id
+        refreshAudioSessionContext()
         if let opt = MockData.models.first(where: { $0.id == id || $0.name == id }) {
             model.model = opt
         }

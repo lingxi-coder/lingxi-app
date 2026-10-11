@@ -850,7 +850,7 @@ mod tests {
         .await
         .expect("idle task wake must not wait for a human newline");
         assert_eq!(result, StepOutcome::Continue);
-        assert_eq!(*prompts.lock().await, vec!["hello"]);
+        assert_eq!(*prompts.lock().await, vec!["hello".into()]);
         assert_eq!(wake.calls.load(Ordering::SeqCst), 1);
         let _ = writing.await.unwrap();
     }

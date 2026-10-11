@@ -2,7 +2,7 @@
 // Do not edit by hand; run node resources/voice/scripts/generate-audio-config.mjs.
 import Foundation
 
-public let audioConfigurationSchemaVersion = 3
+public let audioConfigurationSchemaVersion = 4
 public let audioLanguageAuto = "auto"
 public let audioMinimumRate = 0.5
 public let audioMaximumRate = 2.0
@@ -13,6 +13,7 @@ public struct AudioSource: RawRepresentable, Codable, Equatable, Hashable, Senda
     public init(rawValue: String) { self.rawValue = rawValue }
     public static let automatic = AudioSource(rawValue: "automatic")
     public static let system = AudioSource(rawValue: "system")
+    public static let provider = AudioSource(rawValue: "provider")
     public static let offline = AudioSource(rawValue: "offline")
 
     public init(from decoder: Decoder) throws {
@@ -35,20 +36,60 @@ public struct AudioVoiceSelection: Codable, Equatable, Sendable {
     public let source: AudioSource
     public let id: String
     public let modelId: String?
+    public let profileId: String?
 
-    public init(source: AudioSource, id: String, modelId: String? = nil) {
+    public init(source: AudioSource, id: String, modelId: String? = nil, profileId: String? = nil) {
         self.source = source
         self.id = id
         self.modelId = modelId
+        self.profileId = profileId
+    }
+}
+
+public struct AudioCloudBinding: Codable, Equatable, Sendable {
+    public var binding: String
+    public var profileId: String?
+    public var modelId: String?
+    public init(binding: String = "follow_session", profileId: String? = nil, modelId: String? = nil) {
+        self.binding = binding; self.profileId = profileId; self.modelId = modelId
+    }
+}
+
+public struct AudioConversationPreference: Codable, Equatable, Sendable {
+    public var mode: String
+    public var interaction: String
+    public var cloud: AudioCloudBinding
+    public var voice: AudioVoiceSelection?
+    public init(mode: String = "agent", interaction: String = "turn_based", cloud: AudioCloudBinding = AudioCloudBinding(), voice: AudioVoiceSelection? = nil) {
+        self.mode = mode; self.interaction = interaction; self.cloud = cloud; self.voice = voice
+    }
+}
+
+public struct AudioProviderContext: Sendable {
+    public let profileId: String
+    public init(profileId: String) { self.profileId = profileId }
+}
+public struct AudioProviderCapability: Sendable {
+    public let profileId: String
+    public let providerId: String
+    public let kind: AudioProviderKind
+    public let supported: Bool
+    public let readiness: String
+    public let defaultModelId: String?
+    public let modelIds: [String?]
+    public init(profileId: String, providerId: String, kind: AudioProviderKind, supported: Bool, readiness: String, defaultModelId: String?, modelIds: [String?]) {
+        self.profileId = profileId; self.providerId = providerId; self.kind = kind; self.supported = supported; self.readiness = readiness; self.defaultModelId = defaultModelId; self.modelIds = modelIds
     }
 }
 
 public struct AudioRecognitionPreference: Codable, Equatable, Sendable {
     public var source: AudioSource
     public var offlineModelId: String?
-    public init(source: AudioSource, offlineModelId: String? = nil) {
+    public var cloud: AudioCloudBinding
+    public init(source: AudioSource, offlineModelId: String? = nil, cloud: AudioCloudBinding = AudioCloudBinding()) {
         self.source = source
         self.offlineModelId = offlineModelId
+        self.cloud = cloud
     }
 }
 
@@ -56,20 +97,23 @@ public struct AudioSpeechPreference: Codable, Equatable, Sendable {
     public var source: AudioSource
     public var offlineModelId: String?
     public var voice: AudioVoiceSelection?
-    public init(source: AudioSource, offlineModelId: String? = nil, voice: AudioVoiceSelection? = nil) {
+    public var cloud: AudioCloudBinding
+    public init(source: AudioSource, offlineModelId: String? = nil, voice: AudioVoiceSelection? = nil, cloud: AudioCloudBinding = AudioCloudBinding()) {
         self.source = source
         self.offlineModelId = offlineModelId
         self.voice = voice
+        self.cloud = cloud
     }
 }
 
-public struct AudioConfigurationV3: Codable, Equatable, Sendable {
+public struct AudioConfigurationV4: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var recognition: AudioRecognitionPreference
     public var speech: AudioSpeechPreference
     public var language: String
     public var rate: Double
     public var autoPlayReplies: Bool
+    public var conversation: AudioConversationPreference
 
     public init(
         schemaVersion: Int = audioConfigurationSchemaVersion,
@@ -77,7 +121,8 @@ public struct AudioConfigurationV3: Codable, Equatable, Sendable {
         speech: AudioSpeechPreference,
         language: String = audioLanguageAuto,
         rate: Double = audioDefaultRate,
-        autoPlayReplies: Bool = false
+        autoPlayReplies: Bool = false,
+        conversation: AudioConversationPreference = AudioConversationPreference()
     ) {
         self.schemaVersion = schemaVersion
         self.recognition = recognition
@@ -85,21 +130,7 @@ public struct AudioConfigurationV3: Codable, Equatable, Sendable {
         self.language = language
         self.rate = rate
         self.autoPlayReplies = autoPlayReplies
-    }
-}
-
-public struct AudioVoiceCatalogEntry: Equatable, Sendable {
-    public let source: AudioSource
-    public let id: String
-    public let modelId: String?
-    public let label: String?
-    public let aliases: [String]
-    public init(source: AudioSource, id: String, modelId: String? = nil, label: String? = nil, aliases: [String] = []) {
-        self.source = source
-        self.id = id
-        self.modelId = modelId
-        self.label = label
-        self.aliases = aliases
+        self.conversation = conversation
     }
 }
 
@@ -121,6 +152,7 @@ public struct AudioOfflineModelAvailability: Equatable, Sendable {
 public protocol AudioRoutePreferenceProviding {
     var source: AudioSource { get }
     var offlineModelId: String? { get }
+    var cloud: AudioCloudBinding { get }
     var routeVoice: AudioVoiceSelection? { get }
 }
 
@@ -141,6 +173,9 @@ public struct AudioRouteRequest: Sendable {
     public let systemStatus: AudioReadiness
     public let offlineModels: [AudioOfflineModelAvailability]
     public let systemVoiceIds: [String]?
+    public let cloud: AudioCloudBinding
+    public let sessionContext: AudioProviderContext?
+    public let providerCapabilities: [AudioProviderCapability]
 
     public init<P: AudioRoutePreferenceProviding>(
         kind: AudioProviderKind,
@@ -149,7 +184,9 @@ public struct AudioRouteRequest: Sendable {
         systemStatus: AudioReadiness,
         offlineModels: [AudioOfflineModelAvailability],
         systemVoiceIds: [String]? = nil,
-        voiceOverride: AudioVoiceSelection? = nil
+        voiceOverride: AudioVoiceSelection? = nil,
+        sessionContext: AudioProviderContext? = nil,
+        providerCapabilities: [AudioProviderCapability] = []
     ) {
         self.kind = kind
         self.source = preference.source
@@ -159,6 +196,9 @@ public struct AudioRouteRequest: Sendable {
         self.systemStatus = systemStatus
         self.offlineModels = offlineModels
         self.systemVoiceIds = systemVoiceIds
+        self.cloud = preference.cloud
+        self.sessionContext = sessionContext
+        self.providerCapabilities = providerCapabilities
     }
 }
 
@@ -172,6 +212,8 @@ public struct AudioRouteResolution: Equatable, Sendable {
         public let source: AudioSource
         public let modelId: String?
         public let voiceId: String?
+        public var profileId: String? = nil
+        public var providerId: String? = nil
     }
     public let requested: Requested
     public let effective: Effective?
@@ -181,8 +223,8 @@ public struct AudioRouteResolution: Equatable, Sendable {
 }
 
 public enum AudioConfigurationNormalizer {
-    public static var defaults: AudioConfigurationV3 {
-        AudioConfigurationV3(
+    public static var defaults: AudioConfigurationV4 {
+        AudioConfigurationV4(
             recognition: AudioRecognitionPreference(source: .automatic),
             speech: AudioSpeechPreference(source: .automatic),
             language: audioLanguageAuto,
@@ -191,72 +233,41 @@ public enum AudioConfigurationNormalizer {
         )
     }
 
-    public static func normalize(_ value: Any?) -> AudioConfigurationV3 {
+    public static func normalize(_ value: Any?) -> AudioConfigurationV4 {
         let raw = value as? [String: Any] ?? [:]
+        guard raw["schemaVersion"] as? Int == audioConfigurationSchemaVersion else { return defaults }
         let recognitionRaw = raw["recognition"] as? [String: Any] ?? [:]
         let speechRaw = raw["speech"] as? [String: Any] ?? [:]
         let recognition = AudioRecognitionPreference(
             source: source(recognitionRaw["source"]),
-            offlineModelId: modelID(recognitionRaw["offlineModelId"])
+            offlineModelId: modelID(recognitionRaw["offlineModelId"]),
+            cloud: cloud(recognitionRaw["cloud"])
         )
         var speech = AudioSpeechPreference(
             source: source(speechRaw["source"]),
             offlineModelId: modelID(speechRaw["offlineModelId"]),
-            voice: voice(speechRaw["voice"])
+            voice: voice(speechRaw["voice"]),
+            cloud: cloud(speechRaw["cloud"])
         )
-        if speech.source == .automatic, let selectedVoice = speech.voice {
-            speech.source = selectedVoice.source
-            if selectedVoice.source == .offline, speech.offlineModelId == nil {
-                speech.offlineModelId = selectedVoice.modelId
-            }
-        }
-        return AudioConfigurationV3(
+        if speech.source == .automatic { speech.voice = nil }
+        return AudioConfigurationV4(
             recognition: recognition,
             speech: speech,
             language: language(raw["language"]),
             rate: rate(raw["rate"]),
-            autoPlayReplies: (raw["autoPlayReplies"] as? Bool) == true
+            autoPlayReplies: (raw["autoPlayReplies"] as? Bool) == true,
+            conversation: conversation(raw["conversation"])
         )
     }
 
-    public static func migrateLegacy(_ value: Any?, voiceCatalog: [AudioVoiceCatalogEntry] = []) -> AudioConfigurationV3 {
+    private static func cloud(_ value: Any?) -> AudioCloudBinding {
         let raw = value as? [String: Any] ?? [:]
-        if (raw["schemaVersion"] as? Int) == audioConfigurationSchemaVersion { return normalize(raw) }
-        let recognitionRaw = raw["recognition"] as? [String: Any] ?? [:]
-        let speechRaw = raw["speech"] as? [String: Any] ?? [:]
-        let recognitionSource = legacySource(recognitionRaw["source"] ?? raw["inputProvider"] ?? raw["recognitionMode"], fallback: .automatic)
-        let speechSource = legacySource(speechRaw["source"] ?? raw["outputProvider"] ?? raw["speechProvider"], fallback: .automatic)
-        let rawVoice = speechRaw["voice"] ?? raw["voiceSelection"] ?? raw["voiceId"] ?? raw["voice"]
-        let selectedVoice: AudioVoiceSelection?
-        if let value = rawVoice as? String { selectedVoice = legacyVoice(value, catalog: voiceCatalog) }
-        else { selectedVoice = voice(rawVoice) }
-        var languageValue = raw["language"] ?? raw["inputLanguage"] ?? raw["legacyInputLanguage"] ?? raw["voiceLanguage"] ?? raw["voiceLang"]
-        if languageValue == nil || (languageValue as? String) == "auto" {
-            switch (raw["legacyVoiceLang"] as? String)?.lowercased() {
-            case "zh": languageValue = "zh-CN"
-            case "en": languageValue = "en-US"
-            default: break
-            }
-        }
-        var speech = AudioSpeechPreference(
-            source: speechSource,
-            offlineModelId: modelID(speechRaw["offlineModelId"] ?? raw["speechModelId"] ?? raw["outputModelId"]),
-            voice: selectedVoice
-        )
-        if speech.source == .automatic, let selectedVoice {
-            speech.source = selectedVoice.source
-            if selectedVoice.source == .offline, speech.offlineModelId == nil { speech.offlineModelId = selectedVoice.modelId }
-        }
-        return normalize([
-            "schemaVersion": audioConfigurationSchemaVersion,
-            "recognition": ["source": recognitionSource.rawValue, "offlineModelId": modelID(recognitionRaw["offlineModelId"] ?? raw["recognitionModelId"] ?? raw["inputModelId"]) as Any? ?? NSNull()],
-            "speech": ["source": speech.source.rawValue, "offlineModelId": speech.offlineModelId as Any? ?? NSNull(), "voice": voiceJson(speech.voice)],
-            "language": languageValue ?? audioLanguageAuto,
-            "rate": raw["rate"] ?? raw["speed"] ?? raw["voiceSpeed"] ?? audioDefaultRate,
-            "autoPlayReplies": raw["autoPlayReplies"] ?? raw["autoPlay"] ?? raw["voiceAutoPlay"] ?? false
-        ] as [String: Any])
+        return AudioCloudBinding(binding: raw["binding"] as? String ?? "follow_session", profileId: modelID(raw["profileId"]), modelId: modelID(raw["modelId"]))
     }
-
+    private static func conversation(_ value: Any?) -> AudioConversationPreference {
+        let raw = value as? [String: Any] ?? [:]
+        return AudioConversationPreference(mode: raw["mode"] as? String ?? "agent", interaction: raw["interaction"] as? String ?? "turn_based", cloud: cloud(raw["cloud"]), voice: voice(raw["voice"]))
+    }
     private static func source(_ value: Any?) -> AudioSource {
         let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return AudioSource(rawValue: text.isEmpty ? "automatic" : text)
@@ -274,65 +285,15 @@ public enum AudioConfigurationNormalizer {
         return min(audioMaximumRate, max(audioMinimumRate, number.isFinite ? number : audioDefaultRate))
     }
     private static func voice(_ value: Any?) -> AudioVoiceSelection? {
-        if let text = value as? String { return legacyVoice(text, catalog: []) }
         guard let raw = value as? [String: Any], let id = raw["id"] as? String, !id.isEmpty else { return nil }
         let selectedSource = source(raw["source"])
+        if selectedSource == .provider { return AudioVoiceSelection(source: selectedSource, id: id, modelId: modelID(raw["modelId"]), profileId: modelID(raw["profileId"])) }
         if selectedSource == .offline {
             return AudioVoiceSelection(source: selectedSource, id: id, modelId: modelID(raw["modelId"]))
         }
         return AudioVoiceSelection(source: selectedSource, id: id)
     }
-    private static func legacySource(_ value: Any?, fallback: AudioSource) -> AudioSource {
-        guard let textValue = value as? String, !textValue.isEmpty else { return fallback }
-        let text = textValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch text.lowercased() {
-        case "automatic", "auto": return .automatic
-        case "system": return .system
-        case "offline", "localonly", "on-device", "ondevice": return .offline
-        default: return AudioSource(rawValue: text)
-        }
-    }
-    private static func uniqueMatch(_ catalog: [AudioVoiceCatalogEntry], selector: String) -> AudioVoiceCatalogEntry? {
-        let needle = selector.lowercased()
-        let matches = catalog.filter { entry in
-            ([entry.id] + [entry.label].compactMap { $0 } + entry.aliases).contains { $0.lowercased() == needle }
-        }
-        return matches.count == 1 ? matches[0] : nil
-    }
-    private static func legacyVoice(_ value: String, catalog: [AudioVoiceCatalogEntry]) -> AudioVoiceSelection? {
-        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        if text.hasPrefix("system:") {
-            let id = String(text.dropFirst("system:".count))
-            let match = uniqueMatch(catalog.filter { $0.source == .system }, selector: id)
-            return AudioVoiceSelection(source: .system, id: match?.id ?? id)
-        }
-        if text.hasPrefix("sherpa:") {
-            let payload = String(text.dropFirst("sherpa:".count))
-            let parts = payload.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-            let modelKey = parts.first ?? payload
-            let voiceKey = parts.count > 1 ? parts[1] : payload
-            let offline = catalog.filter { $0.source == .offline }
-            if let match = uniqueMatch(offline, selector: "\(modelKey):\(voiceKey)"), let modelId = match.modelId {
-                return AudioVoiceSelection(source: .offline, id: match.id, modelId: modelId)
-            }
-            if let match = uniqueMatch(offline, selector: voiceKey), let modelId = match.modelId, modelId == modelKey || modelId.hasSuffix(modelKey) {
-                return AudioVoiceSelection(source: .offline, id: match.id, modelId: modelId)
-            }
-            return AudioVoiceSelection(source: .offline, id: voiceKey, modelId: modelKey)
-        }
-        if text == "default" { return AudioVoiceSelection(source: .system, id: "default") }
-        if let match = uniqueMatch(catalog, selector: text) {
-            return AudioVoiceSelection(source: match.source, id: match.id, modelId: match.modelId)
-        }
-        return AudioVoiceSelection(source: .system, id: text)
-    }
-    private static func voiceJson(_ value: AudioVoiceSelection?) -> Any {
-        guard let value else { return NSNull() }
-        var result: [String: Any] = ["source": value.source.rawValue, "id": value.id]
-        if let modelId = value.modelId { result["modelId"] = modelId }
-        return result
-    }
+
 }
 
 public func resolveAudioLanguage(configured: String, deviceLocale: String?) -> String {
@@ -409,6 +370,17 @@ public func resolveAudioRoute(_ request: AudioRouteRequest) -> AudioRouteResolut
     if request.language.isEmpty || request.language.lowercased() == audioLanguageAuto { return audioUnavailable(request, "languageUnresolved", .invalidRequest) }
     let source = request.source
     let voice = request.kind == .speech ? request.voice : nil
+    if source == .provider {
+        let cloud = request.cloud
+        guard cloud.binding == "follow_session" || cloud.binding == "explicit_profile" else { return audioUnavailable(request, "providerBindingInvalid", .invalidRequest) }
+        guard let profileId = cloud.binding == "follow_session" ? request.sessionContext?.profileId : cloud.profileId else { return audioUnavailable(request, cloud.binding == "follow_session" ? "sessionProfileRequired" : "providerProfileRequired") }
+        guard let capability = request.providerCapabilities.first(where: { $0.profileId == profileId && $0.kind == request.kind }), capability.supported else { return audioUnavailable(request, "providerOperationUnsupported") }
+        guard capability.readiness == "ready" else { return audioUnavailable(request, capability.readiness == "unreachable" ? "providerUnreachable" : "providerConfigurationRequired") }
+        let modelId = cloud.modelId ?? capability.defaultModelId
+        guard capability.modelIds.contains(modelId) else { return audioUnavailable(request, "providerModelUnsupported") }
+        if let voice, voice.source != .provider || voice.profileId != profileId || voice.modelId != modelId { return audioUnavailable(request, "providerVoiceScopeMismatch", .invalidRequest) }
+        return AudioRouteResolution(requested: .init(source: request.source, offlineModelId: request.offlineModelId, voice: request.voice), effective: .init(source: .provider, modelId: modelId, voiceId: voice?.id, profileId: profileId, providerId: capability.providerId), status: .ready, reason: "ready", fallbackReason: nil)
+    }
     guard source == .automatic || source == .system || source == .offline else { return audioUnavailable(request, "unsupportedSource") }
     if let voice, voice.source != .system && voice.source != .offline { return audioUnavailable(request, "unsupportedVoiceSource", .invalidRequest) }
     if let voice, source != .automatic && voice.source != source { return audioUnavailable(request, "voiceSourceMismatch", .invalidRequest) }

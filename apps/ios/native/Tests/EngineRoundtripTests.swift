@@ -197,8 +197,6 @@ import XCTest
                     routingJson: snapshot.routingJSON
                 ),
                 mobileLinux: nil,
-                localAppsFullRuntime: false,
-                localAppsRuntimeRoot: nil,
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
                 hostEnvironment: makeIosHostEnvironment(launchMode: .interactive)
             )

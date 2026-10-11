@@ -102,6 +102,7 @@ struct DesktopAccountPage: View {
     @State private var repository = DesktopSettingsRepository.shared
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            LingxiAccountSection()
             SettingsConnectionStatus()
             if let auth = repository.auth {
                 switch auth {

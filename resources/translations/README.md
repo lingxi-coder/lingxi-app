@@ -30,7 +30,7 @@ in before anyone has translated it, not an error.
 ## Key format
 
 Flat, snake_case, prefixed by feature area: `chat_`, `composer_`,
-`settings_`, `local_apps_`, `permission_`, `cron_`, `terminal_`, `voice_`,
+`settings_`, `permission_`, `cron_`, `terminal_`, `voice_`,
 `drawer_`, `onboarding_`, `project_`, `common_`, `app_`, `mcp_`, etc. Reuse an
 existing key whenever a new UI string's source text is byte-identical to one
 already in `zh-Hans.json` — this file has heavy, deliberate cross-feature and

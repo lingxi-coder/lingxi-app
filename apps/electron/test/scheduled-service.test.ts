@@ -16,6 +16,10 @@ function task(patch: Partial<CronAutomationDto> = {}): CronJobDto {
   return { id: 'task-1', cron: '0 9 * * *', prompt: '# Morning brief\n\nSummarize the project.', recurring: true, durable: true, permanent: false, created_at: 1,
     automation: { version: 2, status: 'active', model: 'openai/test-model', reasoning: { type: 'level', id: 'high' }, runMode: 'new_session', notificationPolicy: 'all', ...patch } };
 }
+async function writeCatalog(workspace: string, tasks: unknown[]): Promise<void> {
+  await mkdir(join(workspace, '.lingxi'), { recursive: true });
+  await writeFile(join(workspace, '.lingxi', 'scheduled_tasks.json'), JSON.stringify({ tasks }));
+}
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -83,10 +87,40 @@ test('scheduled scopes isolate no-project workspace and reject arbitrary paths b
   assert.deepEqual(h.service.scopes().map((scope) => scope.id), ['global', h.project]);
   await assert.rejects(h.service.manage(join(h.directory, 'unauthorized'), { action: 'list' }), /unavailable/);
   assert.equal(h.ensured.length, 0);
+  await writeCatalog(h.global, [task()]);
   await h.service.manage('global', { action: 'list' });
   assert.equal(h.ensured[0].ref.projectPath, h.global);
   assert.equal(h.requests[0].action, 'list');
   assert.equal(h.projects.has(h.global), false, 'managed workspace is not added as a user project');
+});
+
+test('listing a scope with no persisted catalog answers without starting an engine', async (t) => {
+  const h = await harness(t);
+  assert.deepEqual(await h.service.manage(h.project, { action: 'list' }), []);
+  assert.deepEqual(await h.service.manage(h.project, { action: 'history', id: 'task-1' }), []);
+  assert.deepEqual(await h.service.manage('global', { action: 'list' }), []);
+  assert.equal(h.ensured.length, 0, 'an empty scope must not lease a controller runtime');
+  assert.equal(h.leases.length, 0);
+  assert.deepEqual(h.errors, []);
+});
+
+test('an unreadable catalog body is not reported as an empty scope', async (t) => {
+  const h = await harness(t);
+  await mkdir(join(h.project, '.lingxi'), { recursive: true });
+  await writeFile(join(h.project, '.lingxi', 'scheduled_tasks.json'), JSON.stringify({ tasks: {} }));
+  await h.service.manage(h.project, { action: 'list' });
+  assert.equal(h.ensured.length, 1, 'a body without a tasks array must reach the engine, which reports the corruption');
+  assert.equal(h.requests[0].action, 'list');
+});
+
+test('an emptied catalog retires the cached jobs of that scope', async (t) => {
+  const h = await harness(t);
+  await writeFile(join(h.directory, 'scheduled-scopes.json'), JSON.stringify([{ path: h.project, label: 'project', jobs: [task()] }]));
+  const service = h.createService();
+  t.after(() => service.dispose());
+  assert.deepEqual(await service.manage(h.project, { action: 'list' }), []);
+  h.projects.delete(h.project);
+  assert.equal(service.scopes().some((scope) => scope.unavailable), false, 'an emptied scope must not be advertised as unavailable with stale jobs');
 });
 
 test('new-session runs use unique background sessions and forward the fixed model/effort snapshot', async (t) => {
@@ -195,6 +229,7 @@ test('discovery keeps active scopes alive and releases controllers for removed p
 
 test('failed controller startup releases its lease and disposed services reject new controllers', async (t) => {
   const h = await harness(t);
+  await writeCatalog(h.project, [task()]);
   h.failEnsure(new Error('engine failed to start'));
   await assert.rejects(h.service.manage(h.project, { action: 'list' }), /failed to start/);
   assert.equal(h.leases[0].released, true);

@@ -89,7 +89,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
     async fn take_mid_turn_input(
         &self,
     ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
-        let batch = self.take_mid_turn_batch().await?;
+        let batch = self.take_mid_turn_batch().await.ok()??;
         let mut units = Vec::new();
         for (index, input) in batch.into_iter().enumerate() {
             if index > 0 {
@@ -106,7 +106,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
 
     async fn take_mid_turn_batch(
         &self,
-    ) -> Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>> {
+    ) -> Result<Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>>, String> {
         discard_cancelled_queued_prompts(&self.queue, &self.state).await;
         let candidates = self
             .queue
@@ -160,8 +160,10 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
         for id in consumed {
             self.state.order.lock().unwrap().queued.remove(&id);
         }
-        let (_, ids) = joined?;
-        Some(
+        let Some((_, ids)) = joined else {
+            return Ok(None);
+        };
+        Ok(Some(
             batch
                 .into_iter()
                 .take(ids.len())
@@ -181,7 +183,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInp
                     })
                 })
                 .collect(),
-        )
+        ))
     }
 }
 
@@ -1643,7 +1645,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // restores it instead of resetting to the CLI/config default.
     let carried_mode_gate = tui_build.runtime.enforcing_permission_gate.clone();
     // Cloned BEFORE `on_submit` (below) moves `turn_tx` into its closure.
-    let web_turn_tx = turn_tx.clone();
+    let notice_turn_tx = turn_tx.clone();
     let fusion_turn_tx = turn_tx.clone();
     let teammate_turn_tx = turn_tx.clone();
     let set_mode_turn_tx = turn_tx.clone();
@@ -1664,20 +1666,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // slot so the widget's rate-limit composer reads the live snapshot at
     // compose time — same wiring as the iocraft `with_subscription` path.
     let subscription = tui_build.runtime.subscription.clone();
-    // (/web async effects) Shared HTTP transport + credential store for the
-    // `/web` test-search + secret-save effects, wired below.
-    let web_key_store = tui_build.runtime.provider_key_store.clone();
-    let web_http = tui_build.runtime.http.clone();
     // (/connect picker) Real per-provider login-method + availability maps,
     // cloned before `tui_build` is consumed further below — same convention
-    // as `subscription`/`web_key_store` above.
+    // as `subscription` above.
     let connect_auth_methods = tui_build.runtime.provider_auth_methods.clone();
     let connect_availability = tui_build.runtime.provider_availability.clone();
     // (/connect async effects) Shared credential store + OAuth/Copilot
     // drivers for the real store-key / device-flow / browser sign-in
-    // effects, wired below — same convention as the `/web` cluster above.
-    // `web_key_store` is cloned again here (cheap `Arc` clone) rather than
-    // reused so each closure owns an independent handle.
+    // effects, wired below.
     let connect_key_store = tui_build.runtime.provider_key_store.clone();
     let connect_oauth = tui_build.runtime.oauth_connect_driver.clone();
     let connect_copilot = tui_build.runtime.connect_copilot.clone();
@@ -1714,7 +1710,6 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // `AddDirectory` arm's `DirectoryAdded` hook fire.
     let permission_orch = concrete_orchestrator.clone();
     let switch_handle = handle.clone();
-    let web_handle = handle.clone();
     let connect_handle = handle.clone();
     let permission_handle = handle.clone();
     let bash_handle = handle.clone();
@@ -1803,40 +1798,8 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let sandbox_handle = handle.clone();
     let sandbox_turn_tx = turn_tx.clone();
     let widget_orch = orchestrator.clone();
-    // (/web async effects) Preload the shared `/web` config snapshot from the
-    // real on-disk settings + credential-store presence, mirroring the
-    // deleted iocraft `AppState::web_config_snapshot` startup seed. Shared
-    // (`Arc<Mutex<_>>`) between `ChatWidget::cmd_web` (sync read to open the
-    // picker) and `run_web_action` (async write-back after a save/test).
-    let web_snapshot = {
-        let cfg = tui::web::persist::web_settings_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .map(|v| tool_web::web_search_config::WebSearchConfig::from_settings_json(&v))
-            .unwrap_or_default();
-        let tavily = web_key_store
-            .get_provider_key("web:tavily")
-            .await
-            .ok()
-            .flatten()
-            .is_some();
-        let brave = web_key_store
-            .get_provider_key("web:brave")
-            .await
-            .ok()
-            .flatten()
-            .is_some();
-        std::sync::Arc::new(std::sync::Mutex::new(tui::web::picker::WebConfigSnapshot {
-            active: cfg.provider,
-            tavily_key: tavily,
-            brave_key: brave,
-            searxng_url: cfg.searxng_url,
-            last_test: None,
-        }))
-    };
     // (/fusion setup) Preload the configured Fusion model roles from the SAME
-    // `~/.lingxi/settings.json` the engine loads, mirroring the `/web` snapshot
-    // above. Shared between `ChatWidget::cmd_fusion` (sync read, to seed the
+    // `~/.lingxi/settings.json` the engine loads. Shared between `ChatWidget::cmd_fusion` (sync read, to seed the
     // wizard and to decide whether an unconfigured `/fusion RUN` should open it
     // instead) and `run_fusion_setup_action` (async write-back after a save).
     //
@@ -1856,7 +1819,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
         ))
     };
     // (/permissions) Preload the rule snapshot from the user/project/local
-    // settings files into a shared slot, mirroring the `/web` snapshot above.
+    // settings files into a shared slot.
     // `ChatWidget::cmd_permissions` reads a clone to seed the editor; the async
     // `on_permission_action` effect re-reads disk into this slot after each
     // edit so the NEXT `/permissions` open is current. Kept DISTINCT from the
@@ -2004,7 +1967,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let loop_host = crate::loop_wakeup::CliLoopHost::bind(
         &tui_build.runtime,
         prompt_queue.clone(),
-        web_turn_tx.clone(),
+        notice_turn_tx.clone(),
         queue_cancel_reason.clone(),
     )
     .await;
@@ -2081,7 +2044,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let queued_pending_slashes = pending_slashes.clone();
     let queued_prompt_queue = prompt_queue.clone();
     let queued_prompt_handle = tokio::runtime::Handle::current();
-    let queued_prompt_tx = web_turn_tx.clone();
+    let queued_prompt_tx = notice_turn_tx.clone();
     let queued_task_registry = tui_build.runtime.task_registry.clone();
     let on_queue_prompt = move |prompt: lingxi_core::types::utf16_json::Utf16JsonProjection,
                                 row_token: String,
@@ -2155,30 +2118,14 @@ pub(crate) async fn run_ratatui_with_initial_state(
     let on_switch_model = move |model: String, profile: Option<String>| {
         let _ = model_selection_tx.send((model, profile));
     };
-    // (/web async effects) The picker/config views return `WebAction`s
-    // synchronously from the blocking ratatui loop; the actual persistence
-    // (credential-store write, settings-file merge) and the test search are
-    // async, so each action is spawned back onto the captured runtime handle
-    // — same shape as `on_submit`/`on_switch_model` above. Results land in the
-    // transcript via `TurnEvent::SystemNotice` on the shared `turn_tx`.
-    let web_snapshot_cb = web_snapshot.clone();
-    let on_web_action = move |action: tui::bottom_pane::WebAction| {
-        let key_store = web_key_store.clone();
-        let http = web_http.clone();
-        let tx = web_turn_tx.clone();
-        let snapshot = web_snapshot_cb.clone();
-        web_handle.spawn(async move {
-            run_web_action(action, key_store, http, tx, snapshot).await;
-        });
-    };
-    // (/fusion setup async effect) Mirrors `on_web_action` above: the wizard
+    // (/fusion setup async effect) The wizard
     // returns a save, the settings merge happens off the render loop, and the
     // result is reported into the transcript.
     let fusion_settings_cb = fusion_settings.clone();
     let on_fusion_setup_action = move |action: tui::bottom_pane::FusionSetupAction| {
         run_fusion_setup_action(action, &fusion_turn_tx, &fusion_settings_cb);
     };
-    // (/connect async effects) Mirrors `on_web_action` above: the picker/
+    // (/connect async effects) The picker/
     // method/key views return a `ConnectAction` synchronously from the
     // blocking ratatui loop; the actual persistence (credential-store
     // write) and the OAuth/Copilot device-flow are async, so the action is
@@ -2198,7 +2145,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
     // (/permissions async effect) The editor returns a `PermissionAction`
     // synchronously from the blocking ratatui loop; the settings-file write is
     // async, so it is spawned onto the captured handle — same shape as
-    // `on_web_action` above. Rule changes update the retained SDK policy and
+    // the other callbacks. Rule changes update the retained SDK policy and
     // the transport's allow cache in the same settings layer. The result lands in the
     // transcript via `TurnEvent::SystemNotice`, and the shared snapshot slot is
     // refreshed so the next `/permissions` open reflects the edit.
@@ -3236,7 +3183,6 @@ pub(crate) async fn run_ratatui_with_initial_state(
             computer_access_rx,
             Some(subscription),
             Some(status_line),
-            Some(web_snapshot),
             Some(fusion_settings),
             Some(permission_snapshot),
             Some(plugin_snapshot),
@@ -3260,7 +3206,6 @@ pub(crate) async fn run_ratatui_with_initial_state(
             on_submit,
             on_queue_prompt,
             on_switch_model,
-            on_web_action,
             on_fusion_setup_action,
             on_connect_action,
             on_permission_action,
@@ -4093,7 +4038,7 @@ fn live_permission_rule_update(
 /// and the transport cache for the edited settings layer. The snapshot slot
 /// is re-read from disk afterward so the next
 /// `/permissions` open reflects the edit, and the outcome is reported to the
-/// transcript via `TurnEvent::SystemNotice` — mirroring [`run_web_action`]'s
+/// transcript via `TurnEvent::SystemNotice` — using the shared callback
 /// off-loop shape.
 pub(crate) async fn run_permission_action(
     action: tui::bottom_pane::PermissionAction,
@@ -4417,16 +4362,6 @@ pub(crate) async fn run_permission_action(
     }
 }
 
-/// Run one `/web` [`tui::bottom_pane::WebAction`] to completion: persist a
-/// saved secret/settings change (credential store + `~/.lingxi/settings.json`
-/// merge) or run the real test search, then report the outcome to the
-/// transcript via `TurnEvent::SystemNotice`. Ported faithfully from the
-/// deleted iocraft `tui` crate's `pump_save_web_secret` / `pump_save_web_settings`
-/// / `pump_test_web_search` (git ref `f4ddad16f`, `tui/src/root.rs`), adapted
-/// from the old `Arc<Mutex<AppState>>` pump shape to the new effect-closure
-/// shape: `snapshot` is the composition root's shared `/web` config snapshot
-/// (read by the sync `ChatWidget::cmd_web` to seed the picker), updated here
-/// after a successful save so the NEXT `/web` open reflects it.
 /// `fusion.maxPanel` as the merged settings say it, for the wizard's roster
 /// ceiling. Reads the same layered settings the engine loads, so the wizard
 /// cannot let an operator build a roster the engine would then reject.
@@ -4454,8 +4389,7 @@ fn fusion_max_panel_setting() -> u8 {
 
 /// Persist one finished `/fusion setup` and report the result.
 ///
-/// Synchronous on purpose: this is a single small settings-file merge, the same
-/// read-modify-write `/web`'s `SaveSettings` arm performs, and doing it inline
+/// Synchronous on purpose: this is a single small settings-file merge. Doing it inline
 /// keeps the "saved" notice ordered before anything the operator types next.
 fn run_fusion_setup_action(
     action: tui::bottom_pane::FusionSetupAction,
@@ -4513,157 +4447,6 @@ fn run_fusion_setup_action(
     }
 }
 
-async fn run_web_action(
-    action: tui::bottom_pane::WebAction,
-    key_store: Arc<secret::CredentialManager>,
-    http: Arc<dyn lingxi_core::host::HttpTransport>,
-    turn_tx: tokio::sync::mpsc::UnboundedSender<tui_core::orchestrator_bridge::TurnEvent>,
-    snapshot: std::sync::Arc<std::sync::Mutex<tui::web::picker::WebConfigSnapshot>>,
-) {
-    use tool_web::web_search_config::{WebSearchConfig, WebSearchProvider};
-    use tui::bottom_pane::WebAction;
-    use tui_core::orchestrator_bridge::TurnEvent;
-
-    let label = tui::web::picker::provider_label;
-
-    match action {
-        WebAction::SaveSecret { provider, secret } => {
-            let Some(id) = tui::web::persist::web_credential_id(provider) else {
-                return;
-            };
-            match key_store.set_provider_key(id, &secret).await {
-                Ok(()) => {
-                    let searxng_url = {
-                        let mut s = snapshot.lock().unwrap();
-                        match provider {
-                            WebSearchProvider::Tavily => s.tavily_key = true,
-                            WebSearchProvider::Brave => s.brave_key = true,
-                            _ => {}
-                        }
-                        s.active = provider;
-                        s.searxng_url.clone()
-                    };
-                    let cfg = WebSearchConfig {
-                        provider,
-                        searxng_url,
-                    };
-                    if let Some(p) = tui::web::persist::web_settings_path() {
-                        let _ = tui::web::persist::save_web_settings_to(&p, &cfg);
-                    }
-                    let _ = turn_tx.send(TurnEvent::SystemNotice {
-                        body: format!("✓ Saved {} API key.", label(provider)).into(),
-                        is_error: false,
-                    });
-                }
-                Err(e) => {
-                    let _ = turn_tx.send(TurnEvent::SystemNotice {
-                        body: format!("✗ Failed to save key: {e}").into(),
-                        is_error: true,
-                    });
-                }
-            }
-        }
-        WebAction::SaveSettings {
-            provider,
-            searxng_url,
-        } => {
-            let cfg = WebSearchConfig {
-                provider,
-                searxng_url: searxng_url.clone(),
-            };
-            let ok = tui::web::persist::web_settings_path()
-                .map(|p| tui::web::persist::save_web_settings_to(&p, &cfg).is_ok())
-                .unwrap_or(false);
-            if ok {
-                let mut s = snapshot.lock().unwrap();
-                s.active = provider;
-                s.searxng_url = searxng_url;
-                drop(s);
-                let _ = turn_tx.send(TurnEvent::SystemNotice {
-                    body: format!("✓ Web search set to {}.", label(provider)).into(),
-                    is_error: false,
-                });
-            } else {
-                let _ = turn_tx.send(TurnEvent::SystemNotice {
-                    body: "✗ Failed to save web settings.".to_string().into(),
-                    is_error: true,
-                });
-            }
-        }
-        WebAction::TestSearch {
-            provider,
-            typed_key,
-        } => {
-            use tool_web::web_search_client::{
-                resolve_client_search_provider_with_credentials, run_client_web_search,
-                EnvSearchConfig, ResolvedWebCredentials,
-            };
-
-            let searxng_url = snapshot.lock().unwrap().searxng_url.clone();
-            let cfg = WebSearchConfig {
-                provider,
-                searxng_url,
-            };
-            let mut creds = ResolvedWebCredentials::empty();
-            match (provider, typed_key) {
-                (WebSearchProvider::Tavily, Some(k)) => creds.tavily_key = Some(k),
-                (WebSearchProvider::Brave, Some(k)) => creds.brave_key = Some(k),
-                _ => {
-                    if let Ok(Some(secret)) = key_store.get_provider_key("web:tavily").await {
-                        creds.tavily_key = Some(secret.expose_secret().clone());
-                    }
-                    if let Ok(Some(secret)) = key_store.get_provider_key("web:brave").await {
-                        creds.brave_key = Some(secret.expose_secret().clone());
-                    }
-                }
-            }
-            let env = EnvSearchConfig::from_env();
-            let result = match resolve_client_search_provider_with_credentials(&cfg, &creds, &env) {
-                Ok(resolved) => {
-                    run_client_web_search(&http, &resolved, "current weather Beijing", &[], &[], 3)
-                        .await
-                        .map(|hits| (resolved, hits))
-                }
-                Err(e) => Err(e),
-            };
-            // Build the BARE message (no ✓/✗ mark) — matches the iocraft
-            // oracle's `WebTestSummary.message`. The mark is added only when
-            // formatting the notice below (and by the picker's
-            // `web_provider_detail_lines` "Last test: {mark} {msg}" line), so
-            // storing it bare avoids a doubled mark.
-            let (bare, is_error) = match result {
-                Ok((resolved, hits)) => {
-                    let count = hits.len();
-                    // Guard an empty top-hit title so no dangling " · " renders
-                    // (oracle parity — DuckDuckGo/SearXNG hits can be titleless).
-                    let top = hits.first().map_or(String::new(), |h| {
-                        if h.title.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · {}", h.title)
-                        }
-                    });
-                    (format!("{}: {count} results{top}", resolved.label()), false)
-                }
-                Err(e) => (format!("{} test failed: {e}", label(provider)), true),
-            };
-            let mark = if is_error { "✗" } else { "✓" };
-            {
-                let mut s = snapshot.lock().unwrap();
-                s.last_test = Some(tui::web::picker::WebTestSummary {
-                    provider,
-                    ok: !is_error,
-                    message: bare.clone(),
-                });
-            }
-            let _ = turn_tx.send(TurnEvent::SystemNotice {
-                body: format!("{mark} {bare}").into(),
-                is_error,
-            });
-        }
-    }
-}
-
 /// Finish the TUI's raw API-key write after the engine has decided whether
 /// the already-built provider route can use it. Keeping this branch separate
 /// makes the fail-closed event contract testable without fabricating a
@@ -4702,7 +4485,7 @@ fn finish_stored_key_connect(
 /// Run one `/connect` [`tui::bottom_pane::ConnectAction`] to completion:
 /// persist an API key, drive the GitHub Copilot device-flow, or drive an
 /// OAuth browser sign-in — then report the outcome to the transcript via
-/// `TurnEvent::SystemNotice`. Mirrors [`run_web_action`]'s shape: the
+/// `TurnEvent::SystemNotice`. Uses the shared callback shape: the
 /// picker/method/key views return the action synchronously from the
 /// blocking ratatui loop; this async tail does the real persistence/network
 /// work off the render thread.
@@ -6018,7 +5801,7 @@ mod tests {
             .map_or(SRC, |(prod, _)| prod);
 
         let call = ".summarize_a".to_string()
-            + "t(&message.to_string(), context.as_deref(), direction, cancel)";
+            + "t(&message.to_string(), context.as_ref(), direction, cancel)";
         assert_eq!(
             production.matches(&call).count(),
             1,
@@ -6163,10 +5946,13 @@ mod tests {
         }
         async fn run_turn_streaming_with_cancel(
             &self,
-            prompt: &str,
+            prompt: &harness_runtime::headless::Utf16JsonProjection,
             _cancel: CancellationToken,
         ) -> Result<lingxi_core::host::TurnOutcome, lingxi_core::host::HandleError> {
-            self.0.lock().unwrap().push(prompt.to_string());
+            self.0
+                .lock()
+                .unwrap()
+                .push(prompt.string_at("").unwrap().to_owned());
             if let Some((started, release)) = &self.1 {
                 started.notify_one();
                 release.notified().await;
@@ -6196,10 +5982,14 @@ mod tests {
         async fn run(
             &self,
             _plugin: &str,
-            _command: &str,
-            args: &str,
+            _command: &harness_runtime::headless::Utf16JsonProjection,
+            args: &harness_runtime::headless::Utf16JsonProjection,
             context: command_api::ModCommandRunContext,
-        ) -> Result<String, String> {
+        ) -> Result<
+            harness_runtime::headless::Utf16JsonProjection,
+            harness_runtime::headless::Utf16JsonProjection,
+        > {
+            let args = args.string_at("").unwrap();
             let raw = format!(
                 "{}:{}:{}:{}:{args}",
                 context.origin["kind"].as_str().unwrap(),
@@ -6207,8 +5997,13 @@ mod tests {
                 context.is_fullscreen,
                 context.columns
             );
-            command_api::record_mod_command_settlement(serde_json::json!({"text":raw}));
-            Ok(format!("display: {raw}"))
+            command_api::record_mod_command_settlement(
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"text":raw}),
+                )
+                .unwrap(),
+            );
+            Ok(format!("display: {raw}").into())
         }
     }
 
@@ -6225,7 +6020,10 @@ mod tests {
         catalog
             .register(
                 "demo",
-                serde_json::json!({"name":"hello","description":"Greet"}),
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"name":"hello","description":"Greet"}),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -6238,7 +6036,8 @@ mod tests {
             queue: queue.clone(),
             state: state.clone(),
         };
-        let call = tokio::spawn(async move { runner.enqueue("demo", "hello", "Ada").await });
+        let call =
+            tokio::spawn(async move { runner.enqueue("demo", "hello".into(), "Ada".into()).await });
         let queued = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if let Some(command) = queue.peek(|_| true).await {
@@ -6268,13 +6067,14 @@ mod tests {
         assert!(matches!(
             rx.try_recv(),
             Ok(tui::TurnEvent::SystemNotice { body, is_error: false })
-                if body == format!("display: plugin:demo:true:{columns}:Ada")
+                if body == format!("display: plugin:demo:true:{columns}:Ada").into()
         ));
         assert_eq!(
             call.await.unwrap().unwrap(),
-            serde_json::json!({
+            harness_runtime::headless::Utf16JsonProjection::from_serde_value(&serde_json::json!({
                 "text":format!("plugin:demo:true:{columns}:Ada")
-            })
+            }))
+            .unwrap()
         );
     }
 
@@ -6288,8 +6088,11 @@ mod tests {
             queue: queue.clone(),
             state: state.clone(),
         };
-        let call =
-            tokio::spawn(async move { runner.enqueue_prompt("demo", "follow up", true).await });
+        let call = tokio::spawn(async move {
+            runner
+                .enqueue_prompt("demo", "follow up".into(), true)
+                .await
+        });
         let queued = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if let Some(command) = queue.peek(|_| true).await {
@@ -6309,7 +6112,10 @@ mod tests {
         drain_teammate_prompts(&queue, &turns, &tx, &state).await;
         assert_eq!(
             call.await.unwrap().unwrap(),
-            serde_json::json!({"text":"follow up"})
+            harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"text":"follow up"})
+            )
+            .unwrap()
         );
         assert_eq!(turns.0.lock().unwrap().as_slice(), &["follow up"]);
     }
@@ -6325,7 +6131,8 @@ mod tests {
             queue: queue.clone(),
             state: state.clone(),
         };
-        let call = tokio::spawn(async move { runner.enqueue("demo", "hello", "Ada").await });
+        let call =
+            tokio::spawn(async move { runner.enqueue("demo", "hello".into(), "Ada".into()).await });
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while queue.peek(|_| true).await.is_none() {
                 tokio::task::yield_now().await;
@@ -6355,7 +6162,10 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap(),
-            serde_json::json!({})
+            harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({})
+            )
+            .unwrap()
         );
         assert!(!drain.is_finished());
         release.notify_one();
@@ -6439,7 +6249,12 @@ mod tests {
         queue.enqueue(teammate).await;
         let input = TuiMsgQueueInput { queue, state };
         assert_eq!(
-            input.take_mid_turn_input().await.as_deref(),
+            input
+                .take_mid_turn_input()
+                .await
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
             Some("unowned teammate")
         );
     }
@@ -6503,7 +6318,15 @@ mod tests {
             queue.enqueue(command).await;
             drop(publication);
         }
-        assert_eq!(input.take_mid_turn_input().await.as_deref(), Some("A\nA2"));
+        assert_eq!(
+            input
+                .take_mid_turn_input()
+                .await
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
+            Some("A\nA2")
+        );
         assert!(state.order.lock().unwrap().queued.is_empty());
         assert_eq!(
             state.owners.lock().unwrap().len(),
@@ -6545,7 +6368,15 @@ mod tests {
         );
         queue.enqueue(first).await;
         drop(first_publication);
-        assert_eq!(input.take_mid_turn_input().await.as_deref(), Some("A\nB"));
+        assert_eq!(
+            input
+                .take_mid_turn_input()
+                .await
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
+            Some("A\nB")
+        );
     }
 
     #[tokio::test]
@@ -6565,7 +6396,15 @@ mod tests {
             drop(publication);
         }
         old.cancel();
-        assert_eq!(input.take_mid_turn_input().await.as_deref(), Some("new"));
+        assert_eq!(
+            input
+                .take_mid_turn_input()
+                .await
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
+            Some("new")
+        );
         assert!(state.order.lock().unwrap().queued.is_empty());
     }
 
@@ -6587,7 +6426,7 @@ mod tests {
             acquire_ordered_host_turn(&gate, &queue, &orch, &tx, &state, first, &cancel)
                 .await
                 .unwrap();
-        orch.run_turn_streaming_with_cancel("slash1", cancel.clone())
+        orch.run_turn_streaming_with_cancel(&"slash1".into(), cancel.clone())
             .await
             .unwrap();
         drop(first_guard);
@@ -6603,7 +6442,7 @@ mod tests {
         queue.enqueue(command).await;
         drop(publication);
         let _second_guard = second_start.await.unwrap();
-        orch.run_turn_streaming_with_cancel("slash2", cancel.clone())
+        orch.run_turn_streaming_with_cancel(&"slash2".into(), cancel.clone())
             .await
             .unwrap();
         assert_eq!(*orch.0.lock().unwrap(), ["slash1", "A", "slash2"]);
@@ -6634,7 +6473,7 @@ mod tests {
         queue.enqueue(command).await;
         drop(publication);
         let _guard = start.await.unwrap();
-        orch.run_turn_streaming_with_cancel("B", cancel.clone())
+        orch.run_turn_streaming_with_cancel(&"B".into(), cancel.clone())
             .await
             .unwrap();
         assert_eq!(*orch.0.lock().unwrap(), ["A", "B"]);
@@ -6776,7 +6615,7 @@ mod tests {
         )
         .is_none());
         assert!(
-            matches!(rx.try_recv().unwrap(), tui::TurnEvent::SystemNotice { body, .. } if body == "Stopped")
+            matches!(rx.try_recv().unwrap(), tui::TurnEvent::SystemNotice { body, .. } if body == "Stopped".into())
         );
         assert!(rx.try_recv().is_err());
         assert!(slash_model_prompt(
@@ -7659,12 +7498,14 @@ detached catalog refresh"
                     body,
                     is_error: false,
                 } => panic!(
-                    "an unsupported hot route must not report a ready/success notice: {body}"
+                    "an unsupported hot route must not report a ready/success notice: {body:?}"
                 ),
                 _ => {}
             }
         }
-        let restart_notice = restart_notice.expect("saved credential reports restart required");
+        let restart_notice = restart_notice
+            .expect("saved credential reports restart required")
+            .display();
         assert!(restart_notice.contains("was saved"), "{restart_notice}");
         assert!(
             restart_notice.contains("Restart LingXi"),

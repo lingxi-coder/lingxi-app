@@ -62,12 +62,6 @@ agent = { workspace = true }
 # (`canonicalModel`, cc 2.1.218 `yo(r)` = `firstPartyNameToCanonical`).
 cost = { workspace = true }
 dirs = "5"
-# `/web` async effect closure (`mode.rs::run_web_action`): persists the
-# picker/config save via `tui::web::persist`'s `WebSearchConfig`, and runs the
-# real test-search via `tool_web::web_search_client`. Naming the leaf crate
-# here (rather than only reaching it transitively through `tui`) matches the
-# `secret`/`command-core` precedent above.
-tool-web = { workspace = true }
 tui = { path = "../tui" }
 tui-core = { path = "../tui-core" }
 session = { workspace = true }

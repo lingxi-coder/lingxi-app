@@ -1,3 +1,6 @@
+import { AccountService } from './account.js';
+import { accountSessionStore } from './account-storage.js';
+import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
 import { app, BrowserWindow, dialog, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
@@ -14,6 +17,7 @@ import {
   SessionLaunchCache,
 } from './credential-broker.js';
 import { CODEX_PROVIDER_ID, parseCodexSession } from './codex-auth.js';
+import { ProviderAudioHost } from './audio/providerAudioHost.js';
 import { NativeAudioManager } from './audio/nativeAudioManager.js';
 import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguration.js';
 import { TerminalManager } from './terminal.js';
@@ -222,12 +226,26 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     ? 'credential store: macOS credential broker'
     : 'credential store: shared engine secure storage');
   const settings = new SettingsStore(userData);
+  const audioSessionContext = (owner?: import('@lingxi/bridge-client').AudioOwnerDto) => {
+    const sessionId = owner?.type === 'session' ? owner.session_id : settings.getPublic().activeSession?.sessionId;
+    return sessionId ? bridge?.get(sessionId)?.audioSessionContext : undefined;
+  };
+  const providerAudio = new ProviderAudioHost({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    cwd: () => settings.getPublic().activeSession?.projectPath ?? settings.getWorkspace() ?? app.getPath('home'),
+    session: () => audioSessionContext(),
+    realtimeSupported: () => { const sessionId = settings.getPublic().activeSession?.sessionId; return !!sessionId && bridge?.get(sessionId)?.realtimeAudioSupported === true; },
+    resolveCredential: (credentialId) => resolveProviderCredential(credentialId, { credentialBroker }),
+  });
   nativeAudio = process.platform === 'darwin'
     ? new NativeAudioManager({
         isPackaged: app.isPackaged,
         resourcesPath: process.resourcesPath,
         userDataPath: userData,
         diagnostics,
+        providerAudio,
+        getAudioSessionContext: audioSessionContext,
         requestMicrophoneAccess: () => requestMicrophoneAccess(),
         getAudioConfiguration: () => {
           const error = settings.getAudioConfigurationError();
@@ -418,6 +436,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
   }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
+  host.attachAccount(new AccountService(firebaseConfig, accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url)));
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
   scheduled.start();

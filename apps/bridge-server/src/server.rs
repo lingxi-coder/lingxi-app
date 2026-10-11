@@ -47,8 +47,8 @@ use crate::audio_bridge::{AudioRequestSink, AudioResponder};
 use async_trait::async_trait;
 use bridge::wire::Frame;
 use bridge::{
-    BRIDGE_PROTOCOL_VERSION, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities,
-    ClientHello, FramePump, FrameSink, ServerHello, version_compatible,
+    version_compatible, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities, ClientHello,
+    FramePump, FrameSink, ServerHello, BRIDGE_PROTOCOL_VERSION,
 };
 use client::adapter::{
     AskUserQuestionBroker, ClientEventSink, ComputerAccessRequestSink, PermissionRequestSink,
@@ -60,8 +60,8 @@ use client::protocol::permission::{PermissionKindDto, PermissionRequest, Permiss
 use client::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use msgqueue::{
-    MessageQueueManager, QueuePriority, QueueSource, QueuedCommand, QueuedCommandContent,
-    TelemetryQueueRecorder, join_prompt_values,
+    join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,
+    QueuedCommandContent, TelemetryQueueRecorder,
 };
 use permission::computer_access::ComputerAccessExchange;
 use tokio::sync::Mutex;
@@ -763,6 +763,119 @@ impl TurnInteractions {
     }
 }
 
+/// Native audio uses the same permission and interaction owner as a chat turn,
+/// while microphone controls remain outside the ordinary turn admission lane.
+#[derive(Clone)]
+pub(crate) struct RealtimeExecutionOwners {
+    active_turn: ActiveTurnControl,
+    turn_running: Arc<AtomicBool>,
+    handoff: Arc<Mutex<()>>,
+    interactions: TurnInteractions,
+}
+pub(crate) struct RealtimeExecutionOwner {
+    active_turn: ActiveTurnControl,
+    interactions: TurnInteractions,
+    generation: u64,
+    permission_owner_id: Option<u64>,
+    cancel: CancellationToken,
+    retire_gate: Mutex<()>,
+    retired: AtomicBool,
+    runner_completion: Arc<RealtimeRunnerCompletion>,
+}
+struct RealtimeRunnerCompletion {
+    done: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+pub(crate) struct RealtimeRunnerGuard(Arc<RealtimeRunnerCompletion>);
+impl Drop for RealtimeRunnerGuard {
+    fn drop(&mut self) {
+        self.0.done.store(true, Ordering::Release);
+        self.0.notify.notify_waiters();
+    }
+}
+impl RealtimeExecutionOwners {
+    pub(crate) fn begin(&self, session_id: &str) -> Result<Arc<RealtimeExecutionOwner>, String> {
+        // A busy ordinary callback is rejected; do not wait while the same
+        // connection may be needed to answer that callback's permission request.
+        let _handoff = self
+            .handoff
+            .try_lock()
+            .map_err(|_| "a session transition is active")?;
+        if self.turn_running.load(Ordering::SeqCst)
+            || self.active_turn.cancellation_target(None).is_some()
+        {
+            return Err("a conversation execution is already active".into());
+        }
+        if let Some(gate) = self.active_turn.gate() {
+            gate.set_session_id(Some(session_id.into()));
+        }
+        let (generation, cancel) = self.active_turn.begin(None);
+        let permission_owner_id = self.active_turn.permission_owner_id(generation);
+        Ok(Arc::new(RealtimeExecutionOwner {
+            active_turn: self.active_turn.clone(),
+            interactions: self.interactions.clone(),
+            generation,
+            permission_owner_id,
+            cancel,
+            retire_gate: Mutex::new(()),
+            retired: AtomicBool::new(false),
+            runner_completion: Arc::new(RealtimeRunnerCompletion {
+                done: AtomicBool::new(true),
+                notify: tokio::sync::Notify::new(),
+            }),
+        }))
+    }
+}
+impl RealtimeExecutionOwner {
+    pub(crate) fn reserve_runner(&self) -> RealtimeRunnerGuard {
+        self.runner_completion.done.store(false, Ordering::Release);
+        RealtimeRunnerGuard(self.runner_completion.clone())
+    }
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+    pub(crate) async fn cancel_permissions(&self) {
+        if let (Some(gate), Some(owner)) = (&self.interactions.gate, self.permission_owner_id) {
+            let cancelled = gate.cancel_owner(owner).await;
+            let mut tool_names = self.interactions.tool_names.lock().await;
+            for request_id in cancelled {
+                tool_names.remove(&request_id);
+            }
+        }
+    }
+    pub(crate) async fn retire(&self) {
+        let _retire = self.retire_gate.lock().await;
+        if self.retired.load(Ordering::Acquire) {
+            return;
+        }
+        self.cancel.cancel();
+        self.cancel_permissions().await;
+        loop {
+            let done = self.runner_completion.notify.notified();
+            tokio::pin!(done);
+            done.as_mut().enable();
+            if self.runner_completion.done.load(Ordering::Acquire) {
+                break;
+            }
+            done.await;
+        }
+        if let Some(broker) = &self.interactions.ask_user_question_broker {
+            broker.cancel_closed().await;
+        }
+        if let Some(broker) = &self.interactions.computer_access_broker {
+            broker.cancel_closed().await;
+        }
+        self.active_turn.finish(self.generation);
+        self.retired.store(true, Ordering::Release);
+    }
+}
+impl Drop for RealtimeExecutionOwner {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.active_turn.finish(self.generation);
+    }
+}
+
 /// Interaction cleanup and owner retirement are one handoff. A cancellation
 /// can await publication/resolution callbacks while the driver finishes; its
 /// owned interaction cleanup must complete before the next owner starts.
@@ -804,16 +917,26 @@ impl ActiveTurnControl {
     fn begin(&self, turn_id: Option<u64>) -> (u64, CancellationToken) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = CancellationToken::new();
-        *self
+        let previous = self
             .owner
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(ActiveTurnOwner {
-            generation,
-            turn_id,
-            cancel: cancel.clone(),
-            terminal: false,
-            permission_owner_id: self.gate().map(|gate| gate.begin_main_turn(None, turn_id)),
-        });
+            .unwrap_or_else(|poison| poison.into_inner())
+            .replace(ActiveTurnOwner {
+                generation,
+                turn_id,
+                cancel: cancel.clone(),
+                terminal: false,
+                permission_owner_id: self.gate().map(|gate| gate.begin_main_turn(None, turn_id)),
+            });
+        // A scheduled execution may replace a native owner without entering
+        // the ordinary command lane. Signal it before it can keep the SDK
+        // turn gate or accept another native permission/input.
+        if let Some(previous) = previous {
+            previous.cancel.cancel();
+            if let (Some(gate), Some(owner)) = (self.gate(), previous.permission_owner_id) {
+                gate.end_main_turn(owner);
+            }
+        }
         (generation, cancel)
     }
 
@@ -1594,6 +1717,9 @@ impl Drop for BridgeConnection {
             handle.abort();
         }
         self.abort_active_turn_task();
+        if let Some(router) = &self.router {
+            router.abort_realtime_audio();
+        }
         for task in self
             .question_rejections
             .lock()
@@ -1978,6 +2104,25 @@ impl BridgeConnection {
             .await;
     }
 
+    pub(crate) fn realtime_execution_owners(
+        &self,
+        gate: Arc<AdapterPermissionGate>,
+        computer_access_broker: Arc<ComputerAccessBroker>,
+        ask_user_question_broker: Arc<AskUserQuestionBroker>,
+    ) -> RealtimeExecutionOwners {
+        RealtimeExecutionOwners {
+            active_turn: self.active_turn.clone(),
+            turn_running: self.turn_running.clone(),
+            handoff: self.turn_handoff.clone(),
+            interactions: TurnInteractions {
+                gate: Some(gate),
+                computer_access_broker: Some(computer_access_broker),
+                ask_user_question_broker: Some(ask_user_question_broker),
+                tool_names: self.tool_names.clone(),
+            },
+        }
+    }
+
     /// The connection-scoped [`PermissionRequestSink`] to bind into the
     /// [`AdapterPermissionGate`]. Every `check()` request flows through here as a
     /// [`Frame::PermissionRequest`].
@@ -2201,7 +2346,13 @@ impl BridgeConnection {
             return;
         }
         let bridge_ok = version_compatible(BRIDGE_PROTOCOL_VERSION, &hello.protocol_version);
-        let server_caps = Capabilities::default();
+        let server_caps = Capabilities {
+            realtime_audio: self
+                .router
+                .as_ref()
+                .is_some_and(|router| router.realtime_audio_supported()),
+            ..Capabilities::default()
+        };
         let client_ok = version_compatible(
             &server_caps.client_protocol_version,
             &hello.capabilities.client_protocol_version,
@@ -2296,6 +2447,20 @@ impl BridgeConnection {
             }
         }
         match command {
+            command @ (ClientCommand::StartRealtimeAudio { .. }
+            | ClientCommand::RealtimeAudioInput { .. }
+            | ClientCommand::StopRealtimeAudio) => {
+                if let Some(router) = self.router.clone() {
+                    router.route(command, self.unscoped_event_sink()).await;
+                } else {
+                    self.unscoped_event_sink()
+                        .emit(ClientEvent::Error {
+                            kind: ErrorKindDto::Rejected,
+                            message: "native realtime audio controller is not installed".into(),
+                        })
+                        .await;
+                }
+            }
             ClientCommand::UiAttach { surface, client_id } => {
                 let _lifecycle = self.ui_lifecycle_gate.lock().await;
                 let mut owned = self.ui_attached_clients.lock().await;
@@ -2401,6 +2566,9 @@ impl BridgeConnection {
                 let text = self
                     .visualization_followup(text.into_projection(), visualization_context.as_ref())
                     .await;
+                if let Some(router) = &self.router {
+                    router.stop_realtime_audio().await;
+                }
                 self.handle_send_prompt(text, images, turn_id).await;
             }
             ClientCommand::ScheduledRunTurn {
@@ -2489,6 +2657,9 @@ impl BridgeConnection {
             // only / unknown / no-dispatcher cases fall back to the router's
             // text-surface path.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
+                if let Some(router) = &self.router {
+                    router.stop_realtime_audio().await;
+                }
                 let raw_source = raw.clone().into_projection();
                 // Check before dispatch_slash: builtins execute there, not in
                 // the later display-only routing fallback. Use connection run
@@ -2650,6 +2821,9 @@ impl BridgeConnection {
                 }
                 let _transition = TransitionScope::begin(&self.transition_active);
                 // Only an admitted replacement owns timer teardown.
+                if let Some(router) = &self.router {
+                    router.stop_realtime_audio().await;
+                }
                 self.stop_loop_for_session_transition().await;
                 if let Some(router) = &self.router {
                     // Session transitions have no active turn. Their restored
@@ -2659,6 +2833,12 @@ impl BridgeConnection {
                     router.route(command, self.unscoped_event_sink()).await;
                 }
                 self.refresh_permission_session().await;
+            }
+            command @ ClientCommand::SetModel { .. } => {
+                if let Some(router) = &self.router {
+                    router.stop_realtime_audio().await;
+                    router.route(command, self.unscoped_event_sink()).await;
+                }
             }
             // The FULL command surface (model, listings, slash, tasks, session
             // control) is delegated to the bound [`CommandRouter`] (F2-08), which
@@ -3137,6 +3317,8 @@ impl FramePump for BridgeConnection {
                 | ClientCommand::ApproveComputerAccess { .. }
                 | ClientCommand::DenyComputerAccess { .. }
                 | ClientCommand::AudioResponse { .. }
+                | ClientCommand::RealtimeAudioInput { .. }
+                | ClientCommand::StopRealtimeAudio
                 | ClientCommand::AnswerAskUserQuestion { .. }
                 | ClientCommand::CancelAskUserQuestion { .. },
             ) => true,
@@ -3387,6 +3569,9 @@ impl BridgeConnection {
                 }
             }
         }
+        if let Some(router) = &self.router {
+            router.stop_realtime_audio().await;
+        }
         self.abort_and_join_active_turn_task().await;
         self.turn_running.store(false, Ordering::SeqCst);
         self.active_turn.clear();
@@ -3498,10 +3683,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ActiveTurnControl, BridgeConnection, BridgeModCommandQueue, ModQueueDrain,
-        PendingModCommands, TurnDriver, TurnInteractions, UnscopedFrameEventSink,
         batchable_prompt_snapshot, deserialize_source, drain_main_thread, is_owned_turn_event,
-        run_queued_mod_command, serialize_source,
+        run_queued_mod_command, serialize_source, text_object_projection, ActiveTurnControl,
+        BridgeConnection, BridgeModCommandQueue, ModQueueDrain, PendingModCommands, TurnDriver,
+        TurnInteractions, UnscopedFrameEventSink,
     };
 
     #[test]
@@ -3570,7 +3755,7 @@ mod tests {
             messages_before: 2,
             messages_after: 1,
             bytes_saved: 10,
-            summary: "kept context".to_string(),
+            summary: "kept context".into(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::SystemNotice {
             message: "late notice".into(),
@@ -3583,20 +3768,20 @@ mod tests {
         }));
         assert!(is_owned_turn_event(&ClientEvent::UiLog {
             plugin: "review".to_string(),
-            text: "late log".to_string(),
+            text: "late log".into(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::UiToast {
             plugin: "review".to_string(),
-            text: "late toast".to_string(),
+            text: "late toast".into(),
             timeout_ms: 4000,
         }));
         assert!(is_owned_turn_event(&ClientEvent::UiStatus {
             plugin: "review".to_string(),
-            text: Some("late status".to_string()),
+            text: Some("late status".into()),
         }));
         assert!(is_owned_turn_event(&ClientEvent::UiNotify {
             plugin: "review".to_string(),
-            text: "late notice".to_string(),
+            text: "late notice".into(),
         }));
         assert!(is_owned_turn_event(&ClientEvent::Attachment {
             attachment: client::protocol::events::AttachmentDto::NestedMemory {
@@ -3618,7 +3803,7 @@ mod tests {
     }
 
     /// Shared cell capturing the `(prompt, images)` a driver was driven with.
-    type CapturedTurn = Arc<Mutex<Option<(String, Vec<ImageRefDto>)>>>;
+    type CapturedTurn = Arc<Mutex<Option<(Utf16JsonProjection, Vec<ImageRefDto>)>>>;
 
     /// A [`TurnDriver`] that records the `(prompt, images)` it was driven with, so a
     /// test can assert the `SendPrompt` dispatch forwarded the wire `images`.
@@ -3874,7 +4059,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             captured.lock().await.as_ref().unwrap().0,
-            "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>"
+            "<teammate-message teammate_id=\"researcher\">\nDone\n</teammate-message>".into()
         );
         assert!(connection.queue.is_empty().await);
     }
@@ -4015,14 +4200,12 @@ mod tests {
         connection.turn_running.store(true, Ordering::SeqCst);
         connection.handshaken.store(true, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                driver.started.notified()
-            )
-            .await
-            .is_err()
-        );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            driver.started.notified()
+        )
+        .await
+        .is_err());
         connection.turn_running.store(false, Ordering::SeqCst);
         tokio::time::timeout(std::time::Duration::from_secs(2), driver.started.notified())
             .await
@@ -4123,7 +4306,7 @@ mod tests {
             .await
             .clone()
             .expect("the bound driver must have been driven");
-        assert_eq!(got.0.string_at(""), Some("look at these"));
+        assert_eq!(got.0.string_at(""), Some("look at these".into()));
         assert_eq!(
             got.1, images,
             "the SendPrompt images must reach run_turn_with_images, not be dropped"
@@ -4325,7 +4508,10 @@ mod tests {
         catalog
             .register(
                 "demo",
-                serde_json::json!({"name":"hello","description":"Greet"}),
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"name":"hello","description":"Greet"}),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -4384,15 +4570,13 @@ mod tests {
         assert_eq!(queued.source, QueueSource::Plugin);
         assert_eq!(queued.priority, QueuePriority::Later);
         assert!(!queued.is_meta);
-        assert!(
-            batchable_prompt_snapshot(
-                &queue,
-                &connection.queued_prompt_payloads,
-                &connection.turn_handoff,
-            )
-            .await
-            .is_empty()
-        );
+        assert!(batchable_prompt_snapshot(
+            &queue,
+            &connection.queued_prompt_payloads,
+            &connection.turn_handoff,
+        )
+        .await
+        .is_empty());
 
         let driver: Arc<dyn TurnDriver> = Arc::new(RecordingDriver {
             captured: Arc::new(Mutex::new(None)),
@@ -4541,7 +4725,10 @@ mod tests {
         catalog
             .register(
                 "demo",
-                serde_json::json!({"name":"origin","description":"Inspect"}),
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"name":"origin","description":"Inspect"}),
+                )
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -4687,7 +4874,7 @@ mod tests {
                 .lock()
                 .await
                 .as_ref()
-                .map(|(prompt, _)| prompt.as_str()),
+                .and_then(|(prompt, _)| prompt.string_at("")),
             Some("expanded plugin prompt")
         );
         assert!(!connection.active_turn.is_active());
@@ -4786,7 +4973,7 @@ mod tests {
         // `dispatch` SPAWNS the turn; wait for the recording driver to fire.
         notify.notified().await;
         let got = captured.lock().await.clone().expect("driver must run");
-        assert_eq!(got.0.string_at(""), Some("EXPANDED /loop prompt"));
+        assert_eq!(got.0.string_at(""), Some("EXPANDED /loop prompt".into()));
         assert!(
             !routed.load(Ordering::SeqCst),
             "a RunAsTurn result must NOT take the display-only route fallback"
@@ -4810,7 +4997,7 @@ mod tests {
         let routed = Arc::new(AtomicBool::new(false));
         let router: Arc<dyn crate::router::CommandRouter> = Arc::new(StubRouter {
             result: lingxi_core::host::SlashDispatchResult::Handled {
-                display: "help text".to_string(),
+                display: "help text".into(),
             },
             routed: routed.clone(),
         });
@@ -4866,8 +5053,8 @@ mod tests {
 
     #[test]
     fn cancellation_priority_requires_an_existing_matching_turn() {
-        use bridge::FramePump;
         use bridge::wire::{BridgeRequest, Frame};
+        use bridge::FramePump;
         let connection = BridgeConnection::new();
         let cancel = |turn_id| {
             Frame::Request(BridgeRequest {
@@ -4894,8 +5081,8 @@ mod tests {
 
     #[test]
     fn audio_capability_updates_share_the_response_lane_after_handshake() {
-        use bridge::FramePump;
         use bridge::wire::{BridgeRequest, Frame};
+        use bridge::FramePump;
 
         let connection = BridgeConnection::new();
         let update = Frame::Request(BridgeRequest {
@@ -4988,7 +5175,13 @@ mod tests {
 
         let decision = tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            gate.check("Bash", &serde_json::json!({ "command": "echo late" })),
+            gate.check(
+                "Bash",
+                &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({ "command": "echo late" }),
+                )
+                .unwrap(),
+            ),
         )
         .await
         .expect("a post-cancel permission must not wait for the normal prompt timeout");
@@ -5029,8 +5222,14 @@ mod tests {
         let check = tokio::spawn({
             let gate = gate.clone();
             async move {
-                gate.check("Bash", &serde_json::json!({"command": "echo hi"}))
-                    .await
+                gate.check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command": "echo hi"}),
+                    )
+                    .unwrap(),
+                )
+                .await
             }
         });
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -5093,7 +5292,7 @@ mod tests {
     /// second `SendPrompt` arriving mid-turn does NOT spawn a concurrent turn but
     /// is enqueued and run as a follow-up once the first turn ends.
     struct GatedDriver {
-        prompts: Arc<Mutex<Vec<String>>>,
+        prompts: Arc<Mutex<Vec<Utf16JsonProjection>>>,
         /// Released by the test to let the FIRST turn complete.
         release: Arc<Notify>,
         /// Notifies the test each time a turn STARTS.
@@ -5211,9 +5410,7 @@ mod tests {
             } else {
                 format!("drain-ka-{text}")
             },
-            content: super::QueuedCommandContent::UserInput {
-                text: text.to_string(),
-            },
+            content: super::QueuedCommandContent::UserInput { text: text.into() },
             priority: super::QueuePriority::Next,
             queued_at: std::time::SystemTime::now(),
             source,
@@ -5263,12 +5460,17 @@ mod tests {
         let second = super::BridgeConnection::new();
         first
             .loop_runtime
-            .begin_tick("first connection tick".to_string());
+            .begin_tick("first connection tick".into());
 
         // A normal prompt on another connection clears only its own state.
         second.loop_runtime.take_in_flight_prompt();
         assert_eq!(
-            first.loop_runtime.in_flight_prompt().as_deref(),
+            first
+                .loop_runtime
+                .in_flight_prompt()
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
             Some("first connection tick")
         );
         assert_eq!(second.loop_runtime.in_flight_prompt(), None);
@@ -5310,7 +5512,11 @@ mod tests {
         )
         .await;
         assert_eq!(
-            loop_runtime.in_flight_prompt().as_deref(),
+            loop_runtime
+                .in_flight_prompt()
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
             Some("# Autonomous loop tick"),
             "the batched drain branch must tag a Cron tick as in-flight"
         );
@@ -5405,7 +5611,7 @@ mod tests {
         assert_eq!(runtime.in_flight_prompt(), None);
         assert_eq!(
             captured.lock().await.as_ref().unwrap().0,
-            "/scheduled raw instruction"
+            "/scheduled raw instruction".into()
         );
     }
 
@@ -5439,11 +5645,15 @@ mod tests {
         )
         .await;
         assert_eq!(
-            runtime.in_flight_prompt().as_deref(),
+            runtime
+                .in_flight_prompt()
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
             Some("<<autonomous-loop-dynamic>>")
         );
         let result = captured.lock().await;
-        let text = &result.as_ref().unwrap().0;
+        let text = result.as_ref().unwrap().0.string_at("").unwrap();
         assert_ne!(text, "<<autonomous-loop-dynamic>>");
         assert!(text.contains("ScheduleWakeup"));
     }
@@ -5484,5 +5694,239 @@ mod tests {
             None,
             "a user prompt must not be tagged as a loop tick"
         );
+    }
+}
+
+#[cfg(test)]
+mod realtime_audio_connection_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    #[derive(Default)]
+    struct Router {
+        inputs: AtomicUsize,
+        stops: AtomicUsize,
+    }
+    #[async_trait]
+    impl CommandRouter for Router {
+        fn realtime_audio_supported(&self) -> bool {
+            true
+        }
+        async fn stop_realtime_audio(&self) {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+        }
+        async fn route(&self, command: ClientCommand, sink: Arc<dyn ClientEventSink>) {
+            if matches!(command, ClientCommand::RealtimeAudioInput { .. }) {
+                self.inputs.fetch_add(1, Ordering::SeqCst);
+                sink.emit(ClientEvent::RealtimeAudioEvent {
+                    session_id: "session".into(),
+                    event_json:
+                        r#"{"type":"turn_completed","sessionId":"session","operationId":"owner"}"#
+                            .into(),
+                })
+                .await;
+            }
+        }
+    }
+    fn input_frame() -> Frame {
+        Frame::Request(bridge::BridgeRequest {
+            id: 2,
+            method: "command".into(),
+            params: serialize_source(&ClientCommand::RealtimeAudioInput {
+                input_json: r#"{"type":"commit","operationId":"owner"}"#.into(),
+            })
+            .unwrap(),
+        })
+    }
+    #[tokio::test]
+    async fn realtime_controls_bypass_busy_turn_handoff_and_session_teardown_stops_owner() {
+        let router = Arc::new(Router::default());
+        let connection = BridgeConnection::new().bind_router(router.clone());
+        connection.handshaken.store(true, Ordering::SeqCst);
+        connection.turn_running.store(true, Ordering::SeqCst);
+        let _handoff = connection.turn_handoff.lock().await;
+        assert!(FramePump::is_priority_frame(&connection, &input_frame()));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            connection.dispatch(ClientCommand::RealtimeAudioInput {
+                input_json: r#"{"type":"commit","operationId":"owner"}"#.into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(router.inputs.load(Ordering::SeqCst), 1);
+        drop(_handoff);
+        connection.turn_running.store(false, Ordering::SeqCst);
+        connection.dispatch(ClientCommand::ClearSession).await;
+        assert_eq!(router.stops.load(Ordering::SeqCst), 1);
+        connection.close_connection(None).await;
+        assert_eq!(router.stops.load(Ordering::SeqCst), 2);
+    }
+    struct NoTurn;
+    #[async_trait]
+    impl TurnDriver for NoTurn {
+        async fn run_turn(&self, _: Utf16JsonProjection) {}
+    }
+    #[tokio::test]
+    async fn native_execution_uses_current_permission_broker_and_cancellation_is_fail_closed() {
+        use lingxi_core::host::permission_gate::PermissionDecision;
+        use lingxi_core::host::PermissionGate;
+        let (endpoint, mut socket, sink) = super::connection_regression_test::captured_sink().await;
+        let connection = BridgeConnection::new();
+        let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
+        let computer = Arc::new(ComputerAccessBroker::new(connection.computer_access_sink()));
+        let question = Arc::new(AskUserQuestionBroker::new(connection.unscoped_event_sink()));
+        let ownership = connection.realtime_execution_owners(gate.clone(), computer, question);
+        let connection = connection.bind(gate.clone(), Arc::new(NoTurn));
+        assert!(connection.claim_outbound(&sink).await);
+        connection.handshaken.store(true, Ordering::SeqCst);
+        let lease = ownership.begin("native-session").unwrap();
+        assert!(!connection.turn_running.load(Ordering::SeqCst));
+        let pending_gate = gate.clone();
+        let pending = tokio::spawn(async move {
+            pending_gate
+                .check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command":"echo permitted"}),
+                    )
+                    .unwrap(),
+                )
+                .await
+        });
+        let Frame::PermissionRequest(request) =
+            super::connection_regression_test::next_frame(&mut socket).await
+        else {
+            panic!("native permission must reach the real client broker")
+        };
+        assert_eq!(
+            request
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.session_id.as_deref()),
+            Some("native-session")
+        );
+        connection
+            .resolve_permission(request.request_id, PermissionResponseDto::AllowOnce)
+            .await;
+        assert!(matches!(pending.await.unwrap(), PermissionDecision::Allow));
+        let pending_gate = gate.clone();
+        let pending = tokio::spawn(async move {
+            pending_gate
+                .check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command":"echo pending"}),
+                    )
+                    .unwrap(),
+                )
+                .await
+        });
+        let Frame::PermissionRequest(request) =
+            super::connection_regression_test::next_frame(&mut socket).await
+        else {
+            panic!("second native permission")
+        };
+        lease.cancel_permissions().await;
+        assert!(matches!(
+            pending.await.unwrap(),
+            PermissionDecision::Deny { .. }
+        ));
+        assert!(
+            !gate
+                .resolve(request.request_id, PermissionResponseDto::AllowOnce, "Bash")
+                .await
+        );
+        assert!(connection.active_turn.accepts_interactions());
+        lease.retire().await;
+        assert!(!connection.active_turn.accepts_interactions());
+        connection.close_connection(None).await;
+        endpoint.shutdown().await;
+    }
+    #[test]
+    fn replacement_execution_cancels_native_owner_before_claiming_gate() {
+        let active = ActiveTurnControl::default();
+        let (old_generation, old_cancel) = active.begin(None);
+        let (new_generation, _) = active.begin(Some(2));
+        assert!(old_cancel.is_cancelled());
+        active.finish(old_generation);
+        assert!(active.owns_generation(new_generation));
+    }
+    #[tokio::test]
+    async fn aborted_startup_keeps_native_owner_until_protected_runner_settles() {
+        let connection = BridgeConnection::new();
+        let gate = Arc::new(AdapterPermissionGate::new(connection.permission_sink()));
+        let computer = Arc::new(ComputerAccessBroker::new(connection.computer_access_sink()));
+        let question = Arc::new(AskUserQuestionBroker::new(connection.unscoped_event_sink()));
+        let ownership = connection.realtime_execution_owners(gate.clone(), computer, question);
+        let connection = connection.bind(gate, Arc::new(NoTurn));
+        let lease = ownership.begin("native-session").unwrap();
+        let runner_guard = lease.reserve_runner();
+        let (release, pending) = tokio::sync::oneshot::channel();
+        let protected = tokio::spawn(async move {
+            let _runner_guard = runner_guard;
+            pending.await.unwrap();
+        });
+        let retire_lease = lease.clone();
+        let retiring = tokio::spawn(async move { retire_lease.retire().await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !lease.cancellation_token().is_cancelled() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!retiring.is_finished());
+        assert!(connection.active_turn.owns_generation(lease.generation));
+        assert!(!connection.active_turn.accepts_interactions());
+        assert!(ownership.begin("replacement-session").is_err());
+        release.send(()).unwrap();
+        protected.await.unwrap();
+        retiring.await.unwrap();
+        assert!(!connection.active_turn.accepts_interactions());
+        let replacement = ownership.begin("replacement-session").unwrap();
+        replacement.retire().await;
+        connection.close_connection(None).await;
+    }
+    #[tokio::test]
+    async fn handshake_advertises_installed_driver_and_unscoped_events_survive_no_chat_turn() {
+        let (endpoint, mut socket, sink) = super::connection_regression_test::captured_sink().await;
+        let router = Arc::new(Router::default());
+        let connection = BridgeConnection::new().bind_router(router);
+        assert!(connection.claim_outbound(&sink).await);
+        connection
+            .handle_hello(
+                1,
+                ClientHello {
+                    protocol_version: BRIDGE_PROTOCOL_VERSION.into(),
+                    client_name: "realtime-test".into(),
+                    capabilities: Capabilities::default(),
+                },
+            )
+            .await;
+        let Frame::Response(response) =
+            super::connection_regression_test::next_frame(&mut socket).await
+        else {
+            panic!("hello response")
+        };
+        assert_eq!(
+            response
+                .result
+                .unwrap()
+                .at_pointer("/capabilities/realtime_audio")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        connection
+            .dispatch(ClientCommand::RealtimeAudioInput {
+                input_json: r#"{"type":"commit","operationId":"owner"}"#.into(),
+            })
+            .await;
+        assert!(matches!(
+            super::connection_regression_test::next_frame(&mut socket).await,
+            Frame::Event(ClientEvent::RealtimeAudioEvent { .. })
+        ));
+        connection.close_connection(None).await;
+        endpoint.shutdown().await;
+        assert!(!Capabilities::default().realtime_audio);
     }
 }

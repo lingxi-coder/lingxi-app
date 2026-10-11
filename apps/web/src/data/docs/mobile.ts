@@ -1080,33 +1080,6 @@ export const mobilePages: DocPage[] = [
         ]
       },
       {
-        "id": "isolated-build",
-        "title": {
-          "en": "Isolated build scope",
-          "zh": "隔离构建范围"
-        },
-        "paragraphs": [
-          {
-            "en": "MobileLinuxRuntime.run_isolated runs with only the supplied mounts and is reserved for one LocalAppBuild project mount. It does not isolate writes inside the shared managed rootfs. Callers requiring filesystem write isolation must supply a separate writable rootfs layer.",
-            "zh": "MobileLinuxRuntime.run_isolated 仅使用请求中给出的挂载，并保留给单个 LocalAppBuild 项目挂载。它不隔离共享托管 rootfs 内的写入。需要文件系统写隔离的调用方必须提供独立的可写 rootfs 层。"
-          },
-          {
-            "en": "Android IsolatedBuildProfile supplies application-specific paths and channels. With no profile, isolated application builds fail closed while ordinary runtime, shell and PTY operations remain available. The standard FFI Android configuration does not set a profile.",
-            "zh": "Android IsolatedBuildProfile 提供应用特定的路径与渠道。未配置 profile 时，隔离应用构建会拒绝执行，普通运行时、shell 与 PTY 操作仍可用。标准 FFI Android 配置不设置该 profile。"
-          }
-        ],
-        "apis": [
-          {
-            "name": "MobileLinuxRuntime::run_isolated",
-            "signature": "async fn run_isolated(&self, request: LinuxCommandRequest) -> Result<LinuxCommandResult, MobileLinuxError>",
-            "description": {
-              "en": "Unsupported by default; implementations reject empty, additional or differently purposed mount sets.",
-              "zh": "默认不支持；具体实现拒绝空挂载、附加挂载或用途不同的挂载集合。"
-            }
-          }
-        ]
-      },
-      {
         "id": "errors",
         "title": {
           "en": "Errors and platform limits",

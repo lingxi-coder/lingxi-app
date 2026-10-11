@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef } from 'react';
-import type { CSSProperties } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { useT } from '../../../theme/ThemeContext';
 import type { UseBridge } from '../../../bridge/bridgeTypes.js';
+import { ExtensionGlyph, ExtensionSkillArtwork } from './ExtensionHubIcons';
 
 type ExtensionHubTab = 'plugins' | 'mcp' | 'skills';
 
@@ -82,15 +83,76 @@ export function useExtensionHubDialogFocus(open: boolean, onRequestClose: () => 
 
 export function extensionHubStyle(t: ReturnType<typeof useT>): CSSProperties {
   return {
-    '--hub-active': t.surfaceActive,
+    '--hub-active': t.dark ? t.surfaceActive : '#ededee',
     '--hub-accent': t.accent,
     '--hub-border': t.border,
-    '--hub-hover': t.surfaceHover,
+    '--hub-hover': t.dark ? t.surfaceHover : '#f6f6f6',
     '--hub-muted': t.text3,
+    '--hub-subtle': t.dark ? t.text4 : '#b7b7ba',
+    '--hub-page': t.stageBg,
+    '--hub-sidebar': t.dark ? '#2b2b2d' : '#fafafa',
     '--hub-surface': t.surface,
     '--hub-text': t.text,
     '--hub-toggle-off': t.surfaceActive,
   } as CSSProperties;
+}
+
+/** The runtime catalog does not supply artwork, so use a neutral plugin mark. */
+export function ExtensionIcon({ kind = 'plugin', large = false }: { kind?: 'plugin' | 'skill' | 'mcp'; large?: boolean }) {
+  return <span className={`extension-hub-icon extension-icon-${kind}${large ? ' is-large' : ''}`} aria-hidden="true">
+    {kind === 'skill' ? <ExtensionSkillArtwork /> : <ExtensionGlyph name={kind} size={large ? 32 : 24} />}
+  </span>;
+}
+
+export function ExtensionHubLayout({ bridge, active, onNavigate, onClose, onSelectPlugin, selectedPlugin, scopeControls, children }: {
+  bridge: UseBridge;
+  active: ExtensionHubTab;
+  onNavigate: (pageId: string, pluginId?: string) => void;
+  onClose: () => void;
+  onSelectPlugin?: (id: string) => void;
+  selectedPlugin?: string | null;
+  scopeControls?: ReactNode;
+  children: ReactNode;
+}) {
+  const t = useT();
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const catalog = parseJson(bridge.pluginCatalogEvent?.catalog_json);
+  const installed = (Array.isArray(catalog.installed) ? catalog.installed : []).flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const entry = item as Record<string, unknown>;
+    const id = typeof entry.id === 'string' ? entry.id : typeof entry.name === 'string' ? entry.name : '';
+    const name = typeof entry.display_name === 'string' ? entry.display_name : typeof entry.name === 'string' ? entry.name : id;
+    return id && name.toLowerCase().includes(search.trim().toLowerCase()) ? [{ id, name }] : [];
+  });
+  return <div className="extension-customize" style={extensionHubStyle(t)}>
+    <aside className="extension-sidebar">
+      <div className="extension-sidebar-heading"><h2>Customize</h2><button type="button" className="extension-hub-icon-button" aria-label="Search installed plugins" aria-expanded={searchOpen} onClick={() => setSearchOpen(!searchOpen)}><ExtensionGlyph name="search" size={16} /></button></div>
+      {searchOpen && <input autoFocus className="extension-sidebar-search" aria-label="Filter installed plugins" placeholder="Search installed" value={search} onChange={(event) => setSearch(event.target.value)} />}
+      <nav aria-label="Customize">
+        {([{ id: 'plugins', label: 'Plugins', icon: 'plugin' }, { id: 'skills', label: 'Skills', icon: 'skills' }, { id: 'mcp', label: 'Tools', icon: 'tools' }] as const).map((tab) => <button key={tab.id} type="button" data-nav-page={tab.id} aria-current={active === tab.id && !selectedPlugin ? 'page' : undefined} className="extension-sidebar-link" onClick={() => onNavigate(tab.id)}><ExtensionGlyph name={tab.icon} /><span>{tab.label}</span></button>)}
+      </nav>
+      <div className="extension-sidebar-installed"><div className="extension-sidebar-label">Installed</div>
+        {installed.map((entry) => <button key={entry.id} type="button" className="extension-sidebar-link" aria-current={selectedPlugin === entry.id ? 'page' : undefined} onClick={() => onSelectPlugin ? onSelectPlugin(entry.id) : onNavigate('plugins', entry.id)}><ExtensionGlyph name="plugin" /><span>{entry.name}</span></button>)}
+        {installed.length === 0 && <p className="extension-sidebar-empty">{search ? 'No matching plugins' : 'Your installed plugins appear here.'}</p>}
+      </div>
+      <div className="extension-sidebar-footer">
+        {scopeControls && <details className="extension-scope-controls"><summary>Settings scope <ExtensionGlyph name="chevron" size={12} /></summary>{scopeControls}</details>}
+        <button type="button" className="extension-sidebar-link" aria-label="All settings" onClick={() => onNavigate('general')}><ExtensionGlyph name="cog" size={16} /><span>Settings</span></button>
+        <button type="button" className="extension-sidebar-link" aria-label="Back to app" onClick={onClose}><ExtensionGlyph name="arrowLeft" size={16} /><span>Back to app</span></button>
+      </div>
+    </aside>
+    <main className="extension-hub-main settings-content-scroll"><div className="extension-hub-page">{children}</div></main>
+  </div>;
+}
+
+export function ExtensionHubHeader({ title, description, search, onSearch, actions }: {
+  title: string; description: string; search: string; onSearch: (value: string) => void; actions: ReactNode;
+}) {
+  return <header className="extension-hub-header">
+    <div className="extension-hub-heading"><h1>{title}</h1><p>{description}</p></div>
+    <div className="extension-hub-toolbar"><label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={`Search ${title.toLowerCase()}`} aria-label={`Search ${title.toLowerCase()}`} /></label><div className="extension-hub-toolbar-actions">{actions}</div></div>
+  </header>;
 }
 
 function parseJson(raw: string | null | undefined): Record<string, unknown> {
@@ -101,79 +163,4 @@ function parseJson(raw: string | null | undefined): Record<string, unknown> {
   } catch {
     return {};
   }
-}
-
-function countMcpServers(bridge: UseBridge): number {
-  const snapshot = parseJson(bridge.mcpConfigurationSnapshotEvent?.snapshot_json);
-  const scopes = Array.isArray(snapshot.scopes) ? snapshot.scopes : [];
-  const configured = scopes.reduce((count, scope) => {
-    if (!scope || typeof scope !== 'object') return count;
-    try {
-      const raw = (scope as Record<string, unknown>).raw_json;
-      const parsed = parseJson(typeof raw === 'string' ? raw : undefined);
-      const servers = parsed.mcpServers;
-      return count + (servers && typeof servers === 'object' && !Array.isArray(servers) ? Object.keys(servers).length : 0);
-    } catch {
-      return count;
-    }
-  }, 0);
-  return configured || bridge.mcpServersEvent?.servers.length || 0;
-}
-
-function countSkills(bridge: UseBridge): number {
-  const catalog = parseJson(bridge.skillCatalogEvent?.catalog_json);
-  if (Array.isArray(catalog.entries)) return catalog.entries.length;
-  return bridge.skillsEvent?.skills.length ?? 0;
-}
-
-function countPlugins(bridge: UseBridge): number {
-  const catalog = parseJson(bridge.pluginCatalogEvent?.catalog_json);
-  if (Array.isArray(catalog.installed)) return catalog.installed.length;
-  return 0;
-}
-
-export function ExtensionHubTabs({
-  bridge,
-  active,
-  onNavigate,
-}: {
-  bridge: UseBridge;
-  active: ExtensionHubTab;
-  onNavigate: (pageId: string) => void;
-}) {
-  const t = useT();
-  const counts = useMemo(() => ({
-    plugins: countPlugins(bridge),
-    mcp: countMcpServers(bridge),
-    skills: countSkills(bridge),
-  }), [
-    bridge.pluginCatalogEvent?.catalog_json,
-    bridge.mcpConfigurationSnapshotEvent?.snapshot_json,
-    bridge.mcpServersEvent?.servers,
-    bridge.skillCatalogEvent?.catalog_json,
-    bridge.skillsEvent?.skills,
-  ]);
-
-  const tabs: Array<{ id: ExtensionHubTab; label: string }> = [
-    { id: 'plugins', label: 'Plugins' },
-    { id: 'mcp', label: 'MCPs' },
-    { id: 'skills', label: 'Skills' },
-  ];
-
-  return (
-    <nav className="extension-hub-tabs" aria-label="Plugin settings categories" style={{ '--hub-active': t.surfaceActive, '--hub-border': t.border, '--hub-text': t.text2, '--hub-muted': t.text4 } as CSSProperties}>
-      {tabs.map((tab) => (
-        <button
-          key={tab.id}
-          type="button"
-          aria-current={active === tab.id ? 'page' : undefined}
-          className={active === tab.id ? 'extension-hub-tab is-active' : 'extension-hub-tab'}
-          onClick={() => onNavigate(tab.id)}
-        >
-          <span>{tab.label}</span>
-          <span className="extension-hub-count">{counts[tab.id]}</span>
-        </button>
-      ))}
-    </nav>
-  );
 }

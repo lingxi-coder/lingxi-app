@@ -36,7 +36,6 @@ enum AppRoute: Hashable {
     )
     case cron(scopeID: String?, taskID: String?)
     case cronRun(runID: String)
-    case localApps(appID: String?)
     case sessionDetails(sessionID: String)
 }
 
@@ -49,8 +48,6 @@ extension AppRoute: Identifiable {
             return "cron:\(scopeID ?? "global"):\(taskID ?? "list")"
         case .cronRun(let runID):
             return "cron-run:\(runID)"
-        case .localApps(let appID):
-            return "local-apps:\(appID ?? "library")"
         case .sessionDetails(let sessionID):
             return "session-details:\(sessionID)"
         }
@@ -62,10 +59,8 @@ extension AppRoute: Identifiable {
 final class AppNavigationModel {
     var path: [AppRoute] = []
     var presentedRoute: AppRoute?
-    /// The root owns the sidebar selection so an app launch, widget, or deep
-    /// link can deliberately return people to the one Local Apps entry point.
+    /// The root owns the sidebar selection.
     var drawerSection: DrawerSection = .chat
-    var localAppsShowsLibrary = true
     /// Sidebar visibility in a regular-width (iPad) split layout. Ignored while
     /// the split view is collapsed.
     var columnVisibility: NavigationSplitViewVisibility = .all
@@ -94,17 +89,6 @@ final class AppNavigationModel {
     func focusDetail() {
         columnVisibility = .detailOnly
         compactColumn = .detail
-    }
-
-    func showLocalApps() {
-        drawerSection = .apps
-        localAppsShowsLibrary = true
-        showSidebar()
-    }
-
-    func showActiveAppSessions() {
-        drawerSection = .apps
-        localAppsShowsLibrary = false
     }
 
     func showSettings(_ page: SettingsPage = .main) {
@@ -177,11 +161,6 @@ final class AppNavigationModel {
         closeSidebar()
         settingsOpen = false
         presentedRoute = .cronRun(runID: runID)
-    }
-
-    func openLocalApps(appID _: String? = nil) {
-        settingsOpen = false
-        showLocalApps()
     }
 
     func openSessionDetails(sessionID: String) {

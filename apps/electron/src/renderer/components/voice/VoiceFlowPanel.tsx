@@ -66,12 +66,14 @@ function footerLabel(phase: VoiceFlowPhase): string {
 
 export function VoiceFlowPanel({
   state,
+  realtimeTurnBased = false,
   onOrb,
   onRetry,
   onOpenSettings,
   onClose,
 }: {
   state: VoiceFlowState;
+  realtimeTurnBased?: boolean;
   onOrb(): void;
   onRetry(): void;
   onOpenSettings(): void;
@@ -144,7 +146,8 @@ export function VoiceFlowPanel({
         <button
           type="button"
           onClick={onOrb}
-          aria-label={orbLabel(state.phase)}
+          aria-label={realtimeTurnBased && (state.phase === 'thinking' || state.phase === 'speaking') ? '轮流说话模式正在处理回复' : orbLabel(state.phase)}
+          disabled={realtimeTurnBased && (state.phase === 'thinking' || state.phase === 'speaking')}
           title={orbLabel(state.phase)}
           style={{
             width: 138,
@@ -177,7 +180,7 @@ export function VoiceFlowPanel({
         </div>
       </div>
       <div style={{ position: 'absolute', left: 0, right: 0, bottom: 14, textAlign: 'center', color: t.text4, fontSize: 11 }}>
-        {footerLabel(state.phase)}
+        {realtimeTurnBased ? '轮流说话 · 轻点 Orb 结束聆听，播报后自动重新聆听' : footerLabel(state.phase)}
       </div>
     </section>
   );

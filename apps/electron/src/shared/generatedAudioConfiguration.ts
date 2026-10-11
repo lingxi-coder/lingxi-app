@@ -1,25 +1,45 @@
 // Generated from resources/voice/audio-config-schema.json and audio-config-fixtures.json.
 // Do not edit by hand; run node resources/voice/scripts/generate-audio-config.mjs.
 
-export const AUDIO_CONFIGURATION_SCHEMA_VERSION = 3 as const;
+export const AUDIO_CONFIGURATION_SCHEMA_VERSION = 4 as const;
 export const AUDIO_LANGUAGE_AUTO = "auto" as const;
 export const AUDIO_MIN_RATE = 0.5 as const;
 export const AUDIO_MAX_RATE = 2.0 as const;
 export const AUDIO_DEFAULT_RATE = 1.0 as const;
 export const AUDIO_CONFIGURATION_DEFAULTS = {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "recognition": {
     "source": "automatic",
-    "offlineModelId": null
+    "offlineModelId": null,
+    "cloud": {
+      "binding": "follow_session",
+      "profileId": null,
+      "modelId": null
+    }
   },
   "speech": {
     "source": "automatic",
     "offlineModelId": null,
-    "voice": null
+    "voice": null,
+    "cloud": {
+      "binding": "follow_session",
+      "profileId": null,
+      "modelId": null
+    }
   },
   "language": "auto",
   "rate": 1,
-  "autoPlayReplies": false
+  "autoPlayReplies": false,
+  "conversation": {
+    "mode": "agent",
+    "cloud": {
+      "binding": "follow_session",
+      "profileId": null,
+      "modelId": null
+    },
+    "voice": null,
+    "interaction": "turn_based"
+  }
 } as const;
 
 export type AudioSource = string;
@@ -31,34 +51,52 @@ export type AudioFallbackFailure = 'permission' | 'unavailable' | 'busy' | 'canc
 export interface AudioVoiceSelection {
   source: AudioSource;
   id: string;
-  modelId?: string;
+  modelId?: string | null;
+  profileId?: string;
+}
+
+export interface AudioCloudBinding {
+  binding: 'follow_session' | 'explicit_profile' | string;
+  profileId: string | null;
+  modelId: string | null;
+}
+
+export interface AudioConversationPreference {
+  mode: 'agent' | 'realtime' | string;
+  interaction: 'turn_based' | 'interruptible' | string;
+  cloud: AudioCloudBinding;
+  voice: AudioVoiceSelection | null;
+}
+
+export interface AudioProviderContext { profileId: string; providerId?: string }
+export interface AudioProviderCapability {
+  profileId: string;
+  providerId: string;
+  kind: AudioProviderKind;
+  supported: boolean;
+  readiness: 'ready' | 'configurationRequired' | 'unreachable' | 'unsupported';
+  defaultModelId: string | null;
+  modelIds: readonly (string | null)[];
 }
 
 export interface AudioRecognitionPreference {
   source: AudioSource;
   offlineModelId: string | null;
+  cloud: AudioCloudBinding;
 }
 
 export interface AudioSpeechPreference extends AudioRecognitionPreference {
   voice: AudioVoiceSelection | null;
 }
 
-export interface AudioConfigurationV3 {
+export interface AudioConfigurationV4 {
   schemaVersion: typeof AUDIO_CONFIGURATION_SCHEMA_VERSION;
   recognition: AudioRecognitionPreference;
   speech: AudioSpeechPreference;
+  conversation: AudioConversationPreference;
   language: string;
   rate: number;
   autoPlayReplies: boolean;
-}
-
-export interface AudioVoiceCatalogEntry {
-  source: 'system' | 'offline' | string;
-  id: string;
-  modelId?: string;
-  label?: string;
-  displayName?: string;
-  aliases?: readonly string[];
 }
 
 export interface AudioOfflineModelAvailability {
@@ -74,6 +112,8 @@ export interface AudioRouteRequest {
   preference: AudioRecognitionPreference | AudioSpeechPreference;
   /** Must be resolved from the config/device locale when the operation begins. */
   language: string;
+  sessionContext?: AudioProviderContext;
+  providerCapabilities?: readonly AudioProviderCapability[];
   systemStatus: AudioReadiness;
   /** Keep this in shared model catalog order for deterministic automatic selection. */
   offlineModels: readonly AudioOfflineModelAvailability[];
@@ -84,7 +124,7 @@ export interface AudioRouteRequest {
 
 export interface AudioRouteResolution {
   requested: { source: string; offlineModelId: string | null; voice: AudioVoiceSelection | null };
-  effective: { source: 'system' | 'offline'; modelId: string | null; voiceId: string | null } | null;
+  effective: { source: 'system' | 'offline' | 'provider'; profileId?: string; providerId?: string; modelId: string | null; voiceId: string | null } | null;
   status: AudioRouteStatus;
   reason: string;
   fallbackReason: string | null;
@@ -115,48 +155,13 @@ function normalizeRate(value: unknown): number {
   return Math.min(AUDIO_MAX_RATE, Math.max(AUDIO_MIN_RATE, rate));
 }
 
-function uniqueVoiceMatch(catalog: readonly AudioVoiceCatalogEntry[], selector: string): AudioVoiceCatalogEntry | null {
-  const needle = selector.toLowerCase();
-  const matches = catalog.filter((entry) => [entry.id, entry.label, entry.displayName, ...(entry.aliases ?? [])]
-    .some((name) => typeof name === 'string' && name.toLowerCase() === needle));
-  return matches.length === 1 ? matches[0] : null;
-}
-
-function migrateLegacyVoice(value: string, catalog: readonly AudioVoiceCatalogEntry[]): AudioVoiceSelection | null {
-  const raw = value.trim();
-  if (!raw) return null;
-  if (raw.startsWith('system:')) {
-    const id = raw.slice('system:'.length);
-    const match = uniqueVoiceMatch(catalog.filter((entry) => entry.source === 'system'), id);
-    return { source: 'system', id: match?.id ?? id };
-  }
-  if (raw.startsWith('sherpa:')) {
-    const payload = raw.slice('sherpa:'.length);
-    const splitAt = payload.indexOf(':');
-    const modelKey = splitAt < 0 ? payload : payload.slice(0, splitAt);
-    const voiceKey = splitAt < 0 ? payload : payload.slice(splitAt + 1);
-    const offlineCatalog = catalog.filter((entry) => entry.source === 'offline');
-    const match = uniqueVoiceMatch(offlineCatalog, `${modelKey}:${voiceKey}`)
-      ?? uniqueVoiceMatch(offlineCatalog, voiceKey);
-    if (match?.modelId && (match.modelId === modelKey || match.modelId.endsWith(modelKey))) {
-      return { source: 'offline', modelId: match.modelId, id: match.id };
-    }
-    return { source: 'offline', modelId: modelKey, id: voiceKey };
-  }
-  if (raw === 'default') return { source: 'system', id: 'default' };
-  const match = uniqueVoiceMatch(catalog, raw);
-  if (match?.source === 'offline' && match.modelId) return { source: 'offline', modelId: match.modelId, id: match.id };
-  if (match?.source === 'system') return { source: 'system', id: match.id };
-  return { source: 'system', id: raw };
-}
-
-function normalizeVoice(value: unknown, catalog: readonly AudioVoiceCatalogEntry[] = []): AudioVoiceSelection | null {
+function normalizeVoice(value: unknown): AudioVoiceSelection | null {
   if (value === null || value === undefined) return null;
-  if (typeof value === 'string') return migrateLegacyVoice(value, catalog);
   const raw = asObject(value);
   const source = normalizeSource(raw.source, '');
   const id = typeof raw.id === 'string' ? raw.id : '';
   if (!source || !id) return null;
+  if (source === 'provider') return { source, id, ...(normalizeModelId(raw.profileId) ? { profileId: raw.profileId as string } : {}), ...(normalizeModelId(raw.modelId) ? { modelId: raw.modelId as string } : {}) };
   if (source === 'offline') {
     const modelId = normalizeModelId(raw.modelId);
     return modelId ? { source, modelId, id } : { source, id };
@@ -164,97 +169,41 @@ function normalizeVoice(value: unknown, catalog: readonly AudioVoiceCatalogEntry
   return { source, id };
 }
 
+export function normalizeCloudBinding(value: unknown): AudioCloudBinding {
+  const raw = asObject(value);
+  return { binding: typeof raw.binding === 'string' ? raw.binding : 'follow_session', profileId: normalizeModelId(raw.profileId), modelId: normalizeModelId(raw.modelId) };
+}
+
 function normalizePreference(value: unknown, kind: AudioProviderKind): AudioRecognitionPreference | AudioSpeechPreference {
   const raw = asObject(value);
   const preference: AudioRecognitionPreference | AudioSpeechPreference = {
     source: normalizeSource(raw.source),
     offlineModelId: normalizeModelId(raw.offlineModelId),
+    cloud: normalizeCloudBinding(raw.cloud),
     ...(kind === 'speech' ? { voice: normalizeVoice(raw.voice) } : {}),
   } as AudioRecognitionPreference | AudioSpeechPreference;
   return preference;
 }
 
-export function audioConfigurationDefaults(): AudioConfigurationV3 {
-  return JSON.parse(JSON.stringify(AUDIO_CONFIGURATION_DEFAULTS)) as AudioConfigurationV3;
+export function audioConfigurationDefaults(): AudioConfigurationV4 {
+  return JSON.parse(JSON.stringify(AUDIO_CONFIGURATION_DEFAULTS)) as AudioConfigurationV4;
 }
 
-export function normalizeAudioConfiguration(value: unknown): AudioConfigurationV3 {
+export function normalizeAudioConfiguration(value: unknown): AudioConfigurationV4 {
   const raw = asObject(value);
+  if (raw.schemaVersion !== AUDIO_CONFIGURATION_SCHEMA_VERSION) return audioConfigurationDefaults();
   const recognition = normalizePreference(raw.recognition, 'recognition') as AudioRecognitionPreference;
   const speech = normalizePreference(raw.speech, 'speech') as AudioSpeechPreference;
-  if (speech.source === 'automatic' && speech.voice) {
-    speech.source = speech.voice.source;
-    if (speech.voice.source === 'offline' && speech.offlineModelId === null) {
-      speech.offlineModelId = speech.voice.modelId ?? null;
-    }
-  }
+  if (speech.source === 'automatic') speech.voice = null;
   return {
     schemaVersion: AUDIO_CONFIGURATION_SCHEMA_VERSION,
     recognition,
     speech,
+    conversation: { interaction: typeof asObject(raw.conversation).interaction === 'string' ? asObject(raw.conversation).interaction as string : 'turn_based', mode: typeof asObject(raw.conversation).mode === 'string' ? asObject(raw.conversation).mode as string : 'agent', cloud: normalizeCloudBinding(asObject(raw.conversation).cloud), voice: normalizeVoice(asObject(raw.conversation).voice) },
     language: normalizeLanguage(raw.language),
     rate: normalizeRate(raw.rate),
     autoPlayReplies: raw.autoPlayReplies === true,
   };
-}
-
-function mapLegacySource(value: unknown, fallback: string): string {
-  if (value === null || value === undefined || value === '') return fallback;
-  const raw = typeof value === 'string' ? value.trim() : String(value);
-  switch (raw.toLowerCase()) {
-    case 'auto':
-    case 'automatic': return 'automatic';
-    case 'system': return 'system';
-    case 'offline':
-    case 'localonly':
-    case 'on-device':
-    case 'ondevice': return 'offline';
-    default: return raw;
-  }
-}
-
-function firstDefined(raw: Record<string, unknown>, names: readonly string[]): unknown {
-  for (const name of names) if (raw[name] !== undefined && raw[name] !== null) return raw[name];
-  return undefined;
-}
-
-export function migrateLegacyAudioConfiguration(value: unknown, voiceCatalog: readonly AudioVoiceCatalogEntry[] = []): AudioConfigurationV3 {
-  const raw = asObject(value);
-  if (raw.schemaVersion === AUDIO_CONFIGURATION_SCHEMA_VERSION) return normalizeAudioConfiguration(raw);
-  const recognitionRaw = asObject(raw.recognition);
-  const speechRaw = asObject(raw.speech);
-  const recognitionSource = mapLegacySource(
-    recognitionRaw.source ?? firstDefined(raw, ['inputProvider', 'recognitionMode']), 'automatic');
-  const speechSource = mapLegacySource(
-    speechRaw.source ?? firstDefined(raw, ['outputProvider', 'speechProvider']), 'automatic');
-  const selectedVoice = speechRaw.voice ?? firstDefined(raw, ['voiceSelection', 'voiceId', 'voice']);
-  const voice = typeof selectedVoice === 'string' ? migrateLegacyVoice(selectedVoice, voiceCatalog) : normalizeVoice(selectedVoice, voiceCatalog);
-  let language = firstDefined(raw, ['language', 'inputLanguage', 'legacyInputLanguage', 'voiceLanguage', 'voiceLang']);
-  if ((!language || language === 'auto') && typeof raw.legacyVoiceLang === 'string') {
-    const locale = raw.legacyVoiceLang.toLowerCase();
-    if (locale === 'zh') language = 'zh-CN';
-    if (locale === 'en') language = 'en-US';
-  }
-  const speech: AudioSpeechPreference = {
-    source: speechSource,
-    offlineModelId: normalizeModelId(speechRaw.offlineModelId ?? firstDefined(raw, ['speechModelId', 'outputModelId'])),
-    voice,
-  };
-  if (speech.source === 'automatic' && voice) {
-    speech.source = voice.source;
-    if (voice.source === 'offline' && speech.offlineModelId === null) speech.offlineModelId = voice.modelId ?? null;
-  }
-  return normalizeAudioConfiguration({
-    schemaVersion: AUDIO_CONFIGURATION_SCHEMA_VERSION,
-    recognition: {
-      source: recognitionSource,
-      offlineModelId: recognitionRaw.offlineModelId ?? firstDefined(raw, ['recognitionModelId', 'inputModelId']),
-    },
-    speech,
-    language,
-    rate: firstDefined(raw, ['rate', 'speed', 'voiceSpeed']),
-    autoPlayReplies: firstDefined(raw, ['autoPlayReplies', 'autoPlay', 'voiceAutoPlay']),
-  });
 }
 
 export function resolveAudioLanguage(configured: unknown, deviceLocale: unknown): string {
@@ -335,6 +284,7 @@ export function resolveAudioRoute(request: AudioRouteRequest): AudioRouteResolut
   const voice = request.voiceOverride !== undefined ? request.voiceOverride : storedVoice;
   const requested = { source, offlineModelId, voice: voice ?? null };
   if (!request.language || normalizeLanguage(request.language) === AUDIO_LANGUAGE_AUTO) return unavailable(requested, 'languageUnresolved', 'invalidRequest');
+  if (source === 'provider') return resolveProviderAudioRoute(request, requested, voice ?? null);
   if (source !== 'automatic' && source !== 'system' && source !== 'offline') return unavailable(requested, 'unsupportedSource');
   if (voice && voice.source !== 'system' && voice.source !== 'offline') return unavailable(requested, 'unsupportedVoiceSource', 'invalidRequest');
   if (voice && source !== 'automatic' && voice.source !== source) return unavailable(requested, 'voiceSourceMismatch', 'invalidRequest');
@@ -353,4 +303,18 @@ export function resolveAudioRoute(request: AudioRouteRequest): AudioRouteResolut
 
 export function isAudioFallbackAllowed(failure: AudioFallbackFailure | string, operationStarted: boolean): boolean {
   return !operationStarted && (failure === 'permission' || failure === 'unavailable');
+}
+
+function resolveProviderAudioRoute(request: AudioRouteRequest, requested: AudioRouteResolution['requested'], voice: AudioVoiceSelection | null): AudioRouteResolution {
+  const cloud = normalizeCloudBinding(request.preference.cloud);
+  if (cloud.binding !== 'follow_session' && cloud.binding !== 'explicit_profile') return unavailable(requested, 'providerBindingInvalid', 'invalidRequest');
+  const profileId = cloud.binding === 'follow_session' ? request.sessionContext?.profileId : cloud.profileId;
+  if (!profileId) return unavailable(requested, cloud.binding === 'follow_session' ? 'sessionProfileRequired' : 'providerProfileRequired');
+  const capability = request.providerCapabilities?.find((entry) => entry.profileId === profileId && entry.kind === request.kind);
+  if (!capability || !capability.supported) return unavailable(requested, 'providerOperationUnsupported');
+  if (capability.readiness !== 'ready') return unavailable(requested, capability.readiness === 'unreachable' ? 'providerUnreachable' : 'providerConfigurationRequired');
+  const modelId = cloud.modelId ?? capability.defaultModelId;
+  if (!capability.modelIds.includes(modelId)) return unavailable(requested, 'providerModelUnsupported');
+  if (voice && (voice.source !== 'provider' || voice.profileId !== profileId || (voice.modelId ?? null) !== modelId)) return unavailable(requested, 'providerVoiceScopeMismatch', 'invalidRequest');
+  return routeResult(requested, { source: 'provider', profileId, providerId: capability.providerId, modelId, voiceId: voice?.id ?? null }, 'ready', 'ready');
 }

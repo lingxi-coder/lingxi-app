@@ -93,20 +93,15 @@ pub enum ViewOutcome {
     OpenView(Box<dyn BottomPaneView>),
     /// The view asks the app to run a command effect on its behalf.
     RunCommand(CommandAction),
-    /// The view asks the app to run a `/web` effect (secret/settings save or
-    /// a test search) on its behalf. The view stays open — the async result
-    /// (and any later close) is a later task's concern.
-    RunWebAction(WebAction),
     /// The view asks the app to run a `/connect` effect (store an API key, or
-    /// kick off a Copilot/OAuth sign-in) on its behalf. Unlike
-    /// [`Self::RunWebAction`], the WHOLE `/connect` view stack (picker →
+    /// kick off a Copilot/OAuth sign-in) on its behalf. The WHOLE `/connect` view stack (picker →
     /// method choice → key entry) is cleared when this fires — the flow is
     /// over and the result is reported into the transcript, not back into a
     /// still-open screen.
     RunConnectAction(ConnectAction),
     /// The view asks the app to run a `/permissions` effect (persist an
     /// added/removed allow/ask/deny rule to a settings file) on its behalf.
-    /// Like [`Self::RunWebAction`]'s test path, the editor stays OPEN so the
+    /// The editor stays OPEN so the
     /// user can make several edits; the async persist result is reported back
     /// through `TurnEvent::SystemNotice`.
     RunPermissionAction(PermissionAction),
@@ -222,7 +217,7 @@ impl RewindScope {
 /// session) and reports the result back through `TurnEvent::SystemNotice`.
 ///
 /// Rule strings are the `"Tool"` / `"Tool(content)"` wire form and are NOT
-/// secret, so the derived `Debug` is fine (unlike [`WebAction`]/[`ConnectAction`]).
+/// secret, so the derived `Debug` is fine (unlike [`ConnectAction`]).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionAction {
@@ -309,7 +304,7 @@ pub enum PluginAction {
 /// [`ViewOutcome::RunFusionSetupAction`]. The owner merges the roles into
 /// `~/.lingxi/settings.json` off-loop and reports the result back through
 /// `TurnEvent::SystemNotice`. Model ids are not secret, so the derived `Debug`
-/// is fine (unlike [`WebAction`]/[`ConnectAction`]).
+/// is fine (unlike [`ConnectAction`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FusionSetupAction {
     /// Write the three model roles, and `fusion.enabled` alongside them.
@@ -364,62 +359,6 @@ impl std::fmt::Debug for ConnectAction {
             Self::OAuth { provider_id } => f
                 .debug_struct("OAuth")
                 .field("provider_id", provider_id)
-                .finish(),
-        }
-    }
-}
-
-/// An app-level `/web` effect a view can request via
-/// [`ViewOutcome::RunWebAction`]. The owner runs these asynchronously
-/// (secure-store writes, settings writes, test network calls) and reports
-/// results back through `TurnEvent::SystemNotice`.
-#[derive(Clone, PartialEq, Eq)]
-pub enum WebAction {
-    /// Persist a secret key through the secure credential store.
-    SaveSecret {
-        provider: tool_web::web_search_config::WebSearchProvider,
-        secret: String,
-    },
-    /// Persist non-secret settings (`provider`, optional SearXNG URL).
-    SaveSettings {
-        provider: tool_web::web_search_config::WebSearchProvider,
-        searxng_url: Option<String>,
-    },
-    /// Run a test search for `provider`, optionally using a not-yet-saved
-    /// `typed_key` (the config screen's in-progress input buffer) instead of
-    /// the persisted credential.
-    TestSearch {
-        provider: tool_web::web_search_config::WebSearchProvider,
-        typed_key: Option<String>,
-    },
-}
-
-// Hand-written `Debug` that REDACTS the secret `secret`/`typed_key` — the
-// derived impl would print them verbatim, leaking the credential through any
-// future `debug!`/panic on a `WebAction`.
-impl std::fmt::Debug for WebAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SaveSecret { provider, .. } => f
-                .debug_struct("SaveSecret")
-                .field("provider", provider)
-                .field("secret", &"<redacted>")
-                .finish(),
-            Self::SaveSettings {
-                provider,
-                searxng_url,
-            } => f
-                .debug_struct("SaveSettings")
-                .field("provider", provider)
-                .field("searxng_url", searxng_url)
-                .finish(),
-            Self::TestSearch {
-                provider,
-                typed_key,
-            } => f
-                .debug_struct("TestSearch")
-                .field("provider", provider)
-                .field("typed_key", &typed_key.as_ref().map(|_| "<redacted>"))
                 .finish(),
         }
     }
@@ -518,9 +457,8 @@ pub trait BottomPaneView: Renderable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_web::web_search_config::WebSearchProvider;
 
-    /// The hand-written `Debug` for `ConnectAction`/`WebAction` must NEVER
+    /// The hand-written `Debug` for `ConnectAction` must NEVER
     /// print the secret — a derived impl would, leaking credentials into any
     /// future `debug!`/panic message.
     #[test]
@@ -536,19 +474,5 @@ mod tests {
         );
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("anthropic"));
-    }
-
-    #[test]
-    fn web_action_debug_redacts_secret_and_typed_key() {
-        let save = WebAction::SaveSecret {
-            provider: WebSearchProvider::Tavily,
-            secret: "tvly-super-secret".to_string(),
-        };
-        assert!(!format!("{save:?}").contains("tvly-super-secret"));
-        let test = WebAction::TestSearch {
-            provider: WebSearchProvider::Brave,
-            typed_key: Some("brave-typed-secret".to_string()),
-        };
-        assert!(!format!("{test:?}").contains("brave-typed-secret"));
     }
 }

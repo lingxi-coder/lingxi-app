@@ -24,14 +24,15 @@ class ScopeStateStoreTest {
     fun `scope keys round-trip through their persistence form`() {
         assertEquals("global", ConversationScope.Global.persistenceKey())
         assertEquals("project.p1", ConversationScope.Project("p1").persistenceKey())
-        assertEquals("app.tracker", ConversationScope.LocalApp("tracker").persistenceKey())
+        assertEquals("scheduled", ConversationScope.Scheduled.persistenceKey())
         assertEquals("project.p1#code", ConversationScope.Project("p1").sessionStateKey(SessionMode.Code))
 
         assertEquals(ConversationScope.Global, conversationScopeFromKey("global"))
         assertEquals(ConversationScope.Project("p1"), conversationScopeFromKey("project.p1"))
-        assertEquals(ConversationScope.LocalApp("tracker"), conversationScopeFromKey("app.tracker"))
+        assertEquals(ConversationScope.Scheduled, conversationScopeFromKey("scheduled"))
         assertNull(conversationScopeFromKey(null))
-        assertNull(conversationScopeFromKey("app."))
+        assertNull(conversationScopeFromKey("app.tracker"))
+        assertNull(conversationScopeFromKey("project."))
         assertNull(conversationScopeFromKey("weird"))
     }
 

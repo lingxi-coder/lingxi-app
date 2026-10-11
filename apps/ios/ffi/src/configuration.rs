@@ -37,10 +37,8 @@ pub struct IosMobileLinuxConfigFfi {
     /// `Library/Application Support`: that yields the iOS *container*, while
     /// the engine's root is `<AppSupport>/LingxiCode` — three components
     /// deeper, and not reachable from `mobile-linux/ios-ish` by any rule. The
-    /// runtime therefore expected local-app builds at
-    /// `<container>/apps/<id>/build/<channel>`, a path nothing writes, so every
-    /// build failed its mount check; and `.lingxi` protection guarded
-    /// `<container>/.lingxi`, leaving the real credential directory unguarded.
+    /// runtime therefore guarded `<container>/.lingxi`, leaving the real
+    /// credential directory unguarded.
     pub app_sandbox_root: String,
 }
 
@@ -80,10 +78,6 @@ pub struct IosEngineLaunchConfigFfi {
     pub project_cwd: Option<String>,
     pub provider_config: Option<IosProviderConfigFfi>,
     pub mobile_linux: Option<IosMobileLinuxConfigFfi>,
-    /// Compile-time distribution mode: false for Store, true for Full.
-    pub local_apps_full_runtime: bool,
-    /// Verified read-only local-app runtime bundle staged by the iOS build.
-    pub local_apps_runtime_root: Option<String>,
     /// Device physical memory reported by the iOS host.
     pub physical_memory_bytes: u64,
     /// Stable native host facts used to describe the device execution surface.
@@ -229,22 +223,12 @@ pub(super) fn ios_project_cwd(
         && matches!(components[0], "Projects" | "projects")
         && is_lowercase_uuid(components[1])
         && components[2] == "workspace";
-    // v3 local apps: an app's conversation scope roots at
-    // `appSandboxRoot/apps/<id>/workspace` — the same shape Swift's
-    // `LocalAppWorkspacePath` derives, with the id legality delegated to the
-    // engine's own minting rule instead of a twin regex.
-    let is_local_app_workspace = components.len() == 3
-        && components[0] == "apps"
-        && local_apps::ids::is_valid_app_id(components[1])
-        && components[2] == "workspace";
     let is_scheduled_workspace = components == ["scheduled", "workspace"];
-    let valid = (is_managed_project || is_local_app_workspace || is_scheduled_workspace)
-        && workspace.is_dir();
+    let valid = (is_managed_project || is_scheduled_workspace) && workspace.is_dir();
     if !valid {
         return Err(MobileEngineError::Internal(
             "iOS conversation workspace must match \
              appSandboxRoot/Projects/<lowercase UUID>/workspace or \
-             appSandboxRoot/apps/<app id>/workspace or \
              appSandboxRoot/scheduled/workspace"
                 .to_string(),
         ));
@@ -268,11 +252,6 @@ pub(super) fn ios_mobile_config_from_launch_config(
             SessionModeDto::Chat => MobileSessionMode::Chat,
             SessionModeDto::Code => MobileSessionMode::Code,
         },
-        local_apps_full_runtime: config.local_apps_full_runtime,
-        local_apps_runtime_root: config
-            .local_apps_runtime_root
-            .as_ref()
-            .map(std::path::PathBuf::from),
         physical_memory_bytes: config.physical_memory_bytes,
         vision_delegation_enabled: config.vision_delegation_enabled,
         host_environment: Some(config.host_environment.as_ref().map_or_else(
@@ -339,16 +318,14 @@ pub(super) fn ios_mobile_config_from_launch_config(
         cfg.provider_profiles = profiles;
         cfg.routing = routing;
     }
-    let mobile_linux_selected = config.mobile_linux.as_ref().is_some_and(|runtime| {
-        matches!(runtime.mode, MobileLinuxRuntimeModeFfi::MobileLinux)
-            || config.local_apps_runtime_root.is_some()
-    });
+    let mobile_linux_selected = config
+        .mobile_linux
+        .as_ref()
+        .is_some_and(|runtime| matches!(runtime.mode, MobileLinuxRuntimeModeFfi::MobileLinux));
     if mobile_linux_selected {
-        // Local-app generation always runs in the bundled Mobile Linux runtime,
-        // even when the user-facing terminal stays in Legacy mode. Advertise
-        // the matching shell carrier so agents can invoke the bundled npm/Vite
-        // toolchain; harness-runtime::mobile's capability gate still fails closed when
-        // the runtime is unavailable.
+        // Advertise the shell carrier only when the Mobile Linux runtime is the
+        // selected terminal; harness-runtime::mobile's capability gate still
+        // fails closed when the runtime is unavailable.
         cfg.enable_mobile_linux_shell();
     }
     Ok(cfg)

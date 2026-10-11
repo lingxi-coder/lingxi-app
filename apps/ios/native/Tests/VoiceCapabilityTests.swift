@@ -38,7 +38,7 @@ final class VoiceCapabilityTests: XCTestCase {
     }
 
     func testOfflineVoiceChangeUpdatesModelAndSourceChangeClearsStaleModel() throws {
-        let store = AudioConfigurationStore(defaults: defaults, voiceCatalog: [])
+        let store = AudioConfigurationStore(defaults: defaults)
         var initial = store.configuration
         initial.speech = AudioSpeechPreference(
             source: .offline,
@@ -48,7 +48,7 @@ final class VoiceCapabilityTests: XCTestCase {
         _ = try store.save(initial, expectedRevision: store.revision)
         let model = VoiceCapabilityModel(defaults: defaults, store: store)
 
-        model.setVoice("sherpa:new-tts-model:new-voice")
+        model.setVoice("offline:new-tts-model:new-voice")
         XCTAssertEqual(model.configurationSnapshot.configuration.speech.offlineModelId, "new-tts-model")
         XCTAssertEqual(model.configurationSnapshot.configuration.speech.voice?.id, "new-voice")
 
@@ -56,90 +56,6 @@ final class VoiceCapabilityTests: XCTestCase {
         XCTAssertEqual(model.configurationSnapshot.configuration.speech.source, .system)
         XCTAssertNil(model.configurationSnapshot.configuration.speech.offlineModelId)
         XCTAssertNil(model.configurationSnapshot.configuration.speech.voice)
-    }
-
-    func testFreshPreferencesDefaultToAutomatic() {
-        let snapshot = VoicePreferencesSnapshot.load(defaults: defaults)
-
-        XCTAssertEqual(snapshot.recognitionMode, .automatic)
-        XCTAssertEqual(snapshot.language, VoicePreferencesSnapshot.automaticLanguage)
-        XCTAssertEqual(snapshot.voiceSelection, VoicePreferencesSnapshot.defaultVoiceSelection)
-    }
-
-    func testSharedPreferencesMigrateLegacyKeysIntoVersionedContract() {
-        defaults.set("on-device", forKey: "voiceRecognitionMode")
-        defaults.set("en-US", forKey: "voiceLanguage")
-        defaults.set("com.apple.ttsbundle.Samantha-compact", forKey: "systemVoiceIdentifier")
-        defaults.set(1.4, forKey: "voiceSpeed")
-        defaults.set(true, forKey: "voiceAutoPlay")
-
-        let snapshot = VoicePreferencesSnapshot.load(defaults: defaults)
-
-        XCTAssertEqual(snapshot.schemaVersion, 2)
-        XCTAssertEqual(snapshot.recognitionMode, .onDevice)
-        XCTAssertEqual(snapshot.language, "en-US")
-        XCTAssertEqual(snapshot.voiceSelection, "system:com.apple.ttsbundle.Samantha-compact")
-        XCTAssertEqual(snapshot.rate, 1.4, accuracy: 0.001)
-        XCTAssertTrue(snapshot.autoPlayReplies)
-        XCTAssertEqual(defaults.integer(forKey: "voice.schemaVersion"), 2)
-    }
-
-    func testLocalOnlyNeverFallsBackToSystemRecognizer() {
-        let preferences = VoicePreferencesSnapshot(
-            schemaVersion: 2,
-            recognitionMode: .onDevice,
-            language: "zh-CN",
-            voiceSelection: VoicePreferencesSnapshot.defaultVoiceSelection,
-            rate: 1,
-            autoPlayReplies: false
-        )
-
-        let unavailable = VoiceRuntimeResolver.recognitionRoute(
-            preferences: preferences,
-            systemRecognizerAvailable: true,
-            modelRoot: { _ in nil }
-        )
-        guard case .unavailable = unavailable else {
-            return XCTFail("local-only must block when the Sherpa model is missing")
-        }
-
-        let ready = VoiceRuntimeResolver.recognitionRoute(
-            preferences: preferences,
-            systemRecognizerAvailable: true,
-            modelRoot: { _ in URL(fileURLWithPath: "/verified-model") }
-        )
-        guard case let .sherpa(_, modelID, _) = ready else {
-            return XCTFail("local-only must select Sherpa even when the system recognizer is available")
-        }
-        XCTAssertEqual(modelID, "sherpa.zipformer-zh-14m-mobile")
-    }
-
-    func testAutomaticPrefersSystemThenUsesVerifiedSherpaFallback() {
-        let preferences = VoicePreferencesSnapshot(
-            schemaVersion: 2,
-            recognitionMode: .automatic,
-            language: "en-US",
-            voiceSelection: VoicePreferencesSnapshot.defaultVoiceSelection,
-            rate: 1,
-            autoPlayReplies: false
-        )
-
-        let system = VoiceRuntimeResolver.recognitionRoute(
-            preferences: preferences,
-            systemRecognizerAvailable: true,
-            modelRoot: { _ in URL(fileURLWithPath: "/verified-model") }
-        )
-        guard case .system = system else { return XCTFail("automatic must prefer the system recognizer") }
-
-        let fallback = VoiceRuntimeResolver.recognitionRoute(
-            preferences: preferences,
-            systemRecognizerAvailable: false,
-            modelRoot: { _ in URL(fileURLWithPath: "/verified-model") }
-        )
-        guard case let .sherpa(_, modelID, _) = fallback else {
-            return XCTFail("automatic must use a verified Sherpa fallback")
-        }
-        XCTAssertEqual(modelID, "sherpa.moonshine-tiny-en")
     }
 
     func testSystemDefaultTtsSelectionProducesPcm() async throws {
@@ -160,7 +76,7 @@ final class VoiceCapabilityTests: XCTestCase {
             initiator: nil,
             timeoutBudgetMs: 30_000,
             maxPayloadBytes: service.maximumPayloadBytes ?? maxAudioPayloadBytes(),
-            operation: .synthesize(text: "hello", language: nil, rate: nil, voice: "system:default")
+            operation: .synthesize(text: "hello", language: nil, rate: nil, voice: nil)
         )
         let task = Task { @MainActor in
             result = await service.execute(request)
@@ -170,39 +86,17 @@ final class VoiceCapabilityTests: XCTestCase {
 
         guard let result else {
             task.cancel()
-            XCTFail("system:default TTS must finish within its bounded cold-start budget")
+            XCTFail("Default system TTS must finish within its bounded cold-start budget")
             return
         }
         guard case let .synthesized(pcm, sampleRateHz) = result else {
-            return XCTFail("system:default TTS should return bounded PCM from the app AudioService; result: \(result)")
+            return XCTFail("Default system TTS should return bounded PCM from the app AudioService; result: \(result)")
         }
 
         XCTAssertFalse(pcm.isEmpty)
         XCTAssertGreaterThan(sampleRateHz, 0)
         XCTAssertEqual(pcm.count % MemoryLayout<Int16>.size, 0)
         XCTAssertLessThanOrEqual(pcm.count, Int(request.maxPayloadBytes))
-    }
-
-    func testDeniedSpeechAuthorizationMakesSystemRecognizerUnavailableForRouting() {
-        XCTAssertFalse(VoiceRuntimeResolver.systemRecognitionAvailable(
-            serviceAvailable: true,
-            authorization: .denied
-        ))
-        XCTAssertFalse(VoiceRuntimeResolver.systemRecognitionAvailable(
-            serviceAvailable: true,
-            authorization: .restricted
-        ))
-        XCTAssertTrue(VoiceRuntimeResolver.systemRecognitionAvailable(
-            serviceAvailable: true,
-            authorization: .notDetermined
-        ))
-    }
-
-    func testFirstRunConfigurationIsExplicitlyUnconfirmed() {
-        let model = VoiceCapabilityModel(defaults: defaults)
-
-        XCTAssertTrue(model.speechConfigurationConfirmed)
-        XCTAssertTrue(model.ttsConfigurationConfirmed)
     }
 
     func testReadinessDifferentiatesPermissionsAndUnavailableCapabilities() {
@@ -257,15 +151,12 @@ final class VoiceCapabilityTests: XCTestCase {
 
         let readiness = model.saveConfiguration()
 
-        XCTAssertTrue(model.speechConfigurationConfirmed)
-        XCTAssertTrue(model.ttsConfigurationConfirmed)
         XCTAssertTrue(readiness.speechConfigured)
         XCTAssertTrue(readiness.ttsConfigured)
         XCTAssertEqual(model.configurationSnapshot.configuration.speech.source, .automatic)
         XCTAssertNil(model.configurationSnapshot.configuration.speech.voice)
         XCTAssertEqual(model.speechRoutePreview.effective?.source, .system)
         XCTAssertNil(model.speechRoutePreview.effective?.voiceId)
-        XCTAssertNil(defaults.string(forKey: VoicePreferencesSnapshot.Keys.voiceSelection))
     }
 
     func testPerCallDefaultVoiceOverridesClearOnlyTheFixedVoice() throws {
@@ -293,7 +184,7 @@ final class VoiceCapabilityTests: XCTestCase {
         )
 
         let snapshot = AudioConfigurationSnapshot(
-            configuration: AudioConfigurationV3(
+            configuration: AudioConfigurationV4(
                 recognition: AudioRecognitionPreference(source: .system),
                 speech: saved,
                 language: voice.language
@@ -360,8 +251,6 @@ final class VoiceCapabilityTests: XCTestCase {
         guard model.selectedVoice != nil else {
             throw XCTSkip("This test host has no installed system speech voices")
         }
-        defaults.set("localOnly", forKey: VoicePreferencesSnapshot.Keys.legacyRecognitionMode)
-        defaults.set("system:recovery.voice", forKey: VoicePreferencesSnapshot.Keys.legacySystemVoice)
 
         model.setMode(.onDevice)
         XCTAssertEqual(model.configurationSnapshot.configuration.recognition.source, .offline)
@@ -370,7 +259,7 @@ final class VoiceCapabilityTests: XCTestCase {
         XCTAssertEqual(model.configurationSnapshot.configuration.recognition.source, .automatic)
         XCTAssertGreaterThan(model.configurationRevision, offlineRevision)
 
-        let alternativeVoice = model.voices.first { $0.id != model.voiceIdentifier }
+        let alternativeVoice = model.voices.first { $0.id.hasPrefix("system:") && $0.id != model.voiceIdentifier }
         if let alternativeVoice {
             model.setVoice(alternativeVoice.id)
             let selected = try XCTUnwrap(model.configurationSnapshot.configuration.speech.voice)
@@ -381,8 +270,6 @@ final class VoiceCapabilityTests: XCTestCase {
         let savedConfiguration = model.configurationSnapshot.configuration
         let reloaded = VoiceCapabilityModel(defaults: defaults)
         XCTAssertEqual(reloaded.configurationSnapshot.configuration, savedConfiguration)
-        XCTAssertEqual(defaults.string(forKey: VoicePreferencesSnapshot.Keys.legacyRecognitionMode), "localOnly")
-        XCTAssertEqual(defaults.string(forKey: VoicePreferencesSnapshot.Keys.legacySystemVoice), "system:recovery.voice")
     }
 
     func testReloadFromDefaultsReadsExternalConfigurationChanges() throws {
@@ -399,8 +286,6 @@ final class VoiceCapabilityTests: XCTestCase {
 
         XCTAssertEqual(reader.language, "en-US")
         XCTAssertEqual(reader.mode, .automatic)
-        XCTAssertTrue(reader.speechConfigurationConfirmed)
-        XCTAssertTrue(reader.ttsConfigurationConfirmed)
         XCTAssertFalse(reader.voiceIdentifier.isEmpty)
     }
 
@@ -617,6 +502,10 @@ private final class CapabilityBlockingSpeechPlayer: VoiceSpeechPlaying {
         await withCheckedContinuation { continuation = $0 }
         try Task.checkCancellation()
         return .completed
+    }
+
+    func openStream(configuration: VoiceSpeechConfiguration, managesAudioSession: Bool) async throws -> any VoiceSpeechStreamingSession {
+        throw AudioServiceFailure.unsupported
     }
 
     func stop() {

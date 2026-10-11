@@ -5,103 +5,488 @@
       "name": "fresh defaults",
       "input": {},
       "expected": {
-        "schemaVersion": 3,
-        "recognition": { "source": "automatic", "offlineModelId": null },
-        "speech": { "source": "automatic", "offlineModelId": null, "voice": null },
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
         "language": "auto",
         "rate": 1,
-        "autoPlayReplies": false
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
       }
     },
     {
       "name": "preserve unknown explicit selections",
       "input": {
-        "schemaVersion": 3,
-        "recognition": { "source": "telepathy", "offlineModelId": "sherpa.future-stt" },
-        "speech": { "source": "offline", "offlineModelId": "sherpa.future-tts", "voice": { "source": "offline", "modelId": "sherpa.future-tts", "id": "voice-future" } },
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "telepathy",
+          "offlineModelId": "sherpa.future-stt"
+        },
+        "speech": {
+          "source": "offline",
+          "offlineModelId": "sherpa.future-tts",
+          "voice": {
+            "source": "offline",
+            "modelId": "sherpa.future-tts",
+            "id": "voice-future"
+          }
+        },
         "language": "zh-CN",
         "rate": 3,
         "autoPlayReplies": true
       },
       "expected": {
-        "schemaVersion": 3,
-        "recognition": { "source": "telepathy", "offlineModelId": "sherpa.future-stt" },
-        "speech": { "source": "offline", "offlineModelId": "sherpa.future-tts", "voice": { "source": "offline", "modelId": "sherpa.future-tts", "id": "voice-future" } },
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "telepathy",
+          "offlineModelId": "sherpa.future-stt",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "offline",
+          "offlineModelId": "sherpa.future-tts",
+          "voice": {
+            "source": "offline",
+            "modelId": "sherpa.future-tts",
+            "id": "voice-future"
+          },
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
         "language": "zh-CN",
         "rate": 2,
-        "autoPlayReplies": true
+        "autoPlayReplies": true,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
       }
     },
     {
       "name": "automatic speech with a persisted fixed voice is promoted",
       "input": {
-        "schemaVersion": 3,
-        "recognition": { "source": "automatic", "offlineModelId": null },
-        "speech": { "source": "automatic", "offlineModelId": null, "voice": { "source": "system", "id": "com.apple.voice.compact.en-US.Alex" } },
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": {
+            "source": "system",
+            "id": "com.apple.voice.compact.en-US.Alex"
+          }
+        },
         "language": " AUTO ",
         "rate": 0.25,
         "autoPlayReplies": false
       },
       "expected": {
-        "schemaVersion": 3,
-        "recognition": { "source": "automatic", "offlineModelId": null },
-        "speech": { "source": "system", "offlineModelId": null, "voice": { "source": "system", "id": "com.apple.voice.compact.en-US.Alex" } },
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
         "language": "auto",
         "rate": 0.5,
-        "autoPlayReplies": false
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
       }
     },
     {
       "name": "preserve an offline voice whose model metadata is missing",
       "input": {
-        "schemaVersion": 3,
-        "speech": { "source": "automatic", "offlineModelId": null, "voice": { "source": "offline", "id": "legacy-unbound-voice" } }
+        "schemaVersion": 4,
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": {
+            "source": "offline",
+            "id": "unbound-current-voice"
+          }
+        }
       },
       "expected": {
-        "schemaVersion": 3,
-        "recognition": { "source": "automatic", "offlineModelId": null },
-        "speech": { "source": "offline", "offlineModelId": null, "voice": { "source": "offline", "id": "legacy-unbound-voice" } },
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
         "language": "auto",
         "rate": 1,
-        "autoPlayReplies": false
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
       }
-    }
-  ],
-  "migrations": [
+    },
     {
-      "name": "localOnly becomes explicit offline recognition",
-      "input": { "schemaVersion": 2, "recognitionMode": "localOnly", "language": " zh-CN ", "autoPlayReplies": true },
-      "expected": {
-        "schemaVersion": 3,
-        "recognition": { "source": "offline", "offlineModelId": null },
-        "speech": { "source": "automatic", "offlineModelId": null, "voice": null },
-        "language": "zh-CN",
-        "rate": 1,
+      "name": "old configuration rejected: localOnly becomes explicit offline recognition",
+      "input": {
+        "schemaVersion": 2,
+        "recognitionMode": "localOnly",
+        "language": " zh-CN ",
         "autoPlayReplies": true
-      }
-    },
-    {
-      "name": "sherpa voice binds to its explicit model",
-      "input": { "schemaVersion": 2, "recognitionMode": "automatic", "voiceSelection": "sherpa:sherpa.melo-zh-en:melo-zh-en", "language": "zh-CN" },
+      },
       "expected": {
-        "schemaVersion": 3,
-        "recognition": { "source": "automatic", "offlineModelId": null },
-        "speech": { "source": "offline", "offlineModelId": "sherpa.melo-zh-en", "voice": { "source": "offline", "modelId": "sherpa.melo-zh-en", "id": "melo-zh-en" } },
-        "language": "zh-CN",
-        "rate": 1,
-        "autoPlayReplies": false
-      }
-    },
-    {
-      "name": "unknown legacy recognition choice stays unavailable",
-      "input": { "schemaVersion": 1, "recognitionMode": "quantum", "voiceSelection": "system:missing.voice" },
-      "expected": {
-        "schemaVersion": 3,
-        "recognition": { "source": "quantum", "offlineModelId": null },
-        "speech": { "source": "system", "offlineModelId": null, "voice": { "source": "system", "id": "missing.voice" } },
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
         "language": "auto",
         "rate": 1,
-        "autoPlayReplies": false
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
+      }
+    },
+    {
+      "name": "old configuration rejected: sherpa voice binds to its explicit model",
+      "input": {
+        "schemaVersion": 2,
+        "recognitionMode": "automatic",
+        "voiceSelection": "sherpa:sherpa.melo-zh-en:melo-zh-en",
+        "language": "zh-CN"
+      },
+      "expected": {
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "auto",
+        "rate": 1,
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
+      }
+    },
+    {
+      "name": "old configuration rejected: unknown obsolete recognition choice stays unavailable",
+      "input": {
+        "schemaVersion": 1,
+        "recognitionMode": "quantum",
+        "voiceSelection": "system:missing.voice"
+      },
+      "expected": {
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "auto",
+        "rate": 1,
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
+      }
+    },
+    {
+      "name": "old configuration rejected: v3 version is rejected",
+      "input": {
+        "schemaVersion": 3,
+        "recognition": {
+          "source": "offline",
+          "offlineModelId": "stt"
+        },
+        "speech": {
+          "source": "system",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "language": "en-US",
+        "rate": 1.2,
+        "autoPlayReplies": true
+      },
+      "expected": {
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "auto",
+        "rate": 1,
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
+      }
+    },
+    {
+      "name": "v3 configuration rejected without retaining source or voice",
+      "input": {
+        "schemaVersion": 3,
+        "recognition": {
+          "source": "offline",
+          "offlineModelId": "old-stt"
+        },
+        "speech": {
+          "source": "system",
+          "voice": {
+            "source": "system",
+            "id": "old-voice"
+          }
+        },
+        "language": "fr-FR",
+        "rate": 1.75
+      },
+      "expected": {
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "auto",
+        "rate": 1,
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
+      }
+    },
+    {
+      "name": "current string voice rejected",
+      "input": {
+        "schemaVersion": 4,
+        "speech": {
+          "source": "system",
+          "voice": "Alex"
+        }
+      },
+      "expected": {
+        "schemaVersion": 4,
+        "recognition": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "speech": {
+          "source": "system",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "auto",
+        "rate": 1,
+        "autoPlayReplies": false,
+        "conversation": {
+          "mode": "agent",
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          },
+          "voice": null,
+          "interaction": "turn_based"
+        }
       }
     }
   ],
@@ -110,14 +495,34 @@
       "name": "automatic is system first",
       "input": {
         "kind": "recognition",
-        "preference": { "source": "automatic", "offlineModelId": null },
+        "preference": {
+          "source": "automatic",
+          "offlineModelId": null
+        },
         "language": "zh-CN",
         "systemStatus": "available",
-        "offlineModels": [{ "id": "sherpa.zipformer-zh-14m-mobile", "kind": "recognition", "languages": ["zh"], "installed": true }]
+        "offlineModels": [
+          {
+            "id": "sherpa.zipformer-zh-14m-mobile",
+            "kind": "recognition",
+            "languages": [
+              "zh"
+            ],
+            "installed": true
+          }
+        ]
       },
       "expected": {
-        "requested": { "source": "automatic", "offlineModelId": null, "voice": null },
-        "effective": { "source": "system", "modelId": null, "voiceId": null },
+        "requested": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": {
+          "source": "system",
+          "modelId": null,
+          "voiceId": null
+        },
         "status": "ready",
         "reason": "ready",
         "fallbackReason": null
@@ -127,17 +532,42 @@
       "name": "automatic falls back in catalog order when system is unavailable",
       "input": {
         "kind": "recognition",
-        "preference": { "source": "automatic", "offlineModelId": null },
+        "preference": {
+          "source": "automatic",
+          "offlineModelId": null
+        },
         "language": "en-US",
         "systemStatus": "unavailable",
         "offlineModels": [
-          { "id": "sherpa.zipformer-zh-14m-mobile", "kind": "recognition", "languages": ["zh"], "installed": true },
-          { "id": "sherpa.moonshine-tiny-en", "kind": "recognition", "languages": ["en"], "installed": true }
+          {
+            "id": "sherpa.zipformer-zh-14m-mobile",
+            "kind": "recognition",
+            "languages": [
+              "zh"
+            ],
+            "installed": true
+          },
+          {
+            "id": "sherpa.moonshine-tiny-en",
+            "kind": "recognition",
+            "languages": [
+              "en"
+            ],
+            "installed": true
+          }
         ]
       },
       "expected": {
-        "requested": { "source": "automatic", "offlineModelId": null, "voice": null },
-        "effective": { "source": "offline", "modelId": "sherpa.moonshine-tiny-en", "voiceId": null },
+        "requested": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": {
+          "source": "offline",
+          "modelId": "sherpa.moonshine-tiny-en",
+          "voiceId": null
+        },
         "status": "ready",
         "reason": "ready",
         "fallbackReason": "systemUnavailable"
@@ -147,13 +577,30 @@
       "name": "explicit unknown offline model remains unavailable",
       "input": {
         "kind": "speech",
-        "preference": { "source": "offline", "offlineModelId": "sherpa.future-tts", "voice": null },
+        "preference": {
+          "source": "offline",
+          "offlineModelId": "sherpa.future-tts",
+          "voice": null
+        },
         "language": "en-US",
         "systemStatus": "available",
-        "offlineModels": [{ "id": "sherpa.kitten-nano-en", "kind": "speech", "languages": ["en"], "installed": true }]
+        "offlineModels": [
+          {
+            "id": "sherpa.kitten-nano-en",
+            "kind": "speech",
+            "languages": [
+              "en"
+            ],
+            "installed": true
+          }
+        ]
       },
       "expected": {
-        "requested": { "source": "offline", "offlineModelId": "sherpa.future-tts", "voice": null },
+        "requested": {
+          "source": "offline",
+          "offlineModelId": "sherpa.future-tts",
+          "voice": null
+        },
         "effective": null,
         "status": "unavailable",
         "reason": "offlineModelUnknown",
@@ -164,16 +611,48 @@
       "name": "per-call system voice narrows automatic speech",
       "input": {
         "kind": "speech",
-        "preference": { "source": "automatic", "offlineModelId": null, "voice": null },
+        "preference": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": null
+        },
         "language": "en-US",
         "systemStatus": "available",
-        "systemVoiceIds": ["com.apple.voice.compact.en-US.Alex"],
-        "voiceOverride": { "source": "system", "id": "com.apple.voice.compact.en-US.Alex" },
-        "offlineModels": [{ "id": "sherpa.kitten-nano-en", "kind": "speech", "languages": ["en"], "installed": true, "voiceIds": ["expr-voice-2-f"] }]
+        "systemVoiceIds": [
+          "com.apple.voice.compact.en-US.Alex"
+        ],
+        "voiceOverride": {
+          "source": "system",
+          "id": "com.apple.voice.compact.en-US.Alex"
+        },
+        "offlineModels": [
+          {
+            "id": "sherpa.kitten-nano-en",
+            "kind": "speech",
+            "languages": [
+              "en"
+            ],
+            "installed": true,
+            "voiceIds": [
+              "expr-voice-2-f"
+            ]
+          }
+        ]
       },
       "expected": {
-        "requested": { "source": "automatic", "offlineModelId": null, "voice": { "source": "system", "id": "com.apple.voice.compact.en-US.Alex" } },
-        "effective": { "source": "system", "modelId": null, "voiceId": "com.apple.voice.compact.en-US.Alex" },
+        "requested": {
+          "source": "automatic",
+          "offlineModelId": null,
+          "voice": {
+            "source": "system",
+            "id": "com.apple.voice.compact.en-US.Alex"
+          }
+        },
+        "effective": {
+          "source": "system",
+          "modelId": null,
+          "voiceId": "com.apple.voice.compact.en-US.Alex"
+        },
         "status": "ready",
         "reason": "ready",
         "fallbackReason": null
@@ -183,16 +662,368 @@
       "name": "unbound offline voice stays invalid instead of choosing a default voice",
       "input": {
         "kind": "speech",
-        "preference": { "source": "offline", "offlineModelId": null, "voice": { "source": "offline", "id": "legacy-unbound-voice" } },
+        "preference": {
+          "source": "offline",
+          "offlineModelId": null,
+          "voice": {
+            "source": "offline",
+            "id": "unbound-current-voice"
+          }
+        },
         "language": "en-US",
         "systemStatus": "available",
-        "offlineModels": [{ "id": "sherpa.kitten-nano-en", "kind": "speech", "languages": ["en"], "installed": true, "voiceIds": ["expr-voice-2-f"] }]
+        "offlineModels": [
+          {
+            "id": "sherpa.kitten-nano-en",
+            "kind": "speech",
+            "languages": [
+              "en"
+            ],
+            "installed": true,
+            "voiceIds": [
+              "expr-voice-2-f"
+            ]
+          }
+        ]
       },
       "expected": {
-        "requested": { "source": "offline", "offlineModelId": null, "voice": { "source": "offline", "id": "legacy-unbound-voice" } },
+        "requested": {
+          "source": "offline",
+          "offlineModelId": null,
+          "voice": {
+            "source": "offline",
+            "id": "unbound-current-voice"
+          }
+        },
         "effective": null,
         "status": "invalidRequest",
         "reason": "offlineModelConflict",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "provider follows exact session profile",
+      "input": {
+        "kind": "speech",
+        "preference": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": [],
+        "sessionContext": {
+          "profileId": "session-profile"
+        },
+        "providerCapabilities": [
+          {
+            "profileId": "session-profile",
+            "providerId": "openai",
+            "kind": "speech",
+            "supported": true,
+            "readiness": "ready",
+            "defaultModelId": "tts",
+            "modelIds": [
+              "tts",
+              "tts-override"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "requested": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": {
+          "source": "provider",
+          "profileId": "session-profile",
+          "providerId": "openai",
+          "modelId": "tts",
+          "voiceId": null
+        },
+        "status": "ready",
+        "reason": "ready",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "provider unsupported never falls back to local",
+      "input": {
+        "kind": "speech",
+        "preference": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": [],
+        "sessionContext": {
+          "profileId": "session-profile"
+        },
+        "providerCapabilities": []
+      },
+      "expected": {
+        "requested": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": null,
+        "status": "unavailable",
+        "reason": "providerOperationUnsupported",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "provider missing session never falls back",
+      "input": {
+        "kind": "speech",
+        "preference": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": [],
+        "sessionContext": null,
+        "providerCapabilities": [
+          {
+            "profileId": "session-profile",
+            "providerId": "openai",
+            "kind": "speech",
+            "supported": true,
+            "readiness": "ready",
+            "defaultModelId": "tts",
+            "modelIds": [
+              "tts",
+              "tts-override"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "requested": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": null,
+        "status": "unavailable",
+        "reason": "sessionProfileRequired",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "provider configured override preserves model",
+      "input": {
+        "kind": "speech",
+        "preference": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": null,
+          "cloud": {
+            "binding": "explicit_profile",
+            "profileId": "session-profile",
+            "modelId": "tts-override"
+          }
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": [],
+        "sessionContext": {
+          "profileId": "session-profile"
+        },
+        "providerCapabilities": [
+          {
+            "profileId": "session-profile",
+            "providerId": "openai",
+            "kind": "speech",
+            "supported": true,
+            "readiness": "ready",
+            "defaultModelId": "tts",
+            "modelIds": [
+              "tts",
+              "tts-override"
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "requested": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": {
+          "source": "provider",
+          "profileId": "session-profile",
+          "providerId": "openai",
+          "modelId": "tts-override",
+          "voiceId": null
+        },
+        "status": "ready",
+        "reason": "ready",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "ready provider native endpoint preserves null model and scoped voice",
+      "input": {
+        "kind": "speech",
+        "preference": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": {
+            "source": "provider",
+            "profileId": "session-profile",
+            "id": "native-voice"
+          },
+          "cloud": {
+            "binding": "explicit_profile",
+            "profileId": "session-profile",
+            "modelId": null
+          }
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": [],
+        "sessionContext": {
+          "profileId": "session-profile"
+        },
+        "providerCapabilities": [
+          {
+            "profileId": "session-profile",
+            "providerId": "xai",
+            "kind": "speech",
+            "supported": true,
+            "readiness": "ready",
+            "defaultModelId": null,
+            "modelIds": [
+              null
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "requested": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": {
+            "source": "provider",
+            "profileId": "session-profile",
+            "id": "native-voice"
+          }
+        },
+        "effective": {
+          "source": "provider",
+          "profileId": "session-profile",
+          "providerId": "xai",
+          "modelId": null,
+          "voiceId": "native-voice"
+        },
+        "status": "ready",
+        "reason": "ready",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "null model is rejected without a ready native descriptor",
+      "input": {
+        "kind": "speech",
+        "preference": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": {
+            "source": "provider",
+            "profileId": "session-profile",
+            "id": "native-voice"
+          },
+          "cloud": {
+            "binding": "explicit_profile",
+            "profileId": "session-profile",
+            "modelId": null
+          }
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": [],
+        "sessionContext": {
+          "profileId": "session-profile"
+        },
+        "providerCapabilities": [
+          {
+            "profileId": "session-profile",
+            "providerId": "xai",
+            "kind": "speech",
+            "supported": true,
+            "readiness": "ready",
+            "defaultModelId": null,
+            "modelIds": []
+          }
+        ]
+      },
+      "expected": {
+        "requested": {
+          "source": "provider",
+          "offlineModelId": null,
+          "voice": {
+            "source": "provider",
+            "profileId": "session-profile",
+            "id": "native-voice"
+          }
+        },
+        "effective": null,
+        "status": "unavailable",
+        "reason": "providerModelUnsupported",
+        "fallbackReason": null
+      }
+    },
+    {
+      "name": "obsolete source spelling remains unsupported in current configuration",
+      "input": {
+        "kind": "recognition",
+        "preference": {
+          "source": "localOnly",
+          "offlineModelId": null,
+          "cloud": {
+            "binding": "follow_session",
+            "profileId": null,
+            "modelId": null
+          }
+        },
+        "language": "en-US",
+        "systemStatus": "available",
+        "offlineModels": []
+      },
+      "expected": {
+        "requested": {
+          "source": "localOnly",
+          "offlineModelId": null,
+          "voice": null
+        },
+        "effective": null,
+        "status": "unavailable",
+        "reason": "unsupportedSource",
         "fallbackReason": null
       }
     }

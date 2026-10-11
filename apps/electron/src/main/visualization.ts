@@ -218,7 +218,13 @@ export function guardVisualizationWebview(
   }
   delete webPreferences.preloadURL;
   for (const key of Object.keys(webPreferences)) delete (webPreferences as Record<string, unknown>)[key];
-  Object.assign(webPreferences, visualizationGuestPreferences(preload, devTools));
+  // Electron carries the `<webview partition>` attribute in these preferences;
+  // without it the guest silently lands on the default session, where the
+  // visualization scheme is not registered and the shell never loads.
+  Object.assign(webPreferences, visualizationGuestPreferences(preload, devTools), {
+    partition: VISUALIZATION_PARTITION,
+    disablePopups: true,
+  });
   return true;
 }
 

@@ -158,8 +158,6 @@ pub struct Runtime {
     /// `/connect` screen's `pump_store_provider_key` persists a collected
     /// provider key via `CredentialManager::set_provider_key`.
     pub provider_key_store: std::sync::Arc<secret::CredentialManager>,
-    /// Shared HTTP transport for TUI-owned `/web` test-search requests.
-    pub http: std::sync::Arc<dyn lingxi_core::host::HttpTransport>,
     /// Shared analytics bus projected from the desktop runtime.
     pub analytics_bus: std::sync::Arc<telemetry::AnalyticsBus>,
     /// Structured-output capture slot, projected from
@@ -921,7 +919,7 @@ pub(crate) fn resolve_desktop_config_at(
     let flag_settings_source = read_flag_settings_source_checked(argv.settings.as_deref())
         .ok()
         .flatten();
-    let flag_settings = flag_settings_source
+    let flag_settings: Option<lingxi_core::settings::SettingsJson> = flag_settings_source
         .as_deref()
         .and_then(|raw| serde_json::from_str(raw).ok());
 
@@ -997,7 +995,7 @@ pub(crate) fn resolve_desktop_config_at(
 
     DesktopConfig {
         build_info,
-        diagnostics: None,
+        diagnostics: Some(Arc::new(CliDesktopDiagnostics)),
         mcp_services_factory: None,
         composition: None,
         user_agent_environment: None,
@@ -1611,7 +1609,6 @@ pub async fn build_runtime_from_config(
         model_provenance: rt.model_provenance,
         catalog_registry: rt.catalog_registry,
         provider_key_store: rt.credentials,
-        http: rt.http,
         analytics_bus: rt.analytics_bus,
         structured_output_slot: rt.structured_output_slot,
         bash_runner: rt.bash_runner,
@@ -2126,7 +2123,9 @@ mod tests {
         input: &serde_json::Value,
     ) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let check = gate.check("Bash", input);
+            let input =
+                harness_runtime::headless::Utf16JsonProjection::from_serde_value(input).unwrap();
+            let check = gate.check("Bash", &input);
             tokio::pin!(check);
             let exchange = tokio::select! {
                 decision = &mut check => panic!("expected a human prompt, got {decision:?}"),
@@ -2182,7 +2181,11 @@ mod tests {
             cwd: project.path().to_owned(),
         };
         assert!(matches!(
-            gate.check("Bash", &input).await,
+            gate.check(
+                "Bash",
+                &harness_runtime::headless::Utf16JsonProjection::from_serde_value(&input).unwrap()
+            )
+            .await,
             permission::PermissionDecision::Allow
         ));
         for (dest, removed_source, remaining) in [
@@ -2229,7 +2232,14 @@ mod tests {
             if remaining > 0 {
                 assert!(
                     matches!(
-                        gate.check("Bash", &input).await,
+                        gate.check(
+                            "Bash",
+                            &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                                &input
+                            )
+                            .unwrap()
+                        )
+                        .await,
                         permission::PermissionDecision::Allow
                     ),
                     "other settings grants must remain live"
@@ -2271,7 +2281,11 @@ mod tests {
             cwd: project.path().to_owned(),
         };
         assert!(matches!(
-            gate.check("Bash", &input).await,
+            gate.check(
+                "Bash",
+                &harness_runtime::headless::Utf16JsonProjection::from_serde_value(&input).unwrap()
+            )
+            .await,
             permission::PermissionDecision::Allow
         ));
         for behavior in [PermissionBehavior::Ask, PermissionBehavior::Deny] {
@@ -2302,7 +2316,12 @@ mod tests {
                 assert_live_permission_asks(&gate, &mut permission_rx, &input).await;
             } else {
                 assert!(matches!(
-                    gate.check("Bash", &input).await,
+                    gate.check(
+                        "Bash",
+                        &harness_runtime::headless::Utf16JsonProjection::from_serde_value(&input)
+                            .unwrap()
+                    )
+                    .await,
                     permission::PermissionDecision::Deny { .. }
                 ));
                 assert!(
@@ -2312,8 +2331,14 @@ mod tests {
             }
             assert!(
                 matches!(
-                    gate.check("Bash", &serde_json::json!({"command":"mkdir unrelated"}))
-                        .await,
+                    gate.check(
+                        "Bash",
+                        &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"command":"mkdir unrelated"})
+                        )
+                        .unwrap()
+                    )
+                    .await,
                     permission::PermissionDecision::Allow
                 ),
                 "content-scoped updates cannot deny unrelated commands"
@@ -2369,7 +2394,13 @@ mod tests {
                 .enforcing_permission_gate
                 .as_ref()
                 .unwrap()
-                .check("Bash", &serde_json::json!({"command":"touch permitted"}))
+                .check(
+                    "Bash",
+                    &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"command":"touch permitted"})
+                    )
+                    .unwrap()
+                )
                 .await,
             permission::PermissionDecision::Allow
         ));
@@ -2442,7 +2473,7 @@ mod tests {
             fixture_cli_runtime_with_balance(home.path(), cwd.path(), Some(123_000_000)).await;
         let orch = &runtime.orchestrator;
         let old_id = orch.current_session_id().await;
-        orch.append_meta_user_message("old-conversation-marker")
+        orch.append_meta_user_message(&"old-conversation-marker".into())
             .await
             .unwrap();
         assert!(!orch.snapshot_history().await.is_empty());
@@ -2470,7 +2501,7 @@ mod tests {
         assert_eq!(cost.session_id.as_uuid().to_string(), new_id);
         assert_eq!(cost.total_nano_usd, 0);
         let preserved_old = std::fs::read(&old_path).unwrap();
-        orch.append_meta_user_message("new-conversation-marker")
+        orch.append_meta_user_message(&"new-conversation-marker".into())
             .await
             .unwrap();
         let new_path = session::jsonl::path::session_path(

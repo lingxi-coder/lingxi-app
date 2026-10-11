@@ -3,7 +3,7 @@ package com.lingxi.code.voice
 import com.lingxi.code.voice.audio.AudioSource
 import com.lingxi.code.voice.audio.AudioSpeechPreference
 import com.lingxi.code.voice.audio.AudioVoiceSelection
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -22,15 +22,14 @@ class AndroidVoiceRuntimeVoiceKeyTest {
     }
 
     @Test
-    fun legacySherpaKeyRemainsSupported() {
-        assertEquals(
-            AudioVoiceSelection(
-                source = AudioSource.OFFLINE,
-                id = "expr-voice-2-f",
-                modelId = "sherpa.kitten-nano-en",
-            ),
-            parseExplicitVoiceSelection("sherpa:sherpa.kitten-nano-en:expr-voice-2-f"),
-        )
+    fun obsoleteOfflineAliasIsNotAnExplicitVoiceKey() {
+        assertNull(parseExplicitVoiceSelection("sherpa:sherpa.kitten-nano-en:expr-voice-2-f"))
+    }
+
+    @Test
+    fun currentProviderKeyAllowsAProfileWithNoModelId() {
+        assertEquals(AudioVoiceSelection(AudioSource.PROVIDER, "voice", profileId = "profile"),
+            parseExplicitVoiceSelection("provider:profile::voice"))
     }
 
     @Test
@@ -43,7 +42,7 @@ class AndroidVoiceRuntimeVoiceKeyTest {
     @Test
     fun defaultAndAutoCallOverridesClearTheFixedVoiceButRetainTheConfiguredSource() {
         val fixedOfflineVoice = AudioVoiceSelection(AudioSource.OFFLINE, "kitten-default-en", "sherpa.kitten-nano-en")
-        val preferences = AudioConfigurationV3(
+        val preferences = AudioConfigurationV4(
             speech = AudioSpeechPreference(
                 source = AudioSource.OFFLINE,
                 offlineModelId = "sherpa.kitten-nano-en",

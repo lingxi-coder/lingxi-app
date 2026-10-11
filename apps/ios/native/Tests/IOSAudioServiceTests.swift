@@ -4,6 +4,14 @@ import XCTest
 
 @MainActor
 final class IOSAudioServiceTests: XCTestCase {
+    func testLocalAppAudioOwnerSeparatesRuntimeGenerations() {
+        let previous = IOSAudioOwner.localApp(appID: "same-app", runtimeGeneration: 1)
+        let current = IOSAudioOwner.localApp(appID: "same-app", runtimeGeneration: 2)
+        XCTAssertNotEqual(previous, current)
+        XCTAssertNotEqual(previous.stableKey, current.stableKey)
+        XCTAssertNotEqual(current.stableKey, IOSAudioOwner.ui(instanceID: "same-app").stableKey)
+    }
+
     func testFlowBargeInRecognitionUsesDuplexSessionPurpose() {
         XCTAssertEqual(
             IOSAudioService.recognitionSessionPurpose(for: .ui(instanceID: "flow-barge-in")),
@@ -59,7 +67,7 @@ final class IOSAudioServiceTests: XCTestCase {
     func testEndOwnerFencesSameOwnerAdmissionsUntilCleanupDrains() async {
         let recorder = EndOwnerGateRecordingDriver()
         let service = IOSAudioService(recorder: recorder, serviceEpoch: 81, onInvalidation: { _ in })
-        let owner = IOSAudioOwner.localApp(appID: "closing-app", runtimeGeneration: 4)
+        let owner = IOSAudioOwner.system(instanceID: "closing-app")
         let started = await service.execute(request(
             identity: identity(generation: 1, epoch: 81),
             owner: owner,
@@ -106,7 +114,7 @@ final class IOSAudioServiceTests: XCTestCase {
             serviceEpoch: 52,
             onInvalidation: { _ in }
         )
-        let owner = IOSAudioOwner.localApp(appID: "demo", runtimeGeneration: 7)
+        let owner = IOSAudioOwner.system(instanceID: "demo")
         let operationIdentity = identity(generation: 9, epoch: 52)
         let operation = Task { @MainActor in
             await service.execute(request(
@@ -334,7 +342,7 @@ final class IOSAudioServiceTests: XCTestCase {
             serviceEpoch: 56,
             onInvalidation: { _ in }
         )
-        let oldOwner = IOSAudioOwner.localApp(appID: "old-app", runtimeGeneration: 3)
+        let oldOwner = IOSAudioOwner.system(instanceID: "old-app")
         let newOwner = IOSAudioOwner.session(sessionID: "new-session")
         let oldStart = Task { @MainActor in
             await service.execute(request(
@@ -662,15 +670,15 @@ final class IOSAudioServiceTests: XCTestCase {
 
         XCTAssertGreaterThan(snapshot.0, 0)
         XCTAssertEqual(snapshot.1, maxAudioPayloadBytes())
-        XCTAssertEqual(snapshot.2, 4)
-        XCTAssertEqual(snapshot.3, 4)
+        XCTAssertEqual(snapshot.2, 6)
+        XCTAssertEqual(snapshot.3, 6)
     }
 
     func testCapabilityCacheRefreshesAfterConfigurationChangeAndStaysStable() async throws {
         let defaultsName = "IOSAudioServiceCapabilityTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: defaultsName)!
         defaults.removePersistentDomain(forName: defaultsName)
-        let store = AudioConfigurationStore(defaults: defaults, voiceCatalog: [])
+        let store = AudioConfigurationStore(defaults: defaults)
         let service = IOSAudioService(
             configurationStore: store,
             serviceEpoch: 78,

@@ -125,11 +125,13 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
 
     async fn take_mid_turn_batch(
         &self,
-    ) -> Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>> {
-        let batch = self.queue.take_mid_turn_commands().await?;
+    ) -> Result<Option<Vec<orchestrator::prompt::mid_turn_input::MidTurnInput>>, String> {
+        let Some(batch) = self.queue.take_mid_turn_commands().await else {
+            return Ok(None);
+        };
         self.foreign_inputs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(
+        Ok(Some(
             batch
                 .into_iter()
                 .filter_map(|command| {
@@ -151,7 +153,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTur
                     })
                 })
                 .collect(),
-        )
+        ))
     }
 }
 
@@ -1202,13 +1204,13 @@ mod tests {
     /// Build a production driver over an orchestrator wired to `streaming` (whose
     /// `captured_calls()` records the outgoing request messages). No network, no
     /// API key — the mock streaming client scripts the whole turn.
-    fn build_driver(streaming: Arc<MockStreamingApiClient>) -> OrchestratorTurnDriver {
+    fn build_orchestrator(streaming: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
         let batched = Arc::new(MockApiClient::new(Vec::new()));
         let sink = MockSink::arc();
         let output: Arc<dyn lingxi_core::host::OutputStream> =
             Arc::new(AdapterOutputStream::new(sink as Arc<dyn ClientEventSink>));
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
-        let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
+        ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig::default(),
             batched,
             streaming,
@@ -1218,8 +1220,13 @@ mod tests {
             output,
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
-        ));
-        OrchestratorTurnDriver::new(orchestrator)
+        )
+    }
+
+    fn build_driver(streaming: Arc<MockStreamingApiClient>) -> OrchestratorTurnDriver {
+        OrchestratorTurnDriver::new(ConversationOrchestrator::into_shared(build_orchestrator(
+            streaming,
+        )))
     }
 
     struct RejectingOutputScopes;
@@ -1248,12 +1255,9 @@ mod tests {
     }
 
     fn build_driver_with_rejected_output_scope() -> OrchestratorTurnDriver {
-        let driver = build_driver(streaming_one_turn());
-        let orchestrator = Arc::try_unwrap(driver.orchestrator)
-            .ok()
-            .expect("test driver is the sole orchestrator owner")
+        let orchestrator = build_orchestrator(streaming_one_turn())
             .with_workflow_output_scopes(Arc::new(RejectingOutputScopes));
-        OrchestratorTurnDriver::new(Arc::new(orchestrator))
+        OrchestratorTurnDriver::new(ConversationOrchestrator::into_shared(orchestrator))
     }
 
     #[test]
@@ -1264,14 +1268,11 @@ mod tests {
         tool_cron::reset_autonomous_loop_delivered();
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("loop.md"), "First session task").unwrap();
-        let driver = build_driver(streaming_one_turn());
-        let orchestrator = Arc::try_unwrap(driver.orchestrator)
-            .ok()
-            .unwrap()
-            .with_current_cwd(Arc::new(std::sync::Mutex::new(
-                directory.path().to_path_buf(),
-            )));
-        let driver = OrchestratorTurnDriver::new(Arc::new(orchestrator));
+        let orchestrator = build_orchestrator(streaming_one_turn()).with_current_cwd(Arc::new(
+            std::sync::Mutex::new(directory.path().to_path_buf()),
+        ));
+        let driver =
+            OrchestratorTurnDriver::new(ConversationOrchestrator::into_shared(orchestrator));
         let prompt = Utf16JsonProjection::from("<<loop.md-dynamic>>");
         assert!(driver
             .resolve_loop_prompt(&prompt)
@@ -1369,9 +1370,10 @@ mod tests {
         let content = first_user_content(&calls[0].messages);
 
         assert!(
-            content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "describe this")),
+            content.iter().any(
+                |b| matches!(b, ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                    if utf16_code_units == &"describe this".encode_utf16().collect::<Vec<_>>())
+            ),
             "the prompt text must precede the image: {content:?}"
         );
         let source = content
@@ -1432,17 +1434,18 @@ mod tests {
         let message_output = AdapterOutputStream::new(sink.clone() as Arc<dyn ClientEventSink>);
         let output: Arc<dyn lingxi_core::host::OutputStream> = Arc::new(message_output.clone());
         let tools = Arc::new(tool_api::registry::ToolRegistry::new());
-        let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            batched,
-            streaming,
-            tools,
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate) as Arc<dyn PermissionGate>,
-            output,
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        ));
+        let orchestrator =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                batched,
+                streaming,
+                tools,
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate) as Arc<dyn PermissionGate>,
+                output,
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
         (
             OrchestratorTurnDriver::new(orchestrator).with_message_output(message_output),
             sink,
@@ -1514,7 +1517,8 @@ mod tests {
         let calls = streaming.captured_calls().await;
         let content = first_user_content(&calls[0].messages);
         assert!(content.iter().any(
-            |block| matches!(block, ContentBlock::Text { text, .. } if text == "queued image")
+            |block| matches!(block, ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                if utf16_code_units == &"queued image".encode_utf16().collect::<Vec<_>>())
         ));
         assert!(content.iter().any(|block| matches!(block, ContentBlock::Image { source: ImageSource::Base64 { media_type, data } } if media_type == &image.media_type && data == &image.base64)));
     }
@@ -1530,7 +1534,7 @@ mod tests {
                 vec![
                     orchestrator::QueuedPromptInput {
                         goal_retry_id: None,
-                        text: "first".to_string(),
+                        text: "first".into(),
                         is_meta: false,
                         mod_origin: Some(serde_json::json!({"kind":"bridge"})),
                         message_id: None,
@@ -1541,7 +1545,7 @@ mod tests {
                     },
                     orchestrator::QueuedPromptInput {
                         goal_retry_id: None,
-                        text: "second".to_string(),
+                        text: "second".into(),
                         is_meta: false,
                         mod_origin: Some(serde_json::json!({"kind":"bridge"})),
                         message_id: None,
@@ -1639,7 +1643,7 @@ mod tests {
         queue.enqueue(command).await;
         let adapter = super::MsgQueueMidTurnInput::new(queue.clone());
 
-        let batch = adapter.take_mid_turn_batch().await.unwrap();
+        let batch = adapter.take_mid_turn_batch().await.unwrap().unwrap();
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].text.string_units(""), Some(units.clone()));
         assert_eq!(
@@ -1673,7 +1677,13 @@ mod tests {
 
         // Only the `Next` prompt is drained mid-turn; the `Now` command is left.
         let joined = adapter.take_mid_turn_input().await;
-        assert_eq!(joined.as_deref(), Some("first"));
+        assert_eq!(
+            joined
+                .as_ref()
+                .and_then(|text| text.string_at(""))
+                .as_deref(),
+            Some("first")
+        );
 
         // The `Now` command survives for the between-turn drain.
         assert_eq!(queue.len().await, 1);
@@ -1807,7 +1817,7 @@ mod tests {
         sched
             .schedule(
                 std::time::Duration::from_millis(0),
-                "<<autonomous-loop-dynamic>>".to_string(),
+                "<<autonomous-loop-dynamic>>".into(),
                 "idle tick".to_string(),
             )
             .await;
@@ -1937,7 +1947,7 @@ mod tests {
         sched
             .schedule(
                 std::time::Duration::from_millis(0),
-                "5m /babysit-prs".to_string(),
+                "5m /babysit-prs".into(),
                 "repeat loop".to_string(),
             )
             .await;

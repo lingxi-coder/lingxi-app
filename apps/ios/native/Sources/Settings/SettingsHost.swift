@@ -10,7 +10,6 @@ enum SettingsPage: Hashable {
     case voice, linuxRuntime, knowledge, memory, workflows
     case appearance, language, notifications, input, appIntegration, privacy, permissionMode, typescriptLsp
     case skills, skillDetail(String)
-    case localAppPlugin
     case mcpList, mcpEdit(String)
     case dream
 }
@@ -34,7 +33,6 @@ struct SettingsHost: View {
     /// listing (out-of-band). The settings store starts with persisted config
     /// and is replaced by the engine's authoritative live listing on refresh.
     @ObservedObject var convo: ConversationModel
-    @Bindable var localAppsStore: LocalAppsStore
     /// Active project root used to read/write the engine's project `.mcp.json`.
     var projectCwd: String? = nil
     var projectStore: ProjectStore? = nil
@@ -161,7 +159,6 @@ struct SettingsHost: View {
             store.effectiveTypescriptLspMode = convo.effectiveTypescriptLspMode
             store.typescriptLspAvailable = convo.typescriptLspAvailable
             store.typescriptLspError = nil
-            Task { await localAppsStore.refreshBuiltinPluginStatus() }
         }
         .onChange(of: convo.requestedPermissionMode) { _, mode in
             store.permissionMode = mode
@@ -276,15 +273,9 @@ struct SettingsHost: View {
                         // sheet and owns its Save/Cancel actions.
                         EmptyView()
                     } else if case .mcpEdit(let serverID) = page {
-                        if managedMcpInventory(serverName: serverID) == nil {
-                            Button("settings_save") { saveMcpAndClose(serverID) }
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(t.accent)
-                        } else {
-                            Button("settings_done") { handleDone(for: page) }
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(t.accent)
-                        }
+                        Button("settings_save") { saveMcpAndClose(serverID) }
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(t.accent)
                     } else {
                         Button("settings_done") { handleDone(for: page) }
                             .font(.system(size: 14, weight: .semibold))
@@ -332,7 +323,6 @@ struct SettingsHost: View {
 
     @discardableResult
     func saveMcpServer(_ server: MCPServer) -> Bool {
-        if managedMcpInventory(serverName: server.id) != nil { return false }
         do {
             try mcpRepository.save(server, projectCwd: projectCwd)
             onRefreshMcp()
@@ -344,7 +334,6 @@ struct SettingsHost: View {
     }
 
     func removeMcpServer(_ server: MCPServer) {
-        if managedMcpInventory(serverName: server.id) != nil { return }
         if !server.id.hasPrefix("new-") {
             do {
                 try mcpRepository.delete(server, projectCwd: projectCwd)
@@ -370,10 +359,6 @@ struct SettingsHost: View {
     }
 
     private func saveMcpAndClose(_ serverID: String) {
-        if managedMcpInventory(serverName: serverID) != nil {
-            reset()
-            return
-        }
         guard let server = store.mcpServers.first(where: { $0.id == serverID }) else { return }
         guard !server.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               server.isConfigured else {
@@ -425,14 +410,9 @@ struct SettingsHost: View {
         case .typescriptLsp: return "TypeScript LSP"
         case .skills: return String(localized: "settings_title_skills")
         case .skillDetail(let id): return store.skills.first(where: { $0.id == id })?.name ?? "Skill"
-        case .localAppPlugin: return String(localized: "local_apps_plugin_title")
         case .mcpList: return String(localized: "settings_mcp_servers")
         case .mcpEdit(let id): return store.mcpServers.first(where: { $0.id == id })?.name ?? "MCP"
         case .dream: return String(localized: "settings_dream_mode")
         }
-    }
-
-    func managedMcpInventory(serverName: String) -> LocalAppManagedMcpInventory? {
-        localAppsStore.managedMcpInventory(serverName: serverName)
     }
 }

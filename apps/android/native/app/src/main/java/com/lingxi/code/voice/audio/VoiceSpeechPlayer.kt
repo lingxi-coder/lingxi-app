@@ -7,7 +7,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.util.UUID
 
-/** Small compatibility facade; playback itself is owned by the app-scoped audio service. */
+/** Owns UI speech playback through the app-scoped audio service. */
 internal class VoiceSpeechPlayer(context: Context) {
     private val appContext = context.applicationContext
     private val owner = AudioOwnerKey.ui("speech-player-${UUID.randomUUID()}")

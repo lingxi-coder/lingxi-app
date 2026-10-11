@@ -57,3 +57,17 @@ test('sendCommand refuses an oversize command instead of putting it on the socke
   client.sendCommand({ type: 'cancel' } as never);
   assert.equal(sent.length, 1, 'an ordinary command still goes out');
 });
+
+test('realtime input refuses transport backlog while stop can still release the session', () => {
+  const client = new BridgeClient();
+  const sent: string[] = [];
+  const socket = { readyState: 1, bufferedAmount: 512 * 1024, send: (data: string) => sent.push(data) };
+  (client as unknown as { ws: unknown }).ws = socket;
+  assert.throws(() => client.sendCommand({ type: 'realtime_audio_input', input_json: '{"type":"audio","audioBase64":"AAA=","operationId":"a"}' }), /queue is full/);
+  assert.deepEqual(sent, []);
+  client.sendCommand({ type: 'stop_realtime_audio' });
+  assert.equal(sent.length, 1);
+  socket.bufferedAmount = 0;
+  client.sendCommand({ type: 'realtime_audio_input', input_json: '{"type":"commit","operationId":"a"}' });
+  assert.equal(sent.length, 2);
+});

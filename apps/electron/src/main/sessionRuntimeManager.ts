@@ -438,6 +438,14 @@ export class SessionRuntimeManager {
     const owner = this.oauthOwner ? this.runtimes.get(this.oauthOwner) : undefined;
     const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
       && (runtime.hasOpenAiOAuth || runtime === owner));
+    // A background launch (scheduled-task controller, archive preflight) must
+    // not stop the chat on screen; it retries once that chat lets go.
+    const background = sessionId !== undefined
+      && this.backgroundSessionLeases.has(sessionId)
+      && !this.openingSessions.get(sessionId)?.activate;
+    if (background && candidates.some(runtime => runtime.sessionId === this.activeSessionId)) {
+      throw new Error('The active Codex chat holds Codex authentication; background work waits for it.');
+    }
     if (candidates.some(runtime => runtime.isStarting || runtime.turnActive || runtime.hasActiveAgents || runtime.pendingInteractions > 0
       || !['connected', 'idle', 'error', 'disconnected'].includes(runtime.connectionState.status))) {
       throw new Error('Wait for the other Codex chat to finish before changing Codex authentication.');

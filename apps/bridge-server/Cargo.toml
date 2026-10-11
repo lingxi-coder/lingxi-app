@@ -20,6 +20,7 @@ name = "bridge_server"
 path = "src/lib.rs"
 
 [dependencies]
+audio-provider = { path = "../audio-provider" }
 # Shared question contracts used by production brokers and test tools.
 tool-api = { workspace = true }
 # Namespace/branding literals (config-dir name, env var names) route through this

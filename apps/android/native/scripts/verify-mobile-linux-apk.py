@@ -30,7 +30,7 @@ def staged_assets(assets_root, source):
     if set(releases) != set(native.ABIS):
         raise ValueError("staged rootfs must cover both Android ABIs")
     required = {
-        "mobile-linux-pins.json", "runtime-pins.json", "local-app-runtime-pins.json",
+        "mobile-linux-pins.json", "runtime-pins.json",
         "native-manifest.json", "mobile-linux-sdk-source.json", "licenses/NOTICE.md",
         "licenses/GPL-3.0-only.txt", "licenses/GPL-2.0-or-later.txt",
     }

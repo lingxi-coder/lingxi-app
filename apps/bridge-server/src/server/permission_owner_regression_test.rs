@@ -1,5 +1,5 @@
 //! Real SDK broker and authenticated transport coverage for execution ownership.
-use super::connection_regression_test::{Socket, connect_authenticated, hello, next_frame};
+use super::connection_regression_test::{connect_authenticated, hello, next_frame, Socket};
 use super::*;
 use client::protocol::events::TurnOutcomeDto;
 use client::protocol::permission::PermissionResolutionDto;
@@ -104,7 +104,10 @@ fn check(
     tokio::spawn(async move {
         gate.check_with_context(
             "Write",
-            &json!({"file_path":path}),
+            &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":path}),
+            )
+            .unwrap(),
             &PermissionCheckContext {
                 background_owned: background,
                 worker,
@@ -296,8 +299,16 @@ async fn delayed_foreground_permission_cannot_attach_to_a_successor_main_owner()
     let rules = gate.session_allow_rules();
     let rules_guard = rules.lock().await;
     let g = gate.clone();
-    let mut old_check =
-        Box::pin(async move { g.check("Write", &json!({"file_path":"/tmp/old"})).await });
+    let mut old_check = Box::pin(async move {
+        g.check(
+            "Write",
+            &harness_runtime::headless::Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":"/tmp/old"}),
+            )
+            .unwrap(),
+        )
+        .await
+    });
     let first_poll = std::future::poll_fn(|cx| {
         std::task::Poll::Ready(std::future::Future::poll(old_check.as_mut(), cx))
     })
@@ -383,6 +394,7 @@ async fn permission_scope_rpc_requires_hello_validates_params_and_bypasses_ordin
         json!({"request_id":-1}),
         json!({"request_id":1,"worker":"forged"}),
         json!({"request_id":"1"}),
+        json!({"request_id":u64::MAX}),
     ] {
         request(&mut socket, 11, "permission_request_scope", params).await;
         assert!(matches!(
@@ -413,7 +425,7 @@ async fn permission_scope_rpc_requires_hello_validates_params_and_bypasses_ordin
         json!({"request_id":permission.request_id,"background_owned":true})
     );
     assert_eq!(
-        scope(&mut socket, 14, u64::MAX).await,
+        scope(&mut socket, 14, 9_007_199_254_740_991).await,
         serde_json::Value::Null
     );
     router.release.notify_one();

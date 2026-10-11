@@ -1,8 +1,7 @@
 # Mobile runtime source boundary
 
 LingXi consumes two immutable Cargo dependencies. `runtime_source.py` resolves
-Harness, which owns Local Apps templates, runtime profiles, permissions and
-product execution policy. `mobile_linux_source.py` resolves the independent
+Harness, which owns permissions and product execution policy. `mobile_linux_source.py` resolves the independent
 mobile Linux SDK, which owns the neutral runtime, rootfs/toolchain builders,
 Android native support and iOS iSH support. Both resolvers inspect locked Cargo
 metadata; sibling paths and guessed Cargo cache directories are unsupported.
@@ -35,33 +34,23 @@ outputs and caches remain under the host's `apps/ios/native/build`.
 
 `mobile-linux-native-pins.json` records the SDK interface and Maven version,
 not duplicate native source hashes. SDK Android/iOS source pins are independent;
-Android builds do not require an iOS source checkout. `local-app-native-policy.json`
-keeps product network and memory policy. Its host gate checks integration and
-Local Apps resource wiring, while the SDK verifies its own source and artifacts.
+Android builds do not require an iOS source checkout. The SDK verifies its own
+source and artifacts.
 
 ## Resources and provenance
 
-Rootfs and node-module host wrappers pass explicit output/cache directories and
-the locked SDK root to Harness's profile adapters. Harness selects the product
-profile; the SDK receives explicit inputs and never reads Harness/LingXi files.
-LingXi owns the host release policy. Its product policy smoke composes host
-authorization, store compliance and integration checks with the pinned Harness
-authorization, SBOM/license and supply-chain gates and the SDK resource gates.
-Both upstream roots are resolved from the product's canonical Cargo pins before
-being passed to the gates. SDK resource contracts live at
-`scripts/checks/check-resource-contracts.sh`; rootfs tooling tests live at
-`scripts/rootfs/test-rootfs-tooling.sh`.
-
-The supply-chain wrapper passes the locked SDK root explicitly, including on
-macOS Bash 3.2. `test_local_app_policy.py` proves that host policy preserves gate
-ordering and failure propagation, requires release evidence and APK inputs, and
-rejects writable-root expansion, removal of host-managed helpers and disabled
-forbidden-feature gates in every locked runtime profile. Enabled releases still
-require authorization, real rootfs archive/evidence, approved licenses and APK
+LingXi owns the host release policy. Its product policy smoke
+(`scripts/mobile-linux/smoke.sh`) composes host authorization and store
+compliance checks with the pinned Harness authorization and SBOM/license gates
+and the SDK resource gates. Both upstream roots are resolved from the product's
+canonical Cargo pins before being passed to the gates. SDK resource contracts
+live at `scripts/checks/check-resource-contracts.sh`; rootfs tooling tests live
+at `scripts/rootfs/test-rootfs-tooling.sh`. Enabled releases still require
+authorization, real rootfs archive/evidence, approved licenses and APK
 validation.
 
 The structural Android/iOS store gates load identities through
-`scripts/lib/local_app_branding.py`, rooted at the gate's own Host checkout,
+`scripts/lib/product_identity.py`, rooted at the gate's own Host checkout,
 independently of the scanned `--repo-root`. Android's reviewed package and
 constant paths use `namespace`/`applicationId` from
 `apps/android/native/app/build.gradle.kts`; they must agree. iOS task IDs use
@@ -73,12 +62,11 @@ do not define the expected identity. Reviewed task suffixes, service classes,
 subtypes, declaration scope and registration/expiration/completion/audio
 cleanup checks remain enforced.
 
-The accessibility service name uses `branding::PRODUCT_NAME`; runtime profile
-policy paths use `branding::DOT_DIR`, read from the branding package located by
-the canonical locked Cargo resolver. Smoke tests obtain the enabled env key
-from the Host authorization script and the APK env key from the Host smoke
-script. Fixtures copy the canonical native configs and invoke the real Host
-gates against their separate mutable source trees, including coordinated
+The accessibility service name uses `branding::PRODUCT_NAME`, read from the
+branding package located by the canonical locked Cargo resolver. Smoke tests
+obtain the enabled env key from the Host authorization script. Fixtures copy
+the canonical native configs and invoke the real Host gates against their
+separate mutable source trees, including coordinated
 config/manifest/plist/source identity attacks.
 
 Source checkout directories are read-only inputs. The SDK receives local rootfs

@@ -10,7 +10,6 @@ import com.lingxi.code.model.CatalogModelDetails
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig
 import com.lingxi.code.model.GenericProvider
-import com.lingxi.code.model.LocalAppPluginStatus
 import com.lingxi.code.model.MCPServer
 import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.ProviderKind
@@ -19,7 +18,7 @@ import com.lingxi.code.model.LlmProviderCatalogEntry
 import com.lingxi.code.model.SettingsMock
 import com.lingxi.code.model.Skill
 import com.lingxi.code.voice.audio.AudioConfigurationNormalizer
-import com.lingxi.code.voice.audio.AudioConfigurationV3
+import com.lingxi.code.voice.audio.AudioConfigurationV4
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -51,14 +50,13 @@ data class SettingsUiState(
     val llmCatalogLoaded: Boolean = false,
     val searchProviders: List<GenericProvider> = emptyList(),
     val fetchProviders: List<GenericProvider> = emptyList(),
-    val voice: AudioConfigurationV3 = AudioConfigurationNormalizer.defaults,
+    val voice: AudioConfigurationV4 = AudioConfigurationNormalizer.defaults,
     val voiceRevision: Long = 0,
     val voiceSaving: Boolean = false,
     val voiceSaveError: String? = null,
     val voiceCapability: VoiceCapabilitySnapshot = VoiceCapabilitySnapshot(),
     val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
-    val skills: List<Skill> = SettingsMock.bundledSkills(),
-    val localAppPlugin: LocalAppPluginStatus = SettingsMock.localAppPlugin(),
+    val skills: List<Skill> = emptyList(),
     val mcpServers: List<MCPServer> = SettingsMock.mcpServers(),
     val dream: DreamConfig = DreamConfig(),
     val language: String = "zh-CN",
@@ -111,8 +109,7 @@ class SettingsStore(
 ) : ViewModel() {
     /**
      * Adapts [resolveString] (empty-string in tests, real `Context.getString`
-     * in production — see the factory below) to [SettingsMock.bundledSkills]/
-     * [SettingsMock.mcpServers]'s (id, fallback) shape: falls back to the
+     * in production — see the factory below) to [SettingsMock.mcpServers]'s (id, fallback) shape: falls back to the
      * literal zh-Hans copy whenever [resolveString] has nothing (i.e. every
      * JVM test that constructs [SettingsStore] with no [Context] at all).
      */
@@ -135,8 +132,6 @@ class SettingsStore(
                 voiceRevision = initialAudioConfiguration?.snapshot?.revision ?: 0,
                 voiceSaveError = initialAudioConfiguration?.persistenceError,
                 notifs = notifRepo?.load() ?: NotifConfig(),
-                skills = SettingsMock.bundledSkills(::resolveWithFallback),
-                localAppPlugin = SettingsMock.localAppPlugin(),
                 mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
                 dream = DreamConfig(
                     lastRun = resolveWithFallback(
@@ -153,8 +148,6 @@ class SettingsStore(
             notifs = notifRepo?.load() ?: NotifConfig(),
             permissionMode = initialPermissionMode,
             effectivePermissionMode = initialPermissionMode,
-            skills = SettingsMock.bundledSkills(::resolveWithFallback),
-            localAppPlugin = SettingsMock.localAppPlugin(),
             mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
             dream = DreamConfig(
                 lastRun = resolveWithFallback(
@@ -262,7 +255,7 @@ class SettingsStore(
     private val voiceUpdates = Mutex()
 
     /** Updates one or more voice fields against the latest serialized snapshot. */
-    fun updateVoice(update: (AudioConfigurationV3) -> AudioConfigurationV3) {
+    fun updateVoice(update: (AudioConfigurationV4) -> AudioConfigurationV4) {
         viewModelScope.launch {
             voiceUpdates.withLock {
                 val current = _state.value
@@ -308,7 +301,7 @@ class SettingsStore(
     }
 
     /** Replaces the configuration for non-editor callers; editors should use [updateVoice]. */
-    fun setVoice(voice: AudioConfigurationV3) = updateVoice { voice }
+    fun setVoice(voice: AudioConfigurationV4) = updateVoice { voice }
 
     fun setVoiceCapability(snapshot: VoiceCapabilitySnapshot) =
         _state.update { it.copy(voiceCapability = snapshot) }
@@ -708,53 +701,11 @@ class SettingsStore(
     fun setSkillEnabled(id: String, on: Boolean) =
         _state.update { s -> s.copy(skills = s.skills.map { if (it.id == id) it.copy(enabled = on) else it }) }
 
-    fun setLocalAppPluginEnabled(enabled: Boolean) =
-        _state.update { s -> s.copy(localAppPlugin = s.localAppPlugin.copy(enabled = enabled)) }
-
-    fun setLocalAppPluginStatus(status: LocalAppPluginStatus) =
-        _state.update { it.copy(localAppPlugin = status) }
-
-    fun setManagedLocalAppInventory(sources: List<com.lingxi.code.model.ManagedLocalAppMcpSource>) =
-        _state.update { state ->
-            val managedByServer = sources.associateBy { it.stableServerName }
-            val merged = state.mcpServers.map { server ->
-                val managed = managedByServer[server.id] ?: managedByServer[server.name]
-                when {
-                    managed != null -> server.copy(
-                        id = managed.stableServerName,
-                        name = managed.stableServerName,
-                        tools = managed.toolCount,
-                        transport = "managed",
-                        managedLocalApp = managed,
-                    )
-                    server.managedLocalApp != null -> server.copy(managedLocalApp = null)
-                    else -> server
-                }
-            }
-            val existingIds = merged.mapTo(hashSetOf()) { it.id }
-            state.copy(
-                mcpServers = merged + sources
-                    .filterNot { it.stableServerName in existingIds }
-                    .map { managed ->
-                        MCPServer(
-                            id = managed.stableServerName,
-                            name = managed.stableServerName,
-                            url = "",
-                            tools = managed.toolCount,
-                            status = ConnStatus.Idle,
-                            enabled = true,
-                            transport = "managed",
-                            managedLocalApp = managed,
-                        )
-                    },
-            )
-        }
-
     fun updateMcp(id: String, mutate: (MCPServer) -> MCPServer) =
         _state.update { s ->
             s.copy(
                 mcpServers = s.mcpServers.map { server ->
-                    if (server.id != id || server.managedLocalApp != null) server else mutate(server)
+                    if (server.id != id) server else mutate(server)
                 },
             )
         }
@@ -770,7 +721,6 @@ class SettingsStore(
                         url = incoming.url.ifBlank { prior.url },
                         tools = if (incoming.tools == 0) prior.tools else incoming.tools,
                         auth = incoming.auth ?: prior.auth,
-                        managedLocalApp = prior.managedLocalApp,
                     )
                 } ?: incoming
             },
@@ -780,9 +730,7 @@ class SettingsStore(
     fun removeMcp(id: String) =
         _state.update { s ->
             s.copy(
-                mcpServers = s.mcpServers.filterNot {
-                    it.id == id && it.managedLocalApp == null
-                },
+                mcpServers = s.mcpServers.filterNot { it.id == id },
             )
         }
 

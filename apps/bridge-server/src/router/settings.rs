@@ -165,8 +165,15 @@ impl EngineCommandRouter {
             }
         };
 
+        let suggestion_setting = patch
+            .iter()
+            .find(|(key, _)| key == "promptSuggestionEnabled")
+            .and_then(|(_, value)| value.as_ref().and_then(serde_json::Value::as_bool));
         match apply_patch(&context.paths, destination, patch) {
             Ok(()) => {
+                if let Some(enabled) = suggestion_setting {
+                    let _ = self.handle.prompt_suggestion_setting_changed(enabled).await;
+                }
                 self.emit_settings_snapshot(sink).await;
             }
             Err(message) => {

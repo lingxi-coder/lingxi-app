@@ -25,6 +25,11 @@ data class ChatState(
     val isNew: Boolean = false,
     /** True while the assistant reply streams — keeps the run trace live. */
     val streaming: Boolean = false,
+    val promptSuggestion: String? = null,
+    val promptSuggestionUuid: String? = null,
+    val promptSuggestionEnabled: Boolean = true,
+    val promptSuggestionNotice: String? = null,
+    val suggestionTurn: Long = 0,
     /** True while ResumeSession/NewSession is awaiting engine confirmation. */
     val sessionTransitioning: Boolean = false,
     /** Cancel has stopped UI streaming but the engine has not acknowledged it yet. */

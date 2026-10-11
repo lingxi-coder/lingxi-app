@@ -1245,11 +1245,12 @@ export function useBridge(): UseBridge {
     }
   }, [capture, host, submittedSessionFor, updateRuntime]);
 
-  const beginLocalCommand = useCallback((raw: string) => {
+  const beginLocalCommand = useCallback(async (raw: string) => {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) return;
+    await host?.command(sessionId, { type: 'record_prompt_suggestion_submission', text: raw }).catch(() => undefined);
     updateRuntime(sessionId, (state) => ({ ...state, conversation: beginLocalSlashCommand(state.conversation, raw) }));
-  }, [updateRuntime]);
+  }, [host, updateRuntime]);
 
   const dismissCommandResult = useCallback(() => {
     const sessionId = activeSessionIdRef.current;
@@ -2017,6 +2018,14 @@ export function useBridge(): UseBridge {
       }
     }, [host],
   );
+  const updatePromptSuggestionContext = useCallback(
+    (context: Parameters<UseBridge['updatePromptSuggestionContext']>[0]) =>
+      command({ type: 'update_prompt_suggestion_context', ...context }), [command],
+  );
+  const promptSuggestionFeedback = useCallback(
+    (sessionId: string, uuid: string, action: 'shown' | 'accepted' | 'dismissed') =>
+      command({ type: 'prompt_suggestion_feedback', session_id: sessionId, uuid, action }), [command],
+  );
   const updateEngineSettings = useCallback(
     async (destination: 'user' | 'project' | 'local', patch: Record<string, unknown>) => {
       await command({ type: 'update_settings', destination, patch_json: JSON.stringify(patch) });
@@ -2160,6 +2169,7 @@ export function useBridge(): UseBridge {
     scheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
     manageCron,
     uiSurfaceClientId: stableUiSurfaceClientId,
+    updatePromptSuggestionContext, promptSuggestionFeedback,
     hosted,
     loading,
     bootstrap: presentedBootstrap,

@@ -28,6 +28,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -118,11 +127,38 @@ fun Composer(
     onStop: () -> Unit = {},
     /** True when a recovered WaitingForUser turn can be discarded. */
     showDiscardRecovery: Boolean = false,
+    promptSuggestion: String? = null,
+    promptSuggestionNotice: String? = null,
+    suggestionTurnKey: String = "",
+    onSuggestionFeedback: (String) -> Unit = {},
     /** Discards the recovered turn after the host confirms cancellation. */
     onDiscardRecovery: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val hasText = text.trim().isNotEmpty()
+    var suggestionShown by remember(suggestionTurnKey) { mutableStateOf(false) }
+    var suggestionRejected by remember(suggestionTurnKey) { mutableStateOf(false) }
+    val visibleSuggestion = promptSuggestion?.takeIf {
+        !suggestionRejected && text.isEmpty() && !isStreaming && enabled
+            && attachment == null && visualizationChip == null
+    }
+    LaunchedEffect(promptSuggestion, visibleSuggestion, suggestionTurnKey) {
+        if (promptSuggestion != null && !suggestionShown && !suggestionRejected) {
+            if (visibleSuggestion != null) {
+                suggestionShown = true
+                onSuggestionFeedback("shown")
+            } else {
+                suggestionRejected = true
+                onSuggestionFeedback("dismissed")
+            }
+        }
+    }
+    val acceptSuggestion: () -> Unit = {
+        visibleSuggestion?.let { suggestion ->
+            onSuggestionFeedback("accepted")
+            onTextChange(suggestion)
+        }
+    }
     val shape = RoundedCornerShape(22.dp)
 
     Column(
@@ -152,7 +188,7 @@ fun Composer(
 
             // Text field (1..5 lines), brand-styled with a placeholder.
             Box(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
-                if (text.isEmpty()) {
+                if (text.isEmpty() && visibleSuggestion == null) {
                     Text(
                         text = stringResource(R.string.composer_placeholder),
                         color = t.text4,
@@ -161,7 +197,7 @@ fun Composer(
                 }
                 BasicTextField(
                     value = text,
-                    onValueChange = onTextChange,
+                    onValueChange = { onTextChange(it) },
                     enabled = enabled,
                     textStyle = LocalTextStyle.current.merge(
                         TextStyle(color = t.text, fontSize = 15.5f.sp),
@@ -180,8 +216,23 @@ fun Composer(
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         imeAction = ImeAction.Send,
                     ),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { event ->
+                        if (visibleSuggestion != null && event.type == KeyEventType.KeyDown
+                            && !event.isShiftPressed && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed
+                            && (event.key == Key.Tab || event.key == Key.DirectionRight)) {
+                            acceptSuggestion(); true
+                        } else false
+                    },
                 )
+                if (visibleSuggestion != null) {
+                    Text(visibleSuggestion, color = t.text4, fontSize = 15.5f.sp,
+                        modifier = Modifier.fillMaxWidth().clickable(onClickLabel = "Use suggestion", onClick = acceptSuggestion)
+                            .testTag("composer.prompt-suggestion"))
+                }
+            }
+
+            if (promptSuggestionNotice != null) {
+                Text(promptSuggestionNotice, color = t.text4, fontSize = 11.sp)
             }
 
             // Action row: attach · model chip · spacer · mic|send.

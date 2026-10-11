@@ -1646,6 +1646,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
 }) {
   const t = useT();
   const [text, setText] = useState('');
+  const shownSuggestionUuids = useRef(new Set<string>());
+  const [rejectedSuggestionUuid, setRejectedSuggestionUuid] = useState<string | null>(null);
+  const [suggestionWindowFocused, setSuggestionWindowFocused] = useState(() => document.hasFocus());
   const [promptComposing, setPromptComposing] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);
@@ -2590,7 +2593,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
       clearComposer();
       const resolved = resolveDesktopCommand(slashCommand, ALL_DESKTOP_COMMANDS);
       if (resolved && !desktopCommandIsShadowed(slashCommand, bridge.desktop.slashCommands)) {
-        bridge.beginLocalCommand(slashCommand);
+        await bridge.beginLocalCommand(slashCommand);
         void Promise.resolve(resolved.command.run(resolved.args, commandContext)).catch(() => undefined);
         return;
       }
@@ -2889,6 +2892,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   };
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (promptSuggestion && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (event.key === 'Tab' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        acceptPromptSuggestion();
+        return;
+      }
+    }
     // Enter on a focused reference follows the link instead of submitting the draft.
     const reference = event.target instanceof Element
       ? event.target.closest<HTMLElement>('[data-context-mention], [data-file-mention]') : null;
@@ -2977,6 +2987,68 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
           ? 'LingXi is working — draft your next message…'
           : 'Do anything';
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
+  const promptSuggestion = bridge.conversation.promptSuggestion?.uuid !== rejectedSuggestionUuid && ready && !bridge.running && !promptComposing && !text.length
+    && !bridge.isCancelling && !bridge.pendingPermission && !bridge.pendingAskUserQuestion
+    && !selectedFiles.length && !imageAttachments.length && !visualizationChip
+    && !filePicker && slashQuery === null
+    ? bridge.conversation.promptSuggestion?.suggestion : undefined;
+  useEffect(() => {
+    const update = () => setSuggestionWindowFocused(document.visibilityState === 'visible' && document.hasFocus());
+    window.addEventListener('focus', update);
+    window.addEventListener('blur', update);
+    document.addEventListener('visibilitychange', update);
+    update();
+    return () => {
+      window.removeEventListener('focus', update);
+      window.removeEventListener('blur', update);
+      document.removeEventListener('visibilitychange', update);
+    };
+  }, []);
+  useEffect(() => {
+    const sessionId = bridge.conversation.sessionKey;
+    if (!ready || !sessionId) return;
+    void bridge.updatePromptSuggestionContext({ session_id: sessionId,
+      focus: suggestionWindowFocused ? 'focused' : 'blurred',
+      input_empty: !text.length && !promptComposing && !selectedFiles.length && !imageAttachments.length && !visualizationChip,
+      pending_permission: Boolean(bridge.pendingPermission || bridge.pendingAskUserQuestion), elicitation_active: false,
+    }).catch(() => undefined);
+  }, [ready, bridge.conversation.sessionKey, bridge.updatePromptSuggestionContext, suggestionWindowFocused,
+    text, promptComposing, selectedFiles.length, imageAttachments.length, visualizationChip,
+    bridge.pendingPermission, bridge.pendingAskUserQuestion]);
+  useEffect(() => {
+    const sessionId = bridge.conversation.sessionKey;
+    if (!ready || !sessionId) return;
+    return () => {
+      void bridge.updatePromptSuggestionContext({ session_id: sessionId, focus: 'blurred',
+        input_empty: false, pending_permission: false, elicitation_active: false }).catch(() => undefined);
+    };
+  }, [ready, bridge.conversation.sessionKey, bridge.updatePromptSuggestionContext]);
+  useEffect(() => {
+    const suggestion = bridge.conversation.promptSuggestion;
+    if (!suggestion || shownSuggestionUuids.current.has(suggestion.uuid) || rejectedSuggestionUuid === suggestion.uuid) return;
+    if (!promptSuggestion) {
+      setRejectedSuggestionUuid(suggestion.uuid);
+      void bridge.promptSuggestionFeedback(suggestion.session_id, suggestion.uuid, 'dismissed').catch(() => undefined);
+      return;
+    }
+    shownSuggestionUuids.current.add(suggestion.uuid);
+    void bridge.promptSuggestionFeedback(suggestion.session_id, suggestion.uuid, 'shown').catch(() => undefined);
+  }, [promptSuggestion, bridge.conversation.promptSuggestion, bridge.promptSuggestionFeedback, rejectedSuggestionUuid]);
+  const acceptPromptSuggestion = () => {
+    const editor = input.current;
+    if (!editor || !promptSuggestion || richPromptSnapshot(editor).text.length) return;
+    const suggestion = bridge.conversation.promptSuggestion;
+    if (suggestion) void bridge.promptSuggestionFeedback(suggestion.session_id, suggestion.uuid, 'accepted').catch(() => undefined);
+    editor.textContent = promptSuggestion;
+    syncPromptState();
+    editor.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  };
   const draftCommand = parseSlashCommandPrefix(text);
   const hasMentionTokens = selectedFiles.length > 0 || Boolean(input.current?.querySelector('[data-context-mention]'));
   const decorateCommand = Boolean(draftCommand && !promptComposing && !hasMentionTokens);
@@ -3076,7 +3148,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
             contentEditable
             suppressContentEditableWarning
             spellCheck
-            data-placeholder={promptPlaceholder}
+            data-placeholder={promptSuggestion ? '' : promptPlaceholder}
             data-empty={!hasPrompt ? 'true' : 'false'}
             data-command-decorated={decorateCommand || undefined}
             onInput={() => { mentionDismissed.current = false; slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
@@ -3100,7 +3172,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                 setPreviewPath(token.dataset.fileMention);
               }
             }}
-            onCompositionStart={() => setPromptComposing(true)}
+            onCompositionStart={() => { setPromptComposing(true); }}
             onCompositionEnd={() => { setPromptComposing(false); syncPromptState(); updateActiveCompletions(); }}
             onScroll={(event) => {
               if (!commandMirror.current) return;
@@ -3121,6 +3193,16 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                 : undefined}
             style={{ ...promptTextStyle, color: decorateCommand ? 'transparent' : t.text, caretColor: t.text, cursor: 'text' }}
           />
+          {bridge.conversation.promptSuggestionNotice && (
+            <div className="composer-prompt-suggestion-notice" role="status" style={{ color: t.text4 }}>{bridge.conversation.promptSuggestionNotice}</div>
+          )}
+          {promptSuggestion && (
+            <button type="button" className="composer-prompt-suggestion" onClick={acceptPromptSuggestion}
+              onMouseDown={(event) => event.preventDefault()} style={{ color: t.text4 }}
+              aria-label={`Use suggestion: ${promptSuggestion}`} title="Tab or → to accept">
+              <span>{promptSuggestion}</span><kbd aria-hidden="true">Tab</kbd>
+            </button>
+          )}
           {draftCommand && (
             <span className="composer-command-marker"><CommandIcon command={draftCommand.name} size={28} /></span>
           )}

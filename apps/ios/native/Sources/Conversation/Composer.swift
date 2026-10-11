@@ -49,6 +49,12 @@ struct Composer: View {
     /// `onTranscript` → draft). The caller owns it (see ChatView).
     @Binding var draft: String
     let onSend: (String) -> Void
+    var promptSuggestion: String? = nil
+    var promptSuggestionNotice: String? = nil
+    var suggestionTurnKey: String = ""
+    var onSuggestionFeedback: (String) -> Void = { _ in }
+    @State private var shownSuggestionKey: String?
+    @State private var rejectedSuggestionKey: String?
 
     /// Engine-owned slash-command catalog. An empty loaded catalog is
     /// authoritative; `slashCommandsLoaded == false` renders a loading row and
@@ -129,6 +135,10 @@ struct Composer: View {
         recentModels: [String] = [],
         draft: Binding<String>,
         onSend: @escaping (String) -> Void,
+        promptSuggestion: String? = nil,
+        promptSuggestionNotice: String? = nil,
+        suggestionTurnKey: String = "",
+        onSuggestionFeedback: @escaping (String) -> Void = { _ in },
         slashCommands: [ConversationSlashCommand] = [],
         slashCommandsLoaded: Bool = false,
         slashCommandPending: Bool = false,
@@ -179,6 +189,10 @@ struct Composer: View {
         self.recentModels = recentModels
         self._draft = draft
         self.onSend = onSend
+        self.promptSuggestion = promptSuggestion
+        self.promptSuggestionNotice = promptSuggestionNotice
+        self.suggestionTurnKey = suggestionTurnKey
+        self.onSuggestionFeedback = onSuggestionFeedback
         self.slashCommands = slashCommands
         self.slashCommandsLoaded = slashCommandsLoaded
         self.slashCommandPending = slashCommandPending
@@ -237,7 +251,7 @@ struct Composer: View {
                         .accessibilityValue(slashArgumentHint)
                 }
 
-                TextField("", text: $draft, prompt: Text("composer_placeholder").foregroundColor(t.text4), axis: .vertical)
+                TextField("", text: $draft, prompt: Text(visibleSuggestion == nil ? String(localized: "composer_placeholder") : "").foregroundColor(t.text4), axis: .vertical)
                     .font(.scaledSystem(15.5, relativeTo: .body))
                     .foregroundStyle(t.text)
                     .lineLimit(1...5)
@@ -253,7 +267,44 @@ struct Composer: View {
                             dismissedSlashDraft = nil
                         }
                     }
+                    .onAppear { recordSuggestionPresentation() }
+                    .onChange(of: suggestionTurnKey) { _, _ in recordSuggestionPresentation() }
+                    .onKeyPress(keys: [.tab, .rightArrow]) { press in
+                        guard visibleSuggestion != nil, press.modifiers.isEmpty else { return .ignored }
+                        acceptSuggestion()
+                        return .handled
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if let visibleSuggestion {
+                            Button(action: acceptSuggestion) {
+                                Text(visibleSuggestion)
+                                    .font(.scaledSystem(15.5, relativeTo: .body))
+                                    .foregroundStyle(t.text4)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 4).padding(.vertical, 2)
+                            .accessibilityLabel("Use suggestion: \(visibleSuggestion)")
+                            .accessibilityIdentifier("composer.prompt-suggestion")
+                            .onAppear {
+                                if shownSuggestionKey != suggestionTurnKey {
+                                    shownSuggestionKey = suggestionTurnKey
+                                    onSuggestionFeedback("shown")
+                                }
+                            }
+                            .onChange(of: suggestionTurnKey) { _, _ in
+                                if shownSuggestionKey != suggestionTurnKey {
+                                    shownSuggestionKey = suggestionTurnKey
+                                    onSuggestionFeedback("shown")
+                                }
+                            }
+                        }
+                    }
 
+                if let promptSuggestionNotice {
+                    Text(promptSuggestionNotice)
+                        .font(.caption).foregroundStyle(t.text4)
+                }
                 if let fastModeError {
                     Text(fastModeError)
                         .font(.caption)
@@ -686,6 +737,31 @@ struct Composer: View {
         let accepted = command.canonicalTrigger
         draft = accepted
         dismissedSlashDraft = accepted
+        inputFocused = true
+    }
+
+    private func recordSuggestionPresentation() {
+        guard promptSuggestion != nil, shownSuggestionKey != suggestionTurnKey,
+              rejectedSuggestionKey != suggestionTurnKey else { return }
+        if visibleSuggestion != nil {
+            shownSuggestionKey = suggestionTurnKey
+            onSuggestionFeedback("shown")
+        } else {
+            rejectedSuggestionKey = suggestionTurnKey
+            onSuggestionFeedback("dismissed")
+        }
+    }
+
+    private var visibleSuggestion: String? {
+        guard rejectedSuggestionKey != suggestionTurnKey, draft.isEmpty, !streaming, sendEnabled, attachment == nil,
+              visualizationChip == nil else { return nil }
+        return promptSuggestion
+    }
+
+    private func acceptSuggestion() {
+        guard let suggestion = visibleSuggestion else { return }
+        onSuggestionFeedback("accepted")
+        draft = suggestion
         inputFocused = true
     }
 

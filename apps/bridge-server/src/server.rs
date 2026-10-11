@@ -87,6 +87,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// parked permission `check()`); the implementation streams its events out
     /// through the connection's [`ClientEventSink`] as a side effect.
     async fn run_turn(&self, prompt: String);
+    async fn record_prompt_suggestion_submission(&self, _text: &str) {}
     /// Mounted conversation identity for immutable permission owners.
     async fn current_session_id(&self) -> Option<String> {
         None
@@ -2362,6 +2363,9 @@ impl BridgeConnection {
                 visualization_context,
                 ..
             } => {
+                if let Some(driver) = &self.driver {
+                    driver.record_prompt_suggestion_submission(&text).await;
+                }
                 let text = self
                     .visualization_followup(text, visualization_context.as_ref())
                     .await;
@@ -2451,6 +2455,9 @@ impl BridgeConnection {
             // only / unknown / no-dispatcher cases fall back to the router's
             // text-surface path.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
+                if let Some(driver) = &self.driver {
+                    driver.record_prompt_suggestion_submission(&raw).await;
+                }
                 if let Some(router) = &self.router {
                     router.stop_realtime_audio().await;
                 }

@@ -436,6 +436,24 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       });
       return { type, which };
     }
+    case 'update_prompt_suggestion_context': {
+      exactKeys(input, ['type', 'session_id', 'focus', 'input_empty', 'pending_permission', 'elicitation_active']);
+      for (const key of ['input_empty', 'pending_permission', 'elicitation_active']) {
+        if (typeof input[key] !== 'boolean') throw new Error(`invalid suggestion ${key}`);
+      }
+      return { type, session_id: string(input['session_id'], 'suggestion session id', 128),
+        focus: enumValue(input['focus'], 'suggestion focus', ['focused', 'blurred', 'unknown'] as const),
+        input_empty: input['input_empty'] as boolean, pending_permission: input['pending_permission'] as boolean,
+        elicitation_active: input['elicitation_active'] as boolean };
+    }
+    case 'record_prompt_suggestion_submission':
+      exactKeys(input, ['type', 'text']);
+      return { type, text: validatePrompt(input['text']) };
+    case 'prompt_suggestion_feedback':
+      exactKeys(input, ['type', 'session_id', 'uuid', 'action']);
+      return { type, session_id: string(input['session_id'], 'suggestion session id', 128),
+        uuid: string(input['uuid'], 'suggestion uuid', 128),
+        action: enumValue(input['action'], 'suggestion action', ['shown', 'accepted', 'dismissed'] as const) };
     case 'update_settings':
       exactKeys(input, ['type', 'destination', 'patch_json']);
       return {

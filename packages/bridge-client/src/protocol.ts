@@ -685,6 +685,9 @@ export type ClientCommand =
   | { type: 'request_exit' }
   // ── Settings (persisted) ─────────────────────────────────────────────────────
   | { type: 'update_settings'; destination: WritableScopeDto; patch_json: string }
+  | { type: 'update_prompt_suggestion_context'; session_id: string; focus: 'focused' | 'blurred' | 'unknown'; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }
+  | { type: 'prompt_suggestion_feedback'; session_id: string; uuid: string; action: 'shown' | 'accepted' | 'dismissed' }
+  | { type: 'record_prompt_suggestion_submission'; text: string }
   // ── Permissions (persisted) ──────────────────────────────────────────────────
   | {
       type: 'update_permission_rules';
@@ -1593,6 +1596,8 @@ export type ClientEvent =
   | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }
   | { type: 'turn_started'; turn_id?: number }
   | { type: 'turn_ended'; outcome: TurnOutcomeDto; stop_reason?: string; cost: CostDto }
+  | { type: 'prompt_suggestion'; suggestion: string; uuid: string; session_id: string }
+  | { type: 'prompt_suggestion_state'; enabled: boolean; notice: string | null }
   /**
    * Authoritative durable state for one mobile turn. Emitted on attach,
    * resume, recovery gating, and every terminal transition

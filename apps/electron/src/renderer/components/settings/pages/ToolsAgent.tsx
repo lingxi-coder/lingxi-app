@@ -125,6 +125,8 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
       </Card>
 
       <Card title="Agent 行为">
+        <FieldProvenanceNotice snapshot={snapshot} fieldKey="promptSuggestionEnabled" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+        <BoolRow title="Prompt suggestions" desc="回合结束后在输入框显示建议。" value={snapshot?.layers[editingLayer]?.promptSuggestionEnabled !== false} saving={saving === 'promptSuggestionEnabled'} onChange={(v) => write({ promptSuggestionEnabled: v }, 'promptSuggestionEnabled')} />
         <BoolRow title="alwaysThinkingEnabled" desc="总是启用扩展思考。" value={alwaysThinkingEnabled} saving={saving === 'alwaysThinkingEnabled'} onChange={(v) => write({ alwaysThinkingEnabled: v }, 'alwaysThinkingEnabled')} />
         <BoolRow title="showThinkingSummaries" desc="展示模型思考过程的摘要。" value={showThinkingSummaries} saving={saving === 'showThinkingSummaries'} onChange={(v) => write({ showThinkingSummaries: v }, 'showThinkingSummaries')} />
         <BoolRow title="visionDelegationEnabled" desc="允许把图像理解委派给视觉模型。" value={visionDelegationEnabled} saving={saving === 'visionDelegationEnabled'} onChange={(v) => write({ visionDelegationEnabled: v }, 'visionDelegationEnabled')} />

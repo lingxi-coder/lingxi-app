@@ -17,8 +17,7 @@ test('an echoed prompt records the send instant, and resumed history does not in
   const sentAt = Date.parse('2026-08-26T23:35:00.000Z');
   const item = appendUserPrompt(emptyConversation(), 'hello', [], sentAt).items[0];
   assert.equal(item.type === 'narration' ? item.sentAt : undefined, sentAt);
-  // The engine's MessageDto carries no timestamp, so history rows stay
-  // `undefined` and the row drops the clock instead of showing a fake one.
+  // A row without a recorded timestamp must not invent one.
   const restored = conversationFromMessages([
     { role: 'user', blocks: [{ type: 'text', text: 'question' }] },
   ]).items[0];
@@ -69,4 +68,28 @@ test('resumed text preserves zero-width joiners inside visible content', () => {
 
   const optimistic = appendUserPrompt(emptyConversation(), text).items[0];
   assert.equal(optimistic.type === 'narration' ? optimistic.text : undefined, text);
+});
+
+test('cold resume restores persisted clocks for repeated prompts and image-only messages', () => {
+  const first = Date.parse('2026-08-26T23:35:00Z');
+  const second = first + 60_000;
+  const state = reduceEvent(emptyConversation(), {
+    type: 'session_resumed', session_id: 'resumed', mode: 'code',
+    messages: [
+      { role: 'user', sent_at_ms: first, blocks: [{ type: 'text', text: 'same prompt' }] },
+      { role: 'user', sent_at_ms: second, blocks: [{ type: 'text', text: 'same prompt' }] },
+      { role: 'user', sent_at_ms: second + 60_000, blocks: [], images: [{ media_type: 'image/png', url: 'data:image/png;base64,YQ==' }] },
+    ],
+  });
+  assert.deepEqual(state.items.map(item => item.type === 'narration' ? item.sentAt : undefined),
+    [first, second, second + 60_000]);
+});
+
+test('restored messages omit unavailable or invalid clocks without inventing a current time', () => {
+  for (const sent_at_ms of [undefined, null, NaN, Infinity, 9e15]) {
+    const item = conversationFromMessages([
+      { role: 'user', sent_at_ms, blocks: [{ type: 'text', text: 'hello' }] },
+    ]).items[0];
+    assert.equal(item.type === 'narration' ? item.sentAt : undefined, undefined);
+  }
 });

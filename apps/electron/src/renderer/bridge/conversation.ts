@@ -1203,6 +1203,8 @@ export function conversationFromMessages(
       continue;
     }
 
+    const sentAt = typeof message.sent_at_ms === 'number' && Number.isFinite(message.sent_at_ms)
+      && Math.abs(message.sent_at_ms) <= 8.64e15 ? message.sent_at_ms : undefined;
     const images = message.role === 'user'
       ? (message.images ?? []).filter(isRenderableMessageImage)
       : [];
@@ -1222,6 +1224,7 @@ export function conversationFromMessages(
               text: block.text,
               strong: message.role === 'user',
               role: message.role === 'user' ? 'user' : 'assistant',
+              sentAt,
               ...(!attachedImages && images.length ? { images } : {}),
               ...(!attachedContext && visualizationContext ? { visualizationContext } : {}),
             });
@@ -1319,6 +1322,7 @@ export function conversationFromMessages(
         text: '',
         strong: true,
         role: 'user',
+        sentAt,
         images,
       });
     }

@@ -95,8 +95,10 @@ const VISUALIZATION_BLOCK_STATUSES: readonly VisualizationBlockStatusDto[] = ['p
 
 function conversationMessage(value: unknown): MessageDto {
   const input = object(value, 'session agent message');
-  exactKeys(input, ['role', 'blocks', 'images', 'loop_wakeup', 'visualization_context'], 'session agent message');
+  exactKeys(input, ['role', 'blocks', 'images', 'loop_wakeup', 'visualization_context', 'sent_at_ms'], 'session agent message');
   string(input['role'], 'session agent message role');
+  if (input['sent_at_ms'] !== undefined && input['sent_at_ms'] !== null
+      && !Number.isSafeInteger(input['sent_at_ms'])) throw new Error('invalid session agent message time');
   if (!Array.isArray(input['blocks'])) throw new Error('invalid session agent message blocks');
   for (const value of input['blocks']) {
     const block = object(value, 'session agent message block');

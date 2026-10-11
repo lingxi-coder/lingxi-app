@@ -1658,10 +1658,7 @@ impl CommandRouter for EngineCommandRouter {
                 // the renderer receives the complete main-thread transcript so
                 // pre-compaction messages remain visible without re-entering
                 // the LLM context.
-                let messages = client::adapter::lowering::lower_transcript_with_tool_results(
-                    &replayed.display_history,
-                    &replayed.client_state_tool_results,
-                );
+                let messages = client::adapter::lowering::lower_replayed_transcript(&replayed);
                 let resume_plan_mode = replayed.state.plan_mode;
                 let previous_session_id = self.handle.current_session_id().await;
                 let previous_permission_mode = self

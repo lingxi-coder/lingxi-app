@@ -607,7 +607,7 @@
       "sdk": "bridge",
       "name": "CLIENT_PROTOCOL_VERSION",
       "kind": "const",
-      "signature": "export const CLIENT_PROTOCOL_VERSION = '20.0.0';",
+      "signature": "export const CLIENT_PROTOCOL_VERSION = '21.0.0';",
       "summary": "`client-protocol` DTO contract version this SDK speaks.",
       "file": "packages/bridge-client/src/protocol.ts",
       "line": 36,

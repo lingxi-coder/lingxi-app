@@ -33,7 +33,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '20.0.0';
+export const CLIENT_PROTOCOL_VERSION = '21.0.0';
 
 /**
  * The largest single WebSocket frame the engine will read
@@ -909,6 +909,8 @@ export interface LoopWakeupDto {
 }
 
 export interface MessageDto {
+  /** Original persisted message time in Unix milliseconds. */
+  sent_at_ms?: number | null;
   loop_wakeup?: LoopWakeupDto | null;
   role: string;
   blocks: MessageBlockDto[];

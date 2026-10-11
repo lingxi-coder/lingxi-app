@@ -79,9 +79,9 @@ speech composes host synthesis and device playback.
 
 `Listen` always captures live speech. `Synthesize` returns bounded, nonempty
 PCM16 mono and never plays it; `Speak` completes only after playback finishes.
-Long recordings use a host-owned handle bound to a stable session or Local App
-runtime-generation owner, so a successful start survives its call and normal
-turn end. Stop uses a fresh operation identity plus that stored handle. Dropping
-or cancelling an unfinished start targets its exact pending identity; after
-the host commits the returned handle, that short-operation cancellation guard
-is disarmed. Runtime teardown ends only the matching Local App generation.
+Long recordings use a host-owned handle bound to a stable owner, such as the
+chat session, so a successful start survives its call and normal turn end.
+Stop uses a fresh operation identity plus that stored handle. Dropping or
+cancelling an unfinished start targets its exact pending identity; after the
+host commits the returned handle, that short-operation cancellation guard is
+disarmed.

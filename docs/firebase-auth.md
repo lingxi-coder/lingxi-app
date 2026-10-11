@@ -121,9 +121,6 @@ Recorded integration checks:
   because Firebase Auth 25.0.0 uses Kotlin 2.4 metadata.
 - iOS: full StoreDebug and FullDebug simulator application builds passed against
   the actual FirebaseAuth and GoogleSignIn packages.
-- Fixed Android/iOS audio adapters for the new local-app owner, preserving both
-  app ID and runtime generation. Android's 10 coordinator tests and the iOS
-  local-app-generation ownership regression passed.
 - iOS normal-launch inspection found a synchronous Rust/MCP constructor exhausting
   a Swift cooperative worker's stack. Engine construction now uses a short-lived
   native thread with an explicit 8 MiB stack while the shared bootstrap task

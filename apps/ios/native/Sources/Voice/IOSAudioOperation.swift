@@ -10,12 +10,14 @@ enum IOSAudioOwner: Hashable, Sendable {
     case session(sessionID: String)
     case ui(instanceID: String)
     case system(instanceID: String)
+    case localApp(appID: String, runtimeGeneration: UInt64)
 
     var stableKey: String {
         switch self {
         case let .session(sessionID): "session:\(sessionID)"
         case let .ui(instanceID): "ui:\(instanceID)"
         case let .system(instanceID): "system:\(instanceID)"
+        case let .localApp(appID, generation): "local-app:\(generation):\(appID)"
         }
     }
 }

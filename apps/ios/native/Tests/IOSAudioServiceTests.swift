@@ -4,6 +4,14 @@ import XCTest
 
 @MainActor
 final class IOSAudioServiceTests: XCTestCase {
+    func testLocalAppAudioOwnerSeparatesRuntimeGenerations() {
+        let previous = IOSAudioOwner.localApp(appID: "same-app", runtimeGeneration: 1)
+        let current = IOSAudioOwner.localApp(appID: "same-app", runtimeGeneration: 2)
+        XCTAssertNotEqual(previous, current)
+        XCTAssertNotEqual(previous.stableKey, current.stableKey)
+        XCTAssertNotEqual(current.stableKey, IOSAudioOwner.ui(instanceID: "same-app").stableKey)
+    }
+
     func testFlowBargeInRecognitionUsesDuplexSessionPurpose() {
         XCTAssertEqual(
             IOSAudioService.recognitionSessionPurpose(for: .ui(instanceID: "flow-barge-in")),

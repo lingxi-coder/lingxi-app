@@ -496,3 +496,22 @@ test('ASAR is fully readable immediately before synchronous signing or archiving
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test('runtime dependency copy handles overlapping Firebase-style globs without copying nested dependencies twice', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-firebase-payload-'));
+  try {
+    const source = join(root, 'node_modules', 'fixture');
+    mkdirSync(join(source, 'compat'), { recursive: true });
+    mkdirSync(join(source, 'node_modules', 'unused'), { recursive: true });
+    writeFileSync(join(source, 'package.json'), JSON.stringify({ name: 'fixture', version: '1.0.0', files: ['**/dist/**/*', '**/package.json', 'compat/index.d.ts'] }));
+    writeFileSync(join(source, 'compat', 'index.d.ts'), 'export {};');
+    writeFileSync(join(source, 'firebase-auth.js'), 'export const ready = true;');
+    writeFileSync(join(source, 'node_modules', 'unused', 'index.js'), 'must not be copied');
+    const destination = join(root, 'output', 'node_modules');
+    copyProductionDependencies({ fixture: '1.0.0' }, root, destination);
+    assert.equal(readFileSync(join(destination, 'fixture', 'compat', 'index.d.ts'), 'utf8'), 'export {};');
+    assert.equal(existsSync(join(destination, 'fixture', 'firebase-auth.js')), true);
+    assert.equal(existsSync(join(destination, 'fixture', 'node_modules')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -1,3 +1,6 @@
+import { AccountService } from './account.js';
+import { accountSessionStore } from './account-storage.js';
+import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
 import { app, BrowserWindow, dialog, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
@@ -433,6 +436,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
   }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)));
+  host.attachAccount(new AccountService(firebaseConfig, accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url)));
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
   scheduled.start();

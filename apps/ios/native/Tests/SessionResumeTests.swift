@@ -1513,6 +1513,10 @@ visionDelegationEnabled: true)
                     Thread.isMainThread,
                     "synchronous engine construction must not block the setup UI"
                 )
+                XCTAssertGreaterThanOrEqual(
+                    Thread.current.stackSize, 8 * 1024 * 1024,
+                    "MCP bootstrap must not run on a small cooperative worker stack"
+                )
                 constructed.fulfill()
                 return handle
             })

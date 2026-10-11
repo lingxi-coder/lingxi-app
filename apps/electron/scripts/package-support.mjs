@@ -235,7 +235,7 @@ function copyPackagePayload(sourceRoot, destinationRoot, manifest) {
   const entries = Array.isArray(manifest.files) && manifest.files.length > 0
     ? [...new Set(manifest.files.flatMap((entry) => {
         // Installed npm manifests can anchor entries at the package root (/cjs).
-        const normalized = String(entry).replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '');
+        const normalized = String(entry).replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
         if (!normalized || normalized.split('/').includes('..')) {
           throw new Error(`unsafe package files entry in ${manifest.name}: ${entry}`);
         }
@@ -246,11 +246,18 @@ function copyPackagePayload(sourceRoot, destinationRoot, manifest) {
           .replace(/[.+^${}()|\\]/g, '\\$&')
           .replaceAll('*', '.*')
           .replaceAll('?', '.')}$`);
-        return readdirSync(sourceRoot).filter((candidate) => pattern.test(candidate));
+        return readdirSync(sourceRoot).filter((candidate) => !OMIT_FROM_RUNTIME_PACKAGE.has(candidate) && pattern.test(candidate));
       }))]
     : readdirSync(sourceRoot).filter((entry) => !OMIT_FROM_RUNTIME_PACKAGE.has(entry));
 
-  for (const entry of entries) {
+  // Some packages (including Firebase) list a directory via a glob and also
+  // explicitly list a file inside it. Copy the directory once; copying its child
+  // a second time fails with EEXIST under the deliberately strict copy policy.
+  const uniqueEntries = entries.filter((entry) => !entries.some((parent) =>
+    parent !== entry && entry.startsWith(`${parent}/`)
+      && existsSync(join(sourceRoot, parent)) && lstatSync(join(sourceRoot, parent)).isDirectory(),
+  ));
+  for (const entry of uniqueEntries) {
     const source = join(sourceRoot, entry);
     if (existsSync(source) && basename(source) !== 'package.json') {
       copyPath(source, join(destinationRoot, entry));

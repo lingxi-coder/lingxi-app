@@ -63,6 +63,7 @@ final class IOSAudioServiceCallbackAdapter: IosAudioService, @unchecked Sendable
         case let .session(sessionId): .session(sessionID: sessionId)
         case let .ui(instanceId): .ui(instanceID: instanceId)
         case let .system(instanceId): .system(instanceID: instanceId)
+        case let .localApp(appId, runtimeGeneration): .localApp(appID: appId, runtimeGeneration: runtimeGeneration)
         }
     }
 

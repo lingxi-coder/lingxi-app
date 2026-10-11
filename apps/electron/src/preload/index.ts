@@ -1,3 +1,4 @@
+import type { AccountApi, AccountState } from '../shared/account.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE, type NativeRealtimeAudioCommand, type NativeRealtimeAudioState } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED, type ScheduledApi } from '../shared/scheduled.js';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../shared/visualization.js';
@@ -208,6 +209,7 @@ export interface LingxiApi {
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
+  account: AccountApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;
@@ -317,6 +319,14 @@ const api: LingxiApi = {
   getPathForFile: (file) => webUtils.getPathForFile(file),
   platform: process.platform,
   isElectron: true,
+  account: {
+    request: command => ipcRenderer.invoke('lingxi:account', command) as Promise<AccountState>,
+    onChanged: callback => {
+      const listener = (_event: Electron.IpcRendererEvent, state: AccountState) => callback(state);
+      ipcRenderer.on('lingxi:account:changed', listener);
+      return () => { ipcRenderer.removeListener('lingxi:account:changed', listener); };
+    },
+  },
   scheduled: {
     context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),
     scopes: () => ipcRenderer.invoke(CH_SCHEDULED, { action: 'scopes' }),

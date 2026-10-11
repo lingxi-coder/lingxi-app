@@ -1,4 +1,5 @@
 import SwiftUI
+import GoogleSignIn
 
 @main
 struct LingxiCodeApp: App {
@@ -7,6 +8,7 @@ struct LingxiCodeApp: App {
     @State private var voice = VoiceCapabilityModel()
 
     init() {
+        FirebaseAccount.configure()
         LXISHRuntimeResourceBootstrap.prepare()
         // M10 A2 / P2 link smoke: a reachable reference to the engine static
         // archive (LingxiCodeFFI.xcframework) so the linker resolves its FFI
@@ -21,6 +23,7 @@ struct LingxiCodeApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(voiceCapability: voice)
+                .onOpenURL { _ = GIDSignIn.sharedInstance.handle($0) }
                 .environment(app)
                 .environment(voice)
                 .environment(LocalizationManager.shared)

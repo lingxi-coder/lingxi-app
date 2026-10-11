@@ -1648,7 +1648,24 @@ final class EngineConversationSource: ConversationSource {
         let audio = IOSAudioServiceCallbackAdapter.shared
         let buildTask = Task.detached(priority: .userInitiated) {
             [handleBuilder, launchConfig, listener, audio, permissionSink] in
-            let handle = try handleBuilder(launchConfig, listener, audio, permissionSink)
+            // The synchronous FFI constructor block_on's MCP initialization.
+            // Its native frames can exhaust a cooperative worker's small stack,
+            // and blocking that worker also prevents unrelated tasks progressing.
+            // Keep the shared build task, but suspend it while a short-lived
+            // native thread performs just the blocking constructor.
+            let handle: MobileEngineHandle = try await withCheckedThrowingContinuation { continuation in
+                let thread = Thread {
+                    autoreleasepool {
+                        continuation.resume(with: Result {
+                            try handleBuilder(launchConfig, listener, audio, permissionSink)
+                        })
+                    }
+                }
+                thread.name = "LingXi engine bootstrap"
+                thread.qualityOfService = .userInitiated
+                thread.stackSize = 8 * 1024 * 1024
+                thread.start()
+            }
             // Bootstrap listings are part of construction: never publish a
             // handle that failed halfway through initialization.
             try await handle.submit(command: .listModels)

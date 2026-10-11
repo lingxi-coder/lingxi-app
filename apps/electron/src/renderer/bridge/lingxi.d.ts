@@ -1,3 +1,4 @@
+import type { AccountApi } from '../../shared/account.js';
 import type { NativeRealtimeAudioCommand, NativeRealtimeAudioState } from '../../shared/realtimeAudio.js';
 import type { ScheduledApi } from '../../shared/scheduled';
 import type { VisualizationGuestEvent, VisualizationMount, VisualizationReference, VisualizationStateWrite, VisualizationTheme } from '../../shared/visualization';
@@ -154,6 +155,7 @@ export interface LingxiApi {
   getPathForFile(file: File): string;
   platform: NodeJS.Platform;
   isElectron: true;
+  account: AccountApi;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
   openSettingsFile(path: string): Promise<void>;

@@ -35,6 +35,14 @@ settings:
       - ja
       - ko
 
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    exactVersion: 12.19.2
+  GoogleSignIn:
+    url: https://github.com/google/GoogleSignIn-iOS.git
+    exactVersion: 9.2.0
+
 targets:
   LingxiCode:
     type: application
@@ -50,7 +58,13 @@ targets:
       # per-namespace C/FFI clang modules from LingxiCodeFFI.xcframework below.
       - path: Generated
       - path: Resources
+        excludes:
+          - Firebase/**
     dependencies:
+      - package: Firebase
+        product: FirebaseAuth
+      - package: GoogleSignIn
+        product: GoogleSignIn
       - target: ConversationWidget
         embed: true
       # UniFFI FFI static-library xcframework: exports the harness_runtime /
@@ -92,7 +106,7 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: Sources/LingxiCode-Bridging-Header.h
         ENABLE_PREVIEWS: true
         GENERATE_INFOPLIST_FILE: false
-        CODE_SIGN_ENTITLEMENTS: Widget.entitlements
+        CODE_SIGN_ENTITLEMENTS: Account.entitlements
         MARKETING_VERSION: "2.4.1"
         CURRENT_PROJECT_VERSION: "8721"
         OTHER_LDFLAGS: "$(inherited) -ObjC"
@@ -102,17 +116,29 @@ targets:
       configs:
         StoreDebug:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
+          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.535003056752-ocjengstsi572dn9uvmrsdulrn1t1fvg
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
         StoreRelease:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code
+          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.535003056752-ocjengstsi572dn9uvmrsdulrn1t1fvg
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_STORE"
         FullDebug:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
+          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.535003056752-l23qteth7diqh6djlpu7vigk9l4srlin
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
         FullRelease:
           PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.full
+          FIREBASE_REVERSED_CLIENT_ID: com.googleusercontent.apps.535003056752-l23qteth7diqh6djlpu7vigk9l4srlin
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) LINGXI_FULL"
     preBuildScripts:
+      - name: Select Firebase application
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          FIREBASE_CONFIG="${SRCROOT}/Resources/Firebase/${PRODUCT_BUNDLE_IDENTIFIER}/GoogleService-Info.plist"
+          test -f "${FIREBASE_CONFIG}"
+          mkdir -p "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          cp "${FIREBASE_CONFIG}" "${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/GoogleService-Info.plist"
       - name: Stage Alpine rootfs
         basedOnDependencyAnalysis: false
         script: |

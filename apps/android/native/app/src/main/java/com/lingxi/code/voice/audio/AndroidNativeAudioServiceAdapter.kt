@@ -90,6 +90,7 @@ internal class AndroidNativeAudioServiceAdapter(context: Context) : AndroidAudio
     }
 
     private fun AudioOwnerDto.toOwnerOrNull(): AudioOwnerKey? = when (this) {
+        is AudioOwnerDto.LocalApp -> appId.takeIf { it.isNotBlank() }?.let { AudioOwnerKey.localApp(it, runtimeGeneration) }
         is AudioOwnerDto.Session -> AudioOwnerKey.session(sessionId).takeIf { sessionId.isNotBlank() }
         is AudioOwnerDto.Ui -> instanceId.takeIf { it.isNotBlank() }?.let(AudioOwnerKey::ui)
         is AudioOwnerDto.System -> instanceId.takeIf { it.isNotBlank() }?.let(AudioOwnerKey::system)

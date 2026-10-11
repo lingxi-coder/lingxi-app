@@ -38,6 +38,7 @@ internal fun GeneralSettingsPage(onNavigate: (String) -> Unit, onReplayOnboardin
 @Composable
 internal fun NativeAccountPage(state: SettingsUiState, onCredentials: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        com.lingxi.code.account.LingxiAccountSection()
         Text(settingsLabel("Provider accounts"))
         Text(settingsLabel("This installation connects using your configured provider credentials. Manage credentials to connect or change an account."))
         state.llmProviders.forEach { provider -> Text(settingsLabel("${provider.name} · ${provider.status}")) }

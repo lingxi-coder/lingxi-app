@@ -1,3 +1,5 @@
+import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
+import type { AccountService } from './account.js';
 import { RealtimeAudioController } from './audio/realtimeAudioController.js';
 import { CH_REALTIME_AUDIO_COMMAND, CH_REALTIME_AUDIO_STATE } from '../shared/realtimeAudio.js';
 import { CH_SCHEDULED } from '../shared/scheduled.js';
@@ -410,6 +412,16 @@ export class HostController {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
 
+  private account?: AccountService;
+  private offAccount?: () => void;
+  attachAccount(service: AccountService): void {
+    this.offAccount?.();
+    this.account = service;
+    this.offAccount = service.onChanged(state => {
+      for (const target of this.targets.keys()) if (!target.isDestroyed()) target.send(CH_ACCOUNT_CHANGED, state);
+    });
+  }
+
   attachScheduled(service: ScheduledTaskService): void { this.scheduled = service; }
 
   /**
@@ -515,6 +527,11 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
+    this.ipc.handle(CH_ACCOUNT, (event: IpcMainInvokeEvent, command: unknown) => {
+      this.assertSender(event);
+      if (!this.account) throw new Error('Account service is unavailable');
+      return this.account.execute(command);
+    });
     if (this.nativeAudio && !this.offNativeAudio) {
       this.offNativeAudio = this.nativeAudio.onEvent((audioEvent) => {
         if (audioEvent.type === 'capture_chunk') return;
@@ -1831,6 +1848,9 @@ export class HostController {
   dispose(): void {
     void this.realtimeAudioController?.stop();
     this.scheduled?.dispose();
+    this.offAccount?.();
+    this.account?.dispose();
+    this.ipc.removeHandler(CH_ACCOUNT);
     this.ipc.removeHandler(CH_SCHEDULED);
     this.codexLoginAbort?.abort();
     this.offTerminals?.();

@@ -72,6 +72,8 @@ export class SessionRuntimeManager {
   private registered = false;
   private oauthOwner: string | undefined;
   private oauthLifecycle: Promise<void> = Promise.resolve();
+  /** Codex claims queued on `oauthLifecycle` that have not settled, by session. */
+  private readonly pendingCodexClaims = new Map<string, Promise<void>>();
 
   /** Routes visualization documents and state writes to the session that issued the mount. */
   readonly visualizations = new VisualizationRouter({
@@ -434,15 +436,19 @@ export class SessionRuntimeManager {
     ));
   }
 
+  /** Host-launched work (scheduled-task controller, archive preflight) rather than a chat being opened. */
+  private isBackgroundLaunch(sessionId: string): boolean {
+    return this.backgroundSessionLeases.has(sessionId)
+      && !this.openingSessions.get(sessionId)?.activate;
+  }
+
   private async stopOtherCodexRuntimes(sessionId?: string): Promise<void> {
     const owner = this.oauthOwner ? this.runtimes.get(this.oauthOwner) : undefined;
     const candidates = [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
       && (runtime.hasOpenAiOAuth || runtime === owner));
-    // A background launch (scheduled-task controller, archive preflight) must
-    // not stop the chat on screen; it retries once that chat lets go.
-    const background = sessionId !== undefined
-      && this.backgroundSessionLeases.has(sessionId)
-      && !this.openingSessions.get(sessionId)?.activate;
+    // A background launch must not stop the chat on screen; it retries once
+    // that chat lets go.
+    const background = sessionId !== undefined && this.isBackgroundLaunch(sessionId);
     if (background && candidates.some(runtime => runtime.sessionId === this.activeSessionId)) {
       throw new Error('The active Codex chat holds Codex authentication; background work waits for it.');
     }
@@ -463,9 +469,46 @@ export class SessionRuntimeManager {
     this.oauthOwner = sessionId;
   }
 
-  private claimCodexRuntime(sessionId?: string): Promise<void> {
+  /**
+   * Starting background engines that hold Codex authentication or have queued
+   * a claim for it. Only a bare engine start (the scheduled-task controller)
+   * counts: a scheduled run or archive preflight resumes its session right
+   * after starting, and stopping it there would fail that work.
+   */
+  private startingBackgroundCodexRuntimes(sessionId: string): SessionRuntime[] {
+    return [...this.runtimes.values()].filter(runtime => runtime.sessionId !== sessionId
+      && runtime.isStarting
+      && (runtime.hasOpenAiOAuth || runtime.sessionId === this.oauthOwner || this.pendingCodexClaims.has(runtime.sessionId))
+      && runtime.sessionId !== this.activeSessionId
+      && this.isBackgroundLaunch(runtime.sessionId)
+      && !this.openingSessions.has(runtime.sessionId));
+  }
+
+  private async claimCodexRuntime(sessionId?: string): Promise<void> {
+    // A chat being opened outranks background work. The scheduled-task engine
+    // launched with the app may still be starting when the chat on screen is
+    // restored, and a starting engine cannot be stopped. Let that start settle
+    // before queueing, so the claim stops the engine instead of refusing the
+    // chat; a start that still needs its own claim can finish it meanwhile.
+    // A claim already queued ahead counts even before it runs, a settled start
+    // may have let another queue, and with nothing to wait for this queues
+    // without yielding, so no background claim can slip in ahead of it.
+    if (sessionId !== undefined && !this.isBackgroundLaunch(sessionId)) {
+      let starting = this.startingBackgroundCodexRuntimes(sessionId);
+      while (starting.length > 0) {
+        await Promise.all(starting.map(runtime => runtime.start().catch(() => undefined)));
+        starting = this.startingBackgroundCodexRuntimes(sessionId);
+      }
+    }
     const operation = this.oauthLifecycle.catch(() => undefined).then(() => this.stopOtherCodexRuntimes(sessionId));
     this.oauthLifecycle = operation;
+    if (sessionId !== undefined) {
+      this.pendingCodexClaims.set(sessionId, operation);
+      const settle = (): void => {
+        if (this.pendingCodexClaims.get(sessionId) === operation) this.pendingCodexClaims.delete(sessionId);
+      };
+      operation.then(settle, settle);
+    }
     return operation;
   }
 

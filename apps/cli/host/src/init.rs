@@ -985,6 +985,10 @@ pub(crate) fn resolve_desktop_config_at(
     } else {
         None
     };
+    // `--no-stream` is always honoured in the baseline pipeline (only the
+    // batched constructor is wired). Read the flag to silence the unused-field
+    // warning and preserve the pre-lift behavior.
+    let _ = argv.no_stream;
     let build_info = harness_runtime::desktop::BuildInfo::new(
         env!("CARGO_PKG_VERSION"),
         option_env!("LINGXI_GIT_SHA_SHORT").unwrap_or("unknown"),
@@ -996,19 +1000,20 @@ pub(crate) fn resolve_desktop_config_at(
     DesktopConfig {
         build_info,
         diagnostics: Some(Arc::new(CliDesktopDiagnostics)),
-        mcp_services_factory: None,
         composition: None,
+        defer_session_start: false,
+        connect_mcp_in_background: false,
+        session_transcript_path: None,
+        session_resume_snapshot: None,
+        session_resume_cost: None,
+        max_structured_output_retries: 5,
+        inline_visualization: false,
+        mcp_services_factory: None,
         user_agent_environment: None,
         request_identity: None,
         anthropic_compatible_version: None,
         native_thinking_display: None,
         oauth_environment_lookup: None,
-        defer_session_start: false,
-        max_structured_output_retries: 5,
-        inline_visualization: false,
-        session_transcript_path: None,
-        session_resume_snapshot: None,
-        session_resume_cost: None,
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
         mod_render_surface: None,

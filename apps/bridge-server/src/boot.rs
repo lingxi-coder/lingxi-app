@@ -598,18 +598,22 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
     DesktopConfig {
         build_info,
         diagnostics: None,
-        mcp_services_factory: None,
         composition: None,
+        defer_session_start: false,
+        // The desktop opens a session while its startup MCP servers connect;
+        // `spawn_mcp_startup_publisher` re-publishes the listings as each
+        // settles.
+        connect_mcp_in_background: true,
+        session_transcript_path: None,
+        session_resume_snapshot: None,
+        session_resume_cost: None,
+        max_structured_output_retries: 5,
+        mcp_services_factory: None,
         user_agent_environment: None,
         request_identity: None,
         anthropic_compatible_version: None,
         native_thinking_display: None,
         oauth_environment_lookup: None,
-        defer_session_start: false,
-        max_structured_output_retries: 5,
-        session_transcript_path: None,
-        session_resume_snapshot: None,
-        session_resume_cost: None,
         verified_computer_profiles: Vec::new(),
         host_workspace_trusted: Some(trusted),
         mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
@@ -1094,23 +1098,51 @@ fn initialize_live_session(
 /// This path deliberately does not call config resolution, credential loading,
 /// customization loaders, or `harness_runtime::desktop::build`; it only reads the JSONL
 /// catalog rooted at `cwd` and returns the stable Desktop envelope.
-pub async fn list_sessions_json(cwd: &Path) -> Result<String, String> {
+///
+/// With `session_id` (`--session-id` beside `--list-sessions-json`) the envelope
+/// holds at most that session's row, and only its transcript is parsed: Desktop
+/// resolves one row before every session it opens.
+pub async fn list_sessions_json(cwd: &Path, session_id: Option<&str>) -> Result<String, String> {
     let lingxi_home =
         lingxi_config_home().ok_or_else(|| "session catalog requires a config home".to_string())?;
-    list_sessions_json_from(cwd, &lingxi_home).await
+    list_sessions_json_from(cwd, &lingxi_home, session_id).await
 }
 
-async fn list_sessions_json_from(cwd: &Path, lingxi_home: &Path) -> Result<String, String> {
+async fn list_sessions_json_from(
+    cwd: &Path,
+    lingxi_home: &Path,
+    session_id: Option<&str>,
+) -> Result<String, String> {
     let fs: Arc<dyn lingxi_core::host::FileSystem> =
         Arc::new(HostFileSystem::new(cwd.to_path_buf()));
-    let catalog = match session::jsonl::list_recent_sessions_with_diagnostics(
-        lingxi_home,
-        &cwd.to_string_lossy(),
-        usize::MAX,
-        fs.clone(),
-    )
-    .await
-    {
+    let session_id = session_id
+        .map(|raw| {
+            lingxi_core::types::SessionId::parse_prefixed(raw)
+                .map(|parsed| parsed.as_uuid())
+                .ok_or_else(|| "session catalog requires a valid session id".to_string())
+        })
+        .transpose()?;
+    let listing = match session_id {
+        Some(session_id) => {
+            session::jsonl::find_session_with_diagnostics(
+                lingxi_home,
+                &cwd.to_string_lossy(),
+                session_id,
+                fs.clone(),
+            )
+            .await
+        }
+        None => {
+            session::jsonl::list_recent_sessions_with_diagnostics(
+                lingxi_home,
+                &cwd.to_string_lossy(),
+                usize::MAX,
+                fs.clone(),
+            )
+            .await
+        }
+    };
+    let catalog = match listing {
         Ok(catalog) => catalog,
         Err(session::jsonl::LoaderError::EmptyDirectory) => session::jsonl::SessionCatalog {
             sessions: Vec::new(),
@@ -1696,6 +1728,11 @@ pub async fn assemble_with_credentials(
     .with_file_changed_watcher(runtime.file_changed_watcher.controller());
     router = router.with_realtime_audio(realtime_audio);
     let router = Arc::new(router);
+    spawn_mcp_startup_publisher(
+        runtime.watch_mcp_startup(),
+        router.clone(),
+        connection.loop_wakeup_event_sink(),
+    );
 
     let connection = connection
         .bind(gate, driver)
@@ -1716,6 +1753,27 @@ pub async fn assemble_with_credentials(
         audio: audio_bridge,
         live_session,
     })
+}
+
+/// Startup MCP servers connect after the session opens
+/// (`DesktopConfig::connect_mcp_in_background`). Re-publish the MCP listings
+/// each time one settles so a client that fetched them on connect sees the
+/// servers, their status and their prompt commands arrive. The sink is the
+/// connection's unscoped one: these updates belong to no turn.
+fn spawn_mcp_startup_publisher(
+    mut progress: tokio::sync::watch::Receiver<harness_runtime::desktop::McpStartupProgress>,
+    router: Arc<EngineCommandRouter>,
+    sink: Arc<dyn client::adapter::ClientEventSink>,
+) {
+    tokio::spawn(async move {
+        while progress.changed().await.is_ok() {
+            let settled = progress.borrow_and_update().pending == 0;
+            router.publish_mcp_startup_progress(sink.as_ref()).await;
+            if settled {
+                break;
+            }
+        }
+    });
 }
 
 /// The `RegistrySlashDispatcher` returned by `harness_runtime::desktop::build` is owned by
@@ -1891,7 +1949,7 @@ mod tests {
     async fn list_mode_is_empty_and_does_not_create_catalog_files() {
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let home = tempfile::tempdir().expect("config tempdir");
-        let json = list_sessions_json_from(cwd.path(), home.path())
+        let json = list_sessions_json_from(cwd.path(), home.path(), None)
             .await
             .expect("empty catalog succeeds");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid envelope");
@@ -1937,7 +1995,7 @@ mod tests {
         });
         std::fs::write(&empty_path, format!("{empty_line}\n")).expect("write empty anchor");
 
-        let json = list_sessions_json_from(cwd.path(), home.path())
+        let json = list_sessions_json_from(cwd.path(), home.path(), None)
             .await
             .expect("catalog succeeds");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid envelope");
@@ -2018,7 +2076,7 @@ mod tests {
         )
         .expect("write transcript");
 
-        let json = list_sessions_json_from(cwd.path(), home.path())
+        let json = list_sessions_json_from(cwd.path(), home.path(), None)
             .await
             .expect("catalog succeeds");
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid envelope");
@@ -2029,6 +2087,71 @@ mod tests {
         assert_eq!(
             row["resume_model"],
             "openrouter/cohere/north-mini-code:free"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_mode_narrowed_to_one_session_returns_its_catalog_row() {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("config tempdir");
+        let ids = [
+            "11111111-2222-4333-8444-555555555555",
+            "66666666-7777-4888-8999-aaaaaaaaaaaa",
+        ];
+        for (index, id) in ids.iter().enumerate() {
+            let path = session::jsonl::session_path(home.path(), &cwd.path().to_string_lossy(), id);
+            std::fs::create_dir_all(path.parent().expect("catalog dir")).expect("catalog dir");
+            let line = serde_json::json!({
+                "type": "user",
+                "uuid": format!("aaaaaaaa-bbbb-4ccc-8ddd-00000000000{index}"),
+                "parentUuid": null,
+                "sessionId": id,
+                "timestamp": format!("2026-08-26T00:00:0{index}.000Z"),
+                "cwd": cwd.path().to_string_lossy(),
+                "isSidechain": false,
+                "message": {"role": "user", "content": format!("prompt {index}")},
+            });
+            std::fs::write(&path, format!("{line}\n")).expect("write transcript");
+        }
+
+        let full: serde_json::Value = serde_json::from_str(
+            &list_sessions_json_from(cwd.path(), home.path(), None)
+                .await
+                .expect("full catalog"),
+        )
+        .expect("valid envelope");
+        for id in ids {
+            let narrowed: serde_json::Value = serde_json::from_str(
+                &list_sessions_json_from(cwd.path(), home.path(), Some(id))
+                    .await
+                    .expect("narrowed catalog"),
+            )
+            .expect("valid envelope");
+            let expected = full["sessions"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["uuid"] == id))
+                .expect("listed in the full catalog");
+            assert_eq!(
+                narrowed,
+                serde_json::json!({"version": 1, "sessions": [expected]})
+            );
+        }
+
+        let missing = list_sessions_json_from(
+            cwd.path(),
+            home.path(),
+            Some("99999999-2222-4333-8444-555555555555"),
+        )
+        .await
+        .expect("a foreign id is an empty catalog");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&missing).expect("valid envelope"),
+            serde_json::json!({"version": 1, "sessions": []})
+        );
+        assert!(
+            list_sessions_json_from(cwd.path(), home.path(), Some("not-a-uuid"))
+                .await
+                .is_err()
         );
     }
 
@@ -2483,6 +2606,7 @@ mod tests {
             diagnostics: None,
             composition: None,
             defer_session_start: false,
+            connect_mcp_in_background: false,
             session_transcript_path: None,
             session_resume_snapshot: None,
             session_resume_cost: None,

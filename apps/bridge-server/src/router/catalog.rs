@@ -205,6 +205,16 @@ impl EngineCommandRouter {
         }
         events
     }
+    /// Re-publish what a startup MCP server changes once it settles in the
+    /// background: the server list, the MCP configuration snapshot (its live
+    /// status column) and the slash-command catalog (MCP prompt commands).
+    /// Clients fetch all three on connect, before the servers have settled.
+    pub async fn publish_mcp_startup_progress(&self, sink: &dyn ClientEventSink) {
+        self.emit_listing(ListingKindDto::Mcp, sink).await;
+        self.emit_mcp_configuration_snapshot(sink).await;
+        self.emit_listing(ListingKindDto::SlashCommands, sink).await;
+    }
+
     /// Pull + emit a single listing kind. Listing kinds with no engine handle in
     /// the foundation are skipped (see module docs).
     pub(super) async fn emit_listing(&self, kind: ListingKindDto, sink: &dyn ClientEventSink) {

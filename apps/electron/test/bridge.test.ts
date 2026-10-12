@@ -636,6 +636,35 @@ test('reusable bridge discovery matches the exact session and workspace', () => 
   }
 });
 
+test('reusable bridge discovery never inspects the command of a dead lockfile pid', () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = join(bridgeRoot, 'launch-crashed');
+  const workspace = '/workspace';
+  const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
+  mkdirSync(launchDir, { mode: 0o700 });
+  writeFileSync(join(launchDir, '43126.lock'), JSON.stringify({
+    pid: process.pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  try {
+    let inspected = 0;
+    const command = `/bridge-server --cwd ${workspace} --session-id ${sessionId}`;
+    assert.equal(discoverReusableBridge(
+      bridgeRoot,
+      { projectPath: workspace, sessionId },
+      () => { inspected += 1; return command; },
+      () => false,
+    ), undefined);
+    assert.equal(inspected, 0);
+  } finally {
+    rmSync(bridgeRoot, { recursive: true, force: true });
+  }
+});
+
 test('external bridge discovery accepts only the exact process workspace and session', () => {
   const launchDir = temporaryDirectory();
   const ref = {
@@ -3234,4 +3263,43 @@ test('Mod UI requests and event frames stay bound to their session and request i
   }]);
   assert.equal(sent.some((event) => event.channel === CH_EVENT && (event.payload as any)?.event?.type?.startsWith('ui_')), false,
     'private UI results/frames do not enter the general sequenced event stream');
+});
+
+test('Mod UI requests beyond the outstanding window wait in order for earlier results', async () => {
+  const sessionId = '33333333-4444-4555-8666-777777777777';
+  const runtime = new SessionRuntime({
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+    sessionId,
+    projectPath: '/workspace',
+    registerIpc: false,
+    envelopeEvents: true,
+  });
+  const commands: any[] = [];
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
+  client.sendCommand = (command) => { commands.push(command); };
+  (runtime as any).client = client;
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).generation = 1;
+  (runtime as any).wireClient(client, 1);
+  // A long transcript mounts a render site per tool row at once.
+  const pending = Array.from({ length: 40 }, (_, index) => runtime.dispatchModUiControl({
+    subtype: 'ui_render', surface: 'desktop', component: 'ToolResult', instance_id: `tool-result:${index}`,
+    props: { plugin_owned: { display: true } },
+  }));
+  assert.equal(commands.length, 16, 'only a bounded window of requests reaches the Bridge command lane');
+
+  const response = JSON.stringify({ tree: { type: 'text', text: 'ok' }, props: {}, rewritten: false, hooked: true });
+  const metadata = JSON.stringify({ renderRevision: 7, clientStateToken: '42' });
+  client.emit('event', { type: 'ui_control_result', request_id: commands[0].request_id, response_json: response, metadata_json: metadata });
+  assert.deepEqual(await pending[0], { response: JSON.parse(response), metadata: { renderRevision: 7, clientStateToken: '42' } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(commands.length, 17);
+  assert.equal(JSON.parse(commands[16].request_json).instance_id, 'tool-result:16', 'a waiting request is sent in arrival order');
+
+  (runtime as any).clearPendingConnectionOperations();
+  const settled = await Promise.allSettled(pending.slice(1));
+  assert.ok(settled.every((result) => result.status === 'rejected' && /Mod UI request interrupted/.test(String(result.reason))),
+    'an interrupted connection fails outstanding and waiting requests alike');
+  assert.equal(commands.length, 17, 'nothing waiting is sent after the interruption');
 });

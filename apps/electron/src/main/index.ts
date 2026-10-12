@@ -212,12 +212,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const diagnostics = new DiagnosticBuffer(join(userData, 'logs', 'desktop.jsonl'));
   diagnostics.add('info', 'host', `desktop start: app=${app.getVersion()} electron=${process.versions.electron} platform=${process.platform} arch=${process.arch}`);
   const bridgeRoot = join(userData, 'bridge-runtime');
-  if (process.platform === 'darwin' && app.isPackaged) {
-    const stoppedLegacyPids = await stopLegacyOrphanBridges(bridgeRoot);
-    if (stoppedLegacyPids.length > 0) {
-      diagnostics.add('warn', 'host', `stopped legacy orphan bridge processes: ${stoppedLegacyPids.join(', ')}`);
-    }
-  }
+  // Pre-broker bridges that launchd inherited must be gone before any runtime
+  // launches, but the process scan behind the sweep need not hold startup: it
+  // runs beside the rest of it and is awaited, failure included, before the
+  // window can open one.
+  const legacyOrphanSweep: Promise<number[]> = process.platform === 'darwin' && app.isPackaged
+    ? stopLegacyOrphanBridges(bridgeRoot)
+    : Promise.resolve([]);
+  legacyOrphanSweep.catch(() => undefined);
   const credentialBroker = createMacCredentialBrokerClient({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -439,7 +441,6 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   host.attachAccount(new AccountService(firebaseConfig, accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url)));
   host.attachScheduled(scheduled);
   host.attachNotifier(notifier);
-  scheduled.start();
   terminals = new TerminalManager({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
   host.attachTerminals(terminals);
   git = new GitService({ isBusy: async (root) => {
@@ -461,15 +462,34 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   } catch (error) {
     diagnostics.add('warn', 'host', `inline visualizations unavailable: ${sanitizeDiagnostic(error)}`);
   }
+  const stoppedLegacyPids = await legacyOrphanSweep;
+  if (stoppedLegacyPids.length > 0) {
+    diagnostics.add('warn', 'host', `stopped legacy orphan bridge processes: ${stoppedLegacyPids.join(', ')}`);
+  }
   createWindow();
 
   const publicSettings = settings.getPublic();
   const activeProject = publicSettings.activeProject;
-  if (activeProject) {
-    void host.restoreProjectSession(activeProject, publicSettings.activeSession).catch((error: unknown) => {
-      diagnostics.add('error', 'host', sanitizeDiagnostic(error));
-    });
-  }
+  const foregroundRestore = activeProject
+    ? host.restoreProjectSession(activeProject, publicSettings.activeSession).then(() => undefined, (error: unknown) => {
+        diagnostics.add('error', 'host', sanitizeDiagnostic(error));
+      })
+    : Promise.resolve();
+  // Scheduled-task controllers are engine sessions too. Started beside the
+  // restored chat, every runtime contended for CPU, disk and the credential
+  // broker; start them once the foreground chat is up, or after a bound so a
+  // stuck restore cannot hold the schedule.
+  let scheduledStarted = false;
+  const startScheduled = (): void => {
+    if (scheduledStarted || quitting) return;
+    scheduledStarted = true;
+    scheduled?.start();
+  };
+  const scheduledFallback = setTimeout(startScheduled, 10_000);
+  void foregroundRestore.then(() => {
+    clearTimeout(scheduledFallback);
+    startScheduled();
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -1097,7 +1097,9 @@ async fn mod_ui_client_module_forwards_driver_success_and_missing_plugin_error_w
         requests: std::sync::Mutex::new(Vec::new()),
     });
     let unbound_connection = BridgeConnection::new();
-    let gate = Arc::new(AdapterPermissionGate::new(unbound_connection.permission_sink()));
+    let gate = Arc::new(AdapterPermissionGate::new(
+        unbound_connection.permission_sink(),
+    ));
     let connection = unbound_connection.bind(gate, driver.clone());
     let (endpoint, mut socket, sink) = captured_sink().await;
     connection.close_connection(Some(&sink)).await;

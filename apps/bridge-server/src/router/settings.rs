@@ -5,11 +5,11 @@ use crate::settings_bridge::lower_snapshot;
 use crate::settings_bridge::permission_destination;
 use crate::settings_bridge::permission_paths;
 use crate::settings_bridge::permission_rule_from_wire;
-use client::adapter::ClientEventSink;
 use client::adapter::controls::lower_conversation_controls;
+use client::adapter::ClientEventSink;
 use client::protocol::commands::PermissionBehaviorDto;
-use client::protocol::controls::NativeProactivityControlStateDto;
 use client::protocol::commands::WritableScopeDto;
+use client::protocol::controls::NativeProactivityControlStateDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::events::ErrorKindDto;
 use std::path::PathBuf;
@@ -96,10 +96,8 @@ impl EngineCommandRouter {
                 level: proactivity.level,
             }
         });
-        sink.emit(ClientEvent::ConversationControlsChanged {
-            controls,
-        })
-        .await;
+        sink.emit(ClientEvent::ConversationControlsChanged { controls })
+            .await;
 
         sink.emit(ClientEvent::FastModeChanged { enabled: fast_mode })
             .await;

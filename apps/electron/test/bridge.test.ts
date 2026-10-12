@@ -637,6 +637,35 @@ test('reusable bridge discovery matches the exact session and workspace', () => 
   }
 });
 
+test('reusable bridge discovery never inspects the command of a dead lockfile pid', () => {
+  const bridgeRoot = temporaryDirectory();
+  const launchDir = join(bridgeRoot, 'launch-crashed');
+  const workspace = '/workspace';
+  const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
+  mkdirSync(launchDir, { mode: 0o700 });
+  writeFileSync(join(launchDir, '43126.lock'), JSON.stringify({
+    pid: process.pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  try {
+    let inspected = 0;
+    const command = `/bridge-server --cwd ${workspace} --session-id ${sessionId}`;
+    assert.equal(discoverReusableBridge(
+      bridgeRoot,
+      { projectPath: workspace, sessionId },
+      () => { inspected += 1; return command; },
+      () => false,
+    ), undefined);
+    assert.equal(inspected, 0);
+  } finally {
+    rmSync(bridgeRoot, { recursive: true, force: true });
+  }
+});
+
 test('external bridge discovery accepts only the exact process workspace and session', () => {
   const launchDir = temporaryDirectory();
   const ref = {

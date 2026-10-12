@@ -893,6 +893,7 @@ pub(crate) fn resolve_desktop_config_at(
         diagnostics: Some(Arc::new(CliDesktopDiagnostics)),
         composition: None,
         defer_session_start: false,
+        connect_mcp_in_background: false,
         session_transcript_path: None,
         session_resume_snapshot: None,
         session_resume_cost: None,

@@ -1017,8 +1017,10 @@ export function useBridge(): UseBridge {
     if (sessionLoading || !host || !activeSessionId || connection.status !== 'connected') return;
     const trusted = bootstrap?.workspace.trusted;
     if (!trusted) return;
+    // A runtime answers one command at a time, and a cold session listing
+    // parses every transcript of the project. Ask for it last so it never
+    // holds the controls this view needs first behind it.
     void Promise.all([
-      host.command(activeSessionId, { type: 'list_sessions', limit: 100 }),
       host.command(activeSessionId, { type: 'list_models' }),
       host.command(activeSessionId, { type: 'get_conversation_controls' }),
       requestTaskList(activeSessionId),
@@ -1032,6 +1034,7 @@ export function useBridge(): UseBridge {
       host.command(activeSessionId, { type: 'mcp_admin', command: { action: 'get_snapshot' } }),
       host.command(activeSessionId, { type: 'plugin_admin', command: { action: 'get_catalog' } }),
       host.command(activeSessionId, { type: 'hook_admin', command: { action: 'get_document' } }),
+      host.command(activeSessionId, { type: 'list_sessions', limit: 100 }),
     ]).catch((cause) => setError(messageFrom(cause)));
   }, [activeSessionId, bootstrap?.workspace.trusted, connection.status, host, requestTaskList, sessionLoading]);
 

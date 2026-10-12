@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     if args.list_sessions_json {
         let cwd = std::env::current_dir()
             .map_err(|_| anyhow::anyhow!("failed to resolve session catalog directory"))?;
-        let json = boot::list_sessions_json(&cwd)
+        let json = boot::list_sessions_json(&cwd, args.session_id.as_deref())
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         println!("{json}");
@@ -90,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let _telemetry_guard = telemetry::otel::install_process("bridge-server", false);
+    // Every HTTP and WebSocket client assembly builds trusts the OS store;
+    // read it once, off this thread, while config and credentials resolve.
+    platform_posix::http::prewarm_native_roots();
 
     // (2) Resolve config, then receive credentials over the dedicated stdin
     //     channel before assembly. They are never placed in argv/env or logged.

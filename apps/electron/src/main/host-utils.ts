@@ -633,7 +633,9 @@ export function buildBridgeArguments(config: {
   packagedCredentialBoundary?: boolean;
   scheduledController?: boolean;
 }): string[] {
-  if (config.listSessionsJson) return ['--cwd', config.workspace, '--list-sessions-json'];
+  if (config.listSessionsJson) {
+    return ['--cwd', config.workspace, '--list-sessions-json', ...(config.sessionId ? ['--session-id', config.sessionId] : [])];
+  }
   const args = ['--cwd', config.workspace, '--bridge-dir', config.bridgeDir];
   if (config.sessionId) args.push('--session-id', config.sessionId);
   if (config.model) args.push('--model', config.model);

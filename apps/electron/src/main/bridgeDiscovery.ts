@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -105,12 +105,34 @@ export function listProcessCommands(): ProcessCommand[] {
       maxBuffer: 4 * 1024 * 1024,
       timeout: 2_000,
     }).split('\n').flatMap((line) => {
-      const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
-      return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] }] : [];
+      const processInfo = parseProcessCommand(line);
+      return processInfo ? [processInfo] : [];
     });
   } catch {
     return [];
   }
+}
+
+/** {@link listProcessCommands} without blocking the main process for the scan. */
+export function listProcessCommandsAsync(): Promise<ProcessCommand[]> {
+  if (process.platform === 'win32') return Promise.resolve([]);
+  return new Promise((resolveList) => {
+    execFile('/bin/ps', ['-axww', '-o', 'pid=,ppid=,command='], {
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 2_000,
+    }, (error, stdout) => {
+      resolveList(error ? [] : stdout.split('\n').flatMap((line) => {
+        const processInfo = parseProcessCommand(line);
+        return processInfo ? [processInfo] : [];
+      }));
+    });
+  });
+}
+
+function parseProcessCommand(line: string): ProcessCommand | undefined {
+  const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+  return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] } : undefined;
 }
 
 function lockfilePort(name: string): number | undefined {
@@ -154,6 +176,7 @@ export function discoverReusableBridge(
   bridgeRoot: string,
   ref: SessionRef,
   processCommand: (pid: number) => string | undefined = readProcessCommand,
+  isAlive: (pid: number) => boolean = processIsAlive,
 ): ReusableBridge | undefined {
   if (!privateOwnedPath(bridgeRoot, 'directory')) return undefined;
   let entries: string[];
@@ -174,6 +197,9 @@ export function discoverReusableBridge(
         const body = JSON.parse(readFileSync(lockfilePath, 'utf8')) as { pid?: unknown };
         if (!Number.isSafeInteger(body.pid) || Number(body.pid) < 1) continue;
         const pid = Number(body.pid);
+        // Crashed or force-quit runtimes leave their launch directories
+        // behind; skip their pids without spawning `ps` for each one.
+        if (!isAlive(pid)) continue;
         const command = processCommand(pid);
         if (!command || !processCommandOwnsSession(command, ref.sessionId)) continue;
         const reusable = reusableBridgeInLaunchDirectory(launchDir, ref, pid, true);
@@ -313,7 +339,8 @@ export async function stopLegacyOrphanBridges(
     timer.unref();
   }));
   const stopped: number[] = [];
-  for (const candidate of discoverLegacyOrphanBridges(bridgeRoot, options.processes)) {
+  const processes = options.processes ?? await listProcessCommandsAsync();
+  for (const candidate of discoverLegacyOrphanBridges(bridgeRoot, processes)) {
     if (!signalProcess(candidate.pid, 'SIGINT')) continue;
     const deadline = Date.now() + (options.stopTimeoutMs ?? 1_000);
     while (isAlive(candidate.pid) && Date.now() < deadline) await wait(50);

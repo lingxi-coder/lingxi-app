@@ -98,6 +98,7 @@ function parseCatalog(output: string, maxSessions?: number): ProjectSessionCatal
 export class ProjectSessionCatalog {
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
+  private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
 
@@ -120,7 +121,16 @@ export class ProjectSessionCatalog {
    */
   async find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined> {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
-    const result = await this.load(projectPath);
+    const canonical = realpathSync.native(projectPath);
+    const cached = this.cache.get(canonical);
+    // Every session open waits on this lookup. Without a fresh catalog, ask
+    // for this one row: the full catalog parses every transcript in the
+    // Project, most of a second once one of them is tens of megabytes. A
+    // runtime that predates the narrowed mode ignores the filter and returns
+    // the full catalog, which the search below handles the same way.
+    const result = cached && cached.expiresAt > Date.now()
+      ? cached.result
+      : await this.loadSession(canonical, sessionId);
     const session = result.sessions.find((candidate) => candidate.uuid === sessionId);
     return session ? { ...session } : undefined;
   }
@@ -156,11 +166,23 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  private run(canonical: string): Promise<ProjectSessionCatalogResult> {
+  private loadSession(canonical: string, sessionId: string): Promise<ProjectSessionCatalogResult> {
+    const key = `${canonical}\0${sessionId}`;
+    const existing = this.pendingSessions.get(key);
+    if (existing) return existing;
+    const operation = this.run(canonical, sessionId).finally(() => {
+      if (this.pendingSessions.get(key) === operation) this.pendingSessions.delete(key);
+    });
+    this.pendingSessions.set(key, operation);
+    return operation;
+  }
+
+  private run(canonical: string, sessionId?: string): Promise<ProjectSessionCatalogResult> {
     const args = buildBridgeArguments({
       workspace: canonical,
       bridgeDir: '',
       listSessionsJson: true,
+      ...(sessionId ? { sessionId } : {}),
       hasApiKey: false,
       trusted: false,
     });

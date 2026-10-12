@@ -181,20 +181,48 @@ test('project catalog coalesces concurrent reads and invalidates after a mutatio
     }) as any,
   });
   try {
-    const [listed, repeated, found] = await Promise.all([
+    const [listed, repeated] = await Promise.all([
       catalog.list(project),
       catalog.list(project),
-      catalog.find(project, uuid),
     ]);
     assert.equal(spawns, 1);
     assert.equal(listed.sessions[0]?.uuid, uuid);
     assert.equal(repeated.sessions[0]?.title, 'Cached');
-    assert.equal(found?.uuid, uuid);
+    assert.equal((await catalog.find(project, uuid))?.uuid, uuid, 'a fresh catalog answers lookups');
+    assert.equal(spawns, 1);
     await catalog.list(project);
     assert.equal(spawns, 1);
     catalog.invalidate(project);
     await catalog.list(project);
     assert.equal(spawns, 2);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('session lookups without a fresh catalog read only that session', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-narrowed-'));
+  const uuid = '44444444-5555-4666-8777-888888888888';
+  const spawned: string[][] = [];
+  const catalog = new ProjectSessionCatalog({
+    serverBin: '/bridge-server',
+    spawnProcess: ((_bin: string, args: readonly string[]) => {
+      spawned.push([...args]);
+      return fakeChild(JSON.stringify({
+        version: 1,
+        sessions: [{ uuid, title: 'Narrowed', modified_rfc3339: '', message_count: 1, path: 'narrowed.jsonl', empty_session: false }],
+      }));
+    }) as any,
+  });
+  try {
+    const [first, second] = await Promise.all([catalog.find(project, uuid), catalog.find(project, uuid)]);
+    assert.equal(first?.title, 'Narrowed');
+    assert.equal(second?.title, 'Narrowed');
+    assert.equal(spawned.length, 1, 'concurrent lookups of one session share a process');
+    assert.deepEqual(spawned[0]?.slice(-3), ['--list-sessions-json', '--session-id', uuid]);
+    assert.equal(await catalog.find(project, '55555555-6666-4777-8888-999999999999'), undefined);
+    await catalog.list(project);
+    assert.equal(spawned.at(-1)?.includes('--session-id'), false, 'a one-row answer never stands in for the catalog');
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

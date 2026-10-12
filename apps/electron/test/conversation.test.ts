@@ -1219,3 +1219,43 @@ test('late dispatch acknowledgements preserve settled, failed, and replacement p
   assert.equal(acknowledgePromptDispatch(replacement, original), replacement);
   assert.equal(acknowledgePromptDispatch(replacement, undefined), replacement);
 });
+
+test('prompt suggestions stay ephemeral and reject active turns and other sessions', () => {
+  let state = reduceEvents(emptyConversation(), [
+    { type: 'session_started', session_id: 's1', mode: 'code' },
+    { type: 'turn_started', turn_id: 1 },
+    { type: 'text_delta', text: 'Tests passed.' },
+    { type: 'message_identity', message_id: 'reply-1' },
+    { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST },
+  ] as ClientEvent[]);
+  const suggestion: ClientEvent = { type: 'prompt_suggestion', session_id: 's1', uuid: 'suggestion-1', suggestion: '提交这些修改' };
+  const before = state.items;
+  state = reduceEvent(state, suggestion);
+  assert.equal(state.promptSuggestion?.suggestion, '提交这些修改');
+  assert.equal(state.items, before);
+  assert.equal(reduceEvent(state, { ...suggestion, session_id: 's2' }), state);
+  const nextTurn = reduceEvent(state, { type: 'turn_started', turn_id: 2 });
+  assert.equal(nextTurn.promptSuggestion, undefined);
+  assert.equal(reduceEvent(nextTurn, suggestion), nextTurn);
+  assert.equal(nextTurn.suggestionTurn, 2);
+  const switched = reduceEvent(state, { type: 'session_started', session_id: 's2', mode: 'code' } as ClientEvent);
+  assert.equal(switched.promptSuggestion, undefined);
+  assert.equal(reduceEvent(switched, suggestion), switched);
+});
+
+
+test('host suggestion state toggles presentation without discarding its candidate', () => {
+  const candidate: ClientEvent = { type: 'prompt_suggestion', suggestion: '运行测试', uuid: 'suggestion-1', session_id: 's1' };
+  let state = reduceEvents(emptyConversation(), [
+    { type: 'session_started', session_id: 's1', mode: 'code' }, candidate,
+  ] as ClientEvent[]);
+  const items = state.items;
+  state = reduceEvent(state, { type: 'prompt_suggestion_state', enabled: false, notice: 'Showing fewer prompt suggestions · use one to bring them back' });
+  assert.equal(state.promptSuggestionEnabled, false);
+  assert.equal(state.promptSuggestion, candidate);
+  assert.equal(state.items, items);
+  state = reduceEvent(state, { type: 'prompt_suggestion_state', enabled: true, notice: null });
+  assert.equal(state.promptSuggestionEnabled, true);
+  assert.equal(state.promptSuggestionNotice, null);
+  assert.equal(state.promptSuggestion, candidate);
+});

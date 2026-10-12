@@ -397,6 +397,17 @@ class ChatViewModel(
             return
         }
         when (event) {
+            is ClientEvent.TurnStarted -> {
+                _state.update { it.copy(promptSuggestion = null, promptSuggestionUuid = null, suggestionTurn = it.suggestionTurn + 1) }
+            }
+            is ClientEvent.PromptSuggestionState -> _state.update {
+                it.copy(promptSuggestionEnabled = event.enabled, promptSuggestionNotice = event.notice)
+            }
+            is ClientEvent.PromptSuggestion -> _state.update { state ->
+                if (state.session.id == event.sessionId
+                    && !state.sessionTransitioning && state.pendingQuestions.isEmpty())
+                    state.copy(promptSuggestion = event.suggestion, promptSuggestionUuid = event.uuid) else state
+            }
             is ClientEvent.ScheduledTaskFire -> _state.update { current ->
                 // Session notice arrives before TurnStarted and is not a loop-fold marker.
                 current.copy(messages = current.messages + Message(role = Role.Ai, text = event.message))
@@ -442,7 +453,7 @@ class ChatViewModel(
                 s.copy(pendingQuestions = s.pendingQuestions.filterNot { it.requestId == event.requestId })
             }
             is ClientEvent.SessionEnded -> _state.update {
-                it.copy(pendingQuestions = emptyList(), compaction = null)
+                it.copy(pendingQuestions = emptyList(), compaction = null, promptSuggestion = null, promptSuggestionUuid = null)
             }
             is ClientEvent.CompactionStatus -> _state.update {
                 it.copy(compaction = reduceCompactionStatus(it.compaction, event.phase, event.error))
@@ -1579,6 +1590,7 @@ class ChatViewModel(
         _state.update {
             it.copy(
                 session = SessionRef(id = restored.sessionId, title = title),
+                promptSuggestion = null, promptSuggestionUuid = null,
                 messages = restored.transcript, // clear-then-restore (oldest-first)
                 visualizationChip = null,
                 visualizationFollowup = null,
@@ -1787,6 +1799,7 @@ class ChatViewModel(
         _state.update {
             it.copy(
                 session = target,
+                promptSuggestion = null, promptSuggestionUuid = null,
                 messages = emptyList(),
                 visualizationChip = null,
                 visualizationFollowup = null,
@@ -2126,6 +2139,20 @@ class ChatViewModel(
                     }
                 },
             )
+        }
+    }
+
+    fun updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Boolean, pendingPermission: Boolean) {
+        viewModelScope.launch {
+            runCatching { source.submitClientCommand(ClientCommand.UpdatePromptSuggestionContext(
+                sessionId, focus, inputEmpty, pendingPermission, false,
+            )) }
+        }
+    }
+
+    fun promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {
+        viewModelScope.launch {
+            runCatching { source.submitClientCommand(ClientCommand.PromptSuggestionFeedback(sessionId, uuid, action)) }
         }
     }
 

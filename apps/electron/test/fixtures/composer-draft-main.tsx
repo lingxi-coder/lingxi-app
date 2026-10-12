@@ -6,6 +6,7 @@ import { BetaComposer } from '../../src/renderer/components/BetaDesktop';
 import { Theme } from '../../src/renderer/theme/ThemeContext';
 import { tokens } from '../../src/renderer/theme/tokens';
 import { emptyRuntimeCenterState } from '../../src/renderer/bridge/runtimeCenterState';
+import { emptyConversation } from '../../src/renderer/bridge/conversation';
 import type { AudioOperationDto, AudioOperationResultDto } from '@lingxi/bridge-client';
 import {
   defaultNativeAudioSnapshot,
@@ -16,6 +17,8 @@ import {
 
 const projectPath = '/tmp/composer-draft-project';
 const mentionsFixture = new URLSearchParams(location.search).has('mentions');
+const suggestionFeedback: Array<{ sessionId: string; uuid: string; action: string }> = [];
+const suggestionContexts: Array<Record<string, unknown>> = [];
 const openedSettings: string[] = [];
 const permissionChanges: string[] = [];
 const mentionSearch = async (query: string) => {
@@ -210,7 +213,7 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
     setFastMode: async () => undefined,
     setPermissionMode: async (mode: string) => { permissionChanges.push(mode); },
     emitCommandOutput: () => undefined,
-    beginLocalCommand: () => undefined,
+    beginLocalCommand: async () => undefined,
     runSlashCommand: async (command: string) => { slashCommands.push(command); },
     sendPrompt: (text: string) => new Promise<void>((resolve) => {
       lastSentPrompt = text;
@@ -228,6 +231,8 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
 function Fixture() {
   const [sessionId, setSessionId] = useState('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
   const [running, setRunning] = useState(false);
+  const [suggestionState, setSuggestionState] = useState({ enabled: true, notice: null as string | null });
+  const [suggestion, setSuggestion] = useState<{ text: string; turn: number; sessionId: string }>();
   const [backgroundStatuses, setBackgroundStatuses] = useState<Record<string, string | undefined>>({});
   const [cancellingSessions, setCancellingSessions] = useState<Record<string, boolean>>({});
   const [sidebarWidth, setSidebarWidth] = useState(0);
@@ -241,6 +246,10 @@ function Fixture() {
       switchSession: setSessionId,
       setSidebarWidth,
       setRunning,
+      setSuggestion: (text, turn, sessionId) => setSuggestion({ text, turn, sessionId }),
+      setSuggestionState: (enabled, notice) => setSuggestionState({ enabled, notice }),
+      suggestionFeedback: () => [...suggestionFeedback],
+      suggestionContexts: () => [...suggestionContexts],
       setBackgroundStatus: (session, status) => setBackgroundStatuses((current) => ({ ...current, [session]: status })),
       setCancelling: (session, cancelling) => setCancellingSessions((current) => ({ ...current, [session]: cancelling })),
       cancelCount: () => cancelCount,
@@ -277,7 +286,13 @@ function Fixture() {
         <aside data-testid="fixture-sidebar" style={{ width: sidebarWidth, flexShrink: 0, background: '#101014' }} />
         <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
           <BetaComposer
-            bridge={bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false, models, connected) as never}
+            bridge={{ ...bridgeFixture(sessionId, running, backgroundStatuses[sessionId], cancellingSessions[sessionId] ?? false, models, connected),
+              updatePromptSuggestionContext: async (context: Record<string, unknown>) => { suggestionContexts.push(context); },
+              promptSuggestionFeedback: async (sessionId: string, uuid: string, action: string) => { suggestionFeedback.push({ sessionId, uuid, action }); },
+              conversation: { ...emptyConversation(), sessionKey: sessionId, suggestionTurn: suggestion?.turn ?? 0,
+                promptSuggestionEnabled: suggestionState.enabled, promptSuggestionNotice: suggestionState.notice,
+                promptSuggestion: suggestion?.text && suggestion?.sessionId === sessionId ? { type: 'prompt_suggestion', suggestion: suggestion.text, session_id: sessionId, uuid: `suggestion-${suggestion.turn}` } : undefined },
+            } as never}
             ready={ready}
             onOpenSettings={() => undefined}
             onOpenSettingsPage={(page) => openedSettings.push(page)}
@@ -293,6 +308,10 @@ function Fixture() {
 declare global {
   interface Window {
     __composerDraftTest?: {
+      setSuggestion(text: string, turn: number, sessionId: string): void;
+      setSuggestionState(enabled: boolean, notice: string | null): void;
+      suggestionFeedback(): Array<{ sessionId: string; uuid: string; action: string }>;
+      suggestionContexts(): Array<Record<string, unknown>>;
       switchSession(sessionId: string): void;
       setTheme(theme: 'dark' | 'light'): void;
       openedSettings(): string[];

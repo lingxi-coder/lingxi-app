@@ -89,6 +89,10 @@ export interface ContextSummarySnapshot {
  * without re-scanning `items`.
  */
 export interface ConversationState {
+  readonly promptSuggestion?: Extract<ClientEvent, { type: 'prompt_suggestion' }>;
+  readonly promptSuggestionEnabled?: boolean;
+  readonly promptSuggestionNotice?: string | null;
+  readonly suggestionTurn?: number;
   /** Items emitted by the last completed attempt, available for retry retraction. */
   readonly pendingAssistantItems?: readonly string[];
   readonly assistantAttemptItems?: Readonly<Record<string, readonly string[]>>;
@@ -590,6 +594,8 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
           ...next,
           items: settlePendingPrompts(next.items),
           running: true,
+          promptSuggestion: undefined,
+          suggestionTurn: (state.suggestionTurn ?? 0) + 1,
           pendingSlashName: null,
           pendingSlashPrompt: null,
           openAssistantIndex: -1,
@@ -602,6 +608,13 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
           pendingRefusalContinuation: null,
         };
       }
+
+    case 'prompt_suggestion_state':
+      return { ...state, promptSuggestionEnabled: event.enabled, promptSuggestionNotice: event.notice };
+
+    case 'prompt_suggestion':
+      return !state.running && event.session_id === state.sessionKey
+        ? { ...state, promptSuggestion: event } : state;
 
     case 'turn_ended': {
       const items = settlePendingPrompts(state.items);

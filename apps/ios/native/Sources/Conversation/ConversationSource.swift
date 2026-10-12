@@ -33,6 +33,8 @@ protocol ConversationSource: AnyObject {
     var sessionMode: SessionMode { get }
     /// Begin a fresh, empty conversation (the "edit / new chat" affordance).
     func startNewConversation()
+    func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool)
+    func promptSuggestionFeedback(sessionId: String, uuid: String, action: String)
     /// Submit a user prompt. Appends the user message, flips `streaming`, and
     /// produces the assistant reply (canned for the mock, streamed for the engine).
     /// MUST be a no-op while a turn is in flight (`model.streaming`) so rapid taps
@@ -177,6 +179,8 @@ protocol ConversationSource: AnyObject {
 /// hooks are no-ops by default; the engine source may override foregrounding to
 /// refresh state, but backgrounding never implies cancellation.
 extension ConversationSource {
+    func updatePromptSuggestionContext(sessionId: String, focus: String, inputEmpty: Bool, pendingPermission: Bool) {}
+    func promptSuggestionFeedback(sessionId: String, uuid: String, action: String) {}
     var sessionMode: SessionMode { .code }
 
     @discardableResult

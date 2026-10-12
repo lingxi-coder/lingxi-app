@@ -67,15 +67,15 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use client::adapter::ClientEventSink;
 pub(crate) use client::adapter::controls::decode_reasoning_selection;
 use client::adapter::lowering::{
     lower_provider_model_catalog_entry, lower_status_snapshot, lower_task_output_chunk,
 };
+use client::adapter::ClientEventSink;
 use client::protocol::commands::{ClientCommand, ListingKindDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::listings::{AuthStateDto, SessionModeDto};
@@ -83,11 +83,11 @@ use client::protocol::text::ClientTextDto;
 use command_api::model::CommandSource;
 use command_api::parser::parse_slash_command;
 use command_api::registry::CommandRegistry;
-use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::host::auth::{AuthHandle, LoginInfo};
 use lingxi_core::host::orchestrator::HandleError;
 use lingxi_core::host::orchestrator::OrchestratorHandle;
 use lingxi_core::host::task_registry::{TaskListFilter, TaskRegistryHandle};
+use lingxi_core::host::SlashCommandDispatcher;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::RwLock;
 
@@ -1485,6 +1485,39 @@ impl CommandRouter for EngineCommandRouter {
             }
 
             // ── Settings ─────────────────────────────────────────────────────
+            ClientCommand::UpdatePromptSuggestionContext {
+                session_id,
+                focus,
+                input_empty,
+                pending_permission,
+                elicitation_active,
+            } => {
+                let _ = self
+                    .handle
+                    .update_prompt_suggestion_context(
+                        lingxi_core::host::orchestrator::PromptSuggestionContext {
+                            session_id,
+                            focus,
+                            input_empty,
+                            pending_permission,
+                            elicitation_active,
+                        },
+                    )
+                    .await;
+            }
+            ClientCommand::RecordPromptSuggestionSubmission { text } => {
+                let _ = self.handle.record_prompt_suggestion_submission(&text).await;
+            }
+            ClientCommand::PromptSuggestionFeedback {
+                session_id,
+                uuid,
+                action,
+            } => {
+                let _ = self
+                    .handle
+                    .prompt_suggestion_feedback(&session_id, &uuid, &action)
+                    .await;
+            }
             ClientCommand::UpdateSettings {
                 destination,
                 patch_json,
@@ -2100,9 +2133,9 @@ mod tasks;
 
 #[cfg(test)]
 use settings::parse_settings_patch;
-pub use tasks::TaskPoll;
 use tasks::emit_correlated_task_list;
 use tasks::task_status_wire;
+pub use tasks::TaskPoll;
 
 #[cfg(test)]
 use configuration::parse_mcp_config_json;

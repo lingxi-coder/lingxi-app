@@ -1122,6 +1122,12 @@ function validateEvent(name: string, v: unknown): void {
           isString(o['event_json']),
       );
       break;
+    case 'prompt_suggestion_state':
+      assert.ok(typeof o['enabled'] === 'boolean' && (o['notice'] === null || isString(o['notice'])));
+      break;
+    case 'prompt_suggestion':
+      assert.ok(isString(o['suggestion']) && isString(o['session_id']) && isString(o['uuid']));
+      break;
     case 'turn_ended':
       assert.ok(['end_turn', 'max_turns', 'cancelled'].includes(rec(o['outcome'])['type'] as string));
       if ('stop_reason' in o) assert.ok(isString(o['stop_reason']));

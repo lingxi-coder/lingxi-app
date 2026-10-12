@@ -42,7 +42,7 @@ export const SETTINGS_NAV: NavPage[] = [
   { id: 'fusion', label: 'Fusion 多模型合议', group: '模型与服务', icon: 'sparkle', needsEngine: true, layered: true, searchKeys: ['fusion', '合议', 'panelModels', 'analystModel', 'panel', 'analyst', '多模型'], implemented: true },
 
   { id: 'permissions', label: '权限', group: '编码', icon: 'shield', needsEngine: true, layered: true, searchKeys: ['permissions', '权限', 'allow', 'deny', 'ask', 'additionalDirectories', 'bypassPermissions'], implemented: true },
-  { id: 'tools-agent', label: '工具与 Agent 行为', group: '编码', icon: 'sliders', needsEngine: true, layered: true, searchKeys: ['enabledTools', 'outputStyle', 'modelOverrides', 'alwaysThinkingEnabled', 'showThinkingSummaries', 'visionDelegationEnabled', 'disableAllHooks', 'skipWebFetchPreflight'], implemented: true },
+  { id: 'tools-agent', label: '工具与 Agent 行为', group: '编码', icon: 'sliders', needsEngine: true, layered: true, searchKeys: ['promptSuggestionEnabled', 'enabledTools', 'outputStyle', 'modelOverrides', 'alwaysThinkingEnabled', 'showThinkingSummaries', 'visionDelegationEnabled', 'disableAllHooks', 'skipWebFetchPreflight'], implemented: true },
   { id: 'skills', label: 'Skills', group: '编码', icon: 'sparkle', needsEngine: true, layered: true, searchKeys: ['skills', 'syncClaudeAiSkills', 'reload'], implemented: true },
   // 组↔layered 的例外 3/3：在 编码 组内，但不 layered。MCP server 活在三个
   // 与设置层无关的独立存储位置，页面自带域选择器，绝不能复用四层切换器——

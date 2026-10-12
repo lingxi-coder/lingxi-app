@@ -420,6 +420,11 @@ final class ConversationModel: ObservableObject {
     /// True while a turn is in flight (drives the streaming dots row + gates
     /// overlapping sends and the Send→Stop swap, PR-4 items 1 & 2).
     @Published var streaming: Bool = false
+    @Published var promptSuggestion: String?
+    @Published var promptSuggestionUuid: String?
+    @Published var promptSuggestionEnabled = true
+    @Published var promptSuggestionNotice: String?
+    @Published var suggestionTurn: UInt64 = 0
     /// True when the correlated durable turn is inactive in the UI (for example
     /// `WaitingForUser` after a foreground recovery). The Composer uses this
     /// only to expose an explicit Stop/Discard action; background execution and
@@ -519,6 +524,8 @@ final class ConversationModel: ObservableObject {
 
     @Published var activeSessionId: String = "" {
         didSet {
+            promptSuggestion = nil
+            promptSuggestionUuid = nil
             restoreTranscriptDisclosures()
             visualizationChip = nil
             visualizationFollowup = nil

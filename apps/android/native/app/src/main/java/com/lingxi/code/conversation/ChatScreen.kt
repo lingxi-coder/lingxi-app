@@ -35,6 +35,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -110,6 +114,9 @@ fun ChatScreen(
     flowModePanel: (@Composable () -> Unit)? = null,
     draft: String = "",
     onDraftChange: (String) -> Unit = {},
+    onSuggestionContext: (String, String, Boolean, Boolean) -> Unit = { _, _, _, _ -> },
+    onSuggestionFeedback: (String, String, String) -> Unit = { _, _, _ -> },
+    pendingPermission: Boolean = false,
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
@@ -159,6 +166,29 @@ fun ChatScreen(
     onAcceptVisualizationFollowup: (VisualizationFollowup) -> Unit = {},
     onRemoveVisualizationChip: () -> Unit = {},
 ) {
+    val suggestionLifecycle = LocalLifecycleOwner.current.lifecycle
+    val suggestionInputEmpty = draft.isEmpty() && attachment == null && state.visualizationChip == null
+    val currentSuggestionContext by rememberUpdatedState(onSuggestionContext)
+    val currentSuggestionInputEmpty by rememberUpdatedState(suggestionInputEmpty)
+    val currentSuggestionPermission by rememberUpdatedState(pendingPermission || state.pendingQuestions.isNotEmpty())
+    DisposableEffect(suggestionLifecycle, state.session.id) {
+        val sessionId = state.session.id
+        val observer = LifecycleEventObserver { _, _ ->
+            currentSuggestionContext(sessionId,
+                if (suggestionLifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) "focused" else "blurred",
+                currentSuggestionInputEmpty, currentSuggestionPermission)
+        }
+        suggestionLifecycle.addObserver(observer)
+        onDispose {
+            suggestionLifecycle.removeObserver(observer)
+            currentSuggestionContext(sessionId, "blurred", currentSuggestionInputEmpty, currentSuggestionPermission)
+        }
+    }
+    LaunchedEffect(state.session.id, suggestionInputEmpty, pendingPermission, state.pendingQuestions.isNotEmpty()) {
+        onSuggestionContext(state.session.id,
+            if (suggestionLifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) "focused" else "blurred",
+            suggestionInputEmpty, pendingPermission || state.pendingQuestions.isNotEmpty())
+    }
     val t = LingXiTheme.palette
     val currentDraft by rememberUpdatedState(draft)
     val currentOnDraftChange by rememberUpdatedState(onDraftChange)
@@ -301,6 +331,12 @@ fun ChatScreen(
             flowModePanel?.invoke()
             Composer(
                 text = draft,
+                promptSuggestion = state.promptSuggestion,
+                promptSuggestionNotice = state.promptSuggestionNotice,
+                suggestionTurnKey = "${state.session.id}:${state.promptSuggestionUuid}",
+                onSuggestionFeedback = { action -> state.promptSuggestionUuid?.let { uuid ->
+                    onSuggestionFeedback(state.session.id, uuid, action)
+                } },
                 onTextChange = onDraftChange,
                 model = state.model,
                 availableModels = state.availableModels,

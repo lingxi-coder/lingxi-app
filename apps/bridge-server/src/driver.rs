@@ -935,6 +935,13 @@ impl TurnDriver for OrchestratorTurnDriver {
         )
     }
 
+    async fn record_prompt_suggestion_submission(&self, text: &str) {
+        let _ = self
+            .orchestrator
+            .record_prompt_suggestion_submission(text)
+            .await;
+    }
+
     async fn ui_attach(&self, client_id: &str, surface: UiSurfaceDto) -> bool {
         let surface = match surface {
             UiSurfaceDto::Desktop => orchestrator::config::ModRenderSurface::Desktop,

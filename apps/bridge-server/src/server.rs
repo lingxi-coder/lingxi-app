@@ -119,6 +119,7 @@ pub trait TurnDriver: Send + Sync + 'static {
     /// parked permission `check()`); the implementation streams its events out
     /// through the connection's [`ClientEventSink`] as a side effect.
     async fn run_turn(&self, prompt: Utf16JsonProjection);
+    async fn record_prompt_suggestion_submission(&self, _text: &str) {}
     /// Mounted conversation identity for immutable permission owners.
     async fn current_session_id(&self) -> Option<String> {
         None
@@ -1550,13 +1551,12 @@ async fn drain_main_thread(
                             .cloned()
                             .unwrap_or_else(|| Utf16JsonProjection::from(""));
                         tag_loop_tick_in_flight(loop_runtime, false, &prompt);
-                        let native_source = if cmd.source == QueueSource::PromptInput
-                            && !cmd.is_meta
-                        {
-                            orchestrator::native_user_message_source::human()
-                        } else {
-                            Default::default()
-                        };
+                        let native_source =
+                            if cmd.source == QueueSource::PromptInput && !cmd.is_meta {
+                                orchestrator::native_user_message_source::human()
+                            } else {
+                                Default::default()
+                            };
                         orchestrator::native_user_message_source::with_source(
                             native_source,
                             orchestrator::mod_prompt_origin::with_origin(
@@ -1592,13 +1592,12 @@ async fn drain_main_thread(
                                 QueueSource::AgentSendMessage => serde_json::json!({"kind":"peer"}),
                                 _ => serde_json::json!({"kind":"unclassified"}),
                             };
-                            let native_source = if cmd.source == QueueSource::PromptInput
-                                && !cmd.is_meta
-                            {
-                                orchestrator::native_user_message_source::human()
-                            } else {
-                                Default::default()
-                            };
+                            let native_source =
+                                if cmd.source == QueueSource::PromptInput && !cmd.is_meta {
+                                    orchestrator::native_user_message_source::human()
+                                } else {
+                                    Default::default()
+                                };
                             orchestrator::native_user_message_source::with_source(
                                 native_source,
                                 orchestrator::mod_prompt_origin::with_origin(
@@ -1664,10 +1663,9 @@ async fn drain_main_thread(
             } else {
                 source_text.clone()
             };
-            let is_human_prompt =
-                command.source == QueueSource::PromptInput && !command.is_meta;
-            let native_source = is_human_prompt
-                .then(orchestrator::native_user_message_source::human);
+            let is_human_prompt = command.source == QueueSource::PromptInput && !command.is_meta;
+            let native_source =
+                is_human_prompt.then(orchestrator::native_user_message_source::human);
             inputs.push(orchestrator::QueuedPromptInput {
                 goal_retry_id: command
                     .uuid
@@ -2581,6 +2579,13 @@ impl BridgeConnection {
                 visualization_context,
                 ..
             } => {
+                if let Some(driver) = &self.driver {
+                    if let Ok(submission) = String::from_utf16(&text.code_units) {
+                        driver
+                            .record_prompt_suggestion_submission(&submission)
+                            .await;
+                    }
+                }
                 let text = self
                     .visualization_followup(text.into_projection(), visualization_context.as_ref())
                     .await;
@@ -2675,6 +2680,13 @@ impl BridgeConnection {
             // only / unknown / no-dispatcher cases fall back to the router's
             // text-surface path.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
+                if let Some(driver) = &self.driver {
+                    if let Ok(submission) = String::from_utf16(&raw.code_units) {
+                        driver
+                            .record_prompt_suggestion_submission(&submission)
+                            .await;
+                    }
+                }
                 if let Some(router) = &self.router {
                     router.stop_realtime_audio().await;
                 }
@@ -3824,11 +3836,15 @@ mod tests {
     }
 
     /// Shared cell capturing the `(prompt, images)` a driver was driven with.
-    type CapturedTurn = Arc<Mutex<Option<(
-        Utf16JsonProjection,
-        Vec<ImageRefDto>,
-        Option<orchestrator::native_user_message_source::NativeUserMessageSource>,
-    )>>>;
+    type CapturedTurn = Arc<
+        Mutex<
+            Option<(
+                Utf16JsonProjection,
+                Vec<ImageRefDto>,
+                Option<orchestrator::native_user_message_source::NativeUserMessageSource>,
+            )>,
+        >,
+    >;
 
     /// A [`TurnDriver`] that records the `(prompt, images)` it was driven with, so a
     /// test can assert the `SendPrompt` dispatch forwarded the wire `images`.
@@ -5337,7 +5353,9 @@ mod tests {
     /// is enqueued and run as a follow-up once the first turn ends.
     struct GatedDriver {
         prompts: Arc<Mutex<Vec<Utf16JsonProjection>>>,
-        sources: Arc<Mutex<Vec<Option<orchestrator::native_user_message_source::NativeUserMessageSource>>>>,
+        sources: Arc<
+            Mutex<Vec<Option<orchestrator::native_user_message_source::NativeUserMessageSource>>>,
+        >,
         /// Released by the test to let the FIRST turn complete.
         release: Arc<Notify>,
         /// Notifies the test each time a turn STARTS.

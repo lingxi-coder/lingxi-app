@@ -2647,3 +2647,29 @@ textarea, input { font-family: inherit; }
 .command-result-card[data-command-name="goal"] .command-result-name { display: none; }
 .command-result-card[data-command-name="goal"] .command-result-pre { background: transparent; border: 0; padding: 0; font-family: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
 .command-result-card[data-command-name="goal"] .command-result-body { background: transparent; box-shadow: none; border-radius: 0; padding: 0 0 4px 30px; }
+
+.composer-prompt-suggestion {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  text-align: left;
+  cursor: pointer;
+}
+.composer-prompt-suggestion span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-prompt-suggestion kbd { flex: none; font-size: 10px; opacity: .7; }
+.composer-prompt-suggestion:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
+
+.composer-prompt-suggestion-notice {
+  font-size: 11px;
+  padding: 4px 12px 0;
+}

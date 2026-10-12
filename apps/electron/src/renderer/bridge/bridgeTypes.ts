@@ -112,6 +112,8 @@ export interface TrackedSpeechEvent {
 export interface UseBridge {
   /** Stable per-renderer identity shared by ui_attach and parent UI requests. */
   readonly uiSurfaceClientId: string;
+  updatePromptSuggestionContext(context: { session_id: string; focus: 'focused' | 'blurred' | 'unknown'; input_empty: boolean; pending_permission: boolean; elicitation_active: boolean }): Promise<void>;
+  promptSuggestionFeedback(sessionId: string, uuid: string, action: 'shown' | 'accepted' | 'dismissed'): Promise<void>;
   readonly hosted: boolean;
   readonly loading: boolean;
   readonly bootstrap: BootstrapState | null;
@@ -163,7 +165,7 @@ export interface UseBridge {
   sendPrompt(text: string, images?: ImageRefDto[], imageNames?: string[], filePaths?: string[]): Promise<void>;
   runSlashCommand(raw: string): Promise<void>;
   /** Echo a slash line the desktop is handling locally; makes no `running` claim. */
-  beginLocalCommand(raw: string): void;
+  beginLocalCommand(raw: string): Promise<void>;
   /** Push a locally-produced command's own output into the transcript. */
   emitCommandOutput(output: string, isError: boolean): void;
   cancel(turnId?: number): Promise<void>;

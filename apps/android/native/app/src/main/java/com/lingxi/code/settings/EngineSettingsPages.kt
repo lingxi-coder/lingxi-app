@@ -15,7 +15,7 @@ import org.json.JSONObject
 internal val layeredPageKeys = mapOf(
     SettingsRoutes.CUSTOM_PROVIDERS to listOf("providerRegion", "providers", "routing"),
     SettingsRoutes.ENGINE_PERMISSIONS to listOf("permissions", "trustedDirectories"),
-    SettingsRoutes.TOOLS_AGENT to listOf("enabledTools", "disableArtifact", "disableAgentView", "disableAllHooks", "skipWebFetchPreflight", "alwaysThinkingEnabled", "showThinkingSummaries", "visionDelegationEnabled", "outputStyle", "modelOverrides"),
+    SettingsRoutes.TOOLS_AGENT to listOf("promptSuggestionEnabled", "enabledTools", "disableArtifact", "disableAgentView", "disableAllHooks", "skipWebFetchPreflight", "alwaysThinkingEnabled", "showThinkingSummaries", "visionDelegationEnabled", "outputStyle", "modelOverrides"),
     SettingsRoutes.HOOKS to listOf("hooks"),
     SettingsRoutes.PLUGINS to listOf("enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"),
     SettingsRoutes.ENGINE_SKILLS to listOf("syncClaudeAiSkills"),

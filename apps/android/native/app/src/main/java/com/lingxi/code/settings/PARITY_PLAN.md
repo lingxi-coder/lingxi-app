@@ -2,7 +2,7 @@
 
 Preserve existing routes and repository data. Add searchable four-group navigation and a 840dp sidebar. Wire engine settings snapshots and administration through the existing ConversationSource event/command stream. Layered editors must use the selected layer's raw values, show effective/provenance/locks, prohibit managed edits, and await engine acknowledgement. MCP uses independent user/project/local scopes. Keep mobile runtime and device controls reachable.
 
-Baseline: inspect existing settings contracts and run SettingsStoreLocalizationTest, ProviderSettingsSemanticsTest, VoiceSettingsContractTest and LocalAppPluginSettingsTest before changes. Add pure navigation and layer/validation regression tests. Validate compilation and the settings JVM suite; root integration owns full build and visual verification.
+Baseline: inspect existing settings contracts and run SettingsStoreLocalizationTest, ProviderSettingsSemanticsTest and VoiceSettingsContractTest before changes. Add pure navigation and layer/validation regression tests. Validate compilation and the settings JVM suite; root integration owns full build and visual verification.
 
 ## Implemented contracts
 

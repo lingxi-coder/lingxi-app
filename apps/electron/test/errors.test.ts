@@ -15,6 +15,9 @@ test('desktop errors distinguish credential, protocol, engine, workspace, and tr
   assert.equal(classifyDesktopError('Provider credential required; configure a trusted credential source').title, 'Provider credential missing');
   assert.equal(classifyDesktopError('stored provider credential could not be decrypted (deepseek); replace it in Settings').title, 'Provider credential unavailable');
   assert.equal(classifyDesktopError('HTTP 401 unauthorized').title, 'Provider credential rejected');
+  const codexHandoff = 'Reconnect or close the other Codex chat before changing Codex authentication; its background work cannot be checked.';
+  assert.deepEqual(classifyDesktopError(codexHandoff), { title: 'Codex authentication is busy', detail: codexHandoff });
+  assert.equal(classifyDesktopError('The active Codex chat holds Codex authentication; background work waits for it.').title, 'Codex authentication is busy');
   assert.equal(classifyDesktopError('incompatible protocol version').title, 'Engine version mismatch');
   assert.equal(classifyDesktopError('packaged bridge-server is missing').title, 'Bundled engine unavailable');
   assert.equal(classifyDesktopError('workspace path is not a directory').title, 'Workspace unavailable');

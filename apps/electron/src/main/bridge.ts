@@ -162,6 +162,12 @@ const MAX_PENDING_ASK_USER_QUESTION = 1_000;
 
 const MAX_TRACKED_AUDIO_REQUESTS_PER_RUNTIME = 256;
 
+// Mod UI requests share the runtime's ordinary command lane, and a transcript
+// mounts a render site per tool row, so opening a long chat asks for well over
+// a hundred renders at once. The Bridge closes a connection with 64 commands
+// waiting behind one slow command, so only this many are outstanding at once.
+const MAX_OUTSTANDING_MOD_UI_REQUESTS = 16;
+
 export class SessionRuntime {
   readonly sessionId: string;
   readonly projectPath: string;
@@ -188,6 +194,8 @@ export class SessionRuntime {
   private readonly pendingRuntimeCredentialLoads = new Map<string, Promise<void>>();
   private readonly pendingProviderConnectionTests = new Map<number, PendingProviderConnectionTest>();
   private readonly pendingModUiRequests = new SessionEventCorrelator<Extract<ClientEvent, { type: 'ui_control_result' }>>();
+  private outstandingModUiRequests = 0;
+  private readonly queuedModUiRequests: Array<{ send(): void; reject(error: Error): void }> = [];
   private archiving = false;
   private activeCronExecutions = 0;
   private readonly pendingCron = new Map<string, { resolve: (jobs: CronJobDto[]) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; creating: boolean }>();
@@ -2330,9 +2338,19 @@ export class SessionRuntime {
     return validateUiClientOperationResponseJson(operation, result.response_json);
   }
 
-  private async requestModUiResult(
+  private requestModUiResult(
     commandFor: (requestId: string) => ClientCommand,
   ): Promise<Extract<ClientEvent, { type: 'ui_control_result' }>> {
+    if (this.outstandingModUiRequests < MAX_OUTSTANDING_MOD_UI_REQUESTS) return this.sendModUiRequest(commandFor);
+    return new Promise((resolve, reject) => {
+      this.queuedModUiRequests.push({ send: () => this.sendModUiRequest(commandFor).then(resolve, reject), reject });
+    });
+  }
+
+  private sendModUiRequest(
+    commandFor: (requestId: string) => ClientCommand,
+  ): Promise<Extract<ClientEvent, { type: 'ui_control_result' }>> {
+    this.outstandingModUiRequests += 1;
     const requestId = randomUUID();
     const response = this.pendingModUiRequests.request(this.sessionId, requestId, 30_000);
     try {
@@ -2344,6 +2362,11 @@ export class SessionRuntime {
         error instanceof Error ? error : new Error(String(error)),
       );
     }
+    const settle = (): void => {
+      this.outstandingModUiRequests -= 1;
+      this.queuedModUiRequests.shift()?.send();
+    };
+    response.then(settle, settle);
     return response;
   }
 
@@ -2805,6 +2828,7 @@ export class SessionRuntime {
   }
 
   private clearPendingConnectionOperations(): void {
+    for (const queued of this.queuedModUiRequests.splice(0)) queued.reject(new Error('Mod UI request interrupted.'));
     this.pendingModUiRequests.rejectSession(this.sessionId, new Error('Mod UI request interrupted.'));
     for (const pending of this.pendingCron.values()) { clearTimeout(pending.timer); pending.reject(new Error('Scheduled task connection interrupted.')); }
     this.pendingCron.clear();

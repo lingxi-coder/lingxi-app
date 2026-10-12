@@ -1648,7 +1648,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
   const [text, setText] = useState('');
   const shownSuggestionUuids = useRef(new Set<string>());
   const [rejectedSuggestionUuid, setRejectedSuggestionUuid] = useState<string | null>(null);
-  const [suggestionWindowFocused, setSuggestionWindowFocused] = useState(() => document.hasFocus());
+  const [suggestionWindowFocused, setSuggestionWindowFocused] = useState(() => typeof document !== 'undefined' && document.hasFocus());
   const [promptComposing, setPromptComposing] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);

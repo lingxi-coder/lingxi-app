@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 (globalThis as { React?: typeof React }).React = React;
 
 import { canResumePendingSession } from '../src/renderer/bridge/bridgeRuntimeState.js';
+import { emptyConversation } from '../src/renderer/bridge/conversation.js';
 import {
   BetaComposer,
   BetaSidebar,
@@ -110,6 +111,7 @@ function composerBridgeFixture() {
   audioSnapshot.capabilities!.supported_operations = ['listen', 'speak'];
   return {
     ...bridge,
+    conversation: emptyConversation(),
     activeSession: bridge.bootstrap.activeSession,
     audioSnapshot,
     desktop: {

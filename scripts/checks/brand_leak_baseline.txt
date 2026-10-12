@@ -141,7 +141,6 @@ G1	apps/cli/host/src/commands/project.rs	LingXi
 G1	apps/cli/host/src/commands/remote_control.rs	LingXi
 G1	apps/cli/host/src/commands/respawn.rs	LINGXI
 G1	apps/cli/host/src/commands/rm.rs	LingXi
-G1	apps/cli/host/src/control_plane.rs	\.lingxi
 G1	apps/cli/host/src/daemon_roster.rs	\.lingxi
 G1	apps/cli/host/src/entrypoint.rs	LINGXI
 G1	apps/cli/host/src/idle_notify.rs	LINGXI
@@ -153,7 +152,6 @@ G1	apps/cli/host/src/mode.rs	LINGXI
 G1	apps/cli/host/src/mode.rs	LingXi
 G1	apps/cli/host/src/mode.rs	\.lingxi
 G1	apps/cli/host/src/permission_mode_preference.rs	LINGXI
-G1	apps/cli/host/src/permission_prompt_notify.rs	LINGXI
 G1	apps/cli/host/src/permission_settings.rs	LINGXI
 G1	apps/cli/host/src/process_wrapper.rs	LINGXI
 G1	apps/cli/host/src/repl.rs	LingXi
@@ -163,7 +161,6 @@ G1	apps/cli/host/src/startup_resources.rs	LINGXI
 G1	apps/cli/host/src/startup_trace.rs	LINGXI
 G1	apps/cli/host/src/stream_json.rs	LINGXI
 G1	apps/cli/host/src/stream_json.rs	\.lingxi
-G1	apps/cli/host/src/stream_json_input.rs	LINGXI
 G1	apps/cli/host/src/teammate_worker.rs	LINGXI
 G1	apps/cli/host/tests/cli_agents.rs	LINGXI
 G1	apps/cli/host/tests/cli_argv_errors.rs	LINGXI
@@ -235,7 +232,6 @@ G2	apps/cli/host/src/lib/tests/startup_notice_tests.rs	CLAUDE_CODE_USE_BEDROCK
 G2	apps/cli/host/src/lib/tests/startup_notice_tests.rs	CLAUDE_CODE_USE_FOUNDRY
 G2	apps/cli/host/src/lib/tests/startup_notice_tests.rs	CLAUDE_CODE_USE_VERTEX
 G2	apps/cli/host/src/process_wrapper.rs	CLAUDE_CODE_PROCESS_WRAPPER
-G2	apps/cli/host/src/run/control.rs	CLAUDE_CODE_DISABLE_FAST_MODE
 G2	apps/cli/tui/src/chat_widget.rs	CLAUDE_CODE_DISABLE_FAST_MODE
 G3	.gitignore	.lingxi
 G3	.gitignore	.lingxi-*
@@ -331,7 +327,6 @@ G3	apps/cli/host/src/commands/plugin_init.rs	.lingxi
 G3	apps/cli/host/src/commands/plugin_init.rs	.lingxi-plugin
 G3	apps/cli/host/src/commands/plugin_tag.rs	.lingxi-plugin
 G3	apps/cli/host/src/commands/project.rs	LINGXI_CONFIG_DIR
-G3	apps/cli/host/src/control_plane.rs	.lingxi
 G3	apps/cli/host/src/daemon_roster.rs	.lingxi-*
 G3	apps/cli/host/src/init.rs	.lingxi-*
 G3	apps/cli/host/src/init.rs	LINGXI.md
@@ -373,20 +368,6 @@ G3	scripts/tests/parity_behaviour.py	.lingxi.json
 G3	scripts/tests/parity_behaviour.py	LINGXI.local.md
 G3	scripts/tests/parity_behaviour.py	LINGXI.md
 G3	scripts/tests/teammate_worker_smoke.py	LINGXI_CONFIG_DIR
-G6	crates/branding/src/lib.rs	CONFIG_DIR_ENV not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	DOT_DIR not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	ENV_PREFIX not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	GLOBAL_CONFIG_FILE not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MANAGED_DIR_MACOS not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MANAGED_DIR_UNIX not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MANAGED_DIR_WINDOWS not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MEMORY_FILE not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	MEMORY_LOCAL_FILE not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PLUGIN_DATA_ENV not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PLUGIN_MANIFEST_DIR not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PLUGIN_ROOT_ENV not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PRODUCT_NAME not in NAMESPACE_VALUES
-G6	crates/branding/src/lib.rs	PROJECT_DIR_ENV not in NAMESPACE_VALUES
 G7	apps/cli/host/src/commands/plugin_eval.rs	CLAUDE_PLUGIN_
 G7	apps/cli/host/src/commands/plugin_eval.rs	\.claude-plugin
 G7	apps/cli/host/src/commands/plugin_init.rs	CLAUDE_PLUGIN_

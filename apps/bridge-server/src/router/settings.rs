@@ -8,6 +8,7 @@ use crate::settings_bridge::permission_rule_from_wire;
 use client::adapter::ClientEventSink;
 use client::adapter::controls::lower_conversation_controls;
 use client::protocol::commands::PermissionBehaviorDto;
+use client::protocol::controls::NativeProactivityControlStateDto;
 use client::protocol::commands::WritableScopeDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::events::ErrorKindDto;
@@ -83,8 +84,20 @@ impl EngineCommandRouter {
             return;
         };
         let fast_mode = self.handle.fast_mode().await;
+        let proactivity = self.handle.native_proactivity_snapshot();
+        let mut controls = lower_conversation_controls(controls);
+        controls.proactivity = (proactivity.opted_in || proactivity.opt_in_available).then(|| {
+            NativeProactivityControlStateDto {
+                opted_in: proactivity.opted_in,
+                selector_gate: proactivity.selector_gate,
+                selector_gate_ever_on: proactivity.selector_gate_ever_on,
+                attachments_enabled: proactivity.attachments_enabled,
+                opt_in_available: proactivity.opt_in_available,
+                level: proactivity.level,
+            }
+        });
         sink.emit(ClientEvent::ConversationControlsChanged {
-            controls: lower_conversation_controls(controls),
+            controls,
         })
         .await;
 

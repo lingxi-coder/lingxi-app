@@ -11,6 +11,7 @@ import {
   APP_NAME,
   NS_MICROPHONE_USAGE_DESCRIPTION,
   NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION,
+  PACKAGE_OUTPUT_ROOT_ENV,
   artifactPaths,
   assertArm64Executable,
   commandAvailable,
@@ -69,12 +70,12 @@ export function assertSandboxedPreloadBundle(source) {
   }
 }
 
-export function verifyPackage(root = packageRoot) {
+export function verifyPackage(root = packageRoot, outputRoot = process.env[PACKAGE_OUTPUT_ROOT_ENV]) {
   if (process.platform !== 'darwin') {
     throw new Error(`package verification requires macOS; received ${process.platform}`);
   }
   const metadata = readJson(join(root, 'package.json'));
-  const paths = artifactPaths(root, metadata);
+  const paths = artifactPaths(root, metadata, outputRoot);
   requirePath(paths.appPath, 'application bundle');
   requirePath(paths.zipPath, 'ZIP artifact');
   requirePath(paths.checksumPath, 'SHA-256 file');

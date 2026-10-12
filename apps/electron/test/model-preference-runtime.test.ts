@@ -25,6 +25,11 @@ function runtime(store: SettingsStore, ref = defaultRef) {
   return { instance, client, commands, observed };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+function modelPreferenceCommands(commands: ClientCommand[]): ClientCommand[] {
+  // model_changed now refreshes the session's audio context as a separate
+  // runtime concern; these tests assert model preference effects only.
+  return commands.filter(command => command.type !== 'get_audio_session_context');
+}
 test('only confirmed user model selections replace the restart default; history still updates observers', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-preference-'));
   try {
@@ -34,7 +39,7 @@ test('only confirmed user model selections replace the restart default; history 
     assert.equal(store.getPublic().model, 'old-model');
     const selection = instance.dispatchCommand({ type: 'set_model', model: 'new-model' });
     await tick();
-    assert.deepEqual(commands, [{ type: 'set_model', model: 'new-model' }]);
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'set_model', model: 'new-model' }]);
     assert.equal(store.getPublic().model, 'old-model');
     client.emit('event', { type: 'model_changed', model: 'unrelated-model' });
     assert.equal(store.getPublic().model, 'old-model');
@@ -89,8 +94,9 @@ test('resume reapplies the last selection over an old snapshot even without a su
     client.emit('event', { type: 'session_resumed', session_id: instance.sessionId, mode: 'default', messages: [] });
     client.emit('event', { type: 'model_changed', model: 'historical-model' });
     await tick();
-    assert.deepEqual(commands.slice(0, 2).map(command => command.type), ['resume_session', 'set_model']);
-    assert.deepEqual(commands[1], { type: 'set_model', model: 'latest-model' });
+    const preferenceCommands = modelPreferenceCommands(commands);
+    assert.deepEqual(preferenceCommands.slice(0, 2).map(command => command.type), ['resume_session', 'set_model']);
+    assert.deepEqual(preferenceCommands[1], { type: 'set_model', model: 'latest-model' });
     client.emit('event', { type: 'model_changed', model: 'latest-model' });
     await resumed;
     assert.equal(new SettingsStore(dir).getPublic().model, 'latest-model');
@@ -124,7 +130,7 @@ test('explicit /model persists only on confirmation, including reselecting the c
     client.emit('event', { type: 'model_changed', model: 'current-model' });
     const selecting = instance.dispatchCommand({ type: 'run_slash_command', raw: '/model current-model ' });
     await tick();
-    assert.deepEqual(commands, [{ type: 'run_slash_command', raw: '/model current-model ' }]);
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'run_slash_command', raw: '/model current-model ' }]);
     assert.equal(store.getPublic().model, 'old-model');
     assert.ok(!events.some(event => event.type === 'slash_command_result'));
     await assert.rejects(instance.dispatchCommand({ type: 'run_slash_command', raw: '/model' }), /already in progress/);
@@ -216,7 +222,7 @@ test('session model selections remain isolated across resume and settings reload
       b.client.emit('event', { type: 'session_resumed', session_id: refB.sessionId, mode: 'default', messages: [] });
       b.client.emit('event', { type: 'model_changed', model: 'old-model-b' });
       await tick();
-      assert.deepEqual(b.commands[1], { type: 'set_model', model: 'model-b' });
+      assert.deepEqual(modelPreferenceCommands(b.commands)[1], { type: 'set_model', model: 'model-b' });
       b.client.emit('event', { type: 'model_changed', model: 'model-b' });
       await resumed;
     }
@@ -225,7 +231,7 @@ test('session model selections remain isolated across resume and settings reload
     legacy.client.emit('event', { type: 'session_resumed', session_id: legacy.instance.sessionId, mode: 'default', messages: [] });
     legacy.client.emit('event', { type: 'model_changed', model: 'historical-model' });
     await resumed;
-    assert.deepEqual(legacy.commands.map(command => command.type), ['resume_session']);
+    assert.deepEqual(modelPreferenceCommands(legacy.commands).map(command => command.type), ['resume_session']);
     assert.deepEqual(legacy.observed, ['historical-model']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

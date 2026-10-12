@@ -19,14 +19,14 @@ import {
   normalizeTimestamp,
   normalizeTimestamps,
   packageRoot,
+  preparePackageOutputRoot,
   readJson,
   renameElectronExecutable,
   repoRoot,
-  resetDirectory,
+  resetMacPackageArtifacts,
   rewriteInfoPlist,
   scanTreeForForbiddenContent,
   sha256File,
-  unlinkIfPresent,
   writeJson,
 } from './package-support.mjs';
 import {
@@ -194,6 +194,9 @@ async function main() {
   const brokerChannel = process.env['LINGXI_CREDENTIAL_BROKER_CHANNEL']?.trim() || 'production';
   const identifiers = brokerIdentifiers(brokerChannel);
   const paths = artifactPaths(packageRoot, metadata);
+  if (process.env['LINGXI_PACKAGE_OUTPUT_ROOT']) {
+    preparePackageOutputRoot(paths);
+  }
   const electronApp = join(packageRoot, 'node_modules', 'electron', 'dist', 'Electron.app');
   const electronExecutable = join(electronApp, 'Contents', 'MacOS', 'Electron');
   const cargoTargetDir = resolve(repoRoot, process.env['CARGO_TARGET_DIR'] || 'target');
@@ -220,9 +223,7 @@ async function main() {
   run('npm', ['run', 'build'], join(repoRoot, 'packages', 'bridge-client'));
   run('npm', ['run', 'build'], packageRoot);
 
-  resetDirectory(paths.appContainer);
-  unlinkIfPresent(paths.zipPath);
-  unlinkIfPresent(paths.checksumPath);
+  resetMacPackageArtifacts(paths);
   copyElectronApp(electronApp, paths.appPath);
 
   const contents = join(paths.appPath, 'Contents');

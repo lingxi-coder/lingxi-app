@@ -66,7 +66,7 @@ plugin = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "6
 provider-config = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "664651414a905738739b289dab631a9b4866d220" }
 secret = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "664651414a905738739b289dab631a9b4866d220" }
 session = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "664651414a905738739b289dab631a9b4866d220" }
-skill-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "664651414a905738739b289dab631a9b4866d220" }
+skill = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "664651414a905738739b289dab631a9b4866d220" }
 tasks = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "664651414a905738739b289dab631a9b4866d220" }
 telemetry = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "664651414a905738739b289dab631a9b4866d220" }
 tool-api = { git = "https://github.com/lingxi-coder/harness-runtime.git", rev = "664651414a905738739b289dab631a9b4866d220" }

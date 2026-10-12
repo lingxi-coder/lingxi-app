@@ -39,6 +39,8 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   );
   assert.deepEqual(validateClientCommand({ type: 'task_list', status_filter: { type: 'paused' } }), { type: 'task_list', status_filter: { type: 'paused' } });
   assert.deepEqual(validateClientCommand({ type: 'set_permission_mode', mode: 'auto' }), { type: 'set_permission_mode', mode: 'auto' });
+  assert.deepEqual(validateClientCommand({ type: 'initialize_proactivity', proactivity: true }), { type: 'initialize_proactivity', proactivity: true });
+  assert.deepEqual(validateClientCommand({ type: 'set_proactivity_level', level: 'proactive' }), { type: 'set_proactivity_level', level: 'proactive' });
   assert.deepEqual(validateClientCommand({ type: 'get_conversation_controls' }), { type: 'get_conversation_controls' });
   assert.deepEqual(validateClientCommand({ type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } }), { type: 'set_reasoning_selection', selection: { type: 'level', id: 'high' } });
   assert.deepEqual(validateClientCommand({ type: 'set_fast_mode', enabled: true }), { type: 'set_fast_mode', enabled: true });
@@ -57,6 +59,8 @@ test('only the bounded Desktop command surface passes the runtime allowlist', ()
   assert.throws(() => validateClientCommand({ type: 'list_models', surprise: true }), /unsupported fields/);
   assert.throws(() => validateClientCommand({ type: 'clear_session' }), /not allowed/);
   assert.throws(() => validateClientCommand({ type: 'set_permission_mode', mode: 'unsafe' }), /invalid permission mode/);
+  assert.throws(() => validateClientCommand({ type: 'initialize_proactivity', proactivity: 'true' }), /invalid proactivity initialize flag/);
+  assert.throws(() => validateClientCommand({ type: 'set_proactivity_level', level: 'always' }), /invalid proactivity level/);
   assert.throws(() => validateClientCommand({ type: 'set_fast_mode', enabled: 'true' }), /invalid fast mode enabled flag/);
   assert.throws(() => validateClientCommand({ type: 'set_reasoning_selection', selection: { type: 'level', id: '' } }), /invalid reasoning level/);
   assert.throws(() => validateClientCommand({ type: 'set_reasoning_selection', selection: { type: 'token_budget', tokens: -1 } }), /invalid reasoning token budget/);

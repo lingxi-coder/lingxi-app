@@ -114,7 +114,7 @@ function startSession(
         // the first turn creates the durable JSONL transcript.
         path: '',
       }, ...state.sessions];
-  return { ...state, sessions, activeSessionId: sessionId };
+  return { ...state, sessions, activeSessionId: sessionId, conversationControls: null };
 }
 
 export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): DesktopState {
@@ -124,9 +124,9 @@ export function reduceDesktopEvent(state: DesktopState, event: ClientEvent): Des
     case 'session_started':
       return startSession({ ...state, lastCost: null, status: null, apiRetry: null }, event.session_id, event.mode);
     case 'session_resumed':
-      return { ...state, activeSessionId: event.session_id, lastCost: null, status: null, apiRetry: null };
+      return { ...state, activeSessionId: event.session_id, conversationControls: null, lastCost: null, status: null, apiRetry: null };
     case 'session_ended':
-      return { ...state, activeSessionId: null, lastCost: null, status: null, apiRetry: null };
+      return { ...state, activeSessionId: null, conversationControls: null, lastCost: null, status: null, apiRetry: null };
     case 'model_list':
       return { ...state, models: [...event.models], modelDetails: [...(event.details ?? [])], currentModel: event.current };
     case 'provider_model_catalog':

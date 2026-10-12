@@ -24,6 +24,11 @@ function runtime(store: SettingsStore) {
 function acknowledge(client: EventEmitter, mode: PermissionModeId) {
   client.emit('event', { type: 'permission_mode_changed', mode });
 }
+function permissionModeCommands(commands: ClientCommand[]): ClientCommand[] {
+  // A model_changed notification also asks for fresh audio-session context;
+  // that request is independent of permission-mode restoration.
+  return commands.filter(command => command.type !== 'get_audio_session_context');
+}
 test('only an acknowledged selection persists, and a new runtime restores it after restart', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-permission-runtime-'));
   try {
@@ -66,7 +71,8 @@ test('history hydration reapplies the saved mode after restoring an old plan sta
     client.emit('event', { type: 'session_resumed', session_id: instance.sessionId, mode: 'plan', messages: [] });
     client.emit('event', { type: 'model_changed', model: 'model' });
     await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(commands.slice(0, 2).map(command => command.type), ['resume_session', 'set_permission_mode']);
+    const relevantCommands = permissionModeCommands(commands);
+    assert.deepEqual(relevantCommands.slice(0, 2).map(command => command.type), ['resume_session', 'set_permission_mode']);
     acknowledge(client, 'acceptEdits');
     await resumed;
     assert.equal(store.getLastPermissionMode(), 'acceptEdits');

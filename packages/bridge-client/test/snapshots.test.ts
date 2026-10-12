@@ -513,6 +513,20 @@ function validateConversationControls(v: unknown): void {
   validateReasoningSelection(spec['provider_default']);
   assert.ok(isBool(spec['forced_reasoning']) && isBool(spec['editable']));
   if ('disabled_reason' in spec) validateDisabledReason(spec['disabled_reason']);
+
+  if ('proactivity' in o) {
+    const proactivity = rec(o['proactivity']);
+    exactObjectKeys(
+      proactivity,
+      ['opted_in', 'selector_gate', 'selector_gate_ever_on', 'attachments_enabled', 'opt_in_available', 'level'],
+      [],
+      'NativeProactivityControlStateDto',
+    );
+    for (const key of ['opted_in', 'selector_gate', 'selector_gate_ever_on', 'attachments_enabled', 'opt_in_available']) {
+      assert.ok(isBool(proactivity[key]));
+    }
+    assert.ok(['ask', 'default', 'proactive'].includes(proactivity['level'] as string));
+  }
 }
 
 function validateAskUserQuestionRequest(v: unknown): void {
@@ -768,6 +782,14 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'set_permission_mode':
       validatePermissionMode(o['mode']);
+      break;
+    case 'initialize_proactivity':
+      if ('proactivity' in o) assert.ok(isBool(o['proactivity']));
+      if ('reinitialize' in o) assert.ok(isBool(o['reinitialize']));
+      break;
+    case 'set_proactivity_level':
+      assert.ok(['ask', 'default', 'proactive'].includes(o['level'] as string));
+      if ('offer_bypass' in o) assert.ok(isBool(o['offer_bypass']));
       break;
     case 'set_typescript_lsp_mode':
       validateTypescriptLspMode(o['mode']);

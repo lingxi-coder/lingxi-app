@@ -1550,14 +1550,24 @@ async fn drain_main_thread(
                             .cloned()
                             .unwrap_or_else(|| Utf16JsonProjection::from(""));
                         tag_loop_tick_in_flight(loop_runtime, false, &prompt);
-                        orchestrator::mod_prompt_origin::with_origin(
-                            serde_json::json!({"kind":"bridge"}),
-                            driver.run_queued_turn_with_images(
-                                cmd.text_projection()
-                                    .cloned()
-                                    .unwrap_or_else(|| Utf16JsonProjection::from("")),
-                                payload.images,
-                                cancel,
+                        let native_source = if cmd.source == QueueSource::PromptInput
+                            && !cmd.is_meta
+                        {
+                            orchestrator::native_user_message_source::human()
+                        } else {
+                            Default::default()
+                        };
+                        orchestrator::native_user_message_source::with_source(
+                            native_source,
+                            orchestrator::mod_prompt_origin::with_origin(
+                                serde_json::json!({"kind":"bridge"}),
+                                driver.run_queued_turn_with_images(
+                                    cmd.text_projection()
+                                        .cloned()
+                                        .unwrap_or_else(|| Utf16JsonProjection::from("")),
+                                    payload.images,
+                                    cancel,
+                                ),
                             ),
                         )
                         .await;
@@ -1582,12 +1592,22 @@ async fn drain_main_thread(
                                 QueueSource::AgentSendMessage => serde_json::json!({"kind":"peer"}),
                                 _ => serde_json::json!({"kind":"unclassified"}),
                             };
-                            orchestrator::mod_prompt_origin::with_origin(
-                                origin,
-                                driver.run_queued_turn(
-                                    text.clone(),
-                                    cmd.source == QueueSource::PromptInput && !cmd.is_meta,
-                                    cancel,
+                            let native_source = if cmd.source == QueueSource::PromptInput
+                                && !cmd.is_meta
+                            {
+                                orchestrator::native_user_message_source::human()
+                            } else {
+                                Default::default()
+                            };
+                            orchestrator::native_user_message_source::with_source(
+                                native_source,
+                                orchestrator::mod_prompt_origin::with_origin(
+                                    origin,
+                                    driver.run_queued_turn(
+                                        text.clone(),
+                                        cmd.source == QueueSource::PromptInput && !cmd.is_meta,
+                                        cancel,
+                                    ),
                                 ),
                             )
                             .await;
@@ -1644,6 +1664,10 @@ async fn drain_main_thread(
             } else {
                 source_text.clone()
             };
+            let is_human_prompt =
+                command.source == QueueSource::PromptInput && !command.is_meta;
+            let native_source = is_human_prompt
+                .then(orchestrator::native_user_message_source::human);
             inputs.push(orchestrator::QueuedPromptInput {
                 goal_retry_id: command
                     .uuid
@@ -1657,6 +1681,10 @@ async fn drain_main_thread(
                     QueueSource::AgentSendMessage => serde_json::json!({"kind":"peer"}),
                     _ => serde_json::json!({"kind":"unclassified"}),
                 }),
+                message_origin: native_source
+                    .as_ref()
+                    .and_then(|source| source.message_origin.clone()),
+                prompt_source: None,
                 message_id: None,
                 transcript_row_token: None,
                 queue_priority: (command.priority == QueuePriority::Later)
@@ -2531,22 +2559,12 @@ impl BridgeConnection {
                     .await;
             }
             ClientCommand::UiClientModule { request_id, plugin } => {
-                let response = Utf16JsonProjection::object(vec![
-                    ("subtype".to_owned(), "ui_client_module".into()),
-                    ("plugin".to_owned(), plugin.into()),
-                ])
-                .expect("generated Mod UI module response is an object");
-                let outcome = lingxi_core::host::orchestrator::ModUiControlOutcome {
-                    response,
-                    render_revision: None,
-                    client_runtime_epochs: Default::default(),
-                    client_state_token: None,
-                };
-                self.unscoped_event_sink()
-                    .emit(client::adapter::turn::mod_ui_control_result_event(
-                        request_id,
-                        Ok(outcome),
-                    ))
+                let request_json = serde_json::json!({
+                    "subtype": "ui_client_module",
+                    "plugin": plugin,
+                })
+                .to_string();
+                self.dispatch_mod_ui_control(request_id, request_json, "ui_client_module")
                     .await;
             }
             ClientCommand::UiClientOperation {
@@ -3040,9 +3058,12 @@ impl BridgeConnection {
                     })
                     .await;
             } else {
-                orchestrator::mod_prompt_origin::with_origin(
-                    serde_json::json!({"kind":"bridge"}),
-                    driver.run_turn_with_images_and_cancel(text, images, seed_cancel),
+                orchestrator::native_user_message_source::with_source(
+                    orchestrator::native_user_message_source::human(),
+                    orchestrator::mod_prompt_origin::with_origin(
+                        serde_json::json!({"kind":"bridge"}),
+                        driver.run_turn_with_images_and_cancel(text, images, seed_cancel),
+                    ),
                 )
                 .await;
             }
@@ -3803,7 +3824,11 @@ mod tests {
     }
 
     /// Shared cell capturing the `(prompt, images)` a driver was driven with.
-    type CapturedTurn = Arc<Mutex<Option<(Utf16JsonProjection, Vec<ImageRefDto>)>>>;
+    type CapturedTurn = Arc<Mutex<Option<(
+        Utf16JsonProjection,
+        Vec<ImageRefDto>,
+        Option<orchestrator::native_user_message_source::NativeUserMessageSource>,
+    )>>>;
 
     /// A [`TurnDriver`] that records the `(prompt, images)` it was driven with, so a
     /// test can assert the `SendPrompt` dispatch forwarded the wire `images`.
@@ -3885,7 +3910,11 @@ mod tests {
             // Record an EMPTY image set so a regression (dispatch taking the old
             // text-only `run_turn` path despite carried images) shows up as a
             // mismatch against the sent images.
-            *self.captured.lock().await = Some((prompt, Vec::new()));
+            *self.captured.lock().await = Some((
+                prompt,
+                Vec::new(),
+                orchestrator::native_user_message_source::current(),
+            ));
             self.notify.notify_one();
         }
 
@@ -3894,7 +3923,11 @@ mod tests {
             prompt: Utf16JsonProjection,
             images: Vec<ImageRefDto>,
         ) {
-            *self.captured.lock().await = Some((prompt, images));
+            *self.captured.lock().await = Some((
+                prompt,
+                images,
+                orchestrator::native_user_message_source::current(),
+            ));
             self.notify.notify_one();
         }
     }
@@ -4311,6 +4344,17 @@ mod tests {
             got.1, images,
             "the SendPrompt images must reach run_turn_with_images, not be dropped"
         );
+        let native_source = got
+            .2
+            .expect("direct SendPrompt stamps a known Native user source");
+        assert_eq!(
+            native_source
+                .message_origin
+                .as_ref()
+                .and_then(|origin| origin.string_at("/kind")),
+            Some("human")
+        );
+        assert!(native_source.prompt_source.is_none());
     }
 
     /// A [`CommandRouter`] that returns a fixed dispatch result for
@@ -5293,6 +5337,7 @@ mod tests {
     /// is enqueued and run as a follow-up once the first turn ends.
     struct GatedDriver {
         prompts: Arc<Mutex<Vec<Utf16JsonProjection>>>,
+        sources: Arc<Mutex<Vec<Option<orchestrator::native_user_message_source::NativeUserMessageSource>>>>,
         /// Released by the test to let the FIRST turn complete.
         release: Arc<Notify>,
         /// Notifies the test each time a turn STARTS.
@@ -5306,6 +5351,10 @@ mod tests {
     impl TurnDriver for GatedDriver {
         async fn run_turn(&self, prompt: Utf16JsonProjection) {
             self.prompts.lock().await.push(prompt);
+            self.sources
+                .lock()
+                .await
+                .push(orchestrator::native_user_message_source::current());
             self.started.notify_one();
             // Only the FIRST turn parks; follow-up turns run straight through.
             if self
@@ -5325,11 +5374,13 @@ mod tests {
     #[tokio::test]
     async fn second_prompt_is_queued_and_drained_after_first_turn() {
         let prompts = Arc::new(Mutex::new(Vec::new()));
+        let sources = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new(Notify::new());
         let started = Arc::new(Notify::new());
         let completed = Arc::new(Notify::new());
         let driver: Arc<dyn TurnDriver> = Arc::new(GatedDriver {
             prompts: prompts.clone(),
+            sources: sources.clone(),
             release: release.clone(),
             started: started.clone(),
             completed: completed.clone(),
@@ -5397,6 +5448,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
+        let sources = sources.lock().await;
+        assert_eq!(sources.len(), 2);
+        for source in sources.iter() {
+            let source = source
+                .as_ref()
+                .expect("direct and busy-queued SendPrompt each stamp Native human origin");
+            assert_eq!(
+                source
+                    .message_origin
+                    .as_ref()
+                    .and_then(|origin| origin.string_at("/kind")),
+                Some("human")
+            );
+            assert!(source.prompt_source.is_none());
+        }
     }
 
     // ── Keepalive: drain tags the in-flight loop tick on SOURCE, not text shape ──

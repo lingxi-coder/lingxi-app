@@ -40,24 +40,18 @@ function transpileForElectron(outputRoot, relativePaths) {
 }
 
 /**
- * Proves BY EXECUTION, on the real machine's real microphone grant, that the
- * value the voice settings page shows in its 麦克风权限 row comes from the OS.
- *
- * Final review, Defects 7 and 9: `probePlatform`'s only source of
- * `microphonePermission` was `navigator.permissions.query({name:'microphone'})`,
- * which in this app is answered by `main/index.ts`'s
- * `session.setPermissionCheckHandler` — `permission === 'media' &&
- * isLocalRendererUrl(origin)` — a value computed with no reference to macOS
- * TCC. The reviewer measured `{"permissionsApiState":"granted",
- * "macOsTccStatus":"not-determined"}` on real Electron 43 with this app's
- * exact handlers. No unit test can tell the two sources apart, because both
- * are only distinguishable against a real OS grant; this one runs them side
- * by side in one real Electron process.
+ * Proves BY EXECUTION that the Voice page's current snapshot consumer displays
+ * the real machine's microphone grant. The fixture adapts the current
+ * `audioRequest({type:'get_snapshot'})` boundary by projecting the production
+ * main-process `readMicrophoneAccess` result into a NativeAudioSnapshot. The
+ * real Electron permission handler and OS reader run in the same process; the
+ * native audio helper/NativeAudioManager itself is deliberately not launched
+ * by this focused UI fixture.
  *
  * The `rendererProbeWhenOsDenies` leg keeps the test honest on a machine
  * whose TCC grant happens to match the page permission: it swaps the OS
- * answer for a denial while the page permission stays granted, so a probe
- * that reads the page permission is caught on ANY machine.
+ * answer for a denial while the page permission stays granted. Focus refresh
+ * then verifies that the mounted page consumes a fresh OS-backed snapshot.
  */
 test('the voice page reads the real OS microphone grant, not the page permission this app grants itself', { skip: process.platform === 'linux' && 'Electron exposes native media access status on macOS and Windows' }, async () => {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-microphone-vite-'));

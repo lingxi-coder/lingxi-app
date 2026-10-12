@@ -9,7 +9,14 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { APP_NAME, artifactPaths, formatError, packageRoot, repoRoot } from './package-support.mjs';
+import {
+  APP_NAME,
+  PACKAGE_OUTPUT_ROOT_ENV,
+  artifactPaths,
+  formatError,
+  packageRoot,
+  repoRoot,
+} from './package-support.mjs';
 
 export const APP_USER_DATA_SUBPATH = join('Library', 'Application Support', APP_NAME);
 
@@ -430,15 +437,18 @@ async function reapTrackedCommands(tempRoot) {
   return trackedCommands(tempRoot);
 }
 
-function runningAppCommands() {
+export function runningAppCommands(execute = execFileSync) {
   try {
-    return execFileSync('/bin/ps', ['-ax', '-o', 'pid=,command='], { encoding: 'utf8' })
+    return execute('/bin/ps', ['-ax', '-o', 'pid=,command='], { encoding: 'utf8' })
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
       .filter((line) => line.includes(`/${APP_NAME}.app/Contents/MacOS/${APP_NAME}`) && !line.includes('Frameworks/Electron Helper'));
-  } catch {
-    return [];
+  } catch (error) {
+    throw new Error(
+      `cannot inspect running ${APP_NAME} processes; refusing packaged smoke: ${error?.message ?? error}`,
+      { cause: error },
+    );
   }
 }
 
@@ -948,13 +958,13 @@ async function assertCustomProviderRequest(page, probe, sessionId) {
   assert.equal(JSON.stringify(diagnostics).includes(probe.key), false);
 }
 
-export async function runPackagedAppSmoke(root = packageRoot) {
+export async function runPackagedAppSmoke(root = packageRoot, outputRoot = process.env[PACKAGE_OUTPUT_ROOT_ENV]) {
   if (process.platform !== 'darwin') {
     throw new Error(`packaged smoke verification requires macOS; received ${process.platform}`);
   }
 
   const metadata = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  const { appPath } = artifactPaths(root, metadata);
+  const { appPath } = artifactPaths(root, metadata, outputRoot);
   if (!existsSync(appPath)) {
     throw new Error(`packaged app is missing: ${appPath}`);
   }

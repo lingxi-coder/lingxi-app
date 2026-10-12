@@ -91,7 +91,7 @@ plugin = { workspace = true }
 # Phase 8 (tui command registry): the `/skills` + `/memory` startup
 # snapshots — the same on-disk walks the iocraft screens used, captured once
 # into `tui_rata::session::SessionInfo` before the TUI loop starts.
-skill-api = { workspace = true }
+skill = { workspace = true }
 memory = { workspace = true }
 # (M8 cc2.1.198) The standalone `agents` view fires the user's `Notification`
 # hook (`agent_needs_input`/`agent_completed`) directly — the view runs

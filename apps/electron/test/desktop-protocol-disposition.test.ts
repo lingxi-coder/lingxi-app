@@ -18,6 +18,11 @@ test('every client command variant has a desktop disposition', () => {
   );
 });
 
+test('native proactivity controls are exposed Desktop commands', () => {
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.initialize_proactivity, 'exposed');
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.set_proactivity_level, 'exposed');
+});
+
 test('every client event variant has a desktop disposition', () => {
   assert.deepEqual(
     Object.keys(CLIENT_EVENT_DISPOSITIONS).sort(),

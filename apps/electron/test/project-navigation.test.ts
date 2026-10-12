@@ -22,6 +22,7 @@ import {
 } from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
+import { defaultNativeAudioSnapshot } from '../src/shared/nativeAudio.js';
 import {
   formatClockTime,
   formatRelativeSessionTime,
@@ -96,9 +97,21 @@ function openingTag(markup: string, marker: string): string {
 
 function composerBridgeFixture() {
   const bridge = bridgeFixture();
+  // These composer tests assert the supported-audio UI. The production
+  // default snapshot intentionally advertises no native audio operations,
+  // which correctly hides both controls; model a host with usable system
+  // recognition and speech instead of relying on that unsupported default.
+  const audioSnapshot = defaultNativeAudioSnapshot();
+  audioSnapshot.permissions.microphone = 'granted';
+  audioSnapshot.permissions.speech = 'authorized';
+  audioSnapshot.recognizerAvailable = true;
+  audioSnapshot.localeTag = 'en-US';
+  audioSnapshot.voices = [{ id: 'system:fixture', label: 'Fixture voice', languageTag: 'en-US', source: 'system', familyId: 'fixture', isDefault: true }];
+  audioSnapshot.capabilities!.supported_operations = ['listen', 'speak'];
   return {
     ...bridge,
     activeSession: bridge.bootstrap.activeSession,
+    audioSnapshot,
     desktop: {
       ...bridge.desktop,
       models: [],

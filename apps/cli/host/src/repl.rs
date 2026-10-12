@@ -105,6 +105,8 @@ impl TaskNotificationWake for ReplTaskWake {
                                     .then(|| command.uuid.clone()),
                                 text: prompt.unwrap_or_else(|| raw.clone()),
                                 is_meta: true,
+                                message_origin: None,
+                                prompt_source: None,
                                 mod_origin: Some(if command.uuid.starts_with("goal-retry-") {
                                     serde_json::json!({"kind":"auto-continuation"})
                                 } else {

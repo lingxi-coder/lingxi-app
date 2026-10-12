@@ -208,6 +208,10 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const selectedSkill = selection.kind === 'skill' ? activeSkills.find((entry) => entry.id === selection.id) ?? null : null;
   const selectedTrash = selection.kind === 'trash' ? trashedSkills.find((entry) => entry.id === selection.id) ?? null : null;
   const selectedDocument = selectedSkill && document?.id === selectedSkill.id ? document : null;
+  const uninstallDisabledReason = selectedDocument?.writable
+    ? undefined
+    : selectedDocument?.readonlyReason
+      ?? (loadingDocument ? '正在读取 SKILL.md；完成后才能确认是否可卸载。' : '无法读取 SKILL.md，因此无法确认是否可卸载。');
 
   useEffect(() => {
     if (!selectedSkill || !adminAvailable) return;
@@ -624,7 +628,18 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
             </> : detail}
           </div>
           {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
-            <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable} title={selectedDocument?.readonlyReason} onClick={handleTrashSkill}>Uninstall</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0, flex: 1 }}>
+              <button
+                type="button"
+                className="extension-hub-danger"
+                disabled={!selectedDocument?.writable}
+                aria-describedby={uninstallDisabledReason ? 'skill-uninstall-disabled-reason' : undefined}
+                onClick={handleTrashSkill}
+              >Uninstall</button>
+              {uninstallDisabledReason && <span id="skill-uninstall-disabled-reason" style={{ color: t.text3, fontSize: 11.5, lineHeight: 1.35 }}>
+                {uninstallDisabledReason}
+              </span>}
+            </div>
             <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);

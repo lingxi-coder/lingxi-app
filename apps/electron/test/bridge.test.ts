@@ -2356,7 +2356,13 @@ test('a turn starting during cold model loading does not interrupt switching or 
     }));
   };
   const switching = runtime.dispatchCommand({ type: 'set_model', model: 'next/model' });
+  // If model preparation rejects before sending set_model, fail this deferred
+  // wait with the real cause instead of leaving the test worker blocked forever.
+  void switching.catch(error => modelDispatched.reject(error));
   const prompt = runtime.sendPrompt('hello');
+  // The prompt shares the model-switch wait; keep its rejection observed if the
+  // dispatch-abort path above exits the test before the final await.
+  void Promise.resolve(prompt).catch(() => {});
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(calls, ['refresh_listings', 'key:next']);
   (runtime as any).activeTurn = true;
@@ -2500,6 +2506,7 @@ test('Codex runtime invalidation refuses active turns and stops idle owners', as
 
 test('switching to Codex restarts with private OAuth then restores history before model dispatch', async () => {
   const calls: string[] = [];
+  const audioContextReceived = deferred<void>();
   const session = { access_token: 'private-access', expires_at: 123, fedramp: false };
   const runtime = new SessionRuntime({ launchConfig: () => ({ workspace: '/workspace', trusted: true }), resolveOpenAiOAuth: async () => session });
   const client = new EventEmitter() as EventEmitter & { sendCommand(command: any): void };
@@ -2516,10 +2523,24 @@ test('switching to Codex restarts with private OAuth then restores history befor
   runtime.restoreOwnedSessionIfNeeded = async () => { calls.push('restore'); };
   client.sendCommand = command => {
     calls.push(command.type);
-    queueMicrotask(() => client.emit('event', { type: 'model_changed', model: command.model }));
+    if (command.type === 'set_model') {
+      queueMicrotask(() => client.emit('event', { type: 'model_changed', model: command.model }));
+    } else if (command.type === 'get_audio_session_context') {
+      queueMicrotask(() => {
+        client.emit('event', {
+          type: 'audio_session_context', session_id: runtime.sessionId,
+          profile_id: 'test-profile', account_scope: 'test-account',
+        });
+        audioContextReceived.resolve();
+      });
+    }
   };
   await runtime.dispatchCommand({ type: 'set_model', model: 'openai-chatgpt/gpt-5.6-sol' });
-  assert.deepEqual(calls, ['restart', 'restore', 'set_model']);
+  await audioContextReceived.promise;
+  assert.deepEqual(calls, ['restart', 'restore', 'set_model', 'get_audio_session_context']);
+  assert.deepEqual(runtime.audioSessionContext, {
+    sessionId: runtime.sessionId, profileId: 'test-profile', accountScope: 'test-account',
+  });
   assert.equal((runtime as any).launchOAuthOverride, undefined);
 });
 
@@ -2531,6 +2552,7 @@ test('a listing that races Codex activation reaches the engine that replaces it'
   // the composer's model pill, disabled on an empty catalog, never came back.
   const entered = deferred();
   const gate = deferred();
+  const audioContextReceived = deferred<void>();
   const sent: string[] = [];
   const session = { access_token: 'private-access', expires_at: 123, fedramp: false };
   const runtime = new SessionRuntime({
@@ -2545,6 +2567,13 @@ test('a listing that races Codex activation reaches the engine that replaces it'
   client.sendCommand = (command: any) => {
     sent.push(command.type);
     if (command.type === 'set_model') queueMicrotask(() => client.emit('event', { type: 'model_changed', model: command.model }));
+    if (command.type === 'get_audio_session_context') queueMicrotask(() => {
+      client.emit('event', {
+        type: 'audio_session_context', session_id: runtime.sessionId,
+        profile_id: 'test-profile', account_scope: 'test-account',
+      });
+      audioContextReceived.resolve();
+    });
   };
   runtime.restart = async () => { await gate.promise; };
   runtime.restoreOwnedSessionIfNeeded = async () => undefined;
@@ -2558,7 +2587,11 @@ test('a listing that races Codex activation reaches the engine that replaces it'
   gate.resolve();
   await switching;
   await listing;
-  assert.deepEqual(sent, ['set_model', 'list_models']);
+  await audioContextReceived.promise;
+  assert.deepEqual(sent.filter(type => type !== 'get_audio_session_context'), ['set_model', 'list_models']);
+  assert.deepEqual(runtime.audioSessionContext, {
+    sessionId: runtime.sessionId, profileId: 'test-profile', accountScope: 'test-account',
+  });
 });
 
 test('a failed Codex activation fails only the switch that started it', async () => {

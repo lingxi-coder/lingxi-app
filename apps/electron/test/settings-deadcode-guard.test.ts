@@ -96,6 +96,15 @@ test('no settings button explains itself with a native title tooltip', () => {
   );
 });
 
+test('a disabled Skills uninstall action keeps its reason visible and associated', () => {
+  const path = 'apps/electron/src/renderer/components/settings/pages/Skills.tsx';
+  const source = readFileSync(join(root, path), 'utf8');
+  const uninstallButton = buttonElements(source).find((element) => element.includes('className="extension-hub-danger"'));
+  assert.ok(uninstallButton, 'the Skills details dialog should retain its Uninstall action');
+  assert.match(uninstallButton, /aria-describedby=\{uninstallDisabledReason \? 'skill-uninstall-disabled-reason' : undefined\}/);
+  assert.match(source, /uninstallDisabledReason && <span id="skill-uninstall-disabled-reason"/);
+});
+
 // ---------------------------------------------------------------------------
 // Final review, Minor: `PublicSettings` was declared independently in the
 // main process, the preload bridge and the renderer's `window.lingxi`

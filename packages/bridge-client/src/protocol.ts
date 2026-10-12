@@ -642,6 +642,8 @@ export type ClientCommand =
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
   | { type: 'deny_permission'; request_id: number }
   | { type: 'set_permission_mode'; mode: PermissionModeId }
+  | { type: 'initialize_proactivity'; proactivity?: boolean; reinitialize?: boolean }
+  | { type: 'set_proactivity_level'; level: NativeProactivityLevelDto; offer_bypass?: boolean }
   | { type: 'set_typescript_lsp_mode'; mode: TypescriptLspModeId }
   // ── `computer` tool request_access resolution ───────────────────────────────
   | { type: 'approve_computer_access'; request_id: number; response: ComputerAccessResponseDto }
@@ -1150,11 +1152,25 @@ export interface PermissionControlStateDto {
   options: PermissionModeOptionDto[];
 }
 
+/** Session-local Native proactivity opt-in and level state. */
+export type NativeProactivityLevelDto = 'ask' | 'default' | 'proactive';
+
+export interface NativeProactivityControlStateDto {
+  opted_in: boolean;
+  selector_gate: boolean;
+  selector_gate_ever_on: boolean;
+  attachments_enabled: boolean;
+  opt_in_available: boolean;
+  level: NativeProactivityLevelDto;
+}
+
 /** Full conversation-controls snapshot authored by the engine. */
 export interface ConversationControlsDto {
   qualified_model: string;
   permission: PermissionControlStateDto;
   reasoning: ReasoningControlStateDto;
+  /** Present when the host exposes Native's session proactivity control. */
+  proactivity?: NativeProactivityControlStateDto;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

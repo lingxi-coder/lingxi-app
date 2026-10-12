@@ -15,6 +15,7 @@ import type {
   HookDto,
   ImageRefDto,
   McpAdminCommandDto,
+  NativeProactivityLevelDto,
   PermissionBehaviorDto,
   PermissionModeId,
   PermissionResponseDto,
@@ -310,6 +311,8 @@ export interface UseBridge {
   setReasoningSelection(selection: ReasoningSelectionDto): Promise<void>;
   setFastMode(enabled: boolean): Promise<void>;
   setPermissionMode(mode: PermissionModeId): Promise<void>;
+  initializeProactivity(proactivity: boolean, reinitialize?: boolean): Promise<void>;
+  setProactivityLevel(level: NativeProactivityLevelDto, offerBypass?: boolean): Promise<void>;
   login(): Promise<void>;
   logout(): Promise<void>;
   forceCompact(instructions?: string): Promise<void>;

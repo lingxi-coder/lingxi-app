@@ -19,10 +19,12 @@ launch_after_build=false
 preflight_only=false
 print_config=false
 auto_register=true
+output_root=''
+reuse_existing=false
 
 usage() {
   cat <<'EOF'
-Usage: package-macos-flare.sh [--channel development|production] [--check] [--launch] [--no-register] [--print-config]
+Usage: package-macos-flare.sh [--channel development|production] [--check] [--launch] [--reuse-existing] [--no-register] [--output-root DIR] [--print-config]
 
 Build, sign, and verify the LingXi macOS Electron app with the Flare App, Inc.
 Apple Development identity. The script discovers matching installed macOS
@@ -38,6 +40,8 @@ Options:
   --check            Validate signing assets without building
   --launch           Launch the verified packaged app
   --no-register      Do not let Xcode create or download missing profiles
+  --output-root DIR  Put package outputs in an isolated directory outside the checkout
+  --reuse-existing   Verify an isolated package already present at --output-root without rebuilding
   --print-config     Print the required identifiers and exit
   -h, --help         Show this help
 EOF
@@ -69,6 +73,15 @@ while (($# > 0)); do
       ;;
     --no-register)
       auto_register=false
+      shift
+      ;;
+    --output-root)
+      (($# >= 2)) || fail '--output-root requires an existing isolated directory'
+      output_root="$2"
+      shift 2
+      ;;
+    --reuse-existing)
+      reuse_existing=true
       shift
       ;;
     --print-config)
@@ -108,11 +121,32 @@ if [[ "$print_config" == true ]]; then
   printf 'desktop_bundle_id=%s\n' "$desktop_bundle_id"
   printf 'broker_bundle_id=%s\n' "$broker_bundle_id"
   printf 'audio_bundle_id=%s\n' "$audio_bundle_id"
+  [[ -z "$output_root" ]] || printf 'output_root=%s\n' "$output_root"
   exit 0
+fi
+
+if [[ "$reuse_existing" == true && -z "$output_root" ]]; then
+  fail '--reuse-existing requires --output-root'
 fi
 
 [[ "$(uname -s)" == "Darwin" ]] || fail 'macOS is required'
 [[ "$(uname -m)" == "arm64" ]] || fail 'an Apple silicon Mac is required'
+
+if [[ -n "$output_root" ]]; then
+  [[ "$output_root" == /* ]] || fail '--output-root must be an absolute path'
+  [[ -d "$output_root" ]] || fail "--output-root must already exist as a directory: ${output_root}"
+  [[ ! -L "$output_root" ]] || fail '--output-root must not be a symbolic link'
+  output_root="$(cd "$output_root" && pwd -P)"
+  export LINGXI_PACKAGE_OUTPUT_ROOT="$output_root"
+  output_root="$(
+    cd "$ELECTRON_DIR"
+    node --input-type=module - "$output_root" <<'NODE'
+import { validatePackageOutputRoot } from './scripts/package-support.mjs';
+process.stdout.write(validatePackageOutputRoot(process.argv[2]));
+NODE
+  )"
+  export LINGXI_PACKAGE_OUTPUT_ROOT="$output_root"
+fi
 
 for required_command in /usr/bin/codesign /usr/bin/security /usr/bin/xcrun cargo node npm; do
   command -v "$required_command" >/dev/null 2>&1 || fail "required command is unavailable: ${required_command}"
@@ -303,6 +337,54 @@ if [[ "$preflight_only" == true ]]; then
   exit 0
 fi
 
+if [[ "$reuse_existing" == true ]]; then
+  (
+    cd "$ELECTRON_DIR"
+    node --input-type=module - "$output_root" <<'NODE'
+import { artifactPaths, packageRoot, preparePackageOutputRoot, readJson } from './scripts/package-support.mjs';
+import { join } from 'node:path';
+const metadata = readJson(join(packageRoot, 'package.json'));
+preparePackageOutputRoot(artifactPaths(packageRoot, metadata, process.argv[2]));
+NODE
+  )
+  (
+    cd "$ELECTRON_DIR"
+    npm run verify:package
+  )
+  package_version="$(node -p "require('${ELECTRON_DIR}/package.json').version")"
+  app_path="${LINGXI_PACKAGE_OUTPUT_ROOT}/LingXi-Code-${package_version}-mac-arm64/LingXi Code.app"
+  [[ -d "$app_path" ]] || fail "verified app is missing: ${app_path}"
+  log "verified existing app: ${app_path}"
+  if [[ "$launch_after_build" == true ]]; then
+    /usr/bin/open "$app_path"
+    log 'launched verified packaged Desktop app'
+  fi
+  exit 0
+fi
+
+if [[ -n "$output_root" ]]; then
+  (
+    cd "$ELECTRON_DIR"
+    node --input-type=module - "$output_root" <<'NODE'
+import { artifactPaths, packageRoot, preparePackageOutputRoot, readJson } from './scripts/package-support.mjs';
+import { join } from 'node:path';
+const metadata = readJson(join(packageRoot, 'package.json'));
+preparePackageOutputRoot(artifactPaths(packageRoot, metadata, process.argv[2]));
+NODE
+  )
+else
+  (
+    cd "$ELECTRON_DIR"
+    node --input-type=module <<'NODE'
+import { runningAppCommands } from './scripts/packaged-app-smoke.mjs';
+const running = runningAppCommands();
+if (running.length > 0) {
+  throw new Error(`refusing to package into the canonical app path while ${running.length} LingXi Code instance(s) are running: ${running.join(' | ')}`);
+}
+NODE
+  )
+fi
+
 repo_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 repo_cargo_target="${CARGO_TARGET_DIR:-${ENGINE_DIR}/target}"
 case "$repo_cargo_target" in
@@ -327,7 +409,8 @@ log 'packaging and signing the Electron app'
 )
 
 package_version="$(node -p "require('${ELECTRON_DIR}/package.json').version")"
-app_path="${ELECTRON_DIR}/dist/LingXi-Code-${package_version}-mac-arm64/LingXi Code.app"
+release_root="${LINGXI_PACKAGE_OUTPUT_ROOT:-${ELECTRON_DIR}/dist}"
+app_path="${release_root}/LingXi-Code-${package_version}-mac-arm64/LingXi Code.app"
 [[ -d "$app_path" ]] || fail "verified app is missing: ${app_path}"
 
 log "verified app: ${app_path}"

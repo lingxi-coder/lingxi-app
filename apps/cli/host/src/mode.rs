@@ -905,21 +905,32 @@ async fn drain_teammate_prompts(
             });
             let in_human_turn = mod_as_user
                 || command.source == msgqueue::QueueSource::PromptInput && !command.is_meta;
+            let native_source = cli_native_source_for_queued_prompt(
+                command.source,
+                command.is_meta,
+                mod_as_user,
+            );
             let turn_result = if let Some(row_token) = transcript_row_token {
-                orchestrator::mod_prompt_origin::with_origin(
-                    origin,
-                    orchestrator.run_queued_turn_streaming_with_row_token(
-                        &text,
-                        cancel,
-                        in_human_turn,
-                        row_token,
+                orchestrator::native_user_message_source::with_source(
+                    native_source,
+                    orchestrator::mod_prompt_origin::with_origin(
+                        origin,
+                        orchestrator.run_queued_turn_streaming_with_row_token(
+                            &text,
+                            cancel,
+                            in_human_turn,
+                            row_token,
+                        ),
                     ),
                 )
                 .await
             } else {
-                orchestrator::mod_prompt_origin::with_origin(
-                    origin,
-                    orchestrator.run_queued_turn_streaming(&text, cancel, in_human_turn),
+                orchestrator::native_user_message_source::with_source(
+                    native_source,
+                    orchestrator::mod_prompt_origin::with_origin(
+                        origin,
+                        orchestrator.run_queued_turn_streaming(&text, cancel, in_human_turn),
+                    ),
                 )
                 .await
             };
@@ -2011,10 +2022,12 @@ pub(crate) async fn run_ratatui_with_initial_state(
             // Image-aware entry: with no images this is byte-identical to
             // `run_turn_streaming_with_cancel`; with pasted/attached images
             // they become `ContentBlock::Image` on the user message.
-            if let Err(e) = orchestrator::mod_prompt_origin::with_origin(
-                serde_json::json!({"kind":"composer"}),
-                orch.run_turn_streaming_with_images_and_row_token(
-                    &prompt, &images, cancel, row_token,
+            if let Err(e) = with_cli_composer_native_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"composer"}),
+                    orch.run_turn_streaming_with_images_and_row_token(
+                        &prompt, &images, cancel, row_token,
+                    ),
                 ),
             )
             .await
@@ -3375,6 +3388,26 @@ pub(crate) async fn run_ratatui_with_initial_state(
             RunOutcome::Exit(exit_codes::RUNTIME_ERROR)
         }
     }
+}
+
+fn cli_native_source_for_queued_prompt(
+    source: msgqueue::QueueSource,
+    is_meta: bool,
+    mod_as_user: bool,
+) -> orchestrator::native_user_message_source::NativeUserMessageSource {
+    if source == msgqueue::QueueSource::PromptInput && !is_meta && !mod_as_user {
+        orchestrator::native_user_message_source::human()
+    } else {
+        Default::default()
+    }
+}
+
+async fn with_cli_composer_native_source<F: std::future::Future>(future: F) -> F::Output {
+    orchestrator::native_user_message_source::with_source(
+        orchestrator::native_user_message_source::human(),
+        future,
+    )
+    .await
 }
 
 /// Render the same plan file used by the plan-mode reminder. The defensive
@@ -5051,11 +5084,11 @@ async fn build_session_info(
     }
 }
 
-/// Flatten the on-disk skill sections (`skill_api::load_file_skill_sections`:
+/// Flatten the on-disk skill sections (`skill::load_file_skill_sections`:
 /// project `.lingxi/skills/` ancestors + user `~/.lingxi/skills/`) into
 /// `/skills` rows: name + `"<section> · <description>"` detail.
 fn skills_rows(cwd: &std::path::Path, lingxi_home: &std::path::Path) -> Vec<tui::session::InfoRow> {
-    skill_api::load_file_skill_sections(cwd, lingxi_home)
+    skill::load_file_skill_sections(cwd, lingxi_home)
         .into_iter()
         .flat_map(|section| {
             let source = section.title;
@@ -5490,6 +5523,45 @@ async fn trust_gate() -> TrustGateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cli_composer_and_typed_queue_stamp_only_native_human_inputs() {
+        let composer = with_cli_composer_native_source(async {
+            orchestrator::native_user_message_source::current().unwrap()
+        })
+        .await;
+        assert_eq!(
+            composer
+                .message_origin
+                .as_ref()
+                .and_then(|origin| origin.string_at("/kind")),
+            Some("human")
+        );
+        assert!(composer.prompt_source.is_none());
+
+        let queued = cli_native_source_for_queued_prompt(
+            msgqueue::QueueSource::PromptInput,
+            false,
+            false,
+        );
+        assert_eq!(
+            queued
+                .message_origin
+                .as_ref()
+                .and_then(|origin| origin.string_at("/kind")),
+            Some("human")
+        );
+        for (source, is_meta, mod_as_user) in [
+            (msgqueue::QueueSource::PromptInput, true, false),
+            (msgqueue::QueueSource::PromptInput, false, true),
+            (msgqueue::QueueSource::Cron, false, false),
+            (msgqueue::QueueSource::AgentSendMessage, false, false),
+        ] {
+            let source = cli_native_source_for_queued_prompt(source, is_meta, mod_as_user);
+            assert!(source.message_origin.is_none());
+            assert!(source.prompt_source.is_none());
+        }
+    }
 
     #[tokio::test]
     async fn tui_catalog_uses_command_describe_for_builtins_and_registry_commands() {

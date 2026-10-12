@@ -56,8 +56,10 @@ key 本身**——用户会在界面上看到 `settings_provider_login` 这种�
 Android 同理：`R.string.foo`（排除 `android.R.string.*` / `androidx.R.string.*`
 框架资源）如果既不在 `zh-Hans.json` 的合法 key 集里、也不在
 `values/strings_conversation_extra.xml`（本仓库
-唯一一份手工维护、由自己的重名冲突当 tripwire 的姊妹目录）里，资源合并会直接
-报错——但只有在真的构建那个 flavor 时才会被发现。
+唯一一份手工维护、由自己的重名冲突当 tripwire 的姊妹目录）里，且没有经当前
+Gradle 插件与配置验证的生成资源来源，资源合并会直接报错——但只有在真的构建
+那个 flavor 时才会被发现。`default_web_client_id` 只有在 Google Services 插件、
+applicationId 和匹配的 OAuth web-client 配置都存在时才作为生成资源处理。
 
 2026-09-03 实测（在本 worktree 上跑出来的，不是读代码推的）：iOS 侧 48 个、
 Android 侧 3 个（`chat_compacting_context` / `chat_compaction_failed` /
@@ -115,6 +117,25 @@ ANDROID_LOCALE_DIR = {
 ANDROID_COMPANION_STRINGS_BASENAME = "strings_conversation_extra.xml"
 ANDROID_RES_ROOT = "apps/android/native/app/src/main/res"
 
+# Android's Google Services Gradle plugin generates `default_web_client_id`
+# from google-services.json when a client for the app package has an OAuth
+# client_type 3 entry. This is a translatable=false build resource, not product
+# copy. Verify the plugin, app id, and source config before treating the
+# reference as provided; do not add a fake translation or unconditional
+# exemption. The generation rule is documented at
+# https://developers.google.com/android/guides/google-services-plugin.
+ANDROID_GOOGLE_SERVICES_GRADLE = "apps/android/native/app/build.gradle.kts"
+ANDROID_GOOGLE_SERVICES_JSON = "apps/android/native/app/google-services.json"
+ANDROID_GOOGLE_SERVICES_PLUGIN_ID = "com.google.gms.google-services"
+ANDROID_GOOGLE_SERVICES_APP_ID = re.compile(
+    r'^\s*applicationId\s*=\s*"([^"]+)"', re.MULTILINE
+)
+ANDROID_GOOGLE_SERVICES_PLUGIN_APPLY = re.compile(
+    r'\bid\s*\(\s*["\']'
+    + re.escape(ANDROID_GOOGLE_SERVICES_PLUGIN_ID)
+    + r'["\']\s*\)'
+)
+
 # 只匹配字面量 key（无 `\(...)` 插值）。插值调用会被 Swift 编译成复合 key
 # （`"foo %lld"` 等），那一半已经由上面的 `_fmt` 配对逻辑覆盖，这里再匹配
 # 只会重新引入本文件开头已经排除过的插值假阳性。
@@ -171,6 +192,58 @@ def _android_companion_names(repo_root):
         if path.is_file():
             names.update(ANDROID_STRING_NAME.findall(path.read_text(encoding="utf-8", errors="replace")))
     return names
+
+
+def _verified_google_services_resource_names(repo_root):
+    """Return only generated resources proven by the app's current config.
+
+    `default_web_client_id` is generated under values/ by the Google Services
+    plugin. Fail closed if the module stops applying that plugin, its package
+    id cannot be read, or the checked-in config lacks a matching OAuth web
+    client. This keeps unrelated missing R.string references visible.
+    """
+    app_gradle = Path(repo_root) / ANDROID_GOOGLE_SERVICES_GRADLE
+    services_json = Path(repo_root) / ANDROID_GOOGLE_SERVICES_JSON
+    try:
+        gradle = app_gradle.read_text(encoding="utf-8")
+        match = ANDROID_GOOGLE_SERVICES_APP_ID.search(gradle)
+        if not match or not ANDROID_GOOGLE_SERVICES_PLUGIN_APPLY.search(gradle):
+            return set()
+        config = json.loads(services_json.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return set()
+
+    if not isinstance(config, dict):
+        return set()
+    app_id = match.group(1)
+    clients = config.get("client")
+    if not isinstance(clients, list):
+        return set()
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        client_info = client.get("client_info")
+        android_info = (
+            client_info.get("android_client_info")
+            if isinstance(client_info, dict)
+            else None
+        )
+        package_name = (
+            android_info.get("package_name")
+            if isinstance(android_info, dict)
+            else None
+        )
+        if package_name != app_id:
+            continue
+        oauth_clients = client.get("oauth_client")
+        if not isinstance(oauth_clients, list):
+            continue
+        for oauth_client in oauth_clients:
+            if not isinstance(oauth_client, dict):
+                continue
+            if oauth_client.get("client_type") == 3 and oauth_client.get("client_id"):
+                return {"default_web_client_id"}
+    return set()
 
 
 def _android_companion_locale_gaps(repo_root):
@@ -246,7 +319,10 @@ def measure(locales, repo_root):
         fail("found only %d distinct key(s) referenced by Android R.string.* under %s — refusing to "
              "trust an enumeration this much smaller than the known count, the scan is probably broken"
              % (len(android_refs), Path(repo_root) / ANDROID_SOURCE_ROOT))
-    android_known = legal | _android_companion_names(repo_root)
+    google_services_resources = _verified_google_services_resource_names(repo_root)
+    # Exempt only the hand-maintained sibling resources and generated names
+    # whose active build-time provider was verified above.
+    android_known = legal | _android_companion_names(repo_root) | google_services_resources
     ios_orphans = sorted(k for k in ios_refs if k not in key_set)
     android_orphans = sorted(k for k in android_refs if k not in android_known)
     companion_gaps = _android_companion_locale_gaps(repo_root)
@@ -257,6 +333,9 @@ def measure(locales, repo_root):
         "androidIllegalUnpaired": len(unpaired),
         "iosSourceOrphans": len(ios_orphans),
         "androidSourceOrphans": len(android_orphans),
+        "androidGeneratedResourceRefs": sorted(
+            set(android_refs) & google_services_resources
+        ),
         "androidCompanionLocaleGapsTotal": sum(len(v) for v in companion_gaps.values()),
         "empty": {},
         "identicalToBase": {},
@@ -316,9 +395,9 @@ def compare(base, now):
         )
     if now["androidSourceOrphans"] > base.get("androidSourceOrphans", 0):
         problems.append(
-            "%d distinct key(s) referenced by Android R.string.* have NO entry in %s.json and no "
-            "sibling in %s, baseline was %d — the resource merger fails at build time for the flavor "
-            "that hits it. New orphans include: %s"
+            "%d distinct key(s) referenced by Android R.string.* have NO entry in %s.json, no "
+            "sibling in %s, and no verified Google Services generated resource, baseline was %d — "
+            "the resource merger fails at build time for the flavor that hits it. New orphans include: %s"
             % (now["androidSourceOrphans"], BASE_LOCALE, ", ".join(ANDROID_COMPANION_STRINGS_FILES),
                base.get("androidSourceOrphans", 0),
                ", ".join(repr(k) for k in sorted(

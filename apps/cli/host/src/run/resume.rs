@@ -446,19 +446,23 @@ pub(super) async fn mount_resumed_tui_inner(
     // turns append to `<session_id>.jsonl` (the loaded file) instead of forking a
     // fresh-uuid file — the fix for resume splitting a conversation across files.
     let parent_session_id = parent_session_id_from_messages(&messages);
-    let mut tui_build = match crate::init::build_runtime_for_tui_inner_with_parent(
-        &resumed_argv,
-        Some(session_id),
-        parent_session_id,
-    )
-    .await
-    {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("lingxi-cli: tui init failed: {e}");
-            return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
-        }
-    };
+    let native_settings_agent_context =
+        native_settings_agent_context_for_launch(shell_launch.map(|launch| launch.launch));
+    let mut tui_build =
+        match crate::init::build_runtime_for_tui_inner_with_parent_and_native_settings_context(
+            &resumed_argv,
+            Some(session_id),
+            parent_session_id,
+            native_settings_agent_context,
+        )
+        .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("lingxi-cli: tui init failed: {e}");
+                return crate::mode::RunOutcome::Exit(exit_codes::RUNTIME_ERROR);
+            }
+        };
     // ENGINE seed: replay the transcript into the orchestrator's session so a
     // live turn continues the prior conversation.
     let effective_permission_mode = match seed_orchestrator_session(
@@ -1511,5 +1515,46 @@ pub(super) fn resume_by_id_error(
             format!("Failed to resume session {session_id}"),
             exit_codes::RUNTIME_ERROR,
         )),
+    }
+}
+
+fn native_settings_agent_context_for_launch(
+    launch: Option<crate::background_launch::BackgroundLaunchKind>,
+) -> lingxi_core::host::NativeSettingsAgentContext {
+    if launch == Some(crate::background_launch::BackgroundLaunchKind::Fork) {
+        lingxi_core::host::NativeSettingsAgentContext::Subagent {
+            is_main_session: true,
+        }
+    } else {
+        lingxi_core::host::NativeSettingsAgentContext::Main
+    }
+}
+
+#[cfg(test)]
+mod native_settings_agent_context_tests {
+    use super::*;
+    use crate::background_launch::BackgroundLaunchKind as Launch;
+    use lingxi_core::host::NativeSettingsAgentContext as Context;
+
+    #[test]
+    fn only_an_explicit_background_fork_uses_main_session_subagent_identity() {
+        assert_eq!(
+            native_settings_agent_context_for_launch(None),
+            Context::Main
+        );
+        assert_eq!(
+            native_settings_agent_context_for_launch(Some(Launch::Fresh)),
+            Context::Main
+        );
+        assert_eq!(
+            native_settings_agent_context_for_launch(Some(Launch::Resume)),
+            Context::Main
+        );
+        assert_eq!(
+            native_settings_agent_context_for_launch(Some(Launch::Fork)),
+            Context::Subagent {
+                is_main_session: true
+            }
+        );
     }
 }

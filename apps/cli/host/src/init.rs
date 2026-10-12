@@ -1687,6 +1687,24 @@ pub async fn build_runtime_for_tui_inner_with_parent(
         argv,
         resume_session_id,
         parent_session_id,
+        None,
+    ))
+    .await
+}
+
+/// Resume/fork-aware variant for a background launch whose persisted launch
+/// spec is an authoritative Native query-agent identity source.
+pub(crate) async fn build_runtime_for_tui_inner_with_parent_and_native_settings_context(
+    argv: &Argv,
+    resume_session_id: Option<uuid::Uuid>,
+    parent_session_id: Option<String>,
+    native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext,
+) -> Result<TuiBuild, InitError> {
+    Box::pin(build_runtime_for_tui_inner_with_parent_impl(
+        argv,
+        resume_session_id,
+        parent_session_id,
+        Some(native_settings_agent_context),
     ))
     .await
 }
@@ -1695,6 +1713,7 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     argv: &Argv,
     resume_session_id: Option<uuid::Uuid>,
     parent_session_id: Option<String>,
+    native_settings_agent_context: Option<lingxi_core::host::NativeSettingsAgentContext>,
 ) -> Result<TuiBuild, InitError> {
     crate::startup_trace::mark("tui_runtime_build_start");
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1713,6 +1732,9 @@ async fn build_runtime_for_tui_inner_with_parent_impl(
     // (TUI-PERM) Resolve config ONCE so the gate's persist paths come from the
     // SAME cfg the engine builds with (no double resolve, no lost paths).
     let mut cfg = resolve_desktop_config(argv, permission_mode);
+    if let Some(context) = native_settings_agent_context {
+        cfg.native_settings_agent_context = context;
+    }
     // Apply fixture paths before constructing the permission gate, so its
     // persistence root agrees with the engine's resolved configuration.
     #[cfg(test)]

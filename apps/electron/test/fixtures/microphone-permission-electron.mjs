@@ -87,8 +87,13 @@ async function main() {
     const rendererProbe = await webContents.executeJavaScript('window.__microphonePermissionTest.probe()');
     const permissionsApi = await webContents.executeJavaScript('window.__microphonePermissionTest.permissionsApi()');
 
-    // The mounted page, once its probe has resolved.
-    await waitFor(webContents, '!window.__microphonePermissionTest.rowText().includes("正在检测设备的语音能力")');
+    // The current Voice page consumes the host audio snapshot. Wait for its
+    // first get_snapshot response to reach the row before comparing values.
+    const initialPermissionLabel = {
+      granted: '已授权', denied: '未授权', prompt: '尚未询问', unavailable: '无法确定',
+    }[mainProcessRead];
+    await waitFor(webContents,
+      `window.__microphonePermissionTest.rowText().includes(${JSON.stringify(`当前状态：${initialPermissionLabel}`)})`);
     const rowTextFromOs = await webContents.executeJavaScript('window.__microphonePermissionTest.rowText()');
 
     // Second pass: the OS answer is swapped for a denial while the renderer's

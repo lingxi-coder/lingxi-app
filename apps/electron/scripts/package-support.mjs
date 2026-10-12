@@ -56,6 +56,9 @@ export const NS_SPEECH_RECOGNITION_USAGE_DESCRIPTION =
 export const FIXED_MTIME_SECONDS = Number(process.env['SOURCE_DATE_EPOCH'] ?? 946684800);
 export const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const repoRoot = resolve(packageRoot, '..', '..');
+export const PACKAGE_OUTPUT_ROOT_ENV = 'LINGXI_PACKAGE_OUTPUT_ROOT';
+const PACKAGE_OUTPUT_ROOT_MARKER = '.lingxi-package-output-root';
+const PACKAGE_OUTPUT_ROOT_MARKER_CONTENT = 'lingxi-package-output-root-v1\n';
 
 export function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -65,9 +68,131 @@ export function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-export function artifactPaths(root = packageRoot, packageJson = readJson(join(root, 'package.json'))) {
+function isPathWithin(parent, candidate) {
+  const relativePath = relative(parent, candidate);
+  return relativePath === ''
+    || (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+}
+
+function resolvePossiblyMissingPath(path) {
+  const absolute = resolve(path);
+  let ancestor = absolute;
+  const suffix = [];
+  for (;;) {
+    try {
+      const metadata = lstatSync(ancestor);
+      if (ancestor === absolute && metadata.isSymbolicLink()) {
+        throw new Error('package output root must not be a symbolic link');
+      }
+      if (suffix.length > 0 && !metadata.isDirectory()) {
+        throw new Error('package output root has a non-directory path component');
+      }
+      return resolve(realpathSync.native(ancestor), ...suffix);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw new Error('cannot resolve package output root');
+      suffix.unshift(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+export function validatePackageOutputRoot(outputRoot, projectRoot = repoRoot) {
+  if (
+    typeof outputRoot !== 'string'
+    || outputRoot.length === 0
+    || outputRoot.includes('\0')
+    || outputRoot.includes('\n')
+    || outputRoot.includes('\r')
+  ) {
+    throw new Error('package output root must be a non-empty absolute path');
+  }
+  if (!isAbsolute(outputRoot)) {
+    throw new Error('package output root must be an absolute path');
+  }
+  const resolvedRoot = resolvePossiblyMissingPath(outputRoot);
+  const canonicalProjectRoot = realpathSync.native(projectRoot);
+  if (
+    isPathWithin(canonicalProjectRoot, resolvedRoot)
+    || isPathWithin(resolvedRoot, canonicalProjectRoot)
+  ) {
+    throw new Error('package output root must be isolated outside the Product checkout');
+  }
+  return resolvedRoot;
+}
+
+export function preparePackageOutputRoot(paths) {
+  const outputRoot = validatePackageOutputRoot(paths.releaseRoot);
+  mkdirSync(outputRoot, { recursive: true });
+  const rootMetadata = lstatSync(outputRoot);
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+    throw new Error('package output root must be a real directory');
+  }
+  const markerPath = join(outputRoot, PACKAGE_OUTPUT_ROOT_MARKER);
+  const allowedEntries = new Set([
+    PACKAGE_OUTPUT_ROOT_MARKER,
+    paths.stem,
+    `${paths.stem}.zip`,
+    `${paths.stem}.zip.sha256`,
+  ]);
+  const entries = readdirSync(outputRoot);
+  for (const entry of entries) {
+    if (!allowedEntries.has(entry)) {
+      throw new Error(`package output root contains an unrelated entry: ${entry}`);
+    }
+  }
+  if (existsSync(markerPath)) {
+    if (lstatSync(markerPath).isSymbolicLink()
+      || readFileSync(markerPath, 'utf8') !== PACKAGE_OUTPUT_ROOT_MARKER_CONTENT) {
+      throw new Error('package output root marker is invalid');
+    }
+  } else {
+    if (entries.length !== 0) {
+      throw new Error('unmarked package output root must be empty');
+    }
+    writeFileSync(markerPath, PACKAGE_OUTPUT_ROOT_MARKER_CONTENT, { flag: 'wx' });
+  }
+  return outputRoot;
+}
+
+export function resetMacPackageArtifacts(paths) {
+  const releaseRoot = resolve(paths.releaseRoot);
+  const expectedContainer = join(releaseRoot, paths.stem);
+  const expectedAppPath = join(expectedContainer, `${APP_NAME}.app`);
+  const expectedZipPath = join(releaseRoot, `${paths.stem}.zip`);
+  const expectedChecksumPath = join(releaseRoot, `${paths.stem}.zip.sha256`);
+  if (
+    resolve(paths.appContainer) !== expectedContainer
+    || resolve(paths.appPath) !== expectedAppPath
+    || resolve(paths.zipPath) !== expectedZipPath
+    || resolve(paths.checksumPath) !== expectedChecksumPath
+  ) {
+    throw new Error('refusing to reset package paths outside the versioned artifact container');
+  }
+  for (const path of [paths.appContainer, paths.zipPath, paths.checksumPath]) {
+    try {
+      if (lstatSync(path).isSymbolicLink()) {
+        throw new Error(`refusing to reset a symbolic-link package artifact: ${path}`);
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  resetDirectory(paths.appContainer);
+  unlinkIfPresent(paths.zipPath);
+  unlinkIfPresent(paths.checksumPath);
+}
+
+export function artifactPaths(
+  root = packageRoot,
+  packageJson = readJson(join(root, 'package.json')),
+  outputRoot = process.env[PACKAGE_OUTPUT_ROOT_ENV],
+) {
   const stem = `LingXi-Code-${packageJson.version}-mac-${TARGET_ARCH}`;
-  const releaseRoot = join(root, 'dist');
+  const releaseRoot = outputRoot
+    ? validatePackageOutputRoot(outputRoot)
+    : join(root, 'dist');
   return {
     stem,
     releaseRoot,

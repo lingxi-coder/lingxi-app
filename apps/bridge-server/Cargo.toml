@@ -67,7 +67,7 @@ cron = { workspace = true }
 harness-runtime = { workspace = true, default-features = true, features = ["desktop"] }
 cli = { path = "../cli/host" }
 plugin = { workspace = true }
-skill-api = { workspace = true }
+skill = { workspace = true }
 hooks = { workspace = true }
 mcp = { workspace = true }
 # `computer_access_bridge::ComputerAccessExchange` — the channel item type for

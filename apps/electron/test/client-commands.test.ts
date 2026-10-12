@@ -43,6 +43,8 @@ test('the shared definition covers every newly-added command and listing kind', 
     'force_compact',
     'list_session_agents',
     'load_session_agent_transcript',
+    'initialize_proactivity',
+    'set_proactivity_level',
     'update_settings',
     'update_permission_rules',
     'set_default_permission_mode',
@@ -79,6 +81,8 @@ test('the allowlists are the exposed subset of the exhaustive desktop dispositio
       .sort(),
   );
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.clear_session, 'host_private');
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.initialize_proactivity, 'exposed');
+  assert.equal(CLIENT_COMMAND_DISPOSITIONS.set_proactivity_level, 'exposed');
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.request_exit, 'not_applicable');
   assert.equal(CLIENT_COMMAND_DISPOSITIONS.resume_workflow, 'not_applicable');
   assert.equal(CLIENT_EVENT_DISPOSITIONS.turn_recovery_state, 'degraded');

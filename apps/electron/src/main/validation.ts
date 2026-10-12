@@ -347,6 +347,35 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       }
       return { type, mode } as Extract<ClientCommand, { type: 'set_permission_mode' }>;
     }
+    case 'initialize_proactivity': {
+      exactKeys(input, ['type', 'proactivity', 'reinitialize']);
+      const proactivity = input['proactivity'];
+      const reinitialize = input['reinitialize'];
+      if (proactivity !== undefined && typeof proactivity !== 'boolean') {
+        throw new Error('invalid proactivity initialize flag');
+      }
+      if (reinitialize !== undefined && typeof reinitialize !== 'boolean') {
+        throw new Error('invalid proactivity reinitialize flag');
+      }
+      return {
+        type,
+        ...(proactivity === undefined ? {} : { proactivity }),
+        ...(reinitialize === undefined ? {} : { reinitialize }),
+      };
+    }
+    case 'set_proactivity_level': {
+      exactKeys(input, ['type', 'level', 'offer_bypass']);
+      const level = enumValue(input['level'], 'proactivity level', ['ask', 'default', 'proactive']);
+      const offer_bypass = input['offer_bypass'];
+      if (offer_bypass !== undefined && typeof offer_bypass !== 'boolean') {
+        throw new Error('invalid proactivity bypass flag');
+      }
+      return {
+        type,
+        level,
+        ...(offer_bypass === undefined ? {} : { offer_bypass }),
+      };
+    }
     case 'list_models':
       exactKeys(input, ['type']);
       return { type };

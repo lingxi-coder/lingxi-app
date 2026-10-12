@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a source declaration catalog from the four SDK repositories' Git HEAD.
+"""Build a source declaration catalog from committed SDK source snapshots.
 
 This is a source index, not rustdoc or a resolved export graph. It lists public
 declarations in the selected first-party contract/facade sources, with comments
@@ -290,7 +290,7 @@ def selected(sdk: str, file: str) -> bool:
             or file.startswith("crates/client/src/protocol/")
             or file in ("crates/client/src/lib.rs", "crates/client/src/adapter/mod.rs", "crates/client/src/adapter/listener.rs", "crates/client/src/adapter/sink.rs", "crates/client/src/adapter/controls.rs", "crates/client/src/adapter/turn.rs")
             or file.startswith("crates/tool-api/src/")
-            or file.startswith("crates/skill-api/src/")
+            or file.startswith("crates/skill/src/")
             or file.startswith("crates/plugin/src/")
         )
     if sdk == "mobile":
@@ -302,13 +302,33 @@ def selected(sdk: str, file: str) -> bool:
     return file.startswith("packages/bridge-client/src/") and file.endswith(".ts") and Path(file).stem in ("index", "protocol", "toolview", "lockfile", "validation", "version", "client")
 
 
+def source_revision(repo: Path, sdk: str) -> str:
+    head = git(repo, "rev-parse", "HEAD").strip()
+    if sdk != "bridge":
+        return head
+
+    # The generated catalog is committed in lingxi-app itself. Its bridge row
+    # must identify the indexed source snapshot rather than the commit that
+    # contains the catalog, or every catalog commit makes --check stale.
+    revision = git(
+        repo,
+        "log",
+        "-1",
+        "--format=%H",
+        head,
+        "--",
+        "packages/bridge-client/src",
+    ).strip()
+    return revision or head
+
+
 def build(workspace: Path) -> dict:
     repositories = []
     entries = []
     timestamps = []
     for sdk, dirname in (("harness", "harness-runtime"), ("llm", "llm-client"), ("mobile", "mobile-linux-runtime"), ("bridge", "lingxi-app")):
         repo = workspace / dirname
-        revision = git(repo, "rev-parse", "HEAD").strip()
+        revision = source_revision(repo, sdk)
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
             raise ValueError(f"Invalid Git revision for {repo}")
         base = source_url(repo)

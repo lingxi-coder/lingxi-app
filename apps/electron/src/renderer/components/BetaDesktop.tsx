@@ -2961,6 +2961,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
     updateActiveCompletions();
   };
   const permissionMode = PERMISSION_MODE_OPTIONS.find((mode) => mode.id === bridge.desktop.permissionMode) ?? PERMISSION_MODE_OPTIONS[0]!;
+  const proactivity = bridge.desktop.conversationControls?.proactivity;
   const workspace = bridge.bootstrap?.workspace;
   const providerConfigured = bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured) ?? false;
   const goal = composerGoalState(bridge.conversation?.items ?? []);
@@ -3270,6 +3271,53 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onOpenSettingsPage
                     </button>
                   );
                 })}
+                {proactivity && (proactivity.opt_in_available || proactivity.opted_in) && (
+                  <div role="group" aria-label="Proactivity" style={{ marginTop: 7, paddingTop: 8, borderTop: `1px solid ${t.border}` }}>
+                    <div style={{ padding: '2px 9px 6px', display: 'flex', alignItems: 'baseline', gap: 9 }}>
+                      <strong style={{ color: t.text, fontSize: 12.5, fontWeight: 650 }}>Proactivity</strong>
+                      <span style={{ marginLeft: 'auto', color: t.text4, fontSize: 10.5 }}>Current session</span>
+                    </div>
+                    {!proactivity.opted_in && proactivity.opt_in_available ? (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => invoke(() => bridge.initializeProactivity(true))}
+                        style={{ width: '100%', padding: '8px 9px', border: 0, borderRadius: 8, background: 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 12.5 }}
+                      >Enable proactivity</button>
+                    ) : proactivity.opted_in ? (
+                      <>
+                        {proactivity.selector_gate ? (
+                          <div style={{ display: 'flex', gap: 4, padding: '0 7px 5px' }}>
+                            {(['ask', 'default', 'proactive'] as const).map((level) => {
+                              const selected = proactivity.level === level;
+                              const label = level === 'ask' ? 'Ask' : level === 'default' ? 'Default' : 'Proactive';
+                              return (
+                                <button
+                                  key={level}
+                                  type="button"
+                                  role="menuitemradio"
+                                  aria-checked={selected}
+                                  onClick={() => { if (!selected) invoke(() => bridge.setProactivityLevel(level)); }}
+                                  style={{ flex: 1, padding: '6px 4px', border: `1px solid ${selected ? t.accent : t.border}`, borderRadius: 7, background: selected ? t.accentBg : 'transparent', color: selected ? t.accent : t.text2, cursor: 'pointer', font: 'inherit', fontSize: 11.5, fontWeight: selected ? 620 : 500 }}
+                                >{label}</button>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div style={{ padding: '4px 9px 7px', color: t.text3, fontSize: 11.5 }}>Proactivity is unavailable under the current session gates.</div>
+                        )}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => invoke(() => bridge.initializeProactivity(false))}
+                          style={{ width: '100%', padding: '6px 9px', border: 0, borderRadius: 8, background: 'transparent', color: t.text3, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 11.5 }}
+                        >Turn off proactivity</button>
+                      </>
+                    ) : (
+                      <div style={{ padding: '4px 9px 7px', color: t.text3, fontSize: 11.5 }}>Proactivity is unavailable under the current session gates.</div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

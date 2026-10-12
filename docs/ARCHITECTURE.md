@@ -38,7 +38,7 @@ use the current extraction guide for build and navigation instructions.
 
 The same core agent logic runs on every OS; only the *assembly* differs. Library
 crates make no shipping choices — they expose capabilities (`tool-*`, `skill-*`,
-`command-*`) and abstractions (`tool-api`, `skill-api`, `command-api`,
+`command-*`) and abstractions (`tool-api`, `command-api`,
 `platform_api::Platform`). Two **composition-root** libraries under `apps/` decide what
 ships by naming a different subset of capability crates via Cargo dependency
 edges:
@@ -51,7 +51,8 @@ edges:
 There is **no `#[cfg(target_os)]` switching in any library crate** — that is
 confined to `platforms/*` and `apps/*`, and enforced by `scripts/check-deps.sh`
 (the §8.1 dependency-graph gate: tools never depend on sibling tools/platforms,
-apps are leaves, the `*-api` crates stay impl-free).
+apps are leaves, and API crates stay impl-free by default, with a narrow optional
+builtin-handler edge for skill commands).
 
 ## Crate map
 
@@ -70,9 +71,12 @@ The platform-agnostic core. None of these depend on `tools/*`, `skills/*`,
   and the mobile/device callback traits (`CameraControl`, `VoiceRecorder`,
   `SharingService`, `ComputerControl`). Implemented by `platforms/*`. Also
   holds cycle-breaking service traits (`OrchestratorHandle`, `SubagentSpawner`).
-- `tool-api` / `skill-api` / `command-api` — the three plugin **abstraction**
-  crates (Tool/Skill/Command traits + registries + shared scaffolding). Kept
-  impl-free so the composition roots can assemble any subset.
+- `skill` — shared skill implementation: frontmatter and file loaders, the
+  skill registry, bundled skills, and discovery/listing support.
+- `tool-api` / `command-api` — the plugin abstraction crates (Tool/Command
+  traits, registries, and shared scaffolding). Their default dependency graph
+  stays implementation-free; `command-api` has a narrowly scoped optional
+  `builtin-handlers` feature for built-in skill commands.
 - `api-client` — Anthropic API + SSE + retry/rate-limit/betas
 - `permission` / `secret` / `cost` — security & cost foundations
 - `hooks` — lifecycle hook execution + registry

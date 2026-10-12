@@ -613,6 +613,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         verified_computer_profiles: Vec::new(),
         host_workspace_trusted: Some(trusted),
         mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
+        native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
         enable_automation_scheduler: args.scheduled_controller,
         initial_teammate_team_name: None,
         api_base,
@@ -2502,6 +2503,7 @@ mod tests {
             enable_automation_scheduler: false,
             host_workspace_trusted: Some(true),
             mod_render_surface: Some(harness_runtime::desktop::ModRenderSurface::Desktop),
+            native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
             initial_teammate_team_name: None,
             // This unit test must not require the signed macOS Credential
             // Broker or inherit a developer login keychain.

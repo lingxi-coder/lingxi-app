@@ -34,13 +34,24 @@ let settlePendingAudioListen: ((result: AudioOperationResultDto) => void) | unde
 let audioCancelCount = 0;
 let audioFinishCount = 0;
 
+function supportedAudioSnapshot() {
+  const snapshot = defaultNativeAudioSnapshot();
+  snapshot.permissions.microphone = 'granted';
+  snapshot.permissions.speech = 'authorized';
+  snapshot.recognizerAvailable = true;
+  snapshot.localeTag = 'en-US';
+  snapshot.voices = [{ id: 'system:fixture', label: 'Fixture voice', languageTag: 'en-US', source: 'system', familyId: 'fixture', isDefault: true }];
+  snapshot.capabilities!.supported_operations = ['listen', 'speak'];
+  return snapshot;
+}
+
 function executeAudioOperation(operation: AudioOperationDto): Promise<NativeAudioOperationResponse> {
   audioOperationTypes.push(operation.type);
   if (operation.type === 'listen') {
     return new Promise((resolve) => {
       settlePendingAudioListen = (result) => {
         settlePendingAudioListen = undefined;
-        resolve({ snapshot: defaultNativeAudioSnapshot(), result });
+        resolve({ snapshot: supportedAudioSnapshot(), result });
       };
     });
   }
@@ -49,7 +60,7 @@ function executeAudioOperation(operation: AudioOperationDto): Promise<NativeAudi
     : operation.type === 'synthesize'
       ? { type: 'synthesized', pcm_base64: 'AQI=', sample_rate_hz: 24_000 }
       : { type: 'failed', error: { kind: 'unsupported', message: 'fixture operation is unsupported' } };
-  return Promise.resolve({ snapshot: defaultNativeAudioSnapshot(), result });
+  return Promise.resolve({ snapshot: supportedAudioSnapshot(), result });
 }
 
 function cancelAudioOperation(): Promise<void> {
@@ -73,7 +84,7 @@ const ALL_MODELS = [
 ];
 
 function audioResponse(command: NativeAudioCommand): NativeAudioResponse {
-  const idleSnapshot = defaultNativeAudioSnapshot();
+  const idleSnapshot = supportedAudioSnapshot();
   switch (command.type) {
     case 'request_authorization':
       return { type: 'authorization', snapshot: idleSnapshot };
@@ -129,7 +140,7 @@ function bridgeFixture(sessionId: string, running: boolean, backgroundStatus: st
     loading: false,
     connected,
     sessionLoading: false,
-    audioSnapshot: defaultNativeAudioSnapshot(),
+    audioSnapshot: supportedAudioSnapshot(),
     audioExecute: executeAudioOperation,
     audioCancel: cancelAudioOperation,
     audioFinishListen: finishAudioListen,

@@ -159,7 +159,6 @@ impl CliBgSessionForker {
                 .await
                 .map_err(|e| BgForkError::Snapshot(e.to_string()))?;
         }
-
         // 3. Dispatch a detached daemon worker that resumes the copied session.
         launch_context.model = Some(model.to_string());
         launch_context.handoff = handoff.cloned();

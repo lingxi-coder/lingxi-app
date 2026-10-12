@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -62,5 +63,21 @@ test('the Flare macOS wrapper pins the iOS team and isolated development identif
   ], { encoding: 'utf8' });
   assert.match(help, /Xcode Automatic Signing/);
   assert.match(help, /--no-register/);
+  assert.match(help, /--output-root DIR/);
   assert.match(help, /LINGXI_MAC_AUDIO_PROVISIONING_PROFILE/);
+});
+
+test('Flare wrapper parses and prints an explicit isolated output root', () => {
+  const outputRoot = mkdtempSync(join(tmpdir(), 'lingxi-flare-artifacts-'));
+  try {
+    const output = execFileSync('/bin/bash', [
+      join(electronRoot, 'scripts', 'package-macos-flare.sh'),
+      '--output-root',
+      outputRoot,
+      '--print-config',
+    ], { encoding: 'utf8' });
+    assert.match(output, new RegExp(`^output_root=${outputRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  } finally {
+    rmSync(outputRoot, { recursive: true, force: true });
+  }
 });

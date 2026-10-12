@@ -1,7 +1,7 @@
 import { extractFile } from '@electron/asar';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -14,12 +14,16 @@ import {
   copyProductionDependencies,
   createAsarArchive,
   normalizeTimestamp,
+  preparePackageOutputRoot,
+  resetMacPackageArtifacts,
   repoRoot,
   rewriteInfoPlist,
   runtimePackageJson,
   scanTreeForForbiddenContent,
+  validatePackageOutputRoot,
   validateZipEntries,
 } from '../scripts/package-support.mjs';
+import { runningAppCommands } from '../scripts/packaged-app-smoke.mjs';
 import {
   BROKER_ALLOWED_CALLERS,
   brokerIdentifiers,
@@ -84,6 +88,57 @@ test('artifact names are versioned and architecture-specific', () => {
   assert.equal(paths.appPath, '/tmp/desktop/dist/LingXi-Code-1.2.3-mac-arm64/LingXi Code.app');
   assert.equal(paths.zipPath, '/tmp/desktop/dist/LingXi-Code-1.2.3-mac-arm64.zip');
   assert.equal(paths.checksumPath, '/tmp/desktop/dist/LingXi-Code-1.2.3-mac-arm64.zip.sha256');
+});
+
+test('isolated Flare artifacts resolve under an external output root', () => {
+  const outputRoot = mkdtempSync(join(tmpdir(), 'lingxi-flare-artifacts-'));
+  try {
+    const paths = artifactPaths('/tmp/desktop', { version: '1.2.3' }, outputRoot);
+    const canonicalRoot = validatePackageOutputRoot(outputRoot);
+    assert.equal(paths.releaseRoot, canonicalRoot);
+    assert.equal(paths.appPath, join(canonicalRoot, 'LingXi-Code-1.2.3-mac-arm64', 'LingXi Code.app'));
+    assert.equal(paths.zipPath, join(canonicalRoot, 'LingXi-Code-1.2.3-mac-arm64.zip'));
+    assert.throws(() => validatePackageOutputRoot('relative/output'), /absolute path/);
+    assert.throws(() => validatePackageOutputRoot(join(repoRoot, 'dist')), /outside the Product checkout/);
+  } finally {
+    rmSync(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test('isolated packaging only resets its versioned app container and artifacts', () => {
+  const outputRoot = mkdtempSync(join(tmpdir(), 'lingxi-flare-artifacts-'));
+  try {
+    const paths = artifactPaths('/tmp/desktop', { version: '1.2.3' }, outputRoot);
+    const unrelated = join(outputRoot, 'keep-me.txt');
+    writeFileSync(unrelated, 'preserved');
+    assert.throws(() => preparePackageOutputRoot(paths), /unrelated entry/);
+    assert.equal(readFileSync(unrelated, 'utf8'), 'preserved');
+    rmSync(unrelated);
+
+    preparePackageOutputRoot(paths);
+    mkdirSync(paths.appContainer, { recursive: true });
+    writeFileSync(join(paths.appContainer, 'old-bundle'), 'old');
+    writeFileSync(paths.zipPath, 'old zip');
+    writeFileSync(paths.checksumPath, 'old checksum');
+    writeFileSync(unrelated, 'preserved');
+
+    resetMacPackageArtifacts(paths);
+
+    assert.equal(existsSync(paths.appContainer), true);
+    assert.deepEqual(readdirSync(paths.appContainer), []);
+    assert.equal(existsSync(paths.zipPath), false);
+    assert.equal(existsSync(paths.checksumPath), false);
+    assert.equal(readFileSync(unrelated, 'utf8'), 'preserved');
+  } finally {
+    rmSync(outputRoot, { recursive: true, force: true });
+  }
+});
+
+test('packaged smoke refuses to continue when the process-list guard cannot run', () => {
+  assert.throws(
+    () => runningAppCommands(() => { throw new Error('ps denied'); }),
+    /cannot inspect running LingXi Code processes; refusing packaged smoke: ps denied/,
+  );
 });
 
 test('runtime dependency copy expands package file globs by copying installed payload', () => {

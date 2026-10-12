@@ -61,6 +61,8 @@ export const ALL_CLIENT_COMMAND_TYPES: Record<ClientCommand['type'], true> = {
   answer_ask_user_question: true,
   cancel_ask_user_question: true,
   set_permission_mode: true,
+  initialize_proactivity: true,
+  set_proactivity_level: true,
   set_typescript_lsp_mode: true,
   list_provider_credentials: true,
   set_provider_credential: true,

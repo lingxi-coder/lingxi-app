@@ -1215,6 +1215,50 @@ impl CommandRouter for EngineCommandRouter {
                 }
                 self.emit_controls_snapshot(&*sink).await;
             }
+            ClientCommand::InitializeProactivity {
+                proactivity,
+                reinitialize,
+            } => match self
+                .handle
+                .apply_native_proactivity_initialize(proactivity, reinitialize.unwrap_or(false))
+                .await
+            {
+                Ok(()) => self.emit_controls_snapshot(&*sink).await,
+                Err(error) => {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: format!("initialize_proactivity failed: {error}"),
+                    })
+                    .await;
+                }
+            },
+            ClientCommand::SetProactivityLevel {
+                level,
+                offer_bypass,
+            } => match self
+                .handle
+                .set_native_proactivity_level(&level, offer_bypass)
+                .await
+            {
+                Ok(response) => {
+                    lingxi_core::host::live_sessions::set_process_permission_mode(
+                        &response.permission_mode,
+                        response.permission_mode == "bypassPermissions",
+                    );
+                    sink.emit(ClientEvent::PermissionModeChanged {
+                        mode: response.permission_mode,
+                    })
+                    .await;
+                    self.emit_controls_snapshot(&*sink).await;
+                }
+                Err(error) => {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: format!("set_proactivity_level failed: {error}"),
+                    })
+                    .await;
+                }
+            },
 
             // ── Model ──────────────────────────────────────────────────────
             ClientCommand::GetAudioSessionContext => {

@@ -19,6 +19,7 @@ import {
 } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
+import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
 
 function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; reject(error: unknown): void } {
   let resolvePromise!: (value: T) => void;
@@ -1205,37 +1206,28 @@ test('settings model, voice and Thought patches persist without restarting a liv
     assert.equal(restartCalls, 0, 'persisting a selected model must not restart its session engine');
 
     const expectedVoiceRevision = settings.getPublic().voiceRevision ?? 0;
+    const voice = audioConfigurationDefaults();
+    voice.recognition.source = 'offline';
+    voice.speech.source = 'system';
+    voice.speech.voice = { source: 'system', id: 'Alex' };
+    voice.language = '  ZH-cn  ';
+    voice.rate = 99;
+    voice.autoPlayReplies = true;
     const result = await Promise.resolve(update!(event, {
       voiceRevision: expectedVoiceRevision,
-      voice: {
-        schemaVersion: 3,
-        recognition: { source: 'offline', offlineModelId: null },
-        speech: {
-          source: 'automatic',
-          offlineModelId: null,
-          voice: { source: 'system', id: 'Alex' },
-        },
-        language: '  ZH-cn  ',
-        rate: 99,
-        autoPlayReplies: true,
-      },
+      voice,
     })) as { voice?: Record<string, unknown>; voiceRevision?: number };
 
-    // Normalized through the generated v3 contract, not echoed back raw:
-    // language is trimmed, rate is clamped, and a fixed voice makes an
-    // otherwise automatic persisted speech source explicitly system-backed.
-    assert.deepEqual(result.voice, {
-      schemaVersion: 3,
-      recognition: { source: 'offline', offlineModelId: null },
-      speech: {
-        source: 'system',
-        offlineModelId: null,
-        voice: { source: 'system', id: 'Alex' },
-      },
-      language: 'ZH-cn',
-      rate: 2.0,
-      autoPlayReplies: true,
-    });
+    // Current generated v4 config is normalized, not echoed raw: language is
+    // trimmed, rate clamped, and the explicit system source/voice are retained.
+    const expectedVoice = audioConfigurationDefaults();
+    expectedVoice.recognition.source = 'offline';
+    expectedVoice.speech.source = 'system';
+    expectedVoice.speech.voice = { source: 'system', id: 'Alex' };
+    expectedVoice.language = 'ZH-cn';
+    expectedVoice.rate = 2.0;
+    expectedVoice.autoPlayReplies = true;
+    assert.deepEqual(result.voice, expectedVoice);
     assert.equal(result.voiceRevision, expectedVoiceRevision + 1);
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');

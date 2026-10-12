@@ -10,6 +10,7 @@ import type {
   HookAdminCommandDto,
   ImageRefDto,
   McpAdminCommandDto,
+  NativeProactivityLevelDto,
   PermissionBehaviorDto,
   PermissionModeId,
   PermissionResponseDto,
@@ -1868,6 +1869,14 @@ export function useBridge(): UseBridge {
   const setReasoningSelection = useCallback((selection: ReasoningSelectionDto) => command({ type: 'set_reasoning_selection', selection }), [command]);
   const setFastMode = useCallback((enabled: boolean) => command({ type: 'set_fast_mode', enabled }), [command]);
   const setPermissionMode = useCallback((mode: PermissionModeId) => command({ type: 'set_permission_mode', mode }), [command]);
+  const initializeProactivity = useCallback(
+    (proactivity: boolean, reinitialize?: boolean) => command({ type: 'initialize_proactivity', proactivity, reinitialize }),
+    [command],
+  );
+  const setProactivityLevel = useCallback(
+    (level: NativeProactivityLevelDto, offerBypass?: boolean) => command({ type: 'set_proactivity_level', level, offer_bypass: offerBypass }),
+    [command],
+  );
   const login = useCallback(() => command({ type: 'login' }), [command]);
   const logout = useCallback(() => command({ type: 'logout' }), [command]);
   const forceCompact = useCallback(async (instructions?: string) => {
@@ -2272,6 +2281,8 @@ export function useBridge(): UseBridge {
     setReasoningSelection,
     setFastMode,
     setPermissionMode,
+    initializeProactivity,
+    setProactivityLevel,
     login,
     logout,
     forceCompact,

@@ -1057,3 +1057,105 @@ async fn mod_ui_request_uses_correlated_unscoped_reply_while_turn_is_active() {
     drop(socket);
     endpoint.shutdown().await;
 }
+
+struct ModUiClientModuleDriver {
+    requests: std::sync::Mutex<Vec<Utf16JsonProjection>>,
+}
+
+#[async_trait]
+impl TurnDriver for ModUiClientModuleDriver {
+    async fn run_turn(&self, _prompt: Utf16JsonProjection) {}
+
+    async fn mod_ui_control(
+        &self,
+        request: Utf16JsonProjection,
+    ) -> Result<lingxi_core::host::orchestrator::ModUiControlOutcome, lingxi_core::host::HandleError>
+    {
+        self.requests.lock().unwrap().push(request.clone());
+        let plugin = request.string_at("/plugin").unwrap_or_default();
+        if plugin == "review" {
+            Ok(lingxi_core::host::orchestrator::ModUiControlOutcome {
+                response: Utf16JsonProjection::parse(
+                    r#"{"plugin":"review","hash":"module-hash","modules":[{"module":"hooks/board.tsx","entry":"surface:///hooks/board.tsx","component":"default"}]}"#,
+                )
+                .expect("static client-module manifest is valid JSON"),
+                render_revision: None,
+                client_runtime_epochs: Default::default(),
+                client_state_token: None,
+            })
+        } else {
+            Err(lingxi_core::host::HandleError::ActionFailed(format!(
+                "ui_client_module: plugin {plugin} is not loaded or its hooks module names no surface module"
+            )))
+        }
+    }
+}
+
+#[tokio::test]
+async fn mod_ui_client_module_forwards_driver_success_and_missing_plugin_error_while_turn_active() {
+    let driver = Arc::new(ModUiClientModuleDriver {
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let unbound_connection = BridgeConnection::new();
+    let gate = Arc::new(AdapterPermissionGate::new(unbound_connection.permission_sink()));
+    let connection = unbound_connection.bind(gate, driver.clone());
+    let (endpoint, mut socket, sink) = captured_sink().await;
+    connection.close_connection(Some(&sink)).await;
+    assert!(connection.claim_outbound(&sink).await);
+    connection.handle_hello(3, hello()).await;
+    assert!(matches!(next_frame(&mut socket).await, Frame::Response(_)));
+
+    let _turn_owner = connection.active_turn.begin(Some(7));
+    connection.turn_running.store(true, Ordering::SeqCst);
+    connection
+        .dispatch(ClientCommand::UiClientModule {
+            request_id: "module-review".into(),
+            plugin: "review".into(),
+        })
+        .await;
+    match next_frame(&mut socket).await {
+        Frame::Event(ClientEvent::UiControlResult {
+            request_id,
+            response_json: Some(response_json),
+            metadata_json: None,
+            error: None,
+        }) => {
+            assert_eq!(request_id, "module-review");
+            let response: serde_json::Value = serde_json::from_str(&response_json).unwrap();
+            assert_eq!(response["plugin"], "review");
+            assert_eq!(response["modules"][0]["module"], "hooks/board.tsx");
+        }
+        frame => panic!("expected successful module manifest reply, got {frame:?}"),
+    }
+
+    connection
+        .dispatch(ClientCommand::UiClientModule {
+            request_id: "module-missing".into(),
+            plugin: "unavailable-plugin".into(),
+        })
+        .await;
+    match next_frame(&mut socket).await {
+        Frame::Event(ClientEvent::UiControlResult {
+            request_id,
+            response_json: None,
+            metadata_json: None,
+            error: Some(error),
+        }) => {
+            assert_eq!(request_id, "module-missing");
+            assert!(error.contains("unavailable-plugin is not loaded"));
+        }
+        frame => panic!("expected unavailable-plugin error reply, got {frame:?}"),
+    }
+
+    let requests = driver.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.string_at("/subtype") == Some("ui_client_module")));
+    assert_eq!(requests[0].string_at("/plugin"), Some("review"));
+    assert_eq!(requests[1].string_at("/plugin"), Some("unavailable-plugin"));
+
+    connection.close_connection(Some(&sink)).await;
+    drop(socket);
+    endpoint.shutdown().await;
+}

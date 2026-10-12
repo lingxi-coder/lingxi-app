@@ -24,3 +24,58 @@ apps/web/public/api-index.json:LINGXI_ENABLE_TODO_TOOLS  # Generated Harness SDK
 apps/web/public/api-index.json:.lingxi-plugin/plugin.json  # Generated Harness SDK plugin-loader manifest namespace; extracted packages require this exact on-disk contract.
 apps/web/public/api-index.json:.lingxi-plugin/marketplace.json  # Generated Harness SDK marketplace manifest namespace; catalog parsing uses this exact persisted filename.
 apps/web/public/api-index.json:LINGXI_ENABLE_TOOL_SEARCH  # Generated Harness SDK summary of the supported tool-search environment ABI; keep the upstream public contract exact.
+
+# R30 reviewed identities: Native reference fixtures and current product/host APIs.
+apps/cli/host/src/headless_oauth.rs:/home/claude/.claude/remote/.oauth_token  # Native remote OAuth handoff file identity, constructed from y/YRe in pinned 2.1.295 at byte 188546247; changing it breaks the remote producer contract.
+apps/cli/host/tests/cli_headless_session.rs:LINGXI_CONFIG_DIR  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/commands_native_cli.rs:LINGXI_CONFIG_DIR  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/commands_native_cli.rs:LINGXI_API_BASE_URL  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/commands_native_cli.rs:LINGXI_NATIVE_ANTHROPIC_ENDPOINT  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/commands_native_cli.rs:.claude  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/provider_error_cli.rs:LINGXI_CONFIG_DIR  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/provider_error_cli.rs:LINGXI_API_BASE_URL  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/provider_error_cli.rs:LINGXI_NATIVE_ANTHROPIC_ENDPOINT  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/provider_error_cli.rs:LINGXI_SIMPLE  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/electron/test/provider-audio-host.test.ts:LINGXI_BRIDGE_SERVER_BIN  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/electron/test/project-removal.test.ts:.lingxi  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/ios/native/Sources/Conversation/MockConversationSource.swift:LINGXI_UI_TEST_ANSWERED_QUESTION  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/ios/native/UITests/FirebaseAccountUITests.swift:LINGXI_FIREBASE_LIVE_TESTS  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/ios/native/UITests/FirebaseAccountUITests.swift:LINGXI_UI_TESTING  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/ios/native/UITests/FirebaseAccountUITests.swift:LINGXI_FIREBASE_API_KEY  # Regression fixture names the actual host environment or persisted namespace contract; preserve the exact input identity.
+apps/cli/host/tests/fixtures/commands-native-293-rerun/native-fixed-fields.json:.claude  # Immutable Native reference capture; source-side directory identity must not be renamed to satisfy the product scan.
+apps/cli/host/tests/fixtures/commands-native-293-rerun/native-session-user-rows/punctuation-skill-name.jsonl:.claude  # Immutable Native reference capture; source-side directory identity must not be renamed to satisfy the product scan.
+apps/cli/host/tests/fixtures/commands-native-293-rerun/native-session-user-rows/unicode-skill-name.jsonl:.claude  # Immutable Native reference capture; source-side directory identity must not be renamed to satisfy the product scan.
+apps/cli/host/tests/fixtures/commands-native-295-rerun/native-fixed-fields.json:.claude  # Immutable Native reference capture; source-side directory identity must not be renamed to satisfy the product scan.
+apps/cli/host/tests/fixtures/commands-native-295-rerun/native-session-user-rows/punctuation-skill-name.jsonl:.claude  # Immutable Native reference capture; source-side directory identity must not be renamed to satisfy the product scan.
+apps/cli/host/tests/fixtures/commands-native-295-rerun/native-session-user-rows/unicode-skill-name.jsonl:.claude  # Immutable Native reference capture; source-side directory identity must not be renamed to satisfy the product scan.
+apps/cli/host/tests/fixtures/provider-error-native-295/empty-response-body/request-0.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/empty-response-body/request-0.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/empty-response-body/request-0.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-401/request-0.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-401/request-0.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-401/request-0.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-403/request-0.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-403/request-0.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-403/request-0.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-404/request-0.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-404/request-0.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-404/request-0.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-404/request-1.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-404/request-1.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-404/request-1.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-413/request-0.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-413/request-0.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-413/request-0.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-500/request-0.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-500/request-0.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/http-500/request-0.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/nested-error-message-lone-surrogate/request-0.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/nested-error-message-lone-surrogate/request-0.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/nested-error-message-lone-surrogate/request-0.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/nested-error-message-null/request-0.body.raw.json:CLAUDE.md  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/nested-error-message-null/request-0.body.raw.json:LingXi  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/cli/host/tests/fixtures/provider-error-native-295/nested-error-message-null/request-0.body.raw.json:.claude  # Immutable Native request fixture; preserving captured bytes is required for differential replay.
+apps/electron/src/renderer/components/VisualizationCard.tsx:window.lingxi  # Existing Electron preload bridge property identity, not a persisted filesystem path.
+apps/electron/src/renderer/components/modUiAbovePrompt.tsx:window.lingxi  # Existing Electron preload bridge property identity, not a persisted filesystem path.
+apps/electron/src/renderer/components/settings/pages/LingxiAccount.tsx:window.lingxi  # Existing Electron preload bridge property identity, not a persisted filesystem path.
+firebase.json:LingXi  # Intentional product OAuth display name; product branding is an explicitly retained alignment difference.
